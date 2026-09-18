@@ -129,7 +129,7 @@ fn a_function_the_program_compiled_is_named_in_the_events() {
     // distinguishable, or the caveat that says to filter on them is useless.
     let kinds: Vec<String> = events
         .iter()
-        .filter_map(|event| attr(event, "kind").as_str().map(str::to_owned))
+        .filter_map(|event| attr(event, "code_kind").as_str().map(str::to_owned))
         .collect();
     assert!(
         kinds.iter().any(|kind| kind == "js"),
@@ -325,4 +325,68 @@ fn attaching_to_a_running_process_reports_the_map_it_already_published() {
     // Nothing was missed: the map was there from the first poll to the last.
     assert_eq!(run["results"][0]["losses"]["failed_reads"], 0);
     assert_eq!(run["results"][0]["losses"]["dropped"], 0);
+}
+
+/// A filter on this source's own fields has to select, not just be accepted.
+///
+/// The map is mostly the runtime's builtins, and the question worth asking of
+/// it is "what did *my* program compile". That is a filter, and the first
+/// version of this source made it unanswerable: the attribute was called
+/// `kind`, which the filter grammar reads as the event's source id, so
+/// `kind == 'js'` was parsed, validated, reported as applied, and matched
+/// nothing. A predicate that quietly keeps nothing is worse than one that is
+/// refused.
+#[test]
+fn filtering_on_the_code_kind_keeps_that_kind_and_drops_the_rest() {
+    if !has_node() {
+        eprintln!("skipped: this machine has no node to launch");
+        return;
+    }
+
+    let program = "function omniscientFiltered(n) { return n < 2 ? n : \
+                   omniscientFiltered(n - 1) + omniscientFiltered(n - 2); }\n\
+                   let total = 0;\n\
+                   for (let i = 0; i < 20; i++) total += omniscientFiltered(18);\n";
+    let node = |filter: &str| {
+        run(&[
+            "runtime.jit",
+            "--mode",
+            "trace",
+            "--emit",
+            "raw",
+            "--filter",
+            filter,
+            "--format",
+            "json",
+            "--",
+            "node",
+            "--perf-basic-prof",
+            "--logfile=/tmp/omn-v8-%p.log",
+            "-e",
+            program,
+        ])
+    };
+
+    let all = node("bytes >= 0");
+    assert!(all.status.success(), "{}", stderr(&all));
+    let all = document(&all);
+    let total = events(&all).len();
+    clean_up_after(&all);
+    assert!(total > 100, "a node run publishes its builtins and more");
+
+    let compiled = node("code_kind == 'js'");
+    assert!(compiled.status.success(), "{}", stderr(&compiled));
+    let compiled = document(&compiled);
+    let kept = events(&compiled);
+    clean_up_after(&compiled);
+
+    assert!(!kept.is_empty(), "the program compiled JavaScript");
+    assert!(
+        kept.len() < total,
+        "the builtins are not JavaScript this program compiled: {} of {total} kept",
+        kept.len()
+    );
+    for event in &kept {
+        assert_eq!(attr(event, "code_kind"), "js");
+    }
 }
