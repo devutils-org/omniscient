@@ -1,0 +1,44 @@
+# What did the runtime compile, and when?
+#
+#   omn -f examples/runtime-jit.yml
+#
+# A just-in-time compiler produces machine code that exists in no file on disk,
+# so a stack sample taken inside it points at an address that belongs to
+# nothing. The convention that fixes this is a text file the runtime maintains,
+# `/tmp/perf-<pid>.map`, with one line per generated code object. Node writes it
+# with `--perf-basic-prof`; a JVM needs an agent that does the same.
+#
+# The file is append-only, so what appeared since the last read is what was
+# compiled since the last read. That is what this session collects: the code
+# objects, named, in the order the runtime created them.
+#
+# Two things the map cannot tell you, and this source does not pretend to.
+#
+# It does not time a compilation: it records that code exists, not when the
+# compiler started. Timing needs the runtime's USDT probes, which is the other
+# backend of `runtime.jit` and needs a runtime built with them.
+#
+# It does not timestamp its lines. An entry is known to have appeared between
+# two reads and no more precisely, so every event carries that gap in
+# `ts_err_ns`, and the entries that were already there at the first read carry
+# the largest error the event model can express.
+name: what the runtime compiled
+format: text
+
+requests:
+  - source: runtime.jit
+    target:
+      launch:
+        - node
+        # `--perf-basic-prof` is what makes node maintain the map. It also turns
+        # on V8's own log, which lands in the working directory unless it is
+        # sent somewhere else, so this run keeps it out of the repository.
+        - --perf-basic-prof
+        - --logfile=/tmp/omn-v8-%p.log
+        - -e
+        # Enough calls that V8 stops interpreting and compiles it.
+        - "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\nlet total = 0;\nfor (let i = 0; i < 30; i++) total += fib(22);\nconsole.log('fib', total);\n"
+    mode: trace
+    # Compilations per second over the run. A profile of *which* methods cost
+    # the most needs `topk`, which lands with the shared aggregation work.
+    emit: [rate, summary]
