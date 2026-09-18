@@ -329,8 +329,8 @@ fn a_known_allocation_shows_up_in_the_measured_series() {
     );
     drop(block);
 
-    let results: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json results");
-    let series = results["outputs"][0]["series"]
+    let run: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json results");
+    let series = run["results"][0]["outputs"][0]["series"]
         .as_array()
         .expect("a summary per key");
     let ours = series
@@ -370,17 +370,184 @@ fn a_run_writes_its_numbers_and_the_record_of_how_they_were_obtained() {
     assert!(output.status.success(), "{}", stderr(&output));
 
     let resolved = std::fs::read_to_string(directory.join("resolved.json")).expect("resolved.json");
+    // The file holds every request of the run, so it is a list even when the
+    // run had one.
     let resolved: serde_json::Value = serde_json::from_str(&resolved).unwrap();
-    assert_eq!(resolved["request"]["source"], "mem.rss");
-    assert!(resolved["backend"]["id"]
+    let first = &resolved[0];
+    assert_eq!(first["request"]["source"], "mem.rss");
+    assert!(first["backend"]["id"]
         .as_str()
         .unwrap()
         .starts_with("fs:proc:"));
-    assert!(!resolved["environment"]["kernel_release"]
+    assert!(!first["environment"]["kernel_release"]
         .as_str()
         .unwrap()
         .is_empty());
     assert!(std::fs::read_to_string(directory.join("results.txt")).is_ok());
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Ground truth for the join.
+///
+/// One allocation is written to and one is not, and only the written one can
+/// have caused faults. That is checkable rather than merely plausible: a join
+/// that matched addresses to whichever range happened to be open would credit
+/// both.
+///
+/// `bytearray(n)` cannot play the untouched role -- CPython zero-fills it, so it
+/// is written to in full. A raw `libc.malloc` gives memory that is genuinely
+/// never touched, and it still goes through the shim.
+#[test]
+fn faults_are_attributed_to_the_allocation_that_was_written_to() {
+    const TOUCHED: usize = 16 * 1024 * 1024;
+    const UNTOUCHED: usize = 16 * 1024 * 1024;
+
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+
+    let program = format!(
+        "import ctypes, time\n\
+         libc = ctypes.CDLL(None)\n\
+         libc.malloc.restype = ctypes.c_void_p\n\
+         untouched = libc.malloc(ctypes.c_size_t({UNTOUCHED}))\n\
+         touched = bytearray({TOUCHED})\n\
+         time.sleep(0.05)\n"
+    );
+    let session = session_for(&program);
+
+    let output = run_with_stdin(&["-f", "-", "--input-format", "yaml"], &session);
+    if let Some(reason) = skipped(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let join = &run["joins"][0];
+    assert_eq!(
+        join["evidence"], "KEY",
+        "an interval match is a shared typed key"
+    );
+
+    let ranges = join["top"].as_array().expect("attributions");
+    let large: Vec<&serde_json::Value> = ranges
+        .iter()
+        .filter(|range| range["len"].as_u64().unwrap_or(0) as usize >= TOUCHED)
+        .collect();
+
+    // Both buffers are the same size, so whichever range carries the faults is
+    // the one that was written to. Exactly one of them may.
+    assert!(
+        !large.is_empty(),
+        "neither large allocation was attributed anything: {join}"
+    );
+    let heaviest = large[0]["matched"].as_u64().unwrap_or(0);
+    assert!(
+        heaviest > 100,
+        "the buffer that was written to should carry the faults, got {}",
+        large[0]
+    );
+    for other in large.iter().skip(1) {
+        assert!(
+            other["matched"].as_u64().unwrap_or(0) * 10 < heaviest,
+            "memory that was never written to was credited with faults: {other}"
+        );
+    }
+}
+
+/// Ground truth for the fault collector itself.
+///
+/// The kernel keeps its own minor-fault counter for every process. If the
+/// collector's count and that counter disagree, the sampling is dropping
+/// events, whatever the loss line claims.
+#[test]
+fn the_fault_count_agrees_with_the_kernels_own_counter() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+
+    let program = "import sys\n\
+                   b = bytearray(16 * 1024 * 1024)\n\
+                   faults = int(open('/proc/self/stat').read().split()[9])\n\
+                   sys.stderr.write('MINFLT %d\\n' % faults)\n";
+    let output = run(&[
+        "mem.faults",
+        "--mode",
+        "trace",
+        "--emit",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        program,
+    ]);
+    if let Some(reason) = skipped(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let reported: u64 = stderr(&output)
+        .lines()
+        .find_map(|line| line.strip_prefix("MINFLT "))
+        .and_then(|value| value.trim().parse().ok())
+        .expect("the program reports its own fault count");
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let counted = run["results"][0]["events_seen"]
+        .as_u64()
+        .expect("events_seen");
+
+    // The collector attaches before exec and the kernel counts from fork, so a
+    // handful of faults differ at the edges; an order of magnitude does not.
+    let ratio = counted as f64 / reported as f64;
+    assert!(
+        (0.8..1.2).contains(&ratio),
+        "the collector counted {counted} faults and the kernel counted {reported}"
+    );
+}
+
+/// Builds a two-source session that launches the same program for both.
+fn session_for(program: &str) -> String {
+    format!(
+        "format: json\n\
+         requests:\n\
+         \x20 - source: mem.heap.alloc\n\
+         \x20   target: {{launch: [python3, -c, {program:?}]}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [summary]\n\
+         \x20 - source: mem.faults\n\
+         \x20   target: {{launch: [python3, -c, {program:?}]}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [summary]\n\
+         joins:\n\
+         \x20 - id: pages-of-allocation\n\
+         \x20   from: mem.heap.alloc\n\
+         \x20   to: mem.faults\n\
+         \x20   via: mem\n\
+         \x20   match: interval\n\
+         \x20   opens: \"op == 'alloc'\"\n\
+         \x20   closes: \"op == 'free'\"\n\
+         \x20   window: 60s\n"
+    )
+}
+
+/// Some machines withhold the permission these tests need. That is a skip, not
+/// a pass and not a failure.
+fn skipped(output: &Output) -> Option<String> {
+    if output.status.success() {
+        return None;
+    }
+    let complaint = stderr(output);
+    if complaint.contains("perf_event_open") || complaint.contains("paranoid") {
+        Some("this machine refuses unprivileged perf sampling".to_owned())
+    } else {
+        None
+    }
 }

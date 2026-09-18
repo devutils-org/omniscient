@@ -33,6 +33,8 @@ use crate::event::{CollectorId, Event};
 use crate::request::{Mode, Target};
 use crate::resolve::ResolvedRequest;
 
+pub use heap::find_shim;
+
 /// Why a collection could not start, or could not continue.
 #[derive(Debug, thiserror::Error)]
 pub enum CollectError {
@@ -48,6 +50,20 @@ pub enum CollectError {
     Launch { program: String, error: String },
     #[error("cannot start collecting `{source_id}`: {reason}")]
     Start { source_id: String, reason: String },
+    #[error(
+        "one run observes one target, but this session asks for `{first}` and `{second}`; \
+         use one session per target"
+    )]
+    MixedTargets { first: String, second: String },
+    #[error(
+        "two collectors disagree about `{variable}` in the launched program's environment \
+         (`{first}` and `{second}`)"
+    )]
+    ConflictingEnvironment {
+        variable: String,
+        first: String,
+        second: String,
+    },
 }
 
 /// What a run produced, and what it lost.
@@ -173,110 +189,152 @@ pub enum SampleError {
     Transient(String),
 }
 
-/// Runs a resolved request to completion.
+/// Runs one resolved request to completion.
 pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
-    let request = &resolved.request;
+    let mut collections = run_all(std::slice::from_ref(resolved))?;
+    Ok(collections.remove(0))
+}
+
+/// Runs several resolved requests over one target, in one window.
+///
+/// They share a window deliberately. Running them one after another would
+/// measure several different moments and present them as one, and a join across
+/// them would then be correlating a program with its own past. One launch, one
+/// set of collectors, one clock.
+pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectError> {
+    assert!(!resolved.is_empty(), "a run needs at least one request");
+    let target = &resolved[0].request.target;
+    if let Some(other) = resolved
+        .iter()
+        .find(|candidate| &candidate.request.target != target)
+    {
+        return Err(CollectError::MixedTargets {
+            first: target.to_string(),
+            second: other.request.target.to_string(),
+        });
+    }
 
     // Asked first, because "no collector exists for this backend" is a
     // different answer from "this target is not wired up yet", and reporting
     // the second when the first is true sends the reader to the wrong place.
-    let prepared = prepare(resolved)?;
+    let prepared: Vec<Box<dyn Prepared>> =
+        resolved.iter().map(prepare).collect::<Result<_, _>>()?;
+
+    let environment = merge_environments(&prepared)?;
 
     // A launched program is both the target and the clock: the run ends when it
     // does, which is what makes `omn <source> -- ./prog` a complete measurement
     // rather than a sample of one. It is held at a gate so that collectors are
     // attached before its first instruction; otherwise the interesting part of
     // a short program is over before anything is watching.
-    let mut child = match &request.target {
-        Target::Launch(argv) => Some(launch::gated(argv, &prepared.launch_environment()).map_err(
-            |error| CollectError::Launch {
-                program: argv.first().cloned().unwrap_or_default(),
-                error: error.to_string(),
-            },
-        )?),
+    let mut child = match target {
+        Target::Launch(argv) => {
+            Some(
+                launch::gated(argv, &environment).map_err(|error| CollectError::Launch {
+                    program: argv.first().cloned().unwrap_or_default(),
+                    error: error.to_string(),
+                })?,
+            )
+        }
         _ => None,
     };
 
     if child.is_none() {
-        if let Some(reason) = prepared.requires_launch() {
-            return Err(CollectError::UnsupportedTarget {
-                source_id: request.source.to_string(),
-                target: format!("{} ({reason})", request.target.kind()),
-            });
+        for (index, prepared) in prepared.iter().enumerate() {
+            if let Some(reason) = prepared.requires_launch() {
+                return Err(CollectError::UnsupportedTarget {
+                    source_id: resolved[index].request.source.to_string(),
+                    target: format!("{} ({reason})", target.kind()),
+                });
+            }
         }
     }
 
-    let pid = match (&request.target, &child) {
+    let pid = match (target, &child) {
         (_, Some(child)) => child.pid(),
         (Target::Pid(pids) | Target::Tid(pids), _) => pids[0],
         (target, _) => {
             return Err(CollectError::UnsupportedTarget {
-                source_id: request.source.to_string(),
+                source_id: resolved[0].request.source.to_string(),
                 target: target.kind().to_string(),
             })
         }
     };
 
-    let mut collector = prepared.attach(pid).map_err(|reason| {
-        if let Some(child) = child.as_mut() {
-            child.terminate();
-        }
-        CollectError::Start {
-            source_id: request.source.to_string(),
+    let mut collectors = Vec::with_capacity(prepared.len());
+    for (index, prepared) in prepared.into_iter().enumerate() {
+        let source_id = resolved[index].request.source.to_string();
+        let mut collector = prepared.attach(pid).map_err(|reason| CollectError::Start {
+            source_id: source_id.clone(),
             reason,
+        })?;
+        if let Err(reason) = collector.start() {
+            if let Some(child) = child.as_mut() {
+                child.terminate();
+            }
+            return Err(CollectError::Start { source_id, reason });
         }
-    })?;
-    collector.start().map_err(|reason| {
-        if let Some(child) = child.as_mut() {
-            child.terminate();
-        }
-        CollectError::Start {
-            source_id: request.source.to_string(),
-            reason,
-        }
-    })?;
+        collectors.push(collector);
+    }
 
     // Everything is attached; let the program run.
     if let Some(child) = child.as_mut() {
         child.release();
     }
 
-    let interval = collector.tick().unwrap_or_else(|| match request.mode {
-        Mode::Poll { interval } => StdDuration::from_nanos(interval.as_nanos()),
-        Mode::Snapshot => StdDuration::ZERO,
-        _ => StdDuration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
-    });
-    let deadline_ns = request
-        .duration
-        .map(|duration| monotonic_ns() + duration.as_nanos());
-    if deadline_ns.is_none() && child.is_none() && request.mode != Mode::Snapshot {
+    // The fastest collector sets the pace: draining a ring every second loses
+    // events, and the cheap pollers do not mind being asked more often.
+    let interval = collectors
+        .iter()
+        .filter_map(|collector| collector.tick())
+        .min()
+        .unwrap_or_else(|| match resolved[0].request.mode {
+            Mode::Poll { interval } => StdDuration::from_nanos(interval.as_nanos()),
+            Mode::Snapshot => StdDuration::ZERO,
+            _ => StdDuration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
+        });
+
+    let deadline_ns = resolved
+        .iter()
+        .filter_map(|resolved| resolved.request.duration)
+        .map(|duration| duration.as_nanos())
+        .max()
+        .map(|longest| monotonic_ns() + longest);
+    let snapshot = resolved
+        .iter()
+        .all(|resolved| resolved.request.mode == Mode::Snapshot);
+    if deadline_ns.is_none() && child.is_none() && !snapshot {
         return Err(CollectError::NoStopCondition);
     }
 
     let started_ns = monotonic_ns();
-    let mut events = Vec::new();
-    let mut losses = Losses::default();
-    let mut seq = 0u64;
+    let mut events: Vec<Vec<Event>> = vec![Vec::new(); collectors.len()];
+    let mut losses: Vec<Losses> = vec![Losses::default(); collectors.len()];
+    let mut sequences = vec![0u64; collectors.len()];
     let stopped_because;
 
     loop {
         let tick_started_ns = monotonic_ns();
-        match collector.sample(seq) {
-            Ok(mut sampled) => {
-                seq += sampled.len() as u64;
-                events.append(&mut sampled);
-            }
-            Err(SampleError::TargetGone(reason)) => {
-                stopped_because = reason;
-                break;
-            }
-            Err(SampleError::Transient(reason)) => {
-                losses.failed_reads += 1;
-                losses.note(reason);
+        let mut gone = None;
+        for (index, collector) in collectors.iter_mut().enumerate() {
+            match collector.sample(sequences[index]) {
+                Ok(mut sampled) => {
+                    sequences[index] += sampled.len() as u64;
+                    events[index].append(&mut sampled);
+                }
+                Err(SampleError::TargetGone(reason)) => gone = Some(reason),
+                Err(SampleError::Transient(reason)) => {
+                    losses[index].failed_reads += 1;
+                    losses[index].note(reason);
+                }
             }
         }
+        if let Some(reason) = gone {
+            stopped_because = reason;
+            break;
+        }
 
-        if request.mode == Mode::Snapshot {
+        if snapshot {
             stopped_because = "snapshot: a single read".to_owned();
             break;
         }
@@ -296,26 +354,31 @@ pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
         }
 
         // Sleep for what is left of the interval, and count the tick as late
-        // when the read itself took longer than the interval: at that point the
-        // series no longer has the spacing it claims.
+        // when the reads themselves took longer than the interval: at that
+        // point the series no longer has the spacing it claims.
         let spent_ns = monotonic_ns().saturating_sub(tick_started_ns);
         match interval.checked_sub(StdDuration::from_nanos(spent_ns)) {
             Some(remaining) => std::thread::sleep(remaining),
             None => {
-                losses.late_ticks += 1;
-                losses.note(format!(
-                    "a read took {spent_ns}ns, longer than the {}ns tick",
-                    interval.as_nanos()
-                ));
+                for losses in losses.iter_mut() {
+                    losses.late_ticks += 1;
+                    losses.note(format!(
+                        "a round of reads took {spent_ns}ns, longer than the {}ns tick",
+                        interval.as_nanos()
+                    ));
+                }
             }
         }
     }
 
-    // Whatever the kernel published between the last tick and the stop still
-    // belongs to this run.
-    let mut trailing = collector.stop();
-    events.append(&mut trailing);
-    losses.absorb(collector.losses());
+    // Whatever the kernel or the shim published between the last tick and the
+    // stop still belongs to this run.
+    for (index, collector) in collectors.iter_mut().enumerate() {
+        let mut trailing = collector.stop();
+        events[index].append(&mut trailing);
+        let collector_losses = collector.losses();
+        losses[index].absorb(collector_losses);
+    }
 
     // A launched program that outlived the duration is stopped: the tool does
     // not leave behind processes it started.
@@ -325,18 +388,47 @@ pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
         }
     }
 
-    events.sort_by_key(|event| event.ts_ns);
-
-    Ok(Collection {
-        observed_ns: monotonic_ns().saturating_sub(started_ns),
-        value_attr: collector.value_attr().to_owned(),
-        events,
-        losses,
-        stopped_because,
-    })
+    let observed_ns = monotonic_ns().saturating_sub(started_ns);
+    Ok(collectors
+        .iter()
+        .enumerate()
+        .map(|(index, collector)| {
+            let mut collected = std::mem::take(&mut events[index]);
+            collected.sort_by_key(|event| event.ts_ns);
+            Collection {
+                observed_ns,
+                value_attr: collector.value_attr().to_owned(),
+                events: collected,
+                losses: std::mem::take(&mut losses[index]),
+                stopped_because: stopped_because.clone(),
+            }
+        })
+        .collect())
 }
 
-pub use heap::find_shim;
+/// Collects what every collector needs in the launched program's environment,
+/// refusing a disagreement rather than letting one win silently.
+fn merge_environments(
+    prepared: &[Box<dyn Prepared>],
+) -> Result<Vec<(String, String)>, CollectError> {
+    let mut merged: Vec<(String, String)> = Vec::new();
+    for prepared in prepared {
+        for (name, value) in prepared.launch_environment() {
+            match merged.iter().find(|(existing, _)| *existing == name) {
+                Some((_, existing)) if *existing != value => {
+                    return Err(CollectError::ConflictingEnvironment {
+                        variable: name,
+                        first: existing.clone(),
+                        second: value,
+                    })
+                }
+                Some(_) => {}
+                None => merged.push((name, value)),
+            }
+        }
+    }
+    Ok(merged)
+}
 
 /// The sources a collector exists for, for error messages that say what *is*
 /// possible rather than only what is not.

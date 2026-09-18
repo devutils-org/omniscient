@@ -1,0 +1,49 @@
+# Which allocation actually cost memory?
+#
+#   omn -f examples/allocation-cost.yml
+#
+# `malloc` allocates nothing: it hands back an address, and the pages only
+# become resident on first write. So an allocation-site profile and a resident
+# memory curve never line up, and neither one answers the question on its own.
+#
+# This session collects both sides and joins them. The shim reports the range
+# each allocation owns; every page fault carries the address that faulted; a
+# fault inside a range is that allocation becoming real. The evidence is KEY:
+# both sides carry the same typed key, `mem:[base,len)`.
+name: which allocation actually cost memory
+format: text
+
+requests:
+  # The ranges. A preloaded shim, so the program has to be launched here.
+  - source: mem.heap.alloc
+    target:
+      launch:
+        - python3
+        - -c
+        # Five 8 MiB buffers, fully touched: 40 MiB that has to become resident.
+        - "import time; b = []; [(b.append(bytearray(8 << 20)), time.sleep(0.2)) for _ in range(5)]"
+    mode: trace
+    emit: [summary]
+
+  # The pages. Every fault, not a sample: a sampled subset would attribute a
+  # fraction of the pages and make an allocation look cheaper than it was.
+  - source: mem.faults
+    target:
+      launch:
+        - python3
+        - -c
+        - "import time; b = []; [(b.append(bytearray(8 << 20)), time.sleep(0.2)) for _ in range(5)]"
+    mode: trace
+    emit: [rate]
+
+joins:
+  - id: pages-of-allocation
+    from: mem.heap.alloc
+    to: mem.faults
+    via: mem
+    match: interval
+    opens: "op == 'alloc'"
+    closes: "op == 'free'"
+    # A range still open after a minute is a leak or a long-lived buffer; either
+    # way it stops being useful to hold, and the eviction is counted.
+    window: 60s

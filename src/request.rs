@@ -955,6 +955,13 @@ pub struct Session {
     #[serde(default)]
     pub format: OutputFormat,
     pub requests: Vec<Request>,
+    /// Boundaries to join the requests' events across.
+    ///
+    /// A join is declared next to the sources it joins, because the two are one
+    /// measurement: running the sources without the rule gives two unrelated
+    /// numbers, and the rule without the sources gives nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<crate::join::Rule>,
 }
 
 impl Session {
@@ -967,6 +974,7 @@ impl Session {
             out,
             format,
             requests: vec![request],
+            joins: Vec::new(),
         }
     }
 

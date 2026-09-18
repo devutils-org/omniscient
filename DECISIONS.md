@@ -41,6 +41,35 @@ that looked like details turned out to be decisions.
 
 ---
 
+## Settled by the first correlation
+
+Joining `mem.heap.alloc` to `mem.faults` by interval produced the first result
+neither source could give alone, and settled a few more things on the way.
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A join is declared beside its sources | `joins:` in the session file, `{id, from, to, via, match, opens, closes, window, capacity}` | Running the sources without the rule gives two unrelated numbers and the rule without the sources gives nothing, so they are one measurement and belong in one file. |
+| Only the interval match is implemented | `eq`, `scoped_eq` and `wakeup` are refused by name | Generalizing an engine against match kinds nothing has exercised makes it fit the imagined cases. The roadmap's own rule: generalize once there are several real joins. |
+| Open and close are predicates, not flags | The filter grammar, reused: `opens: "op == 'alloc'"` | The same expression type the CLI parses, now also evaluated in userspace, which is what filter placement needs anyway. |
+| Sources of one session share one window | `run_all` launches once and drives every collector on one tick loop | Running them one after another would measure several different moments and present them as one, and a join across them would correlate a program with its own past. |
+| A run is one document | `{results: [...], joins: [...]}` | Concatenating results and a correlation produced a file no JSON parser accepts. The shape was wrong, not the formatter. |
+| Eviction is data, not housekeeping | Window, capacity, and counts for expired and overflowed states | An attribution missing because its range was evicted looks exactly like an attribution that never happened. |
+
+### What the measurement taught
+
+The first correlation reported ~515 faults for an 8 MiB allocation, where 4 KiB
+pages would need 2048. The kernel's own counter agreed with ours, and a sweep
+showed why: with multi-size transparent huge pages the fault count is nearly
+flat across sizes — 263 faults for 1 MiB, 528 for 32 MiB, from 4 KiB per fault
+up to 62 KiB. The collector is faithful; the metric is not what it looks like.
+
+A derived "resident bytes" column had already been written from `faults x page
+size`. It was wrong by a factor of four on this machine, and it is gone. Fault
+counts now say where faults happened and explicitly do not convert to bytes.
+This is the failure mode the project exists to prevent, found in its own output.
+
+---
+
 ## Open
 
 These do not block the request surface, which is machine-independent by

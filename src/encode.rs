@@ -12,7 +12,153 @@ use crate::emit::{Output, Results};
 use crate::error::ParseError;
 use crate::event::KeyValue;
 use crate::format::OutputFormat;
+use crate::join::{Correlation, Outcome};
 use crate::scalar::Duration;
+
+/// Everything one run produced: what each source measured, and what the joins
+/// made of it together.
+///
+/// It is one document rather than several because several would not be one:
+/// concatenating two JSON documents produces a file no parser accepts, and a
+/// consumer of the results needs the joins beside them anyway.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RunOutput {
+    pub results: Vec<Results>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<Correlation>,
+}
+
+/// Encodes a whole run.
+pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, ParseError> {
+    match format {
+        OutputFormat::Text => {
+            let mut text = String::new();
+            for (index, results) in output.results.iter().enumerate() {
+                if index > 0 {
+                    text.push('\n');
+                }
+                text.push_str(&self::results(format, results)?);
+            }
+            for correlation in &output.joins {
+                text.push('\n');
+                text.push_str(&self::correlation(format, correlation)?);
+            }
+            Ok(text)
+        }
+        OutputFormat::Ndjson => {
+            let mut text = String::new();
+            for results in &output.results {
+                text.push_str(&self::results(format, results)?);
+            }
+            for correlation in &output.joins {
+                text.push_str(&self::correlation(format, correlation)?);
+            }
+            Ok(text)
+        }
+        format if format.renders_documents() => format.serialize_document(output),
+        format => Err(ParseError::new(format!(
+            "`{format}` has no encoder yet: {}",
+            format.describe()
+        ))),
+    }
+}
+
+/// Encodes a join's result in the session's output format.
+pub fn correlation(format: OutputFormat, correlation: &Correlation) -> Result<String, ParseError> {
+    match format {
+        OutputFormat::Text => Ok(correlation_text(correlation)),
+        OutputFormat::Ndjson => {
+            let line = serde_json::to_string(correlation)
+                .map_err(|error| ParseError::new(format!("cannot encode the join: {error}")))?;
+            Ok(format!("{line}\n"))
+        }
+        format if format.renders_documents() => format.serialize_document(correlation),
+        format => Err(ParseError::new(format!(
+            "`{format}` has no encoder for a join yet: {}",
+            format.describe()
+        ))),
+    }
+}
+
+fn correlation_text(correlation: &Correlation) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "join {}  {} -> {}  evidence {}",
+        correlation.rule, correlation.from, correlation.to, correlation.evidence
+    );
+
+    let total = correlation.matched + correlation.unmatched;
+    let share = if total == 0 {
+        0.0
+    } else {
+        100.0 * correlation.matched as f64 / total as f64
+    };
+    let _ = writeln!(
+        out,
+        "  {} of {} `{}` events attributed ({share:.1} %); {} fell outside every open range",
+        correlation.matched, total, correlation.to, correlation.unmatched
+    );
+
+    let states = &correlation.states;
+    let _ = writeln!(
+        out,
+        "  states: {} opened, {} closed, {} still open at the end, peak {} held at once",
+        states.opened, states.closed, states.still_open, states.peak_open
+    );
+    if states.is_clean() {
+        let _ = writeln!(
+            out,
+            "  no eviction: nothing was dropped for age or for space"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  EVICTED: {} expired past the window, {} dropped because the map was full. \
+             Attributions are missing, not absent.",
+            states.expired, states.overflowed
+        );
+    }
+
+    if correlation.top.is_empty() {
+        let _ = writeln!(out, "\n  nothing was attributed");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n  heaviest ranges");
+    let _ = writeln!(
+        out,
+        "    {:<34} {:>10}  {:>8}  OUTCOME",
+        "RANGE", "SIZE", "EVENTS"
+    );
+    for attribution in &correlation.top {
+        let _ = writeln!(
+            out,
+            "    {:<34} {:>10}  {:>8}  {}",
+            attribution.key,
+            bytes(attribution.len as f64),
+            attribution.matched,
+            outcome(attribution.outcome)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n  EVENTS counts faults, not bytes, and on a kernel with multi-size transparent huge \
+         pages it does not even rank by bytes: the kernel picks larger folios for larger regions, \
+         so a 1 MiB and a 32 MiB allocation both fault a few hundred times. Read it as where the \
+         faults happened, not as how much memory they cost; the THP mode is in the environment."
+    );
+    out
+}
+
+fn outcome(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Closed => "freed",
+        Outcome::Expired => "expired",
+        Outcome::Overflowed => "evicted",
+        Outcome::StillOpen => "live",
+    }
+}
 
 /// Encodes results in the session's output format.
 pub fn results(format: OutputFormat, results: &Results) -> Result<String, ParseError> {

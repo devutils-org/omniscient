@@ -81,6 +81,10 @@
   caveats:
     - "Correlate with mem.heap.alloc through the mem:[base,len) key (interval join)
        to attribute memory to whoever brings it into existence."
+    - "A fault is not a page, and with the multi-size anonymous THP of recent kernels
+       it is not even proportional to pages: the kernel picks larger folios for larger
+       regions, so zeroing 1 MiB and zeroing 32 MiB both take a few hundred faults.
+       Fault counts say where faults happened, not how much memory was made resident."
 
 - id: mem.page_alloc
   family: mem

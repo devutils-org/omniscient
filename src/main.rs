@@ -19,7 +19,7 @@ use omn::format::{FormatStatus, OutputFormat};
 use omn::request::Session;
 use omn::resolve::{self, ResolvedRequest};
 use omn::validate::{Rejection, Report};
-use omn::{collect, emit, encode, render, session as session_file, validate};
+use omn::{collect, emit, encode, join, render, session as session_file, validate};
 
 mod cli {
     pub use omn::cli::*;
@@ -143,25 +143,16 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    if session.requests.len() > 1 {
-        anyhow::bail!(
-            "this session has {} requests, and collectors are still run one at a time. \
-             Running them in sequence would measure five different moments and present them as one, \
-             so it is refused; concurrent attach lands with the hot attach work.",
-            session.requests.len()
-        );
-    }
-
-    measure(&catalog, &session, &report, &defaulted, &resolutions[0])
+    measure(&catalog, &session, &report, &defaulted, &resolutions)
 }
 
-/// Runs one resolved request and prints what it produced.
+/// Runs the session's requests over one window and prints what they produced.
 fn measure(
     catalog: &Catalog,
     session: &Session,
     report: &Report,
     defaulted: &Defaulted,
-    resolved: &ResolvedRequest,
+    resolved: &[ResolvedRequest],
 ) -> anyhow::Result<ExitCode> {
     for note in defaulted.iter() {
         eprintln!("note: {note}");
@@ -170,8 +161,8 @@ fn measure(
         eprintln!("warning: {warning}");
     }
 
-    let collection = match collect::run(resolved) {
-        Ok(collection) => collection,
+    let collections = match collect::run_all(resolved) {
+        Ok(collections) => collections,
         Err(error @ collect::CollectError::NoCollector { .. }) => {
             eprintln!("error: {error}");
             eprintln!(
@@ -184,24 +175,42 @@ fn measure(
         Err(error) => anyhow::bail!(error),
     };
 
-    let unit = catalog
-        .get(&resolved.request.source)
-        .map(|entry| entry.unit)
-        .unwrap_or(omn::catalog::Unit::Count);
-    let value_attr = collection.value_attr.clone();
-    let results = emit::aggregate(resolved, collection, unit, &value_attr)?;
+    // Every source's events go into one stream for the joins: they were
+    // collected over one window against one target, which is what makes them
+    // comparable in the first place.
+    let mut merged = Vec::new();
+    let mut run = encode::RunOutput {
+        results: Vec::new(),
+        joins: Vec::new(),
+    };
 
-    let encoded = encode::results(session.format, &results)?;
-    print!("{encoded}");
+    for (index, collection) in collections.into_iter().enumerate() {
+        let resolved = &resolved[index];
+        merged.extend(collection.events.iter().cloned());
+        let unit = catalog
+            .get(&resolved.request.source)
+            .map(|entry| entry.unit)
+            .unwrap_or(omn::catalog::Unit::Count);
+        let value_attr = collection.value_attr.clone();
+        run.results
+            .push(emit::aggregate(resolved, collection, unit, &value_attr)?);
+    }
+
+    for rule in &session.joins {
+        run.joins.push(join::apply(rule, &merged)?);
+    }
+
+    let output = encode::run_output(session.format, &run)?;
+    print!("{output}");
 
     for caveat in report.caveats() {
         eprintln!("caveat: {caveat}");
     }
 
     if let Some(directory) = &session.out {
-        write_artifacts(directory, session.format, resolved, &results, &encoded)?;
+        write_artifacts(directory, session.format, resolved, &output)?;
         eprintln!(
-            "\nwrote results and the resolved request to {}",
+            "\nwrote results and the resolved requests to {}",
             directory.display()
         );
     }
@@ -211,13 +220,12 @@ fn measure(
 
 /// Writes the numbers and, beside them, the record of how they were obtained.
 ///
-/// The resolved request is always written, in JSON, whatever the results format
-/// is: results without it are a number whose provenance is gone.
+/// The resolved requests are always written, in JSON, whatever the results
+/// format is: results without them are numbers whose provenance is gone.
 fn write_artifacts(
     directory: &Path,
     format: OutputFormat,
-    resolved: &ResolvedRequest,
-    results: &emit::Results,
+    resolved: &[ResolvedRequest],
     encoded: &str,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
@@ -230,7 +238,6 @@ fn write_artifacts(
         other => other.as_str(),
     };
     std::fs::write(directory.join(format!("results.{extension}")), encoded)?;
-    let _ = results;
     Ok(())
 }
 

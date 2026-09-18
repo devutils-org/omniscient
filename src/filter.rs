@@ -552,3 +552,145 @@ mod tests {
         assert!(error.message().contains("is not a predicate"), "{error}");
     }
 }
+
+/// Evaluates a predicate against an event.
+///
+/// This is the userspace half of filter placement. When the resolver cannot
+/// push a predicate into the kernel it says so, and this is what then runs --
+/// after the event has already been paid for, which is exactly why the
+/// placement is worth reporting.
+///
+/// A field resolves against the event's attributes, plus `kind`, which every
+/// event has. A field the event does not carry makes the comparison false
+/// rather than an error: an event that lacks the field simply is not one of the
+/// events being asked for.
+pub fn matches(expression: &FilterExpr, event: &crate::event::Event) -> bool {
+    match expression {
+        FilterExpr::And(left, right) => matches(left, event) && matches(right, event),
+        FilterExpr::Or(left, right) => matches(left, event) || matches(right, event),
+        FilterExpr::Not(inner) => !matches(inner, event),
+        FilterExpr::Compare {
+            field,
+            operator,
+            value,
+        } => compare(field, *operator, value, event),
+    }
+}
+
+fn compare(field: &str, operator: CompareOp, value: &Value, event: &crate::event::Event) -> bool {
+    use crate::event::AttrValue;
+
+    let attribute = if field == "kind" {
+        Some(AttrValue::Text(event.kind.clone()))
+    } else {
+        event.attr(field).cloned()
+    };
+    let Some(attribute) = attribute else {
+        return false;
+    };
+
+    match operator {
+        CompareOp::In => match value {
+            Value::List(values) => values
+                .iter()
+                .any(|candidate| compare_one(&attribute, CompareOp::Eq, candidate)),
+            _ => false,
+        },
+        other => compare_one(&attribute, other, value),
+    }
+}
+
+fn compare_one(attribute: &crate::event::AttrValue, operator: CompareOp, value: &Value) -> bool {
+    use crate::event::AttrValue;
+
+    match value {
+        Value::Int { value, .. } => {
+            let Some(left) = attribute.as_f64() else {
+                return false;
+            };
+            let right = *value as f64;
+            match operator {
+                CompareOp::Eq => left == right,
+                CompareOp::Ne => left != right,
+                CompareOp::Lt => left < right,
+                CompareOp::Le => left <= right,
+                CompareOp::Gt => left > right,
+                CompareOp::Ge => left >= right,
+                // A numeric field has no substring to match against.
+                CompareOp::Matches | CompareOp::In => false,
+            }
+        }
+        Value::Str(text) => {
+            let left = match attribute {
+                AttrValue::Text(left) => left.clone(),
+                other => other.to_string(),
+            };
+            match operator {
+                CompareOp::Eq => left == *text,
+                CompareOp::Ne => left != *text,
+                CompareOp::Matches => left.contains(text.as_str()),
+                CompareOp::Lt => left.as_str() < text.as_str(),
+                CompareOp::Le => left.as_str() <= text.as_str(),
+                CompareOp::Gt => left.as_str() > text.as_str(),
+                CompareOp::Ge => left.as_str() >= text.as_str(),
+                CompareOp::In => false,
+            }
+        }
+        Value::List(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod evaluation_tests {
+    use super::*;
+    use crate::event::{Attr, CollectorId, Event};
+
+    fn event() -> Event {
+        Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "mem.heap.alloc".to_owned(),
+            keys: Vec::new(),
+            attrs: vec![
+                Attr::uint("bytes", 8192),
+                Attr::text("op", "alloc"),
+                Attr::text("comm", "nginx-worker"),
+            ],
+            collector_id: CollectorId::new("test"),
+            seq: 0,
+        }
+    }
+
+    fn check(text: &str) -> bool {
+        matches(&text.parse::<FilterExpr>().unwrap(), &event())
+    }
+
+    #[test]
+    fn numeric_and_textual_comparisons_both_work() {
+        assert!(check("bytes > 4KiB"));
+        assert!(!check("bytes > 16KiB"));
+        assert!(check("op == 'alloc'"));
+        assert!(check("comm =~ 'nginx'"));
+        assert!(!check("comm == 'nginx'"));
+    }
+
+    #[test]
+    fn the_event_kind_is_addressable_like_a_field() {
+        assert!(check("kind == 'mem.heap.alloc'"));
+        assert!(check("kind =~ 'heap'"));
+    }
+
+    #[test]
+    fn a_field_the_event_does_not_carry_is_false_rather_than_an_error() {
+        assert!(!check("dev == 259"));
+        assert!(check("!(dev == 259)"));
+    }
+
+    #[test]
+    fn membership_and_boolean_composition_hold() {
+        assert!(check("op in (alloc, free)"));
+        assert!(!check("op in (free, realloc)"));
+        assert!(check("bytes > 1024 && op == 'alloc'"));
+        assert!(check("bytes > 1000000 || op == 'alloc'"));
+    }
+}

@@ -172,10 +172,67 @@ pub fn validate_session(catalog: &Catalog, session: &Session) -> Result<Report, 
         }
     }
 
+    check_joins(catalog, session, &mut rejections, &mut report);
+
     if rejections.is_empty() {
         Ok(report)
     } else {
         Err(rejections)
+    }
+}
+
+/// Checks that a declared join can be applied to the sources in the session.
+///
+/// A rule naming a source the session does not collect, or a key the source
+/// does not carry, would produce an empty correlation that looks like "nothing
+/// was related" instead of "this rule could never have matched".
+fn check_joins(
+    catalog: &Catalog,
+    session: &Session,
+    rejections: &mut Vec<Rejection>,
+    report: &mut Report,
+) {
+    let present: Vec<&str> = session
+        .requests
+        .iter()
+        .map(|request| request.source.as_str())
+        .collect();
+
+    for rule in &session.joins {
+        for (role, kind) in [("from", &rule.from), ("to", &rule.to)] {
+            if !present.contains(&kind.as_str()) {
+                rejections.push(Rejection::with_hint(
+                    format!(
+                        "join `{}` reads `{kind}` as its `{role}` side, but this session does not collect it",
+                        rule.id
+                    ),
+                    format!("the session collects {}", one_of(present.iter().copied())),
+                ));
+                continue;
+            }
+            let Some(entry) = kind.parse().ok().and_then(|id| catalog.get(&id)) else {
+                continue;
+            };
+            if !entry.keys.contains(&rule.via) {
+                rejections.push(Rejection::with_hint(
+                    format!(
+                        "join `{}` matches on `{}`, which `{kind}` does not carry",
+                        rule.id, rule.via
+                    ),
+                    format!(
+                        "`{kind}` carries {}",
+                        one_of(entry.keys.iter().map(|key| key.as_str()))
+                    ),
+                ));
+            }
+        }
+
+        if rule.window.is_none() {
+            report.push(format!(
+                "join `{}` has no window, so a range that is never closed is held until the run ends",
+                rule.id
+            ));
+        }
     }
 }
 
