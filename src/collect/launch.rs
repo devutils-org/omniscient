@@ -246,13 +246,15 @@ mod tests {
 
     #[test]
     fn terminating_a_running_child_reaps_it_rather_than_leaving_a_zombie() {
-        let mut child = gated(&["/bin/cat".to_owned()], &[]).expect("fork");
+        // `sleep` rather than a program that reads stdin: a child inherits the
+        // test harness's stdin, which is closed, so anything reading it sees end
+        // of file and exits before the test can terminate it.
+        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
         child.release();
-        // `cat` with no argument waits on stdin, so it is still running.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(
             child.finished().is_none(),
-            "cat should still be waiting on stdin"
+            "sleep 30 should still be running"
         );
 
         child.terminate();
