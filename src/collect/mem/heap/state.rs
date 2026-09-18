@@ -259,6 +259,93 @@ mod tests {
         assert_eq!(freed.count(), 0);
     }
 
+    /// Freeing a block and then handing parts of it back out leaves the table
+    /// with what the program still has not taken back, and nothing else.
+    #[test]
+    fn a_reused_address_that_overlaps_an_edge_carves_only_that_edge() {
+        let mut freed = FreedRanges::new(16);
+        freed.insert(0x2000, 0x4000);
+
+        // An allocation that starts before the freed range and ends inside it.
+        freed.remove(0x1000, 0x2800);
+        assert_eq!(freed.iter().collect::<Vec<_>>(), vec![(0x2800, 0x4000)]);
+
+        // And one that starts inside it and runs past its end.
+        freed.remove(0x3800, 0x9000);
+        assert_eq!(freed.iter().collect::<Vec<_>>(), vec![(0x2800, 0x3800)]);
+        assert_eq!(freed.bytes(), 0x1000);
+    }
+
+    #[test]
+    fn a_range_that_covers_nothing_is_not_a_range() {
+        let mut freed = FreedRanges::new(16);
+        freed.insert(0x1000, 0x1000);
+        freed.insert(0x2000, 0x1000);
+        assert_eq!(freed.count(), 0);
+
+        freed.insert(0x1000, 0x2000);
+        freed.remove(0x1000, 0x1000);
+        assert_eq!(freed.count(), 1, "removing nothing removes nothing");
+    }
+
+    /// Merging leaves entries in the eviction queue pointing at ranges that no
+    /// longer exist. Eviction has to walk past those rather than count them as
+    /// dropped, or the table reports losses it never had and stops evicting the
+    /// ranges it does hold.
+    #[test]
+    fn eviction_walks_past_the_ranges_that_merging_replaced() {
+        let mut freed = FreedRanges::new(2);
+
+        // Three ranges that merge into one: two queue entries go stale.
+        freed.insert(0x1000, 0x2000);
+        freed.insert(0x2000, 0x3000);
+        freed.insert(0x3000, 0x4000);
+        assert_eq!(freed.count(), 1);
+        assert_eq!(freed.evicted(), (0, 0), "merging is not eviction");
+
+        // Now past the capacity, with ranges that cannot merge.
+        freed.insert(0x10_0000, 0x10_1000);
+        freed.insert(0x20_0000, 0x20_1000);
+        assert_eq!(freed.count(), 2);
+
+        // The merged range was the oldest, so it went first, and what it cost
+        // is the size it had after merging.
+        let (count, bytes) = freed.evicted();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 0x3000);
+        assert_eq!(
+            freed.iter().collect::<Vec<_>>(),
+            vec![(0x10_0000, 0x10_1000), (0x20_0000, 0x20_1000)]
+        );
+    }
+
+    /// An allocation the collector never saw cannot be subtracted from a total
+    /// it was never added to. Counting those frees is what tells a reader
+    /// whether the live total is missing a whole allocator's worth of activity
+    /// or a few blocks from before the shim was loaded.
+    #[test]
+    fn a_free_of_an_unknown_pointer_is_counted_and_changes_nothing() {
+        let mut live = LiveSet::default();
+        live.allocated(0x1000, 4096);
+        assert_eq!(live.freed(0x9999), None);
+        assert_eq!(live.bytes(), 4096);
+        assert_eq!(live.count(), 1);
+        assert_eq!(live.untracked_frees(), 1);
+    }
+
+    /// The same address handed out twice without a free in between means a
+    /// record was lost. The newer size is what the program is holding.
+    #[test]
+    fn an_address_allocated_twice_counts_once() {
+        let mut live = LiveSet::default();
+        live.allocated(0x1000, 4096);
+        live.allocated(0x1000, 64);
+        assert_eq!(live.bytes(), 64);
+        assert_eq!(live.count(), 1);
+        assert_eq!(live.freed(0x1000), Some((0x1000, 0x1040)));
+        assert_eq!(live.bytes(), 0);
+    }
+
     #[test]
     fn the_table_is_bounded_and_says_what_it_dropped() {
         let mut freed = FreedRanges::new(4);

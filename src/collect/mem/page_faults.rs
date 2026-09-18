@@ -199,15 +199,34 @@ mod tests {
 
         const PAGES: usize = 64;
         let page = 4096;
-        let mut block = vec![0u8; PAGES * page];
-        let base = block.as_ptr() as u64;
+
+        // Mapped rather than allocated. A block from the allocator's arena can
+        // come back on pages another test in this binary already made resident,
+        // and a page that is already there does not fault: the test would then
+        // be waiting for events that had no reason to happen.
+        // SAFETY: an anonymous mapping of our own, unmapped below.
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                PAGES * page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "the mapping must succeed");
+        let base = block as u64;
         for index in 0..PAGES {
-            block[index * page] = 1;
+            // SAFETY: writing inside the mapping, one byte per page, which is
+            // what makes each of them fault in.
+            unsafe { block.cast::<u8>().add(index * page).write_volatile(1) };
         }
-        std::hint::black_box(&block);
 
         let mut events = collector.sample(0).unwrap();
         events.extend(collector.stop());
+        // SAFETY: unmapping what was mapped above, after the last read of it.
+        unsafe { libc::munmap(block, PAGES * page) };
 
         let inside = events
             .iter()
@@ -218,10 +237,32 @@ mod tests {
                 _ => false,
             })
             .count();
+
+        // Neither bound is the page count, and both of the reasons matter.
+        //
+        // Touching N pages does not produce N faults: with multi-size
+        // transparent huge pages one fault installs a whole folio, so the count
+        // is a fraction of the pages touched and varies between runs. And this
+        // collector is scoped to the process, not to this thread, so the other
+        // threads of a test binary running its suite in parallel contribute
+        // faults of their own -- correctly, since `mem.faults --pid` means the
+        // process.
+        //
+        // What can be asserted is that the addresses are real. The block sits
+        // where the allocator put it, so samples landing inside it are not
+        // coincidence, and samples exceeding the pages it holds would mean an
+        // address is being reported that was never touched.
+        assert!(!events.is_empty(), "no page-fault event arrived at all");
         assert!(
-            inside as f64 >= 0.9 * PAGES as f64,
-            "only {inside} of {} faults landed in the block that was touched",
+            inside >= PAGES / 16,
+            "only {inside} of {} events landed in the {PAGES} pages that were touched, which is \
+             below even one fault per sixteen-page folio",
             events.len()
+        );
+        assert!(
+            inside <= PAGES,
+            "{inside} events landed in a block of {PAGES} pages, so an address is being reported \
+             that was never touched"
         );
         assert!(collector.losses().is_clean(), "{:?}", collector.losses());
     }

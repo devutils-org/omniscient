@@ -22,9 +22,9 @@ use std::time::Duration;
 use super::cadence::Cadence;
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Prepared, SampleError};
-use crate::request::Target;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::Mode;
+use crate::request::Target;
 
 /// Which footprint is being measured.
 ///
@@ -341,19 +341,41 @@ mod tests {
         const SLACK: f64 = 512.0 * 1024.0;
 
         for metric in [Metric::Rss, Metric::Pss, Metric::Uss] {
-            let (Some(before), Some(walked), Some(after)) = (
-                read(metric, Source::SmapsRollup),
-                read(metric, Source::Smaps),
-                read(metric, Source::SmapsRollup),
-            ) else {
-                continue; // `smaps_rollup` is restricted here; nothing to check.
+            // The other threads of this test binary allocate and free while
+            // this runs, and a process that moves by megabytes between two
+            // reads cannot have its two readings compared at all. So the
+            // comparison is attempted until it lands in a quiet moment, and
+            // gives up rather than pretending a busy one proved something.
+            const ATTEMPTS: usize = 10;
+            let mut last = None;
+            let agreed = (0..ATTEMPTS).any(|_| {
+                let (Some(before), Some(walked), Some(after)) = (
+                    read(metric, Source::SmapsRollup),
+                    read(metric, Source::Smaps),
+                    read(metric, Source::SmapsRollup),
+                ) else {
+                    return false;
+                };
+                last = Some((before, walked, after));
+                let low = before.min(after) - SLACK;
+                let high = before.max(after) + SLACK;
+                let quiet = (before - after).abs() <= SLACK;
+                if !quiet {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                quiet && (low..=high).contains(&walked)
+            });
+
+            let Some((before, walked, after)) = last else {
+                return; // `smaps_rollup` is restricted here; nothing to check.
             };
-            let low = before.min(after) - SLACK;
-            let high = before.max(after) + SLACK;
+            // One disagreement proves nothing while the other threads of this
+            // binary allocate and free megabytes around the reads. Ten in a row
+            // is not churn.
             assert!(
-                (low..=high).contains(&walked),
-                "{metric:?}: the walk said {walked}, outside the {before}..{after} the rollup \
-                 reported around it"
+                agreed,
+                "{metric:?}: in {ATTEMPTS} tries the walk never landed between the rollups \
+                 around it; last was {walked} against {before}..{after}"
             );
         }
     }
@@ -376,6 +398,185 @@ mod tests {
         let (rss, pss, uss) = (read(Metric::Rss), read(Metric::Pss), read(Metric::Uss));
         assert!(uss <= pss, "uss {uss} exceeds pss {pss}");
         assert!(pss <= rss, "pss {pss} exceeds rss {rss}");
+    }
+
+    /// Ground truth for what PSS and USS *mean*.
+    ///
+    /// A shared mapping is touched by this process alone, then a second process
+    /// starts mapping the same pages. Nothing is allocated and nothing is
+    /// freed: the same physical pages are simply mapped twice. Resident size
+    /// must not move, because every page is still in memory for this process;
+    /// proportional size must halve for that region, because it is now divided
+    /// between two mappers; unique size must lose it entirely, because it no
+    /// longer dies with this process.
+    ///
+    /// That is the whole reason the family refuses to answer "memory" with one
+    /// number, and it is checkable rather than merely plausible.
+    #[test]
+    fn a_second_mapper_halves_the_proportional_size_and_leaves_the_resident_one() {
+        const SIZE: usize = 16 * 1024 * 1024;
+        let page = page_size() as usize;
+
+        // SAFETY: an anonymous shared mapping of our own, unmapped below.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "the mapping must succeed");
+        // SAFETY: writing inside the mapping we just made, to make it resident.
+        unsafe { std::ptr::write_bytes(base.cast::<u8>(), 1, SIZE) };
+
+        let base_address = base as u64;
+        let Some(before) = footprints_of(base_address) else {
+            // SAFETY: unmapping what was mapped above.
+            unsafe { libc::munmap(base, SIZE) };
+            return; // `smaps_rollup` is restricted here; nothing to check.
+        };
+
+        // SAFETY: the child touches the shared mapping and then waits. It calls
+        // nothing that could deadlock on a lock held by another thread at fork.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork must succeed");
+        if child == 0 {
+            // A shared anonymous mapping is not copied into the child's page
+            // tables at fork; the pages become shared when the child touches
+            // them. Reading one byte per page is what makes it a second mapper.
+            let mut total = 0u8;
+            for offset in (page..SIZE).step_by(page) {
+                // SAFETY: reading inside the inherited mapping.
+                total =
+                    total.wrapping_add(unsafe { base.cast::<u8>().add(offset).read_volatile() });
+            }
+            // The first byte is the handshake: the parent measures once it
+            // appears, and `total` keeps the reads from being optimised away.
+            // SAFETY: writing the first byte of the inherited mapping.
+            unsafe { base.cast::<u8>().write_volatile(total | 0x80) };
+            // SAFETY: waiting to be killed, so the mapping stays shared.
+            unsafe {
+                libc::pause();
+                libc::_exit(0);
+            }
+        }
+
+        // Wait for the handshake rather than for a duration.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // SAFETY: reading the first byte of our own mapping.
+        while unsafe { base.cast::<u8>().read_volatile() } & 0x80 == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never finished touching the shared mapping"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let after = footprints_of(base_address);
+
+        // SAFETY: the child is ours, and the mapping is ours.
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+            libc::munmap(base, SIZE);
+        }
+        let after = after.expect("the file was readable a moment ago");
+
+        let size = SIZE as f64;
+        assert!(
+            before.0 >= 0.9 * size,
+            "the mapping was written to, so it should be resident: rss {} of {size}",
+            before.0
+        );
+        let resident_change = (after.0 - before.0).abs();
+        assert!(
+            resident_change < 0.1 * size,
+            "the pages are still resident for this process: the mapping's rss went from {} to {}",
+            before.0,
+            after.0
+        );
+        let proportional_drop = before.1 - after.1;
+        assert!(
+            (0.4 * size..0.6 * size).contains(&proportional_drop),
+            "a second mapper halves this region's share: pss dropped by {proportional_drop}"
+        );
+        let unique_drop = before.2 - after.2;
+        assert!(
+            unique_drop >= 0.9 * size,
+            "what two processes map does not die with one of them: uss dropped by {unique_drop}"
+        );
+    }
+
+    /// The three metrics of one mapping, from the per-mapping walk.
+    ///
+    /// Process totals cannot answer this: the rest of the test binary allocates
+    /// and frees in other threads while this runs, and the claim under test is
+    /// about one mapping rather than about the process. `smaps` publishes a
+    /// block per mapping, and the fields inside it are the ones the collector
+    /// sums.
+    fn footprints_of(base: u64) -> Option<(f64, f64, f64)> {
+        let text = std::fs::read_to_string(Source::Smaps.path(std::process::id() as i32)).ok()?;
+        let block = mapping_block(&text, base)?;
+        let read = |metric: Metric| sum_fields(block, metric.fields()).unwrap_or(0) as f64;
+        Some((read(Metric::Rss), read(Metric::Pss), read(Metric::Uss)))
+    }
+
+    /// The `smaps` block of the mapping that starts at `base`.
+    ///
+    /// A block opens with `<start>-<end> perms ...` and runs to the next line
+    /// of that shape.
+    fn mapping_block(text: &str, base: u64) -> Option<&str> {
+        let header_address = |line: &str| -> Option<u64> {
+            let (start, rest) = line.split_once('-')?;
+            // `7f..-7f.. rw-p 00000000 00:00 0` -- a field line such as
+            // `Rss:  12 kB` has no dash before its first space.
+            if start.contains(char::is_whitespace) || !rest.contains(' ') {
+                return None;
+            }
+            u64::from_str_radix(start, 16).ok()
+        };
+
+        let mut opened_at = None;
+        let mut offset = 0;
+        for line in text.lines() {
+            match (header_address(line), opened_at) {
+                (Some(address), None) if address == base => opened_at = Some(offset),
+                (Some(_), Some(start)) => return Some(&text[start..offset]),
+                _ => {}
+            }
+            offset += line.len() + 1;
+        }
+        opened_at.map(|start| &text[start..])
+    }
+
+    /// A session ticks as fast as its fastest collector needs, which is not
+    /// what the request asked for. The reads happen on the tick; the points
+    /// appear on the grid.
+    #[test]
+    fn the_series_has_the_spacing_the_request_asked_for_and_not_the_runs() {
+        let mut collector = FootprintCollector::new(
+            std::process::id() as i32,
+            Metric::Rss,
+            Source::Statm,
+            Duration::from_millis(50),
+        );
+
+        let started = std::time::Instant::now();
+        let mut published = 0;
+        // A tenth of a second of ten-millisecond ticks, as a run with a shim in
+        // it would produce.
+        while started.elapsed() < Duration::from_millis(100) {
+            published += collector.sample(0).expect("statm is readable").len();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            (2..=4).contains(&published),
+            "a hundred milliseconds at fifty is two or three points, not {published}"
+        );
     }
 
     #[test]

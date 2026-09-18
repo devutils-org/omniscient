@@ -126,6 +126,59 @@ mod tests {
         assert_eq!(events[0].attr("bytes").unwrap().as_f64(), Some(1024.0));
     }
 
+    /// `realloc` is reported as a free and an allocation, because that is what
+    /// it is. The live total has to follow the pointer to its new address
+    /// rather than counting the block twice or losing it.
+    #[test]
+    fn a_block_that_moved_is_counted_once_at_its_new_address() {
+        let (writer, stream) = piped();
+        let mut collector = LiveCollector::new(stream, Duration::ZERO);
+
+        write(writer, &record(OP_ALLOC, 0x1000, 1024));
+        write(writer, &record(OP_FREE, 0x1000, 0));
+        write(writer, &record(OP_ALLOC, 0x5000, 4096));
+
+        let events = collector.sample(0).unwrap();
+        assert_eq!(events[0].attr("bytes").unwrap().as_f64(), Some(4096.0));
+        assert_eq!(events[0].attr("allocations").unwrap().as_f64(), Some(1.0));
+    }
+
+    /// Blocks allocated before the shim could report them are freed normally
+    /// later, and those frees have nothing to subtract from. The count travels
+    /// with the value, because it is what says whether the total is missing a
+    /// handful of blocks or an entire allocator.
+    #[test]
+    fn frees_with_no_allocation_behind_them_are_reported_beside_the_total() {
+        let (writer, stream) = piped();
+        let mut collector = LiveCollector::new(stream, Duration::ZERO);
+
+        write(writer, &record(OP_ALLOC, 0x1000, 1024));
+        write(writer, &record(OP_FREE, 0xdead_0000, 0));
+
+        let events = collector.sample(0).unwrap();
+        assert_eq!(events[0].attr("bytes").unwrap().as_f64(), Some(1024.0));
+        assert_eq!(
+            events[0].attr("untracked_frees").unwrap().as_f64(),
+            Some(1.0)
+        );
+    }
+
+    /// The live heap at exit is the one point of the series that cannot be
+    /// missed: it is what the program never gave back.
+    #[test]
+    fn the_final_point_is_published_whatever_the_grid_says() {
+        let (writer, stream) = piped();
+        let mut collector = LiveCollector::new(stream, Duration::from_secs(3600));
+        assert_eq!(collector.sample(0).unwrap().len(), 1, "the first point");
+
+        write(writer, &record(OP_ALLOC, 0x1000, 8192));
+        assert!(collector.sample(1).unwrap().is_empty());
+
+        let last = collector.stop();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].attr("bytes").unwrap().as_f64(), Some(8192.0));
+    }
+
     /// The pipe has to be drained far more often than the series is published,
     /// or a burst of allocations overflows it. Both cadences exist, and the
     /// value is emitted on the slower one.

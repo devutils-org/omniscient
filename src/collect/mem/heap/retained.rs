@@ -53,6 +53,14 @@ pub struct RetainedCollector {
 
 impl RetainedCollector {
     pub fn new(stream: Stream, interval: Duration) -> Result<Box<Self>, String> {
+        Self::with_capacity(stream, interval, RANGE_CAPACITY)
+    }
+
+    fn with_capacity(
+        stream: Stream,
+        interval: Duration,
+        capacity: usize,
+    ) -> Result<Box<Self>, String> {
         let pagemap = Pagemap::open(stream.pid()).map_err(|error| {
             format!(
                 "cannot read /proc/{}/pagemap: {error}; without it there is no way to tell \
@@ -64,7 +72,7 @@ impl RetainedCollector {
             id: CollectorId::new("mem.heap.retained/preload"),
             stream,
             live: LiveSet::default(),
-            freed: FreedRanges::new(RANGE_CAPACITY),
+            freed: FreedRanges::new(capacity),
             pagemap,
             cadence: Cadence::new(interval),
             emitted: 0,
@@ -244,16 +252,29 @@ mod tests {
         let (writer, stream) = piped();
         let mut collector = RetainedCollector::new(stream, Duration::ZERO).expect("our pagemap");
 
-        // Above the mmap threshold, so the allocator maps fresh pages that are
-        // resident only once something writes to them. Nothing does.
-        let untouched: Vec<u8> = Vec::with_capacity(SIZE);
-        let base = untouched.as_ptr() as u64;
+        // Mapped directly rather than allocated: a block from the allocator's
+        // arena can land on pages another test in this binary already made
+        // resident, and this test is about pages that were never written to.
+        // SAFETY: an anonymous mapping of our own, unmapped below.
+        let untouched = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(untouched, libc::MAP_FAILED, "the mapping must succeed");
+        let base = untouched as u64;
         write(writer, &record(OP_ALLOC, base, SIZE as u64));
         write(writer, &record(OP_FREE, base, 0));
 
         let events = collector.sample(0).unwrap();
         let retained = events[0].attr("bytes").unwrap().as_f64().unwrap();
-        std::hint::black_box(&untouched);
+        // SAFETY: unmapping what was mapped above.
+        unsafe { libc::munmap(untouched, SIZE) };
 
         assert!(
             retained <= 0.1 * SIZE as f64,
@@ -263,6 +284,99 @@ mod tests {
             events[0].attr("freed_span").unwrap().as_f64(),
             Some(SIZE as f64),
             "the address space was still given back"
+        );
+    }
+
+    /// A table that dropped a range is a table whose total is short by whatever
+    /// was resident in it, and the run has to say so. An attribution missing
+    /// because its range was evicted looks exactly like one that never
+    /// happened.
+    #[test]
+    fn ranges_dropped_for_space_are_counted_as_a_loss() {
+        let (writer, stream) = piped();
+        let mut collector =
+            RetainedCollector::with_capacity(stream, Duration::ZERO, 2).expect("our pagemap");
+
+        // Four blocks, far enough apart that none of them merge.
+        for index in 0..4u64 {
+            let base = 0x1_0000_0000 + index * 0x1000_0000;
+            write(writer, &record(OP_ALLOC, base, 0x4000));
+            write(writer, &record(OP_FREE, base, 0));
+        }
+
+        let events = collector.sample(0).unwrap();
+        assert_eq!(events[0].attr("ranges").unwrap().as_f64(), Some(2.0));
+        assert_eq!(
+            events[0].attr("evicted_ranges").unwrap().as_f64(),
+            Some(2.0)
+        );
+
+        let losses = collector.losses();
+        assert_eq!(losses.dropped, 2);
+        assert!(!losses.is_clean());
+        assert!(
+            losses
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("freed-range table")),
+            "the reason must say what was dropped and why: {:?}",
+            losses.reasons
+        );
+    }
+
+    /// The same eviction reported twice would double the loss. It is counted
+    /// once per range, not once per poll.
+    #[test]
+    fn an_eviction_is_reported_once_and_not_on_every_poll() {
+        let (writer, stream) = piped();
+        let mut collector =
+            RetainedCollector::with_capacity(stream, Duration::ZERO, 1).expect("our pagemap");
+
+        for index in 0..3u64 {
+            let base = 0x1_0000_0000 + index * 0x1000_0000;
+            write(writer, &record(OP_ALLOC, base, 0x4000));
+            write(writer, &record(OP_FREE, base, 0));
+        }
+        collector.sample(0).unwrap();
+        assert_eq!(collector.losses().dropped, 2);
+
+        collector.sample(1).unwrap();
+        collector.sample(2).unwrap();
+        assert_eq!(collector.losses().dropped, 2, "nothing new was dropped");
+    }
+
+    /// A program that has exited holds nothing, and a collector that said so
+    /// would be reporting the one number this source must never invent. The run
+    /// ends instead, and the last value stands.
+    #[test]
+    fn a_target_that_has_exited_ends_the_run_rather_than_reading_as_empty() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("sh should run");
+        let pid = child.id() as i32;
+
+        // The pipe is never written to: this is about the target, not the shim.
+        let stream = Stream::new(-1, pid);
+        let mut collector = match RetainedCollector::new(stream, Duration::ZERO) {
+            Ok(collector) => collector,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("skipped: a child's pagemap cannot be read: {error}");
+                return;
+            }
+        };
+        child.kill().expect("our own child");
+        child.wait().expect("reaped");
+
+        match collector.sample(0) {
+            Err(SampleError::TargetGone(reason)) => assert!(reason.contains("exited"), "{reason}"),
+            other => panic!("expected the run to end, got {other:?}"),
+        }
+        assert!(
+            collector.stop().is_empty(),
+            "a scan of a dead process publishes nothing"
         );
     }
 

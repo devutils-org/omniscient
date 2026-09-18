@@ -162,6 +162,74 @@ mod tests {
         assert_eq!(empty.resident, 0, "an unmapped range cannot be resident");
     }
 
+    /// A range larger than one read covers every page of it.
+    ///
+    /// The scan reads the map in batches of a few thousand entries, and a range
+    /// that spans several batches is the case where an off-by-one in the batch
+    /// arithmetic would quietly drop a slice of memory from the total.
+    #[test]
+    fn a_range_that_spans_several_reads_counts_all_of_its_pages() {
+        let page = page_size() as usize;
+        let size = (BATCH * 2 + 17) * page;
+
+        let touched = vec![1u8; size];
+        let mut pagemap = match Pagemap::open(std::process::id() as i32) {
+            Ok(pagemap) => pagemap,
+            Err(error) => {
+                eprintln!("skipped: this pagemap cannot be read: {error}");
+                return;
+            }
+        };
+
+        let base = touched.as_ptr() as u64;
+        let found = pagemap
+            .scan([(base, base + size as u64)].into_iter())
+            .expect("the scan reads our own address space");
+        std::hint::black_box(&touched);
+
+        // Whole pages inside the range: the first and last are partial unless
+        // the allocation happened to be page-aligned.
+        let whole = (size / page - 2) as u64;
+        assert!(
+            found.pages_examined >= whole,
+            "{} pages examined for a range of {} whole pages",
+            found.pages_examined,
+            whole
+        );
+        assert!(
+            found.resident >= whole * page as u64,
+            "a buffer this process wrote to should be resident all the way through: {found:?}"
+        );
+    }
+
+    /// The process is gone and the file with it. A scan that answered zero here
+    /// would report a program that gave all its memory back.
+    #[test]
+    fn a_scan_of_a_process_that_has_exited_fails_rather_than_reporting_nothing() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("sh should run");
+        let pid = child.id() as i32;
+
+        let mut pagemap = match Pagemap::open(pid) {
+            Ok(pagemap) => pagemap,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("skipped: a child's pagemap cannot be read: {error}");
+                return;
+            }
+        };
+        child.kill().expect("our own child");
+        child.wait().expect("reaped");
+
+        let error = pagemap
+            .scan([(0x1000, 0x2000)].into_iter())
+            .expect_err("a dead process has no address space to report");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
     #[test]
     fn only_whole_pages_inside_the_range_are_counted() {
         let page = page_size();

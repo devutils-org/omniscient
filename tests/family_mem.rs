@@ -319,3 +319,95 @@ fn memory_freed_into_a_fragmented_arena_is_reported_as_retained() {
         "the timeline ends with the retained memory still there: {last_point}"
     );
 }
+
+/// The claim `mem.heap.retained` exists to make measurable, end to end.
+///
+/// "`free()` returns nothing to the operating system" is three statements about
+/// one run: the live heap halves, the resident size does not follow it down,
+/// and the difference is memory the allocator is holding. All three come out of
+/// a single `mem.heap.retained` collection, which reports live bytes and
+/// resident bytes beside the retained ones for exactly this reason.
+#[test]
+fn freeing_half_the_heap_moves_the_live_total_and_not_the_resident_size() {
+    const COUNT: usize = 1024;
+    const SIZE: usize = 64 * 1024;
+
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+
+    let session = format!(
+        "format: json\nrequests:\n  \
+         - source: mem.heap.retained\n    \
+         target: {{launch: [python3, -c, {:?}]}}\n    \
+         mode: poll@50ms\n    emit: [raw]\n",
+        fragmenting_program(COUNT, SIZE)
+    );
+    let output = run_session(&session);
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events")
+        .clone();
+    assert!(
+        events.len() > 4,
+        "a poll every 50 ms over a run of one second"
+    );
+
+    let attr = |event: &serde_json::Value, name: &str| -> f64 {
+        event["attrs"]
+            .as_array()
+            .expect("attributes")
+            .iter()
+            .find(|attr| attr["name"] == name)
+            .unwrap_or_else(|| panic!("no `{name}` on {event}"))["value"]
+            .as_f64()
+            .expect("a number")
+    };
+
+    let peak_live = events
+        .iter()
+        .map(|event| attr(event, "live"))
+        .fold(0.0, f64::max);
+    let peak_rss = events
+        .iter()
+        .map(|event| attr(event, "rss"))
+        .fold(0.0, f64::max);
+    let last = events.last().expect("at least one point");
+
+    // Half of the blocks were freed, so the live heap halves.
+    let allocated = (COUNT * SIZE) as f64;
+    assert!(
+        peak_live >= allocated,
+        "{COUNT} blocks of {SIZE} bytes were live at the peak, measured {peak_live}"
+    );
+    assert!(
+        (0.4 * allocated..0.75 * allocated).contains(&attr(last, "live")),
+        "half of them were freed, so about {} bytes should be live at the end, measured {}",
+        allocated / 2.0,
+        attr(last, "live")
+    );
+
+    // And the resident size does not follow it down: that is the whole point.
+    assert!(
+        attr(last, "rss") >= 0.9 * peak_rss,
+        "the allocator kept the pages, so rss should still be near its peak of {peak_rss}, \
+         measured {}",
+        attr(last, "rss")
+    );
+
+    // The retained number accounts for what the live total lost.
+    let freed = allocated / 2.0;
+    assert!(
+        attr(last, "bytes") >= 0.8 * freed,
+        "{freed} bytes were freed into holes, {} reported as retained",
+        attr(last, "bytes")
+    );
+}
