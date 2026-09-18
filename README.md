@@ -12,8 +12,9 @@ omn io.latency --pid 4242 --mode trace --emit hist,topk:5 \
 
 ## Status
 
-The spine is complete, three sources run end to end, and the first correlation
-works. `omn -f examples/allocation-cost.yml`:
+The spine is complete, sources across six families run end to end, the eBPF
+layer loads and attaches its own programs, and the first correlation works.
+`omn -f examples/allocation-cost.yml`:
 
 ```console
 mem.heap.alloc  via preload  (mem.heap.alloc)
@@ -43,13 +44,11 @@ each allocation's range, every page fault carries the address that faulted, and
 a fault inside a range is that allocation becoming real. Evidence `KEY`: both
 sides carry the same typed key.
 
-| Source | Backend | What it does |
-|---|---|---|
-| `mem.rss` | `fs:proc:smaps_rollup`, `fs:proc:statm` | resident size, polled |
-| `mem.faults` | `pmu:sw` | every page fault with its address, through a perf ring buffer |
-| `mem.heap.alloc` | `preload` | every allocation and free, through an `LD_PRELOAD` shim |
-
-The other 97 sources resolve and say plainly that no collector exists yet.
+Which sources this build can actually measure is not restated here, because it
+changes with every merge and a stale list on a front page is exactly the kind of
+claim this tool exists to refuse. `omn list` answers it: the **COLLECTOR**
+column, and a count under the table. Everything else in the catalog resolves,
+validates, and says plainly that no collector exists yet.
 
 | Command | What it does |
 |---|---|
@@ -57,7 +56,7 @@ The other 97 sources resolve and say plainly that no collector exists yet.
 | `omn <source> --dump-request` | shows it and how it would be obtained, without measuring |
 | `omn <source> --dump-resolved` | the record to keep beside the numbers |
 | `omn -f session.yml` | the same, from a file in YAML, JSON or TOML, joins included |
-| `omn list [family\|source]` | the catalog, marked with what this machine can serve |
+| `omn list [family\|source]` | the catalog, marked with what this machine can serve and what this build can measure |
 | `omn validate -f session.toml` | checks a session without touching the machine |
 | `omn formats` | the input and output formats, and what each can carry |
 
