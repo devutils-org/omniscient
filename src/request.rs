@@ -529,7 +529,12 @@ impl ModeKind {
     /// producing something else.
     pub fn valid_emits(self) -> &'static [EmitKind] {
         match self {
-            ModeKind::Count => &[EmitKind::Rate, EmitKind::Summary],
+            // `raw` belongs here because a counted window *is* one event: the
+            // counter, its value, and the window the hardware says it was
+            // enabled for. Without it there is no way to see a derived metric's
+            // terms, or the counter's own window, which is the honest
+            // denominator for a rate.
+            ModeKind::Count => &[EmitKind::Rate, EmitKind::Summary, EmitKind::Raw],
             ModeKind::Sample => &[
                 EmitKind::Stack,
                 EmitKind::TopK,
