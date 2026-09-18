@@ -109,11 +109,35 @@ impl fmt::Display for Access {
 }
 
 /// Looks at a path and says which of the three it is.
+///
+/// The question is whether this process can *read* it, which is not what `stat`
+/// answers. `stat` needs search permission on the directories above a file, not
+/// read permission on the file, so a root-only counter under a world-readable
+/// directory passes it and then fails at `open`. Measured:
+/// `/sys/class/powercap/intel-rapl:0/energy_uj` stats fine, reads `EACCES`, and
+/// was being reported as available -- which is the "restricted is never absent"
+/// rule broken by the one function that exists to keep it.
 fn access(path: &Path) -> Access {
-    match std::fs::metadata(path) {
-        Ok(_) => Access::Readable,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Access::Restricted,
-        Err(_) => Access::Absent,
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return Access::Absent;
+    };
+    // `AT_EACCESS` asks about the effective identity, which is the one that will
+    // do the reading.
+    // SAFETY: a NUL-terminated path this function owns for the duration.
+    let readable = unsafe {
+        libc::faccessat(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            libc::R_OK,
+            libc::AT_EACCESS,
+        )
+    };
+    if readable == 0 {
+        return Access::Readable;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) => Access::Restricted,
+        _ => Access::Absent,
     }
 }
 
@@ -375,7 +399,8 @@ fn probe_path(path: &Path) -> Probe {
     match access(path) {
         Access::Readable => Probe::Available,
         Access::Restricted => Probe::Missing(format!(
-            "{} exists but is not readable by uid {}",
+            "{} exists but is not readable by uid {}: reading it needs root, or a mode that \
+             lets this user read the file",
             path.display(),
             current_uid()
         )),
@@ -631,6 +656,47 @@ mod tests {
             })
         );
         assert!(KernelVersion::parse("6.1") < KernelVersion::parse("6.12"));
+    }
+
+    /// A file that exists and cannot be read must probe as restricted.
+    ///
+    /// This is the rule the whole `Access` type exists for, and it was broken:
+    /// the probe asked `stat`, which answers a different question. Every
+    /// requirement naming a root-only file -- the RAPL energy counters, the MSR
+    /// devices, several sysfs paths across `power`, `cpu` and `gpu` -- was
+    /// reported as available and then failed at open.
+    #[test]
+    fn a_file_that_exists_and_cannot_be_read_is_restricted_not_available() {
+        // Any root-only file under a readable directory will do; RAPL is the
+        // one that caused this, and the test skips where it is absent.
+        let candidates = [
+            "/sys/class/powercap/intel-rapl:0/energy_uj",
+            "/proc/1/environ",
+            "/proc/kcore",
+        ];
+        let Some(path) = candidates
+            .iter()
+            .map(Path::new)
+            .find(|path| path.exists() && std::fs::read_to_string(path).is_err())
+        else {
+            eprintln!(
+                "skipped: every candidate path is readable here, so there is nothing to check"
+            );
+            return;
+        };
+
+        assert_eq!(
+            access(path),
+            Access::Restricted,
+            "{} cannot be read, so it must not probe as available",
+            path.display()
+        );
+        let probe = Capabilities::detect().probe(&path.display().to_string(), None);
+        assert!(probe.is_missing(), "{probe}");
+        assert!(
+            probe.to_string().contains("not readable"),
+            "the reason must send the reader to privileges, not to a missing file: {probe}"
+        );
     }
 
     #[test]

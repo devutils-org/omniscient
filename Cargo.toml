@@ -6,7 +6,7 @@ name = "omn"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
-description = "Omniscient — observabilité système unifiée, sans wrapper"
+description = "Omniscient: one vocabulary for system observability, spoken directly"
 license = "Apache-2.0"
 
 [[bin]]

@@ -413,8 +413,30 @@ fn quantity(value: f64, unit: Unit) -> String {
         // their units first.
         Unit::Ns => duration(value),
         Unit::Ratio => format!("{value:.3}"),
+        // A frequency reads as `3962428538 hz` and a tick's energy as
+        // `0 joules` without this: the same problem the durations had, in the
+        // units the `power` and `cpu` families report in.
+        Unit::Hz => scaled(value, &[(1e9, "GHz"), (1e6, "MHz"), (1e3, "kHz")], "Hz"),
+        Unit::Joules => scaled(value, &[(1e3, "kJ"), (1.0, "J"), (1e-3, "mJ")], "uJ"),
         other => format!("{value:.0} {other}"),
     }
+}
+
+/// Renders a value in the largest of `steps` it reaches, falling back to
+/// `smallest` with three decimals for anything below them.
+///
+/// Without this a number is printed in its base unit whatever its size, and a
+/// column of them cannot be compared at a glance -- which is the whole job of
+/// the text output.
+fn scaled(value: f64, steps: &[(f64, &str)], smallest: &str) -> String {
+    let magnitude = value.abs();
+    for (factor, suffix) in steps {
+        if magnitude >= *factor {
+            return format!("{:.2} {suffix}", value / factor);
+        }
+    }
+    let base = steps.last().map(|(factor, _)| *factor).unwrap_or(1.0);
+    format!("{:.3} {smallest}", value / (base / 1000.0))
 }
 
 /// Renders a duration by magnitude, so every value in a column reads in the
@@ -498,6 +520,17 @@ mod tests {
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
         }
+    }
+
+    #[test]
+    fn frequencies_and_energies_are_scaled_like_every_other_quantity() {
+        assert_eq!(quantity(3_962_428_538.0, Unit::Hz), "3.96 GHz");
+        assert_eq!(quantity(2_400_000.0, Unit::Hz), "2.40 MHz");
+        assert_eq!(quantity(145.5, Unit::Joules), "145.50 J");
+        assert_eq!(quantity(1_450.0, Unit::Joules), "1.45 kJ");
+        // The case that read as `0 joules`: a tick's worth of energy.
+        assert_eq!(quantity(0.004, Unit::Joules), "4.00 mJ");
+        assert_eq!(quantity(0.000_004, Unit::Joules), "4.000 uJ");
     }
 
     #[test]

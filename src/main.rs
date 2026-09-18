@@ -165,6 +165,21 @@ fn measure(
         Ok(collections) => collections,
         Err(error @ collect::CollectError::NoCollector { .. }) => {
             eprintln!("error: {error}");
+            // The selected backend is often the last one standing, and why the
+            // better ones were passed over is the answer the reader actually
+            // needs: a counter that needs root reads as "no collector for
+            // `pmu`" unless the chain's own verdicts come with it.
+            for resolved in resolved {
+                for considered in &resolved.chain {
+                    if let omn::resolve::Verdict::Rejected(reasons) = &considered.verdict {
+                        eprintln!(
+                            "  `{}` was passed over: {}",
+                            considered.id,
+                            reasons.join("; ")
+                        );
+                    }
+                }
+            }
             eprintln!(
                 "\nCollectors exist for: {}.\n\
                  The request itself is valid -- `--dump-request` shows how it would be obtained.",

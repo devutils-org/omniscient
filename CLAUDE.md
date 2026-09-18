@@ -40,5 +40,11 @@ them, the change is probably wrong.
 ## Checks
 
 ```console
-cargo test && cargo clippy --all-targets && cargo fmt --check
+cargo build --workspace && cargo test && cargo clippy --all-targets && cargo fmt --check
 ```
+
+`--workspace` is not optional on a fresh checkout. The preload shim is a
+workspace member that nothing depends on, so `cargo test` alone does not build
+it; `mem.heap.alloc` then resolves onto a backend with no collector and the
+integration tests fail for a reason that has nothing to do with the change being
+tested.

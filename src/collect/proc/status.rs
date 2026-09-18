@@ -121,6 +121,17 @@ impl StatusCollector {
             .and_then(|value| value.parse().ok())
     }
 
+    /// The process's command name, which the catalog offers as a filter field.
+    ///
+    /// Read fresh each tick rather than once: a process can rename itself, and a
+    /// stale name would attribute the samples after the rename to the wrong
+    /// program.
+    fn command(&self) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{}/comm", self.pid))
+            .ok()
+            .map(|name| name.trim().to_owned())
+    }
+
     fn threads(&self) -> Result<u64, SampleError> {
         let path = PathBuf::from(format!("/proc/{}/status", self.pid));
         let text =
@@ -165,6 +176,13 @@ impl Collector for StatusCollector {
                 }
             }
             Counted::Threads => attrs.push(Attr::uint("threads", self.threads()?)),
+        }
+
+        // The catalog offers `comm` as a filter field for both sources, and a
+        // filter field nothing emits is false everywhere: the predicate empties
+        // the series and looks exactly like a process that did nothing.
+        if let Some(command) = self.command() {
+            attrs.push(Attr::text("comm", command));
         }
 
         // Taken after the read, so it bounds it: the value existed at or before
@@ -235,6 +253,27 @@ mod tests {
             value(&mut collector, "threads") >= 1,
             "a running process has at least one thread"
         );
+    }
+
+    /// Every field the catalog offers must be on the events, because the filter
+    /// now runs: a predicate over a field nothing emits is false everywhere,
+    /// which empties the series and reads as a process that did nothing.
+    #[test]
+    fn every_filter_field_the_catalog_offers_is_on_the_events() {
+        let catalog = crate::catalog::Catalog::embedded().unwrap();
+        for counted in [Counted::Descriptors, Counted::Threads] {
+            let entry = catalog
+                .get(&counted.source().parse().unwrap())
+                .expect("the source is in the catalog");
+            let events = collector(counted).sample(0).expect("readable");
+            for field in &entry.filter_fields {
+                assert!(
+                    events[0].attr(field).is_some(),
+                    "`{}` offers `{field}` as a filter field and does not emit it",
+                    counted.source()
+                );
+            }
+        }
     }
 
     #[test]
