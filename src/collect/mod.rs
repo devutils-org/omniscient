@@ -495,6 +495,20 @@ fn merge_environments(
 /// Derived from the registry, because a hand-written second list had already
 /// drifted out of agreement with the first one by the time it was needed.
 pub fn implemented() -> Vec<String> {
+    coverage()
+        .into_iter()
+        .map(|(source, backends)| format!("{source} ({})", backends.join(", ")))
+        .collect()
+}
+
+/// Which backends this build can actually collect, by source.
+///
+/// The catalog says what the vocabulary is; this says how much of it has been
+/// written. The two are deliberately separate -- a source with no collector is
+/// still a valid request, and `--no-resolve` will still write it down for a
+/// machine and a build that can serve it -- but a reader looking at the catalog
+/// deserves to see which is which without running into it.
+pub fn coverage() -> BTreeMap<&'static str, Vec<&'static str>> {
     let mut by_source: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
     for factory in registry() {
         by_source
@@ -503,9 +517,6 @@ pub fn implemented() -> Vec<String> {
             .push(factory.backend);
     }
     by_source
-        .into_iter()
-        .map(|(source, backends)| format!("{source} ({})", backends.join(", ")))
-        .collect()
 }
 
 /// Finds the collector for a resolved backend.

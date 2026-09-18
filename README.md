@@ -12,8 +12,9 @@ omn io.latency --pid 4242 --mode trace --emit hist,topk:5 \
 
 ## Status
 
-The spine is complete, three sources run end to end, and the first correlation
-works. `omn -f examples/allocation-cost.yml`:
+The spine is complete, sources across six families run end to end, the eBPF
+layer loads and attaches its own programs, and the first correlation works.
+`omn -f examples/allocation-cost.yml`:
 
 ```console
 mem.heap.alloc  via preload  (mem.heap.alloc)
@@ -43,13 +44,11 @@ each allocation's range, every page fault carries the address that faulted, and
 a fault inside a range is that allocation becoming real. Evidence `KEY`: both
 sides carry the same typed key.
 
-| Source | Backend | What it does |
-|---|---|---|
-| `mem.rss` | `fs:proc:smaps_rollup`, `fs:proc:statm` | resident size, polled |
-| `mem.faults` | `pmu:sw` | every page fault with its address, through a perf ring buffer |
-| `mem.heap.alloc` | `preload` | every allocation and free, through an `LD_PRELOAD` shim |
-
-The other 97 sources resolve and say plainly that no collector exists yet.
+Which sources this build can actually measure is not restated here, because it
+changes with every merge and a stale list on a front page is exactly the kind of
+claim this tool exists to refuse. `omn list` answers it: the **COLLECTOR**
+column, and a count under the table. Everything else in the catalog resolves,
+validates, and says plainly that no collector exists yet.
 
 | Command | What it does |
 |---|---|
@@ -57,7 +56,7 @@ The other 97 sources resolve and say plainly that no collector exists yet.
 | `omn <source> --dump-request` | shows it and how it would be obtained, without measuring |
 | `omn <source> --dump-resolved` | the record to keep beside the numbers |
 | `omn -f session.yml` | the same, from a file in YAML, JSON or TOML, joins included |
-| `omn list [family\|source]` | the catalog, marked with what this machine can serve |
+| `omn list [family\|source]` | the catalog, marked with what this machine can serve and what this build can measure |
 | `omn validate -f session.toml` | checks a session without touching the machine |
 | `omn formats` | the input and output formats, and what each can carry |
 
@@ -81,18 +80,31 @@ and in the help without touching code.
 
 ```console
 $ omn list mem
-SOURCE          MODES           COST  DET     HERE  SUMMARY
-mem.rss         poll, snapshot  free  medium  yes   Resident footprint
-mem.cgroup      poll, snapshot  free  medium  no    Cgroup memory accounting
-mem.faults      count, sample   free  medium  ?     Minor and major page faults
+SOURCE          MODES                 COST  DET     HERE  COLLECTOR  SUMMARY
+mem.rss         poll, snapshot        free  medium  yes   all        Resident footprint
+mem.cgroup      poll, snapshot        free  medium  no    none       Cgroup memory accounting
+mem.faults      count, sample, trace  free  medium  yes   1 of 2     Minor and major page faults
 ...
-100 sources: 29 usable here, 45 unverified, 26 out of reach on this machine.
+23 sources: 10 usable here, 9 unverified, 4 out of reach on this machine.
+3 of them have a collector, covering 4 of their 37 backends. The rest are
+vocabulary: they resolve, they validate, and they say plainly that nothing
+collects them yet.
 ```
 
-`?` is not a soft yes. It means no probe has been written for that requirement
-class, so nothing was checked — and the resolver will not pick such a backend
-when a fully verified one exists. An unchecked assumption that reaches the output
-as a fact is the failure mode this column exists to prevent.
+Two different questions, deliberately kept apart. **HERE** is what this machine
+offers, probed now. **COLLECTOR** is what this build can actually measure: a
+source can be written and out of reach here, or available here with nothing
+written for it yet. On a terminal the source name is green when something
+collects it and red when nothing does, so a glance answers "what is covered so
+far" — `--color auto|always|never`, and `NO_COLOR` is honoured. The colour is
+only an accelerator: strip the escapes and the listing says exactly the same
+things, because output that lands in a pipe must not be missing a fact the
+terminal had.
+
+`?` in HERE is not a soft yes. It means no probe has been written for that
+requirement class, so nothing was checked — and the resolver will not pick such
+a backend when a fully verified one exists. An unchecked assumption that reaches
+the output as a fact is the failure mode that column exists to prevent.
 
 The same honesty applies to *why* something is out of reach:
 

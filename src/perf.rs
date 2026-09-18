@@ -422,16 +422,29 @@ mod tests {
         };
         event.enable().expect("enable");
 
-        // Touching one byte per page is what makes each page resident, and each
-        // of those is one fault at a known address.
+        // Mapped, not allocated. `free()` returns nothing to the kernel, so an
+        // allocator hands back pages that are already resident and touching
+        // them faults nothing: measured here, a third identical `Vec` produced
+        // zero faults, which is why this test used to fail only inside a full
+        // suite run and pass on its own. A fresh anonymous mapping is the only
+        // way to know the pages are not there yet.
         const PAGES: usize = 64;
         let page = page_size();
-        let mut block = vec![0u8; PAGES * page];
-        let base = block.as_ptr() as u64;
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                PAGES * page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "the test needs a fresh mapping");
+        let base = block as u64;
         for index in 0..PAGES {
-            block[index * page] = 1;
+            unsafe { std::ptr::write_volatile((block as *mut u8).add(index * page), 1) };
         }
-        std::hint::black_box(&block);
         event.disable().expect("disable");
 
         let (mut samples, mut inside) = (0, 0);
@@ -462,6 +475,7 @@ mod tests {
             inside <= PAGES,
             "{inside} samples landed in a block of {PAGES} pages, so an address is being reported that was never touched"
         );
+        unsafe { libc::munmap(block, PAGES * page) };
     }
 
     #[test]
