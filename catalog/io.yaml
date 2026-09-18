@@ -59,6 +59,17 @@
   keys: [blk, task, cgroup]
   filter_fields: [dev, rwbs, bytes, comm]
   determinism: low
+  caveats:
+    - "These are the bytes the device moved, not the bytes the application
+       asked for. Readahead, filesystem metadata and journal writes are in the
+       number, page cache hits never reach it, and the gap between this and
+       io.syscall is the diagnosis rather than an error."
+    - "`fs:proc` adds up the devices nothing is stacked on. A partition's I/O
+       is counted again on the disk holding it and a dm or md device's on its
+       members, so summing every line of /proc/diskstats reports the same bytes
+       two or three times."
+    - "/proc/diskstats counts 512-byte sectors whatever the device's logical
+       block size is; the kernel normalizes before writing the file."
 
 - id: io.iops
   family: io
@@ -73,6 +84,14 @@
   keys: [blk, cgroup]
   filter_fields: [dev, rwbs]
   determinism: low
+  caveats:
+    - "These are the operations the device completed, after the block layer
+       merged what it could. An application issuing many adjacent requests and
+       a device completing few large ones is the normal case, not a discrepancy:
+       io.merges is what accounts for the difference."
+    - "Discards and flushes are counted in their own columns and left out of
+       the operation count, because a discard costs the device nothing like a
+       read does."
 
 - id: io.size
   family: io
@@ -100,6 +119,10 @@
   keys: [blk]
   filter_fields: [dev, rwbs]
   determinism: medium
+  caveats:
+    - "A merge means the block layer combined two adjacent requests into one.
+       A high count is a sign of sequential access being coalesced, not of
+       anything going wrong."
 
 - id: io.inflight
   family: io
@@ -113,6 +136,11 @@
   keys: [blk]
   filter_fields: [dev]
   determinism: low
+  caveats:
+    - "Queue depth is read at an instant, not accumulated. A queue that fills
+       and drains between two polls leaves no trace, and a poll interval close
+       to the device's service time aliases: the series then describes the
+       sampling, not the device."
 
 - id: io.syscall
   family: io
@@ -218,3 +246,14 @@
   keys: [cgroup]
   filter_fields: []
   determinism: low
+  caveats:
+    - "`some` is time during which at least one task was stalled on I/O and
+       `full` time during which every runnable task was. A non-zero `some` on an
+       otherwise idle machine is ordinary; it is `full` that means nothing else
+       could proceed."
+    - "A poll reports the share of its own window, computed from the stall
+       counter. A snapshot has no window, so it reports the kernel's decayed
+       ten-second average instead, under its own name: the two are different
+       measurements and are never given the same one."
+    - "Pressure says time was lost waiting, not which device or which file lost
+       it. It is where an investigation starts, not where it ends."

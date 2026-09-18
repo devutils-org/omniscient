@@ -1,0 +1,31 @@
+# Is the disk the bottleneck, or is it merely busy?
+#
+#   omn -f examples/io-pressure.yml
+#
+# Throughput cannot answer that question. A device at half its throughput with
+# nothing waiting is spare capacity; a device at half its throughput with every
+# thread blocked on it is the limit of the machine, and `/proc/diskstats`
+# reports the same number in both cases.
+#
+# Pressure is the other half: `some` is the share of the window during which at
+# least one task was stalled waiting for I/O, `full` the share during which
+# every runnable task was. Read the two together -- volume flat and pressure
+# high means the device is the constraint; volume high and pressure near zero
+# means it is keeping up.
+name: is the disk the bottleneck
+format: text
+
+requests:
+  - label: stall
+    source: io.pressure
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+  - label: volume
+    source: io.bytes
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+duration: 10s
