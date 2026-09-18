@@ -38,11 +38,17 @@ fn stderr(output: &Output) -> String {
 
 /// Some machines withhold what these tests need. That is a skip, not a pass and
 /// not a failure.
+///
+/// A missing shim is neither: it is a build that was not run, and letting it
+/// skip would mean the heap tests quietly measure nothing on the machine where
+/// they matter most. It fails, and says what to run.
 fn unavailable(output: &Output) -> Option<String> {
     let message = stderr(output);
-    let withheld = message.contains("no viable backend")
-        || message.contains("not readable")
-        || message.contains("perf_event_paranoid");
+    assert!(
+        !message.contains("heap shim was not found"),
+        "the heap sources need the preload shim: run `cargo build -p omn-preload` first\n{message}"
+    );
+    let withheld = message.contains("not readable") || message.contains("perf_event_paranoid");
     withheld.then_some(message)
 }
 
@@ -170,5 +176,146 @@ fn the_proportional_footprint_is_below_the_resident_one_for_a_shared_interpreter
     assert!(
         pss < rss,
         "an interpreter shares its libraries, so pss {pss} must be below rss {rss}"
+    );
+}
+
+/// A program that allocates a known amount of memory, touches it, and then
+/// frees every other block.
+///
+/// The holes are the point. Freeing everything lets the allocator hand the
+/// whole block back to the kernel -- on this machine glibc trims 128 MiB back
+/// to nothing the moment the last chunk goes -- and there would be no
+/// fragmentation to measure. Freeing every other chunk leaves the arena with
+/// live memory at the top and holes below it, which is exactly the shape that
+/// makes a long-running process grow and never shrink.
+fn fragmenting_program(count: usize, size: usize) -> String {
+    format!(
+        "import ctypes, time\n\
+         libc = ctypes.CDLL(None)\n\
+         libc.malloc.restype = ctypes.c_void_p\n\
+         libc.free.argtypes = [ctypes.c_void_p]\n\
+         blocks = [libc.malloc({size}) for _ in range({count})]\n\
+         for block in blocks: ctypes.memset(block, 1, {size})\n\
+         time.sleep(0.25)\n\
+         for block in blocks[::2]: libc.free(block)\n\
+         time.sleep(0.45)\n"
+    )
+}
+
+fn heap_session(source: &str, program: &str) -> String {
+    format!(
+        "format: json\nrequests:\n  \
+         - source: {source}\n    \
+         target: {{launch: [python3, -c, {program:?}]}}\n    \
+         mode: poll@50ms\n    emit: [summary, timeline]\n"
+    )
+}
+
+/// Ground truth for the live heap.
+///
+/// The program allocates a known number of blocks of a known size through
+/// `libc.malloc` itself, so the live total is arithmetic rather than opinion:
+/// 1024 blocks of 64 KiB is 64 MiB, and after half of them are freed it is 32
+/// MiB. The interpreter's own allocations ride on top of that, which is why the
+/// bounds are ranges and not equalities.
+#[test]
+fn the_live_heap_matches_the_allocations_the_program_made() {
+    const COUNT: usize = 1024;
+    const SIZE: usize = 64 * 1024;
+    const ALLOCATED: f64 = (COUNT * SIZE) as f64;
+
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+
+    let output = run_session(&heap_session(
+        "mem.heap.live",
+        &fragmenting_program(COUNT, SIZE),
+    ));
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let series = run["results"][0]["outputs"][0]["series"][0].clone();
+    let peak = series["max"].as_f64().expect("a maximum");
+    let last = series["last"].as_f64().expect("a last value");
+
+    assert!(
+        (ALLOCATED..1.5 * ALLOCATED).contains(&peak),
+        "{COUNT} blocks of {SIZE} bytes are {ALLOCATED} bytes live at the peak, measured {peak}"
+    );
+    assert!(
+        (0.4 * ALLOCATED..0.75 * ALLOCATED).contains(&last),
+        "half of them were freed, so about {} bytes should be left, measured {last}",
+        ALLOCATED / 2.0
+    );
+}
+
+/// Ground truth for retained memory, the metric this family exists to make
+/// measurable.
+///
+/// Half of a known 64 MiB is freed, and every page of it was written to before
+/// the free, so every page of it is memory the program gave back and the
+/// process still holds. The allocator cannot return any of it: the holes are
+/// surrounded by live blocks.
+///
+/// The check that this is not a tautology is the resident size reported beside
+/// it. RSS stays at the full 64 MiB while the live heap halves, and the
+/// retained number accounts for the difference -- which is precisely what "free
+/// returns nothing" means, measured rather than asserted.
+#[test]
+fn memory_freed_into_a_fragmented_arena_is_reported_as_retained() {
+    const COUNT: usize = 1024;
+    const SIZE: usize = 64 * 1024;
+    const FREED: f64 = (COUNT / 2 * SIZE) as f64;
+
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+
+    let output = run_session(&heap_session(
+        "mem.heap.retained",
+        &fragmenting_program(COUNT, SIZE),
+    ));
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let result = &run["results"][0];
+    let retained = result["outputs"][0]["series"][0]["last"]
+        .as_f64()
+        .expect("a last value");
+
+    // A page shared between a freed block and a live one is counted as live, so
+    // the measurement is a lower bound: 64 KiB blocks are 16 pages each and at
+    // most one page at each end is given away.
+    assert!(
+        retained >= 0.8 * FREED,
+        "{FREED} bytes of touched memory were freed into holes, measured {retained} retained"
+    );
+    assert!(
+        retained <= 1.1 * FREED,
+        "only {FREED} bytes were freed, so {retained} is more than there was"
+    );
+
+    // Nothing was lost, and the raw events carry what the number is made of.
+    assert_eq!(result["losses"]["dropped"], 0);
+    let last_point = result["outputs"][1]["series"][0]["points"]
+        .as_array()
+        .expect("a timeline")
+        .last()
+        .cloned()
+        .expect("at least one point");
+    assert!(
+        last_point["value"].as_f64().unwrap() > 0.0,
+        "the timeline ends with the retained memory still there: {last_point}"
     );
 }

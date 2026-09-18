@@ -27,6 +27,64 @@ the two reads happened at once. A comparison of two *metrics* takes both from a
 single read of one file, because reading twice would compare two moments of a
 process that grows while it is being read.
 
+### Retained memory is measured, not subtracted
+
+The obvious formula for "what the allocator kept" is `RSS - live heap`, and it
+is wrong in both directions at once. RSS also holds the executable, the stacks,
+every file mapping and every anonymous mapping the program made for itself,
+while live heap counts bytes the program asked for, which are not resident until
+it writes to them. The difference of those two is a number made of four
+unrelated things — the same shape as the `faults x page size` column that had to
+be deleted earlier.
+
+So `mem.heap.retained` measures the intersection instead: the shim says which
+ranges were allocated and then freed, `/proc/[pid]/pagemap` says which pages of
+those ranges are still in memory. A page shared between a freed range and a live
+one is credited to the live side, which makes the number a lower bound by at
+most one page per end of each range. RSS is reported beside it, for scale, and
+is not part of it.
+
+Measured on a program that allocates 1024 blocks of 64 KiB, touches every page,
+and frees every other block: 30.1 MiB retained against 32 MiB freed, which is
+the 15-of-16 pages the interior convention predicts for 64 KiB blocks.
+
+### Freeing everything proves nothing
+
+The first fragmentation test freed all 128 MiB it had allocated and measured no
+retention at all, correctly: glibc consolidated the whole region into one top
+chunk and trimmed it back to the kernel, and RSS fell from 133 MiB to 2 MiB.
+An allocator gives memory back when the memory is at the top of the arena and
+nothing is above it.
+
+Fragmentation is holes, not volume. The test now frees every other block, which
+leaves live blocks above the holes and makes the arena unshrinkable — the shape
+a long-running service reaches after a few hours.
+
+### An open `pagemap` answers for the address space the process had at the time
+
+Opening `/proc/[pid]/pagemap` at attach time and keeping the descriptor returned
+zero resident bytes for everything. The kernel binds the file to the process's
+memory map when it is opened, and a program the tool launches replaces its
+memory map when it execs — so the descriptor was answering for the address space
+that existed before the program started, which contains none of its addresses.
+
+Worse than wrong: quiet. A `pagemap` descriptor whose memory map is gone does
+not fail, it stops returning data, and the scan counted the pages it never read
+as absent. That is how a dead target became "zero retained memory", the one
+answer this source must never invent. It now opens the file once per scan, two
+syscalls a poll, and a read that stops early ends the run instead of shortening
+the number.
+
+### Draining and publishing are two different cadences
+
+A session ticks as fast as its fastest collector needs, and a shim pipe needs
+draining every ten milliseconds. Every other collector in the session was then
+asked for a sample just as often, so a request for `poll@50ms` came back with a
+series five times denser than it asked for — including `mem.rss`, which had been
+published on the run's tick since it was written. Reading and publishing are now
+separate: the collectors read whenever they are asked and publish on the grid
+the request named.
+
 ## Needs from the shared layer
 
 ### `src/perf.rs`: the page-fault sampling test is flaky under a parallel suite

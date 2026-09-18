@@ -17,11 +17,14 @@
 //! look like noise.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use super::cadence::Cadence;
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Prepared, SampleError};
 use crate::request::Target;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
+use crate::request::Mode;
 
 /// Which footprint is being measured.
 ///
@@ -91,7 +94,27 @@ impl Source {
 }
 
 /// Holds the choice of metric and file until the target exists.
-pub struct Prepare(pub Metric, pub Source);
+pub struct Prepare {
+    metric: Metric,
+    source: Source,
+    interval: Duration,
+}
+
+impl Prepare {
+    pub fn new(metric: Metric, source: Source, mode: Mode) -> Box<Self> {
+        let interval = match mode {
+            Mode::Poll { interval } => Duration::from_nanos(interval.as_nanos()),
+            // A snapshot is one read, so the grid never comes into play.
+            Mode::Snapshot => Duration::ZERO,
+            _ => Duration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
+        };
+        Box::new(Self {
+            metric,
+            source,
+            interval,
+        })
+    }
+}
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
@@ -101,7 +124,12 @@ impl Prepared for Prepare {
                 target.kind()
             )
         })?;
-        Ok(Box::new(FootprintCollector::new(pid, self.0, self.1)))
+        Ok(Box::new(FootprintCollector::new(
+            pid,
+            self.metric,
+            self.source,
+            self.interval,
+        )))
     }
 }
 
@@ -113,10 +141,14 @@ pub struct FootprintCollector {
     source: Source,
     path: PathBuf,
     page_size: u64,
+    /// When to publish, which is not how often the run asks: a session whose
+    /// fastest collector drains a ring every ten milliseconds asks everyone
+    /// else just as often.
+    cadence: Cadence,
 }
 
 impl FootprintCollector {
-    pub fn new(pid: i32, metric: Metric, source: Source) -> Self {
+    pub fn new(pid: i32, metric: Metric, source: Source, interval: Duration) -> Self {
         Self {
             id: CollectorId::new(format!("{}/fs:proc:{}", metric.source_id(), source.label())),
             pid,
@@ -124,6 +156,7 @@ impl FootprintCollector {
             source,
             path: source.path(pid),
             page_size: page_size(),
+            cadence: Cadence::new(interval),
         }
     }
 
@@ -184,6 +217,9 @@ impl Collector for FootprintCollector {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        if !self.cadence.due(monotonic_ns()) {
+            return Ok(Vec::new());
+        }
         // The timestamp is taken after the read, so it bounds the read rather
         // than preceding it: the value existed at or before this instant.
         let bytes = self.read_bytes()?;
@@ -232,6 +268,16 @@ fn sum_fields(text: &str, fields: &[&str]) -> Option<u64> {
     seen.then_some(total)
 }
 
+/// The resident size of one process, for a collector that reports another
+/// number and wants to say how it compares.
+///
+/// Returns `None` when the file cannot be read or does not hold the line, which
+/// for a caller that only wants scale is not worth an error.
+pub(super) fn resident_bytes(pid: i32) -> Option<u64> {
+    let text = std::fs::read_to_string(Source::SmapsRollup.path(pid)).ok()?;
+    sum_fields(&text, Metric::Rss.fields())
+}
+
 fn page_size() -> u64 {
     // SAFETY: `sysconf` takes an integer and returns one; no memory is touched.
     let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -247,7 +293,8 @@ mod tests {
     use super::*;
 
     fn read(metric: Metric, source: Source) -> Option<f64> {
-        let mut collector = FootprintCollector::new(std::process::id() as i32, metric, source);
+        let mut collector =
+            FootprintCollector::new(std::process::id() as i32, metric, source, Duration::ZERO);
         let events = collector.sample(0).ok()?;
         events[0].attr("bytes").unwrap().as_f64()
     }
@@ -346,8 +393,12 @@ mod tests {
 
     #[test]
     fn every_event_records_which_file_it_came_from() {
-        let mut collector =
-            FootprintCollector::new(std::process::id() as i32, Metric::Rss, Source::Statm);
+        let mut collector = FootprintCollector::new(
+            std::process::id() as i32,
+            Metric::Rss,
+            Source::Statm,
+            Duration::ZERO,
+        );
         let events = collector.sample(3).unwrap();
         assert_eq!(events[0].attr("read_from").unwrap().to_string(), "statm");
         assert_eq!(events[0].kind, "mem.rss");
@@ -358,7 +409,7 @@ mod tests {
     #[test]
     fn a_process_that_does_not_exist_ends_the_run_rather_than_failing_a_read() {
         // pid 0 never names a readable process directory.
-        let mut collector = FootprintCollector::new(0, Metric::Rss, Source::Statm);
+        let mut collector = FootprintCollector::new(0, Metric::Rss, Source::Statm, Duration::ZERO);
         match collector.sample(0) {
             Err(SampleError::TargetGone(_)) => {}
             other => panic!("expected the run to end, got {other:?}"),
