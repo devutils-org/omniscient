@@ -37,19 +37,29 @@
   keys: [task, cgroup, mem]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "PSS is the only one of the three footprints that sums across processes
+       without double counting: RSS counts a shared page in full in every
+       process that maps it."
 
 - id: mem.uss
   family: mem
   summary: "Private footprint (what dies with the process)"
   unit: bytes
   backends:
-    - {id: "fs:proc", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: low,
+       degraded: "walks every VMA: expensive on large address spaces"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
   keys: [task, mem]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "The kernel publishes no USS line: this is Private_Clean + Private_Dirty,
+       so privately mapped huge pages, which the kernel counts separately in
+       Private_Hugetlb, are not in it."
 
 - id: mem.cgroup
   family: mem
