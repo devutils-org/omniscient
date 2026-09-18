@@ -40,11 +40,34 @@ them, the change is probably wrong.
 ## Checks
 
 ```console
-cargo build --workspace && cargo test && cargo clippy --all-targets && cargo fmt --check
+make          # build the workspace and grant the capabilities
+make check    # the full suite, clippy and fmt, the way CI would
 ```
 
-`--workspace` is not optional on a fresh checkout. The preload shim is a
-workspace member that nothing depends on, so `cargo test` alone does not build
-it; `mem.heap.alloc` then resolves onto a backend with no collector and the
-integration tests fail for a reason that has nothing to do with the change being
-tested.
+`make` rather than `cargo build` for two reasons, both of which are silent
+failures otherwise.
+
+`--workspace` is not optional: the preload shim is a workspace member that
+nothing depends on, so a plain `cargo build` does not build it, and
+`mem.heap.alloc` then resolves onto a backend with no collector.
+
+And the eBPF and per-cpu perf backends need `CAP_BPF` and `CAP_PERFMON`, which
+are file capabilities that **do not survive a relink** -- every `cargo build`
+drops them. On the development machine that is the difference between 78 usable
+sources and 52, and nothing announces it: the tool reports fewer things as
+available, which reads like the machine changed rather than the binary. `make`
+reapplies them, and says so when it cannot.
+
+To stop `sudo` asking on every build, one narrowly scoped line under
+`visudo -f /etc/sudoers.d/omniscient`, which permits exactly that command on
+exactly that path and nothing else:
+
+```
+<user> ALL=(root) NOPASSWD: /usr/sbin/setcap cap_bpf,cap_perfmon+ep /path/to/omniscient/target/debug/omn
+```
+
+A green suite on a machine without the capabilities is not evidence about the
+eBPF layer: those tests skip, loudly. The integration tests run
+`target/debug/omn` and do take the privileged path once it carries them; the
+in-process unit tests cannot, because their binaries are rebuilt under a fresh
+hash every run.
