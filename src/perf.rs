@@ -278,20 +278,11 @@ impl SampledEvent {
 
     /// Copies `len` bytes starting at ring offset `offset`, following the wrap.
     fn copy_out(&self, offset: u64, len: usize) -> Vec<u8> {
-        let mut bytes = vec![0u8; len];
-        let start = (offset % self.data_size) as usize;
-        let first = len.min(self.data_size as usize - start);
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.data().add(start), bytes.as_mut_ptr(), first);
-            if first < len {
-                std::ptr::copy_nonoverlapping(
-                    self.data(),
-                    bytes.as_mut_ptr().add(first),
-                    len - first,
-                );
-            }
-        }
-        bytes
+        // SAFETY: the mapping is `data_size` bytes long and `read_wrapped`
+        // never reads past it; the kernel writes there and this process only
+        // reads.
+        let ring = unsafe { std::slice::from_raw_parts(self.data(), self.data_size as usize) };
+        read_wrapped(ring, offset, len)
     }
 
     fn read_header(&self, offset: u64) -> (u32, u64) {
@@ -337,6 +328,32 @@ impl Drop for SampledEvent {
     }
 }
 
+/// Copies `len` bytes from ring offset `offset`, following the wrap.
+///
+/// A ring buffer has no end, only a seam, and a record that straddles it is
+/// perfectly ordinary. Split out as a free function because that seam is the
+/// one piece of this module whose correctness does not need a kernel to check.
+fn read_wrapped(ring: &[u8], offset: u64, len: usize) -> Vec<u8> {
+    if ring.is_empty() {
+        return vec![0; len];
+    }
+    let size = ring.len();
+    let start = (offset % size as u64) as usize;
+    let mut bytes = Vec::with_capacity(len);
+    let first = len.min(size - start);
+    bytes.extend_from_slice(&ring[start..start + first]);
+    let mut remaining = len - first;
+    // A read longer than the ring itself would wrap more than once. It cannot
+    // happen for a record, but going around rather than panicking keeps the
+    // seam logic total.
+    while remaining > 0 {
+        let take = remaining.min(size);
+        bytes.extend_from_slice(&ring[..take]);
+        remaining -= take;
+    }
+    bytes
+}
+
 fn page_size() -> usize {
     // SAFETY: `sysconf` takes an integer and returns one.
     let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -368,6 +385,33 @@ mod tests {
     use super::*;
 
     const PAGE_FAULTS: u64 = sys::bindings::PERF_COUNT_SW_PAGE_FAULTS as u64;
+
+    #[test]
+    fn a_record_that_straddles_the_seam_is_read_whole() {
+        // Sixteen bytes of ring, numbered so any misread is visible.
+        let ring: Vec<u8> = (0..16).collect();
+
+        // Wholly before the seam.
+        assert_eq!(read_wrapped(&ring, 4, 4), vec![4, 5, 6, 7]);
+        // Ending exactly on it.
+        assert_eq!(read_wrapped(&ring, 12, 4), vec![12, 13, 14, 15]);
+        // Straddling it: the tail of the ring, then the head.
+        assert_eq!(read_wrapped(&ring, 14, 4), vec![14, 15, 0, 1]);
+        // An offset past the end is the same position, one lap later, which is
+        // what the kernel's ever-growing head and tail mean.
+        assert_eq!(read_wrapped(&ring, 16 + 14, 4), read_wrapped(&ring, 14, 4));
+        assert_eq!(read_wrapped(&ring, 16 * 1000 + 3, 2), vec![3, 4]);
+    }
+
+    #[test]
+    fn a_read_longer_than_the_ring_goes_around_rather_than_panicking() {
+        let ring: Vec<u8> = (0..4).collect();
+        assert_eq!(
+            read_wrapped(&ring, 2, 10),
+            vec![2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+        );
+        assert_eq!(read_wrapped(&[], 0, 3), vec![0, 0, 0]);
+    }
 
     #[test]
     fn a_page_fault_sample_carries_the_address_that_faulted() {

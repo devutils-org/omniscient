@@ -73,18 +73,47 @@ thread_local! {
 /// the real `malloc` existing yet. A bump region breaks the cycle; it is small
 /// because only the dynamic loader's own bootstrap comes through it.
 const BOOTSTRAP_CAPACITY: usize = 64 * 1024;
-static mut BOOTSTRAP: [u8; BOOTSTRAP_CAPACITY] = [0; BOOTSTRAP_CAPACITY];
+
+/// The region is aligned, not merely its block sizes. A plain `static mut
+/// [u8; N]` is byte-aligned, so every block cut from it inherits whatever
+/// address the linker chose -- and `malloc` promises sixteen. The loader stores
+/// pointers and doubles in what it gets back, and on some targets a misaligned
+/// store is a fault rather than a slowdown.
+#[repr(C, align(16))]
+struct Bootstrap([u8; BOOTSTRAP_CAPACITY]);
+
+static mut BOOTSTRAP: Bootstrap = Bootstrap([0; BOOTSTRAP_CAPACITY]);
 static BOOTSTRAP_USED: AtomicUsize = AtomicUsize::new(0);
 
 fn bootstrap_alloc(size: usize) -> *mut c_void {
-    // Sixteen-byte alignment is what malloc promises on every target here.
-    let size = (size + 15) & !15;
-    let offset = BOOTSTRAP_USED.fetch_add(size, Ordering::Relaxed);
-    if offset + size > BOOTSTRAP_CAPACITY {
+    // Rounded up to malloc's alignment promise. A `malloc` replacement may not
+    // panic, so the rounding of an absurd size is checked rather than wrapped:
+    // in a build with overflow checks this is an abort inside the observed
+    // program, and in one without it is a tiny allocation for a huge request.
+    let Some(size) = size.checked_add(15).map(|rounded| rounded & !15) else {
         return std::ptr::null_mut();
+    };
+
+    // The reservation has to be all-or-nothing. Adding first and checking after
+    // would consume the space even when the request does not fit, so one
+    // oversized request during loader bootstrap would permanently exhaust the
+    // region and every small allocation after it would fail too.
+    let mut used = BOOTSTRAP_USED.load(Ordering::Relaxed);
+    loop {
+        let Some(end) = used.checked_add(size) else {
+            return std::ptr::null_mut();
+        };
+        if end > BOOTSTRAP_CAPACITY {
+            return std::ptr::null_mut();
+        }
+        match BOOTSTRAP_USED.compare_exchange_weak(used, end, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            // SAFETY: this thread reserved `used..end` and nothing else can
+            // hand it out.
+            Ok(_) => return unsafe { (&raw mut BOOTSTRAP).cast::<u8>().add(used).cast() },
+            Err(actual) => used = actual,
+        }
     }
-    // SAFETY: the offset was reserved by the atomic above and never reused.
-    unsafe { (&raw mut BOOTSTRAP).cast::<u8>().add(offset).cast() }
 }
 
 fn is_bootstrap(ptr: *mut c_void) -> bool {
@@ -300,4 +329,77 @@ pub unsafe extern "C" fn posix_memalign(
         guarded(|| report(OP_ALLOC, pointer, size as u64));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The record layout is an agreement between this library and the reader in
+    /// `src/collect/mem/heap.rs`, and nothing in the type system holds the two
+    /// together: the reader decodes by offset from a byte stream. If they ever
+    /// disagree, every allocation is misparsed and the numbers stay plausible,
+    /// which is the worst way for it to break. So both sides assert the layout.
+    #[test]
+    fn the_record_layout_matches_what_the_reader_decodes() {
+        assert_eq!(RECORD_SIZE, 32, "the reader hardcodes 32 bytes per record");
+        assert_eq!(std::mem::offset_of!(Record, ts_ns), 0);
+        assert_eq!(std::mem::offset_of!(Record, ptr), 8);
+        assert_eq!(std::mem::offset_of!(Record, size), 16);
+        assert_eq!(std::mem::offset_of!(Record, tid), 24);
+        assert_eq!(std::mem::offset_of!(Record, op), 28);
+    }
+
+    #[test]
+    fn the_operation_codes_are_the_ones_the_reader_expects() {
+        // Named here and in the reader; a silent renumbering would turn every
+        // allocation into a free.
+        assert_eq!((OP_ALLOC, OP_FREE, OP_DROPPED), (1, 2, 3));
+    }
+
+    /// The bump region exists to serve the dynamic loader before `dlsym` has
+    /// produced the real allocator. It must hand back distinct, aligned,
+    /// in-bounds blocks, and refuse rather than overrun when it is exhausted.
+    #[test]
+    fn the_bootstrap_region_hands_out_distinct_aligned_blocks() {
+        let first = bootstrap_alloc(24);
+        let second = bootstrap_alloc(24);
+        assert!(!first.is_null() && !second.is_null());
+        assert_ne!(first, second, "two allocations must not share an address");
+        assert_eq!(first as usize % 16, 0, "malloc promises 16-byte alignment");
+        assert_eq!(second as usize % 16, 0);
+        assert!(
+            (second as usize) - (first as usize) >= 24,
+            "the blocks overlap"
+        );
+        assert!(is_bootstrap(first) && is_bootstrap(second));
+    }
+
+    #[test]
+    fn a_refused_bootstrap_request_does_not_consume_the_region() {
+        // Ask for more than the whole region, twice, then ask for something
+        // that plainly fits. A refusal that still advanced the cursor would
+        // have exhausted the region for everyone after it -- which is what a
+        // failing loader bootstrap would have done in the real thing.
+        assert!(
+            bootstrap_alloc(BOOTSTRAP_CAPACITY * 2).is_null(),
+            "a request larger than the region must fail"
+        );
+        assert!(
+            bootstrap_alloc(usize::MAX).is_null(),
+            "and must not overflow"
+        );
+        assert!(
+            !bootstrap_alloc(16).is_null(),
+            "a refused request must leave the region usable"
+        );
+    }
+
+    #[test]
+    fn a_pointer_from_elsewhere_is_not_mistaken_for_a_bootstrap_block() {
+        let mut owned = 0u64;
+        let outside: *mut c_void = (&raw mut owned).cast();
+        assert!(!is_bootstrap(outside));
+        assert!(!is_bootstrap(std::ptr::null_mut()));
+    }
 }

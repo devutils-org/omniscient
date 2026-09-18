@@ -440,6 +440,43 @@ mod tests {
         assert_eq!(correlation.top[0].matched, 2);
     }
 
+    /// The ordering rule the engine sorts for, asserted rather than assumed.
+    ///
+    /// Two streams merge, and at an equal timestamp the order decides the
+    /// answer: an allocation has to be open before a fault inside it can be
+    /// attributed. The shim timestamps a `malloc` when it returns and the
+    /// kernel timestamps the fault that follows, so equal timestamps are rare
+    /// but not impossible -- and when they happen, sorting the wrong way
+    /// invents an unmatched fault out of nothing.
+    #[test]
+    fn an_allocation_wins_a_tie_against_a_fault_inside_it() {
+        // The fault is listed first and shares the allocation's timestamp.
+        let events = vec![fault(10, 0x1500), allocation(10, 0x1000, 0x1000, "alloc")];
+        let correlation = apply(&rule(), &events).unwrap();
+        assert_eq!(
+            (correlation.matched, correlation.unmatched),
+            (1, 0),
+            "a fault sharing an allocation's timestamp belongs to it"
+        );
+    }
+
+    /// The same rule in reverse: a free at the same instant closes the range,
+    /// and a fault at that instant is still inside it.
+    #[test]
+    fn input_order_does_not_change_the_answer() {
+        let forwards = vec![
+            allocation(10, 0x1000, 0x1000, "alloc"),
+            fault(20, 0x1100),
+            allocation(30, 0x1000, 1, "free"),
+        ];
+        let backwards: Vec<_> = forwards.iter().rev().cloned().collect();
+        assert_eq!(
+            apply(&rule(), &forwards).unwrap(),
+            apply(&rule(), &backwards).unwrap(),
+            "the engine sorts its input, so the order it arrives in cannot matter"
+        );
+    }
+
     #[test]
     fn a_fault_outside_every_allocation_is_counted_not_hidden() {
         let events = vec![
@@ -524,6 +561,65 @@ mod tests {
             correlation.unmatched, 1,
             "the evicted range can no longer match"
         );
+    }
+
+    /// An address on the last byte of a range is inside it; one byte further
+    /// is not. Ranges are half-open, and an off-by-one here silently moves
+    /// every fault at a boundary to the neighbouring allocation.
+    #[test]
+    fn a_range_includes_its_first_byte_and_excludes_the_byte_past_its_end() {
+        let events = vec![
+            allocation(10, 0x1000, 0x100, "alloc"),
+            fault(20, 0x1000),
+            fault(21, 0x10ff),
+            fault(22, 0x1100),
+        ];
+        let correlation = apply(&rule(), &events).unwrap();
+        assert_eq!(
+            (correlation.matched, correlation.unmatched),
+            (2, 1),
+            "the first byte and the last are in; the byte past the end is out"
+        );
+    }
+
+    /// Two ranges side by side, and a fault in each. The lookup walks back to
+    /// the nearest range starting at or before the address, so a neighbouring
+    /// range must not swallow the other's faults.
+    #[test]
+    fn adjacent_ranges_do_not_take_each_others_faults() {
+        let events = vec![
+            allocation(10, 0x1000, 0x100, "alloc"),
+            allocation(11, 0x1100, 0x100, "alloc"),
+            fault(20, 0x1080),
+            fault(21, 0x1180),
+        ];
+        let correlation = apply(&rule(), &events).unwrap();
+        assert_eq!(correlation.matched, 2);
+        assert_eq!(correlation.top.len(), 2);
+        assert!(
+            correlation
+                .top
+                .iter()
+                .all(|attribution| attribution.matched == 1),
+            "each range took exactly its own fault: {:?}",
+            correlation.top
+        );
+    }
+
+    /// A rule whose `to` side carries no usable key is a rule that does not fit
+    /// its sources. That is a mistake in the session, not a runtime hiccup, and
+    /// it fails by name rather than reporting that nothing correlated.
+    #[test]
+    fn a_rule_that_does_not_fit_its_sources_fails_by_name() {
+        let mut unkeyed = fault(20, 0x1500);
+        unkeyed.keys.clear();
+        let events = vec![allocation(10, 0x1000, 0x1000, "alloc"), unkeyed];
+        let error = apply(&rule(), &events).unwrap_err();
+        assert!(
+            matches!(error, JoinError::MissingKey { ref via, .. } if *via == KeyKind::Mem),
+            "{error}"
+        );
+        assert!(error.to_string().contains("mem.faults"), "{error}");
     }
 
     #[test]
