@@ -130,3 +130,26 @@ this family register one shim stream per run and give every heap collector a
 cursor over it. Until then, each of the three works alone, and
 `mem.heap.retained` reports live bytes beside retained bytes so the useful pair
 does not need two sources.
+
+### A run binds one pid, so the machine-wide sources of this family cannot start
+
+`run_all` resolves the target to a single pid and refuses anything else, so
+`mem.thp`, `mem.swap` and `mem.pressure` — which are `system` sources reading
+`/sys/kernel/mm/transparent_hugepage`, `/proc/vmstat` and
+`/proc/pressure/memory` — have nowhere to attach, and `mem.cgroup` cannot take a
+cgroup target either. All four are a few lines of parsing each; none of them can
+be registered until a collector can be given a target that names no process.
+
+What that needs: `Prepared::attach` taking the `Target` rather than a pid, with
+each collector refusing by name the targets it cannot serve. That is four
+sources of this family, and every source of `power`, plus most of `net`.
+
+## What is still blocked, and on what
+
+| Sources | Blocked on |
+|---|---|
+| `thp`, `swap`, `pressure`, `cgroup` | a target that is not a pid (above) |
+| `cache_l1`, `cache_llc`, `cache_tlb`, `bandwidth`, `latency`, `sharing`, `numa` | the perf layer in counting mode, hardware events and uncore PMUs — BRIEF G8 |
+| `wss` | `page_idle` and DAMON probe classes — BRIEF G4 |
+| `page_alloc`, `kmalloc`, `reclaim`, `compaction` | the eBPF layer — BRIEF G10, Wave 2 |
+| `heap.alloc` by call site | stack capture and symbolisation — BRIEF G6 |
