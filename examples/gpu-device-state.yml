@@ -1,0 +1,37 @@
+# What the GPU did while a program ran.
+#
+#   omn -f examples/gpu-device-state.yml
+#
+# Three device figures over one window: the energy the board drew, the shader
+# clock it ran at, and the fraction of the time something was resident on it.
+# Replace the launched program with your own workload -- as written it runs
+# `sleep`, which is the honest way to see what an idle GPU looks like before
+# reading a busy one.
+#
+# Every number here is the whole device's. The launched program sets the window
+# and nothing more: a GPU is shared with the compositor, the browser and
+# whatever else has a context open, and NVML attributes none of it. `gpu.mem`
+# is the one source in this family that can say "this process", because the
+# driver keeps a per-process VRAM figure; a clock or a temperature has no
+# per-process meaning to report.
+name: gpu device state over a run
+format: text
+
+requests:
+  - label: energy
+    source: gpu.power
+    target: {launch: [sleep, "3"]}
+    mode: poll@200ms
+    emit: [timeline, summary]
+
+  - label: clock
+    source: gpu.freq
+    target: {launch: [sleep, "3"]}
+    mode: poll@200ms
+    emit: [summary]
+
+  - label: busy
+    source: gpu.engine_busy
+    target: {launch: [sleep, "3"]}
+    mode: poll@200ms
+    emit: [summary]
