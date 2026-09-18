@@ -81,18 +81,31 @@ and in the help without touching code.
 
 ```console
 $ omn list mem
-SOURCE          MODES           COST  DET     HERE  SUMMARY
-mem.rss         poll, snapshot  free  medium  yes   Resident footprint
-mem.cgroup      poll, snapshot  free  medium  no    Cgroup memory accounting
-mem.faults      count, sample   free  medium  ?     Minor and major page faults
+SOURCE          MODES                 COST  DET     HERE  COLLECTOR  SUMMARY
+mem.rss         poll, snapshot        free  medium  yes   all        Resident footprint
+mem.cgroup      poll, snapshot        free  medium  no    none       Cgroup memory accounting
+mem.faults      count, sample, trace  free  medium  yes   1 of 2     Minor and major page faults
 ...
-100 sources: 29 usable here, 45 unverified, 26 out of reach on this machine.
+23 sources: 10 usable here, 9 unverified, 4 out of reach on this machine.
+3 of them have a collector, covering 4 of their 37 backends. The rest are
+vocabulary: they resolve, they validate, and they say plainly that nothing
+collects them yet.
 ```
 
-`?` is not a soft yes. It means no probe has been written for that requirement
-class, so nothing was checked — and the resolver will not pick such a backend
-when a fully verified one exists. An unchecked assumption that reaches the output
-as a fact is the failure mode this column exists to prevent.
+Two different questions, deliberately kept apart. **HERE** is what this machine
+offers, probed now. **COLLECTOR** is what this build can actually measure: a
+source can be written and out of reach here, or available here with nothing
+written for it yet. On a terminal the source name is green when something
+collects it and red when nothing does, so a glance answers "what is covered so
+far" — `--color auto|always|never`, and `NO_COLOR` is honoured. The colour is
+only an accelerator: strip the escapes and the listing says exactly the same
+things, because output that lands in a pipe must not be missing a fact the
+terminal had.
+
+`?` in HERE is not a soft yes. It means no probe has been written for that
+requirement class, so nothing was checked — and the resolver will not pick such
+a backend when a fully verified one exists. An unchecked assumption that reaches
+the output as a fact is the failure mode that column exists to prevent.
 
 The same honesty applies to *why* something is out of reach:
 
