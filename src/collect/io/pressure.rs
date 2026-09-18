@@ -489,6 +489,33 @@ full avg10=29.77 avg60=36.24 avg300=45.91 total=9194047541
         );
     }
 
+    /// The same measurement per cgroup is a different file and a different
+    /// backend; answering a cgroup with the machine's stall counter would be
+    /// attribution nobody measured.
+    #[test]
+    fn a_cgroup_target_is_sent_to_the_backend_that_can_serve_it() {
+        let prepared = Box::new(Prepare::new(poll()).expect("poll is servable"));
+        let refused = prepared
+            .attach(&Target::Cgroup(PathBuf::from("/sys/fs/cgroup/user.slice")))
+            .err()
+            .expect("the machine-wide file cannot narrow to a cgroup");
+        assert!(refused.contains("fs:cgroup"), "{refused}");
+    }
+
+    /// A poll measures its own window and a snapshot repeats the kernel's.
+    /// They are different numbers, so nothing downstream may find them under
+    /// the same name.
+    #[test]
+    fn the_two_modes_do_not_publish_their_value_under_one_name() {
+        let path = scratch("names");
+        let polled = Pressure::new(poll(), path.clone());
+        let snapshot = Pressure::new(Mode::Snapshot, path.clone());
+        assert_ne!(polled.value_attr(), snapshot.value_attr());
+        assert_eq!(polled.value_attr(), "stall_ratio");
+        assert_eq!(snapshot.value_attr(), "some_avg10");
+        std::fs::remove_file(&path).ok();
+    }
+
     fn read_total_us(path: &Path) -> u64 {
         let text = std::fs::read_to_string(path).expect("/proc/pressure/io reads");
         Reading::parse(&text, 0)

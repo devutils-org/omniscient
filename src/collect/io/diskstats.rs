@@ -903,6 +903,110 @@ mod tests {
         );
     }
 
+    /// Merges are counted per direction, because a read merge and a write merge
+    /// say different things: one is sequential reading being coalesced, the
+    /// other is a writeback pattern the filesystem produced.
+    #[test]
+    fn merges_are_reported_per_direction_and_summed() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let path = scratch("merges");
+        // `line` writes zeroes into the merge columns, so they are set here.
+        let stats = |reads_merged: u64, writes_merged: u64| {
+            vec![format!(
+                "   8       0 {device} 10 {reads_merged} 100 0 20 {writes_merged} 200 0 0 0 0"
+            )]
+        };
+        write_stats(&path, &stats(5, 7));
+
+        let mut collector = Diskstats::new(Metric::Merges, Mode::Count, path.clone());
+        collector.start().expect("the fake file reads");
+        write_stats(&path, &stats(9, 30));
+        let events = collector.stop();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].attr("read_merges").unwrap().as_f64(), Some(4.0));
+        assert_eq!(events[0].attr("write_merges").unwrap().as_f64(), Some(23.0));
+        assert_eq!(events[0].attr("merges").unwrap().as_f64(), Some(27.0));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The runner samples every collector and only then decides to stop, so a
+    /// closing read would cover microseconds. A polled run therefore ends
+    /// without adding a point that says nothing.
+    #[test]
+    fn a_polled_run_adds_no_point_at_its_stop() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let path = scratch("stop");
+        write_stats(&path, &[line(&device, 10, 100, 20, 200)]);
+
+        let mut collector = Diskstats::new(Metric::Bytes, poll(), path.clone());
+        collector.start().expect("the fake file reads");
+        collector.sample(0).expect("the baseline read");
+        write_stats(&path, &[line(&device, 12, 108, 23, 216)]);
+        assert_eq!(collector.sample(1).expect("a tick").len(), 1);
+
+        assert!(
+            collector.stop().is_empty(),
+            "a polled run has already measured everything it can"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The block layer records no process, so a target that names one is
+    /// refused by name rather than answered with the machine's total.
+    #[test]
+    fn a_target_that_names_a_process_is_refused_rather_than_answered() {
+        let prepared = Box::new(Prepare::new(Metric::Bytes, poll()).expect("poll is servable"));
+        let refused = prepared
+            .attach(&Target::Pid(vec![1]))
+            .err()
+            .expect("a pid has no diskstats");
+        assert!(refused.contains("per device"), "{refused}");
+        assert!(refused.contains("--system"), "{refused}");
+
+        let prepared = Box::new(Prepare::new(Metric::Bytes, poll()).expect("poll is servable"));
+        assert!(prepared.attach(&Target::System).is_ok());
+    }
+
+    /// The devices an event says it summed must all be devices whose counters
+    /// are their own. A partition in that list would mean its bytes were
+    /// counted twice.
+    #[test]
+    fn the_devices_an_event_names_are_all_devices_that_stand_alone() {
+        let mut collector = Diskstats::new(
+            Metric::Bytes,
+            Mode::Snapshot,
+            PathBuf::from("/proc/diskstats"),
+        );
+        // Snapshot is refused for a counter, so the reading is taken directly:
+        // what is under test is which devices the sum covers.
+        let Ok(reading) = collector.read() else {
+            return;
+        };
+        assert!(
+            !reading.devices.is_empty(),
+            "this machine has block devices"
+        );
+        for device in &reading.devices {
+            let sysfs = Path::new("/sys/class/block").join(device);
+            assert!(
+                !sysfs.join("partition").exists(),
+                "`{device}` is a partition and its I/O is counted again on its disk"
+            );
+            let stacked = std::fs::read_dir(sysfs.join("slaves"))
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false);
+            assert!(
+                !stacked,
+                "`{device}` is stacked on other devices and its I/O is counted again below it"
+            );
+        }
+    }
+
     /// The sum of every line would be larger than the truth wherever a disk has
     /// partitions doing I/O, which is the ordinary case.
     #[test]

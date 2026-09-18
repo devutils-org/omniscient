@@ -218,3 +218,126 @@ fn the_examples_this_family_ships_validate() {
     }
     assert!(checked > 0, "this family ships no example");
 }
+
+/// The family end to end: resolve, attach, poll, aggregate, render. The unit
+/// tests hold the arithmetic; this holds the wiring, which nothing else does.
+#[test]
+fn a_system_wide_run_produces_events_and_reports_no_loss() {
+    let run = run(&[
+        "io.inflight",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "400ms",
+    ]);
+    let out = stdout(&run);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(out.contains("via fs:proc"), "{out}");
+    assert!(
+        out.contains("no loss"),
+        "a poll of a procfs counter on an idle machine loses nothing: {out}"
+    );
+    let events: usize = out
+        .lines()
+        .find_map(|line| line.split_whitespace().next()?.parse().ok())
+        .expect("the run says how many events it saw");
+    assert!(
+        events >= 2,
+        "a 400 ms run at 100 ms should see several reads, not {events}"
+    );
+}
+
+/// The value of an event is whatever the collector named, and it has to reach
+/// the output under that meaning rather than being guessed from the unit.
+#[test]
+fn the_summary_carries_the_number_the_collector_measured() {
+    let run = run(&[
+        "io.bytes",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "300ms",
+        "--backend",
+        "force:fs:proc",
+        "--format",
+        "json",
+    ]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout(&run)).expect("the json output parses");
+    let result = &document["results"][0];
+    assert_eq!(result["backend"], "fs:proc");
+    assert_eq!(result["unit"], "bytes");
+    let series = &result["outputs"][0]["series"][0];
+    assert!(
+        series["count"].as_u64().unwrap_or(0) >= 1,
+        "the summary should cover the reads that happened: {series}"
+    );
+    assert!(
+        series["mean"].as_f64().is_some(),
+        "a byte count has to arrive as a number: {series}"
+    );
+    // Bytes moved by a device are never negative, whatever the machine did.
+    assert!(series["min"].as_f64().unwrap_or(-1.0) >= 0.0, "{series}");
+}
+
+/// A snapshot of pressure observes no window, so it must say which number it
+/// gave rather than passing the kernel's decayed average off as this run's.
+#[test]
+fn a_pressure_snapshot_says_it_measured_no_window() {
+    let run = run(&["io.pressure", "--system", "-m", "snapshot", "-e", "raw"]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    let out = stdout(&run);
+    assert!(out.contains("some_avg10"), "{out}");
+    assert!(
+        out.contains("observes no window"),
+        "the basis has to travel with the number: {out}"
+    );
+    assert!(
+        !out.contains("stall_ratio"),
+        "a snapshot has no window to compute a ratio over: {out}"
+    );
+}
+
+/// Numbers without the record of how they were obtained are numbers whose
+/// provenance is gone. Both are written, and the record names the backend and
+/// the machine.
+#[test]
+fn the_numbers_and_the_record_of_how_they_were_taken_are_written_together() {
+    let directory = std::env::temp_dir().join(format!("omn-io-artifacts-{}", std::process::id()));
+    std::fs::remove_dir_all(&directory).ok();
+    let run = run(&[
+        "io.pressure",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "300ms",
+        "--out",
+        &directory.to_string_lossy(),
+    ]);
+    assert!(run.status.success(), "{}", stderr(&run));
+
+    let resolved = std::fs::read_to_string(directory.join("resolved.json"))
+        .expect("the resolved request is written beside the results");
+    let document: serde_json::Value =
+        serde_json::from_str(&resolved).expect("the resolved record parses");
+    assert_eq!(document[0]["backend"]["id"], "fs:proc");
+    assert!(
+        document[0]["environment"]["kernel_release"].is_string(),
+        "the record has to carry the machine, or two runs cannot be compared: {resolved}"
+    );
+    assert!(
+        directory.join("results.txt").exists(),
+        "the numbers themselves are written too"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
