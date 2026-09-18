@@ -172,8 +172,22 @@ impl Collector for UtilCollector {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let now = self.read()?;
-        let ts_ns = monotonic_ns();
+        Ok(self.event_from(now, monotonic_ns(), seq))
+    }
 
+    fn tick(&self) -> Option<StdDuration> {
+        None
+    }
+}
+
+impl UtilCollector {
+    /// Turns a reading into an event, against whatever was read before it.
+    ///
+    /// Separate from `sample` so that the arithmetic can be checked against
+    /// readings chosen for the cases that matter -- a cpu that went offline, a
+    /// window where nothing moved -- rather than against whatever the machine
+    /// happened to be doing.
+    fn event_from(&mut self, now: Times, ts_ns: u64, seq: u64) -> Vec<Event> {
         // A snapshot of this file is a statement about the whole uptime, and
         // saying which window a share covers is the difference between a
         // reading and a guess.
@@ -184,10 +198,11 @@ impl Collector for UtilCollector {
 
         let total = delta.total();
         if total == 0 {
-            // Two reads inside one tick of the kernel's own clock. Nothing
-            // changed, so there is no share to report -- and zero would read as
-            // a perfectly idle machine.
-            return Ok(Vec::new());
+            // Two reads inside one tick of the kernel's own clock, or a cpu
+            // that went offline and took its counters with it. Nothing moved,
+            // so there is no share to report -- and zero would read as a
+            // perfectly idle machine.
+            return Vec::new();
         }
         let share = |ticks: u64| ticks as f64 / total as f64;
 
@@ -210,7 +225,7 @@ impl Collector for UtilCollector {
             attrs.push(Attr::uint("steal_ticks", delta.steal));
         }
 
-        Ok(vec![Event {
+        vec![Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "cpu.util".to_owned(),
@@ -218,11 +233,7 @@ impl Collector for UtilCollector {
             attrs,
             collector_id: self.id.clone(),
             seq,
-        }])
-    }
-
-    fn tick(&self) -> Option<StdDuration> {
-        None
+        }]
     }
 }
 
@@ -261,6 +272,111 @@ mod tests {
     fn a_non_cpu_line_is_not_a_cpu_line() {
         assert!(parse_line("intr 12345 0 0").is_none());
         assert!(parse_line("ctxt 999").is_none());
+    }
+
+    /// A reading, in the order `/proc/stat` writes the states.
+    fn times(fields: [u64; 8]) -> Times {
+        Times {
+            user: fields[0],
+            nice: fields[1],
+            system: fields[2],
+            idle: fields[3],
+            iowait: fields[4],
+            irq: fields[5],
+            softirq: fields[6],
+            steal: fields[7],
+        }
+    }
+
+    fn polling() -> UtilCollector {
+        UtilCollector::new(Mode::Poll {
+            interval: Mode::DEFAULT_POLL_INTERVAL,
+        })
+    }
+
+    #[test]
+    fn the_shares_are_of_the_interval_and_not_of_the_uptime() {
+        let mut collector = polling();
+        // A machine that has been up a long while, mostly idle.
+        collector.previous = Some(times([1_000, 0, 0, 9_000, 0, 0, 0, 0]));
+        // And a busy second: fifty ticks of work, fifty of idle.
+        let events = collector.event_from(times([1_050, 0, 0, 9_050, 0, 0, 0, 0]), 1, 0);
+
+        let event = &events[0];
+        assert_eq!(event.attr("busy").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(event.attr("user").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(
+            event.attr("window").unwrap().to_string(),
+            "since the previous read",
+            "an interval was reported as if it were the uptime"
+        );
+    }
+
+    #[test]
+    fn a_cpu_waiting_for_a_disk_is_not_reported_as_busy() {
+        let mut collector = polling();
+        collector.previous = Some(Times::default());
+        // Half the window working, half of it waiting for IO and none of it
+        // idle. A machine stalled on IO must not read as saturated.
+        let events = collector.event_from(times([50, 0, 0, 0, 50, 0, 0, 0]), 1, 0);
+
+        let event = &events[0];
+        assert_eq!(event.attr("busy").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(event.attr("iowait").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(event.attr("idle").unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_window_in_which_nothing_moved_reports_nothing() {
+        let mut collector = polling();
+        let reading = times([1_000, 0, 0, 9_000, 0, 0, 0, 0]);
+        collector.previous = Some(reading);
+        // Two reads inside one tick of the kernel's clock. Zero would read as a
+        // perfectly idle machine, which is a claim nobody measured.
+        assert!(collector.event_from(reading, 1, 0).is_empty());
+    }
+
+    #[test]
+    fn a_counter_that_went_backwards_does_not_become_an_enormous_share() {
+        let mut collector = polling();
+        collector.previous = Some(times([1_000, 0, 0, 9_000, 0, 0, 0, 0]));
+        // A cpu went offline and came back with its counters reset. Wrapping
+        // would turn this into billions of ticks of work.
+        let events = collector.event_from(times([10, 0, 0, 90, 0, 0, 0, 0]), 1, 0);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn stolen_time_is_called_out_rather_than_left_in_a_column() {
+        let mut collector = polling();
+        collector.previous = Some(Times::default());
+        let events = collector.event_from(times([50, 0, 0, 40, 0, 0, 0, 10]), 1, 0);
+
+        let event = &events[0];
+        // The machine was taken away for a tenth of the window. That is not a
+        // state of this workload, and a run with any of it is not comparable to
+        // one without.
+        assert_eq!(event.attr("steal").unwrap().as_f64().unwrap(), 0.1);
+        assert_eq!(event.attr("steal_ticks").unwrap().as_f64().unwrap(), 10.0);
+    }
+
+    #[test]
+    fn a_machine_with_no_steal_time_carries_no_steal_column() {
+        let mut collector = polling();
+        collector.previous = Some(Times::default());
+        let events = collector.event_from(times([50, 0, 0, 50, 0, 0, 0, 0]), 1, 0);
+        assert!(events[0].attr("steal_ticks").is_none());
+    }
+
+    #[test]
+    fn a_cgroup_target_is_refused_by_the_backend_that_reads_the_machine() {
+        let attached = Box::new(Prepare(Mode::Snapshot))
+            .attach(&Target::Cgroup(std::path::PathBuf::from("/user.slice")));
+        let refusal = match attached {
+            Ok(_) => panic!("`/proc/stat` was accepted as a cgroup's file"),
+            Err(refusal) => refusal,
+        };
+        assert!(refusal.contains("cgroup backend"), "{refusal}");
     }
 
     /// Ground truth: burn a known share of the machine and see it appear.

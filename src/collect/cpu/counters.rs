@@ -547,6 +547,148 @@ mod tests {
         );
     }
 
+    /// A reading, as the kernel would have produced it. The failure paths below
+    /// depend on hardware being oversubscribed or a process staying asleep, so
+    /// they are built here instead of being waited for.
+    fn reading(name: &'static str, raw: u64, enabled_ns: u64, running_ns: u64) -> Reading {
+        Reading {
+            name,
+            raw,
+            value: if running_ns == 0 {
+                0
+            } else {
+                ((raw as u128 * enabled_ns as u128) / running_ns as u128) as u64
+            },
+            enabled_ns,
+            running_ns,
+        }
+    }
+
+    #[test]
+    fn a_window_the_counter_never_ran_in_produces_no_number_and_says_why() {
+        let mut collector = CounterCollector::new(0, spec("cpu.instructions"));
+        let event = collector.event(&[reading("instructions", 0, 5_000_000, 0)], 0);
+
+        assert!(event.is_none(), "a counter that never ran reported a value");
+        let losses = collector.losses();
+        assert_eq!(losses.failed_reads, 1);
+        let reason = losses.reasons.keys().next().expect("a reason").clone();
+        assert!(reason.contains("never scheduled"), "{reason}");
+        // The distinction this whole path exists for: an idle target has no
+        // count, and a count of zero is a different statement.
+        assert!(
+            reason.contains("not the same as a count of zero"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_ratio_whose_denominator_counted_nothing_is_not_reported() {
+        let mut collector = CounterCollector::new(0, spec("cpu.ipc"));
+        let event = collector.event(
+            &[
+                reading("instructions", 1_000, 5_000_000, 5_000_000),
+                reading("cycles", 0, 5_000_000, 5_000_000),
+            ],
+            0,
+        );
+
+        assert!(event.is_none(), "a ratio was reported over zero cycles");
+        let losses = collector.losses();
+        assert_eq!(losses.failed_reads, 1);
+        let reason = losses.reasons.keys().next().expect("a reason").clone();
+        assert!(reason.contains("cycles"), "{reason}");
+    }
+
+    #[test]
+    fn a_multiplexed_counter_publishes_what_was_actually_counted_beside_the_estimate() {
+        let mut collector = CounterCollector::new(0, spec("cpu.cycles"));
+        // On for a quarter of the window, so the reported value is four times
+        // what the hardware saw.
+        let event = collector
+            .event(&[reading("cycles", 1_000, 4_000_000, 1_000_000)], 0)
+            .expect("an estimate is still a number");
+
+        assert_eq!(event.attr("count").unwrap().as_f64().unwrap(), 4_000.0);
+        assert_eq!(
+            event.attr("cycles_raw").unwrap().as_f64().unwrap(),
+            1_000.0,
+            "the estimate was published without what it was extrapolated from"
+        );
+        assert_eq!(
+            event.attr("running_ns").unwrap().as_f64().unwrap(),
+            1_000_000.0
+        );
+        assert_eq!(
+            event.attr("enabled_ns").unwrap().as_f64().unwrap(),
+            4_000_000.0
+        );
+    }
+
+    #[test]
+    fn a_counter_that_was_on_throughout_publishes_no_raw_column() {
+        let mut collector = CounterCollector::new(0, spec("cpu.cycles"));
+        let event = collector
+            .event(&[reading("cycles", 1_000, 4_000_000, 4_000_000)], 0)
+            .expect("a full window is a measurement");
+        assert_eq!(event.attr("count").unwrap().as_f64().unwrap(), 1_000.0);
+        // Nothing was extrapolated, so there is nothing to disclose. A `_raw`
+        // column on every event would make the ones that matter invisible.
+        assert!(event.attr("cycles_raw").is_none());
+        assert_eq!(event.kind, "cpu.cycles");
+        assert_eq!(event.seq, 0);
+    }
+
+    /// A process asleep for the whole window never reaches a cpu, so there is
+    /// nothing to count -- and reporting zero instructions for it would be a
+    /// measurement nobody took.
+    #[test]
+    fn a_target_that_never_runs_reports_no_count_rather_than_zero() {
+        let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("5").spawn() else {
+            eprintln!("skipped: /bin/sleep is not available");
+            return;
+        };
+        // Let it reach its nanosleep before the window opens.
+        std::thread::sleep(StdDuration::from_millis(50));
+
+        let mut collector = CounterCollector::new(child.id() as i32, spec("cpu.instructions"));
+        if collector.start().is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        }
+        std::thread::sleep(StdDuration::from_millis(150));
+        let events = collector.stop();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            events.is_empty(),
+            "a sleeping process was reported as having retired instructions"
+        );
+        let losses = collector.losses();
+        assert_eq!(losses.failed_reads, 1, "{losses:?}");
+    }
+
+    #[test]
+    fn nothing_is_reported_until_the_window_closes() {
+        let mut collector = CounterCollector::new(0, spec("cpu.instructions"));
+        if collector.start().is_err() {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        }
+        for seq in 0..3 {
+            // A counted window has one value, at the end. Emitting per tick
+            // would suggest a resolution the mode does not have.
+            assert!(collector.sample(seq).unwrap().is_empty());
+        }
+        let events = collector.stop();
+        assert_eq!(events.len(), 1);
+        // And nothing is left to hand back a second time.
+        assert!(collector.stop().is_empty());
+    }
+
     #[test]
     fn a_mode_this_collector_cannot_serve_is_refused_by_name() {
         let error = Prepare::new(

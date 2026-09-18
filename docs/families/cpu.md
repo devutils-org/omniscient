@@ -139,6 +139,20 @@ satisfy, not against their own arithmetic:
   fall below. Where the cpu controller is not delegated to the user, the test
   says so and stops rather than passing vacuously.
 
+## A test that proved nothing
+
+Worth recording, because it is the failure this family's own invariants exist to
+prevent, found in its own tests. The check that `cpu.ipc` publishes both of its
+terms ran through the binary, asked for `--emit raw`, and skipped whenever the
+command failed — on the assumption that a failure means a machine that cannot
+count. The command had been failing since it was written: `cpu.ipc` did not
+declare `raw`, so the request was *refused*, and the test reported success for
+several runs without ever checking anything.
+
+A machine that cannot serve a request and a request that cannot mean anything
+are different answers, and only the first is a reason to stop quietly. The CLI
+tests now tell them apart by the message and fail loudly on the second.
+
 ## Traps
 
 - **Counting is not cheap sampling.** `-m sample` on these sources is refused
@@ -147,7 +161,21 @@ satisfy, not against their own arithmetic:
 - **The counter's own window is on the event.** `enabled_ns` and `running_ns`
   are attributes, and they are the honest denominator for a rate: the wall
   clock the run reports also contains the time between the last tick and the
-  moment the program was noticed to be gone (up to one 10 ms tick).
+  moment the program was noticed to be gone (up to one 10 ms tick). `--emit raw`
+  is how to see them, and how to see a ratio's two terms:
+
+  ```console
+  $ omn cpu.ipc -m count -e raw -- ./prog
+    raw
+      14428414156587  cpu.ipc  task:581350  ipc=2.062 instructions=1218299767 cycles=590811062 enabled_ns=137602206 running_ns=137602206
+  ```
+
+  This needed a change to the mode and emit matrix, which had `count`
+  producing only `rate` and `summary`. A counted window **is** one event, so
+  `raw` is the emit that shows it; without it a derived metric's terms exist on
+  the event and reach nobody. The seven counting sources now declare `raw`, and
+  `cpu.ipc` consequently has two legitimate emits, so it no longer defaults to
+  one — which is the catalog's own defaulting rule, not an exception to it.
 - **`cpu.instructions` is stable, never exact.** Interrupt skid, speculation
   and SMT all move it. No test here demands an exact count.
 - **SMT and the governor move counters by tens of percent.** Both are in the

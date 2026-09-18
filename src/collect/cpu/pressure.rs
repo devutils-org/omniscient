@@ -121,8 +121,21 @@ impl Collector for PressureCollector {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let (some, full) = self.read()?;
-        let ts_ns = monotonic_ns();
+        Ok(self.event_from(some, full, monotonic_ns(), seq))
+    }
 
+    fn tick(&self) -> Option<StdDuration> {
+        None
+    }
+}
+
+impl PressureCollector {
+    /// Turns a reading into an event, against whatever was read before it.
+    ///
+    /// Separate from `sample` so the share can be checked against a stall time
+    /// and a window chosen for the purpose, instead of against whatever the
+    /// machine was doing while the test ran.
+    fn event_from(&mut self, some: Line, full: Option<Line>, ts_ns: u64, seq: u64) -> Vec<Event> {
         // A single read cannot be a share of anything: the counter is
         // cumulative. What it does carry is the kernel's own ten-second
         // average, which is a share, and saying which of the two is being
@@ -131,7 +144,10 @@ impl Collector for PressureCollector {
             Some((then_ns, then_us)) => {
                 let elapsed_us = ts_ns.saturating_sub(then_ns) / 1_000;
                 if elapsed_us == 0 {
-                    return Ok(Vec::new());
+                    // Two reads inside one microsecond. There is no window to
+                    // take a share of, and zero would read as a machine where
+                    // nothing waited.
+                    return Vec::new();
                 }
                 let stalled_us = some.total_us.saturating_sub(then_us);
                 (
@@ -158,7 +174,7 @@ impl Collector for PressureCollector {
             attrs.push(Attr::uint("full_total_us", full.total_us));
         }
 
-        Ok(vec![Event {
+        vec![Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "cpu.pressure".to_owned(),
@@ -166,11 +182,7 @@ impl Collector for PressureCollector {
             attrs,
             collector_id: self.id.clone(),
             seq,
-        }])
-    }
-
-    fn tick(&self) -> Option<StdDuration> {
-        None
+        }]
     }
 }
 
@@ -185,6 +197,115 @@ mod tests {
         assert_eq!(kind, "some");
         assert_eq!(line.avg300, 1.5);
         assert_eq!(line.total_us, 8_942_667);
+    }
+
+    fn line(avg10: f64, total_us: u64) -> Line {
+        Line {
+            avg10,
+            avg60: 0.0,
+            avg300: 0.0,
+            total_us,
+        }
+    }
+
+    fn polling() -> PressureCollector {
+        PressureCollector::new(Mode::Poll {
+            interval: Mode::DEFAULT_POLL_INTERVAL,
+        })
+    }
+
+    #[test]
+    fn a_malformed_line_is_refused_rather_than_guessed_at() {
+        // A column without a value is a file this reader does not understand,
+        // and a zero would be indistinguishable from an idle machine.
+        assert!(Line::parse("some avg10 0.00 total=5").is_none());
+        // A column it has no meaning for is skipped, not fatal: the kernel is
+        // free to add one.
+        let (_, parsed) = Line::parse("some avg10=1.00 avg600=2.00 total=5").expect("a psi line");
+        assert_eq!((parsed.avg10, parsed.total_us), (1.0, 5));
+    }
+
+    #[test]
+    fn the_share_is_the_stall_time_over_the_window_it_was_measured_in() {
+        let mut collector = polling();
+        collector.previous = Some((0, 1_000_000));
+        // Fifty milliseconds of stall in a hundred milliseconds of window.
+        let events = collector.event_from(line(0.0, 1_050_000), None, 100_000_000, 0);
+
+        let event = &events[0];
+        assert_eq!(event.attr("some").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(
+            event.attr("window").unwrap().to_string(),
+            "since the previous read"
+        );
+        assert_eq!(
+            event.attr("total_us").unwrap().as_f64().unwrap(),
+            1_050_000.0
+        );
+    }
+
+    #[test]
+    fn two_reads_in_the_same_instant_report_nothing() {
+        let mut collector = polling();
+        collector.previous = Some((100_000_000, 1_000_000));
+        assert!(collector
+            .event_from(line(0.0, 1_000_000), None, 100_000_500, 0)
+            .is_empty());
+    }
+
+    #[test]
+    fn the_kernels_percentages_are_published_as_ratios() {
+        let mut collector = PressureCollector::new(Mode::Snapshot);
+        let events = collector.event_from(
+            Line {
+                avg10: 50.0,
+                avg60: 25.0,
+                avg300: 12.5,
+                total_us: 7,
+            },
+            None,
+            1,
+            0,
+        );
+
+        let event = &events[0];
+        // The file writes percentages. One event, one unit, or the first reader
+        // to put two of these columns in the same average is out by a hundred.
+        assert_eq!(event.attr("avg10").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(event.attr("avg60").unwrap().as_f64().unwrap(), 0.25);
+        assert_eq!(event.attr("avg300").unwrap().as_f64().unwrap(), 0.125);
+        assert_eq!(event.attr("some").unwrap().as_f64().unwrap(), 0.5);
+        assert_eq!(
+            event.attr("window").unwrap().to_string(),
+            "the kernel's 10-second average"
+        );
+    }
+
+    #[test]
+    fn a_full_line_is_carried_when_the_kernel_writes_one_and_never_invented() {
+        let mut collector = PressureCollector::new(Mode::Snapshot);
+        let without = collector.event_from(line(0.0, 0), None, 1, 0);
+        assert!(without[0].attr("full_avg10").is_none());
+
+        let mut collector = PressureCollector::new(Mode::Snapshot);
+        let with = collector.event_from(line(0.0, 0), Some(line(10.0, 42)), 1, 0);
+        assert_eq!(with[0].attr("full_avg10").unwrap().as_f64().unwrap(), 0.1);
+        assert_eq!(
+            with[0].attr("full_total_us").unwrap().as_f64().unwrap(),
+            42.0
+        );
+    }
+
+    #[test]
+    fn a_cgroup_target_is_refused_by_the_backend_that_reads_the_machine() {
+        let attached = Box::new(Prepare(Mode::Snapshot))
+            .attach(&Target::Cgroup(std::path::PathBuf::from("/user.slice")));
+        let refusal = match attached {
+            Ok(_) => panic!("the machine's PSI file was accepted as a cgroup's"),
+            Err(refusal) => refusal,
+        };
+        assert!(refusal.contains("cgroup"), "{refusal}");
+        assert!(refusal.contains("not built yet"), "{refusal}");
     }
 
     /// Ground truth: stall time appears when, and only when, tasks are made to

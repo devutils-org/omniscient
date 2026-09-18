@@ -258,6 +258,159 @@ mod tests {
         );
     }
 
+    /// A directory holding a `cpu.stat` this test writes itself.
+    ///
+    /// The collector reads a file in a directory, so the cases that matter --
+    /// counters that move, a cgroup with no quota, a cgroup that disappears --
+    /// can be arranged exactly, on any machine, without needing the cpu
+    /// controller or the privileges to set a quota.
+    struct FakeCgroup(PathBuf);
+
+    impl FakeCgroup {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("omn-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            Self(path)
+        }
+
+        fn write(&self, stat: &str) {
+            std::fs::write(self.0.join("cpu.stat"), stat).expect("writing cpu.stat");
+        }
+
+        fn collector(&self, mode: Mode) -> ThrottleCollector {
+            ThrottleCollector::new(self.0.clone(), mode)
+        }
+    }
+
+    impl Drop for FakeCgroup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const POLL: Mode = Mode::Poll {
+        interval: Mode::DEFAULT_POLL_INTERVAL,
+    };
+
+    #[test]
+    fn what_is_reported_is_what_happened_between_two_reads() {
+        let cgroup = FakeCgroup::new("throttle-delta");
+        cgroup.write("usage_usec 10\nnr_periods 100\nnr_throttled 40\nthrottled_usec 4000\n");
+        let mut collector = cgroup.collector(POLL);
+        collector.start().expect("cpu.stat is readable");
+
+        // Ten periods later, three of them cut short, for 900 ms of stopped
+        // time between them.
+        cgroup.write("usage_usec 20\nnr_periods 110\nnr_throttled 43\nthrottled_usec 904000\n");
+        let events = collector.sample(0).expect("a second read");
+
+        let event = &events[0];
+        // Microseconds in the file, nanoseconds in the event, because the
+        // catalog says this source is in nanoseconds.
+        assert_eq!(
+            event.attr("throttled_ns").unwrap().as_f64().unwrap(),
+            900_000_000.0
+        );
+        assert_eq!(event.attr("nr_periods").unwrap().as_f64().unwrap(), 10.0);
+        assert_eq!(event.attr("nr_throttled").unwrap().as_f64().unwrap(), 3.0);
+        assert_eq!(
+            event.attr("throttled_periods").unwrap().as_f64().unwrap(),
+            0.3
+        );
+        assert_eq!(
+            event.attr("window").unwrap().to_string(),
+            "since the previous read"
+        );
+    }
+
+    #[test]
+    fn a_single_read_covers_the_whole_life_of_the_cgroup_and_says_so() {
+        let cgroup = FakeCgroup::new("throttle-snapshot");
+        cgroup.write("nr_periods 100\nnr_throttled 40\nthrottled_usec 4000\n");
+        let mut collector = cgroup.collector(Mode::Snapshot);
+        collector.start().expect("cpu.stat is readable");
+
+        let events = collector.sample(0).expect("one read");
+        let event = &events[0];
+        assert_eq!(
+            event.attr("window").unwrap().to_string(),
+            "since the cgroup was created"
+        );
+        assert_eq!(event.attr("nr_throttled").unwrap().as_f64().unwrap(), 40.0);
+        assert_eq!(
+            event.attr("throttled_ns").unwrap().as_f64().unwrap(),
+            4_000_000.0
+        );
+    }
+
+    #[test]
+    fn a_cgroup_without_a_quota_says_so_once_rather_than_failing_on_every_tick() {
+        let cgroup = FakeCgroup::new("throttle-unquota'd");
+        // The shape of a real `cpu.stat` with no `cpu.max` set: usage, but none
+        // of the three throttling counters.
+        cgroup.write("usage_usec 262054076\nuser_usec 222854039\nsystem_usec 39200036\n");
+        let mut collector = cgroup.collector(POLL);
+        collector.start().expect("cpu.stat is readable");
+
+        for seq in 0..3 {
+            assert!(collector.sample(seq).unwrap().is_empty());
+        }
+        // Nothing was lost: there was nothing there to lose. What there is, is
+        // a reason, said once.
+        assert!(collector.losses().is_clean(), "{:?}", collector.losses());
+        let notes = collector.notes();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("no cpu.max quota"), "{notes:?}");
+        assert!(
+            notes[0].contains("not the same as not having been"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_cgroup_that_disappears_ends_the_run_rather_than_failing_a_read() {
+        let cgroup = FakeCgroup::new("throttle-vanishing");
+        cgroup.write("nr_periods 1\nnr_throttled 0\nthrottled_usec 0\n");
+        let mut collector = cgroup.collector(POLL);
+        collector.start().expect("cpu.stat is readable");
+
+        std::fs::remove_dir_all(&cgroup.0).expect("removing the directory");
+        match collector.sample(0) {
+            Err(SampleError::TargetGone(reason)) => assert!(reason.contains("gone"), "{reason}"),
+            other => panic!("expected the run to end, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cgroup_that_is_not_there_is_refused_by_name() {
+        let attached = Box::new(Prepare(POLL)).attach(&Target::Cgroup(PathBuf::from(
+            "/omn-definitely-not-a-cgroup",
+        )));
+        let refusal = match attached {
+            Ok(_) => panic!("a cgroup that does not exist was accepted"),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            refusal.contains("/sys/fs/cgroup/omn-definitely-not-a-cgroup"),
+            "{refusal}"
+        );
+        // Two different fixes, and the message must not send the reader to the
+        // wrong one.
+        assert!(refusal.contains("cpu controller"), "{refusal}");
+    }
+
+    #[test]
+    fn a_process_target_is_refused_with_the_scope_that_throttling_belongs_to() {
+        let attached = Box::new(Prepare(POLL)).attach(&Target::Pid(vec![1]));
+        let refusal = match attached {
+            Ok(_) => panic!("a pid was accepted as a cgroup"),
+            Err(refusal) => refusal,
+        };
+        assert!(refusal.contains("property of a cgroup"), "{refusal}");
+        assert!(refusal.contains("pid"), "{refusal}");
+    }
+
     /// Ground truth: a cgroup given a tenth of a cpu and a program that wants a
     /// whole one has to come back throttled, and by an amount the kernel agrees
     /// with.

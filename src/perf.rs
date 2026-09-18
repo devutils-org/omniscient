@@ -461,6 +461,30 @@ impl Reading {
     }
 }
 
+/// Extrapolates a partial count to the window it was meant to cover.
+///
+/// This is the kernel's own convention for a multiplexed counter: it was on for
+/// `running_ns` of an `enabled_ns` window, so what it would have counted
+/// throughout is `raw * enabled / running`. The result is an estimate, and
+/// `Reading::was_multiplexed` is how a caller knows to say so rather than
+/// present it as a count.
+///
+/// A counter that never ran has no value at all. Zero is returned because a
+/// number is needed, and `Reading::never_ran` is what distinguishes it from a
+/// counter that ran and counted nothing -- a difference an idle process makes
+/// every time.
+fn scaled(raw: u64, enabled_ns: u64, running_ns: u64) -> u64 {
+    if running_ns == 0 {
+        0
+    } else if running_ns >= enabled_ns {
+        raw
+    } else {
+        // In 128 bits, because a cycle counter over a long window times a
+        // nanosecond count overflows 64 bits long before either does.
+        ((raw as u128 * enabled_ns as u128) / running_ns as u128) as u64
+    }
+}
+
 /// Counters opened together and scheduled together.
 ///
 /// Group membership is not a convenience here. A ratio of two counters that
@@ -607,20 +631,10 @@ impl CounterGroup {
                 return Err(io::Error::last_os_error());
             }
             let (raw, enabled_ns, running_ns) = (buffer[0], buffer[1], buffer[2]);
-            // Scaling is the kernel's own convention: a counter that was on for
-            // part of the window is extrapolated to the whole of it. It is an
-            // estimate, and `was_multiplexed` is how the caller knows to say so.
-            let value = if running_ns == 0 {
-                0
-            } else if running_ns == enabled_ns {
-                raw
-            } else {
-                ((raw as u128 * enabled_ns as u128) / running_ns as u128) as u64
-            };
             readings.push(Reading {
                 name: counter.name,
                 raw,
-                value,
+                value: scaled(raw, enabled_ns, running_ns),
                 enabled_ns,
                 running_ns,
             });
@@ -816,6 +830,164 @@ mod tests {
                 "a scaled value is an extrapolation upwards, never downwards"
             );
         }
+    }
+
+    #[test]
+    fn a_counter_that_was_on_throughout_is_reported_as_it_was_counted() {
+        // The common case, and the one that must never be touched: an
+        // unmultiplexed counter's value is the hardware's own number.
+        assert_eq!(scaled(1_000, 5_000_000, 5_000_000), 1_000);
+        // The kernel occasionally reports a running window a hair longer than
+        // the enabled one; extrapolating downwards from that would invent a
+        // shortfall.
+        assert_eq!(scaled(1_000, 5_000_000, 5_000_001), 1_000);
+    }
+
+    #[test]
+    fn a_counter_that_was_on_for_part_of_the_window_is_extrapolated_to_all_of_it() {
+        // On for a quarter of the window, so four times what it counted.
+        assert_eq!(scaled(1_000, 4_000_000, 1_000_000), 4_000);
+        // The arithmetic is done in 128 bits: a cycle counter over a minute
+        // times a nanosecond window passes 64 bits without difficulty.
+        let cycles = 4_000_000_000u64 * 60;
+        assert_eq!(
+            scaled(cycles, 60_000_000_000, 30_000_000_000),
+            cycles * 2,
+            "the product overflowed instead of being computed"
+        );
+    }
+
+    #[test]
+    fn a_counter_that_never_ran_is_not_a_counter_that_counted_nothing() {
+        let never = Reading {
+            name: "cycles",
+            raw: 0,
+            value: scaled(0, 5_000_000, 0),
+            enabled_ns: 5_000_000,
+            running_ns: 0,
+        };
+        assert!(never.never_ran());
+        assert_eq!(never.value, 0);
+
+        let idle = Reading {
+            name: "cycles",
+            raw: 0,
+            value: scaled(0, 5_000_000, 5_000_000),
+            enabled_ns: 5_000_000,
+            running_ns: 5_000_000,
+        };
+        // Both hold zero. Only one of them is a measurement, and telling them
+        // apart is what stops an idle process reading as a zero count.
+        assert!(!idle.never_ran());
+        assert!(!idle.was_multiplexed());
+        assert_eq!(idle.duty(), 1.0);
+    }
+
+    /// Counting is exact, which means the window's edges have to be exact too:
+    /// nothing that happens while the group is stopped may appear in it.
+    #[test]
+    fn work_done_outside_the_window_is_not_counted() {
+        let Ok(group) = CounterGroup::open(&[INSTRUCTIONS], Scope::Process(0)) else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        group.enable().expect("enable");
+        busy();
+        let inside = group.read_final().expect("read")[0].value;
+
+        // The group is stopped now. This work belongs to no window.
+        for _ in 0..4 {
+            busy();
+        }
+        let after = group.read().expect("read")[0].value;
+
+        assert_eq!(
+            inside, after,
+            "{} instructions were retired while the group was disabled and {} of them              were counted anyway",
+            after - inside,
+            after - inside
+        );
+        assert!(inside > 0, "nothing at all was counted inside the window");
+    }
+
+    /// A group that cannot fit on the hardware is never scheduled, and the
+    /// kernel then has nothing to report. What must not happen is that nothing
+    /// arrives as zero.
+    #[test]
+    fn a_group_too_large_for_the_hardware_reports_no_value_rather_than_zero() {
+        // How many counters a group may even contain is itself a limit, and it
+        // differs between vendors: the largest group this machine will open is
+        // found rather than assumed, and it only has to exceed the number of
+        // counters the hardware can schedule at once.
+        let opened = (2..=16).rev().find_map(|size| {
+            let counters: Vec<Counter> = (0..size).map(|_| CYCLES).collect();
+            CounterGroup::open(&counters, Scope::Process(0)).ok()
+        });
+        let Some(group) = opened else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        group.enable().expect("enable");
+        busy();
+        let readings = group.read_final().expect("read");
+
+        if !readings[0].never_ran() {
+            eprintln!(
+                "skipped: this machine scheduled {} counters at once",
+                readings.len()
+            );
+            return;
+        }
+        assert!(
+            readings.iter().all(|reading| reading.never_ran()),
+            "part of a group ran without the rest, which a group is meant to prevent"
+        );
+        assert!(
+            readings.iter().all(|reading| reading.value == 0),
+            "a counter that never ran reported a value"
+        );
+    }
+
+    /// Every group holds file descriptors, and a session opens one per source
+    /// per run. A leak here would end a long run with EMFILE and no explanation.
+    #[test]
+    fn closing_a_group_gives_its_descriptors_back() {
+        // Only this process's perf events are counted, and generously: the
+        // other tests in this binary open and close their own while this runs.
+        // The signature of a leak is a hundred and twenty-eight descriptors,
+        // which no amount of concurrent noise resembles.
+        fn perf_descriptors() -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| {
+                    std::fs::read_link(entry.path())
+                        .map(|target| target.to_string_lossy().contains("perf_event"))
+                        .unwrap_or(false)
+                })
+                .count()
+        }
+
+        const GROUPS: usize = 64;
+        let Ok(group) = CounterGroup::open(&[INSTRUCTIONS, CYCLES], Scope::Process(0)) else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        drop(group);
+
+        let before = perf_descriptors();
+        for _ in 0..GROUPS {
+            let group = CounterGroup::open(&[INSTRUCTIONS, CYCLES], Scope::Process(0))
+                .expect("the first one opened, so these do too");
+            drop(group);
+        }
+        let after = perf_descriptors();
+        assert!(
+            after < before + GROUPS,
+            "{GROUPS} groups of two counters left {} perf descriptors behind",
+            after.saturating_sub(before)
+        );
     }
 
     /// On a machine where `perf_event_paranoid` forbids counting kernel mode,
