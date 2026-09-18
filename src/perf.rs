@@ -380,14 +380,34 @@ mod tests {
 
         // Touching one byte per page is what makes each page resident, and each
         // of those is one fault at a known address.
+        //
+        // The pages come from `mmap` rather than from the allocator on purpose.
+        // A `Vec` may be handed memory the allocator already holds and that is
+        // already resident, in which case writing to it faults nothing at all:
+        // this test then counted faults that the rest of the suite had already
+        // taken, and its shortfall grew with how much else was running. A fresh
+        // anonymous mapping is untouched by construction.
         const PAGES: usize = 64;
         let page = page_size();
-        let mut block = vec![0u8; PAGES * page];
-        let base = block.as_ptr() as u64;
+        let length = PAGES * page;
+        // SAFETY: a fresh anonymous mapping of a positive length; the result is
+        // checked and the mapping is released at the end of the test.
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "mmap of {length} bytes failed");
+        let base = block as u64;
         for index in 0..PAGES {
-            block[index * page] = 1;
+            // SAFETY: `index * page` is inside the mapping just made.
+            unsafe { (block as *mut u8).add(index * page).write_volatile(1) };
         }
-        std::hint::black_box(&block);
         event.disable().expect("disable");
 
         let (mut samples, mut inside) = (0, 0);
@@ -399,6 +419,9 @@ mod tests {
                 }
             }
         });
+
+        // SAFETY: the mapping came from the `mmap` above and is not used again.
+        unsafe { libc::munmap(block, length) };
 
         // Either the faults were seen, or the ring says it lost some. What must
         // never happen is a quiet shortfall, so the two cases are both asserted
@@ -428,12 +451,34 @@ mod tests {
             return;
         };
         event.enable().expect("enable");
-        let mut block = vec![0u8; 16 * page_size()];
+        // Mapped rather than allocated, for the same reason as the test above:
+        // memory the allocator already holds is already resident and faults
+        // nothing, which leaves this test with no sample to look at.
+        let length = 16 * page_size();
+        // SAFETY: a fresh anonymous mapping of a positive length; the result is
+        // checked and the mapping is released below.
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "mmap of {length} bytes failed");
         for index in 0..16 {
-            block[index * page_size()] = 1;
+            // SAFETY: `index * page_size()` is inside the mapping just made.
+            unsafe {
+                (block as *mut u8)
+                    .add(index * page_size())
+                    .write_volatile(1)
+            };
         }
-        std::hint::black_box(&block);
         event.disable().expect("disable");
+        // SAFETY: the mapping came from the `mmap` above and is not used again.
+        unsafe { libc::munmap(block, length) };
         let after = crate::clock::monotonic_ns();
 
         let mut seen = None;
