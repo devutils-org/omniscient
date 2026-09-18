@@ -636,18 +636,17 @@ mod tests {
         assert!(line_of("bpf:tp").contains("no collector yet"), "{text}");
     }
 
-    /// Under `cargo test` stdout is captured, so `auto` must decide there is no
-    /// terminal. This is the path every piped run takes, and the one that would
-    /// otherwise put escape sequences into a file nobody wanted them in.
+    /// A run whose output is not a terminal must carry no escape sequences,
+    /// which is what a pipe and a redirect into a file both are.
+    ///
+    /// The style is stated rather than taken from this process: `cargo test`
+    /// captures the print macros and not file descriptor one, so a suite
+    /// launched from a terminal has a terminal on stdout inside its own tests.
+    /// Asking `for_stdout()` here tested how the suite was started.
     #[test]
-    fn auto_paints_nothing_when_stdout_is_not_a_terminal() {
-        let text = list(
-            &catalog(),
-            Some("mem"),
-            &capabilities(),
-            Style::for_stdout(),
-        );
-        assert!(!text.contains('\x1b'), "auto coloured a captured stdout");
+    fn nothing_is_painted_when_the_output_is_not_a_terminal() {
+        let text = list(&catalog(), Some("mem"), &capabilities(), Style::never());
+        assert!(!text.contains('\x1b'), "a pipe was given escape sequences");
     }
 
     /// Removes every escape sequence, which is what a pipe or a file sees.

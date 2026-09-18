@@ -58,7 +58,11 @@ sources and 52, and nothing announces it: the tool reports fewer things as
 available, which reads like the machine changed rather than the binary. `make`
 reapplies them, and says so when it cannot.
 
-To stop `sudo` asking on every build, one narrowly scoped line under
+The capability step never prompts. `sudo -n` on purpose: a build that asks for
+a password blocks forever wherever nobody is there to type one, and "nobody is
+there" is not the same as "no terminal" -- a pty with no human behind it is what
+a build hook, a CI runner and an agent shell all have. To stop needing sudo at
+all, one narrowly scoped line under
 `visudo -f /etc/sudoers.d/omniscient`, which permits exactly that command on
 exactly that path and nothing else:
 

@@ -21,10 +21,27 @@ pub struct Style {
 impl Style {
     /// Colour if stdout is a terminal that has not asked to be left alone.
     pub fn for_stdout() -> Self {
-        let asked_not_to = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
-            || std::env::var("TERM").is_ok_and(|term| term == "dumb");
+        Self::decide(std::io::stdout().is_terminal(), Self::asked_not_to())
+    }
+
+    /// Whether the environment has asked for no colour, by either convention.
+    fn asked_not_to() -> bool {
+        std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+            || std::env::var("TERM").is_ok_and(|term| term == "dumb")
+    }
+
+    /// The decision itself, with nothing read from the process.
+    ///
+    /// Separated because it is the part worth testing and the only part that
+    /// can be: a test cannot ask what `auto` does about a terminal by looking at
+    /// its own, since whether the suite was launched from one is not the
+    /// subject. `cargo test` captures the print macros, not file descriptor
+    /// one, so under a terminal stdout *is* a terminal inside a test -- which is
+    /// how the obvious version of this test passed whenever the suite's output
+    /// was piped and failed whenever a person ran it.
+    fn decide(is_terminal: bool, asked_not_to: bool) -> Self {
         Self {
-            colour: std::io::stdout().is_terminal() && !asked_not_to,
+            colour: is_terminal && !asked_not_to,
         }
     }
 
@@ -58,6 +75,25 @@ impl Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four cases of the decision, none of which depends on how the test
+    /// binary was launched.
+    #[test]
+    fn colour_needs_a_terminal_that_has_not_asked_to_be_left_alone() {
+        assert!(
+            Style::decide(true, false).colour,
+            "a plain terminal gets colour"
+        );
+        assert!(
+            !Style::decide(true, true).colour,
+            "NO_COLOR is honoured on a terminal"
+        );
+        assert!(
+            !Style::decide(false, false).colour,
+            "a pipe never gets colour"
+        );
+        assert!(!Style::decide(false, true).colour);
+    }
 
     #[test]
     fn a_style_without_colour_returns_the_text_untouched() {

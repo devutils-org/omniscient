@@ -33,21 +33,30 @@ build:
 release:
 	@$(MAKE) --no-print-directory build PROFILE=release
 
-# Asks for the capabilities without ever blocking a build that cannot get them.
-# A terminal is allowed to prompt once; anything else -- CI, an agent, a hook --
-# tries the non-interactive path and reports rather than hanging on a password
-# nobody is there to type.
+# Asks for the capabilities without ever prompting.
+#
+# `sudo -n` on purpose: a build that asks for a password blocks forever wherever
+# nobody is there to type one, and "nobody is there" is not the same as "no
+# terminal" -- a pty with no human behind it is exactly what a build hook, a CI
+# runner and an agent shell all have. This target found that out by hanging on
+# its own author.
+#
+# So it succeeds silently when sudo is already available, and otherwise prints
+# the one command to run. To stop needing it at all, one narrowly scoped line
+# under `visudo -f /etc/sudoers.d/omniscient`, permitting exactly this command
+# on exactly this path:
+#
+#   <user> ALL=(root) NOPASSWD: /usr/sbin/setcap $(CAPS) <absolute path to $(BINARY)>
 caps:
 	@if getcap $(BINARY) 2>/dev/null | grep -q cap_bpf; then \
 	    echo "capabilities already on $(BINARY)"; \
-	elif [ -t 0 ] && sudo setcap $(CAPS) $(BINARY) 2>/dev/null; then \
-	    echo "granted $(CAPS) to $(BINARY)"; \
 	elif sudo -n setcap $(CAPS) $(BINARY) 2>/dev/null; then \
 	    echo "granted $(CAPS) to $(BINARY)"; \
 	else \
 	    echo "note: $(BINARY) has no capabilities, so the eBPF and per-cpu perf"; \
 	    echo "      backends will report the one they need instead of collecting."; \
 	    echo "      grant them with: sudo setcap $(CAPS) $(BINARY)"; \
+	    echo "      or once and for all, see the sudoers line in the Makefile."; \
 	fi
 
 # The integration tests run `target/<profile>/omn`, so they take the privileged
