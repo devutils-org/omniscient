@@ -10,7 +10,7 @@
 //! and the count rises by ten. That makes them the cheapest honest ground truth
 //! in the catalog, and the tests take it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
@@ -71,7 +71,7 @@ pub struct StatusCollector {
 /// A process that exits mid-run ends the collection; it has not failed. procfs
 /// says so with ENOENT once the directory is gone and ESRCH while it is going,
 /// and counting either as a lost read would make every clean run look lossy.
-fn classify(path: &PathBuf, pid: i32, error: &std::io::Error) -> SampleError {
+fn classify(path: &Path, pid: i32, error: &std::io::Error) -> SampleError {
     if error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH) {
         SampleError::TargetGone(format!("process {pid} exited"))
     } else if error.kind() == std::io::ErrorKind::PermissionDenied {
