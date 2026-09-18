@@ -1,10 +1,17 @@
 //! Collectors for the `net` family.
-//!
-//! Empty until this family's thread lands its first collector. See BRIEF.md.
+
+mod dev;
 
 use super::Factory;
 
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
-    Vec::new()
+    vec![
+        Factory::new("net.bytes", "fs:proc", |_| {
+            Ok(Box::new(dev::Prepare(dev::Counted::Bytes)))
+        }),
+        Factory::new("net.packets", "fs:proc", |_| {
+            Ok(Box::new(dev::Prepare(dev::Counted::Packets)))
+        }),
+    ]
 }

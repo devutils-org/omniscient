@@ -87,9 +87,19 @@
   modes: [poll, count]
   emits: [rate, timeline, summary, topk]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
-  keys: [sock, task, cgroup]
+  keys: [iface, sock, task, cgroup]
   filter_fields: [iface, comm]
   determinism: low
+  caveats:
+    - "The file holds counters that only grow, so a run reports the increment
+       between two reads. The first read of a run is a baseline and produces
+       nothing: a run shorter than one poll interval measures nothing."
+    - "Loopback traffic is counted twice, once received and once transmitted,
+       because it is both."
+    - "Per-process attribution is not available from this file. It needs the
+       eBPF backend, and the resolver will say so rather than dividing a
+       machine-wide number."
+
 
 - id: net.packets
   family: net
@@ -101,9 +111,13 @@
   modes: [poll, count]
   emits: [rate, timeline, summary]
   targets: {system: native, iface: native}
-  keys: []
+  keys: [iface]
   filter_fields: [iface]
   determinism: low
+  caveats:
+    - "Counters that only grow: a run reports the increment between two reads,
+       and its first read is a baseline that produces nothing."
+
 
 - id: net.socket
   family: net
