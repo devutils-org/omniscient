@@ -12,34 +12,51 @@ omn io.latency --pid 4242 --mode trace --emit hist,topk:5 \
 
 ## Status
 
-The spine is complete and one source runs end to end. Request → validation →
-machine introspection → backend resolution → collection → aggregation →
-encoding, for `mem.rss`:
+The spine is complete, three sources run end to end, and the first correlation
+works. `omn -f examples/allocation-cost.yml`:
 
 ```console
-$ omn mem.rss --emit timeline,summary --mode poll@100ms -- ./a-program
-mem.rss  via fs:proc:smaps_rollup  (mem.rss)
-  11 events over 1.10s, stopped because process 170997 exited
+mem.heap.alloc  via preload  (mem.heap.alloc)
+  5079 events over 1.03s, stopped because the launched program exited with exit status 0
   no loss: every read succeeded and no tick ran late
 
-  timeline
-    task:170997
-      +0ns         12.0 KiB
-      +100ms       17.6 MiB
-      +300ms       25.6 MiB
-      ...
+mem.faults  via pmu:sw  (mem.faults)
+  3518 events over 1.03s, stopped because the launched program exited with exit status 0
+  no loss: every read succeeded and no tick ran late
+
+join pages-of-allocation  mem.heap.alloc -> mem.faults  evidence KEY
+  2655 of 3518 `mem.faults` events attributed (75.5 %); 863 fell outside every open range
+  states: 2555 opened, 2524 closed, 31 still open at the end, peak 1579 held at once
+  no eviction: nothing was dropped for age or for space
+
+  heaviest ranges
+    RANGE                                    SIZE    EVENTS  OUTCOME
+    mem:[0x7fc798efb010,0x7fc7996fb011)    8.0 MiB       515  freed
+    mem:[0x7fc7996fc010,0x7fc799efc011)    8.0 MiB       515  freed
+    ...
 ```
 
-The other 99 sources resolve but have no collector yet, and say so. That is
-deliberate: one source taken all the way down proves the skeleton, and the
-skeleton is what every later source is written against.
+`malloc` allocates nothing: it returns an address, and the pages become resident
+on first write. So an allocation-site profile and a memory curve never line up,
+and neither answers "which allocation actually cost memory". The shim reports
+each allocation's range, every page fault carries the address that faulted, and
+a fault inside a range is that allocation becoming real. Evidence `KEY`: both
+sides carry the same typed key.
+
+| Source | Backend | What it does |
+|---|---|---|
+| `mem.rss` | `fs:proc:smaps_rollup`, `fs:proc:statm` | resident size, polled |
+| `mem.faults` | `pmu:sw` | every page fault with its address, through a perf ring buffer |
+| `mem.heap.alloc` | `preload` | every allocation and free, through an `LD_PRELOAD` shim |
+
+The other 97 sources resolve and say plainly that no collector exists yet.
 
 | Command | What it does |
 |---|---|
 | `omn <source> [options]` | resolves and runs a request |
 | `omn <source> --dump-request` | shows it and how it would be obtained, without measuring |
 | `omn <source> --dump-resolved` | the record to keep beside the numbers |
-| `omn -f session.yml` | the same, from a file in YAML, JSON or TOML |
+| `omn -f session.yml` | the same, from a file in YAML, JSON or TOML, joins included |
 | `omn list [family\|source]` | the catalog, marked with what this machine can serve |
 | `omn validate -f session.toml` | checks a session without touching the machine |
 | `omn formats` | the input and output formats, and what each can carry |
@@ -154,6 +171,27 @@ resolved.json  results.txt
 was probed, what was degraded, and the machine's kernel, governor, THP mode, SMT
 state and clocksource. Two numbers taken through different backends are not
 comparable, and without that file nobody can tell that they were.
+
+## A worked example of why this is careful
+
+The first correlation reported 515 faults for an 8 MiB allocation, where 4 KiB
+pages would need 2048. Rather than explain it away, the number was checked
+against the kernel's own counter, which agreed — and a sweep showed why:
+
+```
+  1 MiB ->   263 kernel minor faults   (3.9 KiB per fault)
+  8 MiB ->   516 kernel minor faults   (15.9 KiB per fault)
+ 32 MiB ->   528 kernel minor faults   (62.1 KiB per fault)
+```
+
+With multi-size transparent huge pages the kernel picks larger folios for larger
+regions, so the fault count is nearly flat across sizes. A derived "resident
+bytes" column computed as `faults x page size` had already been written; it was
+wrong by a factor of four on this machine, and it is gone. Fault counts now say
+where faults happened and state that they do not convert to bytes — and the THP
+mode is in the resolved file, so the next reader can see it.
+
+This is the failure mode the tool exists to prevent, found in its own output.
 
 ## Boundaries
 
