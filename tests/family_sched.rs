@@ -94,6 +94,19 @@ fn the_fallback_backend_says_what_it_gives_up() {
     ]);
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     if !output.status.success() {
+        // A machine that cannot serve the request and a request that cannot
+        // mean anything are different answers, and only the first is a reason
+        // to stop quietly. Skipping on any failure is how a test passes in
+        // green for hours without ever checking what it claims to check.
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            complaint.contains("no viable backend")
+                || complaint.contains("cannot start collecting")
+                || complaint.contains("perf_event_paranoid")
+                || complaint.contains("no collector is written"),
+            "this is not a machine that cannot serve the request, it is a request that was \
+             refused:\n{complaint}"
+        );
         eprintln!("skipped: this machine serves neither backend of sched.switches");
         return;
     }

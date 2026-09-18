@@ -118,6 +118,7 @@ fn the_thread_count_matches_what_the_process_says_it_runs() {
 #[test]
 fn a_count_without_its_limit_is_not_reported_as_a_measurement() {
     if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
         return;
     }
     let output = Command::new(BINARY)
