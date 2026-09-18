@@ -303,7 +303,12 @@ fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
     match args.format {
         OutputFormat::Text => print!(
             "{}",
-            render::list(&catalog, args.selection.as_deref(), &capabilities)
+            render::list(
+                &catalog,
+                args.selection.as_deref(),
+                &capabilities,
+                args.color.style(),
+            )
         ),
         format if format.renders_documents() => {
             let selected: Vec<_> = match args.selection.as_deref() {
