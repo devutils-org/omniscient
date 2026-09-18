@@ -9,8 +9,13 @@
   unit: joules
   backends:
     - {id: "pmu", requires: ["pmu:power/energy-pkg/"], cost: free}
-    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl"], cost: free,
-       degraded: "counter polling: misses short spikes and wraparound"}
+    # The requirement is the counter file itself, not the directory above it.
+    # The directory is world-readable on every machine that has RAPL, while the
+    # counter is root-only on current kernels -- so requiring the directory
+    # would let the resolver promise a measurement that the collector then
+    # cannot take.
+    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl:0/energy_uj"], cost: free,
+       degraded: "polled: a spike between two reads is averaged into the interval that contains it"}
   modes: [count, poll]
   emits: [summary, rate, timeline]
   targets: {system: native}
@@ -20,6 +25,16 @@
   caveats:
     - "RAPL is per package: --pid is invalid. Per-process attribution is a derived
        estimate (share of cycles) and must be labelled as such."
+    - "`energy_uj` is readable only by root on current kernels: the counter was
+       shown to leak what the machine was computing. Present and out of reach is
+       not the same as absent -- it calls for privileges, not for different
+       hardware."
+    - "The counter wraps at `max_energy_range_uj`, about 65 kJ, which is eleven
+       minutes at a hundred watts. A decrease is read as one wrap and the event
+       says so; a poll interval long enough to wrap twice cannot be recovered."
+    - "RAPL domains nest: `intel-rapl:0:0` is the cores inside package
+       `intel-rapl:0`. Only top-level domains are summed, and the event names
+       which ones."
 
 - id: power.freq
   family: power
@@ -28,7 +43,9 @@
   backends:
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpufreq"], cost: free,
-       degraded: "requested frequency, not the effective one"}
+       degraded: "which frequency sysfs gives depends on the driver: cpuinfo_avg_freq is the
+                  effective one, scaling_cur_freq may be the requested one. Every event names the
+                  file it read and whether that is effective or requested"}
     - {id: "pmu", requires: ["msr:aperf", "msr:mperf"], cost: free, equivalent: true}
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
@@ -36,6 +53,14 @@
   keys: []
   filter_fields: [cpu]
   determinism: low
+  caveats:
+    - "The requested frequency is what the governor asked for; the effective one
+       is what the core ran at, and they part company exactly when it matters --
+       under a power or thermal limit, or under an instruction mix carrying a
+       frequency licence such as AVX-512."
+    - "A system target reports the mean across the online cpus, with min and max
+       beside it. One boosted core among twenty-three idle ones is a mean that
+       describes no core; --cpu asks about a core."
 
 - id: power.cstate
   family: power
@@ -51,6 +76,14 @@
   keys: []
   filter_fields: [cpu, state]
   determinism: low
+  caveats:
+    - "Residency is credited when a cpu leaves an idle state, not while it sits
+       there. A tick in which a long sleep ended is therefore paid residency that
+       belongs to earlier ticks, and a short tick can report more idle time than
+       it contains. Measured here: 1.06 of one 300 ms tick, and 0.97 over two
+       seconds, where /proc/stat's own idle accounting said 0.97 as well."
+    - "Residency is cpu-time. The value is the residency of the average watched
+       cpu, which cannot exceed the tick; `idle_ns_total` is the sum over them."
 
 - id: power.temp
   family: power
@@ -64,6 +97,14 @@
   keys: []
   filter_fields: [sensor]
   determinism: low
+  caveats:
+    - "There is no such thing as `the` temperature: a machine offers a processor,
+       a disk controller and a wifi chip, and their mean is a number about
+       nothing. The value is the hottest processor sensor, because that is what
+       throttling follows; every sensor is carried as its own attribute, and
+       `sensor` names the one the value came from."
+    - "A machine with no processor sensor reports the hottest sensor of any kind
+       and says so in `basis`, rather than reporting nothing or pretending."
 
 - id: power.throttle
   family: power
@@ -71,7 +112,9 @@
   unit: count
   backends:
     - {id: "bpf:tp", requires: ["tracepoint:thermal:thermal_temperature", "bpf"], cost: free}
-    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/thermal_throttle"], cost: free, equivalent: true}
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/thermal_throttle"], cost: free,
+       degraded: "counts, not moments: how many times the part throttled during the interval, not
+                  when it started or how long it lasted"}
   modes: [poll, trace]
   emits: [timeline, rate, raw, summary]
   targets: {system: native}
@@ -81,3 +124,7 @@
   caveats:
     - "A throttled run must be invalidated, not averaged in. This is a guardrail
        collected unconditionally, not an opt-in metric."
+    - "`thermal_throttle` is an x86 thermal-interrupt interface. It is absent on
+       AMD parts, on ARM and in most virtual machines, and its absence is not
+       evidence that nothing throttled: it means throttling cannot be seen this
+       way here. The backend refuses rather than reporting zeroes."

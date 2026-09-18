@@ -1,0 +1,30 @@
+# How much energy a window of work cost.
+#
+#   sudo omn -f examples/power-energy.yml
+#
+# `sudo` is not decoration here. RAPL's energy counter was shown to leak what
+# the machine was computing, so `energy_uj` is root-only on current kernels.
+# Without privileges this session refuses and says so, which is the point: a
+# tool that answered anyway would be reporting a number it did not read.
+#
+# The counted mode reports one total for the whole window rather than a value
+# per tick, which is what "what did this cost" means. The package's energy
+# includes the cores, the memory controller and the uncore; the sub-domains are
+# never added to it, because they are already inside it.
+name: energy of a window
+format: text
+
+requests:
+  - label: energy
+    source: power.energy
+    target: system
+    mode: count
+    emit: [summary, rate]
+
+  - label: temperature
+    source: power.temp
+    target: system
+    mode: poll@1s
+    emit: [summary]
+
+duration: 10s

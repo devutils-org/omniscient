@@ -1,0 +1,45 @@
+# The guardrail: what else was happening to the processor while you measured.
+#
+#   omn -f examples/power-confounders.yml
+#
+# A run that thermally throttled is not a slower run, it is a different run.
+# Frequency, idle residency and temperature are collected here not because
+# anyone wants to know them, but because a cpu, memory or gpu number moves with
+# them for a reason that is in none of those measurements. Collect this beside
+# whatever you are actually measuring, and read it first when two runs disagree.
+#
+# `power.throttle` is deliberately absent from this session: it exists, and on a
+# machine whose cpus expose `thermal_throttle` it is the one source that answers
+# the question directly. Add it -- it will refuse, by name, on a machine where
+# throttling cannot be seen, which is the honest answer rather than a series of
+# zeroes.
+name: what the processor was doing meanwhile
+format: text
+
+requests:
+  # Effective where the driver reports it, requested where it does not. Every
+  # event says which it read; read `measures` before comparing two machines.
+  - label: frequency
+    source: power.freq
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+  # The other half of a frequency reading: a core that idled through nine
+  # tenths of the window and boosted through the tenth has a high average
+  # frequency and almost no work behind it.
+  - label: idle
+    source: power.cstate
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+  # The hottest processor sensor, which is what throttling follows. A disk
+  # controller running hotter than the cpu is normal and is not this number.
+  - label: temperature
+    source: power.temp
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+duration: 5s
