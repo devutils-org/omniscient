@@ -1,0 +1,44 @@
+# What the disks of this machine are actually doing.
+#
+#   omn -f examples/io-device-load.yml
+#
+# Three numbers over one window, because separately they mislead. Volume alone
+# cannot tell a few large transfers from many small ones; the operation rate
+# alone cannot tell a busy device from a fast one; queue depth is what says
+# whether the requests were waiting on each other.
+#
+# All three come from `/proc/diskstats`, which counts per device for the whole
+# machine. There is no process in this measurement: the block layer does not
+# record who asked, and the source that does is the eBPF one. So the target is
+# `system`, and a `--pid` against these backends is refused rather than answered
+# with the machine's total.
+name: what the disks are doing
+format: text
+
+requests:
+  # Bytes the devices moved, as an increase per tick rather than the counter's
+  # value: /proc/diskstats has been counting since boot, and that number is
+  # about the machine's lifetime, not about this window.
+  - label: volume
+    source: io.bytes
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+  # Operations the devices completed, after the block layer merged what it
+  # could. Compare with the volume: the quotient is the average transfer size.
+  - label: operations
+    source: io.iops
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+  # What was outstanding at each read. A gauge, not a counter: a queue that
+  # fills and drains between two polls leaves no trace here.
+  - label: queue depth
+    source: io.inflight
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+duration: 10s
