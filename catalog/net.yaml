@@ -46,6 +46,19 @@
   keys: [sock, task]
   filter_fields: [daddr, dport, saddr, sport]
   determinism: low
+  caveats:
+    - "Only an established connection has a round-trip estimate. Listening and
+       closing sockets report zero, and reporting that as a measured latency of
+       zero would be a lie with a number attached, so they are left out."
+    - "This is the kernel's smoothed estimate, not a measured packet round trip:
+       it is what the stack currently believes about the path, which is what
+       drives its own decisions."
+    - "Polling sees the connections alive at each tick. One opened and closed
+       between two ticks is never seen -- a property of polling, not a loss."
+    - "Narrowing to a process matches socket inodes against /proc/[pid]/fd, so a
+       socket passed to another process over a unix socket is attributed to
+       whoever holds the descriptor now."
+
 
 - id: net.tcp.retransmit
   family: net

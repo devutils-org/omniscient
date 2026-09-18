@@ -50,3 +50,23 @@ Nothing blocking yet. Ahead:
   `net.iface` and the netlink backend of `net.bytes` all need it, and so do
   parts of `io`. It is family-local for now; if a second family needs it, it
   should move to `src/netlink.rs`.
+
+### The socket cookie was already the right key
+
+`sock_diag` reports a per-socket cookie, and it is exactly the `sock:cookie` the
+catalog already names as the key that survives softirq processing. `net.tcp.rtt`
+keys its series on it, so when the eBPF backends arrive they join to these
+without a translation layer.
+
+### Only established connections have a round trip
+
+A listening or closing socket reports zero. Emitting that as a measured latency
+of zero would be a lie with a number attached, so those sockets are skipped and
+the catalog says why.
+
+### What the RTT is, and is not
+
+It is the kernel's smoothed estimate — what the stack currently believes about
+the path, which is what drives its own congestion decisions. It is not a
+measured packet round trip. `net.hwts` is the source that splits real latency
+into NIC, kernel and application segments.
