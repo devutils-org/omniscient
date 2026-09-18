@@ -532,7 +532,6 @@ fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::Capabilities;
     use crate::catalog::Catalog;
 
     /// Every registered collector must name a real catalog entry and a real

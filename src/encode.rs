@@ -369,10 +369,34 @@ fn round_to_ms(offset_ns: u64) -> u64 {
 fn quantity(value: f64, unit: Unit) -> String {
     match unit {
         Unit::Bytes => bytes(value),
-        Unit::Ns => Duration::from_nanos(value.max(0.0) as u64).to_string(),
+        // Not the exact-unit form `Duration` renders for round trips: that
+        // picks the largest unit a value divides evenly into, so 6654000 ns
+        // reads as `6654us` while 7021500 ns reads as `7021500ns` in the very
+        // same row. A reader comparing two numbers should not have to compare
+        // their units first.
+        Unit::Ns => duration(value),
         Unit::Ratio => format!("{value:.3}"),
         other => format!("{value:.0} {other}"),
     }
+}
+
+/// Renders a duration by magnitude, so every value in a column reads in the
+/// same unit as its neighbours.
+fn duration(nanos: f64) -> String {
+    const UNITS: [(f64, &str); 5] = [
+        (60_000_000_000.0, "min"),
+        (1_000_000_000.0, "s"),
+        (1_000_000.0, "ms"),
+        (1_000.0, "us"),
+        (1.0, "ns"),
+    ];
+    let nanos = nanos.max(0.0);
+    for (factor, suffix) in UNITS {
+        if nanos >= factor {
+            return format!("{:.2}{suffix}", nanos / factor);
+        }
+    }
+    "0ns".to_owned()
 }
 
 fn bytes(value: f64) -> String {
@@ -436,6 +460,16 @@ mod tests {
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
         }
+    }
+
+    #[test]
+    fn a_column_of_durations_reads_in_one_unit() {
+        // The three values of one summary row, which must not arrive in three
+        // different units because of how evenly they divide.
+        assert_eq!(duration(6_654_000.0), "6.65ms");
+        assert_eq!(duration(7_021_500.0), "7.02ms");
+        assert_eq!(duration(7_341_000.0), "7.34ms");
+        assert_eq!(duration(850.0), "850.00ns");
     }
 
     #[test]

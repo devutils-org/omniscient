@@ -284,6 +284,13 @@ impl Capabilities {
             return probe_pmu(event);
         }
 
+        // Netlink families: the question is whether this kernel exposes the
+        // protocol at all, which is answered by trying to open a socket on it.
+        // Opening one is free and changes nothing.
+        if let Some(protocol) = netlink_protocol(requirement) {
+            return probe_netlink(requirement, protocol);
+        }
+
         if requirement == "preload:shim" {
             return match crate::collect::find_shim() {
                 Ok(_) => Probe::Available,
@@ -439,6 +446,45 @@ fn probe_pmu(event: &str) -> Probe {
     }
 }
 
+/// The netlink protocols the catalog names, and their kernel numbers.
+fn netlink_protocol(requirement: &str) -> Option<i32> {
+    match requirement {
+        // NETLINK_SOCK_DIAG
+        "sock_diag" => Some(4),
+        // NETLINK_ROUTE, which also answers ethtool's newer interface.
+        "rtnetlink" | "netlink" | "ethtool" => Some(0),
+        _ => None,
+    }
+}
+
+/// Asks whether a netlink protocol can be opened, rather than assuming a kernel
+/// built with it.
+fn probe_netlink(requirement: &str, protocol: i32) -> Probe {
+    // SAFETY: creating a socket; the arguments are constants.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            protocol,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: closing a descriptor just created here.
+        unsafe { libc::close(fd) };
+        return Probe::Available;
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPROTONOSUPPORT) => Probe::Missing(format!(
+            "this kernel has no netlink protocol for `{requirement}`"
+        )),
+        Some(libc::EPERM) | Some(libc::EACCES) => Probe::Missing(format!(
+            "opening netlink for `{requirement}` was refused: {error}"
+        )),
+        _ => Probe::Missing(format!("cannot open netlink for `{requirement}`: {error}")),
+    }
+}
+
 fn current_uid() -> u32 {
     // SAFETY: `getuid` reads process state and cannot fail.
     unsafe { libc::getuid() }
@@ -560,6 +606,15 @@ mod tests {
                 "{probe}"
             );
         }
+    }
+
+    #[test]
+    fn a_netlink_protocol_is_answered_by_opening_it() {
+        let capabilities = Capabilities::detect();
+        // Every kernel this tool targets has sock_diag; only a stripped build
+        // or a sandbox refuses it, and then the answer says which.
+        let probe = capabilities.probe("sock_diag", None);
+        assert!(!probe.is_unknown(), "{probe}");
     }
 
     #[test]
