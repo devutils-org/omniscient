@@ -6,12 +6,20 @@
 - id: sched.wakeup
   family: sched
   summary: "Wakeup chain: who unblocks whom"
-  unit: ns
+  # One event per wakeup, not a duration. The nanoseconds this family is about
+  # appear when these events are joined to what the woken task did next; the
+  # source alone counts wakeups and says who caused them.
+  unit: count
   backends:
-    - id: "bpf:tp"
-      requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_waking", "bpf"]
+    - id: "bpf:raw_tp"
+      requires: ["bpf", "btf", "raw_tracepoint:sched_waking", "kernel>=5.8"]
       join: {key: "task:tid", match: wakeup}
       cost: med
+    - id: "bpf:tp"
+      requires: ["bpf", "tracefs", "tracepoint:sched:sched_waking"]
+      join: {key: "task:tid", match: wakeup}
+      cost: med
+      equivalent: true
   modes: [trace]
   emits: [raw, topk, timeline, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, container: bpf_only}
@@ -21,6 +29,14 @@
   caveats:
     - "The only way to attribute latency across a block without instrumenting the
        application. Implement it early: the other families depend on it."
+    - "Attached to `sched_waking`, not `sched_wakeup`: only the first runs in the
+       waker's context, so it is the only one from which the waker can be read.
+       On `sched_wakeup` the current task is whoever happened to be running on
+       the woken task's cpu, which is wrong exactly on the cross-cpu wakeups
+       that matter most."
+    - "A wakeup is not a latency. The pair `waking -> on cpu` is the run queue
+       wait and belongs to `sched.runqlat`; this source says who made a task
+       runnable, and when."
 
 - id: sched.runqlat
   family: sched
@@ -63,13 +79,19 @@
   backends:
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low}
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
-       degraded: "counter only, no per-switch detail"}
+       degraded: "one sample per switch for the observed task, with no second party:
+                  it says a switch happened and when, never what ran next or why
+                  the task left the cpu"}
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, pid, cpu]
   determinism: low
+  caveats:
+    - "A switch count is a symptom, not a cause: a voluntary switch is a task
+       blocking on something and an involuntary one is the scheduler taking the
+       cpu away. Only `bpf:tp` can tell them apart; `pmu:sw` counts both as one."
 
 - id: sched.migrations
   family: sched
