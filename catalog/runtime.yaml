@@ -16,6 +16,11 @@
   keys: [task, req]
   filter_fields: [comm, generation]
   determinism: low
+  caveats:
+    - "A runtime built without its probes reports no probe, which is not the same
+       as a runtime that did not pause. Absence is the normal case: the python3
+       of most distributions is built without --with-dtrace, and a Java runtime
+       needs +ExtendedDTraceProbes. The refusal names the missing probe."
 
 - id: runtime.jit
   family: runtime
@@ -23,28 +28,46 @@
   unit: count
   backends:
     - {id: "bpf:usdt", requires: ["usdt:jit"], cost: low}
-    - {id: "fs:proc", requires: ["/tmp/perf-[pid].map"], cost: free,
-       degraded: "symbol map only: names frames, does not time compilation"}
+    - {id: "fs:jit-map", requires: ["/tmp"], cost: free,
+       degraded: "symbol map only: it names the code that was compiled and when it was
+         first seen, it does not time the compilation, and it carries no deoptimizations"}
   modes: [trace]
-  emits: [raw, topk, timeline, summary]
+  emits: [raw, rate, topk, timeline, summary]
   targets: {pid: native, launch: native}
   keys: [task]
-  filter_fields: [comm, method]
+  filter_fields: [comm, method, kind, bytes]
   determinism: low
+  caveats:
+    - "The map exists only if the runtime was started so that it writes one:
+       node --perf-basic-prof, or a JVM with an agent that maintains
+       /tmp/perf-<pid>.map. A run that reads no map reports that it read none;
+       it does not report that nothing was compiled."
+    - "The file records that code exists, never when it was created, so an entry
+       is only known to have appeared between two reads and every event carries
+       that gap as ts_err_ns. Entries already present at the first read are older
+       than the run by an amount nothing records, and carry the largest error the
+       event model can express."
+    - "A runtime publishes its own precompiled builtins through the same file.
+       They are not compilations this run caused; filter on kind to separate
+       them."
 
 - id: runtime.alloc
   family: runtime
-  summary: "Runtime-level allocation activity"
+  summary: "Runtime-level allocation activity (objects, not the C heap under it)"
   unit: bytes
   backends:
-    - {id: "preload", requires: ["dynamic-linking"], cost: med}
-    - {id: "bpf:usdt", requires: ["usdt:alloc"], cost: med, equivalent: true}
+    - {id: "bpf:usdt", requires: ["usdt:alloc"], cost: med}
   modes: [trace, poll]
   emits: [hist, topk, stack, timeline, summary]
   targets: {pid: native, launch: native}
   keys: [task, mem]
   filter_fields: [comm, bytes]
   determinism: high
+  caveats:
+    - "This is the runtime's own allocation -- an object, a boxed value, a
+       generation -- which only the runtime can report. The C allocator beneath
+       it is mem.heap.alloc, and for a managed runtime the two are unrelated:
+       V8 maps its heap directly and never calls malloc for it."
 
 - id: runtime.custom
   family: runtime
