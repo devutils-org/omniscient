@@ -1,0 +1,36 @@
+# Is this program running out of handles?
+#
+#   omn -f examples/proc-handles.yml
+#
+# Two counts, both exact, both meaningless on their own. A descriptor count is
+# read against the limit it is approaching -- which is why the limit and the
+# remaining headroom are reported beside it -- and a thread count is read
+# against what the program was designed to run.
+#
+# Both are free: one directory listing and one file read per tick. This is the
+# session to leave running next to a service that leaks handles slowly, where
+# the leak is only visible over hours.
+name: handle pressure
+format: text
+
+requests:
+  - label: descriptors
+    source: proc.fd
+    target:
+      launch:
+        - python3
+        - -c
+        # Open files steadily without closing them, the shape of a leak.
+        - "import time; held = []; [(held.append(open('/proc/self/status')), time.sleep(0.1)) for _ in range(20)]"
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: threads
+    source: proc.threads
+    target:
+      launch:
+        - python3
+        - -c
+        - "import time; held = []; [(held.append(open('/proc/self/status')), time.sleep(0.1)) for _ in range(20)]"
+    mode: poll@100ms
+    emit: [timeline, summary]

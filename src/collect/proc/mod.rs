@@ -1,10 +1,17 @@
 //! Collectors for the `proc` family.
-//!
-//! Empty until this family's thread lands its first collector. See BRIEF.md.
+
+mod status;
 
 use super::Factory;
 
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
-    Vec::new()
+    vec![
+        Factory::new("proc.fd", "fs:proc", |_| {
+            Ok(Box::new(status::Prepare(status::Counted::Descriptors)))
+        }),
+        Factory::new("proc.threads", "fs:proc", |_| {
+            Ok(Box::new(status::Prepare(status::Counted::Threads)))
+        }),
+    ]
 }

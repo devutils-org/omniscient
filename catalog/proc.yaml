@@ -54,6 +54,18 @@
   keys: [task, file]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "The count alone says nothing: 900 open descriptors is comfortable against
+       a limit of 524288 and an outage against a limit of 1024. The soft limit
+       and the remaining headroom are reported alongside it."
+    - "There is no cheap count. `FDSize` in `status` is the size of the
+       allocated table rounded up to a power of two, not the number in use, so
+       the directory is walked and the cost is one entry's work per open
+       descriptor."
+    - "Reading another process's table does not include the reader's own
+       handle; reading one's own does. The collector accounts for which it is
+       measuring, and getting that wrong is an off-by-one in either direction."
+
 
 - id: proc.threads
   family: proc
@@ -67,6 +79,11 @@
   keys: [task]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "A thread appears in procfs once it is running, not once the call that
+       created it returns. A poll taken immediately after a program starts its
+       workers will see fewer than it started."
+
 
 - id: proc.signals
   family: proc
