@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event};
-use crate::request::Mode;
+use crate::request::{Mode, Target};
 
 /// `/proc/diskstats` counts in 512-byte sectors whatever the device's own
 /// block size is, so this factor is a fact about the file, not an assumption
@@ -82,12 +82,6 @@ impl Metric {
 }
 
 /// Holds the choice of metric until the run starts.
-///
-/// `attach` ignores the pid it is handed. These counters are kept per device
-/// for the whole machine, and there is no per-process view of them to narrow
-/// to: the catalog says so by marking every non-eBPF target of these sources
-/// system-wide, and the resolver refuses a `--pid` against this backend before
-/// anything gets here.
 #[derive(Debug)]
 pub struct Prepare {
     metric: Metric,
@@ -122,12 +116,22 @@ impl Prepare {
 }
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, _pid: i32) -> Result<Box<dyn Collector>, String> {
-        Ok(Box::new(Diskstats::new(
-            self.metric,
-            self.mode,
-            PathBuf::from("/proc/diskstats"),
-        )))
+    /// These counters are kept per device for the whole machine, and the block
+    /// layer records nothing about who asked for the I/O. So a target that
+    /// names a process is refused by name rather than answered with the
+    /// machine's total, which would be attribution that was never measured.
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        match target {
+            Target::System => Ok(Box::new(Diskstats::new(
+                self.metric,
+                self.mode,
+                PathBuf::from("/proc/diskstats"),
+            ))),
+            other => Err(format!(
+                "/proc/diskstats counts per device for the whole machine, and a {} target asks                  for something it does not record; use --system, or the eBPF backend once it                  lands",
+                other.kind()
+            )),
+        }
     }
 }
 
@@ -319,14 +323,22 @@ impl Collector for Diskstats {
         self.metric.value_attr()
     }
 
+    /// A counted run takes its baseline before the observed program is
+    /// released, so its one total covers the whole run.
+    ///
+    /// A polled run does not: the runner takes its first sample immediately
+    /// after starting, and an interval of a few microseconds would put a
+    /// meaningless ratio at the head of every series. Its first read is the
+    /// baseline instead, and produces no event, because a baseline is not a
+    /// measurement of anything.
     fn start(&mut self) -> Result<(), String> {
-        // Taken before the observed program is released, so the first tick
-        // already measures an interval and a `count` run covers all of it.
+        if self.mode != Mode::Count {
+            return Ok(());
+        }
         let reading = self
             .read()
             .map_err(|error| format!("cannot read {}: {error:?}", self.path.display()))?;
-        self.baseline = Some(reading.clone());
-        self.previous = Some(reading);
+        self.baseline = Some(reading);
         Ok(())
     }
 
@@ -348,19 +360,29 @@ impl Collector for Diskstats {
         Ok(event.into_iter().collect())
     }
 
+    /// A counted run reports its one total here, measured from the baseline
+    /// taken before the observed program started.
+    ///
+    /// A polled run reports nothing here on purpose. The runner samples every
+    /// collector and *then* decides to stop, so a closing read would cover the
+    /// few microseconds since that last tick: a point in the series with a
+    /// window near zero, which says nothing and drags the summary with it.
     fn stop(&mut self) -> Vec<Event> {
         if self.mode != Mode::Count {
             return Vec::new();
         }
-        let Some(baseline) = self.baseline.clone() else {
+        let Some(before) = self.baseline.clone() else {
             return Vec::new();
         };
         match self.read() {
-            Ok(after) => self.delta_event(&baseline, &after, 0).into_iter().collect(),
+            Ok(after) => self
+                .delta_event(&before, &after, u64::MAX / 2)
+                .into_iter()
+                .collect(),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note(format!(
-                    "the closing read failed ({error:?}), so this run has no total"
+                    "the closing read failed ({error:?}), so the last interval of this run is                      missing"
                 ));
                 Vec::new()
             }
@@ -680,8 +702,12 @@ mod tests {
 
         let mut collector = Diskstats::new(Metric::Bytes, poll(), path.clone());
         collector.start().expect("the fake file reads");
+        assert!(
+            collector.sample(0).expect("the first read").is_empty(),
+            "the first read is a baseline, and a baseline measures nothing"
+        );
         write_stats(&path, &[line(&device, 12, 108, 23, 216)]);
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
 
         assert_eq!(events.len(), 1);
         let event = &events[0];
@@ -740,9 +766,10 @@ mod tests {
 
         let mut collector = Diskstats::new(Metric::Bytes, poll(), path.clone());
         collector.start().expect("the fake file reads");
+        collector.sample(0).expect("the baseline read");
         write_stats(&path, &[line(&device, 1, 10, 2, 20)]);
 
-        assert!(collector.sample(0).expect("a read").is_empty());
+        assert!(collector.sample(1).expect("a read").is_empty());
         let losses = collector.losses();
         assert_eq!(losses.undecoded, 1);
         assert!(!losses.is_clean());
@@ -775,12 +802,13 @@ mod tests {
 
         let mut collector = Diskstats::new(Metric::Bytes, poll(), path.clone());
         collector.start().expect("the fake file reads");
+        collector.sample(0).expect("the baseline read");
         write_stats(
             &path,
             &[line(&device, 12, 108, 23, 216), line(&second, 1, 8, 1, 8)],
         );
 
-        assert!(collector.sample(0).expect("a read").is_empty());
+        assert!(collector.sample(1).expect("a read").is_empty());
         assert!(collector
             .losses()
             .reasons
@@ -843,6 +871,7 @@ mod tests {
         let before = independent_sectors_written(&stats);
         let mut collector = Diskstats::new(Metric::Bytes, poll(), stats.clone());
         collector.start().expect("/proc/diskstats reads");
+        collector.sample(0).expect("the baseline read");
 
         // Incompressible, so a filesystem that compresses cannot make the
         // device write less than was asked of it. Written a chunk at a time:
@@ -856,7 +885,7 @@ mod tests {
         file.sync_all().expect("fsync");
         drop(file);
 
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
         let after = independent_sectors_written(&stats);
         std::fs::remove_file(&scratch_file).ok();
 

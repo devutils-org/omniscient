@@ -41,6 +41,16 @@ carried the running total, both would have been nonsense. A `count` request
 skips the intermediate reads entirely and reports one total for the whole run,
 measured from a baseline taken before the observed program starts.
 
+**The first read of a polled run is a baseline and produces no event, and the
+run's end produces none either.** The runner samples every collector and *then*
+decides whether to stop, so a read at either edge covers a window of
+microseconds. Taken at the head, it put a `0.000` at the start of every pressure
+series; taken at the tail, it added a second point at the same offset as the
+last tick. Both were arithmetic about a window near zero, and both dragged the
+summary that followed them. A counted run is the exception: its baseline is
+taken in `start`, before the observed program is released, so its single total
+covers everything.
+
 **Adding up every line double counts, on this machine by a factor of two.** A
 partition's I/O is counted again on the disk that holds it, and a
 device-mapper or md device's on each member below it. Measured here, over the
@@ -100,6 +110,27 @@ the block layer merged the writes on the way down. Both numbers are the point of
 the family: this is what the *device* did, and it is not what the program asked
 for.
 
+And the same family driven from the command line, while `dd` wrote 200 MiB and
+flushed it:
+
+```console
+$ omn io.bytes --system -m poll@300ms -e timeline,summary -d 2s --backend force:fs:proc
+io.bytes  via fs:proc  (io.bytes)
+  8 events over 2.10s, stopped because the requested duration elapsed
+  no loss: every read succeeded and no tick ran late
+  degraded: fs:proc: system-wide, per device
+
+  timeline
+    system
+      +0ns        0 B
+      +300ms      200.5 MiB
+      +600ms      0 B
+      ...
+```
+
+200 MiB asked of `dd`, 200.5 MiB seen at the device, in the tick that contained
+the flush.
+
 ## Ground truth
 
 `bytes_flushed_to_a_disk_show_up_in_its_counters` writes 32 MiB of
@@ -127,45 +158,29 @@ rather than with `cargo test`.
 
 ## Needs from the shared layer
 
-The five collectors exist and are tested, and **none of them can be run from the
-command line yet**. Each of these is in a file this thread does not own.
+The five collectors run end to end. What follows is what the family still
+cannot express, in files this thread does not own.
 
-### 1. A `system` target has to reach the collector
+### 1. A `system` target has to reach the collector -- landed
 
-`src/collect/mod.rs` resolves the target to a pid before attaching:
+`Prepared::attach` now takes the target rather than a pid, so a source with no
+process behind it binds to `Target::System` and refuses anything else by name.
+This family's collectors do exactly that: `/proc/diskstats` counts per device
+for the whole machine, so a `--pid` is refused rather than answered with the
+machine's total.
 
-```rust
-let pid = match (target, &child) {
-    (_, Some(child)) => child.pid(),
-    (Target::Pid(pids) | Target::Tid(pids), _) => pids[0],
-    (target, _) => return Err(CollectError::UnsupportedTarget { .. }),
-};
-```
+The rest of this section is what is still missing.
 
-so `omn io.pressure --system -d 5s` ends at `io.pressure cannot be collected for
-a system target yet`, although the collector for it is registered and tested.
-Every source in this family is system-wide -- the block layer does not record a
-process -- so this blocks the whole family, and it will block `power` and most
-of `net` the same way.
+### 1b. The closing read of a polled counter is noise, and `net` emits it
 
-Wanted: `Prepared::attach` taking what the run is bound to rather than a pid.
-
-```rust
-/// What a collector binds to once the run starts.
-pub enum Attachment {
-    /// One process: launched by the run, or named by --pid/--tid.
-    Process(i32),
-    /// The whole machine: the counters exist per device or per cpu, and there
-    /// is no process to narrow them to.
-    System,
-}
-
-fn attach(self: Box<Self>, target: Attachment) -> Result<Box<dyn Collector>, String>;
-```
-
-The three `mem` collectors take `Attachment::Process` and are otherwise
-unchanged. Until then these five ignore the pid they are handed, which is
-harmless but is not the shape the code should keep.
+`net/dev.rs` closes its window in `stop` -- "without a final read the last
+interval of every run is silently dropped" -- and with this runner that read
+always covers the few microseconds between the last tick and the break, because
+the loop samples and only then checks whether to stop. The `io` collectors did
+the same for one commit and it showed up as a second point at the same offset as
+the last tick, with a value of zero. Either the runner should stop before its
+last sample rather than after it, or a collector should not read at the edge;
+whichever is chosen, the two families should agree, and today they do not.
 
 ### 2. A device key, so a series can be per device
 

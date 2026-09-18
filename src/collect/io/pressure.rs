@@ -30,14 +30,9 @@ use std::path::PathBuf;
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event};
-use crate::request::Mode;
+use crate::request::{Mode, Target};
 
 /// Holds the mode until the run starts.
-///
-/// Like the other `io` backends this one is system-wide and ignores the pid it
-/// is attached to: `/proc/pressure/io` is one file for the machine. The
-/// per-cgroup form of the same measurement is a different backend against a
-/// different file, and it needs a cgroup target.
 pub struct Prepare {
     mode: Mode,
 }
@@ -56,11 +51,20 @@ impl Prepare {
 }
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, _pid: i32) -> Result<Box<dyn Collector>, String> {
-        Ok(Box::new(Pressure::new(
-            self.mode,
-            PathBuf::from("/proc/pressure/io"),
-        )))
+    /// `/proc/pressure/io` is one file for the machine. The same measurement
+    /// per cgroup is a different file and a different backend, so a target this
+    /// one cannot narrow to is refused rather than answered machine-wide.
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        match target {
+            Target::System => Ok(Box::new(Pressure::new(
+                self.mode,
+                PathBuf::from("/proc/pressure/io"),
+            ))),
+            other => Err(format!(
+                "/proc/pressure/io is the machine's stall counter; a {} target needs                  `io.pressure` under that cgroup, which is the `fs:cgroup` backend",
+                other.kind()
+            )),
+        }
     }
 }
 
@@ -191,16 +195,11 @@ impl Collector for Pressure {
         }
     }
 
+    /// Nothing is read here. The runner takes its first sample immediately
+    /// after starting, so a baseline taken now would be a few microseconds old
+    /// and the first ratio in the series would be noise divided by almost
+    /// nothing. The first read is the baseline, and it produces no event.
     fn start(&mut self) -> Result<(), String> {
-        if self.mode == Mode::Snapshot {
-            return Ok(());
-        }
-        // The baseline is taken before the observed program runs, so the first
-        // tick reports a window rather than being spent establishing one.
-        self.previous = Some(
-            self.read()
-                .map_err(|error| format!("cannot read {}: {error:?}", self.path.display()))?,
-        );
         Ok(())
     }
 
@@ -384,11 +383,15 @@ full avg10=29.77 avg60=36.24 avg300=45.91 total=9194047541
 
         let mut collector = Pressure::new(poll(), path.clone());
         collector.start().expect("the fake file reads");
+        assert!(
+            collector.sample(0).expect("the first read").is_empty(),
+            "the first read is a baseline, and a baseline measures nothing"
+        );
         // A quarter of a second more stall, over a window this test bounds
         // below by sleeping for less than it.
         write_totals(&path, 1_250_000, 600_000);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
 
         assert_eq!(events.len(), 1);
         let event = &events[0];
@@ -430,9 +433,10 @@ full avg10=29.77 avg60=36.24 avg300=45.91 total=9194047541
         write_totals(&path, 900, 800);
         let mut collector = Pressure::new(poll(), path.clone());
         collector.start().expect("the fake file reads");
+        collector.sample(0).expect("the baseline read");
         write_totals(&path, 100, 50);
 
-        assert!(collector.sample(0).expect("a read").is_empty());
+        assert!(collector.sample(1).expect("a read").is_empty());
         assert_eq!(collector.losses().undecoded, 1);
         std::fs::remove_file(&path).ok();
     }
@@ -451,6 +455,7 @@ full avg10=29.77 avg60=36.24 avg300=45.91 total=9194047541
         let before = read_total_us(&system);
         let mut collector = Pressure::new(poll(), system.clone());
         collector.start().expect("/proc/pressure/io reads");
+        collector.sample(0).expect("the baseline read");
 
         // Something for the device to do, so the window is not necessarily
         // empty. Whether it stalls at all is the machine's business; the bounds
@@ -466,7 +471,7 @@ full avg10=29.77 avg60=36.24 avg300=45.91 total=9194047541
         }
         std::fs::remove_file(&scratch_file).ok();
 
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
         let after = read_total_us(&system);
 
         assert_eq!(events.len(), 1);
