@@ -140,15 +140,20 @@ The whole listing costs 3 ms more, most of it `nvmlInit`.
 ### A `system` target in the runner — done
 
 `Prepared::attach` took a pid, so every collector was handed a process whether
-or not its source had one. It now takes an `Attachment`, which is a process or
-the machine, and `run_all` resolves a `Target::System` to the second. A
-collector that needs a process says which one is missing:
+or not its source had one. It now takes the `Target` whole, and a launched
+program is bound as the pid it turned out to be. A collector that needs a
+process says which one is missing:
 
 ```
-error: cannot start collecting `mem.faults`: `mem.faults` samples one process
-here; a system-wide sampler opens the event on every cpu, which needs
-CAP_PERFMON and is not written yet
+error: cannot start collecting `mem.faults`: sampling page faults machine-wide
+needs per-cpu events and the privileges for them; a system target names no
+process to sample
 ```
+
+The `net` thread reached the same conclusion from the other end -- an interface
+counter has no pid either -- and its version of the change is the one that
+landed. Both were written before either branch merged, which is a reasonable
+sign that a pid was the wrong thing to pass.
 
 `gpu.mem` uses the distinction rather than refusing it: with a process it
 reports that process's VRAM, without one the device's, and the `scope`
@@ -190,9 +195,12 @@ for the same reason: it needed one sample and sometimes got none.
 The cause was neither loss nor huge pages. Both tests touched a `Vec`, and the
 allocator hands back memory it already holds -- already resident, and faulting
 nothing. The shortfall grew with how much else the suite had allocated, which is
-why adding this family's tests made it worse. Both now map their pages with
-`mmap`, untouched by construction. Ten consecutive runs of `cargo test --lib`
-pass; before the change, one in three failed.
+why adding this family's tests made it worse. Mapping the pages instead is the
+fix, in both tests and in `mem.faults`'s own address test, which had it too.
+
+Found twice independently, here and on `main`, and `main`'s version is the one
+that survived the merge: it also stops asserting one fault per page touched,
+which multi-size transparent huge pages make untrue on this kernel.
 
 ### Still open: the GPU in the environment capture
 

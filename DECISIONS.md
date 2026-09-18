@@ -70,6 +70,20 @@ This is the failure mode the project exists to prevent, found in its own output.
 
 ---
 
+## Settled before the eBPF layer
+
+The two lines that blocked the eBPF layer, and one the layer's first day forced.
+They are what `sched` — and, through it, 62 of the catalog's 155 backends — are
+written against.
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Kernel floor | 6.1 | `lock:contention_*` exists from 6.1, and requiring it removes both the futex + uprobe fallback for `sched.lock` and the untested no-BTF path, where CO-RE relocations would have to degrade into something nobody exercises. A floor is a claim the project can keep: 5.15 would mean shipping two shapes of half the chains to cover one LTS that leaves support before this tool has a second family of eBPF backends. Below 6.1 the affected sources are refused by name, with the version, never quietly degraded. |
+| Privileges | `CAP_BPF` + `CAP_PERFMON` | The eBPF backends need those two capabilities; root also works, because root has them. An unprivileged run is refused with the capability that is missing, never resolved onto a lesser backend that answers a different question. This keeps one chain shape to reason about and to test, which is the cost the open line was weighing: a second, unprivileged shape doubles the resolver's test matrix while making every result depend on who ran it. |
+| Attach through raw tracepoints first | `BPF_RAW_TRACEPOINT_OPEN`, with `bpf:tp` behind it | A classic tracepoint program is attached by reading the numeric event id from tracefs, which is mounted and unreadable on a normal machine — including the development one, where `/sys/kernel/tracing/events/sched` is `Permission denied` at uid 1000. A raw tracepoint needs only BTF and the event name, so `bpf:raw_tp` has strictly fewer requirements than `bpf:tp` and is ordered ahead of it. The two see the same events; the difference is what must be readable to attach, so the fallback declares `equivalent: true`. |
+
+---
+
 ## Settled by the first device family
 
 `gpu` is the first family whose sources belong to a device rather than to a
@@ -78,7 +92,7 @@ decisions that outlive it.
 
 | Decision | Choice | Reason |
 |---|---|---|
-| A collector is bound to a process **or to a machine** | `Prepared::attach` takes an `Attachment`, not a pid | Every collector was handed a process whether or not its source had one. A GPU clock, a RAPL domain and an uncore counter have none, and a sentinel pid standing in for one is how a device figure ends up presented as a program's. A collector that needs a process now says which one is missing. |
+| A collector is bound to a target, not to a pid | `Prepared::attach` takes the `Target` whole | Every collector was handed a process whether or not its source had one. A GPU clock, a RAPL domain and an interface counter have none, and a sentinel pid standing in for one is how a device figure ends up presented as a program's. A collector that needs a process now refuses by name. Reached twice, independently, by the `gpu` and `net` threads. |
 | The target decides the scope, and the event records it | `scope` attribute on every event | `gpu.mem` reports a process's VRAM under a process target and the device's under a system target. They are both bytes of VRAM and mean different things, so they never share a series, and the file says which one it holds without a reader who remembers the command line. |
 | A launch target sets the window, not the scope | Stated as a caveat on every device-scoped source | `omn gpu.temp -- ./prog` measures the device while `prog` ran, alongside everything else using it. Useful, and one step from being read as attribution. |
 | A filter runs where the resolver said it would | Applied in `run_all` for any backend not credited with pushing it down | It was parsed, validated, given a placement in the resolved file, and never applied: `--filter "device == 99"` kept every event. A predicate that is reported and not executed is the worst shape a bug takes here, because the numbers look like an answer to the question that was asked. |
@@ -96,8 +110,6 @@ construction. They block the resolver, which is the next milestone.
 
 | Decision | Options | What it costs to decide either way |
 |---|---|---|
-| Kernel floor | 5.15 (BTF, ringbuf) · 6.1 (`lock:contention_*`) | 5.15 means writing the futex + uprobe fallback for `sched.lock` and testing a no-BTF path. 6.1 removes both but excludes the current Debian and Ubuntu LTS defaults. |
-| Privileges | root · `CAP_BPF`+`CAP_PERFMON` · unprivileged degraded | Roughly half the backend chains change shape. The unprivileged path is not "fewer sources": it is a different first viable backend for most entries, so it doubles what the resolver must be tested against. |
 | Usage target | One-off session · continuous daemon | A session can buffer and aggregate at the end. A daemon must aggregate online, bound every map, and support hot attach and detach, which phase 6 already assumes. Deciding "daemon" now is cheaper than retrofitting it. |
 
 ---

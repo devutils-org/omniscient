@@ -1,0 +1,27 @@
+# Who unblocks whom, and how often a program leaves the cpu.
+#
+# The two sources answer different halves of the same question. `sched.switches`
+# says how often the program stopped running -- it needs no privileges, and it
+# cannot say why. `sched.wakeup` says which task made it runnable again, which
+# is the half no cpu profiler can see; it needs CAP_BPF and CAP_PERFMON.
+#
+#   omn -f examples/sched-wakeup.yml
+#
+# Run it against a program of your own by replacing the target below.
+name: what blocks this program, and who releases it
+requests:
+  - label: switches
+    source: sched.switches
+    target:
+      launch: ["/bin/sh", "-c", "for i in 1 2 3 4 5; do sleep 0.05; done"]
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: wakeups
+    source: sched.wakeup
+    target:
+      launch: ["/bin/sh", "-c", "for i in 1 2 3 4 5; do sleep 0.05; done"]
+    mode: trace
+    emit: [raw, topk:5]
+    keys: [task]

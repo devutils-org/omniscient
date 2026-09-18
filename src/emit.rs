@@ -78,7 +78,13 @@ pub struct SeriesRate {
     pub key: String,
     pub events: usize,
     pub total: f64,
-    pub per_second: f64,
+    /// Absent when the run had no measurable window.
+    ///
+    /// A window of zero is not a very short window, it is no window, and
+    /// dividing by it produces an infinity that renders as a number. The total
+    /// is still true and is still reported; the rate is the part that does not
+    /// exist.
+    pub per_second: Option<f64>,
     pub window_ns: u64,
 }
 
@@ -188,7 +194,7 @@ fn grouped(events: &[Event]) -> BTreeMap<String, Vec<&Event>> {
             .keys
             .first()
             .map(KeyValue::to_string)
-            .unwrap_or_else(|| "<unkeyed>".to_owned());
+            .unwrap_or_else(|| "system".to_owned());
         groups.entry(key).or_default().push(event);
     }
     groups
@@ -219,7 +225,7 @@ fn timeline(events: &[Event], first_ts_ns: u64, attr: &str) -> Result<Vec<Series
 }
 
 fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>, EmitError> {
-    let seconds = (window_ns as f64 / 1e9).max(f64::MIN_POSITIVE);
+    let seconds = (window_ns > 0).then(|| window_ns as f64 / 1e9);
     let mut rates = Vec::new();
     for (key, events) in grouped(events) {
         let total: f64 = events
@@ -232,7 +238,7 @@ fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>,
             key,
             events: events.len(),
             total,
-            per_second: total / seconds,
+            per_second: seconds.map(|seconds| total / seconds),
             window_ns,
         });
     }
@@ -303,6 +309,38 @@ mod tests {
             (first.count, first.min, first.max, first.mean),
             (2, 10.0, 20.0, 15.0)
         );
+    }
+
+    /// A rate is a total over a window, and a window of zero is not a very
+    /// short window: it is no window. Dividing by it would produce infinity and
+    /// render as a number.
+    #[test]
+    fn a_rate_over_no_window_does_not_produce_infinity() {
+        let events = vec![event(0, 1, 10), event(0, 1, 20)];
+        let rates = rate(&events, 0, "bytes").unwrap();
+        assert_eq!(rates[0].total, 30.0, "the total is still true");
+        assert_eq!(
+            rates[0].per_second, None,
+            "a window of zero has no rate, and no number should be invented for it"
+        );
+
+        // A window that exists, however short, does have one.
+        let measured = rate(&events, 1_000_000, "bytes").unwrap();
+        assert_eq!(measured[0].per_second, Some(30_000.0));
+    }
+
+    /// An emit with no implementation says which ones have one, rather than
+    /// returning an empty result that reads as "nothing happened".
+    #[test]
+    fn an_emit_without_an_implementation_names_the_ones_that_have_one() {
+        let error = EmitError::NotImplemented {
+            emit: "hist:log2".into(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("hist:log2"), "{message}");
+        for implemented in ["raw", "timeline", "summary", "rate"] {
+            assert!(message.contains(implemented), "{message}");
+        }
     }
 
     #[test]

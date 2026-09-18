@@ -667,7 +667,7 @@ fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
     let complaint = stderr(&output);
     assert!(complaint.contains("mem.faults"), "{complaint}");
     assert!(
-        complaint.contains("every cpu") && complaint.contains("CAP_PERFMON"),
+        complaint.contains("per-cpu events") && complaint.contains("names no process"),
         "the refusal should say what a system-wide sampler would need: {complaint}"
     );
 }

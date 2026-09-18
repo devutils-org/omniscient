@@ -21,8 +21,9 @@
 use std::path::Path;
 
 use crate::clock::monotonic_ns;
-use crate::collect::{Attachment, Collector, Prepared, SampleError};
+use crate::collect::{Collector, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
+use crate::request::Target;
 
 use super::nvml::{DeviceHandle, Nvml, NvmlError};
 
@@ -71,11 +72,11 @@ impl Metric {
 pub struct Prepare(pub Metric);
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String> {
-        // A device figure needs no process, and `gpu.mem` uses one when it has
-        // one: with a process it reports that process's VRAM, without one it
-        // reports the device's.
-        NvmlCollector::new(self.0, attachment.pid())
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        // A device figure needs no process, so no target is refused here. What
+        // the target decides is `gpu.mem`: with a process it reports that
+        // process's VRAM, without one the device's.
+        NvmlCollector::new(self.0, target.first_pid())
             .map(|collector| Box::new(collector) as Box<dyn Collector>)
     }
 }

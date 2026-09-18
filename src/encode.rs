@@ -301,14 +301,26 @@ fn text(results: &Results) -> String {
             Output::Rate { series } => {
                 let _ = writeln!(out, "  rate");
                 for rate in series {
-                    let _ = writeln!(
-                        out,
-                        "    {:<14} {} over {}  =  {}/s",
-                        rate.key,
-                        quantity(rate.total, results.unit),
-                        approximate(rate.window_ns),
-                        quantity(rate.per_second, results.unit),
-                    );
+                    match rate.per_second {
+                        Some(per_second) => {
+                            let _ = writeln!(
+                                out,
+                                "    {:<14} {} over {}  =  {}/s",
+                                rate.key,
+                                quantity(rate.total, results.unit),
+                                approximate(rate.window_ns),
+                                quantity(per_second, results.unit),
+                            );
+                        }
+                        None => {
+                            let _ = writeln!(
+                                out,
+                                "    {:<14} {} over no measurable window, so there is no rate",
+                                rate.key,
+                                quantity(rate.total, results.unit),
+                            );
+                        }
+                    }
                 }
             }
             Output::Summary { series } => {
@@ -394,10 +406,34 @@ fn round_to_ms(offset_ns: u64) -> u64 {
 fn quantity(value: f64, unit: Unit) -> String {
     match unit {
         Unit::Bytes => bytes(value),
-        Unit::Ns => Duration::from_nanos(value.max(0.0) as u64).to_string(),
+        // Not the exact-unit form `Duration` renders for round trips: that
+        // picks the largest unit a value divides evenly into, so 6654000 ns
+        // reads as `6654us` while 7021500 ns reads as `7021500ns` in the very
+        // same row. A reader comparing two numbers should not have to compare
+        // their units first.
+        Unit::Ns => duration(value),
         Unit::Ratio => format!("{value:.3}"),
         other => format!("{value:.0} {other}"),
     }
+}
+
+/// Renders a duration by magnitude, so every value in a column reads in the
+/// same unit as its neighbours.
+fn duration(nanos: f64) -> String {
+    const UNITS: [(f64, &str); 5] = [
+        (60_000_000_000.0, "min"),
+        (1_000_000_000.0, "s"),
+        (1_000_000.0, "ms"),
+        (1_000.0, "us"),
+        (1.0, "ns"),
+    ];
+    let nanos = nanos.max(0.0);
+    for (factor, suffix) in UNITS {
+        if nanos >= factor {
+            return format!("{:.2}{suffix}", nanos / factor);
+        }
+    }
+    "0ns".to_owned()
 }
 
 fn bytes(value: f64) -> String {
@@ -462,6 +498,16 @@ mod tests {
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
         }
+    }
+
+    #[test]
+    fn a_column_of_durations_reads_in_one_unit() {
+        // The three values of one summary row, which must not arrive in three
+        // different units because of how evenly they divide.
+        assert_eq!(duration(6_654_000.0), "6.65ms");
+        assert_eq!(duration(7_021_500.0), "7.02ms");
+        assert_eq!(duration(7_341_000.0), "7.34ms");
+        assert_eq!(duration(850.0), "850.00ns");
     }
 
     #[test]
@@ -535,6 +581,99 @@ mod tests {
         assert!(
             text.contains("no event carried `comm`"),
             "an empty series must explain itself: {text}"
+        );
+    }
+
+    fn correlated_run() -> RunOutput {
+        RunOutput {
+            results: vec![sample()],
+            joins: vec![crate::join::Correlation {
+                rule: "pages-of-allocation".into(),
+                from: "mem.heap.alloc".into(),
+                to: "mem.faults".into(),
+                evidence: crate::join::Evidence::Key,
+                matched: 12,
+                unmatched: 3,
+                states: crate::join::StateStats {
+                    opened: 4,
+                    closed: 3,
+                    still_open: 1,
+                    peak_open: 2,
+                    ..Default::default()
+                },
+                top: vec![crate::join::Attribution {
+                    key: "mem:[0x1000,0x2000)".into(),
+                    base: 0x1000,
+                    len: 0x1000,
+                    opened_ns: 10,
+                    closed_ns: Some(20),
+                    matched: 12,
+                    outcome: crate::join::Outcome::Closed,
+                }],
+                total_attributed: 12,
+            }],
+        }
+    }
+
+    /// A run is one document because two would not be one: concatenating a
+    /// results document and a correlation produces a file no parser accepts.
+    /// This is what that regression would look like.
+    #[test]
+    fn a_whole_run_is_one_document_in_every_structured_format() {
+        let run = correlated_run();
+        for format in [OutputFormat::Json, OutputFormat::Yaml, OutputFormat::Toml] {
+            let encoded = run_output(format, &run).expect("encoding");
+            let decoded: RunOutput = match format {
+                OutputFormat::Json => serde_json::from_str(&encoded).expect("one json document"),
+                OutputFormat::Yaml => serde_norway::from_str(&encoded).expect("one yaml document"),
+                OutputFormat::Toml => toml::from_str(&encoded).expect("one toml document"),
+                _ => unreachable!(),
+            };
+            assert_eq!(decoded, run, "a run did not survive {format}");
+        }
+    }
+
+    #[test]
+    fn every_ndjson_line_of_a_run_parses_on_its_own() {
+        let encoded = run_output(OutputFormat::Ndjson, &correlated_run()).expect("encoding");
+        let lines: Vec<&str> = encoded.lines().collect();
+        assert!(
+            lines.len() >= 4,
+            "a run header, a summary, two points, a join"
+        );
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|error| panic!("`{line}` is not a document on its own: {error}"));
+        }
+        assert!(
+            lines.iter().any(|line| line.contains("\"rule\"")),
+            "the join belongs in the stream too"
+        );
+    }
+
+    /// Text is read by a person, so what a person needs is not the number but
+    /// what it does and does not mean.
+    #[test]
+    fn a_correlation_states_its_evidence_and_what_was_not_attributed() {
+        let text = correlation(OutputFormat::Text, &correlated_run().joins[0]).unwrap();
+        assert!(text.contains("evidence KEY"), "{text}");
+        assert!(text.contains("3 fell outside"), "{text}");
+        assert!(text.contains("no eviction"), "{text}");
+        assert!(
+            text.contains("counts faults, not bytes"),
+            "the fault count must not read as a quantity of memory: {text}"
+        );
+    }
+
+    #[test]
+    fn an_eviction_is_never_quietly_absent_from_the_output() {
+        let mut run = correlated_run();
+        run.joins[0].states.expired = 7;
+        let text = correlation(OutputFormat::Text, &run.joins[0]).unwrap();
+        assert!(text.contains("EVICTED"), "{text}");
+        assert!(
+            text.contains("missing, not absent"),
+            "an attribution lost to eviction looks exactly like one that never happened: {text}"
         );
     }
 

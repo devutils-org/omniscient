@@ -1,0 +1,41 @@
+# Is the network the problem, or is it us?
+#
+#   omn -f examples/net-health.yml
+#
+# Three cheap, always-on sources that answer three different failure modes, and
+# together rule out most of the network before anything expensive is attached:
+#
+#   net.tcp.rtt   what the stack believes about each path right now
+#   net.iface     whether the links themselves are dropping or erroring
+#   net.backlog   whether this machine is refusing connections it was offered
+#
+# None of them needs privileges and none costs more than reading a file or a
+# netlink dump, so this can run continuously.
+#
+# What it cannot tell you is whether a slow request was slow *because* of any of
+# this: that needs the per-connection eBPF sources, which carry the socket
+# cookie these already key on.
+name: network health
+duration: 30s
+format: text
+
+requests:
+  - label: round-trip
+    source: net.tcp.rtt
+    target: system
+    mode: poll@1s
+    emit: [timeline, summary]
+    keys: [sock]
+
+  - label: links
+    source: net.iface
+    target: system
+    mode: count
+    emit: [summary]
+    keys: [iface]
+
+  - label: accept-queue
+    source: net.backlog
+    target: system
+    mode: count
+    emit: [rate, summary]

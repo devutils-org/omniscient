@@ -33,6 +33,7 @@ macro_rules! serde_as_string {
     };
 }
 
+pub mod bpf;
 pub mod capabilities;
 pub mod catalog;
 pub mod cli;
@@ -51,6 +52,7 @@ pub mod request;
 pub mod resolve;
 pub mod scalar;
 pub mod session;
+pub mod style;
 pub mod validate;
 
 pub use catalog::Catalog;

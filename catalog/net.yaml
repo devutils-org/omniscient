@@ -46,6 +46,19 @@
   keys: [sock, task]
   filter_fields: [daddr, dport, saddr, sport]
   determinism: low
+  caveats:
+    - "Only an established connection has a round-trip estimate. Listening and
+       closing sockets report zero, and reporting that as a measured latency of
+       zero would be a lie with a number attached, so they are left out."
+    - "This is the kernel's smoothed estimate, not a measured packet round trip:
+       it is what the stack currently believes about the path, which is what
+       drives its own decisions."
+    - "Polling sees the connections alive at each tick. One opened and closed
+       between two ticks is never seen -- a property of polling, not a loss."
+    - "Narrowing to a process matches socket inodes against /proc/[pid]/fd, so a
+       socket passed to another process over a unix socket is attributed to
+       whoever holds the descriptor now."
+
 
 - id: net.tcp.retransmit
   family: net
@@ -87,9 +100,19 @@
   modes: [poll, count]
   emits: [rate, timeline, summary, topk]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
-  keys: [sock, task, cgroup]
+  keys: [iface, sock, task, cgroup]
   filter_fields: [iface, comm]
   determinism: low
+  caveats:
+    - "The file holds counters that only grow, so a run reports the increment
+       between two reads. The first read of a run is a baseline and produces
+       nothing: a run shorter than one poll interval measures nothing."
+    - "Loopback traffic is counted twice, once received and once transmitted,
+       because it is both."
+    - "Per-process attribution is not available from this file. It needs the
+       eBPF backend, and the resolver will say so rather than dividing a
+       machine-wide number."
+
 
 - id: net.packets
   family: net
@@ -101,9 +124,13 @@
   modes: [poll, count]
   emits: [rate, timeline, summary]
   targets: {system: native, iface: native}
-  keys: []
+  keys: [iface]
   filter_fields: [iface]
   determinism: low
+  caveats:
+    - "Counters that only grow: a run reports the increment between two reads,
+       and its first read is a baseline that produces nothing."
+
 
 - id: net.socket
   family: net
@@ -126,12 +153,19 @@
   unit: count
   backends:
     - {id: "fs:proc", requires: ["/proc/net/netstat"], cost: free}
-  modes: [poll, snapshot]
+  modes: [count, poll, snapshot]
   emits: [timeline, rate, raw, summary]
   targets: {system: native}
   keys: []
   filter_fields: []
   determinism: medium
+  caveats:
+    - "Overflows and drops are reported apart because they mean different
+       things: an overflow is an application too slow to accept, a drop without
+       one is usually the SYN queue or a cookie, and the fix differs."
+    - "These are counters, so a run reports the increment between two reads and
+       its first read is a baseline that produces nothing."
+
 
 - id: net.qdisc
   family: net
@@ -213,9 +247,18 @@
   backends:
     - {id: "netlink", requires: ["ethtool"], cost: free}
     - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, degraded: "generic counters only, no driver-specific ones"}
-  modes: [poll, snapshot]
-  emits: [timeline, raw, summary]
+  modes: [count, poll, snapshot]
+  emits: [timeline, rate, raw, summary]
   targets: {iface: native, system: native}
-  keys: []
+  keys: [iface]
   filter_fields: [iface]
   determinism: medium
+  caveats:
+    - "Errors and drops are counted apart: a bad frame and a full queue are
+       different failures, and summing them would hide which one happened."
+    - "The procfs backend carries the counters every driver keeps. The long
+       driver-specific list `ethtool -S` prints needs the ethtool netlink
+       family, which is why that backend is first in the chain."
+    - "These are counters, so a run reports the increment between two reads and
+       its first read is a baseline that produces nothing."
+

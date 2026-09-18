@@ -24,6 +24,7 @@ use crate::request::{
     Target,
 };
 use crate::scalar::Duration;
+use crate::style::ColorChoice;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -178,6 +179,10 @@ pub struct ListArgs {
     /// Load the catalog from this directory instead of the built-in one.
     #[arg(long, value_name = "DIR")]
     pub catalog: Option<PathBuf>,
+
+    /// When to colour the listing: auto, always or never.
+    #[arg(long, value_name = "WHEN", default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
 }
 
 #[derive(Debug, Args)]

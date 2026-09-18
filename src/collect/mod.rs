@@ -236,37 +236,6 @@ fn registry() -> Vec<Factory> {
     families.into_iter().flat_map(|family| family()).collect()
 }
 
-/// What a collector is being bound to.
-///
-/// Most sources observe a process, and a launched program is a process like any
-/// other. A few observe something that has no process at all -- a GPU, a RAPL
-/// domain, a whole machine -- and passing those a pid, or a sentinel standing in
-/// for one, is how a device figure ends up presented as a program's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Attachment {
-    /// One process: a `--pid` target, or the program the tool launched.
-    Process(i32),
-    /// The machine as a whole. Nothing here is attributable to a process.
-    System,
-}
-
-impl Attachment {
-    /// The process being observed, when there is one.
-    pub fn pid(self) -> Option<i32> {
-        match self {
-            Attachment::Process(pid) => Some(pid),
-            Attachment::System => None,
-        }
-    }
-
-    /// The refusal a collector that needs a process returns for a system
-    /// target, phrased so the reader knows it is the source and not the
-    /// machine that cannot do it.
-    pub fn needs_a_process(self, source: &str) -> String {
-        format!("`{source}` observes a process, and a system target names none")
-    }
-}
-
 /// A collector before the thing it observes exists.
 ///
 /// Two phases are needed because some collectors have to act on the target
@@ -287,7 +256,12 @@ pub trait Prepared {
     }
 
     /// Binds to the target now that it exists.
-    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String>;
+    ///
+    /// The target is passed whole rather than as a pid, because not every
+    /// source observes a process: an interface counter and a machine-wide file
+    /// have no pid to be given, and inventing one for them would push the lie
+    /// into every collector.
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String>;
 }
 
 /// What a single sample can go wrong with.
@@ -379,26 +353,20 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
         }
     }
 
-    let attachment = match (target, &child) {
-        (_, Some(child)) => Attachment::Process(child.pid()),
-        (Target::Pid(pids) | Target::Tid(pids), _) => Attachment::Process(pids[0]),
-        // A system target has nothing to attach to, which is not the same as
-        // having nothing to measure: the sources that are scoped to a device or
-        // to the machine are exactly the ones that need it.
-        (Target::System, _) => Attachment::System,
-        (target, _) => {
-            return Err(CollectError::UnsupportedTarget {
-                source_id: resolved[0].request.source.to_string(),
-                target: target.kind().to_string(),
-            })
-        }
+    // A launched program replaces the target's own identity: the collectors
+    // observe the process that was just created, not a pid the request named.
+    // A target that names no process -- an interface, the machine -- is passed
+    // through, and a collector that needs a pid refuses it by name.
+    let bound = match &child {
+        Some(child) => Target::Pid(vec![child.pid()]),
+        None => target.clone(),
     };
 
     let mut collectors = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
         let source_id = resolved[index].request.source.to_string();
         let mut collector = prepared
-            .attach(attachment)
+            .attach(&bound)
             .map_err(|reason| CollectError::Start {
                 source_id: source_id.clone(),
                 reason,
@@ -591,6 +559,20 @@ fn merge_environments(
 /// Derived from the registry, because a hand-written second list had already
 /// drifted out of agreement with the first one by the time it was needed.
 pub fn implemented() -> Vec<String> {
+    coverage()
+        .into_iter()
+        .map(|(source, backends)| format!("{source} ({})", backends.join(", ")))
+        .collect()
+}
+
+/// Which backends this build can actually collect, by source.
+///
+/// The catalog says what the vocabulary is; this says how much of it has been
+/// written. The two are deliberately separate -- a source with no collector is
+/// still a valid request, and `--no-resolve` will still write it down for a
+/// machine and a build that can serve it -- but a reader looking at the catalog
+/// deserves to see which is which without running into it.
+pub fn coverage() -> BTreeMap<&'static str, Vec<&'static str>> {
     let mut by_source: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
     for factory in registry() {
         by_source
@@ -599,9 +581,6 @@ pub fn implemented() -> Vec<String> {
             .push(factory.backend);
     }
     by_source
-        .into_iter()
-        .map(|(source, backends)| format!("{source} ({})", backends.join(", ")))
-        .collect()
 }
 
 /// Finds the collector for a resolved backend.
@@ -660,6 +639,83 @@ mod tests {
                 factory.source,
                 factory.backend
             );
+        }
+    }
+
+    /// Two collectors that disagree about the launched program's environment
+    /// cannot both be satisfied, and picking a winner silently would mean one
+    /// of them measuring something other than what it was configured for.
+    #[test]
+    fn a_disagreement_about_the_child_environment_is_refused_rather_than_resolved() {
+        struct Wants(&'static str, &'static str);
+        impl Prepared for Wants {
+            fn launch_environment(&self) -> Vec<(String, String)> {
+                vec![(self.0.to_owned(), self.1.to_owned())]
+            }
+            fn attach(self: Box<Self>, _: &Target) -> Result<Box<dyn Collector>, String> {
+                unreachable!("this test never attaches")
+            }
+        }
+
+        // Agreeing on the same value is not a disagreement.
+        let agreeing: Vec<Box<dyn Prepared>> = vec![
+            Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
+            Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
+        ];
+        let merged = merge_environments(&agreeing).expect("identical values agree");
+        assert_eq!(merged.len(), 1, "the variable is set once, not twice");
+
+        let conflicting: Vec<Box<dyn Prepared>> = vec![
+            Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
+            Box::new(Wants("LD_PRELOAD", "/lib/b.so")),
+        ];
+        match merge_environments(&conflicting) {
+            Err(CollectError::ConflictingEnvironment { variable, .. }) => {
+                assert_eq!(variable, "LD_PRELOAD");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// One run observes one target. Running two targets in sequence would
+    /// measure two different moments and present them as one window, and a join
+    /// across that would correlate a program with something that was not
+    /// happening at the same time.
+    #[test]
+    fn a_session_asking_for_two_targets_is_refused_before_anything_starts() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let own = std::process::id() as i32;
+
+        let request = |target| crate::request::Request {
+            source: "mem.rss".parse().unwrap(),
+            target,
+            mode: crate::request::Mode::Poll {
+                interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+            },
+            emit: vec![crate::request::Emit::Summary],
+            keys: Vec::new(),
+            filter: None,
+            duration: Some("50ms".parse().unwrap()),
+            budget: None,
+            stack: None,
+            backend: None,
+            label: None,
+        };
+        let resolved: Vec<_> = [Target::Pid(vec![own]), Target::Pid(vec![1])]
+            .into_iter()
+            .map(|target| {
+                crate::resolve::resolve(&catalog, &capabilities, &request(target))
+                    .expect("resolves")
+            })
+            .collect();
+
+        match run_all(&resolved) {
+            Err(CollectError::MixedTargets { .. }) => {}
+            other => panic!(
+                "expected a refusal, got {:?}",
+                other.map(|_| "a collection")
+            ),
         }
     }
 
@@ -795,17 +851,6 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
-    /// The two things a collector can be bound to, and the refusal that names
-    /// the source rather than blaming the machine.
-    #[test]
-    fn an_attachment_is_a_process_or_the_machine_and_says_which() {
-        assert_eq!(Attachment::Process(42).pid(), Some(42));
-        assert_eq!(Attachment::System.pid(), None);
-        let refusal = Attachment::System.needs_a_process("mem.rss");
-        assert!(refusal.contains("mem.rss"), "{refusal}");
-        assert!(refusal.contains("system target"), "{refusal}");
-    }
-
     /// A system target has no program to end the run, so a duration is the only
     /// thing that can. Starting collectors that nothing will ever stop is worse
     /// than refusing.
@@ -835,7 +880,10 @@ mod tests {
             Err(CollectError::Start { reason, .. }) => {
                 eprintln!("skipped: {reason}");
             }
-            other => panic!("expected a refusal, got {other:?}"),
+            other => panic!(
+                "expected a refusal, got {:?}",
+                other.map(|_| "a collection")
+            ),
         }
     }
 

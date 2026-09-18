@@ -14,7 +14,7 @@ use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
 
-use crate::collect::{Attachment, Collector, Losses, Prepared, SampleError};
+use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Record, SampledEvent, Scope};
 use crate::request::Mode;
@@ -35,15 +35,15 @@ const RING_PAGES: usize = 512;
 pub struct Prepare(pub Mode);
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String> {
-        // A machine-wide fault sampler opens the event on every cpu, which
-        // needs CAP_PERFMON or a permissive perf_event_paranoid. This collector
-        // opens it on one process, so it says what it cannot do rather than
-        // quietly watching a single one under a system target.
-        let pid = attachment.pid().ok_or_else(|| {
-            "`mem.faults` samples one process here; a system-wide sampler opens the event on \
-             every cpu, which needs CAP_PERFMON and is not written yet"
-                .to_owned()
+    fn attach(
+        self: Box<Self>,
+        target: &crate::request::Target,
+    ) -> Result<Box<dyn Collector>, String> {
+        let pid = target.first_pid().ok_or_else(|| {
+            format!(
+                "sampling page faults machine-wide needs per-cpu events and the privileges for them; a {} target names no process to sample",
+                target.kind()
+            )
         })?;
         Ok(Box::new(PageFaultCollector::new(pid, self.0)))
     }
@@ -197,36 +197,17 @@ mod tests {
             return;
         }
 
-        // Mapped rather than allocated: memory the allocator already holds is
-        // already resident and faults nothing, so a `Vec` here counted whatever
-        // the rest of the suite had allocated first and came up short under
-        // load. A fresh anonymous mapping is untouched by construction.
         const PAGES: usize = 64;
         let page = 4096;
-        let length = PAGES * page;
-        // SAFETY: a fresh anonymous mapping of a positive length; the result is
-        // checked and the mapping is released below.
-        let block = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                length,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(block, libc::MAP_FAILED, "mmap of {length} bytes failed");
-        let base = block as u64;
+        let mut block = vec![0u8; PAGES * page];
+        let base = block.as_ptr() as u64;
         for index in 0..PAGES {
-            // SAFETY: `index * page` is inside the mapping just made.
-            unsafe { (block as *mut u8).add(index * page).write_volatile(1) };
+            block[index * page] = 1;
         }
+        std::hint::black_box(&block);
 
         let mut events = collector.sample(0).unwrap();
         events.extend(collector.stop());
-        // SAFETY: the mapping came from the `mmap` above and is not used again.
-        unsafe { libc::munmap(block, length) };
 
         let inside = events
             .iter()

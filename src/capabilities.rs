@@ -57,6 +57,22 @@ impl fmt::Display for Probe {
     }
 }
 
+impl From<&crate::bpf::Support> for Probe {
+    fn from(support: &crate::bpf::Support) -> Self {
+        match support {
+            crate::bpf::Support::Yes => Probe::Available,
+            crate::bpf::Support::No(reason) => Probe::Missing(reason.clone()),
+            crate::bpf::Support::Unchecked(reason) => Probe::Unknown(reason.clone()),
+        }
+    }
+}
+
+impl From<crate::bpf::Support> for Probe {
+    fn from(support: crate::bpf::Support) -> Self {
+        Probe::from(&support)
+    }
+}
+
 /// Whether something is there, and whether this user may look at it.
 ///
 /// The distinction matters: tracefs is mounted on almost every machine and
@@ -284,6 +300,26 @@ impl Capabilities {
             return probe_pmu(event);
         }
 
+        // A raw tracepoint is looked for in the kernel's own BTF rather than in
+        // tracefs, because that is how this tool attaches to one: through
+        // `BPF_RAW_TRACEPOINT_OPEN`, which takes a name and needs no tracefs.
+        if let Some(event) = requirement.strip_prefix("raw_tracepoint:") {
+            return Probe::from(crate::bpf::raw_tracepoint_support(event));
+        }
+
+        // Netlink families: the question is whether this kernel exposes the
+        // protocol at all, which is answered by trying to open a socket on it.
+        // Opening one is free and changes nothing.
+        if let Some(protocol) = netlink_protocol(requirement) {
+            return probe_netlink(requirement, protocol);
+        }
+
+        // Packet capture is a privilege question, not a kernel-build question,
+        // and the two call for different answers from whoever reads the report.
+        if requirement.starts_with("af_packet") {
+            return probe_af_packet(requirement);
+        }
+
         if requirement == "preload:shim" {
             return match crate::collect::find_shim() {
                 Ok(_) => Probe::Available,
@@ -309,6 +345,10 @@ impl Capabilities {
                 )),
                 Access::Absent => Probe::Missing("tracefs is not mounted".into()),
             },
+            // Asked by loading the smallest possible tracing program. The
+            // answer depends on capabilities, on a sysctl and on how the kernel
+            // was built, and only the kernel knows all three.
+            "bpf" => Probe::from(crate::bpf::load_support()),
             "btf" => match self.environment.kernel_btf {
                 Access::Readable => Probe::Available,
                 Access::Restricted => {
@@ -444,6 +484,76 @@ fn probe_pmu(event: &str) -> Probe {
             Probe::Missing(format!("`{event}` is not available on this cpu"))
         }
         _ => Probe::Missing(format!("perf_event_open failed for `{event}`: {error}")),
+    }
+}
+
+/// The netlink protocols the catalog names, and their kernel numbers.
+fn netlink_protocol(requirement: &str) -> Option<i32> {
+    match requirement {
+        // NETLINK_SOCK_DIAG
+        "sock_diag" => Some(4),
+        // NETLINK_ROUTE.
+        "rtnetlink" | "netlink" => Some(0),
+        // `ethtool` is deliberately absent: it is a generic-netlink family,
+        // resolved by name through CTRL_CMD_GETFAMILY, not a protocol number.
+        // Answering it as NETLINK_ROUTE would report a different question's
+        // answer, and reporting it unverified is the honest state until the
+        // family lookup exists.
+        _ => None,
+    }
+}
+
+/// Asks whether a netlink protocol can be opened, rather than assuming a kernel
+/// built with it.
+fn probe_netlink(requirement: &str, protocol: i32) -> Probe {
+    // SAFETY: creating a socket; the arguments are constants.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            protocol,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: closing a descriptor just created here.
+        unsafe { libc::close(fd) };
+        return Probe::Available;
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPROTONOSUPPORT) => Probe::Missing(format!(
+            "this kernel has no netlink protocol for `{requirement}`"
+        )),
+        Some(libc::EPERM) | Some(libc::EACCES) => Probe::Missing(format!(
+            "opening netlink for `{requirement}` was refused: {error}"
+        )),
+        _ => Probe::Missing(format!("cannot open netlink for `{requirement}`: {error}")),
+    }
+}
+
+/// Whether this process may open a packet socket.
+///
+/// Opening one is the only way to know: the capability can come from the
+/// process, from a file capability on the binary, or from a user namespace, and
+/// none of those are visible by reading a file.
+fn probe_af_packet(requirement: &str) -> Probe {
+    // SAFETY: creating a socket; the arguments are constants.
+    let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
+    if fd >= 0 {
+        // SAFETY: closing a descriptor just created here.
+        unsafe { libc::close(fd) };
+        return Probe::Available;
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPERM) | Some(libc::EACCES) => Probe::Missing(format!(
+            "`{requirement}` needs CAP_NET_RAW, which uid {} does not have; this is a privilege to grant, not a kernel to change",
+            current_uid()
+        )),
+        Some(libc::EAFNOSUPPORT) => {
+            Probe::Missing("this kernel was built without AF_PACKET".into())
+        }
+        _ => Probe::Missing(format!("cannot open a packet socket: {error}")),
     }
 }
 
@@ -584,6 +694,31 @@ mod tests {
                 "{probe}"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_capability_is_not_reported_as_a_missing_kernel_feature() {
+        let capabilities = Capabilities::detect();
+        let probe = capabilities.probe("af_packet:tpacket_v3", None);
+        assert!(!probe.is_unknown(), "{probe}");
+        if probe.is_missing() {
+            let message = probe.to_string();
+            // Whichever it is, the reader must be told where to go: a
+            // capability to grant, or a kernel that cannot do it at all.
+            assert!(
+                message.contains("CAP_NET_RAW") || message.contains("without AF_PACKET"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_netlink_protocol_is_answered_by_opening_it() {
+        let capabilities = Capabilities::detect();
+        // Every kernel this tool targets has sock_diag; only a stripped build
+        // or a sandbox refuses it, and then the answer says which.
+        let probe = capabilities.probe("sock_diag", None);
+        assert!(!probe.is_unknown(), "{probe}");
     }
 
     #[test]
