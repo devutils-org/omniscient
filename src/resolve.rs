@@ -507,6 +507,80 @@ mod tests {
         );
     }
 
+    /// Pinning exists for the comparison bench, which forces every backend of a
+    /// chain in turn. It bypasses the resolver, and a result obtained that way
+    /// is not the result the tool would have produced -- so the record has to
+    /// say both that it was pinned and that the chain was never walked.
+    #[test]
+    fn a_pinned_backend_bypasses_the_chain_and_the_record_says_so() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("mem.rss", Target::Pid(vec![std::process::id() as i32]));
+        // The second backend of the chain, which the resolver would not pick.
+        request.backend = Some("force:fs:proc:statm".parse().unwrap());
+
+        let resolved = resolve(&catalog, &capabilities, &request).unwrap();
+        assert_eq!(resolved.backend.id, "fs:proc:statm");
+        assert_eq!(resolved.backend.rank, 2, "it is not the preferred backend");
+        assert!(resolved.backend.pinned);
+        assert!(
+            resolved
+                .degradations
+                .iter()
+                .any(|degradation| degradation.contains("chain was not walked")),
+            "{:?}",
+            resolved.degradations
+        );
+        // Its own degradation is reported too, not replaced by the pin notice.
+        assert!(
+            resolved
+                .degradations
+                .iter()
+                .any(|degradation| degradation.contains("resident pages only")),
+            "{:?}",
+            resolved.degradations
+        );
+    }
+
+    #[test]
+    fn pinning_a_backend_the_source_does_not_have_fails_by_name() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("mem.rss", Target::Pid(vec![1]));
+        request.backend = Some("force:bpf:tp".parse().unwrap());
+        match resolve(&catalog, &capabilities, &request) {
+            Err(ResolveError::UnknownBackend { backend, .. }) => assert_eq!(backend, "bpf:tp"),
+            other => panic!("expected the pin to be refused, got {other:?}"),
+        }
+    }
+
+    /// A target the catalog marks `bpf_only` can only be filtered inside an
+    /// eBPF program, so the chain's other backends cannot serve it whatever
+    /// else they can do. The rejection has to name that, not a missing file.
+    #[test]
+    fn a_bpf_only_target_rules_out_the_backends_that_cannot_filter_in_program() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("io.latency", Target::Pid(vec![1]));
+        request.mode = Mode::Trace;
+        request.emit = vec!["hist".parse().unwrap()];
+
+        match resolve(&catalog, &capabilities, &request) {
+            Ok(resolved) => assert!(
+                resolved.backend.id.starts_with("bpf"),
+                "a pid target on io.latency needs in-program filtering, got `{}`",
+                resolved.backend.id
+            ),
+            Err(ResolveError::NoViableBackend { rejections, .. }) => assert!(
+                rejections
+                    .iter()
+                    .any(|rejection| rejection.contains("in-program filtering")),
+                "{rejections:?}"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_resolved_request_survives_a_round_trip() {
         let catalog = Catalog::embedded().unwrap();

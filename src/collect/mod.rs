@@ -578,6 +578,83 @@ mod tests {
         }
     }
 
+    /// Two collectors that disagree about the launched program's environment
+    /// cannot both be satisfied, and picking a winner silently would mean one
+    /// of them measuring something other than what it was configured for.
+    #[test]
+    fn a_disagreement_about_the_child_environment_is_refused_rather_than_resolved() {
+        struct Wants(&'static str, &'static str);
+        impl Prepared for Wants {
+            fn launch_environment(&self) -> Vec<(String, String)> {
+                vec![(self.0.to_owned(), self.1.to_owned())]
+            }
+            fn attach(self: Box<Self>, _: &Target) -> Result<Box<dyn Collector>, String> {
+                unreachable!("this test never attaches")
+            }
+        }
+
+        // Agreeing on the same value is not a disagreement.
+        let agreeing: Vec<Box<dyn Prepared>> = vec![
+            Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
+            Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
+        ];
+        let merged = merge_environments(&agreeing).expect("identical values agree");
+        assert_eq!(merged.len(), 1, "the variable is set once, not twice");
+
+        let conflicting: Vec<Box<dyn Prepared>> = vec![
+            Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
+            Box::new(Wants("LD_PRELOAD", "/lib/b.so")),
+        ];
+        match merge_environments(&conflicting) {
+            Err(CollectError::ConflictingEnvironment { variable, .. }) => {
+                assert_eq!(variable, "LD_PRELOAD");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// One run observes one target. Running two targets in sequence would
+    /// measure two different moments and present them as one window, and a join
+    /// across that would correlate a program with something that was not
+    /// happening at the same time.
+    #[test]
+    fn a_session_asking_for_two_targets_is_refused_before_anything_starts() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let own = std::process::id() as i32;
+
+        let request = |target| crate::request::Request {
+            source: "mem.rss".parse().unwrap(),
+            target,
+            mode: crate::request::Mode::Poll {
+                interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+            },
+            emit: vec![crate::request::Emit::Summary],
+            keys: Vec::new(),
+            filter: None,
+            duration: Some("50ms".parse().unwrap()),
+            budget: None,
+            stack: None,
+            backend: None,
+            label: None,
+        };
+        let resolved: Vec<_> = [Target::Pid(vec![own]), Target::Pid(vec![1])]
+            .into_iter()
+            .map(|target| {
+                crate::resolve::resolve(&catalog, &capabilities, &request(target))
+                    .expect("resolves")
+            })
+            .collect();
+
+        match run_all(&resolved) {
+            Err(CollectError::MixedTargets { .. }) => {}
+            other => panic!(
+                "expected a refusal, got {:?}",
+                other.map(|_| "a collection")
+            ),
+        }
+    }
+
     #[test]
     fn losses_merge_without_losing_their_reasons() {
         let mut first = Losses {

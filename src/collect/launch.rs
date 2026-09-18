@@ -216,6 +216,62 @@ mod tests {
         panic!("the child never finished");
     }
 
+    /// A gated child is parked in a `read` that only the parent can end. If the
+    /// parent goes away without releasing it -- a failed collector, a panic,
+    /// an early return -- the child would wait forever, holding whatever the
+    /// caller wanted measured. Dropping the handle has to end it.
+    #[test]
+    fn dropping_the_handle_does_not_leave_the_child_parked_forever() {
+        let pid = {
+            let child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+            child.pid()
+        };
+
+        // The child is gone once it is reaped, so its pid stops naming a live
+        // process. Give the kernel a moment to finish the teardown.
+        let mut alive = true;
+        for _ in 0..200 {
+            // SAFETY: signal zero checks for existence without sending one.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !alive,
+            "process {pid} is still running after its handle was dropped"
+        );
+    }
+
+    #[test]
+    fn terminating_a_running_child_reaps_it_rather_than_leaving_a_zombie() {
+        // `sleep` rather than a program that reads stdin: a child inherits the
+        // test harness's stdin, which is closed, so anything reading it sees end
+        // of file and exits before the test can terminate it.
+        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+        child.release();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            child.finished().is_none(),
+            "sleep 30 should still be running"
+        );
+
+        child.terminate();
+        let status = child.finished().expect("a terminated child has a status");
+        assert!(
+            status.contains("signal"),
+            "killed by a signal, not exited: {status}"
+        );
+
+        // Reaped: waiting on it again must fail with ECHILD rather than
+        // returning a pid, which is what a lingering zombie would do.
+        let mut ignored = 0;
+        // SAFETY: waiting on a pid this process created and already reaped.
+        let result = unsafe { libc::waitpid(child.pid(), &mut ignored, libc::WNOHANG) };
+        assert_eq!(result, -1, "the child was not reaped and is now a zombie");
+    }
+
     #[test]
     fn the_child_environment_carries_what_was_added() {
         let marker = "OMN_LAUNCH_TEST";
