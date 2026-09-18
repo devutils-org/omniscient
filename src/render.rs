@@ -562,8 +562,19 @@ mod tests {
                 .to_owned()
         };
         assert!(line_of("mem.rss").starts_with("\x1b[32m"), "{text}");
-        assert!(line_of("mem.pss").starts_with("\x1b[31m"), "{text}");
-        assert!(line_of("mem.pss").contains("none"));
+
+        // Whichever `mem` source has no collector in this build. Naming one
+        // here would make this test fail the day that source is implemented,
+        // which is a promise about the roadmap rather than about the rendering.
+        let uncovered = catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.family == "mem")
+            .map(|entry| entry.id.to_string())
+            .find(|id| !covered.contains_key(id.as_str()))
+            .expect("some `mem` source is still waiting for its collector");
+        assert!(line_of(&uncovered).starts_with("\x1b[31m"), "{text}");
+        assert!(line_of(&uncovered).contains("none"));
     }
 
     /// The column is derived from the registry, and the table is written by

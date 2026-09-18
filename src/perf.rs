@@ -485,14 +485,37 @@ mod tests {
             return;
         };
         event.enable().expect("enable");
-        // Enough pages that a folio of any size still yields several faults.
+        // Enough pages that a folio of any size still yields several faults,
+        // and mapped rather than allocated: a block from the allocator's arena
+        // can come back on pages another test in this binary already made
+        // resident, and a page that is already there does not fault. The test
+        // would then be waiting for events that had no reason to happen.
         const PAGES: usize = 256;
-        let mut block = vec![0u8; PAGES * page_size()];
+        let size = PAGES * page_size();
+        // SAFETY: an anonymous mapping of our own, unmapped below.
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "the mapping must succeed");
         for index in 0..PAGES {
-            block[index * page_size()] = 1;
+            // SAFETY: writing one byte per page inside that mapping.
+            unsafe {
+                block
+                    .cast::<u8>()
+                    .add(index * page_size())
+                    .write_volatile(1)
+            };
         }
-        std::hint::black_box(&block);
         event.disable().expect("disable");
+        // SAFETY: unmapping what was mapped above.
+        unsafe { libc::munmap(block, size) };
         let after = crate::clock::monotonic_ns();
 
         let mut seen = None;
