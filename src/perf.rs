@@ -416,6 +416,80 @@ impl Counter {
             config: config as u64,
         }
     }
+
+    /// Builds a counter from a performance unit the kernel describes itself.
+    ///
+    /// Everything beyond the architectural events -- RAPL's energy domains, the
+    /// uncore's memory controllers, the `msr` unit's `aperf` and `mperf` --
+    /// publishes its own type number and the config of each event it offers
+    /// under `/sys/bus/event_source/devices`. Reading that is how a counter for
+    /// them gets built without a table of magic numbers that would be wrong on
+    /// the next machine.
+    pub fn from_sysfs(name: &'static str, pmu: &str, event: &str) -> Option<Self> {
+        let (kind, config) = sysfs_event(pmu, event)?;
+        Some(Self { name, kind, config })
+    }
+
+    pub fn kind(&self) -> u32 {
+        self.kind
+    }
+
+    pub fn config(&self) -> u64 {
+        self.config
+    }
+}
+
+/// The directory the kernel describes its performance units in.
+pub const PMU_DEVICES: &str = "/sys/bus/event_source/devices";
+
+/// The type and config of an event a performance unit publishes.
+///
+/// Only the `event=` and `umask=` terms are read. The rest of a config's layout
+/// lives in the unit's `format` directory and is left alone rather than
+/// guessed at: a config built wrong makes the open fail, so the error is always
+/// in the direction of reporting something unavailable that works, never the
+/// reverse.
+pub fn sysfs_event(pmu: &str, event: &str) -> Option<(u32, u64)> {
+    let kind: u32 = read_trimmed(&format!("{PMU_DEVICES}/{pmu}/type"))?
+        .parse()
+        .ok()?;
+    let terms = read_trimmed(&format!("{PMU_DEVICES}/{pmu}/events/{event}"))?;
+
+    let mut config = 0u64;
+    for term in terms.split(',') {
+        let Some((key, value)) = term.split_once('=') else {
+            continue;
+        };
+        let Ok(value) = u64::from_str_radix(value.trim().trim_start_matches("0x"), 16) else {
+            continue;
+        };
+        match key.trim() {
+            "event" => config |= value,
+            "umask" => config |= value << 8,
+            _ => {}
+        }
+    }
+    Some((kind, config))
+}
+
+/// What one tick of a unit's counter is worth, and in what.
+///
+/// RAPL counts in units of 2^-32 joules and says so in the `.scale` file beside
+/// the event. A collector that assumed microjoules would be wrong by ten orders
+/// of magnitude, which is why this is read rather than known.
+pub fn sysfs_scale(pmu: &str, event: &str) -> Option<(f64, String)> {
+    let scale = read_trimmed(&format!("{PMU_DEVICES}/{pmu}/events/{event}.scale"))?
+        .parse()
+        .ok()?;
+    let unit = read_trimmed(&format!("{PMU_DEVICES}/{pmu}/events/{event}.unit"))
+        .unwrap_or_else(|| "count".to_owned());
+    Some((scale, unit))
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_owned())
 }
 
 /// One counter's value at the moment the group was read.
@@ -563,18 +637,24 @@ impl CounterGroup {
             if group.fds.is_empty() {
                 attr.set_disabled(1);
             }
+            let (pid, cpu) = match scope {
+                Scope::Process(pid) => (pid, -1),
+                Scope::Cpu(cpu) => (-1, cpu as i32),
+            };
             // A counting event needs no ring buffer, which is what makes
             // `inherit` usable here: the count follows the threads and children
             // the target starts, and a program whose work happens in a thread
             // pool is counted rather than reported as idle. The sampling path
             // in this file cannot do the same, because the kernel refuses to
             // map a ring for an inherited per-task event.
-            attr.set_inherit(1);
-
-            let (pid, cpu) = match scope {
-                Scope::Process(pid) => (pid, -1),
-                Scope::Cpu(cpu) => (-1, cpu as i32),
-            };
+            //
+            // It is equally refused for an event that follows a cpu rather than
+            // a task: there is nothing to inherit into. A package counter --
+            // RAPL, the uncore -- is exactly that, and setting the bit made
+            // every one of them fail with EINVAL.
+            if matches!(scope, Scope::Process(_)) {
+                attr.set_inherit(1);
+            }
             let leader = group.fds.first().copied().unwrap_or(-1);
             let fd = unsafe {
                 sys::perf_event_open(

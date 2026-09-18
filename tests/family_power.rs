@@ -44,10 +44,14 @@ const SOURCES: [&str; 5] = [
 
 #[test]
 fn every_source_of_this_family_has_a_collector_in_this_build() {
+    // The source, not the backend: `power.energy` now also collects through
+    // the `power` performance unit, which is the backend the resolver prefers
+    // because it needs no root. Pinning the test to one backend id would have
+    // made adding a better one look like a regression.
     let implemented = omn::collect::implemented().join(", ");
     for source in SOURCES {
         assert!(
-            implemented.contains(&format!("{source} (fs:sys")),
+            implemented.contains(&format!("{source} (")),
             "`{source}` has no collector: {implemented}"
         );
     }
@@ -349,7 +353,15 @@ fn an_unreadable_energy_counter_asks_for_privileges_not_for_hardware() {
         assert!(attempt.status.success(), "{}", stderr(&attempt));
         return;
     }
-    assert_ne!(attempt.status.code(), Some(0));
+
+    // The sysfs file being out of reach does not mean the machine cannot
+    // measure energy: the same RAPL domains open as a perf event wherever
+    // `perf_event_paranoid` allows it, and the resolver takes that backend. A
+    // run that succeeds here is the chain working, not the test's premise
+    // failing -- what must never happen is a refusal that blames the hardware.
+    if attempt.status.success() {
+        return;
+    }
     let message = stderr(&attempt);
     assert!(
         message.contains("root"),

@@ -15,6 +15,7 @@
 
 mod cstate;
 mod energy;
+mod energy_pmu;
 mod freq;
 mod sysfs;
 mod temp;
@@ -25,6 +26,9 @@ use super::Factory;
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![
+        Factory::new("power.energy", "pmu", |resolved| {
+            Ok(Box::new(energy_pmu::Prepare::new(resolved.request.mode)?))
+        }),
         Factory::new("power.energy", "fs:sys", |resolved| {
             Ok(Box::new(energy::Prepare::new(resolved.request.mode)?))
         }),

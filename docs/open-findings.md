@@ -159,12 +159,11 @@ gets a different convention in each.
   only if they were taken on the same device under the same driver. Not free:
   `nvmlInit` costs 3.3–4.9 ms and `Capabilities::detect` runs on every command,
   including those that measure nothing.
-- **`hwmon` and `pmu:power/energy-pkg/` are answerable and still unverified.**
-  `Capabilities::probe` now ends with a family extension point; `power` can
-  answer `hwmon` by listing `/sys/class/hwmon` for a chip with a `tempN_input`,
-  and the perf event encoding is sitting in
-  `/sys/bus/event_source/devices/power/events/energy-pkg` with its scale beside
-  it.
+- **`hwmon` is answerable and still unverified.** `Capabilities::probe` ends
+  with a family extension point; `power` can answer it by listing
+  `/sys/class/hwmon` for a chip with a `tempN_input`. (`pmu:power/energy-pkg/`
+  was the other half of this and is done: the encoding is read from sysfs and
+  the domain is opened, so `power.energy` collects through perf without root.)
 
 ---
 

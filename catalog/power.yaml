@@ -23,6 +23,16 @@
   filter_fields: [domain]
   determinism: medium
   caveats:
+    - "Reachable two ways that are not equally available: the sysfs counters
+       under /sys/class/powercap are root-only on a normal machine, while the
+       same domains open as a perf event for any user the paranoid setting
+       allows. The resolver prefers the perf unit for that reason."
+    - "What one tick is worth is read from the kernel, not assumed: RAPL counts
+       in units of 2^-32 joules. A collector that assumed microjoules would be
+       wrong by ten orders of magnitude."
+    - "A part with several domains -- package, cores, dram -- reports one event
+       per domain per tick, and they share one series because there is no key
+       for a package. Read the `domain` attribute until that key exists."
     - "RAPL is per package: --pid is invalid. Per-process attribution is a derived
        estimate (share of cycles) and must be labelled as such."
     - "`energy_uj` is readable only by root on current kernels: the counter was

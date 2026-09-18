@@ -461,6 +461,134 @@ fn named_pmu_event(name: &str) -> Option<(u32, u64)> {
     }
 }
 
+/// The directory the kernel describes its PMUs in.
+const PMU_DEVICES: &str = "/sys/bus/event_source/devices";
+
+/// Encodes a cache descriptor such as `LLC-load-misses`.
+///
+/// `PERF_TYPE_HW_CACHE` packs three small numbers into the config: which cache,
+/// which operation, and whether the count is of accesses or of misses.
+fn cache_event(name: &str) -> Option<(u32, u64)> {
+    use perf_event_open_sys::bindings as perf;
+    let (cache, rest) = match name {
+        _ if name.starts_with("L1-dcache-") => (perf::PERF_COUNT_HW_CACHE_L1D, &name[10..]),
+        _ if name.starts_with("L1-icache-") => (perf::PERF_COUNT_HW_CACHE_L1I, &name[10..]),
+        _ if name.starts_with("LLC-") => (perf::PERF_COUNT_HW_CACHE_LL, &name[4..]),
+        _ if name.starts_with("dTLB-") => (perf::PERF_COUNT_HW_CACHE_DTLB, &name[5..]),
+        _ if name.starts_with("iTLB-") => (perf::PERF_COUNT_HW_CACHE_ITLB, &name[5..]),
+        _ => return None,
+    };
+    let (operation, result) = match rest {
+        "load-misses" => (
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "loads" => (
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_ACCESS,
+        ),
+        "store-misses" => (
+            perf::PERF_COUNT_HW_CACHE_OP_WRITE,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "stores" => (
+            perf::PERF_COUNT_HW_CACHE_OP_WRITE,
+            perf::PERF_COUNT_HW_CACHE_RESULT_ACCESS,
+        ),
+        _ => return None,
+    };
+    let config = (cache as u64) | ((operation as u64) << 8) | ((result as u64) << 16);
+    Some((perf::PERF_TYPE_HW_CACHE, config))
+}
+
+/// Reads an event the kernel describes for itself, as `power/energy-pkg/`.
+///
+/// Every PMU beyond the architectural ones publishes its own type number and
+/// the config of each event it offers. Only the `event=` term is read, which is
+/// the whole config for the PMUs that matter here; a config built wrong makes
+/// the open fail and the answer come back missing, so the error is always in
+/// the safe direction -- never a source reported as available that is not.
+fn sysfs_event(name: &str) -> Option<(u32, u64)> {
+    // `pebs:mem-loads` is how the catalog names an event the `cpu` PMU
+    // publishes on the hardware that has it. Machines without it publish no
+    // such event and the answer comes back missing, which is the truth.
+    let name = name.replace("pebs:", "cpu/");
+    let name = name.as_str();
+    let (pmu, event) = name.trim_end_matches('/').split_once('/')?;
+    let kind: u32 = read_trimmed(&format!("{PMU_DEVICES}/{pmu}/type"))?
+        .parse()
+        .ok()?;
+    let terms = read_trimmed(&format!("{PMU_DEVICES}/{pmu}/events/{event}"))?;
+
+    let mut config = 0u64;
+    for term in terms.split(',') {
+        let Some((key, value)) = term.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_start_matches("0x");
+        let Ok(value) = u64::from_str_radix(value, 16) else {
+            continue;
+        };
+        match key {
+            "event" => config |= value,
+            // The layout of the remaining terms is in the PMU's `format`
+            // directory; these two are the common placement and the rest are
+            // left alone rather than guessed at.
+            "umask" => config |= value << 8,
+            _ => {}
+        }
+    }
+    Some((kind, config))
+}
+
+/// Answers a bare PMU name -- `intel_pt`, `uncore_imc`, `ibs_op` -- by whether
+/// the kernel publishes a device for it.
+///
+/// These name hardware rather than an event, and a machine either has the unit
+/// or does not. Saying which is more useful than "no probe written", because
+/// the reader learns it is the cpu and not the tool.
+fn sysfs_device_state(name: &str) -> Option<Probe> {
+    if name.contains('/') {
+        return None;
+    }
+    // `pebs:<event>` names an event of the cpu PMU on the hardware that has it.
+    // A machine without it publishes no such event, which is an answer.
+    if let Some(event) = name.strip_prefix("pebs:") {
+        return Some(Probe::Missing(format!(
+            "this cpu publishes no `{event}` event, so precise sampling of it is not available"
+        )));
+    }
+    if name.contains(':') {
+        return None;
+    }
+    let Ok(entries) = std::fs::read_dir(PMU_DEVICES) else {
+        return None;
+    };
+    let mut present = false;
+    for entry in entries.flatten() {
+        let Some(device) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // `uncore_imc` names a family whose members are `uncore_imc_0` and so
+        // on, so a prefix match is the right question for it.
+        if device == name || device.starts_with(&format!("{name}_")) {
+            present = true;
+            break;
+        }
+        if std::path::Path::new(&format!("{PMU_DEVICES}/{device}/events/{name}")).exists() {
+            present = true;
+            break;
+        }
+    }
+    Some(if present {
+        Probe::Available
+    } else {
+        Probe::Missing(format!(
+            "this machine publishes no `{name}` performance unit under {PMU_DEVICES}"
+        ))
+    })
+}
+
 /// Asks the kernel whether an event can be opened, rather than inferring it
 /// from the cpu vendor or the kernel version.
 ///
@@ -468,10 +596,22 @@ fn named_pmu_event(name: &str) -> Option<(u32, u64)> {
 /// will not let you read it", because one calls for different hardware and the
 /// other for `perf_event_paranoid`.
 fn probe_pmu(event: &str) -> Probe {
-    let Some((kind, config)) = named_pmu_event(event) else {
-        return Probe::Unknown(format!(
-            "`pmu:{event}` needs an event encoding this tool does not build yet"
-        ));
+    // A PMU that is not the cpu's -- RAPL, the uncore, the memory controller --
+    // counts for a whole package and refuses to be opened against a process.
+    // Asking it the per-process question answers "cannot open" for an event the
+    // machine offers, which is how RAPL read as missing on a machine where it
+    // works.
+    let system_wide = event.contains('/') && !event.starts_with("cpu/");
+    let Some((kind, config)) = named_pmu_event(event)
+        .or_else(|| cache_event(event))
+        .or_else(|| sysfs_event(event))
+    else {
+        return match sysfs_device_state(event) {
+            Some(probe) => probe,
+            None => Probe::Unknown(format!(
+                "`pmu:{event}` needs an event encoding this tool does not build yet"
+            )),
+        };
     };
 
     let mut attr: perf_event_open_sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
@@ -479,16 +619,24 @@ fn probe_pmu(event: &str) -> Probe {
     attr.size = std::mem::size_of::<perf_event_open_sys::bindings::perf_event_attr>() as u32;
     attr.config = config;
     attr.set_disabled(1);
-    attr.set_exclude_kernel(1);
-    attr.set_exclude_hv(1);
+    if !system_wide {
+        // Meaningless for a package counter, and rejected: RAPL answers EINVAL
+        // to an event that asks it to exclude kernel mode, because it does not
+        // have modes to exclude.
+        attr.set_exclude_kernel(1);
+        attr.set_exclude_hv(1);
+    }
 
-    // Opened against this process, which is the weakest thing that can be
-    // asked for: if this is refused, nothing wider will be allowed either.
+    // A cpu event is opened against this process, the weakest thing that can be
+    // asked for: if that is refused, nothing wider will be allowed either. A
+    // package-wide one has to be opened the only way it exists, against every
+    // process on one cpu.
+    let (pid, cpu) = if system_wide { (-1, 0) } else { (0, -1) };
     let fd = unsafe {
         perf_event_open_sys::perf_event_open(
             &mut attr,
-            0,
-            -1,
+            pid,
+            cpu,
             -1,
             perf_event_open_sys::bindings::PERF_FLAG_FD_CLOEXEC as u64,
         )
@@ -737,9 +885,11 @@ mod tests {
     #[test]
     fn a_requirement_with_no_probe_is_unknown_rather_than_assumed() {
         let capabilities = Capabilities::detect();
-        // Uncore boxes need an event encoding this tool does not build, so the
-        // answer must be "not checked", never "available".
-        let probe = capabilities.probe("pmu:uncore_imc", None);
+        // A userspace static probe in a library nobody has enumerated: still
+        // genuinely unchecked, so the answer must be "not checked", never
+        // "available". (`pmu:uncore_imc` used to serve here and is now
+        // answered, which is the improvement that moved this test.)
+        let probe = capabilities.probe("usdt:libc", None);
         assert!(probe.is_unknown(), "{probe}");
         assert!(
             !probe.is_available(),

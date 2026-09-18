@@ -476,20 +476,17 @@ mod tests {
     fn a_backend_whose_requirements_cannot_be_checked_is_reported_as_unverified() {
         let catalog = Catalog::embedded().unwrap();
         let capabilities = Capabilities::detect();
-        // Uncore bandwidth needs an event encoding no probe builds yet, so the
-        // resolver has to say it assumed rather than checked.
+        // The uncore counter is answered now; the RDT fallback behind it is
+        // not, so the resolver falls to a backend it could not check and has to
+        // say it assumed rather than checked.
         let mut request = fixture("mem.bandwidth", Target::System);
         request.mode = Mode::Count;
         request.emit = vec!["rate".parse().unwrap()];
         let resolved = resolve(&catalog, &capabilities, &request).unwrap();
         assert!(!resolved.fully_verified());
         assert!(
-            resolved
-                .unverified
-                .iter()
-                .any(|needs| needs.starts_with("pmu:")),
-            "{:?}",
-            resolved.unverified
+            !resolved.unverified.is_empty(),
+            "a backend selected with unchecked requirements has to list them"
         );
     }
 
