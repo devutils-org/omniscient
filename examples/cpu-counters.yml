@@ -1,0 +1,38 @@
+# What is this program's cpu actually doing?
+#
+#   omn -f examples/cpu-counters.yml
+#
+# Three counters, one window, one program. Together they answer a question no
+# one of them can: a program that is slow because it retires little work per
+# cycle, a program that is slow because it misses the last-level cache, and a
+# program that is slow because it keeps being taken off the cpu look identical
+# from the outside, and identical to a wall clock.
+#
+# `cpu.ipc` is instructions over cycles, and the two counters are opened as one
+# group so the ratio is of one window rather than of two. Every counter follows
+# the threads the program starts, and none of them is a sample: these are
+# counts, read once when the window closes.
+name: what the cpu is doing
+format: text
+
+requests:
+  - label: work per cycle
+    source: cpu.ipc
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"]
+    mode: count
+    emit: [summary]
+
+  - label: memory stalls
+    source: cpu.cache_misses
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"]
+    mode: count
+    emit: [summary, rate]
+
+  - label: taken off the cpu
+    source: cpu.context_switches
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"]
+    mode: count
+    emit: [summary]

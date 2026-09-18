@@ -207,6 +207,16 @@ impl Attr {
         }
     }
 
+    /// A value that is genuinely fractional, such as a ratio of two counters.
+    /// Counts stay integers: rounding one into a float loses the exactness that
+    /// makes a counter worth reading.
+    pub fn float(name: impl Into<String>, value: f64) -> Self {
+        Self {
+            name: name.into(),
+            value: AttrValue::Float(value),
+        }
+    }
+
     pub fn text(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             name: name.into(),

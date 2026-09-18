@@ -11,7 +11,7 @@
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK"], cost: free,
        degraded: "CPU time, not cycles: blind to DVFS"}
   modes: [count, sample]
-  emits: [summary, rate, hist, topk, stack]
+  emits: [summary, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
@@ -26,7 +26,7 @@
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS"], cost: free}
   modes: [count, sample]
-  emits: [summary, rate, hist, topk, stack]
+  emits: [summary, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
@@ -45,11 +45,16 @@
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS", "pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
   modes: [count]
-  emits: [summary]
+  emits: [summary, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
   determinism: medium
+  caveats:
+    - "A ratio, not an amount: a spin loop retires instructions at a high IPC
+       while doing nothing. Read it beside `cpu.instructions`, never alone."
+    - "Both counters must be read over the same window, which means one counter
+       group; two separately scheduled counters give a ratio of two windows."
 
 - id: cpu.branch_misses
   family: cpu
@@ -58,7 +63,7 @@
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_BRANCH_MISSES"], cost: free}
   modes: [count, sample]
-  emits: [summary, rate, topk, stack]
+  emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
@@ -71,7 +76,7 @@
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES"], cost: free}
   modes: [count, sample]
-  emits: [summary, rate, topk, stack]
+  emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
@@ -135,11 +140,15 @@
   backends:
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free}
   modes: [count, sample]
-  emits: [summary, rate, topk, stack]
+  emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
   determinism: low
+  caveats:
+    - "Counts switches away from the task, matching the kernel's own voluntary
+       plus nonvoluntary counters; it says nothing about what ran instead, nor
+       about how long the task stayed off the cpu."
 
 - id: cpu.migrations
   family: cpu
@@ -148,7 +157,7 @@
   backends:
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: free}
   modes: [count]
-  emits: [summary, rate]
+  emits: [summary, rate, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm]

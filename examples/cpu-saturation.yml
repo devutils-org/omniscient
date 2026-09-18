@@ -1,0 +1,30 @@
+# Is this machine busy, or is it oversubscribed?
+#
+#   omn -f examples/cpu-saturation.yml
+#
+# They are different questions with the same wrong answer. A machine at 100 %
+# utilisation may be exactly the right size: every cpu is doing work and nothing
+# is waiting. A machine at 60 % may have half its tasks sitting in a run queue,
+# because the work arrives in bursts that no average shows.
+#
+# `cpu.util` answers the first from `/proc/stat`, with `busy` deliberately
+# excluding `iowait`: a cpu waiting for a disk is not doing work. `cpu.pressure`
+# answers the second from PSI, which counts the time at least one runnable task
+# was waiting for a cpu. Read together, over one window, they separate a machine
+# that is full from a machine that is late.
+name: busy or oversubscribed
+format: text
+duration: 5s
+
+requests:
+  - label: doing work
+    source: cpu.util
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
+
+  - label: waiting for a cpu
+    source: cpu.pressure
+    target: system
+    mode: poll@500ms
+    emit: [timeline, summary]
