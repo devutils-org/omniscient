@@ -67,6 +67,14 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
                     }
                 }
             }
+            Output::Rate { series } => {
+                for rate in series {
+                    let mut line = serde_json::to_value(rate)
+                        .map_err(|error| ParseError::new(format!("cannot encode rate: {error}")))?;
+                    line["record"] = serde_json::Value::from("rate");
+                    let _ = writeln!(out, "{line}");
+                }
+            }
             Output::Summary { series } => {
                 for summary in series {
                     let mut line = serde_json::to_value(summary).map_err(|error| {
@@ -119,6 +127,19 @@ fn text(results: &Results) -> String {
     for output in &results.outputs {
         out.push('\n');
         match output {
+            Output::Rate { series } => {
+                let _ = writeln!(out, "  rate");
+                for rate in series {
+                    let _ = writeln!(
+                        out,
+                        "    {:<14} {} over {}  =  {}/s",
+                        rate.key,
+                        quantity(rate.total, results.unit),
+                        approximate(rate.window_ns),
+                        quantity(rate.per_second, results.unit),
+                    );
+                }
+            }
             Output::Summary { series } => {
                 let _ = writeln!(out, "  summary");
                 for summary in series {

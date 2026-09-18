@@ -476,9 +476,11 @@ mod tests {
     fn a_backend_whose_requirements_cannot_be_checked_is_reported_as_unverified() {
         let catalog = Catalog::embedded().unwrap();
         let capabilities = Capabilities::detect();
-        let mut request = fixture("cpu.cycles", Target::System);
+        // Uncore bandwidth needs an event encoding no probe builds yet, so the
+        // resolver has to say it assumed rather than checked.
+        let mut request = fixture("mem.bandwidth", Target::System);
         request.mode = Mode::Count;
-        request.emit = vec!["summary".parse().unwrap()];
+        request.emit = vec!["rate".parse().unwrap()];
         let resolved = resolve(&catalog, &capabilities, &request).unwrap();
         assert!(!resolved.fully_verified());
         assert!(

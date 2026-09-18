@@ -19,6 +19,7 @@ serde_json = "1"
 serde_norway = "0.9"
 thiserror = "2"
 toml = "0.9"
+perf-event-open-sys = "7.0.0"
 
 [profile.release]
 lto = "thin"

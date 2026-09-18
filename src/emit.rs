@@ -49,6 +49,7 @@ pub enum Output {
     Raw { events: Vec<Event> },
     Timeline { series: Vec<Series> },
     Summary { series: Vec<SeriesSummary> },
+    Rate { series: Vec<SeriesRate> },
 }
 
 impl Output {
@@ -57,8 +58,24 @@ impl Output {
             Output::Raw { .. } => EmitKind::Raw,
             Output::Timeline { .. } => EmitKind::Timeline,
             Output::Summary { .. } => EmitKind::Summary,
+            Output::Rate { .. } => EmitKind::Rate,
         }
     }
+}
+
+/// How much of something happened, per second, over the observed window.
+///
+/// The window is the run's own observed duration, not the requested one: a
+/// program that exits after 200 ms of a 30 s request did not produce its events
+/// over 30 s, and dividing by the request would understate the rate by two
+/// orders of magnitude.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeriesRate {
+    pub key: String,
+    pub events: usize,
+    pub total: f64,
+    pub per_second: f64,
+    pub window_ns: u64,
 }
 
 /// Values over time for one key.
@@ -90,7 +107,9 @@ pub struct SeriesSummary {
 /// What an emit cannot be computed from.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EmitError {
-    #[error("`{emit}` is not implemented yet: this milestone computes raw, timeline and summary")]
+    #[error(
+        "`{emit}` is not implemented yet: this milestone computes raw, timeline, summary and rate"
+    )]
     NotImplemented { emit: String },
     #[error("`{attr}` is not a numeric attribute, so it cannot be aggregated")]
     NotNumeric { attr: String },
@@ -122,6 +141,9 @@ pub fn aggregate(
             Emit::Summary => Output::Summary {
                 series: summary(&collection.events, value_attr)?,
             },
+            Emit::Rate => Output::Rate {
+                series: rate(&collection.events, collection.observed_ns, value_attr)?,
+            },
             other => {
                 return Err(EmitError::NotImplemented {
                     emit: other.to_string(),
@@ -148,7 +170,12 @@ pub fn aggregate(
     })
 }
 
-/// Groups events by their primary key, keeping the order they arrived in.
+/// Groups events by their first key, keeping the order they arrived in.
+///
+/// The first key is the series key by convention, and the collector decides it:
+/// it is the one that knows whether a source is naturally per-thread, per
+/// device or per socket. Grouping page faults by address, for instance, would
+/// produce one series per page.
 fn grouped(events: &[Event]) -> BTreeMap<String, Vec<&Event>> {
     let mut groups: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
     for event in events {
@@ -184,6 +211,27 @@ fn timeline(events: &[Event], first_ts_ns: u64, attr: &str) -> Result<Vec<Series
         series.push(Series { key, points });
     }
     Ok(series)
+}
+
+fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>, EmitError> {
+    let seconds = (window_ns as f64 / 1e9).max(f64::MIN_POSITIVE);
+    let mut rates = Vec::new();
+    for (key, events) in grouped(events) {
+        let total: f64 = events
+            .iter()
+            .map(|event| value_of(event, attr))
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .sum();
+        rates.push(SeriesRate {
+            key,
+            events: events.len(),
+            total,
+            per_second: total / seconds,
+            window_ns,
+        });
+    }
+    Ok(rates)
 }
 
 fn summary(events: &[Event], attr: &str) -> Result<Vec<SeriesSummary>, EmitError> {

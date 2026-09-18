@@ -186,6 +186,7 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "perf-event-open-sys",
  "serde",
  "serde_json",
  "serde_norway",
@@ -198,6 +199,15 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "perf-event-open-sys"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6029c3b5907384c19f62177e0fd435dfc30088e28f80dd87ae7bb62d5fc534"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "proc-macro2"

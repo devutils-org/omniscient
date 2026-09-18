@@ -280,6 +280,10 @@ impl Capabilities {
             };
         }
 
+        if let Some(event) = requirement.strip_prefix("pmu:") {
+            return probe_pmu(event);
+        }
+
         match requirement {
             "tracefs" => match self.environment.tracefs {
                 Access::Readable => Probe::Available,
@@ -345,6 +349,87 @@ fn tracefs_access() -> Access {
         }
     }
     best
+}
+
+/// The named `perf_event_open` events this tool knows how to ask for.
+///
+/// Everything else under `pmu:` -- uncore boxes, PEBS, topdown slots, cache
+/// descriptors -- needs an encoding this does not build yet, and stays
+/// unverified rather than being guessed at.
+fn named_pmu_event(name: &str) -> Option<(u32, u64)> {
+    use perf_event_open_sys::bindings as perf;
+    let hardware = |config: u32| Some((perf::PERF_TYPE_HARDWARE, config as u64));
+    let software = |config: u32| Some((perf::PERF_TYPE_SOFTWARE, config as u64));
+    match name {
+        "PERF_COUNT_HW_CPU_CYCLES" => hardware(perf::PERF_COUNT_HW_CPU_CYCLES),
+        "PERF_COUNT_HW_INSTRUCTIONS" => hardware(perf::PERF_COUNT_HW_INSTRUCTIONS),
+        "PERF_COUNT_HW_CACHE_REFERENCES" => hardware(perf::PERF_COUNT_HW_CACHE_REFERENCES),
+        "PERF_COUNT_HW_CACHE_MISSES" => hardware(perf::PERF_COUNT_HW_CACHE_MISSES),
+        "PERF_COUNT_HW_BRANCH_INSTRUCTIONS" => hardware(perf::PERF_COUNT_HW_BRANCH_INSTRUCTIONS),
+        "PERF_COUNT_HW_BRANCH_MISSES" => hardware(perf::PERF_COUNT_HW_BRANCH_MISSES),
+        "PERF_COUNT_HW_REF_CPU_CYCLES" => hardware(perf::PERF_COUNT_HW_REF_CPU_CYCLES),
+        "PERF_COUNT_SW_CPU_CLOCK" => software(perf::PERF_COUNT_SW_CPU_CLOCK),
+        "PERF_COUNT_SW_TASK_CLOCK" => software(perf::PERF_COUNT_SW_TASK_CLOCK),
+        "PERF_COUNT_SW_PAGE_FAULTS" => software(perf::PERF_COUNT_SW_PAGE_FAULTS),
+        "PERF_COUNT_SW_PAGE_FAULTS_MIN" => software(perf::PERF_COUNT_SW_PAGE_FAULTS_MIN),
+        "PERF_COUNT_SW_PAGE_FAULTS_MAJ" => software(perf::PERF_COUNT_SW_PAGE_FAULTS_MAJ),
+        "PERF_COUNT_SW_CONTEXT_SWITCHES" => software(perf::PERF_COUNT_SW_CONTEXT_SWITCHES),
+        "PERF_COUNT_SW_CPU_MIGRATIONS" => software(perf::PERF_COUNT_SW_CPU_MIGRATIONS),
+        "PERF_COUNT_SW_ALIGNMENT_FAULTS" => software(perf::PERF_COUNT_SW_ALIGNMENT_FAULTS),
+        "PERF_COUNT_SW_EMULATION_FAULTS" => software(perf::PERF_COUNT_SW_EMULATION_FAULTS),
+        _ => None,
+    }
+}
+
+/// Asks the kernel whether an event can be opened, rather than inferring it
+/// from the cpu vendor or the kernel version.
+///
+/// The answer distinguishes "this cpu has no such counter" from "this machine
+/// will not let you read it", because one calls for different hardware and the
+/// other for `perf_event_paranoid`.
+fn probe_pmu(event: &str) -> Probe {
+    let Some((kind, config)) = named_pmu_event(event) else {
+        return Probe::Unknown(format!(
+            "`pmu:{event}` needs an event encoding this tool does not build yet"
+        ));
+    };
+
+    let mut attr: perf_event_open_sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = kind;
+    attr.size = std::mem::size_of::<perf_event_open_sys::bindings::perf_event_attr>() as u32;
+    attr.config = config;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+
+    // Opened against this process, which is the weakest thing that can be
+    // asked for: if this is refused, nothing wider will be allowed either.
+    let fd = unsafe {
+        perf_event_open_sys::perf_event_open(
+            &mut attr,
+            0,
+            -1,
+            -1,
+            perf_event_open_sys::bindings::PERF_FLAG_FD_CLOEXEC as u64,
+        )
+    };
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+        return Probe::Available;
+    }
+
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) => Probe::Missing(format!(
+            "perf_event_open was refused for `{event}`: perf_event_paranoid is {}",
+            read_trimmed("/proc/sys/kernel/perf_event_paranoid")
+                .unwrap_or_else(|| "unknown".into())
+        )),
+        Some(libc::ENOENT) | Some(libc::EOPNOTSUPP) => {
+            Probe::Missing(format!("`{event}` is not available on this cpu"))
+        }
+        _ => Probe::Missing(format!("perf_event_open failed for `{event}`: {error}")),
+    }
 }
 
 fn current_uid() -> u32 {
@@ -445,12 +530,29 @@ mod tests {
     #[test]
     fn a_requirement_with_no_probe_is_unknown_rather_than_assumed() {
         let capabilities = Capabilities::detect();
-        let probe = capabilities.probe("pmu:PERF_COUNT_HW_CPU_CYCLES", None);
+        // Uncore boxes need an event encoding this tool does not build, so the
+        // answer must be "not checked", never "available".
+        let probe = capabilities.probe("pmu:uncore_imc", None);
         assert!(probe.is_unknown(), "{probe}");
         assert!(
             !probe.is_available(),
             "an unwritten probe must never read as available"
         );
+    }
+
+    #[test]
+    fn a_named_perf_event_is_answered_by_asking_the_kernel() {
+        let capabilities = Capabilities::detect();
+        // Software page faults exist on every kernel, so only permission can
+        // stand in the way -- and then the answer names the reason.
+        let probe = capabilities.probe("pmu:PERF_COUNT_SW_PAGE_FAULTS", None);
+        assert!(!probe.is_unknown(), "{probe}");
+        if probe.is_missing() {
+            assert!(
+                probe.to_string().contains("paranoid") || probe.to_string().contains("cpu"),
+                "{probe}"
+            );
+        }
     }
 
     #[test]
