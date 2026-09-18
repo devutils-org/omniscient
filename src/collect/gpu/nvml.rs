@@ -540,3 +540,78 @@ fn to_string(buffer: &[c_char]) -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The structs above are handed to a C library that will write through
+    /// them. Their layout is not an implementation detail: a field at the wrong
+    /// offset reads someone else's bytes and reports them as a measurement.
+    /// These are the layouts of `nvmlMemory_t`, `nvmlUtilization_t` and
+    /// `nvmlProcessInfo_v2_t`, which are what the entry points asked for by
+    /// name expect.
+    #[test]
+    fn the_structs_handed_to_the_library_have_the_layout_it_writes() {
+        use std::mem::{align_of, size_of};
+
+        assert_eq!(size_of::<Memory>(), 24);
+        assert_eq!(align_of::<Memory>(), 8);
+
+        assert_eq!(size_of::<Utilization>(), 8);
+        assert_eq!(align_of::<Utilization>(), 4);
+
+        // `{ u32; u64; u32; u32 }` with C padding: the 64-bit field is aligned
+        // to 8, which puts the two instance ids at 16 and 20 and the size at
+        // 24. Packing it would move every field after the first.
+        assert_eq!(size_of::<ProcessInfo>(), 24);
+        assert_eq!(align_of::<ProcessInfo>(), 8);
+        let process = ProcessInfo::default();
+        let base = &process as *const ProcessInfo as usize;
+        assert_eq!(&process.pid as *const _ as usize - base, 0);
+        assert_eq!(&process.used_gpu_memory as *const _ as usize - base, 8);
+        assert_eq!(&process.gpu_instance_id as *const _ as usize - base, 16);
+        assert_eq!(&process.compute_instance_id as *const _ as usize - base, 20);
+    }
+
+    /// A library that is not there is a fact about the machine, reported with
+    /// what the loader said rather than as a generic failure.
+    #[test]
+    fn a_library_the_loader_cannot_find_is_reported_with_the_loaders_reason() {
+        let error = dlopen_probe("libthis-is-not-a-library.so.99")
+            .expect_err("that library exists nowhere");
+        assert!(!error.is_empty(), "the loader's reason must be carried");
+    }
+
+    /// Whichever machine this runs on, the answer is one of the two checked
+    /// ones: the library loaded, or it did not and we know what was tried.
+    #[test]
+    fn the_library_is_either_loadable_or_says_what_was_tried() {
+        match Nvml::present() {
+            Ok(name) => assert!(name.starts_with("libnvidia-ml")),
+            Err(reason) => {
+                for candidate in LIBRARY_NAMES {
+                    assert!(reason.contains(candidate), "{reason}");
+                }
+            }
+        }
+    }
+
+    /// "This device cannot do that" and "the driver went away" lead to
+    /// different places: the first is a fact to report, the second ends the run.
+    #[test]
+    fn an_error_says_whether_it_is_the_device_or_the_run_that_is_over() {
+        let unsupported = NvmlError {
+            code: NVML_ERROR_NOT_SUPPORTED,
+            message: "Not Supported".into(),
+        };
+        assert!(unsupported.is_not_supported() && !unsupported.is_gone());
+
+        let lost = NvmlError {
+            code: NVML_ERROR_GPU_IS_LOST,
+            message: "GPU is lost".into(),
+        };
+        assert!(lost.is_gone() && !lost.is_not_supported());
+        assert!(lost.to_string().contains("NVML code 15"), "{lost}");
+    }
+}

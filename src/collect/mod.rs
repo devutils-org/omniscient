@@ -332,6 +332,25 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
 
     let environment = merge_environments(&prepared)?;
 
+    // A run that nothing will ever stop is refused before the target is
+    // launched or anything is attached to it -- but after the collectors have
+    // been asked for, because "no collector is written for this" is the deeper
+    // answer and the one worth giving first. A duration, a program whose exit
+    // ends the run, or a single read: with none of the three there is no
+    // window, and observing a target that nothing will stop watching is worse
+    // than refusing.
+    let duration_ns = resolved
+        .iter()
+        .filter_map(|resolved| resolved.request.duration)
+        .map(|duration| duration.as_nanos())
+        .max();
+    let snapshot = resolved
+        .iter()
+        .all(|resolved| resolved.request.mode == Mode::Snapshot);
+    if duration_ns.is_none() && !matches!(target, Target::Launch(_)) && !snapshot {
+        return Err(CollectError::NoStopCondition);
+    }
+
     // A launched program is both the target and the clock: the run ends when it
     // does, which is what makes `omn <source> -- ./prog` a complete measurement
     // rather than a sample of one. It is held at a gate so that collectors are
@@ -410,18 +429,7 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
             _ => StdDuration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
         });
 
-    let deadline_ns = resolved
-        .iter()
-        .filter_map(|resolved| resolved.request.duration)
-        .map(|duration| duration.as_nanos())
-        .max()
-        .map(|longest| monotonic_ns() + longest);
-    let snapshot = resolved
-        .iter()
-        .all(|resolved| resolved.request.mode == Mode::Snapshot);
-    if deadline_ns.is_none() && child.is_none() && !snapshot {
-        return Err(CollectError::NoStopCondition);
-    }
+    let deadline_ns = duration_ns.map(|longest| monotonic_ns() + longest);
 
     let started_ns = monotonic_ns();
     let mut events: Vec<Vec<Event>> = vec![Vec::new(); collectors.len()];
@@ -652,6 +660,182 @@ mod tests {
                 factory.source,
                 factory.backend
             );
+        }
+    }
+
+    /// Builds a resolved request for `mem.rss`, optionally pinned to a backend
+    /// so the filter placement can be steered: `fs:proc` returns whole records
+    /// and gets a userspace placement, an eBPF backend is credited with pushing
+    /// the predicate down.
+    fn resolved_with_filter(source: &str, backend: Option<&str>, filter: &str) -> ResolvedRequest {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let entry = catalog.get(&source.parse().unwrap()).unwrap();
+        let request = crate::request::Request {
+            source: source.parse().unwrap(),
+            target: Target::Pid(vec![std::process::id() as i32]),
+            mode: if entry.modes.contains(&crate::request::ModeKind::Poll) {
+                crate::request::Mode::Poll {
+                    interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+                }
+            } else {
+                crate::request::Mode::Trace
+            },
+            emit: vec![crate::request::Emit::Raw],
+            keys: Vec::new(),
+            filter: Some(filter.parse().unwrap()),
+            duration: None,
+            budget: None,
+            stack: None,
+            backend: backend.map(|id| id.parse().unwrap()),
+            label: None,
+        };
+        crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
+    }
+
+    fn event_with(attrs: Vec<crate::event::Attr>) -> Event {
+        Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "mem.rss".to_owned(),
+            keys: Vec::new(),
+            attrs,
+            collector_id: CollectorId::new("test"),
+            seq: 0,
+        }
+    }
+
+    /// The filter has to remove what it does not match, and the count has to
+    /// survive: a series of three events that was a series of forty before the
+    /// predicate ran describes a different run.
+    #[test]
+    fn a_userspace_filter_removes_what_it_does_not_match_and_counts_it() {
+        let resolved = resolved_with_filter("mem.rss", Some("fs:proc:statm"), "comm == 'keep'");
+        let mut events = vec![
+            event_with(vec![crate::event::Attr::text("comm", "keep")]),
+            event_with(vec![crate::event::Attr::text("comm", "drop")]),
+            event_with(vec![crate::event::Attr::text("comm", "keep")]),
+        ];
+
+        let filtered = apply_filter(&resolved, &mut events).expect("a filtered request reports it");
+        assert_eq!(events.len(), 2);
+        assert_eq!((filtered.kept, filtered.dropped), (2, 1));
+        assert_eq!(filtered.predicate, "comm == 'keep'");
+        assert!(filtered.unseen_fields.is_empty(), "{filtered:?}");
+    }
+
+    /// A backend the resolver credited with pushing the predicate into the
+    /// kernel is taken at its word. Running the filter again here would produce
+    /// the same events either way, which is exactly why it must not happen: it
+    /// would hide a collector that ignored the predicate it was given.
+    #[test]
+    fn a_filter_the_backend_pushed_down_is_not_run_a_second_time() {
+        let resolved = resolved_with_filter("io.latency", Some("bpf:tp"), "bytes > 4096");
+        assert!(
+            matches!(
+                resolved.filter,
+                Some(crate::resolve::FilterPlacement::Kernel(_))
+            ),
+            "this test needs a backend credited with pushing the filter down"
+        );
+
+        let mut events = vec![event_with(vec![crate::event::Attr::uint("bytes", 1)])];
+        assert!(apply_filter(&resolved, &mut events).is_none());
+        assert_eq!(events.len(), 1, "userspace must not re-filter kernel work");
+    }
+
+    /// A predicate over a field nothing produces is false everywhere, which
+    /// empties the series and looks like a workload that did nothing. The field
+    /// is named so the reader can tell the two apart.
+    #[test]
+    fn a_predicate_over_a_field_no_event_carries_says_which_field() {
+        let resolved = resolved_with_filter("mem.rss", Some("fs:proc:statm"), "comm == 'anything'");
+        let mut events = vec![event_with(vec![crate::event::Attr::uint("bytes", 4096)])];
+
+        let filtered = apply_filter(&resolved, &mut events).expect("a filtered request reports it");
+        assert!(events.is_empty());
+        assert_eq!(filtered.unseen_fields, vec!["comm".to_owned()]);
+    }
+
+    /// `kind` is on every event by construction, so it is never a missing
+    /// field even when nothing matches it.
+    #[test]
+    fn the_kind_field_is_never_reported_as_one_no_event_carried() {
+        let resolved =
+            resolved_with_filter("mem.rss", Some("fs:proc:statm"), "kind == 'io.latency'");
+        let mut events = vec![event_with(Vec::new())];
+
+        let filtered = apply_filter(&resolved, &mut events).expect("a filtered request reports it");
+        assert!(events.is_empty());
+        assert!(filtered.unseen_fields.is_empty(), "{filtered:?}");
+    }
+
+    /// A request with no filter reports nothing rather than reporting that a
+    /// filter kept everything: there was no predicate to keep anything.
+    #[test]
+    fn a_request_without_a_filter_reports_no_filtering() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let request = crate::request::Request {
+            source: "mem.rss".parse().unwrap(),
+            target: Target::Pid(vec![std::process::id() as i32]),
+            mode: crate::request::Mode::Snapshot,
+            emit: vec![crate::request::Emit::Raw],
+            keys: Vec::new(),
+            filter: None,
+            duration: None,
+            budget: None,
+            stack: None,
+            backend: None,
+            label: None,
+        };
+        let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
+        let mut events = vec![event_with(Vec::new())];
+        assert!(apply_filter(&resolved, &mut events).is_none());
+        assert_eq!(events.len(), 1);
+    }
+
+    /// The two things a collector can be bound to, and the refusal that names
+    /// the source rather than blaming the machine.
+    #[test]
+    fn an_attachment_is_a_process_or_the_machine_and_says_which() {
+        assert_eq!(Attachment::Process(42).pid(), Some(42));
+        assert_eq!(Attachment::System.pid(), None);
+        let refusal = Attachment::System.needs_a_process("mem.rss");
+        assert!(refusal.contains("mem.rss"), "{refusal}");
+        assert!(refusal.contains("system target"), "{refusal}");
+    }
+
+    /// A system target has no program to end the run, so a duration is the only
+    /// thing that can. Starting collectors that nothing will ever stop is worse
+    /// than refusing.
+    #[test]
+    fn a_system_run_with_nothing_to_stop_it_is_refused() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let request = crate::request::Request {
+            source: "gpu.temp".parse().unwrap(),
+            target: Target::System,
+            mode: crate::request::Mode::Poll {
+                interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+            },
+            emit: vec![crate::request::Emit::Raw],
+            keys: Vec::new(),
+            filter: None,
+            duration: None,
+            budget: None,
+            stack: None,
+            backend: None,
+            label: None,
+        };
+        let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
+        match run(&resolved) {
+            Err(CollectError::NoStopCondition) => {}
+            // A machine with no GPU cannot get that far, and says so first.
+            Err(CollectError::Start { reason, .. }) => {
+                eprintln!("skipped: {reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
         }
     }
 

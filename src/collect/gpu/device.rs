@@ -530,6 +530,90 @@ mod tests {
         }
     }
 
+    /// The energy counter runs since the driver loaded, so a run that reported
+    /// it raw would say a GPU drew three hundred kilojoules during a two-second
+    /// measurement. The baseline is taken in `start`, before the observed
+    /// program is released, and every event is the energy of this run.
+    #[test]
+    fn energy_is_counted_from_the_start_of_the_run_not_of_the_driver() {
+        let Some(mut collector) = collector(Metric::Power) else {
+            return;
+        };
+        if let Err(reason) = collector.start() {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+
+        // The bound is loose on purpose. What it separates is two readings
+        // orders of magnitude apart: the energy of a run that has barely
+        // started, and the counter since the driver loaded, which is hundreds
+        // of kilojoules on a machine that has been up a while. A tight bound
+        // would instead measure how long this thread waited for a core under a
+        // parallel test run.
+        let first = value(&mut collector);
+        assert!(
+            (0.0..1000.0).contains(&first),
+            "the first reading should be this run's energy, not the driver's: {first} J"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let second = value(&mut collector);
+        assert!(
+            second >= first,
+            "energy since the start of a run cannot go down: {first} then {second}"
+        );
+    }
+
+    /// A field the catalog offers to filter on that no event carries is a
+    /// filter that silently matches nothing -- the shape of bug the userspace
+    /// filter surfaced in another family. Every `filter_fields` entry of a
+    /// source this collector serves has to be on its events.
+    #[test]
+    fn every_filter_field_the_catalog_offers_is_on_the_events() {
+        let catalog = crate::catalog::Catalog::embedded().unwrap();
+        for metric in [
+            Metric::Freq,
+            Metric::Power,
+            Metric::Temp,
+            Metric::Mem,
+            Metric::EngineBusy,
+        ] {
+            let Some(mut collector) = collector(metric) else {
+                return;
+            };
+            // The energy counter needs its baseline before it can be read.
+            if let Err(reason) = collector.start() {
+                eprintln!("skipped {}: {reason}", metric.source());
+                continue;
+            }
+            let events = collector.sample(0).expect("the device answers");
+            let entry = catalog.get(&metric.source().parse().unwrap()).unwrap();
+            for field in &entry.filter_fields {
+                assert!(
+                    events[0].attr(field).is_some(),
+                    "`{}` offers `{field}` as a filter field and its events do not carry it",
+                    metric.source()
+                );
+            }
+        }
+    }
+
+    /// A process target that has gone ends the run. Reporting zero bytes for a
+    /// process that no longer exists would be a series saying the program
+    /// released its memory, when what happened is that it died.
+    #[test]
+    fn a_process_that_no_longer_exists_ends_the_run_rather_than_reporting_zero() {
+        // pid 0 never names a readable process directory.
+        let Ok(mut collector) = NvmlCollector::new(Metric::Mem, Some(0)) else {
+            eprintln!("skipped: no NVIDIA device on this machine");
+            return;
+        };
+        match collector.sample(0) {
+            Err(SampleError::TargetGone(reason)) => assert!(reason.contains("exited"), "{reason}"),
+            other => panic!("expected the run to end, got {other:?}"),
+        }
+    }
+
     /// A device figure is averaged over a window the driver chooses and does
     /// not report, so its timestamp carries that uncertainty rather than
     /// pretending the value was taken at an instant.

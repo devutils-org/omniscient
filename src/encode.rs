@@ -501,6 +501,43 @@ mod tests {
         assert_eq!(decoded, sample());
     }
 
+    /// What a filter removed is part of how the numbers came to be, so the
+    /// text output carries it beside the losses rather than leaving a reader to
+    /// wonder why a poll that ran for a second produced three events.
+    #[test]
+    fn the_text_output_says_what_the_filter_removed() {
+        let mut sample = sample();
+        sample.filtered = Some(crate::collect::Filtered {
+            predicate: "bytes >= 8388608".into(),
+            kept: 5,
+            dropped: 307,
+            unseen_fields: Vec::new(),
+        });
+        let text = results(OutputFormat::Text, &sample).unwrap();
+        assert!(text.contains("kept 5 of 312 events"), "{text}");
+        assert!(text.contains("bytes >= 8388608"), "{text}");
+    }
+
+    /// The case that empties a series: a predicate over a field the collector
+    /// never produces. The output names the field, because an empty series and
+    /// a workload that did nothing look identical otherwise.
+    #[test]
+    fn the_text_output_names_a_field_no_event_carried() {
+        let mut sample = sample();
+        sample.filtered = Some(crate::collect::Filtered {
+            predicate: "comm == 'sleep'".into(),
+            kept: 0,
+            dropped: 5,
+            unseen_fields: vec!["comm".into()],
+        });
+        let text = results(OutputFormat::Text, &sample).unwrap();
+        assert!(text.contains("kept 0 of 5 events"), "{text}");
+        assert!(
+            text.contains("no event carried `comm`"),
+            "an empty series must explain itself: {text}"
+        );
+    }
+
     #[test]
     fn a_format_without_an_encoder_says_so() {
         let error = results(OutputFormat::Folded, &sample()).unwrap_err();

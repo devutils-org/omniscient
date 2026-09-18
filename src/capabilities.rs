@@ -542,6 +542,22 @@ mod tests {
         assert!(probe.is_missing(), "{probe}");
     }
 
+    /// A family answers the requirement classes it introduces, and the probe
+    /// walks through this module to reach it. Losing that hookup would not
+    /// break a build: every `gpu` source would quietly go back to reading `?`
+    /// on a machine where the answer is known.
+    #[test]
+    fn a_requirement_a_family_answers_is_not_left_unknown() {
+        let capabilities = Capabilities::detect();
+        let probe = capabilities.probe("nvml", None);
+        assert!(
+            !probe.is_unknown(),
+            "the gpu family answers `nvml`, so this must be checked, not assumed: {probe}"
+        );
+        let hwmon = capabilities.probe("hwmon:definitely-not-a-sensor", None);
+        assert!(hwmon.is_missing(), "{hwmon}");
+    }
+
     #[test]
     fn a_requirement_with_no_probe_is_unknown_rather_than_assumed() {
         let capabilities = Capabilities::detect();

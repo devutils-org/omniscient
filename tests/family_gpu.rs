@@ -33,7 +33,15 @@ fn stderr(output: &Output) -> String {
 /// Runs a device-state request over a short launched program, or says why this
 /// machine cannot.
 fn measure(source: &str, emit: &str) -> Result<serde_json::Value, String> {
-    let output = run(&[
+    measure_with(source, emit, None)
+}
+
+fn measure_with(
+    source: &str,
+    emit: &str,
+    filter: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut args = vec![
         source,
         "--mode",
         "poll@100ms",
@@ -41,10 +49,12 @@ fn measure(source: &str, emit: &str) -> Result<serde_json::Value, String> {
         emit,
         "--format",
         "json",
-        "--",
-        "sleep",
-        "0.4",
-    ]);
+    ];
+    if let Some(filter) = filter {
+        args.extend_from_slice(&["--filter", filter]);
+    }
+    args.extend_from_slice(&["--", "sleep", "0.4"]);
+    let output = run(&args);
     if output.status.success() {
         return serde_json::from_slice(&output.stdout).map_err(|error| error.to_string());
     }
@@ -296,4 +306,51 @@ fn the_listing_marks_what_this_machine_can_serve() {
             "without gpu_scheduler tracepoints gpu.job cannot be served: {job}"
         );
     }
+}
+
+/// The filter has to reach the events of a source that declares the field, and
+/// the run has to say what it removed. A GPU is the case that made this
+/// visible: `device` is the field that matters on a machine with two cards, and
+/// a predicate over it that quietly kept everything would average them.
+#[test]
+fn a_filter_on_the_device_keeps_that_device_and_reports_the_rest() {
+    let kept = match measure_with("gpu.temp", "raw", Some("device == 0")) {
+        Ok(run) => run,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let events = kept["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("raw emits events")
+        .clone();
+    assert!(
+        !events.is_empty(),
+        "device 0 exists on any machine with a GPU"
+    );
+    for event in &events {
+        assert_eq!(attr(event, "device").unwrap(), 0);
+    }
+    let filtered = &kept["results"][0]["filtered"];
+    assert_eq!(filtered["predicate"], "device == 0");
+    assert_eq!(filtered["kept"].as_u64().unwrap(), events.len() as u64);
+
+    // And a device that is not there keeps nothing, without the run pretending
+    // the numbers it did collect answer the question.
+    let dropped = match measure_with("gpu.temp", "raw", Some("device == 99")) {
+        Ok(run) => run,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let none = dropped["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("raw emits events")
+        .clone();
+    assert!(none.is_empty(), "no machine here has a hundredth GPU");
+    let filtered = &dropped["results"][0]["filtered"];
+    assert_eq!(filtered["kept"].as_u64().unwrap(), 0);
+    assert!(
+        filtered["dropped"].as_u64().unwrap() > 0,
+        "the events that were collected and discarded have to be counted: {filtered}"
+    );
+    // `device` was on every event, so the empty series is the predicate's doing
+    // and not a field nothing carried.
+    assert!(filtered["unseen_fields"].is_null(), "{filtered}");
 }

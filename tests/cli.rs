@@ -223,14 +223,22 @@ fn the_same_session_reads_from_yaml_json_and_toml() {
 
 #[test]
 fn the_shipped_examples_validate() {
-    for example in [
-        "examples/web-latency.yml",
-        "examples/saturation.toml",
-        "examples/rss-run.yml",
-    ] {
+    // The directory is walked rather than listed here: an example that ships
+    // broken because nobody added it to a list is exactly the kind of rot this
+    // test exists to prevent, and every family adds its own.
+    let mut checked = 0;
+    for entry in std::fs::read_dir("examples").expect("the examples directory ships") {
+        let path = entry.expect("readable directory entry").path();
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("yml" | "yaml" | "json" | "toml") => {}
+            _ => continue,
+        }
+        let example = path.to_str().expect("a printable path");
         let output = run(&["validate", "-f", example]);
         assert!(output.status.success(), "{example}: {}", stderr(&output));
+        checked += 1;
     }
+    assert!(checked >= 3, "only {checked} examples were validated");
 }
 
 #[test]

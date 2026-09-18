@@ -197,17 +197,36 @@ mod tests {
             return;
         }
 
+        // Mapped rather than allocated: memory the allocator already holds is
+        // already resident and faults nothing, so a `Vec` here counted whatever
+        // the rest of the suite had allocated first and came up short under
+        // load. A fresh anonymous mapping is untouched by construction.
         const PAGES: usize = 64;
         let page = 4096;
-        let mut block = vec![0u8; PAGES * page];
-        let base = block.as_ptr() as u64;
+        let length = PAGES * page;
+        // SAFETY: a fresh anonymous mapping of a positive length; the result is
+        // checked and the mapping is released below.
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "mmap of {length} bytes failed");
+        let base = block as u64;
         for index in 0..PAGES {
-            block[index * page] = 1;
+            // SAFETY: `index * page` is inside the mapping just made.
+            unsafe { (block as *mut u8).add(index * page).write_volatile(1) };
         }
-        std::hint::black_box(&block);
 
         let mut events = collector.sample(0).unwrap();
         events.extend(collector.stop());
+        // SAFETY: the mapping came from the `mmap` above and is not used again.
+        unsafe { libc::munmap(block, length) };
 
         let inside = events
             .iter()
