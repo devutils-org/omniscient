@@ -1,0 +1,26 @@
+# How much video memory one process holds.
+#
+#   omn -f examples/gpu-vram-of-a-process.yml
+#
+# This is the only `gpu` source that attributes anything to a process: the
+# driver keeps a per-process VRAM figure and this reads it, so the series is
+# that program's own and the device totals ride along beside it under names of
+# their own.
+#
+# As written the program is `sleep`, which holds no VRAM and reports zero --
+# which is the point: a program that never touches the GPU produces a series of
+# zeros, not an empty one. Swap in a workload that opens a context and the
+# series follows its allocations.
+#
+# What it cannot tell you: what is inside the arena. A CUDA context reserves
+# memory the way an allocator reserves a heap, and `free` returns nothing to
+# the device until the context goes.
+name: video memory held by a process
+format: text
+
+requests:
+  - label: vram
+    source: gpu.mem
+    target: {launch: [sleep, "2"]}
+    mode: poll@100ms
+    emit: [timeline, summary]

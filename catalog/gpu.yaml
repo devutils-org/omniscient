@@ -2,6 +2,12 @@
 # NVIDIA is proprietary: no DRM scheduler tracepoints, no exposed kernel PMU.
 # Everything goes through vendor:*. AMD and Intel have the full kernel stack.
 # The catalog reflects that asymmetry rather than hiding it.
+#
+# The sysfs backends name the driver they read through -- `/sys/bus/pci/drivers/
+# amdgpu` and friends -- rather than `/sys/class/drm`, which exists on every
+# machine with a display, the NVIDIA ones included. A requirement that is
+# satisfied on hardware the backend cannot read is worse than no requirement at
+# all: it makes the resolver pick a backend that will find nothing.
 
 - id: gpu.job
   family: gpu
@@ -30,71 +36,110 @@
   summary: "Per-engine occupancy"
   unit: ratio
   backends:
-    - {id: "pmu:i915", requires: ["pmu:i915"], cost: free}
-    - {id: "pmu:amdgpu", requires: ["pmu:amdgpu"], cost: free, equivalent: true}
-    - {id: "vendor:nvml", requires: ["nvml"], cost: low, degraded: "coarse sampling, vendor-defined semantics"}
+    - {id: "pmu:i915", requires: ["/sys/bus/event_source/devices/i915"], cost: free}
+    - {id: "pmu:xe", requires: ["/sys/bus/event_source/devices/xe"], cost: free, equivalent: true}
+    - {id: "pmu:amdgpu", requires: ["/sys/bus/event_source/devices/amdgpu"], cost: free, equivalent: true}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: low,
+       degraded: "one whole-device figure instead of a per-engine breakdown, sampled by the driver over a window it chooses"}
   modes: [count, poll]
   emits: [timeline, rate, summary]
-  targets: {system: native}
-  keys: [gpu]
+  targets: {system: native, launch: native}
+  keys: []
   filter_fields: [engine, device]
   determinism: low
+  caveats:
+    - "NVML's utilization is the fraction of a driver-chosen window during which
+       at least one kernel was resident. It is not SM occupancy: a kernel using
+       one of 68 SMs and one using all of them both read 100 %."
+    - "A launch target sets the window, not the scope. The figure is the whole
+       device's, shared with everything else that was using it."
 
 - id: gpu.freq
   family: gpu
   summary: "GPU clock frequency"
   unit: hz
   backends:
-    - {id: "fs:sys", requires: ["/sys/class/drm"], cost: free}
+    - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu"], cost: free}
+    - {id: "fs:sys:i915", requires: ["/sys/bus/pci/drivers/i915"], cost: free, equivalent: true}
     - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {system: native}
-  keys: [gpu]
+  targets: {system: native, launch: native}
+  keys: []
   filter_fields: [device]
   determinism: low
+  caveats:
+    - "The reported clock is the one the device is running at when it is asked,
+       and a GPU idles at a fraction of its boost clock. A frequency series says
+       what the device did, never what it was allowed to do."
+    - "A launch target sets the window, not the scope. The figure is the whole
+       device's, shared with everything else that was using it."
 
 - id: gpu.power
   family: gpu
-  summary: "GPU power draw"
+  summary: "GPU energy drawn over the run"
   unit: joules
   backends:
-    - {id: "fs:sys", requires: ["hwmon:amdgpu"], cost: free}
+    - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu", "hwmon:amdgpu"], cost: free,
+       degraded: "instantaneous draw sampled by the poller, not an energy counter: short spikes between two reads are invisible"}
     - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {system: native}
-  keys: [gpu]
+  targets: {system: native, launch: native}
+  keys: []
   filter_fields: [device]
   determinism: low
+  caveats:
+    - "Energy is read from the device's own counter, not integrated from sampled
+       power. Integrating a 100 ms poll across a workload that swings between 50
+       and 300 W is a number with no error bar."
+    - "The NVML energy counter needs Volta or later. Before that the driver
+       reports instantaneous draw only, and this source refuses rather than
+       presenting a sampled integral as energy."
+    - "A launch target sets the window, not the scope. The energy is the whole
+       device's, shared with everything else that was using it."
 
 - id: gpu.temp
   family: gpu
   summary: "GPU temperature"
   unit: celsius
   backends:
-    - {id: "fs:sys", requires: ["hwmon:amdgpu"], cost: free}
+    - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu", "hwmon:amdgpu"], cost: free}
     - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {system: native}
-  keys: [gpu]
+  targets: {system: native, launch: native}
+  keys: []
   filter_fields: [device]
   determinism: low
+  caveats:
+    - "Temperature is a confounder, not a result: a GPU at its thermal limit is
+       a different machine from the same GPU cold, and a run that crossed the
+       limit is not a slower run, it is another run."
+    - "A launch target sets the window, not the scope. The figure is the whole
+       device's, shared with everything else that was using it."
 
 - id: gpu.mem
   family: gpu
-  summary: "VRAM allocated and used"
+  summary: "VRAM held, by device or by process"
   unit: bytes
   backends:
-    - {id: "fs:sys", requires: ["/sys/class/drm/amdgpu"], cost: free}
+    - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu"], cost: free}
     - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {system: native, pid: native}
-  keys: [gpu, task]
-  filter_fields: [device]
+  targets: {system: native, pid: native, launch: native}
+  keys: [task]
+  filter_fields: [device, scope]
   determinism: medium
+  caveats:
+    - "With a process target the figure is that process's own VRAM, from the
+       driver's process list, and the device totals ride along as separate
+       attributes. The two are never mixed into one series."
+    - "VRAM held is not VRAM used. A CUDA context reserves an arena the way an
+       allocator does, and what the kernels touch inside it is invisible here."
+    - "A process that holds no VRAM reports zero rather than nothing: an absent
+       series and an empty one say different things about a run."
 
 - id: gpu.kernel
   family: gpu
@@ -113,6 +158,9 @@
   caveats:
     - "Vendor timestamps live in another clock domain: calibration is mandatory
        and ts_err_ns is non-zero."
+    - "CUPTI drops activity records under a launch-bound workload and reports
+       how many. An overhead measured on an incomplete trace describes a tracer
+       that gave up, so the drop count belongs beside the numbers."
 
 - id: gpu.api
   family: gpu
@@ -126,6 +174,10 @@
   keys: [gpu, task, req]
   filter_fields: [api, comm]
   determinism: low
+  caveats:
+    - "This is the host's view: how long the submitting thread spent inside the
+       call. An asynchronous launch returns long before the GPU runs anything,
+       so this is not GPU time and cannot be read as such."
 
 - id: gpu.counters
   family: gpu
@@ -143,3 +195,8 @@
   caveats:
     - "Does NOT measure time: kernel replay destroys the timeline. Its value is
        counter determinism, and it locks clocks by default."
+    - "Only the counters the workload dominates are reproducible. Instruction
+       counts repeat bit for bit; DRAM traffic on a compute-bound kernel moved
+       16 % run to run on the hardware this was measured on. A fixed list of
+       reproducible GPU counters is a property of the benchmark, not of the
+       device."

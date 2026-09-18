@@ -223,16 +223,22 @@ fn the_same_session_reads_from_yaml_json_and_toml() {
 
 #[test]
 fn the_shipped_examples_validate() {
-    for example in [
-        "examples/web-latency.yml",
-        "examples/saturation.toml",
-        "examples/rss-run.yml",
-        "examples/net-health.yml",
-        "examples/proc-handles.yml",
-    ] {
+    // The directory is walked rather than listed here: an example that ships
+    // broken because nobody added it to a list is exactly the kind of rot this
+    // test exists to prevent, and every family adds its own.
+    let mut checked = 0;
+    for entry in std::fs::read_dir("examples").expect("the examples directory ships") {
+        let path = entry.expect("readable directory entry").path();
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("yml" | "yaml" | "json" | "toml") => {}
+            _ => continue,
+        }
+        let example = path.to_str().expect("a printable path");
         let output = run(&["validate", "-f", example]);
         assert!(output.status.success(), "{example}: {}", stderr(&output));
+        checked += 1;
     }
+    assert!(checked >= 3, "only {checked} examples were validated");
 }
 
 #[test]
@@ -552,4 +558,116 @@ fn skipped(output: &Output) -> Option<String> {
     } else {
         None
     }
+}
+
+/// A filter the resolver could not push down has to actually run, and the
+/// events it removed have to be accounted for. A predicate that is parsed,
+/// validated, reported in the resolved file and then never applied is the
+/// worst shape a bug can take here: the numbers look like an answer to the
+/// question that was asked, and are an answer to a different one.
+#[test]
+fn a_filter_that_cannot_be_pushed_down_runs_after_reading_and_says_what_it_removed() {
+    const BIG: usize = 8 << 20;
+    // Five big allocations among a few hundred small ones: the filter has a
+    // known population to separate.
+    let program = format!(
+        "b = [bytearray({BIG}) for _ in range(5)]\n\
+         s = [bytearray(1024) for _ in range(300)]\n"
+    );
+    let output = run(&[
+        "mem.heap.alloc",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--filter",
+        &format!("bytes >= {BIG}"),
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &program,
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let run: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json results");
+    let result = &run["results"][0];
+    let events = result["outputs"][0]["events"]
+        .as_array()
+        .expect("raw emits events");
+
+    assert!(
+        events.len() >= 5,
+        "five allocations of {BIG} bytes were made, only {} came through",
+        events.len()
+    );
+    for event in events {
+        let bytes = event["attrs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|attr| attr["name"] == "bytes")
+            .and_then(|attr| attr["value"].as_f64())
+            .expect("an allocation carries its size");
+        assert!(bytes >= BIG as f64, "an event of {bytes} bytes got through");
+    }
+
+    let filtered = &result["filtered"];
+    assert_eq!(filtered["kept"].as_u64().unwrap(), events.len() as u64);
+    assert!(
+        filtered["dropped"].as_u64().unwrap() > 100,
+        "the three hundred small allocations should have been dropped: {filtered}"
+    );
+}
+
+/// A predicate over a field the collector never produces is false everywhere,
+/// which empties the series. That is a legitimate outcome and an easy one to
+/// misread, so the run says which field was never there.
+#[test]
+fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_series() {
+    let output = run(&[
+        "mem.rss",
+        "--pid",
+        &std::process::id().to_string(),
+        "--mode",
+        "poll@50ms",
+        "--duration",
+        "200ms",
+        "--emit",
+        "summary",
+        "--filter",
+        "comm == 'nothing-here'",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("kept 0 of"), "{text}");
+    assert!(
+        text.contains("no event carried `comm`"),
+        "an empty series must explain itself: {text}"
+    );
+}
+
+/// A source the catalog says can be system-wide, whose collector can only watch
+/// one process, has to say which of the two is missing. Watching one process
+/// and labelling the result "system" is the failure this refusal exists for.
+#[test]
+fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
+    let output = run(&[
+        "mem.faults",
+        "--system",
+        "--mode",
+        "sample@997hz",
+        "--emit",
+        "raw",
+        "--duration",
+        "200ms",
+    ]);
+    assert!(!output.status.success());
+    let complaint = stderr(&output);
+    assert!(complaint.contains("mem.faults"), "{complaint}");
+    assert!(
+        complaint.contains("per-cpu events") && complaint.contains("names no process"),
+        "the refusal should say what a system-wide sampler would need: {complaint}"
+    );
 }

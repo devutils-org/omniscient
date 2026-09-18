@@ -1,0 +1,37 @@
+# What the GPU is doing, for a bounded window.
+#
+#   omn -f examples/gpu-device-state.yml
+#
+# Three device figures over one window: the energy the board drew, the shader
+# clock it ran at, and the fraction of the time something was resident on it.
+# The target is the machine, because none of these three belongs to a process:
+# there is no per-process shader clock to report, and a GPU is shared with the
+# compositor, the browser and everything else holding a context.
+#
+# To measure a workload instead of a stretch of time, replace `system` with
+# `{launch: [./your-program]}`. The run then ends when the program does -- but
+# the numbers stay the device's, and every event says so in its `scope`
+# attribute. `gpu.mem` is the one source here that can say "this process",
+# because the driver keeps a per-process VRAM figure.
+name: gpu device state
+format: text
+duration: 3s
+
+requests:
+  - label: energy
+    source: gpu.power
+    target: system
+    mode: poll@200ms
+    emit: [timeline, summary]
+
+  - label: clock
+    source: gpu.freq
+    target: system
+    mode: poll@200ms
+    emit: [summary]
+
+  - label: busy
+    source: gpu.engine_busy
+    target: system
+    mode: poll@200ms
+    emit: [summary]

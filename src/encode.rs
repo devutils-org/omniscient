@@ -263,6 +263,31 @@ fn text(results: &Results) -> String {
         }
     }
 
+    // A filter that ran here is part of how the numbers came to be: the events
+    // it removed were collected and paid for, and every series below is what
+    // was left.
+    if let Some(filtered) = &results.filtered {
+        let _ = writeln!(
+            out,
+            "  filter `{}` kept {} of {} events, evaluated after reading",
+            filtered.predicate,
+            filtered.kept,
+            filtered.kept + filtered.dropped
+        );
+        if !filtered.unseen_fields.is_empty() {
+            let _ = writeln!(
+                out,
+                "    no event carried {}, so that part of the predicate was never true",
+                filtered
+                    .unseen_fields
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     for degradation in &results.degradations {
         let _ = writeln!(out, "  degraded: {degradation}");
     }
@@ -469,6 +494,7 @@ mod tests {
             observed_ns: 1_000_000_000,
             stopped_because: "the requested duration elapsed".into(),
             losses: Losses::default(),
+            filtered: None,
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
         }
@@ -519,6 +545,43 @@ mod tests {
         let encoded = results(OutputFormat::Json, &sample()).unwrap();
         let decoded: Results = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, sample());
+    }
+
+    /// What a filter removed is part of how the numbers came to be, so the
+    /// text output carries it beside the losses rather than leaving a reader to
+    /// wonder why a poll that ran for a second produced three events.
+    #[test]
+    fn the_text_output_says_what_the_filter_removed() {
+        let mut sample = sample();
+        sample.filtered = Some(crate::collect::Filtered {
+            predicate: "bytes >= 8388608".into(),
+            kept: 5,
+            dropped: 307,
+            unseen_fields: Vec::new(),
+        });
+        let text = results(OutputFormat::Text, &sample).unwrap();
+        assert!(text.contains("kept 5 of 312 events"), "{text}");
+        assert!(text.contains("bytes >= 8388608"), "{text}");
+    }
+
+    /// The case that empties a series: a predicate over a field the collector
+    /// never produces. The output names the field, because an empty series and
+    /// a workload that did nothing look identical otherwise.
+    #[test]
+    fn the_text_output_names_a_field_no_event_carried() {
+        let mut sample = sample();
+        sample.filtered = Some(crate::collect::Filtered {
+            predicate: "comm == 'sleep'".into(),
+            kept: 0,
+            dropped: 5,
+            unseen_fields: vec!["comm".into()],
+        });
+        let text = results(OutputFormat::Text, &sample).unwrap();
+        assert!(text.contains("kept 0 of 5 events"), "{text}");
+        assert!(
+            text.contains("no event carried `comm`"),
+            "an empty series must explain itself: {text}"
+        );
     }
 
     fn correlated_run() -> RunOutput {
