@@ -259,6 +259,18 @@ mod tests {
         }
     }
 
+    /// The perf event follows a task. A target that names none is refused with
+    /// the reason and the target's own name, rather than being served a
+    /// machine-wide number that would read as this process's.
+    #[test]
+    fn a_target_without_a_process_is_refused_by_name() {
+        let Err(error) = Box::new(Prepare(Mode::Trace)).attach(&Target::System) else {
+            panic!("a system target names no process for a per-task event");
+        };
+        assert!(error.contains("system"), "{error}");
+        assert!(error.contains("names no process"), "{error}");
+    }
+
     #[test]
     fn counting_mode_is_refused_with_what_would_make_it_work() {
         let error = SwitchCollector::new(0, Mode::Count).start().unwrap_err();

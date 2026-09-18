@@ -175,7 +175,12 @@ fn instructions(
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
 
-    Ok(program.build())
+    let instructions = program.build();
+    // Checked before the kernel sees it: a structural mistake here comes back
+    // from the verifier as a register dump, and this is a program nobody
+    // compiled, so nothing else would have caught it.
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
 }
 
 /// A loaded, attached wakeup program and the two maps it writes.
@@ -297,6 +302,113 @@ mod tests {
         bytes[32..36].copy_from_slice(b"true");
         let wakeup = Wakeup::from_bytes(&bytes).expect("a full record");
         assert_eq!(wakeup.wakee_comm(), "true");
+    }
+
+    /// Every helper the program calls, in the order it calls them.
+    fn helpers_called(instructions: &[Insn]) -> Vec<i32> {
+        instructions
+            .iter()
+            .filter(|insn| insn.code == 0x85)
+            .map(|insn| insn.imm)
+            .collect()
+    }
+
+    /// Invariant 6, checked in the instruction stream rather than trusted.
+    ///
+    /// `bpf_ktime_get_boot_ns` includes suspend time. A program that called it
+    /// would produce timestamps in a different domain from every other
+    /// collector, every join across them would be wrong, and nothing anywhere
+    /// would report an error -- which is exactly why this is asserted against
+    /// the built program and not left to a reviewer noticing the helper number.
+    #[test]
+    fn the_program_reads_the_monotonic_clock_and_no_other() {
+        let Ok(btf) = Btf::from_kernel() else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        let program = instructions(&btf, Some(1), 3, 4).expect("a program");
+        let called = helpers_called(&program);
+        assert!(
+            called.contains(&helper::KTIME_GET_NS),
+            "the program must timestamp its records"
+        );
+        const KTIME_GET_BOOT_NS: i32 = 125;
+        assert!(
+            !called.contains(&KTIME_GET_BOOT_NS),
+            "boot time includes suspend, and mixing clock domains breaks every join silently"
+        );
+    }
+
+    /// The program calls these and nothing else. A helper appearing here that
+    /// nobody intended is either dead weight on a path that runs tens of
+    /// thousands of times a second, or a fact being read that the record does
+    /// not carry.
+    #[test]
+    fn the_program_calls_only_the_helpers_it_needs() {
+        let Ok(btf) = Btf::from_kernel() else { return };
+        let program = instructions(&btf, Some(1), 3, 4).expect("a program");
+        let called = helpers_called(&program);
+        let expected = [
+            helper::KTIME_GET_NS,
+            helper::GET_CURRENT_PID_TGID,
+            helper::GET_SMP_PROCESSOR_ID,
+            helper::PROBE_READ_KERNEL,
+            helper::RINGBUF_OUTPUT,
+            helper::MAP_LOOKUP_ELEM,
+        ];
+        for helper in &called {
+            assert!(
+                expected.contains(helper),
+                "the program calls helper {helper}, which it was never meant to"
+            );
+        }
+        assert_eq!(
+            called
+                .iter()
+                .filter(|id| **id == helper::PROBE_READ_KERNEL)
+                .count(),
+            3,
+            "one read per field taken out of the task: tid, pid and comm"
+        );
+    }
+
+    /// The machine-wide program keeps every wakeup on the machine, so it must
+    /// carry no comparison against a process -- and the filtered one must carry
+    /// two, because a wakeup counts at either end.
+    #[test]
+    fn the_filter_is_present_only_when_a_process_was_named() {
+        let Ok(btf) = Btf::from_kernel() else { return };
+        let machine_wide = instructions(&btf, None, 3, 4).expect("a program");
+        assert!(
+            !machine_wide.iter().any(|insn| insn.imm == 4242),
+            "a machine-wide program compares against no process"
+        );
+        let filtered = instructions(&btf, Some(4242), 3, 4).expect("a program");
+        assert_eq!(
+            filtered.iter().filter(|insn| insn.imm == 4242).count(),
+            2,
+            "a wakeup is kept when either end belongs to the target"
+        );
+    }
+
+    /// The size handed to `bpf_ringbuf_output` is the size of the record the
+    /// rest of the program wrote. A smaller one publishes a truncated record
+    /// and a larger one publishes whatever is on the stack behind it.
+    #[test]
+    fn the_published_record_is_exactly_the_size_of_the_struct() {
+        let Ok(btf) = Btf::from_kernel() else { return };
+        let program = instructions(&btf, None, 3, 4).expect("a program");
+        let output_at = program
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
+            .expect("the program publishes its record");
+        // r3 is the length argument, set just before the call.
+        let length = program[..output_at]
+            .iter()
+            .rev()
+            .find(|insn| insn.regs & 0xf == 3 && insn.code == 0xb7)
+            .expect("a length is moved into r3");
+        assert_eq!(length.imm as usize, std::mem::size_of::<Wakeup>());
     }
 
     /// The program is built without any privilege, so this checks the shape

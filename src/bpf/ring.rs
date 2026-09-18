@@ -275,6 +275,31 @@ mod tests {
         assert_eq!(seen[0], payload.to_vec());
     }
 
+    /// A header claiming more payload than the mapping holds cannot come from
+    /// a ring the kernel produced, so it means something is being read at the
+    /// wrong offset. The walk stops without advancing, which loses nothing and
+    /// hands out nothing, rather than slicing memory past the end.
+    #[test]
+    fn a_record_longer_than_the_mapping_stops_the_walk() {
+        let mut data = vec![0u8; 64];
+        data[0..4].copy_from_slice(&999u32.to_ne_bytes());
+        let mirrored = [data.clone(), data].concat();
+        let mut seen = 0;
+        let (position, records) = walk(&mirrored, 63, 0, 64, &mut |_| seen += 1);
+        assert_eq!((records, seen), (0, 0));
+        assert_eq!(position, 0, "nothing was consumed, so nothing is skipped");
+    }
+
+    /// An empty ring is the common case on a quiet tick: no records, and the
+    /// consumer position stays exactly where it was.
+    #[test]
+    fn an_empty_ring_consumes_nothing() {
+        let (data, published) = ring_of(64, &[]);
+        assert_eq!(published, 0);
+        let (position, records) = walk(&data, 63, 0, published, &mut |_| unreachable!());
+        assert_eq!((position, records), (0, 0));
+    }
+
     #[test]
     fn a_ring_size_is_rounded_to_what_the_kernel_accepts() {
         let page = page_size();
