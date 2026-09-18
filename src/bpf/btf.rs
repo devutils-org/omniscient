@@ -43,6 +43,10 @@ struct TypeEntry {
 }
 
 /// The kernel's BTF, indexed by type name.
+///
+/// `Debug` prints its size rather than its contents: the blob is several
+/// megabytes, and a test that unwraps a `Result<Btf, _>` would otherwise print
+/// all of it.
 pub struct Btf {
     buffer: Vec<u8>,
     string_offset: usize,
@@ -196,6 +200,15 @@ impl Btf {
     }
 }
 
+impl std::fmt::Debug for Btf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Btf")
+            .field("types", &(self.types.len() - 1))
+            .field("bytes", &self.buffer.len())
+            .finish()
+    }
+}
+
 /// Reads a NUL-terminated name out of the string section.
 fn read_string(buffer: &[u8], at: usize) -> Option<String> {
     let rest = buffer.get(at..)?;
@@ -206,6 +219,148 @@ fn read_string(buffer: &[u8], at: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a BTF blob by hand, so the parser can be tested against input
+    /// this machine's kernel does not happen to produce -- a bitfield, a
+    /// truncated header, the wrong magic. Reading only the live kernel tests
+    /// one layout and no error path.
+    struct BtfBuilder {
+        types: Vec<u8>,
+        strings: Vec<u8>,
+    }
+
+    impl BtfBuilder {
+        fn new() -> Self {
+            // Offset zero is the empty string, by definition.
+            Self {
+                types: Vec::new(),
+                strings: vec![0],
+            }
+        }
+
+        fn string(&mut self, text: &str) -> u32 {
+            let at = self.strings.len() as u32;
+            self.strings.extend_from_slice(text.as_bytes());
+            self.strings.push(0);
+            at
+        }
+
+        /// A struct with `members` of `(name, bit offset)`, `bitfields` set
+        /// when the kind flag is on and the offsets carry a width in their top
+        /// eight bits.
+        fn structure(&mut self, name: &str, members: &[(&str, u32)], bitfields: bool) -> &mut Self {
+            let name_off = self.string(name);
+            let mut info = (4u32 << 24) | members.len() as u32;
+            if bitfields {
+                info |= 1 << 31;
+            }
+            self.types.extend_from_slice(&name_off.to_ne_bytes());
+            self.types.extend_from_slice(&info.to_ne_bytes());
+            self.types.extend_from_slice(&8u32.to_ne_bytes());
+            for (member, offset) in members {
+                let member_off = self.string(member);
+                self.types.extend_from_slice(&member_off.to_ne_bytes());
+                self.types.extend_from_slice(&0u32.to_ne_bytes());
+                self.types.extend_from_slice(&offset.to_ne_bytes());
+            }
+            self
+        }
+
+        /// A type of a kind this parser skips over rather than indexes, to
+        /// check that it walks past the right number of bytes.
+        fn integer(&mut self, name: &str) -> &mut Self {
+            let name_off = self.string(name);
+            self.types.extend_from_slice(&name_off.to_ne_bytes());
+            self.types
+                .extend_from_slice(&((1u32 << 24) | 0).to_ne_bytes());
+            self.types.extend_from_slice(&4u32.to_ne_bytes());
+            self.types.extend_from_slice(&0u32.to_ne_bytes());
+            self
+        }
+
+        fn build(&self) -> Vec<u8> {
+            let mut blob = Vec::new();
+            blob.extend_from_slice(&BTF_MAGIC.to_ne_bytes());
+            blob.push(1); // version
+            blob.push(0); // flags
+            blob.extend_from_slice(&24u32.to_ne_bytes()); // header length
+            blob.extend_from_slice(&0u32.to_ne_bytes()); // type section offset
+            blob.extend_from_slice(&(self.types.len() as u32).to_ne_bytes());
+            blob.extend_from_slice(&(self.types.len() as u32).to_ne_bytes()); // strings after
+            blob.extend_from_slice(&(self.strings.len() as u32).to_ne_bytes());
+            blob.extend_from_slice(&self.types);
+            blob.extend_from_slice(&self.strings);
+            blob
+        }
+    }
+
+    #[test]
+    fn a_member_offset_is_read_in_bytes_from_a_bit_offset() {
+        let blob = BtfBuilder::new()
+            .structure("task_like", &[("pid", 0), ("comm", 32)], false)
+            .build();
+        let btf = Btf::parse(blob).expect("a well-formed blob");
+        assert_eq!(btf.member_offset("task_like", "pid"), Ok(0));
+        assert_eq!(btf.member_offset("task_like", "comm"), Ok(4));
+    }
+
+    /// A type this parser does not index still has to be stepped over by
+    /// exactly its own length, or every type after it is read from the middle
+    /// of the previous one.
+    #[test]
+    fn a_kind_with_trailing_data_is_walked_past_correctly() {
+        let blob = BtfBuilder::new()
+            .integer("int")
+            .structure("after_the_int", &[("field", 64)], false)
+            .build();
+        let btf = Btf::parse(blob).expect("a well-formed blob");
+        assert!(btf.has_type("after_the_int"), "the walk lost its place");
+        assert_eq!(btf.member_offset("after_the_int", "field"), Ok(8));
+    }
+
+    /// With the kind flag set, the top byte of a member's offset is a bitfield
+    /// width and only the low 24 bits are the offset. Reading the whole word
+    /// would put the field megabytes into the structure.
+    #[test]
+    fn a_bitfield_width_is_not_mistaken_for_part_of_the_offset() {
+        let width_and_offset = (3u32 << 24) | 64;
+        let blob = BtfBuilder::new()
+            .structure("flags_like", &[("packed", width_and_offset)], true)
+            .build();
+        let btf = Btf::parse(blob).expect("a well-formed blob");
+        assert_eq!(btf.member_offset("flags_like", "packed"), Ok(8));
+    }
+
+    /// A field that does not start on a byte cannot be addressed by a load, and
+    /// the answer is to say so rather than to round to the nearest byte and
+    /// read a neighbouring field.
+    #[test]
+    fn a_field_that_starts_mid_byte_is_refused_rather_than_rounded() {
+        let blob = BtfBuilder::new()
+            .structure("flags_like", &[("third_bit", (1u32 << 24) | 3)], true)
+            .build();
+        let btf = Btf::parse(blob).expect("a well-formed blob");
+        let error = btf.member_offset("flags_like", "third_bit").unwrap_err();
+        assert!(error.contains("bitfield at bit 3"), "{error}");
+    }
+
+    #[test]
+    fn a_blob_that_is_not_btf_is_refused_by_its_magic() {
+        let error = Btf::parse(vec![0xff; 64]).unwrap_err();
+        assert!(error.contains("BTF magic"), "{error}");
+    }
+
+    #[test]
+    fn a_truncated_blob_is_refused_rather_than_read_past_its_end() {
+        assert!(Btf::parse(vec![0u8; 8]).unwrap_err().contains("too short"));
+
+        let mut blob = BtfBuilder::new()
+            .structure("task_like", &[("pid", 0)], false)
+            .build();
+        blob.truncate(30);
+        let error = Btf::parse(blob).unwrap_err();
+        assert!(error.contains("past the end"), "{error}");
+    }
 
     fn kernel_btf() -> Option<Btf> {
         match Btf::from_kernel() {

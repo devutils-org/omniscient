@@ -310,6 +310,91 @@ mod tests {
         assert_eq!(parse_cpu_list(""), None);
     }
 
+    /// Every field of every attribute, against the offsets in
+    /// `include/uapi/linux/bpf.h`.
+    ///
+    /// The kernel reads these structs by offset and checks that everything past
+    /// the size passed in is zero. A field one slot out of place is not a crash
+    /// and not an error: it is a map created with the wrong value size, or a
+    /// program loaded with a log buffer where its license should be. This is
+    /// the one thing in this layer that cannot be caught by reading the code.
+    #[test]
+    fn the_attribute_structs_match_the_kernels_layout() {
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(offset_of!(MapCreateAttr, map_type), 0);
+        assert_eq!(offset_of!(MapCreateAttr, key_size), 4);
+        assert_eq!(offset_of!(MapCreateAttr, value_size), 8);
+        assert_eq!(offset_of!(MapCreateAttr, max_entries), 12);
+        assert_eq!(offset_of!(MapCreateAttr, map_flags), 16);
+        assert_eq!(offset_of!(MapCreateAttr, numa_node), 24);
+        assert_eq!(offset_of!(MapCreateAttr, map_name), 28);
+        assert_eq!(offset_of!(MapCreateAttr, map_ifindex), 44);
+        assert_eq!(offset_of!(MapCreateAttr, map_extra), 64);
+        assert_eq!(size_of::<MapCreateAttr>(), 72);
+
+        assert_eq!(offset_of!(ProgLoadAttr, prog_type), 0);
+        assert_eq!(offset_of!(ProgLoadAttr, insn_cnt), 4);
+        assert_eq!(offset_of!(ProgLoadAttr, insns), 8);
+        assert_eq!(offset_of!(ProgLoadAttr, license), 16);
+        assert_eq!(offset_of!(ProgLoadAttr, log_level), 24);
+        assert_eq!(offset_of!(ProgLoadAttr, log_size), 28);
+        assert_eq!(offset_of!(ProgLoadAttr, log_buf), 32);
+        assert_eq!(offset_of!(ProgLoadAttr, kern_version), 40);
+        assert_eq!(offset_of!(ProgLoadAttr, prog_flags), 44);
+        assert_eq!(offset_of!(ProgLoadAttr, prog_name), 48);
+        assert_eq!(offset_of!(ProgLoadAttr, expected_attach_type), 68);
+        assert_eq!(size_of::<ProgLoadAttr>(), 72);
+
+        assert_eq!(offset_of!(RawTracepointOpenAttr, name), 0);
+        assert_eq!(offset_of!(RawTracepointOpenAttr, prog_fd), 8);
+        assert_eq!(size_of::<RawTracepointOpenAttr>(), 16);
+
+        assert_eq!(offset_of!(MapElemAttr, map_fd), 0);
+        assert_eq!(offset_of!(MapElemAttr, key), 8);
+        assert_eq!(offset_of!(MapElemAttr, value), 16);
+        assert_eq!(offset_of!(MapElemAttr, flags), 24);
+        assert_eq!(size_of::<MapElemAttr>(), 32);
+    }
+
+    /// A zeroed attribute is what the kernel requires of every field the caller
+    /// does not set, and `Default` is what produces one here.
+    #[test]
+    fn an_attribute_starts_out_entirely_zero() {
+        let attr = ProgLoadAttr::default();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &attr as *const _ as *const u8,
+                std::mem::size_of::<ProgLoadAttr>(),
+            )
+        };
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    /// The load is refused without the capabilities on a normal machine, which
+    /// is itself worth asserting: what must never happen is a load that fails
+    /// and is reported as anything other than what the kernel said.
+    #[test]
+    fn a_refused_load_carries_the_kernels_own_error() {
+        let program = [
+            crate::bpf::insn::Insn::mov64_imm(0, 0),
+            crate::bpf::insn::Insn::exit(),
+        ];
+        match prog_load(BPF_PROG_TYPE_RAW_TRACEPOINT, &program, "omn_test", "GPL") {
+            Ok(_) => eprintln!("this machine grants CAP_BPF: the smallest program loaded"),
+            Err(error) => {
+                assert!(
+                    error.error.raw_os_error().is_some(),
+                    "a refusal must carry an errno, not a message invented here"
+                );
+                assert!(
+                    error.is_permission() || !error.verifier_log.is_empty(),
+                    "a refusal that is not about privileges must carry the verifier's reason: {error}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_kernel_name_keeps_room_for_the_terminator() {
         let name = kernel_name("omn_wakeup_far_too_long");

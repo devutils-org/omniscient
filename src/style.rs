@@ -65,6 +65,31 @@ mod tests {
         assert_eq!(Style::never().present("yes"), "yes");
     }
 
+    /// `--color` is parsed the way every other option of this tool is parsed:
+    /// the spelling that comes back out is the spelling that goes in, and an
+    /// unknown value says what the choices are instead of falling back to one.
+    #[test]
+    fn a_colour_choice_round_trips_through_its_own_spelling() {
+        for choice in ColorChoice::ALL {
+            assert_eq!(choice.to_string().parse(), Ok(choice));
+        }
+    }
+
+    #[test]
+    fn an_unknown_colour_choice_names_the_ones_that_exist() {
+        let error = "sometimes".parse::<ColorChoice>().unwrap_err().to_string();
+        assert!(error.contains("auto, always or never"), "{error}");
+    }
+
+    /// `never` is not the same as "no terminal": it must hold even where a
+    /// terminal is present, because it is the reader's own instruction.
+    #[test]
+    fn never_and_always_do_not_consult_the_terminal() {
+        assert_eq!(ColorChoice::Never.style(), Style::never());
+        assert_eq!(ColorChoice::Always.style(), Style::always());
+        assert_ne!(Style::always(), Style::never());
+    }
+
     #[test]
     fn a_painted_string_still_contains_its_text() {
         let style = Style::always();

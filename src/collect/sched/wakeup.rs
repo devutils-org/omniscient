@@ -179,6 +179,50 @@ impl Collector for WakeupCollector {
 mod tests {
     use super::*;
 
+    /// A refusal is the answer for a mode that cannot mean anything here, and
+    /// it has to say why: sampling one wakeup in a hundred would attribute a
+    /// block to whichever waker happened to be caught, which reads as a result.
+    #[test]
+    fn a_sampled_mode_is_refused_with_the_reason() {
+        let prepared = Box::new(Prepare(Mode::Sample {
+            freq: "997hz".parse().expect("a frequency"),
+        }));
+        let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
+            panic!("a sampled mode must be refused");
+        };
+        assert!(error.contains("cannot observe wakeups"), "{error}");
+    }
+
+    /// A target that names no process and is not the machine cannot be
+    /// filtered on, and saying which target it was is what tells the reader
+    /// what to pass instead.
+    #[test]
+    fn a_target_without_a_process_is_refused_by_name() {
+        let prepared = Box::new(Prepare(Mode::Trace));
+        let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
+            panic!("an interface names no process to filter on");
+        };
+        assert!(error.contains("iface"), "{error}");
+        assert!(error.contains("--system"), "{error}");
+    }
+
+    /// The machine-wide target is not a missing filter, it is the absence of
+    /// one, and the collector must carry that distinction into the program it
+    /// builds.
+    #[test]
+    fn the_machine_target_filters_on_nothing_and_a_pid_target_filters_on_it() {
+        let collector = Box::new(Prepare(Mode::Trace))
+            .attach(&Target::System)
+            .expect("a machine-wide collector");
+        assert_eq!(collector.id().as_str(), "sched.wakeup/bpf:raw_tp");
+
+        let prepared = Box::new(Prepare(Mode::Trace));
+        let collector = prepared
+            .attach(&Target::Pid(vec![4242]))
+            .expect("a per-process collector");
+        assert_eq!(collector.id().as_str(), "sched.wakeup/bpf:raw_tp");
+    }
+
     /// Whether this machine lets the tests load a program at all. Without the
     /// capabilities there is nothing to test here, and saying so beats a test
     /// that passes because it did nothing.

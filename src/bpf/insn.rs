@@ -28,6 +28,9 @@ const BPF_LDX: u8 = 0x01;
 const BPF_ST: u8 = 0x02;
 const BPF_STX: u8 = 0x03;
 const BPF_JMP: u8 = 0x05;
+/// The 32-bit comparison class. Nothing here emits one yet; the audit knows it
+/// because a jump of either class has to land inside the program.
+const BPF_JMP32: u8 = 0x06;
 const BPF_ALU64: u8 = 0x07;
 
 /// Operand widths.
@@ -151,6 +154,101 @@ impl Insn {
     }
 }
 
+/// Checks a program for the structural mistakes the verifier would reject, but
+/// would reject in its own language.
+///
+/// The kernel's answer to a jump past the end of a program is a register dump
+/// and an instruction index; the answer to a half-written 64-bit load is
+/// "invalid bpf_ld_imm64 insn". Neither tells the person who wrote the program
+/// what to change, and unlike a compiled program there is no compiler in
+/// between to have caught it. So the same checks run here first, in words, and
+/// cost a few microseconds once per load.
+///
+/// This is not a verifier. It knows nothing about types, about what a helper
+/// expects, or about whether a pointer is where the program thinks it is --
+/// only the kernel can say that, and it still does.
+pub fn audit(instructions: &[Insn]) -> Result<(), String> {
+    if instructions.is_empty() {
+        return Err("a program with no instructions".to_owned());
+    }
+    if instructions.last().map(|insn| insn.code) != Some(BPF_JMP | BPF_EXIT) {
+        return Err("the last instruction is not `exit`".to_owned());
+    }
+
+    let mut index = 0;
+    while index < instructions.len() {
+        let insn = instructions[index];
+        let (dst, src) = (insn.regs & 0xf, insn.regs >> 4);
+
+        // A 64-bit immediate load occupies two slots, and the second is not an
+        // instruction: it carries the high half and must be otherwise empty.
+        if insn.code == (BPF_LD | BPF_DW | BPF_IMM) {
+            match instructions.get(index + 1) {
+                None => {
+                    return Err(format!(
+                        "instruction {index} loads a 64-bit immediate but is the last one; it                          needs a second slot"
+                    ))
+                }
+                Some(second) if second.code != 0 => {
+                    return Err(format!(
+                        "instruction {index} loads a 64-bit immediate and the slot after it is                          an instruction ({:#04x}), not the value's high half",
+                        second.code
+                    ))
+                }
+                Some(_) => {}
+            }
+            index += 2;
+            continue;
+        }
+
+        if dst > 10 || src > 10 {
+            return Err(format!(
+                "instruction {index} names register r{} or r{}, and there are only r0 to r10",
+                dst.max(src),
+                dst.min(src)
+            ));
+        }
+
+        let class = insn.code & 0x07;
+        let operation = insn.code & 0xf0;
+        if (class == BPF_JMP || class == BPF_JMP32)
+            && operation != BPF_CALL
+            && operation != BPF_EXIT
+        {
+            let target = index as i64 + 1 + insn.off as i64;
+            if target < 0 || target >= instructions.len() as i64 {
+                return Err(format!(
+                    "the jump at instruction {index} lands at {target}, outside a program of {}                      instructions",
+                    instructions.len()
+                ));
+            }
+        }
+
+        if class == BPF_JMP && operation == BPF_CALL && insn.imm <= 0 {
+            return Err(format!(
+                "instruction {index} calls helper {}, and helper numbers start at 1",
+                insn.imm
+            ));
+        }
+
+        // The stack is 512 bytes below the frame pointer and nothing else.
+        let base = match class {
+            BPF_LDX => Some(src),
+            BPF_STX | BPF_ST => Some(dst),
+            _ => None,
+        };
+        if base == Some(10) && !(-512..0).contains(&insn.off) {
+            return Err(format!(
+                "instruction {index} touches the stack at {} bytes from the frame pointer, and                  the stack is the 512 bytes below it",
+                insn.off
+            ));
+        }
+
+        index += 1;
+    }
+    Ok(())
+}
+
 /// Instructions being assembled, with the jump bookkeeping that makes a
 /// hand-written program survive an edit.
 ///
@@ -263,5 +361,77 @@ mod tests {
     #[test]
     fn an_instruction_is_eight_bytes() {
         assert_eq!(std::mem::size_of::<Insn>(), 8);
+    }
+
+    /// The audit exists because these mistakes are silent until the kernel
+    /// rejects them in its own language, and there is no compiler in between.
+    /// Each case below is a program that would come back as a register dump.
+    #[test]
+    fn a_jump_past_the_end_is_caught_before_the_kernel_sees_it() {
+        let program = vec![Insn::jeq_imm(1, 0, 40), Insn::exit()];
+        let error = audit(&program).unwrap_err();
+        assert!(error.contains("outside a program of 2"), "{error}");
+    }
+
+    #[test]
+    fn a_backward_jump_before_the_first_instruction_is_caught_too() {
+        let program = vec![Insn::mov64_imm(0, 0), Insn::jeq_imm(0, 0, -5), Insn::exit()];
+        let error = audit(&program).unwrap_err();
+        assert!(error.contains("lands at -3"), "{error}");
+    }
+
+    #[test]
+    fn a_half_written_sixty_four_bit_load_is_caught() {
+        let mut program = vec![];
+        program.extend(Insn::load_map_fd(1, 3));
+        program.push(Insn::exit());
+        assert!(audit(&program).is_ok(), "the well-formed pair is accepted");
+
+        // The same load with an instruction where its high half should be.
+        let broken = vec![
+            Insn::load_map_fd(1, 3)[0],
+            Insn::mov64_imm(2, 0),
+            Insn::exit(),
+        ];
+        let error = audit(&broken).unwrap_err();
+        assert!(error.contains("high half"), "{error}");
+
+        let truncated = vec![Insn::load_map_fd(1, 3)[0]];
+        assert!(audit(&truncated).is_err());
+    }
+
+    #[test]
+    fn a_register_that_does_not_exist_is_caught() {
+        let program = vec![Insn::mov64_reg(11, 1), Insn::exit()];
+        let error = audit(&program).unwrap_err();
+        assert!(error.contains("r11"), "{error}");
+    }
+
+    /// The stack is the 512 bytes below the frame pointer. A positive offset
+    /// reads the caller's frame, which the verifier refuses and which would be
+    /// a real bug if it did not.
+    #[test]
+    fn a_stack_access_outside_the_frame_is_caught() {
+        for offset in [8, -600] {
+            let program = vec![Insn::stx(BPF_DW, R10, offset, 1), Insn::exit()];
+            let error = audit(&program).unwrap_err();
+            assert!(error.contains("frame pointer"), "{offset}: {error}");
+        }
+        assert!(audit(&[Insn::stx(BPF_DW, R10, -8, 1), Insn::exit()]).is_ok());
+    }
+
+    #[test]
+    fn a_program_that_does_not_end_in_exit_is_caught() {
+        let error = audit(&[Insn::mov64_imm(0, 0)]).unwrap_err();
+        assert!(error.contains("not `exit`"), "{error}");
+        assert!(audit(&[]).is_err(), "and neither is an empty one a program");
+    }
+
+    /// A call whose helper number was never filled in reads as `call 0`, which
+    /// the kernel reports as an invalid function.
+    #[test]
+    fn a_call_to_no_helper_is_caught() {
+        let error = audit(&[Insn::call(0), Insn::exit()]).unwrap_err();
+        assert!(error.contains("helper numbers start at 1"), "{error}");
     }
 }

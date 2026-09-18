@@ -566,6 +566,76 @@ mod tests {
         assert!(line_of("mem.pss").contains("none"));
     }
 
+    /// The column is derived from the registry, and the table is written by
+    /// hand around it. This checks every source in the catalog rather than the
+    /// two the other tests happen to name: a source whose column says `none`
+    /// while a collector exists for it is a build that understates itself, and
+    /// the reverse is a build that claims a measurement it cannot take.
+    #[test]
+    fn the_collector_column_says_exactly_what_the_registry_holds() {
+        let catalog = catalog();
+        let text = list(&catalog, None, &capabilities(), Style::never());
+        let coverage = crate::collect::coverage();
+        for entry in catalog.entries() {
+            let line = text
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some(entry.id.as_str()))
+                .unwrap_or_else(|| panic!("{} is missing from the listing", entry.id));
+            let expected = match coverage.get(entry.id.as_str()) {
+                None => "none".to_owned(),
+                Some(written) if written.len() == entry.backends.len() => "all".to_owned(),
+                Some(written) => format!("{} of {}", written.len(), entry.backends.len()),
+            };
+            assert!(
+                line.contains(&expected),
+                "{} should read `{expected}`: {line}",
+                entry.id
+            );
+            for backend in coverage.get(entry.id.as_str()).into_iter().flatten() {
+                assert!(
+                    entry.backend(backend).is_some(),
+                    "a collector is registered for `{}` on backend `{backend}`, which that \
+                     source's chain does not contain",
+                    entry.id
+                );
+            }
+        }
+    }
+
+    /// The detail view marks each backend of a chain, which is finer than the
+    /// table can be: `mem.faults` has a collector on one backend and none on
+    /// the other, and "1 of 2" does not say which.
+    #[test]
+    fn the_detail_view_marks_the_backend_that_is_written() {
+        let catalog = catalog();
+        let entry = catalog
+            .get(&"mem.faults".parse().unwrap())
+            .expect("mem.faults");
+        let text = self::entry(entry, &capabilities(), Style::never());
+        let line_of = |backend: &str| {
+            text.lines()
+                .find(|line| line.contains(backend) && line.contains("cost"))
+                .unwrap_or_else(|| panic!("{backend} should be listed"))
+                .to_owned()
+        };
+        assert!(line_of("pmu:sw").contains("collector written"), "{text}");
+        assert!(line_of("bpf:tp").contains("no collector yet"), "{text}");
+    }
+
+    /// Under `cargo test` stdout is captured, so `auto` must decide there is no
+    /// terminal. This is the path every piped run takes, and the one that would
+    /// otherwise put escape sequences into a file nobody wanted them in.
+    #[test]
+    fn auto_paints_nothing_when_stdout_is_not_a_terminal() {
+        let text = list(
+            &catalog(),
+            Some("mem"),
+            &capabilities(),
+            Style::for_stdout(),
+        );
+        assert!(!text.contains('\x1b'), "auto coloured a captured stdout");
+    }
+
     /// Removes every escape sequence, which is what a pipe or a file sees.
     fn strip_escapes(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
