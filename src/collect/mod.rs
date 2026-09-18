@@ -85,6 +85,13 @@ pub struct Collection {
     pub observed_ns: u64,
     /// Why the run stopped.
     pub stopped_because: String,
+    /// What this collector had to give up, discovered while running rather than
+    /// while resolving: a counter the machine would only open for user mode, a
+    /// group the hardware had to time-share. The resolver cannot know these
+    /// until the event is opened, and they change what the number means, so
+    /// they travel with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Everything that did not make it into `events`.
@@ -160,6 +167,12 @@ pub trait Collector {
     /// What the collector itself knows it lost.
     fn losses(&self) -> Losses {
         Losses::default()
+    }
+
+    /// What the collector had to give up to produce these numbers. Empty is the
+    /// normal case; anything here reaches the user-visible output.
+    fn notes(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -460,6 +473,7 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
                 events: collected,
                 losses: std::mem::take(&mut losses[index]),
                 stopped_because: stopped_because.clone(),
+                notes: collector.notes(),
             }
         })
         .collect())

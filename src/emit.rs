@@ -38,6 +38,10 @@ pub struct Results {
     /// resolver so they are visible next to the numbers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified: Vec<String>,
+    /// What this measurement gave up. Two sources feed it: the resolver, which
+    /// knows what a fallback backend costs before anything is attached, and the
+    /// collector, which only learns at open time that the machine would not
+    /// count kernel mode or that the hardware had to time-share the counters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degradations: Vec<String>,
 }
@@ -135,6 +139,11 @@ pub fn aggregate(
         .map(|event| event.ts_ns)
         .unwrap_or(0);
 
+    // What the resolver knew, plus what the collectors found out once they were
+    // attached. Both are degradations of the same measurement.
+    let mut degradations = resolved.degradations.clone();
+    degradations.extend(collection.notes.iter().cloned());
+
     let mut outputs = Vec::new();
     for emit in &request.emit {
         outputs.push(match emit {
@@ -172,7 +181,7 @@ pub fn aggregate(
         stopped_because: collection.stopped_because,
         losses: collection.losses,
         unverified: resolved.unverified.clone(),
-        degradations: resolved.degradations.clone(),
+        degradations,
     })
 }
 

@@ -6,6 +6,14 @@
 //! make the tool a scraper of someone else's output format and would put a
 //! second clock domain in the middle of the pipeline.
 //!
+//! Two shapes live here. A *sampled* event hands back one record per
+//! occurrence through the ring; a *counted* event hands back one number per
+//! read and needs no ring at all. The second is not a cheaper version of the
+//! first: counting is what makes `cpu.instructions` exact to a fraction of a
+//! percent, and it is the only shape that can follow the threads and children a
+//! program starts, because the kernel refuses to map a ring buffer for an
+//! inherited per-task event.
+//!
 //! Two things here are not incidental. The clock is pinned explicitly with
 //! `use_clockid` and `CLOCK_MONOTONIC`, so a sample and an event read from
 //! procfs sort into the same stream. And the ring reports its own overflows
@@ -380,6 +388,265 @@ pub fn self_sampling_error() -> Option<String> {
     }
 }
 
+/// A counter the kernel knows by type and config.
+///
+/// The name travels with the counter because it is what a reading is labelled
+/// with, and because a counter that could not be opened has to be able to say
+/// which one it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counter {
+    pub name: &'static str,
+    kind: u32,
+    config: u64,
+}
+
+impl Counter {
+    pub const fn hardware(name: &'static str, config: u32) -> Self {
+        Self {
+            name,
+            kind: sys::bindings::PERF_TYPE_HARDWARE,
+            config: config as u64,
+        }
+    }
+
+    pub const fn software(name: &'static str, config: u32) -> Self {
+        Self {
+            name,
+            kind: sys::bindings::PERF_TYPE_SOFTWARE,
+            config: config as u64,
+        }
+    }
+}
+
+/// One counter's value at the moment the group was read.
+///
+/// `raw` and `value` are both kept. They differ when the kernel had more events
+/// open than the hardware has counters and time-shared them, and the difference
+/// is the size of the estimate: reporting the scaled number alone would present
+/// an extrapolation as a measurement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reading {
+    pub name: &'static str,
+    /// What the kernel returned, counted only while the counter was scheduled.
+    pub raw: u64,
+    /// `raw` extrapolated to the whole enabled window. Equal to `raw` whenever
+    /// the counter was never multiplexed, which is the normal case.
+    pub value: u64,
+    /// How long the counter was enabled, in nanoseconds of the same domain the
+    /// rest of the tool uses.
+    pub enabled_ns: u64,
+    /// How long it was actually scheduled onto hardware.
+    pub running_ns: u64,
+}
+
+impl Reading {
+    /// True when the counter shared hardware with others, so `value` is an
+    /// extrapolation rather than a count.
+    pub fn was_multiplexed(&self) -> bool {
+        self.running_ns < self.enabled_ns
+    }
+
+    /// True when the counter never got onto hardware at all: there is no
+    /// number here, and zero would be a lie.
+    pub fn never_ran(&self) -> bool {
+        self.running_ns == 0
+    }
+
+    /// The share of the enabled window the counter was actually on.
+    pub fn duty(&self) -> f64 {
+        if self.enabled_ns == 0 {
+            return 1.0;
+        }
+        self.running_ns as f64 / self.enabled_ns as f64
+    }
+}
+
+/// Counters opened together and scheduled together.
+///
+/// Group membership is not a convenience here. A ratio of two counters that
+/// were not co-scheduled is a ratio of two different windows: instructions from
+/// one slice of time over cycles from another says nothing about either. The
+/// kernel guarantees that the members of a group are on the hardware at the
+/// same time or not at all, which is what makes `cpu.ipc` a number rather than
+/// a coincidence.
+///
+/// The group is read after it is disabled, and the leader's `DISABLE` stops
+/// every member at once. So the readings are of one instant, without a
+/// `PERF_FORMAT_GROUP` read that the kernel refuses for inherited events on
+/// several kernels.
+pub struct CounterGroup {
+    /// The leader first; every other member was opened against it.
+    fds: Vec<RawFd>,
+    counters: Vec<Counter>,
+    kernel_excluded: bool,
+}
+
+impl CounterGroup {
+    /// Opens the counters against one target, following the threads and
+    /// children it starts.
+    ///
+    /// Kernel-mode events are counted when the machine allows it. When
+    /// `perf_event_paranoid` forbids it the group is reopened counting user
+    /// mode only, and `kernel_excluded` says so: a count of user-mode
+    /// instructions is a different measurement from a count of all of them, and
+    /// which one was taken has to reach the output.
+    pub fn open(counters: &[Counter], scope: Scope) -> io::Result<Self> {
+        assert!(!counters.is_empty(), "a group needs at least one counter");
+        match Self::open_with(counters, scope, false) {
+            Ok(group) => Ok(group),
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM)) =>
+            {
+                Self::open_with(counters, scope, true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_with(counters: &[Counter], scope: Scope, exclude_kernel: bool) -> io::Result<Self> {
+        let mut group = Self {
+            fds: Vec::with_capacity(counters.len()),
+            counters: counters.to_vec(),
+            kernel_excluded: exclude_kernel,
+        };
+        for counter in counters {
+            let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+            attr.type_ = counter.kind;
+            attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+            attr.config = counter.config;
+            // Both times come back with every read, which is the only way to
+            // know whether the value is a count or an extrapolation.
+            attr.read_format = (sys::bindings::PERF_FORMAT_TOTAL_TIME_ENABLED
+                | sys::bindings::PERF_FORMAT_TOTAL_TIME_RUNNING)
+                as u64;
+            if exclude_kernel {
+                attr.set_exclude_kernel(1);
+                attr.set_exclude_hv(1);
+            }
+            // The whole group starts stopped and is released by the leader, so
+            // a launched program can be counted from its first instruction.
+            if group.fds.is_empty() {
+                attr.set_disabled(1);
+            }
+            // A counting event needs no ring buffer, which is what makes
+            // `inherit` usable here: the count follows the threads and children
+            // the target starts, and a program whose work happens in a thread
+            // pool is counted rather than reported as idle. The sampling path
+            // in this file cannot do the same, because the kernel refuses to
+            // map a ring for an inherited per-task event.
+            attr.set_inherit(1);
+
+            let (pid, cpu) = match scope {
+                Scope::Process(pid) => (pid, -1),
+                Scope::Cpu(cpu) => (-1, cpu as i32),
+            };
+            let leader = group.fds.first().copied().unwrap_or(-1);
+            let fd = unsafe {
+                sys::perf_event_open(
+                    &mut attr,
+                    pid,
+                    cpu,
+                    leader,
+                    sys::bindings::PERF_FLAG_FD_CLOEXEC as u64,
+                )
+            };
+            if fd < 0 {
+                let errno = io::Error::last_os_error();
+                return Err(io::Error::from_raw_os_error(
+                    errno.raw_os_error().unwrap_or(libc::EINVAL),
+                ));
+            }
+            group.fds.push(fd);
+        }
+        Ok(group)
+    }
+
+    /// Whether kernel-mode events had to be left out, and why.
+    pub fn kernel_excluded(&self) -> bool {
+        self.kernel_excluded
+    }
+
+    pub fn enable(&self) -> io::Result<()> {
+        // The leader carries the whole group, so one ioctl starts them all at
+        // the same instant.
+        let result = unsafe { sys::ioctls::ENABLE(self.leader(), 0) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn disable(&self) -> io::Result<()> {
+        let result = unsafe { sys::ioctls::DISABLE(self.leader(), 0) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn leader(&self) -> RawFd {
+        *self.fds.first().expect("a group always has a leader")
+    }
+
+    /// Reads every counter in the group.
+    ///
+    /// Read the group while it is disabled when the values have to describe one
+    /// instant, which is what [`CounterGroup::read_final`] does.
+    pub fn read(&self) -> io::Result<Vec<Reading>> {
+        let mut readings = Vec::with_capacity(self.fds.len());
+        for (fd, counter) in self.fds.iter().zip(&self.counters) {
+            let mut buffer = [0u64; 3];
+            let read = unsafe {
+                libc::read(
+                    *fd,
+                    buffer.as_mut_ptr() as *mut libc::c_void,
+                    std::mem::size_of_val(&buffer),
+                )
+            };
+            if read != std::mem::size_of_val(&buffer) as isize {
+                return Err(io::Error::last_os_error());
+            }
+            let (raw, enabled_ns, running_ns) = (buffer[0], buffer[1], buffer[2]);
+            // Scaling is the kernel's own convention: a counter that was on for
+            // part of the window is extrapolated to the whole of it. It is an
+            // estimate, and `was_multiplexed` is how the caller knows to say so.
+            let value = if running_ns == 0 {
+                0
+            } else if running_ns == enabled_ns {
+                raw
+            } else {
+                ((raw as u128 * enabled_ns as u128) / running_ns as u128) as u64
+            };
+            readings.push(Reading {
+                name: counter.name,
+                raw,
+                value,
+                enabled_ns,
+                running_ns,
+            });
+        }
+        Ok(readings)
+    }
+
+    /// Stops the group and reads it.
+    ///
+    /// Stopping first is what makes the readings simultaneous: the leader's
+    /// `DISABLE` freezes every member, so two counters read a microsecond apart
+    /// still describe the same window.
+    pub fn read_final(&self) -> io::Result<Vec<Reading>> {
+        self.disable()?;
+        self.read()
+    }
+}
+
+impl Drop for CounterGroup {
+    fn drop(&mut self) {
+        for fd in self.fds.drain(..) {
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,8 +731,8 @@ mod tests {
         // page count was a test encoding an expectation the kernel never made.
         //
         // What is worth asserting is that the addresses are real: the block
-        // sits at an address the allocator chose, so samples landing inside it
-        // cannot be coincidence.
+        // sits at an address the kernel chose for this mapping, so samples
+        // landing inside it cannot be coincidence.
         assert!(samples > 0, "no page-fault sample arrived at all");
         assert!(
             inside >= PAGES / 16,
@@ -476,6 +743,114 @@ mod tests {
             "{inside} samples landed in a block of {PAGES} pages, so an address is being reported that was never touched"
         );
         unsafe { libc::munmap(block, PAGES * page) };
+    }
+
+    const CYCLES: Counter = Counter::hardware("cycles", sys::bindings::PERF_COUNT_HW_CPU_CYCLES);
+    const INSTRUCTIONS: Counter =
+        Counter::hardware("instructions", sys::bindings::PERF_COUNT_HW_INSTRUCTIONS);
+
+    /// Something to count that the compiler cannot delete.
+    fn busy() {
+        let mut total = 0u64;
+        for index in 0..2_000_000u64 {
+            total = total.wrapping_add(index * 3);
+        }
+        std::hint::black_box(total);
+    }
+
+    #[test]
+    fn every_counter_of_a_group_describes_the_same_window() {
+        let Ok(group) = CounterGroup::open(&[INSTRUCTIONS, CYCLES], Scope::Process(0)) else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        group.enable().expect("enable");
+        busy();
+        let readings = group.read_final().expect("read");
+
+        assert_eq!(readings.len(), 2);
+        assert!(readings.iter().all(|reading| reading.value > 0));
+        // The whole point of a group: the two counters were on the hardware
+        // together, so a ratio of them is a ratio of one window.
+        let spread = readings[0].enabled_ns.abs_diff(readings[1].enabled_ns);
+        assert!(
+            spread < 1_000_000,
+            "the two counters describe windows {spread}ns apart"
+        );
+    }
+
+    /// A counter that shared the hardware has to say so. The scaled value is an
+    /// extrapolation, and a tool that presented it as a count would report a
+    /// number nobody could tell apart from a measured one.
+    #[test]
+    fn a_time_shared_counter_reports_that_its_value_is_scaled() {
+        let groups: Vec<CounterGroup> = (0..16)
+            .filter_map(|_| CounterGroup::open(&[CYCLES], Scope::Process(0)).ok())
+            .collect();
+        if groups.len() < 16 {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        }
+        for group in &groups {
+            group.enable().expect("enable");
+        }
+        busy();
+        let readings: Vec<Reading> = groups
+            .iter()
+            .filter_map(|group| group.read_final().ok())
+            .flatten()
+            .collect();
+
+        let shared: Vec<&Reading> = readings
+            .iter()
+            .filter(|reading| reading.was_multiplexed())
+            .collect();
+        if shared.is_empty() {
+            eprintln!("skipped: this cpu scheduled sixteen counters at once");
+            return;
+        }
+        for reading in shared {
+            assert!(reading.duty() < 1.0);
+            assert!(
+                reading.value >= reading.raw,
+                "a scaled value is an extrapolation upwards, never downwards"
+            );
+        }
+    }
+
+    /// On a machine where `perf_event_paranoid` forbids counting kernel mode,
+    /// the group is reopened without it -- and then the count means something
+    /// different. This checks the restricted shape opens and admits what it is;
+    /// the retry that reaches it can only be triggered on a machine that
+    /// refuses the unrestricted one.
+    #[test]
+    fn a_user_mode_only_group_says_that_it_is_one() {
+        let Ok(group) = CounterGroup::open_with(&[INSTRUCTIONS], Scope::Process(0), true) else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        assert!(group.kernel_excluded());
+        group.enable().expect("enable");
+        busy();
+        let readings = group.read_final().expect("read");
+        assert!(readings[0].value > 0);
+
+        let Ok(everything) = CounterGroup::open(&[INSTRUCTIONS], Scope::Process(0)) else {
+            return;
+        };
+        if everything.kernel_excluded() {
+            // This machine has no unrestricted shape to compare against.
+            return;
+        }
+        everything.enable().expect("enable");
+        busy();
+        let full = everything.read_final().expect("read");
+        assert!(
+            full[0].value > readings[0].value,
+            "counting kernel mode as well cannot yield fewer instructions              ({} against {})",
+            full[0].value,
+            readings[0].value
+        );
     }
 
     #[test]
