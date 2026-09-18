@@ -237,3 +237,206 @@ fn the_examples_this_family_ships_validate() {
     }
     assert!(checked > 0, "this family ships no example");
 }
+
+/// Whether a source can be served here, asked of the tool itself rather than
+/// guessed from the filesystem a second time.
+///
+/// A backend whose requirements no probe covers still runs -- it is reported as
+/// assumed rather than checked -- so only "no backend is usable" means there is
+/// nothing to exercise. Reading this as "usable through" would have skipped
+/// `power.temp` on the machine this was written on, which is exactly the kind
+/// of test that passes by not running.
+fn usable(source: &str) -> bool {
+    !stdout(&run(&["list", source])).contains("no backend is usable")
+}
+
+/// The family end to end: resolve, attach, poll, aggregate, render. The unit
+/// tests hold the arithmetic against a synthetic `/sys`; this holds the wiring,
+/// which nothing else does.
+#[test]
+fn every_source_this_machine_can_serve_runs_and_reports_no_loss() {
+    let mut ran = 0;
+    for source in ["power.temp", "power.freq", "power.cstate"] {
+        if !usable(source) {
+            continue;
+        }
+        let attempt = run(&[
+            source,
+            "--system",
+            "-m",
+            "poll@100ms",
+            "-e",
+            "summary",
+            "-d",
+            "400ms",
+        ]);
+        let out = stdout(&attempt);
+        assert!(attempt.status.success(), "{source}: {}", stderr(&attempt));
+        assert!(out.contains("via fs:sys"), "{source}: {out}");
+        assert!(
+            out.contains("no loss"),
+            "{source}: reading sysfs on an idle machine loses nothing: {out}"
+        );
+        let events: usize = out
+            .lines()
+            .find_map(|line| line.split_whitespace().next()?.parse().ok())
+            .unwrap_or_else(|| panic!("{source} says how many events it saw: {out}"));
+        assert!(events >= 2, "{source} saw only {events} events in 400 ms");
+        ran += 1;
+    }
+    assert!(
+        ran > 0,
+        "this machine served none of the three sysfs sources, which no Linux does"
+    );
+}
+
+/// The distinction the source exists for has to survive all the way to the
+/// output: a number that does not say whether it is the effective or the
+/// requested frequency cannot be compared with anything.
+#[test]
+fn a_frequency_run_says_which_frequency_it_measured() {
+    if !usable("power.freq") {
+        return;
+    }
+    let attempt = run(&[
+        "power.freq",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "raw",
+        "-d",
+        "250ms",
+    ]);
+    assert!(attempt.status.success(), "{}", stderr(&attempt));
+    let out = stdout(&attempt);
+    assert!(
+        out.contains("measures=effective") || out.contains("measures=requested"),
+        "every event says which of the two it is: {out}"
+    );
+    assert!(
+        out.contains("basis=cpuinfo_avg_freq")
+            || out.contains("basis=cpuinfo_cur_freq")
+            || out.contains("basis=scaling_cur_freq"),
+        "and which file it read: {out}"
+    );
+    assert!(
+        out.contains("driver="),
+        "and which driver produced it: {out}"
+    );
+}
+
+/// A counter that is there and out of reach calls for privileges. Reporting it
+/// as missing would send the reader looking for different hardware.
+#[test]
+fn an_unreadable_energy_counter_asks_for_privileges_not_for_hardware() {
+    let rapl = Path::new("/sys/class/powercap/intel-rapl:0/energy_uj");
+    if !rapl.exists() {
+        return;
+    }
+    let readable = std::fs::read_to_string(rapl).is_ok();
+    let attempt = run(&[
+        "power.energy",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "timeline",
+        "-d",
+        "300ms",
+    ]);
+    if readable {
+        assert!(attempt.status.success(), "{}", stderr(&attempt));
+        return;
+    }
+    assert_ne!(attempt.status.code(), Some(0));
+    let message = stderr(&attempt);
+    assert!(
+        message.contains("root"),
+        "the refusal has to name privileges: {message}"
+    );
+    assert!(
+        !message.contains("does not exist"),
+        "the file is there; saying otherwise sends the reader to the wrong place: {message}"
+    );
+}
+
+/// Residency is cpu-time, and the value is the average watched cpu's share of
+/// the tick. It is allowed to exceed the tick, because the kernel credits
+/// residency when a cpu leaves an idle state -- but not by an order of
+/// magnitude, which is what a unit or a cpu-count error would produce.
+#[test]
+fn an_idle_share_stays_within_reach_of_the_window_it_covers() {
+    if !usable("power.cstate") {
+        return;
+    }
+    let attempt = run(&[
+        "power.cstate",
+        "--system",
+        "-m",
+        "poll@200ms",
+        "-e",
+        "raw",
+        "-d",
+        "700ms",
+    ]);
+    assert!(attempt.status.success(), "{}", stderr(&attempt));
+    let out = stdout(&attempt);
+    let mut seen = 0;
+    for line in out.lines() {
+        let Some(field) = line
+            .split_whitespace()
+            .find(|f| f.starts_with("idle_ratio="))
+        else {
+            continue;
+        };
+        let ratio: f64 = field
+            .trim_start_matches("idle_ratio=")
+            .parse()
+            .unwrap_or_else(|_| panic!("idle_ratio is a number: {line}"));
+        assert!(
+            (0.0..1.5).contains(&ratio),
+            "an idle share of {ratio} is not late crediting, it is an error of scale: {line}"
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "the raw output carries the share: {out}");
+}
+
+/// The record written beside the numbers is what makes two runs comparable, and
+/// for this family it is the run's own subject: governor, clocksource, and what
+/// the machine was.
+#[test]
+fn the_record_beside_the_numbers_carries_the_machine_it_was_taken_on() {
+    if !usable("power.temp") {
+        return;
+    }
+    let directory =
+        std::env::temp_dir().join(format!("omn-power-artifacts-{}", std::process::id()));
+    std::fs::remove_dir_all(&directory).ok();
+    let attempt = run(&[
+        "power.temp",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "300ms",
+        "--out",
+        &directory.to_string_lossy(),
+    ]);
+    assert!(attempt.status.success(), "{}", stderr(&attempt));
+
+    let resolved = std::fs::read_to_string(directory.join("resolved.json"))
+        .expect("the resolved request is written beside the results");
+    let document: serde_json::Value =
+        serde_json::from_str(&resolved).expect("the resolved record parses");
+    let environment = &document[0]["environment"];
+    assert!(environment["kernel_release"].is_string(), "{resolved}");
+    assert!(
+        environment.get("cpu_governor").is_some() || environment.get("clocksource").is_some(),
+        "a power measurement that does not record the governor cannot be compared: {resolved}"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}

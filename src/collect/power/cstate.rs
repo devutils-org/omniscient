@@ -34,6 +34,7 @@ use super::sysfs;
 
 const CPU_ROOT: &str = "/sys/devices/system/cpu";
 
+#[derive(Debug)]
 pub struct Prepare {
     mode: Mode,
 }
@@ -318,6 +319,90 @@ mod tests {
         assert_eq!(event.attr("state.c1_entries").unwrap().as_f64(), Some(4.0));
         assert_eq!(event.attr("entries").unwrap().as_f64(), Some(6.0));
         assert_eq!(event.attr("cpus").unwrap().as_f64(), Some(2.0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The cpus asked for are the cpus read: a mean over the machine is not an
+    /// answer to a question about two cores.
+    #[test]
+    fn a_cpu_target_narrows_the_residency_to_those_cores() {
+        let root = scratch::tree("cpuidle-cpus");
+        for cpu in 0..4 {
+            scratch::write(&root, &format!("cpu{cpu}/cpuidle/state0/name"), "C1");
+            scratch::write(&root, &format!("cpu{cpu}/cpuidle/state0/time"), "0");
+            scratch::write(&root, &format!("cpu{cpu}/cpuidle/state0/usage"), "0");
+        }
+
+        let mut collector = Residency::new(poll(), root.clone(), vec![0, 1]);
+        collector.start().expect("a cpuidle directory");
+        collector.sample(0).expect("the baseline read");
+        for cpu in 0..4 {
+            scratch::write(&root, &format!("cpu{cpu}/cpuidle/state0/time"), "10000");
+            scratch::write(&root, &format!("cpu{cpu}/cpuidle/state0/usage"), "1");
+        }
+        let events = collector.sample(1).expect("a second read");
+
+        // Two cpus of the four, ten milliseconds each.
+        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(2.0));
+        assert_eq!(
+            events[0].attr("idle_ns_total").unwrap().as_f64(),
+            Some(20_000_000.0)
+        );
+        assert_eq!(
+            events[0].attr("idle_ns").unwrap().as_f64(),
+            Some(10_000_000.0)
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two readings over different sets of states do not subtract: the machine
+    /// changed idle drivers in between, and the difference would be part
+    /// residency and part bookkeeping.
+    #[test]
+    fn a_change_of_idle_states_voids_the_interval_rather_than_inventing_one() {
+        let root = scratch::tree("cpuidle-states");
+        scratch::write(&root, "cpu0/cpuidle/state0/name", "C1");
+        scratch::write(&root, "cpu0/cpuidle/state0/time", "1000");
+        scratch::write(&root, "cpu0/cpuidle/state0/usage", "1");
+
+        let mut collector = Residency::new(poll(), root.clone(), vec![0]);
+        collector.start().expect("a cpuidle directory");
+        collector.sample(0).expect("the baseline read");
+
+        scratch::write(&root, "cpu0/cpuidle/state1/name", "C2");
+        scratch::write(&root, "cpu0/cpuidle/state1/time", "5000");
+        scratch::write(&root, "cpu0/cpuidle/state1/usage", "2");
+
+        assert!(collector.sample(1).expect("a read").is_empty());
+        assert_eq!(collector.losses().undecoded, 1);
+        assert!(collector
+            .losses()
+            .reasons
+            .keys()
+            .any(|reason| reason.contains("set of idle states changed")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A counter that goes backwards means a cpu went away and came back; the
+    /// interval that straddles it cannot be attributed.
+    #[test]
+    fn a_residency_counter_that_goes_backwards_is_a_counted_loss() {
+        let root = scratch::tree("cpuidle-backwards");
+        scratch::write(&root, "cpu0/cpuidle/state0/name", "C1");
+        scratch::write(&root, "cpu0/cpuidle/state0/time", "9000");
+        scratch::write(&root, "cpu0/cpuidle/state0/usage", "9");
+
+        let mut collector = Residency::new(poll(), root.clone(), vec![0]);
+        collector.start().expect("a cpuidle directory");
+        collector.sample(0).expect("the baseline read");
+        scratch::write(&root, "cpu0/cpuidle/state0/time", "10");
+
+        assert!(collector.sample(1).expect("a read").is_empty());
+        assert!(collector
+            .losses()
+            .reasons
+            .keys()
+            .any(|reason| reason.contains("went backwards")));
         std::fs::remove_dir_all(&root).ok();
     }
 

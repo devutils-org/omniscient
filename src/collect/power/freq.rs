@@ -74,6 +74,7 @@ impl Source {
     }
 }
 
+#[derive(Debug)]
 pub struct Prepare {
     mode: Mode,
 }
@@ -377,6 +378,93 @@ mod tests {
         let refused = collector.start().expect_err("nothing to read");
         assert!(refused.contains("no cpufreq driver"), "{refused}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `--cpu` is how to ask about a core rather than about a mean, so the
+    /// collector must read those cores and only those.
+    #[test]
+    fn a_cpu_target_narrows_the_reading_to_those_cores() {
+        let root = scratch::tree("freq-cpus");
+        scratch::write(&root, "online", "0-3");
+        for cpu in 0..4 {
+            scratch::write(
+                &root,
+                &format!("cpu{cpu}/cpufreq/scaling_driver"),
+                "amd_pstate",
+            );
+            scratch::write(
+                &root,
+                &format!("cpu{cpu}/cpufreq/cpuinfo_avg_freq"),
+                &format!("{}", 1_000_000 + cpu * 1_000_000),
+            );
+        }
+
+        let mut collector = Frequencies::new(poll(), root.clone(), vec![2, 3]);
+        collector.start().expect("a cpufreq directory");
+        let events = collector.sample(0).expect("a read");
+
+        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(2.0));
+        assert_eq!(events[0].attr("cpu2").unwrap().as_f64(), Some(3e9));
+        assert_eq!(events[0].attr("cpu3").unwrap().as_f64(), Some(4e9));
+        assert!(
+            events[0].attr("cpu0").is_none(),
+            "a cpu that was not asked for must not be in the reading"
+        );
+        // The mean is over what was watched, not over the machine.
+        assert_eq!(events[0].attr("hz").unwrap().as_f64(), Some(3.5e9));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A cpu going offline mid-run is a read that failed, counted and
+    /// explained; the other cpus still give a number.
+    #[test]
+    fn a_cpu_that_stops_answering_is_a_counted_loss_not_a_silent_gap() {
+        let root = cpu_tree(
+            "freq-offline",
+            "amd_pstate",
+            &[("cpuinfo_avg_freq", "3000000")],
+        );
+        let mut collector = Frequencies::new(poll(), root.clone(), vec![0, 1]);
+        collector.start().expect("a cpufreq directory");
+
+        std::fs::remove_file(root.join("cpu1/cpufreq/cpuinfo_avg_freq")).expect("cpu1 goes away");
+        let events = collector.sample(0).expect("cpu0 still answers");
+
+        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(1.0));
+        let losses = collector.losses();
+        assert_eq!(losses.failed_reads, 1);
+        assert!(!losses.is_clean());
+        assert!(losses.reasons.keys().any(|reason| reason.contains("cpu1")));
+
+        // And when the last one goes, the run ends rather than reporting a
+        // frequency nobody read.
+        std::fs::remove_file(root.join("cpu0/cpufreq/cpuinfo_avg_freq")).expect("cpu0 goes away");
+        match collector.sample(1) {
+            Err(SampleError::TargetGone(_)) => {}
+            other => panic!("expected the run to end, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A frequency belongs to a core. Asked about a process, this backend says
+    /// so rather than reporting the machine's mean under that process's name.
+    #[test]
+    fn a_process_target_is_refused_with_what_would_answer_it() {
+        let prepared = Box::new(Prepare::new(poll()).expect("poll is servable"));
+        let refused = prepared
+            .attach(&Target::Pid(vec![1]))
+            .err()
+            .expect("a pid has no frequency of its own");
+        assert!(refused.contains("--cpu"), "{refused}");
+        assert!(refused.contains("sched"), "{refused}");
+    }
+
+    #[test]
+    fn a_mode_cpufreq_cannot_serve_is_refused_with_the_reason() {
+        let refused = Prepare::new(Mode::Trace).expect_err("sysfs holds no events");
+        assert!(refused.contains("cpu_frequency"), "{refused}");
+        let refused = Prepare::new(Mode::Count).expect_err("there is nothing to accumulate");
+        assert!(refused.contains("poll it"), "{refused}");
     }
 
     /// Ground truth against the kernel's own declaration: whatever this machine

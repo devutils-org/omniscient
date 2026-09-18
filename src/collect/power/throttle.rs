@@ -27,6 +27,7 @@ use super::sysfs;
 
 const CPU_ROOT: &str = "/sys/devices/system/cpu";
 
+#[derive(Debug)]
 pub struct Prepare {
     mode: Mode,
 }
@@ -288,6 +289,44 @@ mod tests {
             "the refusal has to say why zero would be a lie: {refused}"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A cpu that went offline and came back restarts its counters; the
+    /// interval that straddles it is void rather than enormous.
+    #[test]
+    fn a_counter_that_goes_backwards_is_a_counted_loss() {
+        let root = throttle_tree("throttle-backwards", 50, 4);
+        let mut collector = Throttling::new(poll(), root.clone(), vec![0, 1]);
+        collector.start().expect("the counters are there");
+        collector.sample(0).expect("the baseline read");
+
+        for cpu in 0..2 {
+            scratch::write(
+                &root,
+                &format!("cpu{cpu}/thermal_throttle/core_throttle_count"),
+                "0",
+            );
+        }
+        assert!(collector.sample(1).expect("a read").is_empty());
+        assert_eq!(collector.losses().undecoded, 1);
+        assert!(collector
+            .losses()
+            .reasons
+            .keys()
+            .any(|reason| reason.contains("went backwards")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Throttling happens to a core. A target that names a process is refused,
+    /// because the machine's throttle count is not that process's.
+    #[test]
+    fn a_process_target_is_refused_rather_than_answered_for_the_machine() {
+        let prepared = Box::new(Prepare::new(poll()).expect("poll is servable"));
+        let refused = prepared
+            .attach(&Target::Pid(vec![1]))
+            .err()
+            .expect("a pid does not throttle, a core does");
+        assert!(refused.contains("--cpu"), "{refused}");
     }
 
     /// And on this machine, whichever it is, the collector and the filesystem

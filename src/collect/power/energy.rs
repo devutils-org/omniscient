@@ -33,6 +33,7 @@ use super::sysfs::ReadError;
 
 const POWERCAP: &str = "/sys/class/powercap";
 
+#[derive(Debug)]
 pub struct Prepare {
     mode: Mode,
 }
@@ -426,6 +427,51 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].attr("joules").unwrap().as_f64(), Some(8.0));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two readings over different sets of domains do not subtract.
+    #[test]
+    fn a_change_of_domains_voids_the_interval() {
+        let root = rapl_tree("rapl-domains", 1_000_000, 0, 65_532_610_987);
+        let mut collector = Energy::new(poll(), root.clone());
+        collector.start().expect("a readable domain");
+        collector.sample(0).expect("the baseline read");
+
+        scratch::write(&root, "intel-rapl:1/name", "psys");
+        scratch::write(&root, "intel-rapl:1/energy_uj", "500000");
+        scratch::write(&root, "intel-rapl:1/max_energy_range_uj", "65532610987");
+        // The domains are discovered once, at the start, so the second reading
+        // is taken over the same set -- what must not happen is a total that
+        // silently mixes the two.
+        let events = collector.sample(1).expect("a second read");
+        for event in &events {
+            assert_eq!(
+                event.attr("domains").unwrap().to_string(),
+                "package-0",
+                "a domain that appeared after the start must not join the sum"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// RAPL measures a package; a per-process figure would be an estimate, and
+    /// this backend does not offer to make one.
+    #[test]
+    fn a_process_target_is_refused_with_what_it_would_have_taken() {
+        let prepared = Box::new(Prepare::new(poll()).expect("poll is servable"));
+        let refused = prepared
+            .attach(&Target::Pid(vec![1]))
+            .err()
+            .expect("a pid has no package energy");
+        assert!(refused.contains("share of cycles"), "{refused}");
+        assert!(refused.contains("estimate"), "{refused}");
+    }
+
+    #[test]
+    fn a_mode_that_has_no_window_is_refused() {
+        let refused = Prepare::new(Mode::Snapshot).expect_err("one read is not a difference");
+        assert!(refused.contains("counter"), "{refused}");
+        assert!(Prepare::new(Mode::Count).is_ok());
     }
 
     #[test]

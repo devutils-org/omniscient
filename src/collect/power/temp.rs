@@ -38,6 +38,7 @@ const CPU_CHIPS: [&str; 5] = [
     "cpu-thermal",
 ];
 
+#[derive(Debug)]
 pub struct Prepare {
     mode: Mode,
 }
@@ -349,6 +350,67 @@ mod tests {
         let refused = collector.start().expect_err("there is nothing to read");
         assert!(refused.contains("no temperature sensor"), "{refused}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A chip whose module is unloaded mid-run is a read that failed, counted
+    /// and explained, while the remaining sensors still give a temperature.
+    #[test]
+    fn a_sensor_that_stops_answering_is_a_counted_loss() {
+        let root = scratch::tree("hwmon-vanishing");
+        scratch::write(&root, "hwmon0/name", "k10temp");
+        scratch::write(&root, "hwmon0/temp1_input", "55000");
+        scratch::write(&root, "hwmon1/name", "nvme");
+        scratch::write(&root, "hwmon1/temp1_input", "44000");
+
+        let mut collector = Temperatures::new(poll(), root.clone());
+        collector.start().expect("sensors are there");
+        collector.sample(0).expect("a first read");
+
+        std::fs::remove_file(root.join("hwmon1/temp1_input")).expect("the disk chip goes away");
+        let events = collector.sample(1).expect("the processor still answers");
+        assert_eq!(celsius(&events[0]), 55.0);
+        let losses = collector.losses();
+        assert_eq!(losses.failed_reads, 1);
+        assert!(losses.reasons.keys().any(|reason| reason.contains("nvme")));
+
+        // When the last one goes, the run ends rather than reporting nothing.
+        std::fs::remove_file(root.join("hwmon0/temp1_input")).expect("the processor goes away");
+        match collector.sample(2) {
+            Err(SampleError::TargetGone(_)) => {}
+            other => panic!("expected the run to end, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A snapshot is one read and then the run is over: the collector says so
+    /// through its tick rather than leaving the runner to wait out an interval.
+    #[test]
+    fn a_snapshot_asks_to_be_read_once_and_immediately() {
+        let root = scratch::tree("hwmon-snapshot");
+        scratch::write(&root, "hwmon0/name", "k10temp");
+        scratch::write(&root, "hwmon0/temp1_input", "50000");
+
+        let polled = Temperatures::new(poll(), root.clone());
+        let snapshot = Temperatures::new(Mode::Snapshot, root.clone());
+        assert_eq!(snapshot.tick(), Some(std::time::Duration::ZERO));
+        assert_eq!(
+            polled.tick(),
+            None,
+            "a poll takes its interval from the request"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Silicon does not know which process heated it, so a target that names
+    /// one is refused rather than answered with the machine's temperature.
+    #[test]
+    fn a_process_target_is_refused_rather_than_answered_machine_wide() {
+        let prepared = Box::new(Prepare::new(poll()).expect("poll is servable"));
+        let refused = prepared
+            .attach(&Target::Pid(vec![1]))
+            .err()
+            .expect("a pid has no temperature");
+        assert!(refused.contains("--system"), "{refused}");
     }
 
     /// Ground truth: the thermal zone interface exposes some of the same chips
