@@ -50,6 +50,11 @@
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
   determinism: medium
+  caveats:
+    - "A ratio, not an amount: a spin loop retires instructions at a high IPC
+       while doing nothing. Read it beside `cpu.instructions`, never alone."
+    - "Both counters must be read over the same window, which means one counter
+       group; two separately scheduled counters give a ratio of two windows."
 
 - id: cpu.branch_misses
   family: cpu
@@ -140,6 +145,10 @@
   keys: [task, cgroup]
   filter_fields: [comm, cpu]
   determinism: low
+  caveats:
+    - "Counts switches away from the task, matching the kernel's own voluntary
+       plus nonvoluntary counters; it says nothing about what ran instead, nor
+       about how long the task stayed off the cpu."
 
 - id: cpu.migrations
   family: cpu
