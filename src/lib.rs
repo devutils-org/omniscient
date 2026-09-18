@@ -33,6 +33,7 @@ macro_rules! serde_as_string {
     };
 }
 
+pub mod bpf;
 pub mod capabilities;
 pub mod catalog;
 pub mod cli;

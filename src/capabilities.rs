@@ -57,6 +57,22 @@ impl fmt::Display for Probe {
     }
 }
 
+impl From<&crate::bpf::Support> for Probe {
+    fn from(support: &crate::bpf::Support) -> Self {
+        match support {
+            crate::bpf::Support::Yes => Probe::Available,
+            crate::bpf::Support::No(reason) => Probe::Missing(reason.clone()),
+            crate::bpf::Support::Unchecked(reason) => Probe::Unknown(reason.clone()),
+        }
+    }
+}
+
+impl From<crate::bpf::Support> for Probe {
+    fn from(support: crate::bpf::Support) -> Self {
+        Probe::from(&support)
+    }
+}
+
 /// Whether something is there, and whether this user may look at it.
 ///
 /// The distinction matters: tracefs is mounted on almost every machine and
@@ -284,6 +300,13 @@ impl Capabilities {
             return probe_pmu(event);
         }
 
+        // A raw tracepoint is looked for in the kernel's own BTF rather than in
+        // tracefs, because that is how this tool attaches to one: through
+        // `BPF_RAW_TRACEPOINT_OPEN`, which takes a name and needs no tracefs.
+        if let Some(event) = requirement.strip_prefix("raw_tracepoint:") {
+            return Probe::from(crate::bpf::raw_tracepoint_support(event));
+        }
+
         // Netlink families: the question is whether this kernel exposes the
         // protocol at all, which is answered by trying to open a socket on it.
         // Opening one is free and changes nothing.
@@ -314,6 +337,10 @@ impl Capabilities {
                 )),
                 Access::Absent => Probe::Missing("tracefs is not mounted".into()),
             },
+            // Asked by loading the smallest possible tracing program. The
+            // answer depends on capabilities, on a sysctl and on how the kernel
+            // was built, and only the kernel knows all three.
+            "bpf" => Probe::from(crate::bpf::load_support()),
             "btf" => match self.environment.kernel_btf {
                 Access::Readable => Probe::Available,
                 Access::Restricted => {
