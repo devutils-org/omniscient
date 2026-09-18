@@ -527,6 +527,17 @@ impl CounterGroup {
         }
     }
 
+    /// Opens counters that count user-mode instructions only.
+    ///
+    /// Wanted whenever the number is being compared against an expectation
+    /// about a program's own work. An unrestricted counter also counts every
+    /// interrupt handler, timer tick and page fault that landed on the task,
+    /// and on a busy machine that is a percent or more -- enough to make a
+    /// comparison against a known instruction count meaningless.
+    pub fn open_user_mode(counters: &[Counter], scope: Scope) -> io::Result<Self> {
+        Self::open_with(counters, scope, true)
+    }
+
     fn open_with(counters: &[Counter], scope: Scope, exclude_kernel: bool) -> io::Result<Self> {
         let mut group = Self {
             fds: Vec::with_capacity(counters.len()),

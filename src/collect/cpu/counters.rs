@@ -426,9 +426,17 @@ mod tests {
     /// instructions, counted.
     ///
     /// Two instructions per iteration, fifty million iterations, so a hundred
-    /// million retired instructions plus whatever the test harness itself runs
-    /// between the enable and the disable -- a few thousand at most. A counter
-    /// that is off by more than a percent here is not measuring what it claims.
+    /// million retired instructions plus whatever runs between the enable and
+    /// the disable -- a few thousand at most.
+    ///
+    /// The counter is opened user-mode only, and that is not a convenience. A
+    /// hundred million is a count of *this loop's* instructions, and an
+    /// unrestricted counter also counts every interrupt handler, timer tick and
+    /// page fault that landed on this thread while it ran. Comparing the first
+    /// number against the second compares two different things, and on a busy
+    /// machine the difference is over a percent -- which is how this test
+    /// failed one full-suite run in five before the two sides were made to
+    /// measure the same thing.
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn instructions_match_a_loop_whose_instruction_count_is_known() {
@@ -438,22 +446,23 @@ mod tests {
 
         let mut counted = Vec::new();
         for _ in 0..5 {
-            let mut collector = CounterCollector::new(0, spec("cpu.instructions"));
-            if collector.start().is_err() {
+            let Ok(group) =
+                crate::perf::CounterGroup::open_user_mode(&[INSTRUCTIONS], Scope::Process(0))
+            else {
                 eprintln!("skipped: this machine refuses unprivileged perf counting");
                 return;
-            }
+            };
+            group.enable().expect("enable");
             known_loop(ITERATIONS);
-            let events = collector.stop();
-            assert!(collector.losses().is_clean(), "{:?}", collector.losses());
-            counted.push(events[0].attr("count").unwrap().as_f64().unwrap());
+            let readings = group.read_final().expect("read");
+            counted.push(readings[0].value as f64);
         }
 
         for count in &counted {
             let error = (count - expected).abs() / expected;
             assert!(
                 error < 0.01,
-                "counted {count} instructions where the loop retires {expected}: {:.2} % off",
+                "counted {count} user-mode instructions where the loop retires {expected}:                  {:.2} % off",
                 error * 100.0
             );
         }
