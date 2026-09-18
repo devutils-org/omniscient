@@ -107,86 +107,109 @@ with a reason where there is no GPU or no `nvidia-smi`.
   display, NVIDIA ones included, and would have made the resolver pick a
   backend with nothing to read.
 
-## Needs from the shared layer
+## What this family needed from the shared layer
 
-### A probe for vendor libraries and hwmon names
+Four of these were fixed on this branch rather than requested, at the
+coordinator's call; the last two stand.
 
-`src/collect/gpu/mod.rs` exports the probe this family needs:
+### A probe for vendor libraries and hwmon names — done
+
+`src/collect/gpu/mod.rs` exports:
 
 ```rust
 pub fn probe(requirement: &str) -> Option<crate::capabilities::Probe>
 ```
 
-It answers `nvml`, `cupti`, `rocprofiler`, `level-zero` by asking the dynamic
+It answers `nvml`, `cupti`, `rocprofiler` and `level-zero` by asking the dynamic
 loader whether the library is there, and `hwmon:<name>` by reading the names
-under `/sys/class/hwmon`. `None` means "not this family's requirement". Wiring
-it into `Capabilities::probe`, before the final `match`, is one line:
+under `/sys/class/hwmon`. `None` means "not this family's requirement", so
+`Capabilities::probe` falls through to what it already knew. The probe lives
+with the code that depends on it: a family cannot be added without the means to
+check what it needs.
 
-```rust
-if let Some(probe) = crate::collect::gpu::probe(requirement) {
-    return probe;
-}
+`omn list gpu` went from nine `?` to six `yes`, one `no` and two `?`, and a
+rejection now reads
+
+```
+fs:sys:amdgpu  rejected: hwmon:amdgpu: missing: no hwmon device is named
+`amdgpu` (this machine has iwlwifi_1, k10temp, nvme, ucsi_source_psy_10_00081)
 ```
 
-Until that lands, every `gpu` source reads `?` in `omn list` and every run
-reports `unverified requirement: nvml`, which is the honest reading of "no
-probe covers this" -- but it is wrong about this machine, where the answer is
-known and checkable.
+The whole listing costs 3 ms more, most of it `nvmlInit`.
 
-### A `system` target in the runner
+### A `system` target in the runner — done
 
-`run_all` maps a target to a pid and refuses anything that is not a pid, a tid
-or a launch. Every device-scoped source in this family -- and `power.energy`,
-and `mem.bandwidth` -- is declared `system` in the catalog and can only be run
-here by naming a program whose window to use. `omn gpu.temp --system -d 30s` is
-the natural command and it does not exist.
+`Prepared::attach` took a pid, so every collector was handed a process whether
+or not its source had one. It now takes an `Attachment`, which is a process or
+the machine, and `run_all` resolves a `Target::System` to the second. A
+collector that needs a process says which one is missing:
 
-### A userspace filter that runs
-
-A filter is parsed, validated against the source's declared fields, and given a
-placement in the resolved file. Nothing then applies it to the events:
-
-```console
-$ omn gpu.temp --mode poll@200ms -e summary --filter "device == 99" -- sleep 0.4
-  summary
-    <unkeyed>      n=4     min 39 celsius  mean 39 celsius  max 39 celsius
+```
+error: cannot start collecting `mem.faults`: `mem.faults` samples one process
+here; a system-wide sampler opens the event on every cpu, which needs
+CAP_PERFMON and is not written yet
 ```
 
-Four events matched a predicate that excludes them all. `crate::filter::matches`
-exists and is used by the join engine; it is the collection path that never
-calls it. This is a silent wrong number, which is the one thing the project
-says it will not do, and it is not confined to this family.
+`gpu.mem` uses the distinction rather than refusing it: with a process it
+reports that process's VRAM, without one the device's, and the `scope`
+attribute says which. The two never share a series.
 
-### The GPU in the environment capture
+### A userspace filter that runs — done
+
+A filter was parsed, validated against the source's declared fields, given a
+placement in the resolved file, and never applied. `--filter "device == 99"`
+kept every event. It now runs in `run_all` for any backend the resolver did not
+credit with pushing it down, and what it removed is reported beside the losses:
+
+```
+  filter `bytes >= 8388608` kept 5 of 312 events, evaluated after reading
+```
+
+Events a filter removes are not losses -- they were asked to go -- but they were
+collected and paid for, and a series holding five of three hundred events looks
+exactly like a series of five. The run also names any field the predicate uses
+that no event carried, because that is the case that empties a series and looks
+like a workload that did nothing:
+
+```
+  filter `comm == 'sleep'` kept 0 of 5 events, evaluated after reading
+    no event carried `comm`, so that part of the predicate was never true
+```
+
+That last line is worth reading twice: `mem.rss` declares `comm` as a filter
+field and its collector never produces one. The filter was inert, so nobody
+noticed.
+
+### Fault-sampler tests that do not depend on the other tests — done
+
+`perf::tests::a_page_fault_sample_carries_the_address_that_faulted` failed about
+twice in three runs of `cargo test`, on `main`, before this family existed, and
+its neighbour `sample_timestamps_share_the_tools_clock_domain` failed less often
+for the same reason: it needed one sample and sometimes got none.
+
+The cause was neither loss nor huge pages. Both tests touched a `Vec`, and the
+allocator hands back memory it already holds -- already resident, and faulting
+nothing. The shortfall grew with how much else the suite had allocated, which is
+why adding this family's tests made it worse. Both now map their pages with
+`mmap`, untouched by construction. Ten consecutive runs of `cargo test --lib`
+pass; before the change, one in three failed.
+
+### Still open: the GPU in the environment capture
 
 Two runs are comparable only if they were taken on the same device under the
-same driver. Those two facts are on every event this family produces, which is
-the wrong place for something that does not vary within a run: they belong in
-the environment of the resolved file, beside the kernel and the governor.
-`Environment::not_captured` currently lists "vendor SDK versions".
+same driver. Both facts are on every event this family produces, which is the
+wrong place for something that cannot vary within a run: they belong in the
+environment of the resolved file, beside the kernel and the governor.
 
-### The checks do not pass on `main`
+Not done, for a measured reason: `nvmlInit` costs 3.3 to 4.9 ms and
+`nvmlShutdown` 1.2 ms, and `Capabilities::detect` runs on every command,
+including those that measure nothing. Capturing the GPU unconditionally would
+put 5 ms on `omn list` for a field that matters when a `gpu` source is used. The
+environment capture needs a way to ask for what the request is about before this
+is worth doing.
 
-Besides the flaky test below, `cargo fmt --check` reports `src/collect/mem/rss.rs`
-and `src/collect/mod.rs`, and `cargo clippy` reports an unused import in
-`src/collect/mod.rs`. Both arrived with the per-family registry commit and
-neither belongs to this family. The gate in `CLAUDE.md` is red before any family
-thread touches anything.
+### Still open: `Unit::Watts`
 
-### A page-fault sampler test that does not depend on the other tests
-
-`perf::tests::a_page_fault_sample_carries_the_address_that_faulted` demands all
-64 of its faults and fails when it gets 63. It already fails on `main` about
-twice in three runs of `cargo test`, before this family existed; the sampler is
-attached to the process and its period is consumed by faults from every other
-test running at the same time, so the number it gets depends on what else the
-suite is doing. This family's tests make it worse -- creating a CUDA context
-faults hundreds of megabytes -- but the fragility is in the test, not in what
-loads the machine beside it. A sampler that legitimately sees fewer samples
-under load should be checked for the property it promises, not for a count.
-
-### `Unit::Watts`, if a sampled-power source is ever wanted
-
-The unit enum has no watts, which is part of why `gpu.power` reports energy.
-Any future source that reports an instantaneous draw -- an AMD hwmon reading,
-an older NVIDIA device with no energy counter -- needs one.
+The unit enum has no watts, which is part of why `gpu.power` reports energy. Any
+future source reporting an instantaneous draw -- an AMD hwmon reading, an older
+NVIDIA device with no energy counter -- needs one.

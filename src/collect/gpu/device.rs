@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use crate::clock::monotonic_ns;
-use crate::collect::{Collector, Prepared, SampleError};
+use crate::collect::{Attachment, Collector, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 
 use super::nvml::{DeviceHandle, Nvml, NvmlError};
@@ -71,8 +71,12 @@ impl Metric {
 pub struct Prepare(pub Metric);
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
-        NvmlCollector::new(self.0, pid).map(|collector| Box::new(collector) as Box<dyn Collector>)
+    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String> {
+        // A device figure needs no process, and `gpu.mem` uses one when it has
+        // one: with a process it reports that process's VRAM, without one it
+        // reports the device's.
+        NvmlCollector::new(self.0, attachment.pid())
+            .map(|collector| Box::new(collector) as Box<dyn Collector>)
     }
 }
 
@@ -98,13 +102,14 @@ pub struct NvmlCollector {
     /// The driver, which is part of what a number means: NVML's semantics are
     /// the driver's, not a kernel interface's.
     driver: String,
-    /// The process this run is scoped to, which for the device-wide metrics
-    /// only sets the window.
-    pid: i32,
+    /// The process this run is scoped to, when there is one. For the
+    /// device-wide metrics it only sets the window; for `gpu.mem` it decides
+    /// whether the figure is a process's or the device's.
+    pid: Option<i32>,
 }
 
 impl NvmlCollector {
-    fn new(metric: Metric, pid: i32) -> Result<Self, String> {
+    fn new(metric: Metric, pid: Option<i32>) -> Result<Self, String> {
         let nvml = Nvml::open()?;
         let count = nvml
             .device_count()
@@ -215,19 +220,30 @@ impl NvmlCollector {
         Ok((attrs, UTILIZATION_WINDOW_NS))
     }
 
-    /// VRAM held by the process this run observes, with the device totals
-    /// beside it.
+    /// VRAM held: by the process this run observes, or by the device when the
+    /// run observes no process.
+    ///
+    /// The two never share a series. A process figure and a device figure are
+    /// both bytes of VRAM and mean entirely different things, so the target
+    /// decides which one this is and the `scope` attribute records the answer.
     ///
     /// A process absent from the driver's list holds nothing, which is reported
     /// as zero: an empty series and a series of zeros say different things
     /// about a run, and only one of them is true here.
     fn mem(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
         let memory = self.nvml.memory(device.handle)?;
+        let Some(pid) = self.pid else {
+            let mut attrs = self.device_attrs(device, "device");
+            attrs.push(Attr::uint("bytes", memory.used));
+            attrs.push(Attr::uint("device_total_bytes", memory.total));
+            return Ok((attrs, 0));
+        };
+
         let processes = self.nvml.processes(device.handle)?;
         let mut held = 0u64;
         let mut kinds: Vec<&'static str> = Vec::new();
         for (kind, process) in processes {
-            if process.pid as i32 != self.pid {
+            if process.pid as i32 != pid {
                 continue;
             }
             held = held.saturating_add(process.used_gpu_memory);
@@ -294,11 +310,10 @@ impl Collector for NvmlCollector {
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         // A process target that has gone ends the run rather than producing a
         // series of zeros that looks like a program holding no memory.
-        if self.metric == Metric::Mem && !Path::new(&format!("/proc/{}", self.pid)).exists() {
-            return Err(SampleError::TargetGone(format!(
-                "process {} exited",
-                self.pid
-            )));
+        if let (Metric::Mem, Some(pid)) = (self.metric, self.pid) {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return Err(SampleError::TargetGone(format!("process {pid} exited")));
+            }
         }
 
         let mut events = Vec::with_capacity(self.devices.len());
@@ -330,8 +345,8 @@ impl Collector for NvmlCollector {
             // before this instant.
             let ts_ns = monotonic_ns();
             let mut keys = Vec::new();
-            if self.metric == Metric::Mem {
-                keys.push(KeyValue::task(self.pid));
+            if let (Metric::Mem, Some(pid)) = (self.metric, self.pid) {
+                keys.push(KeyValue::task(pid));
             }
             events.push(Event {
                 ts_ns,
@@ -367,7 +382,7 @@ mod tests {
     /// cannot run the test. Most machines have no NVIDIA device and must skip
     /// cleanly: a test that fails there says nothing about the code.
     fn collector(metric: Metric) -> Option<NvmlCollector> {
-        match NvmlCollector::new(metric, std::process::id() as i32) {
+        match NvmlCollector::new(metric, Some(std::process::id() as i32)) {
             Ok(collector) => Some(collector),
             Err(reason) => {
                 eprintln!("skipped: {reason}");

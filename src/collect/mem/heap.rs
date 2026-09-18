@@ -12,7 +12,7 @@
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
-use crate::collect::{Collector, Losses, Prepared, SampleError};
+use crate::collect::{Attachment, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
 /// One record as the shim writes it: fixed size, native endian, both sides
@@ -109,7 +109,12 @@ impl Prepared for HeapPrepared {
         )
     }
 
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String> {
+        // `requires_launch` already refuses anything but a launched program, so
+        // reaching here without a process would mean the runner changed shape.
+        let pid = attachment
+            .pid()
+            .ok_or_else(|| attachment.needs_a_process("mem.heap.alloc"))?;
         // The child has its own copy now. Closing this one is what makes the
         // read end report end-of-file when the program exits.
         // SAFETY: closing a descriptor this process owns, once.

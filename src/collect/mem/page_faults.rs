@@ -14,7 +14,7 @@ use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
 
-use crate::collect::{Collector, Losses, Prepared, SampleError};
+use crate::collect::{Attachment, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Record, SampledEvent, Scope};
 use crate::request::Mode;
@@ -35,7 +35,16 @@ const RING_PAGES: usize = 512;
 pub struct Prepare(pub Mode);
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String> {
+        // A machine-wide fault sampler opens the event on every cpu, which
+        // needs CAP_PERFMON or a permissive perf_event_paranoid. This collector
+        // opens it on one process, so it says what it cannot do rather than
+        // quietly watching a single one under a system target.
+        let pid = attachment.pid().ok_or_else(|| {
+            "`mem.faults` samples one process here; a system-wide sampler opens the event on \
+             every cpu, which needs CAP_PERFMON and is not written yet"
+                .to_owned()
+        })?;
         Ok(Box::new(PageFaultCollector::new(pid, self.0)))
     }
 }

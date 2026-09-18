@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use crate::collect::{Collector, Prepared, SampleError};
 use crate::clock::monotonic_ns;
+use crate::collect::{Attachment, Collector, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
 /// Which file the resident size is read from.
@@ -40,7 +40,13 @@ impl RssSource {
 pub struct Prepare(pub RssSource);
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String> {
+        // Resident size is read out of one process's procfs directory. There is
+        // no machine-wide equivalent to fall back on: /proc/meminfo answers a
+        // different question.
+        let pid = attachment
+            .pid()
+            .ok_or_else(|| attachment.needs_a_process("mem.rss"))?;
         Ok(Box::new(RssCollector::new(pid, self.0)))
     }
 }

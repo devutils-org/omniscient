@@ -19,7 +19,7 @@
 //! travels all the way to the user-visible output.
 
 mod cpu;
-mod gpu;
+pub mod gpu;
 mod io;
 mod launch;
 pub mod mem;
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::clock::monotonic_ns;
 use crate::event::{CollectorId, Event};
 use crate::request::{Mode, Target};
-use crate::resolve::ResolvedRequest;
+use crate::resolve::{FilterPlacement, ResolvedRequest};
 
 pub use mem::heap::find_shim;
 
@@ -85,6 +85,31 @@ pub struct Collection {
     pub observed_ns: u64,
     /// Why the run stopped.
     pub stopped_because: String,
+    /// What the request's filter removed, when it had to run here. `None` when
+    /// the request carried no filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered: Option<Filtered>,
+}
+
+/// What a filter the resolver could not push down did to a collection.
+///
+/// Events a filter removed are not losses: they were asked to go. But they were
+/// collected, paid for, and are absent from every number that follows, so the
+/// count belongs beside the results for the same reason the loss count does --
+/// a series that quietly holds three of forty events looks exactly like a
+/// series of three.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Filtered {
+    /// The predicate, as the request wrote it.
+    pub predicate: String,
+    pub kept: u64,
+    pub dropped: u64,
+    /// Fields the predicate names that no event carried. A predicate over a
+    /// field nothing produces is false everywhere, which empties the series and
+    /// looks exactly like a workload that did nothing -- so the reason is
+    /// recorded rather than left to be guessed at.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unseen_fields: Vec<String>,
 }
 
 /// Everything that did not make it into `events`.
@@ -211,6 +236,37 @@ fn registry() -> Vec<Factory> {
     families.into_iter().flat_map(|family| family()).collect()
 }
 
+/// What a collector is being bound to.
+///
+/// Most sources observe a process, and a launched program is a process like any
+/// other. A few observe something that has no process at all -- a GPU, a RAPL
+/// domain, a whole machine -- and passing those a pid, or a sentinel standing in
+/// for one, is how a device figure ends up presented as a program's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attachment {
+    /// One process: a `--pid` target, or the program the tool launched.
+    Process(i32),
+    /// The machine as a whole. Nothing here is attributable to a process.
+    System,
+}
+
+impl Attachment {
+    /// The process being observed, when there is one.
+    pub fn pid(self) -> Option<i32> {
+        match self {
+            Attachment::Process(pid) => Some(pid),
+            Attachment::System => None,
+        }
+    }
+
+    /// The refusal a collector that needs a process returns for a system
+    /// target, phrased so the reader knows it is the source and not the
+    /// machine that cannot do it.
+    pub fn needs_a_process(self, source: &str) -> String {
+        format!("`{source}` observes a process, and a system target names none")
+    }
+}
+
 /// A collector before the thing it observes exists.
 ///
 /// Two phases are needed because some collectors have to act on the target
@@ -231,7 +287,7 @@ pub trait Prepared {
     }
 
     /// Binds to the target now that it exists.
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String>;
+    fn attach(self: Box<Self>, attachment: Attachment) -> Result<Box<dyn Collector>, String>;
 }
 
 /// What a single sample can go wrong with.
@@ -304,9 +360,13 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
         }
     }
 
-    let pid = match (target, &child) {
-        (_, Some(child)) => child.pid(),
-        (Target::Pid(pids) | Target::Tid(pids), _) => pids[0],
+    let attachment = match (target, &child) {
+        (_, Some(child)) => Attachment::Process(child.pid()),
+        (Target::Pid(pids) | Target::Tid(pids), _) => Attachment::Process(pids[0]),
+        // A system target has nothing to attach to, which is not the same as
+        // having nothing to measure: the sources that are scoped to a device or
+        // to the machine are exactly the ones that need it.
+        (Target::System, _) => Attachment::System,
         (target, _) => {
             return Err(CollectError::UnsupportedTarget {
                 source_id: resolved[0].request.source.to_string(),
@@ -318,10 +378,12 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
     let mut collectors = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
         let source_id = resolved[index].request.source.to_string();
-        let mut collector = prepared.attach(pid).map_err(|reason| CollectError::Start {
-            source_id: source_id.clone(),
-            reason,
-        })?;
+        let mut collector = prepared
+            .attach(attachment)
+            .map_err(|reason| CollectError::Start {
+                source_id: source_id.clone(),
+                reason,
+            })?;
         if let Err(reason) = collector.start() {
             if let Some(child) = child.as_mut() {
                 child.terminate();
@@ -449,15 +511,46 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
         .map(|(index, collector)| {
             let mut collected = std::mem::take(&mut events[index]);
             collected.sort_by_key(|event| event.ts_ns);
+            let filtered = apply_filter(&resolved[index], &mut collected);
             Collection {
                 observed_ns,
                 value_attr: collector.value_attr().to_owned(),
                 events: collected,
                 losses: std::mem::take(&mut losses[index]),
                 stopped_because: stopped_because.clone(),
+                filtered,
             }
         })
         .collect())
+}
+
+/// Evaluates the request's filter over what was collected.
+///
+/// This is the other half of filter placement. The resolver decides where a
+/// predicate runs and says so in the resolved file; for a backend that returns
+/// whole records, "userspace" means here, after the event has been paid for. A
+/// backend that was credited with pushing the predicate down is taken at its
+/// word and its events are left alone -- running the filter twice would hide
+/// the bug if it had not.
+fn apply_filter(resolved: &ResolvedRequest, events: &mut Vec<Event>) -> Option<Filtered> {
+    let predicate = resolved.request.filter.as_ref()?;
+    if !matches!(resolved.filter, Some(FilterPlacement::Userspace(_))) {
+        return None;
+    }
+    let before = events.len();
+    let unseen_fields = predicate
+        .fields()
+        .into_iter()
+        .filter(|field| *field != "kind" && !events.iter().any(|event| event.attr(field).is_some()))
+        .map(str::to_owned)
+        .collect();
+    events.retain(|event| crate::filter::matches(predicate, event));
+    Some(Filtered {
+        predicate: predicate.to_string(),
+        kept: events.len() as u64,
+        dropped: (before - events.len()) as u64,
+        unseen_fields,
+    })
 }
 
 /// Collects what every collector needs in the launched program's environment,
@@ -492,7 +585,10 @@ fn merge_environments(
 pub fn implemented() -> Vec<String> {
     let mut by_source: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
     for factory in registry() {
-        by_source.entry(factory.source).or_default().push(factory.backend);
+        by_source
+            .entry(factory.source)
+            .or_default()
+            .push(factory.backend);
     }
     by_source
         .into_iter()
@@ -524,7 +620,6 @@ fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::Capabilities;
     use crate::catalog::Catalog;
 
     /// Every registered collector must name a real catalog entry and a real

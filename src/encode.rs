@@ -263,6 +263,31 @@ fn text(results: &Results) -> String {
         }
     }
 
+    // A filter that ran here is part of how the numbers came to be: the events
+    // it removed were collected and paid for, and every series below is what
+    // was left.
+    if let Some(filtered) = &results.filtered {
+        let _ = writeln!(
+            out,
+            "  filter `{}` kept {} of {} events, evaluated after reading",
+            filtered.predicate,
+            filtered.kept,
+            filtered.kept + filtered.dropped
+        );
+        if !filtered.unseen_fields.is_empty() {
+            let _ = writeln!(
+                out,
+                "    no event carried {}, so that part of the predicate was never true",
+                filtered
+                    .unseen_fields
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     for degradation in &results.degradations {
         let _ = writeln!(out, "  degraded: {degradation}");
     }
@@ -433,6 +458,7 @@ mod tests {
             observed_ns: 1_000_000_000,
             stopped_because: "the requested duration elapsed".into(),
             losses: Losses::default(),
+            filtered: None,
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
         }

@@ -291,6 +291,14 @@ impl Capabilities {
             };
         }
 
+        // A family may answer requirement classes of its own -- a vendor
+        // library it loads, a sysfs layout only it reads. The probe lives with
+        // the code that depends on it, so a family cannot be added without the
+        // means to check what it needs.
+        if let Some(probe) = crate::collect::gpu::probe(requirement) {
+            return probe;
+        }
+
         match requirement {
             "tracefs" => match self.environment.tracefs {
                 Access::Readable => Probe::Available,

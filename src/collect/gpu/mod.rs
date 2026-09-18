@@ -50,10 +50,9 @@ pub fn factories() -> Vec<Factory> {
 /// requirement says, and the profiling *binaries* -- `ncu`, `rocprofv3` -- stay
 /// unanswered rather than being guessed at from a name on `PATH`.
 ///
-/// This is not wired into `capabilities.rs` yet; see the shared-layer note in
-/// `docs/families/gpu.md`. Until it is, every `gpu` source reads `?` in
-/// `omn list`, which is the honest reading of "no probe covers this".
-#[allow(dead_code)]
+/// `Capabilities::probe` calls this before falling back to "no probe is written
+/// for that yet", so a `gpu` source reads `yes` or `no` in `omn list` rather
+/// than `?`.
 pub fn probe(requirement: &str) -> Option<Probe> {
     if let Some(name) = requirement.strip_prefix("hwmon:") {
         return Some(hwmon(name));

@@ -184,6 +184,39 @@ fn a_program_that_never_touches_the_gpu_reports_zero_rather_than_nothing() {
     }
 }
 
+/// A device figure has no process to belong to, so `--system` is its natural
+/// target: the run is bounded by a duration rather than by a program's life.
+#[test]
+fn a_system_target_measures_the_device_and_says_that_is_what_it_did() {
+    let output = run(&[
+        "gpu.mem", "--system", "--mode", "snapshot", "--emit", "raw", "--format", "json",
+    ]);
+    if !output.status.success() {
+        let complaint = stderr(&output);
+        assert!(
+            complaint.contains("libnvidia-ml")
+                || complaint.contains("no viable backend")
+                || complaint.contains("reports no device"),
+            "{complaint}"
+        );
+        return eprintln!("skipped: no GPU on this machine");
+    }
+
+    let run: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json results");
+    let event = run["results"][0]["outputs"][0]["events"][0].clone();
+    // Without a process, the figure is the device's own VRAM and the event says
+    // so: the same number under `scope=process` would be an attribution nobody
+    // measured.
+    assert_eq!(attr(&event, "scope").unwrap(), "device");
+    assert!(event["keys"].as_array().is_none_or(|keys| keys.is_empty()));
+    let used = attr(&event, "bytes").unwrap().as_f64().unwrap();
+    let total = attr(&event, "device_total_bytes")
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert!(used <= total, "{used} bytes held of {total}");
+}
+
 #[test]
 fn a_device_wide_source_refuses_a_per_process_target() {
     // A clock is the device's, and there is no per-process share of it to

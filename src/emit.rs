@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::Unit;
-use crate::collect::{Collection, Losses};
+use crate::collect::{Collection, Filtered, Losses};
 use crate::event::{Event, KeyValue};
 use crate::request::{Emit, EmitKind};
 use crate::resolve::ResolvedRequest;
@@ -34,6 +34,10 @@ pub struct Results {
     pub observed_ns: u64,
     pub stopped_because: String,
     pub losses: Losses,
+    /// What the request's filter removed after the fact, when the resolver
+    /// could not push it down. Absent when the request carried no filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered: Option<Filtered>,
     /// Requirements that were assumed rather than checked, carried from the
     /// resolver so they are visible next to the numbers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -165,6 +169,7 @@ pub fn aggregate(
         observed_ns: collection.observed_ns,
         stopped_because: collection.stopped_because,
         losses: collection.losses,
+        filtered: collection.filtered,
         unverified: resolved.unverified.clone(),
         degradations: resolved.degradations.clone(),
     })
