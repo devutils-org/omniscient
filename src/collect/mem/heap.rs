@@ -109,7 +109,13 @@ impl Prepared for HeapPrepared {
         )
     }
 
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+    fn attach(
+        self: Box<Self>,
+        target: &crate::request::Target,
+    ) -> Result<Box<dyn Collector>, String> {
+        let pid = target
+            .first_pid()
+            .ok_or_else(|| "a preloaded shim observes a launched program".to_owned())?;
         // The child has its own copy now. Closing this one is what makes the
         // read end report end-of-file when the program exits.
         // SAFETY: closing a descriptor this process owns, once.

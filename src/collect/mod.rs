@@ -231,7 +231,12 @@ pub trait Prepared {
     }
 
     /// Binds to the target now that it exists.
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String>;
+    ///
+    /// The target is passed whole rather than as a pid, because not every
+    /// source observes a process: an interface counter and a machine-wide file
+    /// have no pid to be given, and inventing one for them would push the lie
+    /// into every collector.
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String>;
 }
 
 /// What a single sample can go wrong with.
@@ -304,24 +309,24 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
         }
     }
 
-    let pid = match (target, &child) {
-        (_, Some(child)) => child.pid(),
-        (Target::Pid(pids) | Target::Tid(pids), _) => pids[0],
-        (target, _) => {
-            return Err(CollectError::UnsupportedTarget {
-                source_id: resolved[0].request.source.to_string(),
-                target: target.kind().to_string(),
-            })
-        }
+    // A launched program replaces the target's own identity: the collectors
+    // observe the process that was just created, not a pid the request named.
+    // A target that names no process -- an interface, the machine -- is passed
+    // through, and a collector that needs a pid refuses it by name.
+    let bound = match &child {
+        Some(child) => Target::Pid(vec![child.pid()]),
+        None => target.clone(),
     };
 
     let mut collectors = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
         let source_id = resolved[index].request.source.to_string();
-        let mut collector = prepared.attach(pid).map_err(|reason| CollectError::Start {
-            source_id: source_id.clone(),
-            reason,
-        })?;
+        let mut collector = prepared
+            .attach(&bound)
+            .map_err(|reason| CollectError::Start {
+                source_id: source_id.clone(),
+                reason,
+            })?;
         if let Err(reason) = collector.start() {
             if let Some(child) = child.as_mut() {
                 child.terminate();
@@ -492,7 +497,10 @@ fn merge_environments(
 pub fn implemented() -> Vec<String> {
     let mut by_source: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
     for factory in registry() {
-        by_source.entry(factory.source).or_default().push(factory.backend);
+        by_source
+            .entry(factory.source)
+            .or_default()
+            .push(factory.backend);
     }
     by_source
         .into_iter()

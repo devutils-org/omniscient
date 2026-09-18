@@ -127,9 +127,23 @@ pub enum KeyValue {
     Cgroup {
         id: u64,
     },
+    /// A network interface, by kernel index and by name. Both are carried: the
+    /// index is what the kernel uses, the name is what a person reads, and an
+    /// interface that gets renamed is still the same interface.
+    Iface {
+        index: u32,
+        name: String,
+    },
 }
 
 impl KeyValue {
+    pub fn iface(index: u32, name: impl Into<String>) -> Self {
+        KeyValue::Iface {
+            index,
+            name: name.into(),
+        }
+    }
+
     pub fn task(tid: i32) -> Self {
         KeyValue::Task { tid }
     }
@@ -149,6 +163,7 @@ impl KeyValue {
             KeyValue::Mem { .. } => KeyKind::Mem,
             KeyValue::Gpu { .. } => KeyKind::Gpu,
             KeyValue::Cgroup { .. } => KeyKind::Cgroup,
+            KeyValue::Iface { .. } => KeyKind::Iface,
         }
     }
 }
@@ -165,6 +180,7 @@ impl fmt::Display for KeyValue {
             KeyValue::Mem { base, len } => write!(f, "mem:[{base:#x},{:#x})", base + len),
             KeyValue::Gpu { fence_ctx, seqno } => write!(f, "gpu:{fence_ctx}+{seqno}"),
             KeyValue::Cgroup { id } => write!(f, "cgroup:{id}"),
+            KeyValue::Iface { name, .. } => write!(f, "iface:{name}"),
         }
     }
 }

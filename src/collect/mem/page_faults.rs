@@ -35,7 +35,16 @@ const RING_PAGES: usize = 512;
 pub struct Prepare(pub Mode);
 
 impl Prepared for Prepare {
-    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+    fn attach(
+        self: Box<Self>,
+        target: &crate::request::Target,
+    ) -> Result<Box<dyn Collector>, String> {
+        let pid = target.first_pid().ok_or_else(|| {
+            format!(
+                "sampling page faults machine-wide needs per-cpu events and the privileges                  for them; a {} target names no process to sample",
+                target.kind()
+            )
+        })?;
         Ok(Box::new(PageFaultCollector::new(pid, self.0)))
     }
 }

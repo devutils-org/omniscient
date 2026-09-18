@@ -107,6 +107,25 @@ pub enum Target {
 }
 
 impl Target {
+    /// The process to observe, when the target names one.
+    ///
+    /// A target that names no process is not an error: an interface or the
+    /// whole machine is observed without one.
+    pub fn first_pid(&self) -> Option<i32> {
+        match self {
+            Target::Pid(pids) | Target::Tid(pids) => pids.first().copied(),
+            _ => None,
+        }
+    }
+
+    /// The interface to observe, when the target names one.
+    pub fn interface(&self) -> Option<&str> {
+        match self {
+            Target::Iface(name) => Some(name),
+            _ => None,
+        }
+    }
+
     /// The catalog key this target is looked up under.
     pub fn kind(&self) -> TargetKind {
         match self {
@@ -723,10 +742,15 @@ pub enum KeyKind {
     Gpu,
     /// `cgroup:id`.
     Cgroup,
+    /// `iface:name`, the network interface an event belongs to.
+    ///
+    /// Not only a series label: a qdisc delay, a driver drop and a link error
+    /// are three sources whose only shared identity is the interface.
+    Iface,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 9] = [
+    pub const ALL: [KeyKind; 10] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -736,6 +760,7 @@ impl KeyKind {
         KeyKind::Mem,
         KeyKind::Gpu,
         KeyKind::Cgroup,
+        KeyKind::Iface,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -749,6 +774,7 @@ impl KeyKind {
             KeyKind::Mem => "mem",
             KeyKind::Gpu => "gpu",
             KeyKind::Cgroup => "cgroup",
+            KeyKind::Iface => "iface",
         }
     }
 }
