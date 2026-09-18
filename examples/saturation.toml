@@ -1,0 +1,49 @@
+# A cheap, always-on saturation sweep: what is this machine limited by?
+#
+# Run it with:  omn -f examples/saturation.toml
+#
+# Every source here polls a file or reads a counter, so the whole session costs
+# about nothing and can run continuously. It answers "which resource is
+# saturated", not "why"; the expensive sources come after, pointed at whichever
+# layer this one accuses.
+
+name = "machine saturation"
+duration = "60s"
+format = "json"
+
+[[requests]]
+label = "cpu-stall"
+source = "cpu.pressure"
+target = "system"
+mode = "poll@1s"
+emit = ["timeline"]
+
+[[requests]]
+label = "memory-stall"
+source = "mem.pressure"
+target = "system"
+mode = "poll@1s"
+emit = ["timeline"]
+
+[[requests]]
+label = "io-stall"
+source = "io.pressure"
+target = "system"
+mode = "poll@1s"
+emit = ["timeline"]
+
+[[requests]]
+label = "queue-depth"
+source = "io.inflight"
+target = "system"
+mode = "poll@1s"
+emit = ["timeline"]
+
+# Collected whether or not anyone asked: a throttled run is not comparable to a
+# cold one, and without this the other numbers quietly lie.
+[[requests]]
+label = "throttling"
+source = "power.throttle"
+target = "system"
+mode = "poll@1s"
+emit = ["timeline"]

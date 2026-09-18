@@ -1,0 +1,58 @@
+# A latency budget for one web server process: where its 400 ms actually went.
+#
+# Run it with:  omn -f examples/web-latency.yml
+#
+# The five sources below are phase 1 of the catalog's phasing, chosen because
+# together they cross network, scheduler, CPU, filesystem and device. They share
+# the `req` and `task` keys, which is what lets the correlator attribute one
+# request's time across all of them instead of reporting five unrelated numbers.
+name: web latency budget
+duration: 30s
+budget: 2%
+out: ./results
+format: text
+
+requests:
+  # Where the request enters and leaves.
+  - label: connection
+    source: net.tcp.lifetime
+    target: {pid: 4242}
+    mode: trace
+    emit: [raw, topk:10]
+    keys: [sock, task, req]
+    filter: "dport == 443"
+
+  # Who unblocks whom: the only join that crosses a block.
+  - label: wakeups
+    source: sched.wakeup
+    target: {pid: 4242}
+    mode: trace
+    emit: [raw]
+    keys: [task]
+
+  # Time spent not running, with the stack that blocked.
+  - label: blocked
+    source: sched.offcpu
+    target: {pid: 4242}
+    mode: trace
+    emit: [stack, hist]
+    keys: [task]
+    stack: fp
+
+  # Time spent running, by call site.
+  - label: on-cpu
+    source: cpu.profile
+    target: {pid: 4242}
+    mode: sample@99hz
+    emit: [stack]
+    stack: fp
+
+  # What the device did, for reads only: writes leave through writeback and lose
+  # the submitting context (see the source's caveats).
+  - label: device
+    source: io.latency
+    target: {pid: 4242}
+    mode: trace
+    emit: [hist, topk:5]
+    keys: [blk, task, req]
+    filter: "rwbs == 'R' && bytes > 4KiB"

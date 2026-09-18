@@ -1,0 +1,23 @@
+# A runnable session: watch one program's resident memory while it runs.
+#
+#   omn -f examples/rss-run.yml
+#
+# The program is part of the request: launching it makes it both the target and
+# the clock, so the run ends when it does rather than after an arbitrary
+# duration. Swap the `launch` line for `{pid: 1234}` to watch something already
+# running, and add `duration` to bound it.
+name: resident memory of a launched program
+format: yaml
+out: ./results
+
+requests:
+  - label: rss
+    source: mem.rss
+    target:
+      launch:
+        - python3
+        - -c
+        # Touch 8 MiB five times, 200 ms apart: a staircase with a known height.
+        - "import time; b = []; [(b.append(bytearray(8 << 20)), time.sleep(0.2)) for _ in range(5)]"
+    mode: poll@100ms
+    emit: [timeline, summary]

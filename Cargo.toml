@@ -1,0 +1,25 @@
+[package]
+name = "omn"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Omniscient — observabilité système unifiée, sans wrapper"
+license = "Apache-2.0"
+
+[[bin]]
+name = "omn"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+thiserror = "2"
+toml = "0.9"
+
+[profile.release]
+lto = "thin"
+strip = true

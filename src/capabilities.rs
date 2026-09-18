@@ -1,0 +1,488 @@
+//! Machine introspection.
+//!
+//! Nothing in the catalog is taken to be available. Every backend declares what
+//! it needs and this module goes and looks. The important part is the third
+//! answer: besides "there" and "missing", a probe may say **unknown**, meaning
+//! no check has been written for that class of requirement yet.
+//!
+//! Unknown is not treated as available. A backend with an unverified
+//! requirement is usable only when nothing better exists, and the fact is
+//! carried all the way to the output. The alternative -- assuming what was not
+//! checked -- is how a tool ends up claiming a measurement it never took.
+//!
+//! The environment is captured whether or not anyone asked. Two measurements are
+//! comparable only if the governor, the THP mode, SMT and the clocksource were
+//! the same, so those values belong next to the numbers rather than in someone's
+//! memory of how the machine was set up.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// The answer to "can this machine do that".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "detail")]
+pub enum Probe {
+    /// Checked, and there.
+    Available,
+    /// Checked, and not there. The string says what was looked for.
+    Missing(String),
+    /// Not checked: no probe exists for this class of requirement yet.
+    Unknown(String),
+}
+
+impl Probe {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Probe::Available)
+    }
+
+    pub fn is_missing(&self) -> bool {
+        matches!(self, Probe::Missing(_))
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Probe::Unknown(_))
+    }
+}
+
+impl fmt::Display for Probe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Probe::Available => f.write_str("available"),
+            Probe::Missing(detail) => write!(f, "missing: {detail}"),
+            Probe::Unknown(detail) => write!(f, "unverified: {detail}"),
+        }
+    }
+}
+
+/// Whether something is there, and whether this user may look at it.
+///
+/// The distinction matters: tracefs is mounted on almost every machine and
+/// readable on almost none of them without privileges. Reporting "absent" for
+/// something that is merely out of reach sends the reader looking for a kernel
+/// config option instead of for `sudo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    Readable,
+    /// Present, but this user may not read it.
+    Restricted,
+    Absent,
+}
+
+impl Access {
+    pub fn is_readable(self) -> bool {
+        self == Access::Readable
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::Readable => "readable",
+            Access::Restricted => "present but not readable by this user",
+            Access::Absent => "absent",
+        }
+    }
+}
+
+impl fmt::Display for Access {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Looks at a path and says which of the three it is.
+fn access(path: &Path) -> Access {
+    match std::fs::metadata(path) {
+        Ok(_) => Access::Readable,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Access::Restricted,
+        Err(_) => Access::Absent,
+    }
+}
+
+/// A kernel version, compared the way requirements write it: `kernel>=6.1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct KernelVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl KernelVersion {
+    /// Parses the leading `major.minor` of a release string such as
+    /// `6.12.4-arch1-1`.
+    pub fn parse(release: &str) -> Option<Self> {
+        let mut parts = release.split(|c: char| !c.is_ascii_digit());
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next().unwrap_or("0").parse().unwrap_or(0);
+        Some(Self { major, minor })
+    }
+}
+
+impl fmt::Display for KernelVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// What the machine is, at the moment of measuring.
+///
+/// Captured on every session. This is what makes two runs on two machines
+/// comparable, and what makes a run comparable to itself an hour later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Environment {
+    pub kernel_release: String,
+    pub kernel_version: Option<KernelVersion>,
+    pub arch: String,
+    pub cpus: usize,
+    /// The clocksource in use. A run on `hpet` and a run on `tsc` do not have
+    /// comparable timestamp costs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clocksource: Option<String>,
+    /// The scaling governor. `powersave` and `performance` differ by tens of
+    /// percent on the same workload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_governor: Option<String>,
+    /// Transparent huge pages. `always` makes RSS grow in 2 MB steps in the
+    /// background, which is enough on its own to make two runs disagree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparent_hugepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smt: Option<String>,
+    /// `perf_event_paranoid`: decides half the backends on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perf_event_paranoid: Option<i32>,
+    pub kernel_btf: Access,
+    pub cgroup2: Access,
+    /// Where the block, sched and other tracepoints are enumerated. Root-only
+    /// by default, which is why this is not a boolean.
+    pub tracefs: Access,
+    /// Speculative execution mitigations, which cost what they cost.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mitigations: BTreeMap<String, String>,
+    /// What is deliberately not captured yet, so its absence is not read as
+    /// "this machine has none of it".
+    pub not_captured: Vec<String>,
+}
+
+/// Everything the resolver knows about this machine.
+#[derive(Debug, Clone)]
+pub struct Capabilities {
+    environment: Environment,
+}
+
+impl Capabilities {
+    /// Looks at the machine. Every field is read, never assumed.
+    pub fn detect() -> Self {
+        let kernel_release =
+            read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_else(|| "unknown".into());
+        let environment = Environment {
+            kernel_version: KernelVersion::parse(&kernel_release),
+            kernel_release,
+            arch: arch(),
+            cpus: available_cpus(),
+            clocksource: read_trimmed(
+                "/sys/devices/system/clocksource/clocksource0/current_clocksource",
+            ),
+            cpu_governor: read_trimmed("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
+            transparent_hugepage: read_trimmed("/sys/kernel/mm/transparent_hugepage/enabled")
+                .and_then(|line| selected_bracket(&line)),
+            smt: read_trimmed("/sys/devices/system/cpu/smt/control"),
+            perf_event_paranoid: read_trimmed("/proc/sys/kernel/perf_event_paranoid")
+                .and_then(|value| value.parse().ok()),
+            kernel_btf: access(Path::new("/sys/kernel/btf/vmlinux")),
+            cgroup2: access(Path::new("/sys/fs/cgroup/cgroup.controllers")),
+            tracefs: tracefs_access(),
+            mitigations: mitigations(),
+            not_captured: vec![
+                "microarchitecture".into(),
+                "NUMA topology".into(),
+                "virtualization and steal time".into(),
+                "vendor SDK versions".into(),
+            ],
+        };
+        Self { environment }
+    }
+
+    pub fn environment(&self) -> &Environment {
+        &self.environment
+    }
+
+    /// Checks a cgroup v2 interface file.
+    ///
+    /// The file is looked for at the root, but its absence there proves
+    /// nothing: the root cgroup carries no `memory.current`, while every child
+    /// does. So the controller is checked against `cgroup.controllers`, which
+    /// is what actually decides whether the file exists where it matters.
+    fn probe_cgroup_file(&self, file: &str) -> Probe {
+        if self.environment.cgroup2 == Access::Absent {
+            return Probe::Missing("cgroup v2 is not mounted at /sys/fs/cgroup".into());
+        }
+        let root = PathBuf::from("/sys/fs/cgroup");
+        if access(&root.join(file)).is_readable() {
+            return Probe::Available;
+        }
+        let controller = file.split('.').next().unwrap_or(file);
+        match std::fs::read_to_string(root.join("cgroup.controllers")) {
+            Ok(controllers)
+                if controllers
+                    .split_whitespace()
+                    .any(|name| name == controller) =>
+            {
+                Probe::Available
+            }
+            Ok(_) => Probe::Missing(format!(
+                "the `{controller}` controller is not enabled on this cgroup hierarchy"
+            )),
+            Err(error) => Probe::Missing(format!("cannot read cgroup.controllers: {error}")),
+        }
+    }
+
+    /// Answers one requirement string from a catalog backend.
+    ///
+    /// `pid` supplies the process a `/proc/[pid]/...` requirement refers to;
+    /// without one, such a requirement can only be checked for the current
+    /// process, which is what `[pid]` means for a self-test.
+    pub fn probe(&self, requirement: &str, pid: Option<i32>) -> Probe {
+        if let Some(rest) = requirement.strip_prefix("kernel>=") {
+            return match (KernelVersion::parse(rest), self.environment.kernel_version) {
+                (Some(wanted), Some(actual)) if actual >= wanted => Probe::Available,
+                (Some(wanted), Some(actual)) => {
+                    Probe::Missing(format!("kernel {actual} is older than {wanted}"))
+                }
+                _ => Probe::Unknown(format!("cannot compare kernel version against `{rest}`")),
+            };
+        }
+
+        if requirement.starts_with('/') {
+            let path = substitute_pid(requirement, pid);
+            return probe_path(&path);
+        }
+
+        if let Some(file) = requirement.strip_prefix("cgroup2:") {
+            return self.probe_cgroup_file(file);
+        }
+
+        if let Some(event) = requirement.strip_prefix("tracepoint:") {
+            return match self.environment.tracefs {
+                Access::Absent => Probe::Missing("tracefs is not mounted".into()),
+                Access::Restricted => Probe::Missing(format!(
+                    "tracefs is mounted but not readable by uid {}, so `{event}` cannot even be \
+                     looked for: this needs root or CAP_SYS_ADMIN, not a different kernel",
+                    current_uid()
+                )),
+                Access::Readable => {
+                    let Some(root) = tracefs_root() else {
+                        return Probe::Missing("tracefs is not mounted".into());
+                    };
+                    probe_path(&root.join("events").join(event.replace(':', "/")))
+                }
+            };
+        }
+
+        match requirement {
+            "tracefs" => match self.environment.tracefs {
+                Access::Readable => Probe::Available,
+                Access::Restricted => Probe::Missing(format!(
+                    "tracefs is mounted but not readable by uid {}: this needs root, not a \
+                     different kernel",
+                    current_uid()
+                )),
+                Access::Absent => Probe::Missing("tracefs is not mounted".into()),
+            },
+            "btf" => match self.environment.kernel_btf {
+                Access::Readable => Probe::Available,
+                Access::Restricted => {
+                    Probe::Missing("/sys/kernel/btf/vmlinux is not readable by this user".into())
+                }
+                Access::Absent => Probe::Missing(
+                    "/sys/kernel/btf/vmlinux is absent, so CO-RE is unavailable".into(),
+                ),
+            },
+            other => Probe::Unknown(format!("no probe is written for `{other}` yet")),
+        }
+    }
+}
+
+/// Replaces `[pid]` in a procfs path, defaulting to this process.
+fn substitute_pid(requirement: &str, pid: Option<i32>) -> PathBuf {
+    let pid = pid.unwrap_or(std::process::id() as i32);
+    PathBuf::from(requirement.replace("[pid]", &pid.to_string()))
+}
+
+/// Reports a path as available, out of reach, or absent -- never conflating the
+/// last two.
+fn probe_path(path: &Path) -> Probe {
+    match access(path) {
+        Access::Readable => Probe::Available,
+        Access::Restricted => Probe::Missing(format!(
+            "{} exists but is not readable by uid {}",
+            path.display(),
+            current_uid()
+        )),
+        Access::Absent => Probe::Missing(format!("{} does not exist", path.display())),
+    }
+}
+
+const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
+
+fn tracefs_root() -> Option<PathBuf> {
+    TRACEFS_ROOTS
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| access(&path.join("events")).is_readable())
+}
+
+/// Readable wins over restricted, restricted over absent: the best of the
+/// candidate mount points is what the machine offers.
+fn tracefs_access() -> Access {
+    let mut best = Access::Absent;
+    for candidate in TRACEFS_ROOTS {
+        match access(&PathBuf::from(candidate).join("events")) {
+            Access::Readable => return Access::Readable,
+            Access::Restricted => best = Access::Restricted,
+            Access::Absent => {}
+        }
+    }
+    best
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: `getuid` reads process state and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+/// Picks the `[selected]` entry out of a sysfs enumeration such as
+/// `always [madvise] never`.
+fn selected_bracket(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find_map(|word| {
+            word.strip_prefix('[')
+                .and_then(|word| word.strip_suffix(']'))
+        })
+        .map(str::to_owned)
+        .or_else(|| Some(line.to_owned()))
+}
+
+fn mitigations() -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/sys/devices/system/cpu/vulnerabilities") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Ok(value) = std::fs::read_to_string(entry.path()) {
+            found.insert(name, value.trim().to_owned());
+        }
+    }
+    found
+}
+
+fn arch() -> String {
+    let mut info: libc::utsname = unsafe { std::mem::zeroed() };
+    // SAFETY: `uname` fills a struct we own and never fails for a valid pointer.
+    if unsafe { libc::uname(&mut info) } != 0 {
+        return "unknown".into();
+    }
+    let bytes: Vec<u8> = info
+        .machine
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn available_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_versions_parse_from_a_release_string() {
+        assert_eq!(
+            KernelVersion::parse("6.12.4-arch1-1"),
+            Some(KernelVersion {
+                major: 6,
+                minor: 12
+            })
+        );
+        assert!(KernelVersion::parse("6.1") < KernelVersion::parse("6.12"));
+    }
+
+    #[test]
+    fn a_restricted_path_is_not_reported_as_absent() {
+        // Whatever this machine's tracefs is, the two states must not be
+        // confused: one calls for privileges, the other for a different kernel.
+        let capabilities = Capabilities::detect();
+        if capabilities.environment().tracefs == Access::Restricted {
+            let probe = capabilities.probe("tracefs", None);
+            assert!(probe.to_string().contains("not readable"), "{probe}");
+            assert!(!probe.to_string().contains("not mounted"), "{probe}");
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_reported_as_missing_not_unknown() {
+        let capabilities = Capabilities::detect();
+        let probe = capabilities.probe("/proc/definitely-not-here", None);
+        assert!(probe.is_missing(), "{probe}");
+    }
+
+    #[test]
+    fn a_requirement_with_no_probe_is_unknown_rather_than_assumed() {
+        let capabilities = Capabilities::detect();
+        let probe = capabilities.probe("pmu:PERF_COUNT_HW_CPU_CYCLES", None);
+        assert!(probe.is_unknown(), "{probe}");
+        assert!(
+            !probe.is_available(),
+            "an unwritten probe must never read as available"
+        );
+    }
+
+    #[test]
+    fn a_cgroup_file_absent_from_the_root_is_judged_by_its_controller() {
+        let capabilities = Capabilities::detect();
+        if capabilities.environment().cgroup2 == Access::Absent {
+            return;
+        }
+        // The root cgroup has no `memory.current`, yet every child does, so a
+        // machine with the memory controller enabled must not read as missing.
+        let probe = capabilities.probe("cgroup2:memory.current", None);
+        let controllers =
+            std::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers").unwrap_or_default();
+        if controllers.split_whitespace().any(|name| name == "memory") {
+            assert!(probe.is_available(), "{probe}");
+        }
+    }
+
+    #[test]
+    fn this_process_own_procfs_files_are_found() {
+        let capabilities = Capabilities::detect();
+        assert!(capabilities.probe("/proc/[pid]/statm", None).is_available());
+    }
+
+    #[test]
+    fn the_environment_captures_what_makes_runs_comparable() {
+        let environment = Capabilities::detect().environment().clone();
+        assert!(!environment.kernel_release.is_empty());
+        assert!(environment.cpus > 0);
+        assert!(
+            !environment.not_captured.is_empty(),
+            "what is not captured must be stated"
+        );
+    }
+}
