@@ -201,11 +201,12 @@ impl OutputFormat {
             OutputFormat::Text | OutputFormat::Json | OutputFormat::Yaml | OutputFormat::Toml => {
                 FormatStatus::Ready
             }
-            OutputFormat::Ndjson | OutputFormat::Folded | OutputFormat::Speedscope => {
-                FormatStatus::Planned {
-                    phase: "phase 3, with the first collectors",
-                }
-            }
+            // ndjson landed with the first collector: it encodes any record
+            // stream, so it needed no emit-specific work.
+            OutputFormat::Ndjson => FormatStatus::Ready,
+            OutputFormat::Folded | OutputFormat::Speedscope => FormatStatus::Planned {
+                phase: "the first stack-producing collector",
+            },
             OutputFormat::Pprof | OutputFormat::ChromeTrace => FormatStatus::Planned {
                 phase: "phase 4, with the correlated vertical case",
             },

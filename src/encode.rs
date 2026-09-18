@@ -710,6 +710,29 @@ mod tests {
         );
     }
 
+    /// What a format claims about itself has to match what it does. A merge
+    /// once put `ndjson` back to "planned" while it was encoding perfectly
+    /// well, and nothing noticed: the claim and the encoder are in different
+    /// files and only a test crosses them.
+    #[test]
+    fn every_format_does_what_its_declared_status_says() {
+        let run = correlated_run();
+        for format in OutputFormat::ALL {
+            let encoded = run_output(format, &run);
+            match format.status() {
+                crate::format::FormatStatus::Ready => assert!(
+                    encoded.is_ok(),
+                    "`{format}` is declared ready and cannot encode: {:?}",
+                    encoded.err()
+                ),
+                crate::format::FormatStatus::Planned { .. } => assert!(
+                    encoded.is_err(),
+                    "`{format}` is declared unwritten and encoded anyway"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn a_format_without_an_encoder_says_so() {
         let error = results(OutputFormat::Folded, &sample()).unwrap_err();
