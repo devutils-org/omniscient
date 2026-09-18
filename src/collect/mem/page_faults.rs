@@ -14,7 +14,7 @@ use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
 
-use super::{Collector, Losses, Prepared, SampleError};
+use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Record, SampledEvent, Scope};
 use crate::request::Mode;

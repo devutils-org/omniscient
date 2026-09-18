@@ -18,10 +18,16 @@
 //! gone. So a `Collection` always carries what was lost and why, and the count
 //! travels all the way to the user-visible output.
 
-pub mod heap;
+mod cpu;
+mod gpu;
+mod io;
 mod launch;
-mod page_faults;
-mod proc_rss;
+pub mod mem;
+mod net;
+mod power;
+mod proc;
+mod runtime;
+mod sched;
 
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
@@ -33,7 +39,7 @@ use crate::event::{CollectorId, Event};
 use crate::request::{Mode, Target};
 use crate::resolve::ResolvedRequest;
 
-pub use heap::find_shim;
+pub use mem::heap::find_shim;
 
 /// Why a collection could not start, or could not continue.
 #[derive(Debug, thiserror::Error)]
@@ -155,6 +161,54 @@ pub trait Collector {
     fn losses(&self) -> Losses {
         Losses::default()
     }
+}
+
+/// One collector this build knows how to create.
+///
+/// Families register through this list rather than through a central `match`,
+/// so adding a source touches only that family's directory. Nine agents editing
+/// one match arm is nine merge conflicts on the same three lines.
+pub struct Factory {
+    /// The catalog source this builds, such as `mem.rss`.
+    pub source: &'static str,
+    /// The backend id within that source's chain, such as `fs:proc:statm`.
+    /// Backend ids are unique within a chain, which is what makes this pair a
+    /// key.
+    pub backend: &'static str,
+    build: fn(&ResolvedRequest) -> Result<Box<dyn Prepared>, String>,
+}
+
+impl Factory {
+    pub fn new(
+        source: &'static str,
+        backend: &'static str,
+        build: fn(&ResolvedRequest) -> Result<Box<dyn Prepared>, String>,
+    ) -> Self {
+        Self {
+            source,
+            backend,
+            build,
+        }
+    }
+}
+
+/// Every collector in this build.
+///
+/// The nine families are listed once. There will never be a tenth: the catalog
+/// families are the vocabulary, not an extension point.
+fn registry() -> Vec<Factory> {
+    let families = [
+        cpu::factories,
+        gpu::factories,
+        io::factories,
+        mem::factories,
+        net::factories,
+        power::factories,
+        proc::factories,
+        runtime::factories,
+        sched::factories,
+    ];
+    families.into_iter().flat_map(|family| family()).collect()
 }
 
 /// A collector before the thing it observes exists.
@@ -432,12 +486,18 @@ fn merge_environments(
 
 /// The sources a collector exists for, for error messages that say what *is*
 /// possible rather than only what is not.
-pub fn implemented() -> Vec<&'static str> {
-    vec![
-        "mem.rss (fs:proc:smaps_rollup, fs:proc:statm)",
-        "mem.faults (pmu:sw)",
-        "mem.heap.alloc (preload)",
-    ]
+///
+/// Derived from the registry, because a hand-written second list had already
+/// drifted out of agreement with the first one by the time it was needed.
+pub fn implemented() -> Vec<String> {
+    let mut by_source: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
+    for factory in registry() {
+        by_source.entry(factory.source).or_default().push(factory.backend);
+    }
+    by_source
+        .into_iter()
+        .map(|(source, backends)| format!("{source} ({})", backends.join(", ")))
+        .collect()
 }
 
 /// Finds the collector for a resolved backend.
@@ -447,24 +507,18 @@ pub fn implemented() -> Vec<&'static str> {
 /// numbers.
 fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError> {
     let source_id = resolved.request.source.as_str();
-    let start_error = |reason: String| CollectError::Start {
+    let backend = resolved.backend.id.as_str();
+    let factory = registry()
+        .into_iter()
+        .find(|factory| factory.source == source_id && factory.backend == backend)
+        .ok_or_else(|| CollectError::NoCollector {
+            source_id: source_id.to_owned(),
+            backend: backend.to_owned(),
+        })?;
+    (factory.build)(resolved).map_err(|reason| CollectError::Start {
         source_id: source_id.to_owned(),
         reason,
-    };
-    match (source_id, resolved.backend.id.as_str()) {
-        ("mem.rss", "fs:proc:smaps_rollup") => Ok(Box::new(proc_rss::Prepare(
-            proc_rss::RssSource::SmapsRollup,
-        ))),
-        ("mem.rss", "fs:proc:statm") => Ok(Box::new(proc_rss::Prepare(proc_rss::RssSource::Statm))),
-        ("mem.faults", "pmu:sw") => Ok(Box::new(page_faults::Prepare(resolved.request.mode))),
-        ("mem.heap.alloc", "preload") => {
-            Ok(Box::new(heap::HeapPrepared::new().map_err(start_error)?))
-        }
-        _ => Err(CollectError::NoCollector {
-            source_id: source_id.to_owned(),
-            backend: resolved.backend.id.clone(),
-        }),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -473,49 +527,36 @@ mod tests {
     use crate::capabilities::Capabilities;
     use crate::catalog::Catalog;
 
-    /// `implemented` is written by hand for the error message; this keeps it
-    /// from drifting away from what `prepare` actually knows how to build.
+    /// Every registered collector must name a real catalog entry and a real
+    /// backend in its chain. A typo here would surface as "no collector is
+    /// written for this" at run time, which reads like an unimplemented source
+    /// rather than a mistake.
     #[test]
-    fn every_source_listed_as_implemented_can_be_prepared() {
+    fn every_registered_collector_names_a_real_catalog_backend() {
         let catalog = Catalog::embedded().unwrap();
-        let capabilities = Capabilities::detect();
-        for listed in implemented() {
-            let (source, backends) = listed.split_once(" (").expect("`source (backends)`");
+        for factory in registry() {
             let entry = catalog
-                .get(&source.parse().unwrap())
-                .unwrap_or_else(|| panic!("{source} is not in the catalog"));
-            for backend in backends.trim_end_matches(')').split(", ") {
-                assert!(
-                    entry.backend(backend).is_some(),
-                    "{source} has no backend `{backend}`"
-                );
-                let mut request = crate::request::Request {
-                    source: source.parse().unwrap(),
-                    target: crate::request::Target::Launch(vec!["/bin/true".to_owned()]),
-                    mode: crate::request::Mode::Trace,
-                    emit: vec![crate::request::Emit::Raw],
-                    keys: Vec::new(),
-                    filter: None,
-                    duration: None,
-                    budget: None,
-                    stack: None,
-                    backend: Some(backend.parse().unwrap()),
-                    label: None,
-                };
-                if !entry.modes.contains(&crate::request::ModeKind::Trace) {
-                    request.mode = crate::request::Mode::Poll {
-                        interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
-                    };
-                }
-                let resolved = crate::resolve::resolve(&catalog, &capabilities, &request)
-                    .unwrap_or_else(|error| panic!("{source}/{backend}: {error}"));
-                match prepare(&resolved) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        panic!("{source}/{backend} is listed but cannot be prepared: {error}")
-                    }
-                }
-            }
+                .get(&factory.source.parse().unwrap())
+                .unwrap_or_else(|| panic!("`{}` is not in the catalog", factory.source));
+            assert!(
+                entry.backend(factory.backend).is_some(),
+                "`{}` has no backend `{}`",
+                factory.source,
+                factory.backend
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_collectors_claim_the_same_source_and_backend() {
+        let mut seen = std::collections::BTreeSet::new();
+        for factory in registry() {
+            assert!(
+                seen.insert((factory.source, factory.backend)),
+                "two collectors claim `{}` on `{}`",
+                factory.source,
+                factory.backend
+            );
         }
     }
 

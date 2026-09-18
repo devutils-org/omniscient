@@ -12,7 +12,7 @@
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
-use super::{Collector, Losses, Prepared, SampleError};
+use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
 /// One record as the shim writes it: fixed size, native endian, both sides

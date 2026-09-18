@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use super::{Collector, Prepared, SampleError};
+use crate::collect::{Collector, Prepared, SampleError};
 use crate::clock::monotonic_ns;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
