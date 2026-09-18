@@ -1,0 +1,47 @@
+# What did the allocator keep?
+#
+#   omn -f examples/mem-fragmentation.yml
+#
+# `free()` returns nothing to the operating system. The allocator keeps the
+# pages for its next allocation, and a process that has freed almost everything
+# can sit on hundreds of megabytes for the rest of its life. That gap is what
+# ends long-running services in an OOM killer while every allocation profile
+# says the program is fine.
+#
+# The program below makes the gap on purpose: it allocates a thousand 64 KiB
+# blocks, writes to every page of them, and then frees every other one. Freeing
+# all of them would prove nothing — the allocator would hand the whole region
+# back and the resident size would collapse. Freeing every other one leaves
+# holes between live blocks, which is the shape a real workload arrives at after
+# a few hours.
+#
+# Two things are collected over that. `mem.heap.retained` reads the shim's
+# record of which ranges were allocated and freed, and asks
+# `/proc/[pid]/pagemap` which of their pages are still in memory: that is the
+# retained memory, measured rather than inferred. `mem.rss` is the whole
+# process, and it is here to show what the number is worth — the live heap
+# halves, the resident size does not move, and retained memory accounts for the
+# difference.
+name: what the allocator kept
+format: text
+
+requests:
+  - label: retained
+    source: mem.heap.retained
+    target:
+      launch:
+        - python3
+        - -c
+        - "import ctypes, time\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nblocks = [libc.malloc(65536) for _ in range(1024)]\nfor block in blocks: ctypes.memset(block, 1, 65536)\ntime.sleep(0.3)\nfor block in blocks[::2]: libc.free(block)\ntime.sleep(0.5)\n"
+    mode: poll@50ms
+    emit: [timeline]
+
+  - label: whole process
+    source: mem.rss
+    target:
+      launch:
+        - python3
+        - -c
+        - "import ctypes, time\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nblocks = [libc.malloc(65536) for _ in range(1024)]\nfor block in blocks: ctypes.memset(block, 1, 65536)\ntime.sleep(0.3)\nfor block in blocks[::2]: libc.free(block)\ntime.sleep(0.5)\n"
+    mode: poll@50ms
+    emit: [timeline]

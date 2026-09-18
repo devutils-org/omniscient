@@ -37,19 +37,29 @@
   keys: [task, cgroup, mem]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "PSS is the only one of the three footprints that sums across processes
+       without double counting: RSS counts a shared page in full in every
+       process that maps it."
 
 - id: mem.uss
   family: mem
   summary: "Private footprint (what dies with the process)"
   unit: bytes
   backends:
-    - {id: "fs:proc", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: low,
+       degraded: "walks every VMA: expensive on large address spaces"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
   keys: [task, mem]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "The kernel publishes no USS line: this is Private_Clean + Private_Dirty,
+       so privately mapped huge pages, which the kernel counts separately in
+       Private_Hugetlb, are not in it."
 
 - id: mem.cgroup
   family: mem
@@ -138,7 +148,7 @@
   summary: "Live heap: allocated and not yet freed"
   unit: bytes
   backends:
-    - {id: "preload", requires: ["dynamic-linking"], cost: low}
+    - {id: "preload", requires: ["preload:shim"], cost: low}
     - {id: "fs:proc", requires: ["allocator-stats:jemalloc|tcmalloc"], cost: free,
        degraded: "depends on the linked allocator, no allocation site"}
   modes: [poll, snapshot]
@@ -147,15 +157,22 @@
   keys: [task, mem]
   filter_fields: []
   determinism: high
+  caveats:
+    - "Live heap is what the program asked for, not what it holds: malloc returns
+       an address and the pages behind it become resident only on first write. This
+       number and an RSS curve answer different questions and will not line up."
+    - "A preloaded shim reaches a program only at exec, so this needs a program
+       the tool launches, and a snapshot of one is refused: it would be taken
+       before the program allocated anything."
 
 - id: mem.heap.retained
   family: mem
   summary: "Fragmentation: memory retained by the allocator but no longer live"
   unit: bytes
   primitive: false
-  derived_from: [mem.heap.live, mem.rss]
+  derived_from: [mem.heap.live]
   backends:
-    - {id: "preload", requires: ["dynamic-linking", "/proc/[pid]/smaps_rollup"], cost: low}
+    - {id: "preload", requires: ["preload:shim", "/proc/[pid]/pagemap", "/proc/[pid]/smaps_rollup"], cost: low}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
@@ -165,6 +182,16 @@
   caveats:
     - "free() returns nothing: the allocator keeps its arenas. This is the metric
        that predicts OOMs in production, and almost nobody collects it."
+    - "This is not RSS minus live heap. That subtraction mixes the executable, the
+       stacks and every file mapping into a heap number, and subtracts bytes that
+       were asked for but never made resident. What is counted here is the pages of
+       ranges the program allocated and then freed, read from /proc/[pid]/pagemap.
+       RSS is reported beside the number for scale and is not part of it."
+    - "A page shared between a freed range and a live one is counted as live, so
+       the number is a lower bound: at most one page per end of each freed range."
+    - "The table of freed ranges is bounded. What it evicts is counted and
+       surfaced as a loss, because retained memory missing from the table looks
+       exactly like retained memory that does not exist."
 
 - id: mem.cache_l1
   family: mem
