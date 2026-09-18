@@ -1,0 +1,386 @@
+.TH OMN 1 "2026-09" "Omniscient" "User Commands"
+.SH NAME
+omn \- one vocabulary for system observability
+.SH SYNOPSIS
+.B omn
+.I source
+.RI [ options ]
+.RI [ target ]
+.RI [ "\-\- program [args]" ]
+.br
+.B omn
+.B \-f
+.I session
+.RI [ options ]
+.br
+.B omn list
+.RI [ family | source ]
+.br
+.B omn validate
+.B \-f
+.I session
+.br
+.B omn formats
+.SH DESCRIPTION
+.B omn
+describes a measurement along five axes and refuses the combinations that cannot
+mean anything, rather than answering them with a number that means something
+else.
+.PP
+It speaks to
+.BR perf_event_open (2),
+.BR bpf (2),
+procfs, sysfs and netlink directly. It does not wrap
+.BR perf (1),
+.B bpftrace
+or
+.BR bcc ,
+so there is no second output format to parse and no second clock in the middle
+of the pipeline.
+.SS The five axes
+.TP
+.B source
+What to measure, as
+.IR family . metric :
+.BR io.latency ", " cpu.instructions ", " net.tcp.rtt .
+.BR "omn list" " enumerates them."
+.TP
+.B target
+What to observe:
+.BR \-\-pid ", " \-\-tid ", " \-\-cgroup ", " \-\-cpu ", " \-\-iface ", "
+.BR \-\-container ", " \-\-system ", or a program to launch after " \-\- .
+.TP
+.B mode
+How to observe:
+.BR count ", " sample@997hz ", " trace ", " poll@100ms ", " snapshot .
+.TP
+.B emit
+What comes out:
+.BR raw ", " hist ", " rate ", " topk ", " stack ", " timeline ", " summary .
+.TP
+.B keys
+Correlation keys to attach:
+.BR req ", " task ", " proc ", " file ", " sock ", " blk ", " mem ", " gpu ", "
+.BR cgroup ", " iface .
+.PP
+A bare
+.BI "omn " source
+is short for
+.BI "omn trace " source .
+.SS What it refuses
+The validator runs before anything is attached. It rejects a target a source
+cannot carry, a mode it does not support, an emit that mode cannot produce, a
+correlation key it does not carry, a filter field it does not expose, and an
+output format that cannot express the requested emit. Each refusal says why and
+what the source does accept.
+.PP
+Returning a machine-wide value while presenting it as per-process attribution is
+the worst bug this tool could have, so the combination fails rather than
+degrading.
+.SH COMMANDS
+.TP
+.BI "trace " source
+Build a request, resolve it against this machine, and run it. The default
+command, which may be omitted.
+.TP
+.B list \fR[\fIfamily\fR|\fIsource\fR]
+Project the catalog. With no argument, every source; with a family, that family;
+with a source, that entry in full, including every backend, what each one
+requires and how each requirement was probed.
+.IP
+The listing answers three different questions in three columns.
+.B HERE
+is what this machine offers, probed now.
+.B COLLECTOR
+is what this build can measure, which is not the same question.
+.B COST
+is the cheapest backend in a chain, and
+.B DET
+is reproducibility between runs \(em never bit-exactness.
+.TP
+.B validate \fB\-f\fI session
+Check a session against the catalog without touching the machine. Machine
+independent, so it answers for a host other than this one.
+.TP
+.B formats
+The input and output formats, which emits each output format can carry, and
+which encoders exist yet.
+.SH OPTIONS
+.SS Target
+.TP
+.BI \-\-pid " PID" "\fR, " \-\-tid " TID"
+An existing process or thread. Repeatable as a comma-separated list.
+.TP
+.BI \-\-cgroup " PATH"
+A cgroup v2 path.
+.TP
+.BI \-\-cpu " SET"
+Cores, written the way the kernel writes them:
+.BR 0\-3,8 .
+.TP
+.BI \-\-iface " NAME"
+A network interface.
+.TP
+.BI \-\-container " NAME"
+A container, resolved to a cgroup plus a pid namespace.
+.TP
+.B \-\-system
+The whole machine.
+.TP
+.BI \-\- " program " [ args ]
+Launch the program and measure it. The program is held at a gate until every
+collector is attached, so the measurement starts before its first instruction,
+and the run ends when it does.
+.SS Measurement
+.TP
+.BI \-m ", " \-\-mode " MODE"
+.BR count ", " trace ", " snapshot ", " sample@\fIFREQ\fR ", " poll@\fIINTERVAL\fR.
+A frequency is
+.BR 997hz " or " 1khz ;
+an interval is
+.BR 100ms ", " 1s ", " 2m .
+.TP
+.BI \-e ", " \-\-emit " EMIT"
+Comma-separated.
+.BR hist " takes " :log2 " or " :linear: \fIWIDTH\fR,
+and
+.BR topk " takes " : \fIN\fR.
+Asking for two emits costs one collection.
+.TP
+.BI \-k ", " \-\-keys " KEY"
+Correlation keys to attach, comma-separated.
+.TP
+.BI \-\-filter " EXPR"
+A predicate:
+.RB ` "bytes > 4KiB && rwbs == 'R'" '.
+Supports
+.BR == " " != " " < " " <= " " > " " >= " " =~ " and " in ,
+grouped with
+.BR && ", " || ", " ! " and parentheses."
+Integers take size suffixes
+.RB ( 4KiB ", " 4KB )
+and duration suffixes
+.RB ( 5ms ).
+.IP
+The resolver pushes a predicate into the kernel where the backend allows it and
+evaluates it here otherwise, and says which it did. A userspace filter is paid
+for in full before it removes anything, and what it removed is reported beside
+the losses.
+.TP
+.BI \-d ", " \-\-duration " DURATION"
+How long to observe. Required unless a program is launched or the mode is
+.BR snapshot .
+.TP
+.BI \-b ", " \-\-budget " PERCENT"
+An overhead ceiling, as
+.BR 2% .
+Parsed and recorded; not yet enforced.
+.TP
+.BI \-\-stack " MODE"
+.BR fp ", " dwarf ", " lbr " or " none .
+.B dwarf
+copies the stack on every sample: far more volume and cost than frame pointers.
+.SS Output
+.TP
+.BI \-\-format " FORMAT"
+.BR text " (default), " json ", " yaml ", " toml ", " ndjson ", " folded ", "
+.BR speedscope ", " pprof ", " chrome .
+A result format only accepts the emits it can express;
+.B omn formats
+says which, and which encoders exist.
+.TP
+.BI \-o ", " \-\-out " DIR"
+Write the results and the resolved request into a directory. The resolved
+request is always written as JSON whatever the results format is: results
+without it are numbers whose provenance is gone.
+.TP
+.B \-\-dump\-request
+Print the request and how it resolves on this machine, then exit without
+measuring.
+.TP
+.B \-\-dump\-resolved
+Print the resolved request alone \(em the record to keep beside the numbers.
+.TP
+.B \-\-no\-resolve
+Do not consult this machine. For writing down a session meant to run somewhere
+else, where what this machine can do says nothing.
+.TP
+.BI \-\-color " WHEN"
+.BR auto " (default), " always " or " never .
+Colour is an accelerator and never the carrier of a fact: everything it
+highlights is also written in words.
+.SS Session files
+.TP
+.BI \-f ", " \-\-file " PATH"
+Read the session from a file, or from standard input with
+.BR \- .
+YAML, JSON and TOML are accepted, inferred from the extension.
+.TP
+.BI \-\-input\-format " FORMAT"
+.BR yaml ", " json " or " toml ,
+when the extension does not say or the input is standard input.
+.SS Other
+.TP
+.BI \-\-backend " force:ID"
+Pin a backend instead of resolving one. For the comparison bench: a result
+obtained this way is not the result the tool would have produced, and the record
+says so.
+.TP
+.BI \-\-catalog " DIR"
+Load the catalog from a directory instead of the one compiled in. For iterating
+on entries without rebuilding.
+.SH SESSION FILES
+A session file describes exactly what a command line does, and
+.B \-\-dump\-request
+prints one. The two surfaces cannot express different things, which is what
+keeps them from drifting apart.
+.PP
+.RS
+.EX
+name: which allocation actually cost memory
+duration: 30s
+format: text
+
+requests:
+  \- label: ranges
+    source: mem.heap.alloc
+    target: {launch: [./server]}
+    mode: trace
+    emit: [summary]
+
+  \- label: pages
+    source: mem.faults
+    target: {launch: [./server]}
+    mode: trace
+    emit: [rate]
+
+joins:
+  \- id: pages\-of\-allocation
+    from: mem.heap.alloc
+    to: mem.faults
+    via: mem
+    match: interval
+    opens: "op == 'alloc'"
+    closes: "op == 'free'"
+    window: 60s
+.EE
+.RE
+.PP
+Every request in one session observes one target over one window. Running them
+one after another would measure several different moments and present them as
+one, and a join across that would correlate a program with its own past.
+.SH EVIDENCE
+Every correlated result carries the grounds it was obtained on, because a
+correlation backed by a propagated identity and one backed by two things
+happening at the same time are both "correlations" and only one is evidence.
+.TP
+.B IDENTITY
+The downstream event carries an identity the upstream one propagated.
+.TP
+.B KEY
+Both sides carry the same typed key.
+.TP
+.B WAKEUP
+A wakeup chain links them: the only join that crosses a block.
+.TP
+.B TEMPORAL
+They overlapped in time. A hypothesis, nothing more.
+.SH EXIT STATUS
+.TP
+.B 0
+The measurement ran.
+.TP
+.B 1
+Usage, parsing, or a failure while running.
+.TP
+.B 2
+The request was refused: it cannot mean what it asks for, or this machine cannot
+serve it.
+.TP
+.B 3
+The request is valid and nothing collects it yet.
+.SH ENVIRONMENT
+.TP
+.B OMN_CATALOG_DIR
+Load the catalog from this directory instead of the one compiled in.
+.TP
+.B OMN_PRELOAD_LIB
+Path to the heap shim, when it is not beside the binary.
+.TP
+.B NO_COLOR
+Set and non-empty, or
+.B TERM=dumb
+, disables colour.
+.SH PRIVILEGES
+The eBPF backends need
+.B CAP_BPF
+and
+.BR CAP_PERFMON ,
+and several sysfs counters need root. An unprivileged run is refused with the
+capability that is missing, never resolved onto a lesser backend that answers a
+different question.
+.PP
+File capabilities do not survive a relink, so every rebuild drops them and
+nothing announces it: the tool reports fewer sources as available, which reads
+like the machine changed rather than the binary.
+.PP
+.RS
+.EX
+sudo setcap cap_bpf,cap_perfmon+ep $(which omn)
+.EE
+.RE
+.SH FILES
+.TP
+.I catalog/*.yaml
+The vocabulary, as data. Adding a source is an entry here, not code.
+.TP
+.I <out>/resolved.json
+The backend selected, every requirement and how it was probed, what was
+degraded, and the machine's kernel, governor, THP mode, SMT state and
+clocksource. Two measurements taken through different backends are not
+comparable, and this is what says which was used.
+.SH EXAMPLES
+.TP
+Resident memory of a program, as it runs:
+.EX
+omn mem.rss \-\-emit timeline \-\-mode poll@100ms \-\- ./build.sh
+.EE
+.TP
+Which allocation actually cost memory:
+.EX
+omn \-f examples/allocation\-cost.yml
+.EE
+.TP
+Round\-trip time of every TCP connection this machine holds:
+.EX
+omn net.tcp.rtt \-\-system \-m poll@1s \-d 30s \-e timeline
+.EE
+.TP
+Instructions retired by a program, the most reproducible number in the catalog:
+.EX
+omn cpu.instructions \-m count \-e summary \-\- ./bench
+.EE
+.TP
+Block I/O over 4 KiB, as a histogram:
+.EX
+omn io.latency \-\-system \-m trace \-e hist \-\-filter "bytes > 4KiB"
+.EE
+.TP
+What this machine can serve, and what this build can measure:
+.EX
+omn list
+.EE
+.TP
+Write a session down for a machine other than this one:
+.EX
+omn io.latency \-\-pid 1 \-m trace \-e hist \-\-no\-resolve \-\-dump\-request \-\-format yaml
+.EE
+.SH SEE ALSO
+.BR perf_event_open (2),
+.BR bpf (2),
+.BR proc (5),
+.BR sysfs (5),
+.BR capabilities (7)
+.PP
+.IR CATALOG.md " for the vocabulary, " STATE.md " for what works today,"
+.IR DECISIONS.md " for what is settled and why."

@@ -9,6 +9,8 @@
 #   make            build the workspace and grant the capabilities
 #   make test       the full suite, after a build that has them
 #   make check      test, clippy and fmt, the way CI would
+#   make demo       every demonstration in this repository, against this machine
+#   make man        the manual page
 #   make release    the same for an optimised build
 #
 # `cargo build` still works and is still correct; it just leaves the privileged
@@ -19,7 +21,7 @@ BINARY     = target/$(PROFILE)/omn
 CAPS       = cap_bpf,cap_perfmon+ep
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
-.PHONY: all build release caps test check fmt clippy clean
+.PHONY: all build release caps test check demo man fmt clippy clean
 
 all: build
 
@@ -70,6 +72,15 @@ test: build
 check: test
 	cargo clippy --all-targets -- -D warnings
 	cargo fmt --check
+
+# Every demonstration this repository ships, run against this machine. A block
+# that cannot run here says why, which is half of what is being demonstrated.
+demo: build
+	@scripts/demo.sh
+
+# The manual page, rendered.
+man:
+	@groff -man -Tascii man/omn.1 | less -R
 
 fmt:
 	cargo fmt

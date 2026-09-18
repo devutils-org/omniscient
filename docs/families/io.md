@@ -255,7 +255,7 @@ events it removed.
 
 ## Traps recorded for the eBPF work
 
-From `BRIEF.md` and confirmed by the catalog entries, so that the wave 2 thread
+From the catalog entries, so that the wave 2 thread
 does not rediscover them:
 
 - `io.latency --pid` is reliable **for reads only**. Reads are submitted in the

@@ -149,7 +149,7 @@ sources of this family, and every source of `power`, plus most of `net`.
 | Sources | Blocked on |
 |---|---|
 | `thp`, `swap`, `pressure`, `cgroup` | a target that is not a pid (above) |
-| `cache_l1`, `cache_llc`, `cache_tlb`, `bandwidth`, `latency`, `sharing`, `numa` | the perf layer in counting mode, hardware events and uncore PMUs — BRIEF G8 |
-| `wss` | `page_idle` and DAMON probe classes — BRIEF G4 |
-| `page_alloc`, `kmalloc`, `reclaim`, `compaction` | the eBPF layer — BRIEF G10, Wave 2 |
-| `heap.alloc` by call site | stack capture and symbolisation — BRIEF G6 |
+| `cache_l1`, `cache_llc`, `cache_tlb`, `bandwidth`, `latency`, `sharing`, `numa` | the perf layer in counting mode, hardware events and uncore PMUs |
+| `wss` | `page_idle` and DAMON probe classes |
+| `page_alloc`, `kmalloc`, `reclaim`, `compaction` | the eBPF layer, Wave 2 |
+| `heap.alloc` by call site | stack capture and symbolisation |

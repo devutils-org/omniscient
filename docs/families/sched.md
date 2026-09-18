@@ -5,7 +5,7 @@ blocked on a lock, on a disk, or on another thread costs nothing in a cpu
 profile and everything in latency, which is why this is the family most often
 missing from a performance investigation that went nowhere.
 
-Thread 5 of `BRIEF.md`, which also owns the eBPF layer: see `docs/bpf-layer.md`.
+The family that also owns the eBPF layer: see `docs/bpf-layer.md`.
 
 ## State
 

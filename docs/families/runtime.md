@@ -171,14 +171,14 @@ The mechanism itself is Wave 2: attaching either kind needs the eBPF layer.
 ### The emits this family declares are mostly not built yet
 
 `topk` is what makes a JIT stream readable — which methods, how much code — and
-`hist` is what makes GC pauses readable. Neither exists (BRIEF G5), so the
+`hist` is what makes GC pauses readable. Neither exists yet (see `STATE.md`), so the
 example ships with `rate` and `summary` and says why.
 
 ## What is still blocked, and on what
 
 | Sources | Blocked on |
 |---|---|
-| `gc`, `alloc`, `custom` | the eBPF layer and USDT attachment — BRIEF G10, Wave 2 |
+| `gc`, `alloc`, `custom` | the eBPF layer and USDT attachment (wave 2) |
 | `jit` deoptimizations and compilation timing | the same: the map carries neither |
 | `custom` declaration surface | a `probe` field in the request model (above) |
-| readable output for all four | `topk` and `hist` — BRIEF G5 |
+| readable output for all four | `topk` and `hist` |

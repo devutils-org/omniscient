@@ -4,9 +4,9 @@
 #   scripts/spawn-family.sh cpu
 #   cd ../omniscient-cpu && claude
 #
-# Each family owns a disjoint set of files (see BRIEF.md Part 1), so the
+# Each family owns a disjoint set of files (see docs/contributing.md), so the
 # worktrees never need to rebase against each other and the merge order does
-# not matter.
+# not matter. See docs/contributing.md for what a family owns.
 set -euo pipefail
 
 FAMILIES="cpu mem io net sched power gpu proc runtime"
@@ -41,8 +41,8 @@ You are implementing the \`${family}\` family of the Omniscient catalog.
 
 Read these first, in this order:
   1. CLAUDE.md               the standing invariants of this repository
-  2. BRIEF.md, Parts 1 and 2 file ownership and the non-negotiable invariants
-  3. BRIEF.md, your thread   the section titled "Thread N -- \`${family}\`"
+  2. docs/contributing.md    what a family owns, and what ground truth means
+  3. STATE.md                where the project is and what is left
   4. CATALOG.md section for \`${family}\`, and catalog/${family}.yaml
 
 You own, and may only edit:

@@ -17,6 +17,10 @@
 | `catalog/*.yaml` | the same vocabulary as data, compiled into the binary |
 | `ROADMAP.md` | milestones and their exit criteria, in order |
 | `DECISIONS.md` | what is settled, what is still open, and why |
+| `STATE.md` | what works today, measured, and what remains |
+| `docs/contributing.md` | what a family owns, and what ground truth means |
+| `docs/open-findings.md` | findings that cut across families |
+| `man/omn.1` | the manual page |
 
 The catalog is **data, not documentation**. The CLI, `omn list`, the validator
 and the resolver are projections of it: adding a source means adding an entry,

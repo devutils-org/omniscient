@@ -5,222 +5,213 @@ axes — **source**, **target**, **mode**, **emit**, **keys** — and the
 combinations that cannot mean anything are refused rather than answered with a
 number that means something else.
 
-```
-omn io.latency --pid 4242 --mode trace --emit hist,topk:5 \
-    --keys blk,task --filter "bytes > 4KiB && rwbs == 'R'" --duration 30s
+```console
+$ omn mem.rss --emit timeline --mode poll@100ms -- ./build.sh
+mem.rss  via fs:proc:smaps_rollup  (mem.rss)
+  11 events over 1.10s, stopped because the launched program exited with exit status 0
+  no loss: every read succeeded and no tick ran late
+
+  timeline
+    task:170997
+      +0ns        12.0 KiB
+      +100ms      17.6 MiB
+      +300ms      25.6 MiB
+      +901ms      49.6 MiB
 ```
 
-## Status
-
-The spine is complete, sources across six families run end to end, the eBPF
-layer loads and attaches its own programs, and the first correlation works.
-`omn -f examples/allocation-cost.yml`:
+It talks to `perf_event_open`, `bpf()`, procfs, sysfs and netlink directly. It
+does not wrap `perf`, `bpftrace` or `bcc`, so there is no second output format to
+parse and no second clock in the middle of the pipeline.
 
 ```console
-mem.heap.alloc  via preload  (mem.heap.alloc)
-  5079 events over 1.03s, stopped because the launched program exited with exit status 0
-  no loss: every read succeeded and no tick ran late
+make          # build, and grant the capabilities a relink drops
+make demo     # every demonstration in this repository, against this machine
+make man      # the manual page
+```
 
-mem.faults  via pmu:sw  (mem.faults)
-  3518 events over 1.03s, stopped because the launched program exited with exit status 0
-  no loss: every read succeeded and no tick ran late
+## The number no single source can give
 
+`malloc()` allocates nothing: it returns an address, and the pages become
+resident on first write. So an allocation-site profile and a memory curve never
+line up, and neither answers *which allocation actually cost memory*.
+
+The shim reports the range each allocation owns; every page fault carries the
+address that faulted; a fault inside a range is that allocation becoming real.
+
+```console
+$ omn -f examples/allocation-cost.yml
 join pages-of-allocation  mem.heap.alloc -> mem.faults  evidence KEY
-  2655 of 3518 `mem.faults` events attributed (75.5 %); 863 fell outside every open range
-  states: 2555 opened, 2524 closed, 31 still open at the end, peak 1579 held at once
+  2144 of 3012 `mem.faults` events attributed (71.2 %); 868 fell outside every open range
+  states: 2556 opened, 2525 closed, 31 still open at the end, peak 1580 held at once
   no eviction: nothing was dropped for age or for space
 
   heaviest ranges
     RANGE                                    SIZE    EVENTS  OUTCOME
-    mem:[0x7fc798efb010,0x7fc7996fb011)    8.0 MiB       515  freed
-    mem:[0x7fc7996fc010,0x7fc799efc011)    8.0 MiB       515  freed
-    ...
+    mem:[0x7f51651fb010,0x7f51659fb011)    8.0 MiB       515  freed
+    mem:[0x7f51659fc010,0x7f51661fc011)    8.0 MiB       515  freed
 ```
 
-`malloc` allocates nothing: it returns an address, and the pages become resident
-on first write. So an allocation-site profile and a memory curve never line up,
-and neither answers "which allocation actually cost memory". The shim reports
-each allocation's range, every page fault carries the address that faulted, and
-a fault inside a range is that allocation becoming real. Evidence `KEY`: both
-sides carry the same typed key.
+`evidence KEY` is the point. A correlation backed by a propagated identity and
+one backed by two things happening at the same time are both "correlations", and
+only one of them is evidence. Every joined result says which it is:
+`IDENTITY` > `KEY` > `WAKEUP` > `TEMPORAL`.
 
-Which sources this build can actually measure is not restated here, because it
-changes with every merge and a stale list on a front page is exactly the kind of
-claim this tool exists to refuse. `omn list` answers it: the **COLLECTOR**
-column, and a count under the table. Everything else in the catalog resolves,
-validates, and says plainly that no collector exists yet.
-
-| Command | What it does |
-|---|---|
-| `omn <source> [options]` | resolves and runs a request |
-| `omn <source> --dump-request` | shows it and how it would be obtained, without measuring |
-| `omn <source> --dump-resolved` | the record to keep beside the numbers |
-| `omn -f session.yml` | the same, from a file in YAML, JSON or TOML, joins included |
-| `omn list [family\|source]` | the catalog, marked with what this machine can serve and what this build can measure |
-| `omn validate -f session.toml` | checks a session without touching the machine |
-| `omn formats` | the input and output formats, and what each can carry |
-
-## The five axes
-
-```
-source   <family>.<metric>      io.latency, sched.offcpu, net.tcp.rtt
-target   what to observe        --pid --tid --cgroup --cpu --iface --container --system -- ./prog
-mode     how to observe         count · sample@997hz · trace · poll@100ms · snapshot
-emit     what comes out         raw · hist[:log2|:linear:WIDTH] · rate · topk[:N] · stack · timeline · summary
-keys     correlation keys       req · task · proc · file · sock · blk · mem · gpu · cgroup
-```
-
-`CATALOG.md` is the vocabulary and `catalog/*.yaml` is the same thing as data.
-Adding a source means adding an entry: it appears in `omn list`, in validation
-and in the help without touching code.
-
-## What it says about this machine
-
-`omn list` is the catalog projected through what was actually probed here:
-
-```console
-$ omn list mem
-SOURCE          MODES                 COST  DET     HERE  COLLECTOR  SUMMARY
-mem.rss         poll, snapshot        free  medium  yes   all        Resident footprint
-mem.cgroup      poll, snapshot        free  medium  no    none       Cgroup memory accounting
-mem.faults      count, sample, trace  free  medium  yes   1 of 2     Minor and major page faults
-...
-23 sources: 10 usable here, 9 unverified, 4 out of reach on this machine.
-3 of them have a collector, covering 4 of their 37 backends. The rest are
-vocabulary: they resolve, they validate, and they say plainly that nothing
-collects them yet.
-```
-
-Two different questions, deliberately kept apart. **HERE** is what this machine
-offers, probed now. **COLLECTOR** is what this build can actually measure: a
-source can be written and out of reach here, or available here with nothing
-written for it yet. On a terminal the source name is green when something
-collects it and red when nothing does, so a glance answers "what is covered so
-far" — `--color auto|always|never`, and `NO_COLOR` is honoured. The colour is
-only an accelerator: strip the escapes and the listing says exactly the same
-things, because output that lands in a pipe must not be missing a fact the
-terminal had.
-
-`?` in HERE is not a soft yes. It means no probe has been written for that
-requirement class, so nothing was checked — and the resolver will not pick such
-a backend when a fully verified one exists. An unchecked assumption that reaches
-the output as a fact is the failure mode that column exists to prevent.
-
-The same honesty applies to *why* something is out of reach:
-
-```console
-$ omn io.latency --pid 1 --mode trace --emit hist
-error: `io.latency` has no viable backend on this machine:
-  bpf:tp: tracepoint:block:block_rq_issue: missing: tracefs is mounted but not
-    readable by uid 1000 — this needs root or CAP_SYS_ADMIN, not a different kernel
-  fs:tracefs: a pid target needs in-program filtering, which `fs:tracefs` cannot do
-  fs:proc: a pid target needs in-program filtering, which `fs:proc` cannot do
-  hint: the request is valid; it is this machine that cannot serve it.
-        Use --no-resolve to write it down for one that can.
-```
-
-## What it refuses, and why
+## What it refuses
 
 ```console
 $ omn mem.bandwidth --pid 1 --mode count --emit rate
 error: `mem.bandwidth` cannot be measured per pid: the counter is scoped to the
        package, so no per-process number exists to return
   hint: this source accepts system
+
+$ omn io.latency --system -m trace -e hist --filter "bites > 4096"
+error: `io.latency` has no field `bites` to filter on; did you mean `bytes`?
+  hint: `io.latency` exposes dev, rwbs, bytes, comm
 ```
 
-Returning a system-wide value while presenting it as per-process attribution is
+Returning a machine-wide value while presenting it as per-process attribution is
 the worst bug this tool could have. So the validator rejects, before anything is
-attached: a target a source cannot carry, a mode it does not support, an emit its
-mode cannot produce, a correlation key it does not carry, a filter field it does
-not expose, and an output format that cannot express the requested emit.
+attached: a target a source cannot carry, a mode it does not support, an emit
+that mode cannot produce, a key it does not carry, a filter field it does not
+expose, an output format that cannot express the emit.
 
-It also surfaces what is true but easy to miss — that `io.latency --pid` is
-reliable for reads only, that `dwarf` unwinding copies the stack on every sample,
-that a cold and a warm page cache differ by an order of magnitude — next to the
-request, not in documentation nobody reads at the moment it matters.
+The same applies to privileges. An unprivileged run is refused with the
+capability that is missing, never resolved onto a lesser backend that answers a
+different question:
+
+```console
+$ omn sched.wakeup --mode trace --emit raw -- ./server
+error: `sched.wakeup` has no viable backend on this machine:
+  bpf:raw_tp: loading a tracing program needs CAP_BPF and CAP_PERFMON.
+    Grant them with `sudo setcap cap_bpf,cap_perfmon+ep $(which omn)`.
+```
+
+## What this machine can serve
+
+```console
+$ omn list mem
+SOURCE             MODES                 COST   DET     HERE  COLLECTOR  SUMMARY
+mem.rss            poll, snapshot        free   medium  yes   all        Resident footprint
+mem.heap.retained  poll, snapshot        low    high    yes   all        Fragmentation: retained but no longer live
+mem.bandwidth      count, poll           free   low     ?     none       DRAM throughput
+mem.reclaim        trace, count          low    medium  no    none       Direct reclaim
+
+23 sources: 17 usable here, 1 unverified, 5 out of reach on this machine.
+7 of them have a collector, covering 10 of their 38 backends.
+```
+
+Three different questions, kept apart. **HERE** is what this machine offers,
+probed now — not inferred from the kernel version or the cpu vendor. **`?`** is
+not a soft yes: it means no probe covers that requirement, so nothing was
+checked, and the resolver will not select such a backend while a verified one
+exists. **COLLECTOR** is what this build can measure, which is a different
+question again: a source can be reachable here with nothing written for it.
+
+`CATALOG.md` is the vocabulary and `catalog/*.yaml` is the same thing as data.
+Adding a source means adding an entry: it appears in `omn list`, in validation
+and in the help without touching code.
 
 ## Trace as code
 
-A session file describes the same thing a command line does, and
-`--dump-request` prints one:
+A session file describes exactly what a command line does, and
+`--dump-request` prints one, so a measurement is prototyped in the shell and
+frozen into a file without being retyped.
 
 ```yaml
-name: web latency budget
+name: which allocation actually cost memory
 duration: 30s
-budget: 2%
+
 requests:
-  - label: device
-    source: io.latency
-    target: {pid: 4242}
+  - source: mem.heap.alloc
+    target: {launch: [./server]}
     mode: trace
-    emit: [hist, topk:5]
-    keys: [blk, task, req]
-    filter: "rwbs == 'R' && bytes > 4KiB"
+    emit: [summary]
+  - source: mem.faults
+    target: {launch: [./server]}
+    mode: trace
+    emit: [rate]
+
+joins:
+  - id: pages-of-allocation
+    from: mem.heap.alloc
+    to: mem.faults
+    via: mem
+    match: interval
+    opens: "op == 'alloc'"
+    closes: "op == 'free'"
+    window: 60s
 ```
 
-YAML, JSON and TOML are all accepted, inferred from the extension or forced with
-`--input-format`; `-f -` reads standard input. See `examples/`.
+YAML, JSON and TOML are all accepted. See `examples/` — there is an index in
+`examples/README.md`, and `make demo` runs all of them.
 
-## Output formats
-
-`text` for a terminal, `json` / `yaml` / `toml` for tooling and for the resolved
-file, `ndjson` for a record stream. The profile and trace formats are declared
-with the emits they can carry — `folded` and `pprof` for stacks, `speedscope` for
-stacks and timelines, `chrome` for timelines — and report that their encoder
-lands with the first stack-producing collector rather than approximating
-something else. `omn formats` lists them.
-
-Every run can write its numbers and, beside them, the resolved request that
-produced them:
+## The record beside the numbers
 
 ```console
-$ omn mem.rss --pid 4242 -d 30s -e summary --out ./results
+$ omn proc.fd --pid 4242 -d 30s -e summary --out ./results
 $ ls results
 resolved.json  results.txt
 ```
 
-`resolved.json` holds the backend that was selected, every requirement and how it
-was probed, what was degraded, and the machine's kernel, governor, THP mode, SMT
-state and clocksource. Two numbers taken through different backends are not
-comparable, and without that file nobody can tell that they were.
+`resolved.json` holds the backend that was selected, every requirement and how
+it was probed, what was degraded, and the machine's kernel, governor, THP mode,
+SMT state and clocksource. Two measurements taken through different backends are
+not comparable, and without that file nobody can tell that they were.
 
-## A worked example of why this is careful
+## Output formats
 
-The first correlation reported 515 faults for an 8 MiB allocation, where 4 KiB
-pages would need 2048. Rather than explain it away, the number was checked
-against the kernel's own counter, which agreed — and a sweep showed why:
-
-```
-  1 MiB ->   263 kernel minor faults   (3.9 KiB per fault)
-  8 MiB ->   516 kernel minor faults   (15.9 KiB per fault)
- 32 MiB ->   528 kernel minor faults   (62.1 KiB per fault)
-```
-
-With multi-size transparent huge pages the kernel picks larger folios for larger
-regions, so the fault count is nearly flat across sizes. A derived "resident
-bytes" column computed as `faults x page size` had already been written; it was
-wrong by a factor of four on this machine, and it is gone. Fault counts now say
-where faults happened and state that they do not convert to bytes — and the THP
-mode is in the resolved file, so the next reader can see it.
-
-This is the failure mode the tool exists to prevent, found in its own output.
+`text` for a terminal, `json` / `yaml` / `toml` for tooling and for the resolved
+file, `ndjson` for a record stream. The profile and trace formats — `folded`,
+`speedscope`, `pprof`, `chrome` — are declared with the emits they can carry and
+report that their encoder is not written rather than approximating something
+else. A result format only accepts the emits it can express: `--emit hist
+--format folded` is refused, not guessed at.
 
 ## Boundaries
 
 Stated up front, because a project called "Omniscient" that hides them turns
-them into perceived bugs:
+them into perceived bugs.
 
-- **No bit-exact determinism.** Counters are stable, never exact.
-- **No inside view of NVIDIA GPUs.** CUPTI is closed; AMD and Intel are covered.
-- **Writes are less attributable than reads.** Writeback loses the submitter.
-- **Single machine.** Inter-machine clock drift is a different problem.
+- **No bit-exact determinism.** Counters are stable — `cpu.instructions` has a
+  run-to-run spread under 0.1 % here — and never exact: skid, speculation, IRQs,
+  SMT.
+- **No inside view of NVIDIA GPUs.** CUPTI is closed and there is no kernel
+  path; AMD and Intel have the full stack, and the catalog reflects the
+  asymmetry rather than hiding it.
+- **Writes are less attributable than reads.** Writeback leaves in a kworker and
+  the originating context is gone: `KEY` evidence, not `IDENTITY`.
+- **Single machine.** Inter-machine clock drift is a different class of problem.
+
+## State
+
+`STATE.md` has the measured numbers, where each roadmap phase stands, and what
+remains in the order it is worth doing. In short: the skeleton is finished and
+42 of 100 sources collect for real, across procfs, sysfs, `perf_event_open`
+counting and sampling, netlink, an `LD_PRELOAD` shim and eBPF raw tracepoints.
+499 tests pass, several of which found real defects in the code they were
+written against.
+
+## Documentation
+
+| | |
+|---|---|
+| `man/omn.1` | the manual page — `make man` |
+| `CATALOG.md` | the vocabulary: axes, backends, families, caveats |
+| `STATE.md` | what works today, and what is left |
+| `ROADMAP.md` | the milestones and their exit criteria |
+| `DECISIONS.md` | what is settled, what is open, and why |
+| `docs/contributing.md` | how to add a source |
+| `docs/open-findings.md` | findings that cut across families |
+| `docs/families/*.md` | what each family's measurements taught |
+| `docs/bpf-layer.md` | how a program is loaded and attached |
 
 ## Building
 
 ```console
-cargo build --release
-cargo test
+make check    # test, clippy and fmt, the way CI would
 ```
 
-`ROADMAP.md` has the milestones and their exit criteria, `DECISIONS.md` what is
-settled and what is still open.
+`make` rather than `cargo build`: the preload shim is a workspace member nothing
+depends on, and the `CAP_BPF` and `CAP_PERFMON` file capabilities do not survive
+a relink. Both failures are silent — the tool simply reports fewer sources as
+available, which reads like the machine changed rather than the binary.

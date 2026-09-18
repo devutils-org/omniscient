@@ -1,0 +1,29 @@
+# The same measurement, four ways out.
+#
+#   omn -f examples/filters-and-formats.yml
+#   omn -f examples/filters-and-formats.yml --format json | jq '.results[0].outputs'
+#   omn -f examples/filters-and-formats.yml --format ndjson | head
+#   omn -f examples/filters-and-formats.yml --out /tmp/run && ls /tmp/run
+#
+# A `--format` on the command line overrides the one in the file, so one session
+# feeds a terminal and a pipeline without being edited.
+#
+# The filter here is evaluated after reading, because procfs hands back whole
+# records: the run says so, and says how many events it removed. A filter that
+# names a field no event carries is false everywhere, which empties the series --
+# so that case is named too rather than looking like a program that did nothing.
+name: one measurement, several ways out
+duration: 2s
+format: text
+
+requests:
+  - label: threads
+    source: proc.threads
+    target:
+      launch:
+        - /bin/sh
+        - -c
+        - "sleep 0.4; sleep 0.4; sleep 0.4"
+    mode: poll@200ms
+    emit: [timeline, summary]
+    filter: "comm =~ 'sh'"

@@ -187,7 +187,7 @@ tests now tell them apart by the message and fail loudly on the second.
 ## Not implemented yet, and why
 
 - `cpu.profile`, and `sample` mode generally, need the sampling path and stack
-  capture (G6 in `BRIEF.md`). Sampling a hardware counter without stacks would
+  capture (see `STATE.md`). Sampling a hardware counter without stacks would
   produce addresses nobody can read.
 - `cpu.topdown` needs `pmu:slots` and `pmu:topdown-*`, which are raw event
   encodings per microarchitecture. `src/capabilities.rs` answers **unverified**
