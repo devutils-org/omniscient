@@ -61,6 +61,43 @@ Both floors, never equalities. The kernel is free to add wakeups — a signal, a
 page fault on a cold binary, a preemption — and a test that demanded an exact
 count would be asserting that nothing else happens on the machine.
 
+## What the first privileged run measured
+
+The program loads, the verifier accepts it, it attaches to `sched_waking`, and
+the events are the causal chain they claim to be. Running
+`omn sched.wakeup --emit raw -- /bin/sh -c 'for i in 1 2 3 4 5; do sleep 0.02; done'`
+produced, in order: one wakeup of the launched process by `omn` itself -- the
+launch gate being released, before the `exec`, so the woken task is still named
+`omn` -- then five wakeups of the shell, each by a different `sleep` child
+exiting. Five blocks, five wakers, named.
+
+And one thing worth knowing before trusting a waker.
+
+**A waker is the task that was running when the wakeup was issued, which is not
+always the task that caused it.** A wakeup issued from interrupt or softirq
+context is credited to whatever was interrupted, because that is what `current`
+is there. Measured, with a process that does nothing at all:
+
+```
+$ omn sched.wakeup --emit raw -- /bin/sleep 0.3
+  wakee kworker/1:2   waker 772820   (the sleeping process)
+  wakee rcu_preempt   waker 772820
+  wakee tailscaled    waker 772820
+  wakee sleep         waker 0        (the idle task: a timer expiry)
+```
+
+A process asleep for 300 ms wakes nobody. Those three are the timer and network
+softirqs running on its cpu, in its context. A waker of pid 0 is the idle task,
+which is what a timer expiry looks like from here.
+
+This is not a bug in the collector and not something `sched_wakeup` would fix --
+it is what the kernel knows at that point. It is stated as a caveat on the
+source, so it reaches the user beside their own numbers rather than living here.
+Telling the two apart needs the interrupt state at the time of the wakeup, which
+on x86 is a per-cpu `preempt_count` rather than a field of `task_struct`, so it
+needs `bpf_this_cpu_ptr` and a ksym lookup the layer does not have yet. Until
+then the waker is evidence, not proof.
+
 ## Traps
 
 - A switch count is a symptom. A *voluntary* switch is a task blocking on

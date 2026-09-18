@@ -37,6 +37,12 @@
     - "A wakeup is not a latency. The pair `waking -> on cpu` is the run queue
        wait and belongs to `sched.runqlat`; this source says who made a task
        runnable, and when."
+    - "The waker is the task that was running when the wakeup was issued, which
+       is not always the task that caused it. A wakeup issued from interrupt or
+       softirq context is credited to whatever was interrupted: measured here, a
+       process doing nothing but `sleep 0.3` appeared to wake `rcu_preempt`, a
+       kworker and a network daemon. A waker of pid 0 is the idle task, which is
+       how a timer expiry looks. Read the waker as evidence, not as proof."
 
 - id: sched.runqlat
   family: sched
