@@ -477,7 +477,27 @@ with no way to tell.
 
 ---
 
-## Part 4 — Coordinator checklist
+## Part 4 — Launching a thread
+
+One family per agent. The thread's mission block is the prompt.
+
+```console
+$ scripts/spawn-family.sh cpu
+$ cd ../omniscient-cpu && claude       # paste the prompt it printed
+```
+
+The script creates a worktree on `feat/<family>-collectors` and prints a prompt
+that points the agent at `CLAUDE.md`, at Parts 1 and 2 of this brief, and at its
+own thread. Each worktree builds into its own target directory: sharing one
+makes the builds serialize on cargo's lock, which defeats the point.
+
+Agents run unattended and commit on their own branch. They do not merge. A merge
+that conflicts means a thread edited a file it does not own — that is the bug,
+not the merge.
+
+---
+
+## Part 5 — Coordinator checklist
 
 - [ ] Kernel floor and privileges settled in `DECISIONS.md` (blocks Wave 2)
 - [ ] G1-G9 landed on `main` (blocks Wave 1)
