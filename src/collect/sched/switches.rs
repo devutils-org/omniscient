@@ -244,10 +244,17 @@ mod tests {
         // lost. Both cases are asserted rather than the comparison being
         // loosened until it always passes: a shortfall with nothing reported as
         // lost is the failure this test exists to catch.
+        // The two counters are not read at the same instant, and cannot be: the
+        // reference is read by opening a file, which is itself liable to switch
+        // off the cpu. Each edge of the window is worth a switch or two that one
+        // side counted and the other had not yet. That is the only slack given;
+        // the ratio bound below is what a collector returning a constant fails.
+        const EDGES: u64 = 4;
+
         let losses = collector.losses();
         if losses.is_clean() {
             assert!(
-                measured <= kernel && measured * 10 >= kernel * 8,
+                measured <= kernel + EDGES && measured * 10 >= kernel * 8,
                 "counted {measured} switches against the kernel's own {kernel}, with nothing \
                  reported as lost"
             );
