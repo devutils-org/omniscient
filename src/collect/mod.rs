@@ -567,6 +567,18 @@ fn merge_environments(
     Ok(merged)
 }
 
+/// Whether this build can actually collect a source through a backend.
+///
+/// The resolver asks before choosing. A machine that gains a privilege gains
+/// backends, and without this a source that worked five minutes ago stops
+/// working because something better became reachable that nothing implements --
+/// which is an absurd way for a tool to react to being given more access.
+pub fn implements(source_id: &str, backend: &str) -> bool {
+    registry()
+        .iter()
+        .any(|factory| factory.source == source_id && factory.backend == backend)
+}
+
 /// The sources a collector exists for, for error messages that say what *is*
 /// possible rather than only what is not.
 ///

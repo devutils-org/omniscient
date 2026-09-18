@@ -169,16 +169,21 @@ fn throttling_that_cannot_be_seen_is_never_reported_as_none() {
 /// promise what the collector then refuses.
 #[test]
 fn the_listing_agrees_with_what_this_machine_exposes() {
-    let listing = stdout(&run(&["list", "power"]));
+    // Per backend, not per source: a source is usable when *any* of its chain
+    // is, and `power.throttle` also has an eBPF backend that a machine with
+    // readable tracefs can serve. Asserting on the source would make gaining a
+    // privilege look like the listing lying.
+    let detail = stdout(&run(&["list", "power.throttle"]));
     let exposed = Path::new("/sys/devices/system/cpu/cpu0/thermal_throttle").exists();
-    let row = listing
+    let sysfs_line = detail
         .lines()
-        .find(|line| line.starts_with("power.throttle"))
-        .expect("power.throttle is listed");
-    let says_usable = row.split_whitespace().any(|word| word == "yes");
+        .find(|line| line.contains("thermal_throttle"))
+        .expect("the sysfs requirement is listed");
     assert_eq!(
-        says_usable, exposed,
-        "the listing and the filesystem disagree about throttling: {row}"
+        sysfs_line.contains("available"),
+        exposed,
+        "the listing and the filesystem disagree about {}: {sysfs_line}",
+        "/sys/devices/system/cpu/cpu0/thermal_throttle"
     );
 }
 

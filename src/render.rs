@@ -124,6 +124,9 @@ fn push_resolution(out: &mut String, resolved: &ResolvedRequest) {
         let verdict = match &considered.verdict {
             Verdict::Selected => "selected".to_owned(),
             Verdict::NotReached => "not reached".to_owned(),
+            Verdict::Unimplemented => {
+                "this machine can serve it and no collector is written for it yet".to_owned()
+            }
             Verdict::Rejected(reasons) => format!("rejected: {}", reasons.join("; ")),
         };
         let _ = writeln!(out, "    chain   {:<34} {verdict}", considered.id);

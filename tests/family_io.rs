@@ -136,8 +136,23 @@ fn a_per_process_request_is_refused_rather_than_answered_system_wide() {
     let message = stderr(&refused);
     assert_ne!(refused.status.code(), Some(0), "{message}");
     assert!(
-        message.contains("in-program filtering"),
-        "the refusal must say why a procfs counter cannot serve a pid: {message}"
+        stdout(&refused).is_empty(),
+        "a machine-wide total must not be produced for a process target:\n{}",
+        stdout(&refused)
+    );
+
+    // Which refusal arrives depends on what this machine grants. Without
+    // readable tracefs no backend can serve a pid at all; with it, the request
+    // resolves onto the eBPF backend, which is the one that could answer and
+    // has no collector yet. Both are the tool declining to invent a
+    // per-process number -- the assertion is on that, not on which of the two
+    // privileges the machine happens to have.
+    assert!(
+        message.contains("in-program filtering")
+            || message.contains("no viable backend")
+            || message.contains("no collector is written for `io.bytes` on backend `bpf"),
+        "the refusal must name why a procfs counter cannot serve a pid, or which backend \
+         could: {message}"
     );
 }
 

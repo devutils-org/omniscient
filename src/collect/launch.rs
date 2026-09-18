@@ -150,6 +150,15 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
     if pid == 0 {
         // Child: wait at the gate, then become the program.
         unsafe {
+            // A process forked from a binary that carries file capabilities
+            // inherits `dumpable = 0`, which makes its own /proc entries
+            // root-owned and unreadable to the user who started the run. The
+            // measured program is not the privileged one and has no reason to
+            // be protected from its own user, and without this every procfs
+            // collector reads EACCES on a program this tool launched -- but
+            // only once the tool has been given capabilities, which is the
+            // worst time to discover it.
+            libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
             libc::close(write_fd);
             let mut go = [0u8; 1];
             // A short read or an interrupted one still means "go": the parent
@@ -270,6 +279,26 @@ mod tests {
         // SAFETY: waiting on a pid this process created and already reaped.
         let result = unsafe { libc::waitpid(child.pid(), &mut ignored, libc::WNOHANG) };
         assert_eq!(result, -1, "the child was not reaped and is now a zombie");
+    }
+
+    /// A launched program must be readable in procfs by the user who launched
+    /// it, whatever privileges the tool itself was given.
+    #[test]
+    fn a_launched_program_is_readable_in_procfs_by_its_launcher() {
+        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+        child.release();
+        // Give the exec a moment; before it, the child is still this process's
+        // fork and the question is not yet meaningful.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let fds = format!("/proc/{}/fd", child.pid());
+        let listed = std::fs::read_dir(&fds);
+        child.terminate();
+        assert!(
+            listed.is_ok(),
+            "{fds} is not readable by the user who launched it: {:?}",
+            listed.err()
+        );
     }
 
     #[test]

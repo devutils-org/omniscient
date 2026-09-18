@@ -75,6 +75,10 @@ pub struct ConsideredBackend {
 pub enum Verdict {
     /// Chosen.
     Selected,
+    /// This machine can serve it and this build cannot: no collector is written
+    /// for it yet. Passed over in favour of one that is, which is what keeps a
+    /// newly granted privilege from taking a working source away.
+    Unimplemented,
     /// Ruled out, with what was missing.
     Rejected(Vec<String>),
     /// Never looked at: a backend above it was selected.
@@ -212,6 +216,11 @@ pub fn resolve(
 
     let mut chain = Vec::new();
     let mut unverified_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
+    // A backend this machine can serve but this build cannot collect. Kept as a
+    // fallback so that a chain with no implemented backend still resolves and
+    // still reports "no collector is written", rather than claiming the machine
+    // cannot serve it at all.
+    let mut unimplemented_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
 
     for (index, backend) in entry.backends.iter().enumerate() {
         if needs_bpf && !backend.id.starts_with("bpf") {
@@ -244,7 +253,9 @@ pub fn resolve(
         let all_checked = requirements
             .iter()
             .all(|requirement| requirement.probe.is_available());
-        if all_checked {
+        let implemented = crate::collect::implements(request.source.as_str(), &backend.id);
+
+        if all_checked && implemented {
             let mut resolved = build(
                 entry,
                 request,
@@ -256,6 +267,18 @@ pub fn resolve(
             );
             resolved.chain = finish_chain(chain, &backend.id, entry, index);
             return Ok(resolved);
+        }
+
+        if all_checked {
+            // Viable here, unwritten in this build.
+            if unimplemented_candidate.is_none() {
+                unimplemented_candidate = Some((index, backend, requirements));
+            }
+            chain.push(ConsideredBackend {
+                id: backend.id.clone(),
+                verdict: Verdict::Unimplemented,
+            });
+            continue;
         }
 
         // Nothing is missing, but something could not be checked. Keep looking
@@ -272,7 +295,12 @@ pub fn resolve(
         });
     }
 
-    if let Some((index, backend, requirements)) = unverified_candidate {
+    // An unverified-but-implemented backend beats a verified one nothing can
+    // collect: the first might work, the second certainly will not.
+    for candidate in [unverified_candidate.take(), unimplemented_candidate.take()] {
+        let Some((index, backend, requirements)) = candidate else {
+            continue;
+        };
         let mut resolved = build(
             entry,
             request,
