@@ -1,0 +1,221 @@
+# Family `net` — see CATALOG.md section 5.
+# The key that crosses the whole stack is sock:cookie (bpf_get_socket_cookie),
+# not the PID: on receive, processing happens in softirq, outside any process
+# context. bpf_sk_storage carries keys along the socket.
+
+- id: net.tcp.connect
+  family: net
+  summary: "TCP connection setup latency"
+  unit: ns
+  backends:
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect"], cost: low}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
+  keys: [task, sock, req]
+  filter_fields: [comm, daddr, dport, family]
+  determinism: low
+
+- id: net.tcp.lifetime
+  family: net
+  summary: "Connection duration and volume"
+  unit: ns
+  backends:
+    - id: "bpf:tp"
+      requires: ["tracepoint:sock:inet_sock_set_state", "bpf"]
+      join: {key: "sock:cookie", match: eq, ttl: 300s}
+      cost: low
+  modes: [trace]
+  emits: [hist, topk, raw, timeline, summary]
+  targets: {pid: bpf_only, cgroup: bpf_only, container: bpf_only, system: native}
+  keys: [sock, task, req]
+  filter_fields: [comm, daddr, dport, saddr, sport, family]
+  determinism: low
+
+- id: net.tcp.rtt
+  family: net
+  summary: "RTT, congestion window and congestion state"
+  unit: ns
+  backends:
+    - {id: "netlink", requires: ["sock_diag"], cost: free}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_rcv_established"], cost: low, equivalent: true}
+  modes: [poll, trace]
+  emits: [timeline, hist, raw, summary]
+  targets: {pid: native, system: native, cgroup: bpf_only}
+  keys: [sock, task]
+  filter_fields: [daddr, dport, saddr, sport]
+  determinism: low
+
+- id: net.tcp.retransmit
+  family: net
+  summary: "TCP retransmissions"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [rate, topk, raw, summary]
+  targets: {system: native, pid: bpf_only, cgroup: bpf_only}
+  keys: [sock, task]
+  filter_fields: [daddr, dport, saddr, sport]
+  determinism: low
+
+- id: net.drops
+  family: net
+  summary: "Dropped packets with drop reason"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [rate, topk, raw, summary]
+  targets: {system: native}
+  keys: [sock]
+  filter_fields: [reason, protocol]
+  determinism: medium
+  caveats:
+    - "The drop reason field only exists on recent kernels: discover the
+       tracepoint format at runtime instead of assuming it."
+
+- id: net.bytes
+  family: net
+  summary: "Network volume"
+  unit: bytes
+  backends:
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, degraded: "per interface, system-wide"}
+    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_sendmsg"], cost: low, equivalent: true}
+  modes: [poll, count]
+  emits: [rate, timeline, summary, topk]
+  targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
+  keys: [sock, task, cgroup]
+  filter_fields: [iface, comm]
+  determinism: low
+
+- id: net.packets
+  family: net
+  summary: "Packet counts"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free}
+    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true}
+  modes: [poll, count]
+  emits: [rate, timeline, summary]
+  targets: {system: native, iface: native}
+  keys: []
+  filter_fields: [iface]
+  determinism: low
+
+- id: net.socket
+  family: net
+  summary: "Socket read and write latency"
+  unit: ns
+  backends:
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_sendmsg", "fentry:sock_recvmsg"], cost: low}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med,
+       degraded: "no BTF: struct offsets are not portable across kernels"}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
+  keys: [sock, task, req]
+  filter_fields: [comm, bytes, dport]
+  determinism: low
+
+- id: net.backlog
+  family: net
+  summary: "Accept and SYN queue drops"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/net/netstat"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, rate, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: medium
+
+- id: net.qdisc
+  family: net
+  summary: "Transmit scheduling latency"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low}
+  modes: [trace]
+  emits: [hist, raw, summary, timeline]
+  targets: {system: native, iface: bpf_only}
+  keys: [sock]
+  filter_fields: [iface]
+  determinism: low
+
+- id: net.softirq
+  family: net
+  summary: "Time spent in network softirq processing"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med}
+  modes: [trace, count]
+  emits: [hist, rate, raw, summary]
+  targets: {system: native, cpu: native}
+  keys: []
+  filter_fields: [cpu, vec]
+  determinism: low
+
+- id: net.hwts
+  family: net
+  summary: "NIC hardware timestamps (PHC domain)"
+  unit: ns
+  backends:
+    - {id: "netlink", requires: ["so_timestamping", "phc"], cost: free}
+  modes: [trace]
+  emits: [raw, hist, timeline, summary]
+  targets: {pid: native, launch: native, iface: native}
+  keys: [sock]
+  filter_fields: [iface, dport]
+  determinism: high
+  caveats:
+    - "The only way to settle 'is it the network or is it us': it splits latency
+       into NIC / kernel / application segments."
+    - "A different clock domain from CLOCK_MONOTONIC: calibration is mandatory and
+       ts_err_ns is non-zero on these events."
+
+- id: net.xdp
+  family: net
+  summary: "In-driver XDP counters"
+  unit: count
+  backends:
+    - {id: "bpf", requires: ["xdp", "bpf"], cost: free}
+  modes: [count, poll]
+  emits: [rate, summary, timeline]
+  targets: {iface: native}
+  keys: []
+  filter_fields: [iface]
+  determinism: medium
+
+- id: net.capture
+  family: net
+  summary: "Raw packet capture"
+  unit: bytes
+  backends:
+    - {id: "af_packet", requires: ["af_packet:tpacket_v3"], cost: high}
+  modes: [trace]
+  emits: [raw, timeline]
+  targets: {iface: native, system: native}
+  keys: [sock]
+  filter_fields: [iface, protocol, dport, daddr]
+  determinism: high
+  caveats:
+    - "Watch buffer drops. A capture that loses packets under load silently
+       produces wrong conclusions."
+
+- id: net.iface
+  family: net
+  summary: "Interface errors, drops and pause frames"
+  unit: count
+  backends:
+    - {id: "netlink", requires: ["ethtool"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, degraded: "generic counters only, no driver-specific ones"}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {iface: native, system: native}
+  keys: []
+  filter_fields: [iface]
+  determinism: medium

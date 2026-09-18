@@ -1,0 +1,145 @@
+# Family `gpu` — see CATALOG.md section 8.
+# NVIDIA is proprietary: no DRM scheduler tracepoints, no exposed kernel PMU.
+# Everything goes through vendor:*. AMD and Intel have the full kernel stack.
+# The catalog reflects that asymmetry rather than hiding it.
+
+- id: gpu.job
+  family: gpu
+  summary: "DRM job latency, submit -> fence"
+  unit: ns
+  backends:
+    - id: "bpf:tp"
+      requires: ["tracepoint:gpu_scheduler:drm_run_job", "tracepoint:gpu_scheduler:drm_sched_process_job", "bpf"]
+      join: {key: "gpu:fence_ctx+seqno", match: eq, ttl: 30s}
+      cost: low
+  modes: [trace]
+  emits: [hist, topk, raw, timeline, summary]
+  targets: {system: native, pid: bpf_only}
+  keys: [gpu, task]
+  filter_fields: [ring, comm]
+  determinism: low
+  caveats:
+    - "Unavailable on the NVIDIA proprietary driver: no DRM scheduler tracepoints."
+    - "Measures a command buffer, not a kernel, IRQ included. It cannot tell you
+       whether the GPU is saturating its SMs or waiting on VRAM."
+    - "Tracepoint fields are volatile across kernel versions: discover the format
+       at runtime and prefer (fence_context, seqno) over the pointer."
+
+- id: gpu.engine_busy
+  family: gpu
+  summary: "Per-engine occupancy"
+  unit: ratio
+  backends:
+    - {id: "pmu:i915", requires: ["pmu:i915"], cost: free}
+    - {id: "pmu:amdgpu", requires: ["pmu:amdgpu"], cost: free, equivalent: true}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: low, degraded: "coarse sampling, vendor-defined semantics"}
+  modes: [count, poll]
+  emits: [timeline, rate, summary]
+  targets: {system: native}
+  keys: [gpu]
+  filter_fields: [engine, device]
+  determinism: low
+
+- id: gpu.freq
+  family: gpu
+  summary: "GPU clock frequency"
+  unit: hz
+  backends:
+    - {id: "fs:sys", requires: ["/sys/class/drm"], cost: free}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: [gpu]
+  filter_fields: [device]
+  determinism: low
+
+- id: gpu.power
+  family: gpu
+  summary: "GPU power draw"
+  unit: joules
+  backends:
+    - {id: "fs:sys", requires: ["hwmon:amdgpu"], cost: free}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: [gpu]
+  filter_fields: [device]
+  determinism: low
+
+- id: gpu.temp
+  family: gpu
+  summary: "GPU temperature"
+  unit: celsius
+  backends:
+    - {id: "fs:sys", requires: ["hwmon:amdgpu"], cost: free}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: [gpu]
+  filter_fields: [device]
+  determinism: low
+
+- id: gpu.mem
+  family: gpu
+  summary: "VRAM allocated and used"
+  unit: bytes
+  backends:
+    - {id: "fs:sys", requires: ["/sys/class/drm/amdgpu"], cost: free}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, pid: native}
+  keys: [gpu, task]
+  filter_fields: [device]
+  determinism: medium
+
+- id: gpu.kernel
+  family: gpu
+  summary: "GPU time per compute kernel"
+  unit: ns
+  backends:
+    - {id: "vendor:cupti", requires: ["cupti"], cost: med}
+    - {id: "vendor:rocprof", requires: ["rocprofiler"], cost: med, equivalent: true}
+    - {id: "vendor:l0", requires: ["level-zero"], cost: med, equivalent: true}
+  modes: [trace]
+  emits: [hist, topk, raw, timeline, summary]
+  targets: {pid: native, launch: native}
+  keys: [gpu, task]
+  filter_fields: [kernel, device]
+  determinism: medium
+  caveats:
+    - "Vendor timestamps live in another clock domain: calibration is mandatory
+       and ts_err_ns is non-zero."
+
+- id: gpu.api
+  family: gpu
+  summary: "Host-side submission latency (CUDA / Vulkan)"
+  unit: ns
+  backends:
+    - {id: "preload", requires: ["dynamic-linking"], cost: low}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [gpu, task, req]
+  filter_fields: [api, comm]
+  determinism: low
+
+- id: gpu.counters
+  family: gpu
+  summary: "Internal GPU counters (SM occupancy, cache, stalls)"
+  unit: count
+  backends:
+    - {id: "vendor:ncu", requires: ["nsight-compute"], cost: extreme}
+    - {id: "vendor:rocprof", requires: ["rocprofv3"], cost: extreme, equivalent: true}
+  modes: [snapshot]
+  emits: [summary]
+  targets: {pid: native, launch: native}
+  keys: [gpu]
+  filter_fields: [kernel, device]
+  determinism: high
+  caveats:
+    - "Does NOT measure time: kernel replay destroys the timeline. Its value is
+       counter determinism, and it locks clocks by default."

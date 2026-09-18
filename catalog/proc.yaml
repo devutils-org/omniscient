@@ -1,0 +1,82 @@
+# Family `proc` (processes and syscalls) — see CATALOG.md section 9.
+
+- id: proc.syscall
+  family: proc
+  summary: "Per-syscall latency and count"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high}
+  modes: [trace, count]
+  emits: [hist, topk, rate, raw, summary]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
+  keys: [task, req, file]
+  filter_fields: [comm, syscall, pid]
+  determinism: low
+  caveats:
+    - "raw_syscalls fires on everything: aggregate in the kernel, or filter by
+       syscall number inside the eBPF program."
+
+- id: proc.exec
+  family: proc
+  summary: "Process execution events"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: free}
+  modes: [trace]
+  emits: [raw, timeline, topk, summary]
+  targets: {system: native, cgroup: bpf_only, container: bpf_only}
+  keys: [task, cgroup]
+  filter_fields: [comm, filename]
+  determinism: medium
+
+- id: proc.exit
+  family: proc
+  summary: "Process exit events with exit code"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: free}
+  modes: [trace]
+  emits: [raw, timeline, topk, summary]
+  targets: {system: native, cgroup: bpf_only, container: bpf_only}
+  keys: [task, cgroup]
+  filter_fields: [comm, code]
+  determinism: medium
+
+- id: proc.fd
+  family: proc
+  summary: "Open file descriptors against the limit"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/fd"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, file]
+  filter_fields: [comm]
+  determinism: medium
+
+- id: proc.threads
+  family: proc
+  summary: "Thread count"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/status"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [task]
+  filter_fields: [comm]
+  determinism: medium
+
+- id: proc.signals
+  family: proc
+  summary: "Signals delivered"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:signal:signal_generate", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [raw, topk, rate, summary]
+  targets: {pid: bpf_only, system: native, cgroup: bpf_only}
+  keys: [task]
+  filter_fields: [comm, sig, pid]
+  determinism: medium

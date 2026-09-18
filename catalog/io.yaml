@@ -1,0 +1,220 @@
+# Family `io` (block + filesystem) — see CATALOG.md section 4.
+# Three layers must never be conflated: syscall latency (what the application
+# suffers), block latency (what the device does), FS latency (journal, locks,
+# allocation). The gap between them is the diagnosis.
+
+- id: io.latency
+  family: io
+  summary: "Block request latency, submit -> completion"
+  unit: ns
+  backends:
+    - id: "bpf:tp"
+      requires: ["tracepoint:block:block_rq_issue", "tracepoint:block:block_rq_complete", "bpf"]
+      join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
+      cost: low
+    - {id: "fs:tracefs", requires: ["tracefs"], cost: med,
+       degraded: "no per-task attribution, no pushed-down filter"}
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
+       degraded: "aggregated per device, no per-request latency"}
+  modes: [trace, count]
+  emits: [hist, raw, rate, topk, summary]
+  targets: {system: native, cgroup: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, container: bpf_only}
+  keys: [blk, task, file, req]
+  filter_fields: [dev, rwbs, bytes, comm]
+  determinism: low
+  caveats:
+    - "Reads are attributable to the submitter (IDENTITY); writes are not, they
+       leave through writeback in a kworker and fall back to file:dev+ino (KEY)."
+    - "Request pointers get recycled: the key is (ptr, open_ts), not the pointer."
+    - "A cold run and a warm run differ by an order of magnitude. Declare which
+       one the protocol wants and enforce it."
+
+- id: io.queue
+  family: io
+  summary: "Software queueing time, insert -> issue"
+  unit: ns
+  backends:
+    - id: "bpf:tp"
+      requires: ["tracepoint:block:block_rq_insert", "tracepoint:block:block_rq_issue", "bpf"]
+      join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
+      cost: low
+  modes: [trace]
+  emits: [hist, raw, topk, summary]
+  targets: {system: native, cgroup: bpf_only}
+  keys: [blk, task]
+  filter_fields: [dev, rwbs, bytes, comm]
+  determinism: low
+
+- id: io.bytes
+  family: io
+  summary: "I/O volume"
+  unit: bytes
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low}
+    - {id: "fs:cgroup", requires: ["cgroup2:io.stat"], cost: free, degraded: "per cgroup and device only"}
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free, degraded: "system-wide, per device"}
+  modes: [count, trace, poll]
+  emits: [rate, summary, timeline, topk]
+  targets: {system: native, cgroup: native, pid: bpf_only, container: native}
+  keys: [blk, task, cgroup]
+  filter_fields: [dev, rwbs, bytes, comm]
+  determinism: low
+
+- id: io.iops
+  family: io
+  summary: "I/O operation rate"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low}
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free, degraded: "system-wide, per device"}
+  modes: [count, poll]
+  emits: [rate, summary, timeline]
+  targets: {system: native, cgroup: native, pid: bpf_only, container: native}
+  keys: [blk, cgroup]
+  filter_fields: [dev, rwbs]
+  determinism: low
+
+- id: io.size
+  family: io
+  summary: "Request size distribution"
+  unit: bytes
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {system: native, cgroup: bpf_only, pid: bpf_only}
+  keys: [blk, task]
+  filter_fields: [dev, rwbs, bytes, comm]
+  determinism: medium
+
+- id: io.merges
+  family: io
+  summary: "Request merges performed by the block layer"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_merge", "bpf"], cost: low}
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free, degraded: "counters only, no per-request detail"}
+  modes: [count]
+  emits: [rate, summary]
+  targets: {system: native}
+  keys: [blk]
+  filter_fields: [dev, rwbs]
+  determinism: medium
+
+- id: io.inflight
+  family: io
+  summary: "Device queue depth"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: [blk]
+  filter_fields: [dev]
+  determinism: low
+
+- id: io.syscall
+  family: io
+  summary: "I/O latency as the application sees it"
+  unit: ns
+  backends:
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,
+       degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
+  modes: [trace, count]
+  emits: [hist, topk, raw, rate, summary]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
+  keys: [task, file, req]
+  filter_fields: [comm, fd, bytes]
+  determinism: low
+
+- id: io.fs
+  family: io
+  summary: "VFS and filesystem latency"
+  unit: ns
+  backends:
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:ext4:*", "bpf"], cost: low, degraded: "filesystem-specific tracepoints"}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, degraded: "no BTF: struct layouts are not portable"}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
+  keys: [task, file, req]
+  filter_fields: [comm, dev, ino, bytes]
+  determinism: low
+
+- id: io.pagecache
+  family: io
+  summary: "Page cache hits and misses"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med}
+  modes: [trace, count]
+  emits: [rate, topk, summary, raw]
+  targets: {system: native, pid: bpf_only, cgroup: bpf_only}
+  keys: [task, file]
+  filter_fields: [comm, dev, ino]
+  determinism: low
+  caveats:
+    - "A cold run and a warm run differ by an order of magnitude. Mixing them
+       produces a bimodal distribution that then gets mistaken for noise."
+
+- id: io.readahead
+  family: io
+  summary: "Readahead effectiveness (pages read ahead vs pages used)"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:filemap:*", "bpf"], cost: low}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"], cost: low, equivalent: true}
+  modes: [trace, count]
+  emits: [rate, summary, hist]
+  targets: {system: native, pid: bpf_only}
+  keys: [task, file]
+  filter_fields: [comm, dev, ino]
+  determinism: low
+
+- id: io.writeback
+  family: io
+  summary: "Deferred writeback"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:writeback:writeback_start", "tracepoint:writeback:writeback_written", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [hist, rate, raw, summary, timeline]
+  targets: {system: native, cgroup: bpf_only}
+  keys: [file, cgroup]
+  filter_fields: [dev]
+  determinism: low
+  caveats:
+    - "Writeback runs in a kworker: the originating task context is gone.
+       Evidence is KEY (file:dev+ino), never IDENTITY."
+
+- id: io.fsync
+  family: io
+  summary: "Synchronization latency (fsync, fdatasync)"
+  unit: ns
+  backends:
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_fsync_range"], cost: low}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low,
+       degraded: "no BTF: struct offsets are not portable across kernels"}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {pid: native, tid: native, launch: native, cgroup: bpf_only, system: native}
+  keys: [task, file]
+  filter_fields: [comm, dev, ino]
+  determinism: low
+
+- id: io.pressure
+  family: io
+  summary: "PSI: I/O stall time"
+  unit: ratio
+  backends:
+    - {id: "fs:proc", requires: ["/proc/pressure/io"], cost: free}
+    - {id: "fs:cgroup", requires: ["cgroup2:io.pressure"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, cgroup: native, container: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: low

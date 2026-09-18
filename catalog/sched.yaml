@@ -1,0 +1,154 @@
+# Family `sched` (scheduling and synchronization) — see CATALOG.md section 6.
+# The most underrated family: it measures the time spent NOT running, which is
+# invisible to every CPU profiler. sched.wakeup is the correlator's WAKEUP join
+# mechanism and a dependency of every other family.
+
+- id: sched.wakeup
+  family: sched
+  summary: "Wakeup chain: who unblocks whom"
+  unit: ns
+  backends:
+    - id: "bpf:tp"
+      requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_waking", "bpf"]
+      join: {key: "task:tid", match: wakeup}
+      cost: med
+  modes: [trace]
+  emits: [raw, topk, timeline, summary]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, container: bpf_only}
+  keys: [task, cgroup]
+  filter_fields: [comm, pid, cpu]
+  determinism: low
+  caveats:
+    - "The only way to attribute latency across a block without instrumenting the
+       application. Implement it early: the other families depend on it."
+
+- id: sched.runqlat
+  family: sched
+  summary: "Run queue wait: wakeup -> on-CPU"
+  unit: ns
+  backends:
+    - id: "bpf:tp"
+      requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_switch", "bpf"]
+      join: {key: "task:tid", match: eq, ttl: 10s}
+      cost: med
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only, container: bpf_only}
+  keys: [task, cgroup]
+  filter_fields: [comm, pid, cpu, prio]
+  determinism: low
+
+- id: sched.offcpu
+  family: sched
+  summary: "Blocked time with the blocking stack"
+  unit: ns
+  backends:
+    - {id: "bpf:tp:stacks", requires: ["tracepoint:sched:sched_switch", "bpf", "callchain"], cost: high}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med,
+       degraded: "no stacks: tells you how long, not where"}
+  modes: [trace]
+  emits: [hist, stack, topk, raw, summary]
+  targets: {pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, container: bpf_only, system: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, pid, state]
+  determinism: low
+  caveats:
+    - "Expensive on switch-heavy workloads: aggregate in the kernel (stack-id ->
+       counter) rather than streaming a raw trace."
+
+- id: sched.switches
+  family: sched
+  summary: "Context switches"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
+       degraded: "counter only, no per-switch detail"}
+  modes: [count, trace]
+  emits: [rate, summary, topk, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, pid, cpu]
+  determinism: low
+
+- id: sched.migrations
+  family: sched
+  summary: "Task migrations between cores"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [rate, topk, raw, summary]
+  targets: {system: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
+  keys: [task, cgroup]
+  filter_fields: [comm, pid, cpu]
+  determinism: low
+
+- id: sched.lock
+  family: sched
+  summary: "Kernel lock contention"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
+       degraded: "older kernels: futex and uprobe fallback, partial coverage"}
+  modes: [trace]
+  emits: [hist, topk, stack, raw, summary]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only}
+  keys: [task]
+  filter_fields: [comm, pid]
+  determinism: low
+
+- id: sched.futex
+  family: sched
+  summary: "Userspace futex wait"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med}
+  modes: [trace]
+  emits: [hist, topk, stack, raw, summary]
+  targets: {pid: native, tid: native, launch: native, cgroup: bpf_only}
+  keys: [task]
+  filter_fields: [comm, pid, addr]
+  determinism: low
+
+- id: sched.mutex
+  family: sched
+  summary: "pthread mutex contention"
+  unit: ns
+  backends:
+    - {id: "preload", requires: ["dynamic-linking"], cost: med}
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:pthread_mutex_lock"], cost: high,
+       degraded: "~1-2 us per call: serializes what it measures on hot locks"}
+  modes: [trace]
+  emits: [hist, topk, stack, raw, summary]
+  targets: {pid: native, tid: native, launch: native}
+  keys: [task]
+  filter_fields: [comm, addr]
+  determinism: low
+
+- id: sched.irq
+  family: sched
+  summary: "Time spent in hard and soft interrupt handlers"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "bpf"], cost: med}
+  modes: [trace, count]
+  emits: [hist, topk, rate, raw, summary]
+  targets: {system: native, cpu: native}
+  keys: []
+  filter_fields: [irq, cpu, name]
+  determinism: low
+
+- id: sched.numa_balance
+  family: sched
+  summary: "Automatic NUMA balancing decisions"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [rate, topk, raw, summary]
+  targets: {system: native}
+  keys: [task]
+  filter_fields: [comm, pid, node]
+  determinism: low

@@ -1,0 +1,344 @@
+# Family `mem` — see CATALOG.md section 3.
+# Cardinal rule: the accounting metric is always explicit. RSS, PSS, USS, live
+# heap, retained heap and memory.current are six different numbers, all correct.
+# A `mem` request without a named metric must fail rather than pick a default.
+
+- id: mem.rss
+  family: mem
+  summary: "Resident footprint (pages in RAM, shared ones counted in full)"
+  unit: bytes
+  backends:
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:statm", requires: ["/proc/[pid]/statm"], cost: free,
+       degraded: "resident pages only: no per-VMA breakdown, and no PSS or USS to cross-check against"}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, tid: native, cgroup: native, launch: native, container: native}
+  keys: [task, cgroup, mem]
+  filter_fields: [comm]
+  determinism: medium
+  caveats:
+    - "malloc() allocates nothing: RSS only rises on first write. An
+       allocation-site profile and an RSS curve never line up."
+    - "THP breaks reproducibility: khugepaged promotes in the background and RSS
+       grows in 2 MB steps. Freeze and log the mode."
+
+- id: mem.pss
+  family: mem
+  summary: "Proportional footprint (shared pages divided by the number of mappers)"
+  unit: bytes
+  backends:
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: low,
+       degraded: "walks every VMA: expensive on large address spaces"}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, cgroup: native, launch: native, container: native}
+  keys: [task, cgroup, mem]
+  filter_fields: [comm]
+  determinism: medium
+
+- id: mem.uss
+  family: mem
+  summary: "Private footprint (what dies with the process)"
+  unit: bytes
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, mem]
+  filter_fields: [comm]
+  determinism: medium
+
+- id: mem.cgroup
+  family: mem
+  summary: "Cgroup memory accounting (current / peak / stat)"
+  unit: bytes
+  backends:
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.current"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {cgroup: native, container: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: medium
+
+- id: mem.faults
+  family: mem
+  summary: "Minor and major page faults"
+  unit: count
+  backends:
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_PAGE_FAULTS"], cost: free}
+    - {id: "bpf:tp", requires: ["tracepoint:exceptions:page_fault_user", "bpf"], cost: low,
+       degraded: "x86 only for this tracepoint"}
+  modes: [count, sample, trace]
+  emits: [summary, rate, hist, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, mem, cgroup]
+  filter_fields: [comm, addr]
+  determinism: medium
+  caveats:
+    - "Correlate with mem.heap.alloc through the mem:[base,len) key (interval join)
+       to attribute memory to whoever brings it into existence."
+
+- id: mem.page_alloc
+  family: mem
+  summary: "Kernel page allocations and frees"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:kmem:mm_page_alloc", "tracepoint:kmem:mm_page_free", "bpf"], cost: med}
+  modes: [trace, count]
+  emits: [hist, topk, rate, raw, summary]
+  targets: {system: native, cgroup: bpf_only}
+  keys: [task, mem, cgroup]
+  filter_fields: [order, comm]
+  determinism: medium
+
+- id: mem.kmalloc
+  family: mem
+  summary: "Kernel slab allocations"
+  unit: bytes
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med}
+  modes: [trace, count]
+  emits: [hist, topk, rate, raw, summary]
+  targets: {system: native}
+  keys: [task, mem]
+  filter_fields: [bytes, comm]
+  determinism: medium
+
+- id: mem.heap.alloc
+  family: mem
+  summary: "Userspace allocations by call site"
+  unit: bytes
+  backends:
+    - {id: "preload", requires: ["dynamic-linking"], cost: med}
+    - {id: "bpf:usdt", requires: ["usdt:libc"], cost: med, equivalent: true}
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc"], cost: high,
+       degraded: "~1-2 us per call: heavily dilates allocation-heavy workloads"}
+  modes: [trace]
+  emits: [hist, topk, stack, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, mem]
+  filter_fields: [bytes, comm]
+  determinism: high
+
+- id: mem.heap.live
+  family: mem
+  summary: "Live heap: allocated and not yet freed"
+  unit: bytes
+  backends:
+    - {id: "preload", requires: ["dynamic-linking"], cost: low}
+    - {id: "fs:proc", requires: ["allocator-stats:jemalloc|tcmalloc"], cost: free,
+       degraded: "depends on the linked allocator, no allocation site"}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, mem]
+  filter_fields: []
+  determinism: high
+
+- id: mem.heap.retained
+  family: mem
+  summary: "Fragmentation: memory retained by the allocator but no longer live"
+  unit: bytes
+  primitive: false
+  derived_from: [mem.heap.live, mem.rss]
+  backends:
+    - {id: "preload", requires: ["dynamic-linking", "/proc/[pid]/smaps_rollup"], cost: low}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, mem]
+  filter_fields: []
+  determinism: high
+  caveats:
+    - "free() returns nothing: the allocator keeps its arenas. This is the metric
+       that predicts OOMs in production, and almost nobody collects it."
+
+- id: mem.cache_l1
+  family: mem
+  summary: "L1 data cache misses"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:L1-dcache-load-misses"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: low
+
+- id: mem.cache_llc
+  family: mem
+  summary: "Last-level cache misses"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:LLC-load-misses"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: low
+
+- id: mem.cache_tlb
+  family: mem
+  summary: "Data and instruction TLB misses"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:dTLB-load-misses"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: low
+
+- id: mem.latency
+  family: mem
+  summary: "Memory access latency (load latency sampling)"
+  unit: count
+  backends:
+    - {id: "pmu:pebs", requires: ["pmu:pebs:mem-loads"], cost: med}
+    - {id: "pmu:ibs", requires: ["pmu:ibs_op"], cost: med, equivalent: true}
+  modes: [sample]
+  emits: [hist, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, mem]
+  filter_fields: [comm, cpu, addr]
+  determinism: low
+
+- id: mem.sharing
+  family: mem
+  summary: "False sharing: cache lines in HITM across cores"
+  unit: count
+  backends:
+    - {id: "pmu:pebs", requires: ["pmu:pebs:mem-loads", "pmu:pebs:mem-stores"], cost: med}
+    - {id: "pmu:ibs", requires: ["pmu:ibs_op"], cost: med, equivalent: true}
+  modes: [sample]
+  emits: [topk, stack, raw, summary]
+  targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
+  keys: [task, mem]
+  filter_fields: [comm, cpu, addr]
+  determinism: low
+
+- id: mem.bandwidth
+  family: mem
+  summary: "DRAM throughput"
+  unit: bytes
+  backends:
+    - {id: "pmu:uncore", requires: ["pmu:uncore_imc"], cost: free}
+    - {id: "pmu:rdt", requires: ["rdt:mbm"], cost: free,
+       degraded: "attribution per RDT class, available only on some CPUs"}
+  modes: [count, poll]
+  emits: [rate, timeline, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "The uncore is inherently package-scoped: --pid must be REFUSED, never
+       degraded into a system-wide value presented as per-process attribution."
+
+- id: mem.numa
+  family: mem
+  summary: "Memory access locality (local / remote)"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:pebs:mem-loads"], cost: med}
+    - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: free,
+       degraded: "page placement, not accesses"}
+  modes: [sample, poll]
+  emits: [topk, hist, raw, summary, timeline]
+  targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
+  keys: [task, mem]
+  filter_fields: [comm, cpu, node]
+  determinism: low
+
+- id: mem.wss
+  family: mem
+  summary: "Real working set (pages actually touched)"
+  unit: bytes
+  backends:
+    - {id: "fs:sys:damon", requires: ["damon"], cost: low}
+    - {id: "fs:sys:page_idle", requires: ["/sys/kernel/mm/page_idle"], cost: low,
+       degraded: "expensive scan, perturbs reclaim"}
+  modes: [poll]
+  emits: [timeline, raw, summary]
+  targets: {system: native, cgroup: native, pid: native, launch: native, container: native}
+  keys: [task, cgroup, mem]
+  filter_fields: []
+  determinism: medium
+
+- id: mem.reclaim
+  family: mem
+  summary: "Direct reclaim"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [hist, topk, rate, raw, summary]
+  targets: {system: native, cgroup: bpf_only, pid: bpf_only, container: bpf_only}
+  keys: [task, cgroup]
+  filter_fields: [comm]
+  determinism: medium
+
+- id: mem.compaction
+  family: mem
+  summary: "Memory compaction"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "bpf"], cost: low}
+  modes: [trace, count]
+  emits: [hist, rate, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+
+- id: mem.thp
+  family: mem
+  summary: "Transparent huge pages: promotions and current mode"
+  unit: count
+  backends:
+    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free,
+       degraded: "promotion counters only, not the configured mode"}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "The THP mode must be frozen and logged just like clock frequencies."
+
+- id: mem.swap
+  family: mem
+  summary: "Swap in / swap out"
+  unit: bytes
+  backends:
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free}
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, rate, raw, summary]
+  targets: {system: native, cgroup: native, container: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: low
+
+- id: mem.pressure
+  family: mem
+  summary: "PSI: memory stall time"
+  unit: ratio
+  backends:
+    - {id: "fs:proc", requires: ["/proc/pressure/memory"], cost: free}
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.pressure"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, cgroup: native, container: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: low

@@ -1,0 +1,62 @@
+# Family `runtime` (late phase) — see CATALOG.md section 10.
+# The layer above the kernel: GC, JIT, allocator, interpreter. Without it, a GC
+# pause or a JIT deoptimization gets attributed to the wrong resource.
+# Not a closed family: it is the extension point where users declare their probes.
+
+- id: runtime.gc
+  family: runtime
+  summary: "Garbage collection pauses"
+  unit: ns
+  backends:
+    - {id: "bpf:usdt", requires: ["usdt:gc"], cost: low,
+       degraded: "requires a runtime built with probes (Java +ExtendedDTraceProbes, Python --with-dtrace)"}
+  modes: [trace]
+  emits: [hist, timeline, raw, topk, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, req]
+  filter_fields: [comm, generation]
+  determinism: low
+
+- id: runtime.jit
+  family: runtime
+  summary: "JIT compilation and deoptimization events"
+  unit: count
+  backends:
+    - {id: "bpf:usdt", requires: ["usdt:jit"], cost: low}
+    - {id: "fs:proc", requires: ["/tmp/perf-[pid].map"], cost: free,
+       degraded: "symbol map only: names frames, does not time compilation"}
+  modes: [trace]
+  emits: [raw, topk, timeline, summary]
+  targets: {pid: native, launch: native}
+  keys: [task]
+  filter_fields: [comm, method]
+  determinism: low
+
+- id: runtime.alloc
+  family: runtime
+  summary: "Runtime-level allocation activity"
+  unit: bytes
+  backends:
+    - {id: "preload", requires: ["dynamic-linking"], cost: med}
+    - {id: "bpf:usdt", requires: ["usdt:alloc"], cost: med, equivalent: true}
+  modes: [trace, poll]
+  emits: [hist, topk, stack, timeline, summary]
+  targets: {pid: native, launch: native}
+  keys: [task, mem]
+  filter_fields: [comm, bytes]
+  determinism: high
+
+- id: runtime.custom
+  family: runtime
+  summary: "User-declared probe on an arbitrary symbol or USDT marker"
+  unit: count
+  backends:
+    - {id: "bpf:usdt", requires: ["usdt"], cost: med}
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf"], cost: high,
+       degraded: "~1-2 us per hit: only viable on low-rate call sites"}
+  modes: [trace, count]
+  emits: [hist, topk, stack, raw, rate, summary]
+  targets: {pid: native, tid: native, launch: native}
+  keys: [task, req]
+  filter_fields: [comm]
+  determinism: low

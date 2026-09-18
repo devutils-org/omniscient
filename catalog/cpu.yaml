@@ -1,0 +1,217 @@
+# Family `cpu` — see CATALOG.md section 2.
+# Every entry declares an ORDERED backend chain: the resolver keeps the first one
+# viable on this machine and writes it into the resolved file.
+
+- id: cpu.cycles
+  family: cpu
+  summary: "Unhalted CPU cycles"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK"], cost: free,
+       degraded: "CPU time, not cycles: blind to DVFS"}
+  modes: [count, sample]
+  emits: [summary, rate, hist, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: medium
+  caveats:
+    - "Frequency-dependent: lock the governor or the measurement is not comparable."
+
+- id: cpu.instructions
+  family: cpu
+  summary: "Retired instructions"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, hist, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: high
+  caveats:
+    - "The most stable metric of the core (typical CV < 0.1 %) but never bit-exact:
+       interrupt skid, speculation, IRQs, SMT."
+    - "Disabling SMT or pinning affinity moves the counter by 10-30 %."
+
+- id: cpu.ipc
+  family: cpu
+  summary: "Instructions per cycle (derived)"
+  unit: ratio
+  primitive: false
+  derived_from: [cpu.instructions, cpu.cycles]
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS", "pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
+  modes: [count]
+  emits: [summary]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: medium
+
+- id: cpu.branch_misses
+  family: cpu
+  summary: "Mispredicted branches"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_BRANCH_MISSES"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: medium
+
+- id: cpu.cache_misses
+  family: cpu
+  summary: "Last-level cache misses"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: low
+
+- id: cpu.topdown
+  family: cpu
+  summary: "Top-down Microarchitecture Analysis: front-end / back-end / bad-spec / retiring"
+  unit: ratio
+  backends:
+    - {id: "pmu", requires: ["pmu:slots", "pmu:topdown-*"], cost: low}
+  modes: [count]
+  emits: [summary]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: medium
+  caveats:
+    - "Heavily microarchitecture-dependent: map per CPU family, never hard-code
+       event names."
+
+- id: cpu.profile
+  family: cpu
+  summary: "On-CPU profile with call stacks"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CPU_CYCLES", "callchain"], cost: low}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK", "callchain"], cost: low,
+       degraded: "time-based sampling: blind to phases running at reduced frequency"}
+  modes: [sample]
+  emits: [stack, topk, hist, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: low
+  caveats:
+    - "The unwind mode (fp / dwarf / lbr) must be declared: dwarf copies the stack
+       on every sample, with far higher volume and cost."
+
+- id: cpu.oncpu_time
+  family: cpu
+  summary: "CPU time actually consumed"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low}
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free,
+       degraded: "aggregated per cgroup, no stacks and no per-thread attribution"}
+    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: free,
+       degraded: "tick granularity, no per-site attribution"}
+  modes: [trace, poll]
+  emits: [summary, timeline, hist, rate]
+  targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm]
+  determinism: low
+
+- id: cpu.context_switches
+  family: cpu
+  summary: "Context switches"
+  unit: count
+  backends:
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free}
+  modes: [count, sample]
+  emits: [summary, rate, topk, stack]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm, cpu]
+  determinism: low
+
+- id: cpu.migrations
+  family: cpu
+  summary: "Cross-core migrations"
+  unit: count
+  backends:
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: free}
+  modes: [count]
+  emits: [summary, rate]
+  targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
+  keys: [task, cgroup]
+  filter_fields: [comm]
+  determinism: low
+
+- id: cpu.util
+  family: cpu
+  summary: "CPU utilization by state (user/sys/iowait/idle/steal)"
+  unit: ratio
+  backends:
+    - {id: "fs:proc", requires: ["/proc/stat"], cost: free}
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free,
+       degraded: "scoped to one cgroup: no per-cpu breakdown and no steal time"}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, cgroup: native, cpu: native, container: native}
+  keys: [cgroup]
+  filter_fields: [cpu]
+  determinism: low
+
+- id: cpu.pressure
+  family: cpu
+  summary: "PSI: CPU stall time"
+  unit: ratio
+  backends:
+    - {id: "fs:proc", requires: ["/proc/pressure/cpu"], cost: free}
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.pressure"], cost: free, equivalent: true}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, cgroup: native, container: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: low
+
+- id: cpu.throttle
+  family: cpu
+  summary: "CFS cgroup throttling (nr_throttled, throttled_usec)"
+  unit: ns
+  backends:
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {cgroup: native, container: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: medium
+  caveats:
+    - "A throttled run is not comparable: the harness must invalidate it rather
+       than average it in."
+
+- id: cpu.flow
+  family: cpu
+  summary: "Exhaustive control flow (Intel PT / CoreSight ETM)"
+  unit: count
+  backends:
+    - {id: "pmu:aux:intel_pt", requires: ["pmu:intel_pt"], cost: high}
+    - {id: "pmu:aux:cs_etm", requires: ["pmu:cs_etm"], cost: high, equivalent: true}
+  modes: [trace]
+  emits: [raw, timeline]
+  targets: {pid: native, tid: native, cpu: native, launch: native}
+  keys: [task]
+  filter_fields: [comm, cpu]
+  determinism: high
+  caveats:
+    - "The kernel provides raw bytes; decoding (libipt, binary images, sideband)
+       is a separate, late deliverable."

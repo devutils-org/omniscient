@@ -1,0 +1,83 @@
+# Family `power` — see CATALOG.md section 7.
+# This family is also a CONFOUNDER for every other one: thermal throttling and
+# AVX-512 frequency licensing silently corrupt CPU and GPU measurements. The
+# harness collects it at all times and invalidates any throttled run.
+
+- id: power.energy
+  family: power
+  summary: "Energy consumed per RAPL domain (pkg / cores / dram / gpu)"
+  unit: joules
+  backends:
+    - {id: "pmu", requires: ["pmu:power/energy-pkg/"], cost: free}
+    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl"], cost: free,
+       degraded: "counter polling: misses short spikes and wraparound"}
+  modes: [count, poll]
+  emits: [summary, rate, timeline]
+  targets: {system: native}
+  keys: []
+  filter_fields: [domain]
+  determinism: medium
+  caveats:
+    - "RAPL is per package: --pid is invalid. Per-process attribution is a derived
+       estimate (share of cycles) and must be labelled as such."
+
+- id: power.freq
+  family: power
+  summary: "Effective CPU frequency"
+  unit: hz
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free}
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpufreq"], cost: free,
+       degraded: "requested frequency, not the effective one"}
+    - {id: "pmu", requires: ["msr:aperf", "msr:mperf"], cost: free, equivalent: true}
+  modes: [poll, trace]
+  emits: [timeline, hist, raw, summary]
+  targets: {system: native, cpu: native}
+  keys: []
+  filter_fields: [cpu]
+  determinism: low
+
+- id: power.cstate
+  family: power
+  summary: "Idle state residency"
+  unit: ns
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low}
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpuidle"], cost: free,
+       degraded: "residency totals only: no transition timeline"}
+  modes: [trace, poll]
+  emits: [timeline, hist, summary, raw]
+  targets: {system: native, cpu: native}
+  keys: []
+  filter_fields: [cpu, state]
+  determinism: low
+
+- id: power.temp
+  family: power
+  summary: "Package and component temperatures"
+  unit: celsius
+  backends:
+    - {id: "fs:sys", requires: ["hwmon"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: [sensor]
+  determinism: low
+
+- id: power.throttle
+  family: power
+  summary: "Thermal and power-limit throttling (PL1 / PL2)"
+  unit: count
+  backends:
+    - {id: "bpf:tp", requires: ["tracepoint:thermal:thermal_temperature", "bpf"], cost: free}
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/thermal_throttle"], cost: free, equivalent: true}
+  modes: [poll, trace]
+  emits: [timeline, rate, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: [cpu]
+  determinism: medium
+  caveats:
+    - "A throttled run must be invalidated, not averaged in. This is a guardrail
+       collected unconditionally, not an opt-in metric."
