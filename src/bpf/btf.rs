@@ -272,7 +272,8 @@ mod tests {
             let name_off = self.string(name);
             self.types.extend_from_slice(&name_off.to_ne_bytes());
             self.types
-                .extend_from_slice(&((1u32 << 24) | 0).to_ne_bytes());
+                // Kind 1, an integer, with no members of its own.
+                .extend_from_slice(&(1u32 << 24).to_ne_bytes());
             self.types.extend_from_slice(&4u32.to_ne_bytes());
             self.types.extend_from_slice(&0u32.to_ne_bytes());
             self
