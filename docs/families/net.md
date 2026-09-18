@@ -68,15 +68,38 @@ overflow. Both are reachable -- a veth pair with `tc netem loss`, and a listener
 that never accepts -- and both are worth writing before this family is called
 done.
 
+## Status
+
+Implemented, with ground truth:
+
+| Source | Backend | Ground truth |
+|---|---|---|
+| `net.bytes` | `fs:proc` | 16 MiB pushed through loopback, asserted against the counters |
+| `net.packets` | `fs:proc` | same file, same discipline |
+| `net.tcp.rtt` | `netlink` | a loopback connection found in the dump, keyed by its cookie, round trip under 0.1 s |
+| `net.iface` | `fs:proc` | loopback reports zero errors, drops, collisions and carrier losses |
+| `net.backlog` | `fs:proc` | a one-deep accept queue given 64 connections, asserted to move the counters |
+
+Blocked, and on what:
+
+| Source | Blocked on |
+|---|---|
+| `net.capture` | `CAP_NET_RAW`. `AF_PACKET` is refused at uid 1000, so a collector here could not be given a ground truth, which is the standard this family is held to. The probe reports it as a privilege to grant, not a kernel to change. |
+| `net.hwts` | Owning the socket. `SO_TIMESTAMPING` is set per socket, so reaching an arbitrary process's sockets means the preload shim. It also needs a NIC with a PHC; loopback has none. |
+| `net.xdp` | Privileges, and an XDP program to attach. |
+| `tcp.connect`, `tcp.lifetime`, `tcp.retransmit`, `drops`, `socket`, `qdisc`, `softirq` | The eBPF layer. All seven carry `sock:cookie`, which `net.tcp.rtt` already keys on, so they join to it without a translation. |
+
 ## Needs from the shared layer
 
 Nothing blocking yet. Ahead:
 
 - `topk` emit, for `net.bytes --emit topk` across interfaces (G5).
-- A netlink layer for `sock_diag`, `rtnetlink` and `ethtool`. `net.tcp.rtt`,
-  `net.iface` and the netlink backend of `net.bytes` all need it, and so do
-  parts of `io`. It is family-local for now; if a second family needs it, it
-  should move to `src/netlink.rs`.
+- A netlink layer for `sock_diag`, `rtnetlink` and `ethtool`. It is family-local
+  in `collect/net/netlink.rs` for now; if a second family needs it -- `io` will
+  -- it should move up to `src/netlink.rs`.
+- The ethtool generic-netlink family, resolved by name through
+  `CTRL_CMD_GETFAMILY`, for the driver-specific counters `net.iface` currently
+  cannot reach.
 
 ### The socket cookie was already the right key
 

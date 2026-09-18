@@ -41,7 +41,7 @@ impl Prepared for Prepare {
     ) -> Result<Box<dyn Collector>, String> {
         let pid = target.first_pid().ok_or_else(|| {
             format!(
-                "sampling page faults machine-wide needs per-cpu events and the privileges                  for them; a {} target names no process to sample",
+                "sampling page faults machine-wide needs per-cpu events and the privileges for them; a {} target names no process to sample",
                 target.kind()
             )
         })?;

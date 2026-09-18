@@ -291,6 +291,12 @@ impl Capabilities {
             return probe_netlink(requirement, protocol);
         }
 
+        // Packet capture is a privilege question, not a kernel-build question,
+        // and the two call for different answers from whoever reads the report.
+        if requirement.starts_with("af_packet") {
+            return probe_af_packet(requirement);
+        }
+
         if requirement == "preload:shim" {
             return match crate::collect::find_shim() {
                 Ok(_) => Probe::Available,
@@ -490,6 +496,32 @@ fn probe_netlink(requirement: &str, protocol: i32) -> Probe {
     }
 }
 
+/// Whether this process may open a packet socket.
+///
+/// Opening one is the only way to know: the capability can come from the
+/// process, from a file capability on the binary, or from a user namespace, and
+/// none of those are visible by reading a file.
+fn probe_af_packet(requirement: &str) -> Probe {
+    // SAFETY: creating a socket; the arguments are constants.
+    let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
+    if fd >= 0 {
+        // SAFETY: closing a descriptor just created here.
+        unsafe { libc::close(fd) };
+        return Probe::Available;
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EPERM) | Some(libc::EACCES) => Probe::Missing(format!(
+            "`{requirement}` needs CAP_NET_RAW, which uid {} does not have; this is a privilege to grant, not a kernel to change",
+            current_uid()
+        )),
+        Some(libc::EAFNOSUPPORT) => {
+            Probe::Missing("this kernel was built without AF_PACKET".into())
+        }
+        _ => Probe::Missing(format!("cannot open a packet socket: {error}")),
+    }
+}
+
 fn current_uid() -> u32 {
     // SAFETY: `getuid` reads process state and cannot fail.
     unsafe { libc::getuid() }
@@ -609,6 +641,22 @@ mod tests {
             assert!(
                 probe.to_string().contains("paranoid") || probe.to_string().contains("cpu"),
                 "{probe}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_capability_is_not_reported_as_a_missing_kernel_feature() {
+        let capabilities = Capabilities::detect();
+        let probe = capabilities.probe("af_packet:tpacket_v3", None);
+        assert!(!probe.is_unknown(), "{probe}");
+        if probe.is_missing() {
+            let message = probe.to_string();
+            // Whichever it is, the reader must be told where to go: a
+            // capability to grant, or a kernel that cannot do it at all.
+            assert!(
+                message.contains("CAP_NET_RAW") || message.contains("without AF_PACKET"),
+                "{message}"
             );
         }
     }

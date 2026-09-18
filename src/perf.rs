@@ -412,11 +412,11 @@ mod tests {
         assert!(samples > 0, "no page-fault sample arrived at all");
         assert!(
             inside >= PAGES / 16,
-            "only {inside} of {samples} samples landed in the {PAGES} pages that were touched,              which is below even one fault per sixteen-page folio"
+            "only {inside} of {samples} samples landed in the {PAGES} pages that were touched, which is below even one fault per sixteen-page folio"
         );
         assert!(
             inside <= PAGES,
-            "{inside} samples landed in a block of {PAGES} pages, so an address is being              reported that was never touched"
+            "{inside} samples landed in a block of {PAGES} pages, so an address is being reported that was never touched"
         );
     }
 

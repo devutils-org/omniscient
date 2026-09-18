@@ -227,6 +227,7 @@ fn the_shipped_examples_validate() {
         "examples/web-latency.yml",
         "examples/saturation.toml",
         "examples/rss-run.yml",
+        "examples/net-health.yml",
     ] {
         let output = run(&["validate", "-f", example]);
         assert!(output.status.success(), "{example}: {}", stderr(&output));
