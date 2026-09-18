@@ -153,12 +153,19 @@
   unit: count
   backends:
     - {id: "fs:proc", requires: ["/proc/net/netstat"], cost: free}
-  modes: [poll, snapshot]
+  modes: [count, poll, snapshot]
   emits: [timeline, rate, raw, summary]
   targets: {system: native}
   keys: []
   filter_fields: []
   determinism: medium
+  caveats:
+    - "Overflows and drops are reported apart because they mean different
+       things: an overflow is an application too slow to accept, a drop without
+       one is usually the SYN queue or a cookie, and the fix differs."
+    - "These are counters, so a run reports the increment between two reads and
+       its first read is a baseline that produces nothing."
+
 
 - id: net.qdisc
   family: net
@@ -240,9 +247,18 @@
   backends:
     - {id: "netlink", requires: ["ethtool"], cost: free}
     - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, degraded: "generic counters only, no driver-specific ones"}
-  modes: [poll, snapshot]
-  emits: [timeline, raw, summary]
+  modes: [count, poll, snapshot]
+  emits: [timeline, rate, raw, summary]
   targets: {iface: native, system: native}
-  keys: []
+  keys: [iface]
   filter_fields: [iface]
   determinism: medium
+  caveats:
+    - "Errors and drops are counted apart: a bad frame and a full queue are
+       different failures, and summing them would hide which one happened."
+    - "The procfs backend carries the counters every driver keeps. The long
+       driver-specific list `ethtool -S` prints needs the ethtool netlink
+       family, which is why that backend is first in the chain."
+    - "These are counters, so a run reports the increment between two reads and
+       its first read is a baseline that produces nothing."
+

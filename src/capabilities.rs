@@ -451,8 +451,13 @@ fn netlink_protocol(requirement: &str) -> Option<i32> {
     match requirement {
         // NETLINK_SOCK_DIAG
         "sock_diag" => Some(4),
-        // NETLINK_ROUTE, which also answers ethtool's newer interface.
-        "rtnetlink" | "netlink" | "ethtool" => Some(0),
+        // NETLINK_ROUTE.
+        "rtnetlink" | "netlink" => Some(0),
+        // `ethtool` is deliberately absent: it is a generic-netlink family,
+        // resolved by name through CTRL_CMD_GETFAMILY, not a protocol number.
+        // Answering it as NETLINK_ROUTE would report a different question's
+        // answer, and reporting it unverified is the honest state until the
+        // family lookup exists.
         _ => None,
     }
 }

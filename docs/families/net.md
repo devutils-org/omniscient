@@ -41,6 +41,33 @@ collector behaves the same either way; the mode says what the number means.
 Every byte over `lo` is both received and transmitted, so the ground-truth test
 asserts a floor of the transfer size and a ceiling that allows the doubling.
 
+### A machine-wide source has one series, and it is the machine
+
+`net.backlog` carries no key: the accept queue is the machine's, not an
+interface's or a process's. The emit layer labelled such a series `<unkeyed>`,
+which reads like something went missing. It now reads `system`, which is what it
+is.
+
+### Errors and drops are different failures
+
+A bad frame and a full queue are counted apart everywhere in this family, and
+summing them would hide which one happened. Same for `ListenOverflows` against
+`ListenDrops`: an overflow is an application too slow to accept, a drop without
+one is usually the SYN queue, and the two call for different fixes.
+
+### What is not measured yet
+
+`net.iface` reports the counters every driver keeps. The driver-specific list
+`ethtool -S` prints needs the ethtool generic-netlink family, resolved by name
+through `CTRL_CMD_GETFAMILY`. Until that exists, the `ethtool` requirement is
+reported unverified rather than being answered as `NETLINK_ROUTE`, which would
+be a different question's answer.
+
+There is no ground-truth test that forces a link error or an accept-queue
+overflow. Both are reachable -- a veth pair with `tc netem loss`, and a listener
+that never accepts -- and both are worth writing before this family is called
+done.
+
 ## Needs from the shared layer
 
 Nothing blocking yet. Ahead:

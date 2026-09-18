@@ -183,7 +183,7 @@ fn grouped(events: &[Event]) -> BTreeMap<String, Vec<&Event>> {
             .keys
             .first()
             .map(KeyValue::to_string)
-            .unwrap_or_else(|| "<unkeyed>".to_owned());
+            .unwrap_or_else(|| "system".to_owned());
         groups.entry(key).or_default().push(event);
     }
     groups
