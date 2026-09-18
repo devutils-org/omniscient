@@ -81,10 +81,16 @@ pub struct JitMapCollector {
 
 impl JitMapCollector {
     pub fn new(pid: i32) -> Self {
+        Self::at(PathBuf::from(format!("/tmp/perf-{pid}.map")), pid)
+    }
+
+    /// The same collector reading a map at a path of its own, which is what
+    /// lets the tests write one without having to own a pid.
+    fn at(path: PathBuf, pid: i32) -> Self {
         Self {
             id: CollectorId::new("runtime.jit/fs:jit-map"),
             pid,
-            path: PathBuf::from(format!("/tmp/perf-{pid}.map")),
+            path,
             consumed: 0,
             partial: String::new(),
             last_read_ns: 0,
@@ -407,6 +413,162 @@ mod tests {
             "an entry between two reads is bounded by their gap, got {}",
             later[0].ts_err_ns
         );
+    }
+
+    /// A collector reading a map this test writes, at a path of its own.
+    fn writing(name: &str) -> (PathBuf, JitMapCollector) {
+        let path = std::env::temp_dir().join(format!("omn-jit-{}-{name}.map", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let collector = JitMapCollector::at(path.clone(), 4242);
+        (path, collector)
+    }
+
+    fn append(path: &PathBuf, line: &str) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the test owns this file");
+        writeln!(file, "{line}").expect("writing a map line");
+    }
+
+    /// Only what was appended since the last read becomes events. A collector
+    /// that re-read the file from the start would report every compilation
+    /// again on every poll, and a rate would climb with the length of the run.
+    #[test]
+    fn each_read_reports_only_what_was_appended_since_the_last_one() {
+        let (path, mut collector) = writing("appended");
+
+        append(&path, "1000 10 JS:~first script.js:1:1");
+        assert_eq!(collector.sample(0).unwrap().len(), 1);
+        assert!(
+            collector.sample(1).unwrap().is_empty(),
+            "nothing was appended between the two reads"
+        );
+
+        append(&path, "2000 20 JS:~second script.js:2:1");
+        let events = collector.sample(2).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].attr("method").unwrap().to_string(),
+            "JS:~second script.js:2:1"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Code compiled between the last poll and the exit is in the file, and the
+    /// program being gone does not take it away.
+    #[test]
+    fn what_was_written_after_the_last_poll_is_read_at_the_stop() {
+        let (path, mut collector) = writing("trailing");
+
+        append(&path, "1000 10 JS:~early script.js:1:1");
+        assert_eq!(collector.sample(0).unwrap().len(), 1);
+        append(&path, "2000 20 JS:~late script.js:2:1");
+
+        let trailing = collector.stop();
+        assert_eq!(trailing.len(), 1);
+        assert_eq!(
+            trailing[0].attr("method").unwrap().to_string(),
+            "JS:~late script.js:2:1"
+        );
+        assert!(
+            collector.losses().is_clean(),
+            "a map that was read holds no loss: {:?}",
+            collector.losses()
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The map is append-only by convention. Shorter than what was already read
+    /// means it was replaced -- a recycled pid, a runtime that restarted -- and
+    /// whatever stood between the two reads is gone. Starting over silently
+    /// would report the new file's contents as though nothing had been missed.
+    #[test]
+    fn a_map_that_was_replaced_is_counted_as_a_loss_and_read_from_the_start() {
+        let (path, mut collector) = writing("replaced");
+
+        for index in 0..5 {
+            append(&path, &format!("100{index} 10 JS:~gone{index} a.js:1:1"));
+        }
+        assert_eq!(collector.sample(0).unwrap().len(), 5);
+
+        // A shorter file at the same path.
+        std::fs::write(&path, "9000 30 JS:~fresh b.js:1:1\n").expect("replacing the map");
+        let events = collector.sample(5).unwrap();
+
+        assert_eq!(events.len(), 1, "the replacement is read from its start");
+        assert_eq!(collector.losses().dropped, 1);
+        assert!(
+            collector
+                .losses()
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("replaced")),
+            "the reason must say the file was replaced: {:?}",
+            collector.losses().reasons
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A map that existed and then vanished is a loss straight away: the
+    /// runtime is still compiling and nothing is reading it any more. That is
+    /// the opposite of a map that has not appeared yet, which has lost nothing.
+    #[test]
+    fn a_map_that_vanishes_mid_run_is_a_loss_and_one_that_never_appeared_is_not() {
+        let (path, mut collector) = writing("vanished");
+
+        // Before it exists: nothing read, nothing lost.
+        assert!(collector.sample(0).unwrap().is_empty());
+        assert!(collector.losses().is_clean());
+
+        append(&path, "1000 10 JS:~here a.js:1:1");
+        assert_eq!(collector.sample(1).unwrap().len(), 1);
+
+        std::fs::remove_file(&path).expect("the test owns this file");
+        assert!(collector.sample(2).unwrap().is_empty());
+        assert_eq!(collector.losses().failed_reads, 1);
+        assert!(
+            collector
+                .losses()
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("disappeared")),
+            "{:?}",
+            collector.losses().reasons
+        );
+    }
+
+    /// A run that never read a map reports every poll that found nothing, so
+    /// that "nothing was watching" cannot be read as "nothing was compiled".
+    #[test]
+    fn polls_that_found_no_map_at_all_are_reported_at_the_end() {
+        let (path, mut collector) = writing("never");
+
+        for seq in 0..4 {
+            assert!(collector.sample(seq).unwrap().is_empty());
+        }
+        // Nothing has been reported yet: a map that has not appeared has lost
+        // nothing, and the run may still read it.
+        assert!(collector.losses().is_clean());
+
+        assert!(collector.stop().is_empty());
+        assert_eq!(
+            collector.losses().failed_reads,
+            5,
+            "four polls and the final read"
+        );
+        assert!(collector
+            .losses()
+            .reasons
+            .keys()
+            .any(|reason| reason.contains("does not exist")));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

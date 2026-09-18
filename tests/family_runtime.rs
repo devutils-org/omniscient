@@ -255,3 +255,74 @@ fn a_program_that_publishes_no_map_says_so_rather_than_reporting_no_compilation(
         "the reasons must name the absent map: {reasons:?}"
     );
 }
+
+/// The other target this source accepts: a program that is already running.
+///
+/// A JIT's map outlives the poll that reads it, so attaching to a live process
+/// must report what is already in the file — marked as what it is, code that
+/// was compiled before anything was watching, with an uncertainty that says the
+/// file does not record when.
+#[test]
+fn attaching_to_a_running_process_reports_the_map_it_already_published() {
+    const ENTRIES: usize = 4;
+
+    let mut child = Command::new("sh")
+        .args(["-c", "sleep 5"])
+        .spawn()
+        .expect("sh should run");
+    let pid = child.id();
+    let map = format!("/tmp/perf-{pid}.map");
+
+    let lines: String = (0..ENTRIES)
+        .map(|index| {
+            format!(
+                "{:x} 40 JS:~already{index} before.js:{index}:1\n",
+                0x40000 + index
+            )
+        })
+        .collect();
+    std::fs::write(&map, lines).expect("the test owns this file");
+
+    let output = run(&[
+        "runtime.jit",
+        "--pid",
+        &pid.to_string(),
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--duration",
+        "200ms",
+        "--format",
+        "json",
+    ]);
+
+    let _ = std::fs::remove_file(&map);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run = document(&output);
+    let events = events(&run);
+    assert_eq!(
+        events.len(),
+        ENTRIES,
+        "the map held {ENTRIES} entries: {events:?}"
+    );
+    for event in &events {
+        assert_eq!(
+            attr(event, "first_read"),
+            1,
+            "everything in the file predates this run"
+        );
+        assert_eq!(
+            event["ts_err_ns"],
+            u32::MAX,
+            "how long before the run it was compiled is not in the file"
+        );
+    }
+
+    // Nothing was missed: the map was there from the first poll to the last.
+    assert_eq!(run["results"][0]["losses"]["failed_reads"], 0);
+    assert_eq!(run["results"][0]["losses"]["dropped"], 0);
+}
