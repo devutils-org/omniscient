@@ -18,6 +18,7 @@
 //! gone. So a `Collection` always carries what was lost and why, and the count
 //! travels all the way to the user-visible output.
 
+pub mod heap;
 mod launch;
 mod page_faults;
 mod proc_rss;
@@ -140,6 +141,29 @@ pub trait Collector {
     }
 }
 
+/// A collector before the thing it observes exists.
+///
+/// Two phases are needed because some collectors have to act on the target
+/// before it runs: a preloaded shim is given at exec and cannot be handed to a
+/// process that is already going. Splitting construction from attachment lets
+/// the launch carry whatever the collector needs, without the runner knowing
+/// what any particular collector wants.
+pub trait Prepared {
+    /// Environment the launched program must be given.
+    fn launch_environment(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Set when this collector can only observe a program the tool launches,
+    /// with the reason, so the refusal explains itself.
+    fn requires_launch(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Binds to the target now that it exists.
+    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String>;
+}
+
 /// What a single sample can go wrong with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SampleError {
@@ -156,29 +180,32 @@ pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
     // Asked first, because "no collector exists for this backend" is a
     // different answer from "this target is not wired up yet", and reporting
     // the second when the first is true sends the reader to the wrong place.
-    if !has_collector(request.source.as_str(), &resolved.backend.id) {
-        return Err(CollectError::NoCollector {
-            source_id: request.source.to_string(),
-            backend: resolved.backend.id.clone(),
-        });
-    }
+    let prepared = prepare(resolved)?;
 
     // A launched program is both the target and the clock: the run ends when it
     // does, which is what makes `omn <source> -- ./prog` a complete measurement
-    // rather than a sample of one. It is started stopped so that collectors are
+    // rather than a sample of one. It is held at a gate so that collectors are
     // attached before its first instruction; otherwise the interesting part of
     // a short program is over before anything is watching.
     let mut child = match &request.target {
-        Target::Launch(argv) => {
-            Some(
-                launch::gated(argv, &[]).map_err(|error| CollectError::Launch {
-                    program: argv.first().cloned().unwrap_or_default(),
-                    error: error.to_string(),
-                })?,
-            )
-        }
+        Target::Launch(argv) => Some(launch::gated(argv, &prepared.launch_environment()).map_err(
+            |error| CollectError::Launch {
+                program: argv.first().cloned().unwrap_or_default(),
+                error: error.to_string(),
+            },
+        )?),
         _ => None,
     };
+
+    if child.is_none() {
+        if let Some(reason) = prepared.requires_launch() {
+            return Err(CollectError::UnsupportedTarget {
+                source_id: request.source.to_string(),
+                target: format!("{} ({reason})", request.target.kind()),
+            });
+        }
+    }
+
     let pid = match (&request.target, &child) {
         (_, Some(child)) => child.pid(),
         (Target::Pid(pids) | Target::Tid(pids), _) => pids[0],
@@ -190,7 +217,15 @@ pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
         }
     };
 
-    let mut collector = build(resolved, pid)?;
+    let mut collector = prepared.attach(pid).map_err(|reason| {
+        if let Some(child) = child.as_mut() {
+            child.terminate();
+        }
+        CollectError::Start {
+            source_id: request.source.to_string(),
+            reason,
+        }
+    })?;
     collector.start().map_err(|reason| {
         if let Some(child) = child.as_mut() {
             child.terminate();
@@ -301,22 +336,16 @@ pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
     })
 }
 
+pub use heap::find_shim;
+
 /// The sources a collector exists for, for error messages that say what *is*
 /// possible rather than only what is not.
 pub fn implemented() -> Vec<&'static str> {
     vec![
         "mem.rss (fs:proc:smaps_rollup, fs:proc:statm)",
         "mem.faults (pmu:sw)",
+        "mem.heap.alloc (preload)",
     ]
-}
-
-fn has_collector(source_id: &str, backend: &str) -> bool {
-    matches!(
-        (source_id, backend),
-        ("mem.rss", "fs:proc:smaps_rollup")
-            | ("mem.rss", "fs:proc:statm")
-            | ("mem.faults", "pmu:sw")
-    )
 }
 
 /// Finds the collector for a resolved backend.
@@ -324,21 +353,21 @@ fn has_collector(source_id: &str, backend: &str) -> bool {
 /// The lookup is on the backend id, not on the source alone: two backends of the
 /// same source read different things and produce differently trustworthy
 /// numbers.
-fn build(resolved: &ResolvedRequest, pid: i32) -> Result<Box<dyn Collector>, CollectError> {
+fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError> {
     let source_id = resolved.request.source.as_str();
+    let start_error = |reason: String| CollectError::Start {
+        source_id: source_id.to_owned(),
+        reason,
+    };
     match (source_id, resolved.backend.id.as_str()) {
-        ("mem.rss", "fs:proc:smaps_rollup") => Ok(Box::new(proc_rss::RssCollector::new(
-            pid,
+        ("mem.rss", "fs:proc:smaps_rollup") => Ok(Box::new(proc_rss::Prepare(
             proc_rss::RssSource::SmapsRollup,
         ))),
-        ("mem.rss", "fs:proc:statm") => Ok(Box::new(proc_rss::RssCollector::new(
-            pid,
-            proc_rss::RssSource::Statm,
-        ))),
-        ("mem.faults", "pmu:sw") => Ok(Box::new(page_faults::PageFaultCollector::new(
-            pid,
-            resolved.request.mode,
-        ))),
+        ("mem.rss", "fs:proc:statm") => Ok(Box::new(proc_rss::Prepare(proc_rss::RssSource::Statm))),
+        ("mem.faults", "pmu:sw") => Ok(Box::new(page_faults::Prepare(resolved.request.mode))),
+        ("mem.heap.alloc", "preload") => {
+            Ok(Box::new(heap::HeapPrepared::new().map_err(start_error)?))
+        }
         _ => Err(CollectError::NoCollector {
             source_id: source_id.to_owned(),
             backend: resolved.backend.id.clone(),
@@ -349,6 +378,54 @@ fn build(resolved: &ResolvedRequest, pid: i32) -> Result<Box<dyn Collector>, Col
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::Capabilities;
+    use crate::catalog::Catalog;
+
+    /// `implemented` is written by hand for the error message; this keeps it
+    /// from drifting away from what `prepare` actually knows how to build.
+    #[test]
+    fn every_source_listed_as_implemented_can_be_prepared() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        for listed in implemented() {
+            let (source, backends) = listed.split_once(" (").expect("`source (backends)`");
+            let entry = catalog
+                .get(&source.parse().unwrap())
+                .unwrap_or_else(|| panic!("{source} is not in the catalog"));
+            for backend in backends.trim_end_matches(')').split(", ") {
+                assert!(
+                    entry.backend(backend).is_some(),
+                    "{source} has no backend `{backend}`"
+                );
+                let mut request = crate::request::Request {
+                    source: source.parse().unwrap(),
+                    target: crate::request::Target::Launch(vec!["/bin/true".to_owned()]),
+                    mode: crate::request::Mode::Trace,
+                    emit: vec![crate::request::Emit::Raw],
+                    keys: Vec::new(),
+                    filter: None,
+                    duration: None,
+                    budget: None,
+                    stack: None,
+                    backend: Some(backend.parse().unwrap()),
+                    label: None,
+                };
+                if !entry.modes.contains(&crate::request::ModeKind::Trace) {
+                    request.mode = crate::request::Mode::Poll {
+                        interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+                    };
+                }
+                let resolved = crate::resolve::resolve(&catalog, &capabilities, &request)
+                    .unwrap_or_else(|error| panic!("{source}/{backend}: {error}"));
+                match prepare(&resolved) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        panic!("{source}/{backend} is listed but cannot be prepared: {error}")
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn losses_merge_without_losing_their_reasons() {

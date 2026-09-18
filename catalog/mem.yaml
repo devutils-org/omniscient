@@ -113,7 +113,7 @@
   summary: "Userspace allocations by call site"
   unit: bytes
   backends:
-    - {id: "preload", requires: ["dynamic-linking"], cost: med}
+    - {id: "preload", requires: ["preload:shim"], cost: med}
     - {id: "bpf:usdt", requires: ["usdt:libc"], cost: med, equivalent: true}
     - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc"], cost: high,
        degraded: "~1-2 us per call: heavily dilates allocation-heavy workloads"}
@@ -123,6 +123,11 @@
   keys: [task, mem]
   filter_fields: [bytes, comm]
   determinism: high
+  caveats:
+    - "A preloaded shim reaches a program only at exec, so this needs a program
+       the tool launches, not one already running."
+    - "A statically linked program, or one with its own allocator, ignores the
+       shim: the run reports no allocation rather than reporting none happened."
 
 - id: mem.heap.live
   family: mem

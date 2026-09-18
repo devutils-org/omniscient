@@ -284,6 +284,13 @@ impl Capabilities {
             return probe_pmu(event);
         }
 
+        if requirement == "preload:shim" {
+            return match crate::collect::find_shim() {
+                Ok(_) => Probe::Available,
+                Err(reason) => Probe::Missing(reason),
+            };
+        }
+
         match requirement {
             "tracefs" => match self.environment.tracefs {
                 Access::Readable => Probe::Available,

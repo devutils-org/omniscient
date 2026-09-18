@@ -14,7 +14,7 @@ use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
 
-use super::{Collector, Losses, SampleError};
+use super::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Record, SampledEvent, Scope};
 use crate::request::Mode;
@@ -30,6 +30,15 @@ const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 /// Data pages to ask for. `perf_event_mlock_kb` usually caps an unprivileged
 /// process well below this, and the ring shrinks to what the machine allows.
 const RING_PAGES: usize = 512;
+
+/// Holds the mode until the target exists.
+pub struct Prepare(pub Mode);
+
+impl Prepared for Prepare {
+    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+        Ok(Box::new(PageFaultCollector::new(pid, self.0)))
+    }
+}
 
 pub struct PageFaultCollector {
     id: CollectorId,

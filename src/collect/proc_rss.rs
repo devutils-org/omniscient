@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use super::{Collector, SampleError};
+use super::{Collector, Prepared, SampleError};
 use crate::clock::monotonic_ns;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
@@ -33,6 +33,15 @@ impl RssSource {
             RssSource::SmapsRollup => "smaps_rollup",
             RssSource::Statm => "statm",
         }
+    }
+}
+
+/// Holds the choice of file until the target exists.
+pub struct Prepare(pub RssSource);
+
+impl Prepared for Prepare {
+    fn attach(self: Box<Self>, pid: i32) -> Result<Box<dyn Collector>, String> {
+        Ok(Box::new(RssCollector::new(pid, self.0)))
     }
 }
 
