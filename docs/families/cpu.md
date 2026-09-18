@@ -6,18 +6,21 @@ still needs from the shared layer.
 
 ## What runs today
 
-All of these are `count` mode: the counter is opened over the target, and read
-once, when the window closes.
+Ten of the fourteen sources. The first seven are counters, read once when the
+window closes; the last three are files, read at every tick.
 
-| Source | Backend | The number |
-|---|---|---|
-| `cpu.cycles` | `pmu` | unhalted cycles |
-| `cpu.instructions` | `pmu` | retired instructions |
-| `cpu.ipc` | `pmu` | instructions over cycles, from one counter group |
-| `cpu.branch_misses` | `pmu` | mispredicted branches |
-| `cpu.cache_misses` | `pmu` | last-level cache misses |
-| `cpu.context_switches` | `pmu:sw` | switches away from the task |
-| `cpu.migrations` | `pmu:sw` | moves between cpus |
+| Source | Backend | Mode | The number |
+|---|---|---|---|
+| `cpu.cycles` | `pmu` | count | unhalted cycles |
+| `cpu.instructions` | `pmu` | count | retired instructions |
+| `cpu.ipc` | `pmu` | count | instructions over cycles, from one counter group |
+| `cpu.branch_misses` | `pmu` | count | mispredicted branches |
+| `cpu.cache_misses` | `pmu` | count | last-level cache misses |
+| `cpu.context_switches` | `pmu:sw` | count | switches away from the task |
+| `cpu.migrations` | `pmu:sw` | count | moves between cpus |
+| `cpu.util` | `fs:proc` | poll, snapshot | the machine's time by state, from `/proc/stat` |
+| `cpu.pressure` | `fs:proc` | poll, snapshot | time spent waiting for a cpu, from PSI |
+| `cpu.throttle` | `fs:cgroup` | poll, snapshot | time a cgroup was stopped by its quota |
 
 ```console
 $ omn cpu.ipc -m count -e summary -- ./prog
@@ -64,6 +67,31 @@ forbids counting kernel mode, the group is reopened without it and the run
 reports `this machine would only open ... for user mode`. It is not a lesser
 version of the same number: it excludes every system call the program makes.
 
+## How the files are read
+
+The three polled sources read counters that only grow, so every number they
+report is a difference. Three decisions follow from that.
+
+**The baseline is taken when the window opens**, in `start`, not on the first
+tick. Otherwise the first point of a timeline would describe the machine's
+uptime and the rest would describe a second, plotted on the same axis.
+
+**Every event says which window it covers.** A single read of `/proc/stat` can
+only speak about the time since boot, and a single read of PSI can only offer
+the kernel's own ten-second average. Both are honest answers; presenting either
+as "the last second" would not be. The attribute is `window`, and it is on every
+event.
+
+**`busy` excludes `iowait`.** A cpu waiting for a disk is not doing work, and
+counting it as busy is how a machine stalled on IO comes to look saturated. The
+state is still reported on its own, beside the others, which all sum to one.
+
+`cpu.throttle` reports nothing at all when the cgroup has no `cpu.max`: the
+kernel writes `nr_throttled` and `throttled_usec` only once a quota exists, and
+their absence means the cgroup *cannot* be throttled, which is a different
+statement from "was not". The run says so as a degradation rather than
+reporting a zero that reads like a measurement.
+
 ## Ground truth
 
 A counter cannot be checked against another tool — that would only prove the
@@ -96,6 +124,21 @@ started, and the process leader's counters describe a thread that is idle.
 The inheritance claim has its own test: the work is done in a thread started
 after the window opened, and the count has to include it.
 
+The polled sources are checked against conditions this machine is made to
+satisfy, not against their own arithmetic:
+
+- `cpu.util` — half the cpus are made to spin for a known time, and the
+  reported busy share has to reach that fraction of the machine. The
+  independent quantity is the work the test does, measured by a clock.
+- `cpu.pressure` — twice as many spinning threads as there are cpus guarantees
+  a run queue, and the stall counter has to move. It is also the check that the
+  counter is not simply always zero.
+- `cpu.throttle` — the test creates a cgroup, caps it at a tenth of a cpu, puts
+  a spinning process inside it and reads the counters back. Each 100 ms period
+  then holds about 90 ms of stopped time, which is a floor the reading cannot
+  fall below. Where the cpu controller is not delegated to the user, the test
+  says so and stops rather than passing vacuously.
+
 ## Traps
 
 - **Counting is not cheap sampling.** `-m sample` on these sources is refused
@@ -126,30 +169,36 @@ after the window opened, and the count has to include it.
   separate deliverable. Capture without decoding is still worth having, but it
   is not worth half a decoder.
 - `cpu.oncpu_time` is `bpf:tp` first, and the eBPF layer is Wave 2.
-- `cpu.util`, `cpu.pressure` and `cpu.throttle` are procfs and cgroup polls
-  that read whole-machine or whole-cgroup files. They are blocked on the runner,
-  see below.
+- `cpu.util`'s cgroup backend, and `cpu.pressure`'s, read the same quantities
+  inside one cgroup. They are a small addition once a cgroup target resolves to
+  a directory, which `cpu.throttle` already does.
 - `cpu.cycles`'s `pmu:sw` fallback counts CPU time, not cycles. It is a
   different quantity in a different unit, and it is not wired up rather than
   returning nanoseconds under a counter's name.
 
 ## Needs from the shared layer
 
-1. **Per-cpu counting.** `Prepared::attach` now takes the target whole, so a
+1. **A `cpu` correlation key.** `/proc/stat` has a line per cpu and the catalog
+   accepts a `--cpu` target for `cpu.util`, but the events would all land in one
+   series: the key vocabulary has `task`, `proc`, `file`, `sock`, `blk`, `mem`,
+   `gpu` and `cgroup`, and nothing for a cpu. A mean across cpus describes no
+   cpu, so the target is refused with that reason instead. The same gap makes a
+   machine-wide series print as `<unkeyed>`.
+2. **Per-cpu counting.** `Prepared::attach` now takes the target whole, so a
    system or cgroup target reaches a collector. A counter still cannot serve
    one: counting every cpu means one event per cpu -- `Scope::Cpu` in
    `src/perf.rs`, which nothing uses yet -- and the privileges for it. The
    refusal names that today rather than counting one process and calling it the
    machine.
-2. **An exit code for "valid, but this mechanism is not built".** A mode a
+3. **An exit code for "valid, but this mechanism is not built".** A mode a
    collector cannot serve comes back as `CollectError::Start`, which exits 1
    like a genuine failure. `NoCollector` already exits 3, and the sample-mode
    refusal belongs in the same class.
-3. **A rate over the counter's own window.** `emit::rate` divides by the run's
+4. **A rate over the counter's own window.** `emit::rate` divides by the run's
    wall clock. A counted source knows exactly how long it was enabled, and that
    number is already on the event as `enabled_ns`.
-4. **Stack capture** (G6) and the `hist` and `topk` emits (G5), for
+5. **Stack capture** (G6) and the `hist` and `topk` emits (G5), for
    `cpu.profile` and for the `sample` mode of every counter here.
-5. **A probe class for raw PMU event encodings**, for `cpu.topdown` and for the
+6. **A probe class for raw PMU event encodings**, for `cpu.topdown` and for the
    uncore events `mem` needs. Until then those requirements are unverified,
    which is the correct answer but not a useful one.

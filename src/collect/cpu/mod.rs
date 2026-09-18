@@ -6,6 +6,9 @@
 //! the table there is what a new counting source is added to.
 
 mod counters;
+mod pressure;
+mod throttle;
+mod util;
 
 use super::Factory;
 
@@ -39,5 +42,16 @@ pub fn factories() -> Vec<Factory> {
                 )?))
             })
         })
+        .chain([
+            Factory::new("cpu.util", "fs:proc", |resolved| {
+                Ok(Box::new(util::Prepare(resolved.request.mode)))
+            }),
+            Factory::new("cpu.pressure", "fs:proc", |resolved| {
+                Ok(Box::new(pressure::Prepare(resolved.request.mode)))
+            }),
+            Factory::new("cpu.throttle", "fs:cgroup", |resolved| {
+                Ok(Box::new(throttle::Prepare(resolved.request.mode)))
+            }),
+        ])
         .collect()
 }

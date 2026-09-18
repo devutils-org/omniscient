@@ -169,3 +169,60 @@ fn the_resolved_record_names_the_backend_that_counts() {
     assert!(resolved["environment"]["smt"].is_string());
     assert!(resolved["environment"]["cpu_governor"].is_string());
 }
+
+/// The machine-wide sources answer without a pid, and their shares have to be
+/// shares: a utilisation outside zero to one is a parsing bug wearing a
+/// plausible number.
+#[test]
+fn utilisation_polls_the_machine_and_stays_a_share() {
+    let output = run(&[
+        "cpu.util",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "-d",
+        "400ms",
+    ]);
+    if !output.status.success() {
+        eprintln!("skipped: {}", stderr(&output));
+        return;
+    }
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("the json output parses");
+    let summary = &document["results"][0]["outputs"][0]["series"][0];
+    let count = summary["count"].as_u64().expect("a polled series");
+    assert!(count >= 2, "a 400ms run at 100ms produced {count} reads");
+    for bound in ["min", "max"] {
+        let value = summary[bound].as_f64().expect("a share");
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "`{bound}` utilisation is {value}, which is not a share of anything"
+        );
+    }
+}
+
+/// A per-cpu target is valid vocabulary and cannot be served yet. The refusal
+/// has to say what is missing rather than answer with the machine's average,
+/// which is a number that describes no cpu.
+#[test]
+fn a_per_cpu_target_is_refused_with_what_it_would_need() {
+    let output = run(&[
+        "cpu.util",
+        "--cpu",
+        "0",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "200ms",
+    ]);
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let message = stderr(&output);
+    assert!(message.contains("correlation key"), "{message}");
+    assert!(message.contains("--system"), "{message}");
+}
