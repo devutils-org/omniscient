@@ -1083,3 +1083,153 @@ rather than a target's is measuring a process whose procfs ownership depends on
 how the binary was installed. There are no others today; `capabilities.rs`
 substitutes `[pid]` with `self` when a requirement names no target, and that is
 exactly where this surfaced.
+
+---
+
+## 15. What the profile and trace encoders found
+
+Written by stream D, which owns `src/encode.rs` and `src/format.rs`. `pprof` and
+`chrome` were the last two declared formats without an encoder; both have one
+now, and writing them turned up four things about the layers underneath.
+
+### The result model has no wall clock and no sampling period, and pprof wants both
+
+`profile.proto` carries `time_nanos`, the wall-clock instant a profile started,
+and `period`, the interval between samples. This tool has neither to give.
+`CLOCK_MONOTONIC` is the only clock domain it admits, so there is no realtime
+instant to write; and the sampling period lives in the `Request`, which the
+encoder is not handed -- `Results` carries the label, the source, the backend,
+the unit, the window and the losses, and nothing about how the window was
+sampled.
+
+Both fields are therefore left at zero, which pprof reads as unknown, and the
+profile's comment list says why. That is the right answer for `time_nanos`: a
+wall-clock start would be invented. It is a **losable** answer for `period`,
+because a continuous-profiling pipeline uses it to compare two profiles taken at
+different rates, and the number does exist one layer up. Whoever owns
+`src/emit.rs` could close it:
+
+```rust
+pub struct Results {
+    // ...
+    /// The interval between samples, for a sampling mode. Absent for a poll or
+    /// a trace, which have no period.
+    pub period_ns: Option<u64>,
+}
+```
+
+`emit::aggregate` already takes the `ResolvedRequest`, so the value is in scope;
+nothing but the encoders would read it.
+
+### `Output::Stack` carries a count that only one encoder can keep
+
+A `StackCount` has both `events` -- how many events landed on that stack -- and
+`total`, what their value attribute summed to. `folded` writes one number per
+line and `speedscope` one weight per sample, so both drop `events`. For
+`cpu.profile` the two are equal and nothing is lost; for a source whose unit is
+not `count`, `sched.offcpu` above all, "this stack blocked for 300 ms" and "this
+stack blocked four times" are different facts and only the first survives.
+
+`pprof` keeps the second as a numeric sample label, which is what pprof labels
+are for; `go tool pprof -tagshow events` reads it back. Nothing needs to change,
+but the asymmetry is worth knowing before anyone concludes the three stack
+formats are interchangeable.
+
+### Four of the seven units have no pprof name, and two of them have no profile
+
+pprof scales and labels an axis from a fixed set of unit names. `ns`, `bytes`
+and `count` map onto `nanoseconds`, `bytes` and `count`. `ratio`, `hz`, `joules`
+and `celsius` do not, and the encoder writes them under their own names with a
+comment saying no tool will scale them, rather than borrowing the nearest name
+pprof would recognize -- energy reported as `count` renders as a count of
+nothing.
+
+Two of the four are worse than unlabelled, and it is a modelling question rather
+than an encoding one: **a ratio and a temperature do not sum**, and a profile is
+a sum over stacks. No source declaring `stack` has either unit today, so nothing
+is wrong now; a source that did would produce a profile whose every number is a
+sum of things that cannot be added. The `emits`/`unit` pair in a catalog entry is
+where that could be refused.
+
+This is also the second reason for `Unit::Watts`, already asked for further up
+this file: a `power.*` source with a `stack` emit would be exactly the case
+above, and watts is the unit that makes `rate` over joules mean something.
+
+### The encode layer returned text, and one declared format is not text
+
+`encode::run_output` returned a `String`, and a gzipped protobuf cannot be one.
+`encode::run_output_bytes` is now the general entry point -- it returns the
+bytes of any of the nine formats, and the text entry point stays for the eight
+that are text and refuses the ninth by name. `OutputFormat::is_binary` and
+`OutputFormat::extension` are the two questions a caller needs to answer to
+write a file.
+
+**This required four lines in `src/main.rs`, which stream E owns.** They are
+listed under "Needs from another stream" below; they are already applied,
+because without them a format the tool lists as implemented could not come out
+of the command line, and the test that crosses a format's claim with reality
+exists for exactly that kind of gap. If stream E's own work conflicts there, its
+version wins -- the only thing that must survive is that the run's bytes reach
+stdout as bytes.
+
+### Measured
+
+- **The Chrome trace's axis holds across requests.** A trace gives every request
+  its own process track, and each track's zero is that request's own first
+  event, which is only one axis if the requests start together. Two `poll@50ms`
+  requests over one 400 ms window, on this machine: the last point of one track
+  is at 400 463.6 µs and of the other at 400 462.5 µs, so the two axes agree to
+  **1.1 µs over 400 ms**. `otherData.time_origin` states the convention rather
+  than leaving a reader to assume it.
+- **The gzip container is written with stored deflate blocks**, which is a
+  conformant gzip stream produced without a compressor -- `gzip -t` accepts it
+  and `go tool pprof` reads it. It costs five bytes per 64 KiB over the raw
+  protobuf and buys no dependency. A 244-stack profile of python came to 19 186
+  bytes.
+- **The frame-pointer degradation reaches the profile.** `cpu.profile` on a
+  python built without frame pointers reports "139 of 270 samples landed in a
+  function that sets up no frame pointer", and that sentence is in the pprof
+  file's comment list, where anyone who opens the profile in `pprof` or Parca
+  reads it before believing the shape.
+
+## Needs from another stream
+
+Written by stream D, which owns `src/encode.rs` and `src/format.rs`.
+
+### To stream E, for `src/main.rs` -- already applied, see above
+
+```rust
+use std::io::{IsTerminal, Write};
+
+let output = encode::run_output_bytes(session.format, &run)?;
+if session.format.is_binary() && std::io::stdout().is_terminal() {
+    anyhow::bail!( /* redirect it to a file or pass --out <dir> */ );
+}
+std::io::stdout().write_all(&output)?;
+
+fn write_artifacts(/* ... */ encoded: &[u8]) -> anyhow::Result<()> {
+    // results.{format.extension()} rather than results.{format}
+}
+```
+
+`format.extension()` exists for the second half: a Chrome trace is `.json` and a
+speedscope file is `.speedscope.json`, because that is what the tools that read
+them open by, and `results.chrome` opens in nothing.
+
+### To whoever owns `README.md` and `DECISIONS.md`
+
+Both say result formats "report that their encoder is not written". Every
+declared format has one now. `README.md:163` and the "Output formats" row of
+`DECISIONS.md` need the sentence about *why* the mechanism exists -- a format is
+declared before it is written, and the listing says which -- without the claim
+that any format is currently in that state.
+
+### To whoever owns `src/render.rs`
+
+`render::formats()` ends with "`chrome` carries timelines". It carries `raw` as
+well, which is the emit that puts individual events on the trace with what they
+measured and what they can be joined on. One word:
+
+```
+`chrome` carries timelines and raw events
+```
