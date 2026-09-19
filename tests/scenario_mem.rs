@@ -101,6 +101,34 @@ requests:
     emit: [rate]
 ";
 
+/// Both huge-page backends, read one round apart rather than half a second.
+///
+/// `examples/mem-machine-counters.yml` asks a great deal of one session and is
+/// right to; what it cannot do is compare a *level* read by two backends,
+/// because its reads are spread across its window. Every request here is a
+/// `snapshot`, so the run is a single round and the two reads are microseconds
+/// apart -- which is the only way a count of resident huge pages on a machine
+/// that is promoting them is a comparison rather than two instants.
+const BOTH_HUGE_PAGE_BACKENDS_AT_ONCE: &str = "\
+name: both huge page backends at one instant
+format: json
+
+requests:
+  - label: per-size statistics
+    source: mem.thp
+    backend: force:fs:sys
+    target: system
+    mode: snapshot
+    emit: [raw]
+
+  - label: vmstat
+    source: mem.thp
+    backend: force:fs:proc
+    target: system
+    mode: snapshot
+    emit: [raw]
+";
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -877,8 +905,8 @@ fn an_exact_number_of_allocations_is_reported_exactly() {
 /// reading either file faults in pages of the reader's own, so two reads are
 /// two instants of a process that grows while it is read.
 ///
-/// The `statm` series additionally contains a value that is not a measurement.
-/// See "Defects found", D1.
+/// The `statm` series used to contain a value that was not a measurement: a
+/// zero for a process that had already exited. See "Defects found", D1, fixed.
 #[test]
 fn the_two_roads_to_a_footprint_arrive_at_the_same_number() {
     const TOUCHED: f64 = 64.0 * 1024.0 * 1024.0;
@@ -916,22 +944,31 @@ fn the_two_roads_to_a_footprint_arrive_at_the_same_number() {
         );
     }
 
-    // D1: `statm` publishes one more point than the rollup, and it is a zero
-    // for a process that has already exited.
-    let (rollup_points, ..) = summary(result(&run, "rss via the rollup"));
+    // D1, fixed. A zombie keeps its `/proc/<pid>/statm` and that file reads
+    // `0 0 0 0 0 0 0`, which is not an error and used to be parsed and
+    // published as a resident set of zero bytes -- the one answer a footprint
+    // must never invent. The same zombie's `smaps_rollup` answers ESRCH, so
+    // the two backends of one chain ended the run one reading apart and the
+    // self-benchmark reported them 6.25 % apart on a value that was not a
+    // measurement.
+    let (rollup_points, _, _, rollup_last) = summary(result(&run, "rss via the rollup"));
     let (statm_points, statm_low, _, statm_last) = summary(result(&run, "rss via statm"));
-    assert_eq!(
-        (statm_points, statm_low, statm_last),
-        (rollup_points + 1, 0.0, 0.0),
-        "\n`mem.rss` through `fs:proc:statm` used to publish one value more than the rollup, \
-         and that value was a fabricated 0 B for a process that had already exited (D1 in \
-         docs/scenarios/mem.md).\n\
-         If it now stops where the rollup stops, the defect is fixed: replace this with the \
-         assertion below it, which is what the scenario is actually about.\n"
-    );
     assert!(
-        statm_low == 0.0,
-        "a live process is never 0 bytes resident; when D1 is fixed this becomes the check"
+        statm_low > 0.0,
+        "no live process is 0 bytes resident: `statm` published {statm_low} B, which is a \
+         departed process parsed as a measurement"
+    );
+    assert_eq!(
+        statm_points, rollup_points,
+        "both roads watch one process over one window, so they end on the same reading: \
+         {statm_points} against {rollup_points}"
+    );
+    // And the mean the self-benchmark compares is no longer dragged by it: the
+    // two roads end on the same last reading of the same live process.
+    let apart = (statm_last - rollup_last).abs() / rollup_last;
+    assert!(
+        apart <= 0.01,
+        "the last reading of one process through two files: {statm_last} against {rollup_last}"
     );
 }
 
@@ -1049,9 +1086,25 @@ fn the_machine_and_the_root_cgroup_are_two_routes_to_one_counter() {
 /// counter must agree, and the mode must be absent from the fallback rather
 /// than guessed.
 ///
-/// A third field disagrees and nothing declares it. See "Defects found", D6.
+/// A third field used to disagree with nothing declaring it. See "Defects
+/// found", D6, fixed.
 #[test]
 fn both_huge_page_backends_read_the_same_promotion_counter() {
+    // The kernel's own answer to the question both backends are asked, read
+    // either side of the run so that what moves during it is visible rather
+    // than assumed away. `AnonHugePages` is the fully-mapped anonymous huge
+    // pages, in kilobytes.
+    fn anon_huge_kilobytes() -> Option<u64> {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("AnonHugePages:"))?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    let before = anon_huge_kilobytes();
     let output = run_example("mem-machine-counters.yml");
     if let Some(reason) = unavailable(&output) {
         eprintln!("skipped: {reason}");
@@ -1099,19 +1152,118 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
          the degradation it declares"
     );
 
-    // D6: a field both carry, that neither the catalog nor the event explains.
-    let (theirs, ours) = (
-        sysfs["resident_huge_pages"].as_u64().expect("a count"),
-        vmstat["resident_huge_pages"].as_u64().expect("a count"),
-    );
-    assert!(
-        theirs >= ours,
-        "\n`fs:sys` reads `nr_anon` out of the per-size statistics and `fs:proc` reads \
-         `nr_anon_transparent_hugepages` out of /proc/vmstat, and on this machine the first is \
-         consistently the larger (D6 in docs/scenarios/mem.md).\n\
-         If the two now agree, one of them was corrected and this becomes an equality.\n\
-         {theirs} against {ours}\n"
-    );
+    // D6, fixed. `fs:sys` used to read `nr_anon` out of the per-size
+    // statistics, which counts every anonymous huge page of that size, while
+    // `fs:proc` read `nr_anon_transparent_hugepages` out of /proc/vmstat,
+    // which counts only the ones still wholly mapped. The two were 8 % apart
+    // on this machine, systematically, under one attribute name and with no
+    // caveat anywhere saying they were answering different questions.
+    //
+    // A resident count is a *level*, so the comparison needs the two reads to
+    // be one instant. The session above mixes modes and spreads its reads over
+    // half a second, and under this suite the machine promotes and splits huge
+    // pages the whole time, so this half is asked of a session of its own in
+    // which every request is a `snapshot` and the two reads are one round
+    // apart.
+    //
+    // A round apart is still not an instant on a loaded machine -- the reading
+    // thread can be descheduled between the two -- and that is why the session
+    // is run five times and the *closest* pair is the one asserted on. The
+    // drift between two reads is noise either way; the defect was a bias, the
+    // same 8 % in the same direction on every run, and a biased pair can never
+    // produce a close one. Measured here: nineteen pages apart on the worst of
+    // five runs under the full suite, none on the best.
+    const TRIES: usize = 5;
+    let mut pairs = Vec::new();
+    let mut partial = None;
+    for _ in 0..TRIES {
+        let at_one_instant = run_written_session(BOTH_HUGE_PAGE_BACKENDS_AT_ONCE);
+        assert!(
+            at_one_instant.status.success(),
+            "{}",
+            stderr(&at_one_instant)
+        );
+        let instant = json(&at_one_instant);
+        let sysfs = attrs(result(&instant, "per-size statistics"));
+        let vmstat = attrs(result(&instant, "vmstat"));
+
+        // What only `fs:sys` can see travels beside the comparable number
+        // rather than inside it, and `fs:proc` says nothing it cannot see.
+        partial = sysfs
+            .get("partially_mapped_huge_pages")
+            .and_then(serde_json::Value::as_u64);
+        assert!(
+            partial.is_some(),
+            "`fs:sys` reads the per-size statistics, which count the partially mapped huge \
+             pages: {sysfs:?}"
+        );
+        assert!(
+            !vmstat.contains_key("partially_mapped_huge_pages"),
+            "/proc/vmstat has no such counter, and inventing one is the degradation this \
+             source declares, in reverse"
+        );
+        pairs.push((
+            sysfs["resident_huge_pages"].as_u64().expect("a count"),
+            vmstat["resident_huge_pages"].as_u64().expect("a count"),
+        ));
+    }
+    let after = anon_huge_kilobytes();
+    let partial = partial.expect("five runs read it");
+    let (theirs, ours) = *pairs
+        .iter()
+        .min_by_key(|(theirs, ours)| theirs.abs_diff(*ours))
+        .expect("five runs");
+
+    if partial == 0 {
+        eprintln!(
+            "skipped the agreement half: this machine has no partially mapped huge pages right \
+             now, so the two backends cannot disagree and nothing here would catch it if they \
+             did. Both said {theirs}"
+        );
+    } else {
+        // The bound is the size of the error, not a number chosen to pass: the
+        // gap between the two used to be exactly the partially-mapped count.
+        assert!(
+            theirs.abs_diff(ours) <= partial / 2,
+            "\nnot one of {TRIES} pairs of reads of one kernel's huge pages, taken one round \
+             apart through the two backends of one source, came within {} of each other: \
+             {pairs:?}. The difference used to be exactly the {partial} partially-mapped huge \
+             pages that only `fs:sys` can see.\n",
+            partial / 2
+        );
+    }
+
+    // Ground truth, and the reason this is not two numbers agreeing on a
+    // mistake: `/proc/meminfo` publishes the same count, and it is read here
+    // rather than taken from the tool. It is a level and the machine is not
+    // idle while the suite runs, so it is read either side of the session and
+    // what moved in between is carried as the slack -- the pattern the PSI
+    // pair above uses for the same reason.
+    let page_size = sysfs["hpage_bytes"].as_u64().expect("the huge page size") / 1024;
+    let (Some(before), Some(after)) = (before, after) else {
+        eprintln!("skipped the kernel cross-check: this kernel publishes no AnonHugePages line");
+        return;
+    };
+    let (before, after) = (before / page_size, after / page_size);
+    let drift = before.abs_diff(after);
+    if drift > 64 {
+        eprintln!(
+            "skipped the kernel cross-check: AnonHugePages moved from {before} to {after} huge \
+             pages while the session ran, which is wider than the 8 % this is looking for. The \
+             tool said {theirs} and {ours}"
+        );
+        return;
+    }
+    let slack = drift + 4;
+    let (low, high) = (before.min(after) - slack, before.max(after) + slack);
+    for (backend, reported) in [("fs:sys", theirs), ("fs:proc", ours)] {
+        assert!(
+            (low..=high).contains(&reported),
+            "`{backend}` reports {reported} fully-mapped huge pages and /proc/meminfo says \
+             between {before} and {after} over the same window. {partial} of them are \
+             partially mapped, which is the size of the error this once made"
+        );
+    }
 }
 
 /// Forcing a backend nothing implements is exit 3, and it names the backend.
@@ -1198,9 +1350,22 @@ fn forcing_a_backend_with_no_collector_exits_three_and_names_it() {
 ///
 /// The shim never blocks the measured program: when the pipe is full it throws
 /// the record away and counts it, and reports the count as soon as there is
-/// room. So seen plus dropped has to come to the number the workload chose.
+/// room. So what the run saw plus what it counted lost has to cover every
+/// record the program caused the shim to write.
 ///
-/// It does not. See "Defects found", D2.
+/// It did not: the counter reported seven drops for thirty-one thousand lost
+/// records, because the record that met a full pipe while a backlog was
+/// already waiting left through an early `return` without being counted. D2 of
+/// `docs/scenarios/mem.md`, fixed.
+///
+/// The closure is over *records*, not over the filtered series, and the
+/// difference is the whole of what this test had to learn. The session keeps
+/// only the 4001-byte allocations, and a drop is a record that never reached
+/// the reader at all -- so it can be the `free` of one of those allocations,
+/// or the interpreter's own traffic, and the two numbers are not commensurable
+/// until the filter's own count is added back. What the workload guarantees is
+/// the floor: `free(malloc(4001))` two hundred thousand times is four hundred
+/// thousand records, whatever else `python3` does around them.
 #[test]
 fn the_shim_counts_every_record_it_could_not_carry() {
     const CHOSEN: u64 = 200_000;
@@ -1245,15 +1410,63 @@ fn the_shim_counts_every_record_it_could_not_carry() {
         "a loss has to say what was lost and why: {result}"
     );
 
-    let accounted = seen + dropped;
+    // Every record the shim wrote or threw away, which is the quantity the
+    // accounting is about: what the filter kept, what it dropped, and what
+    // never arrived for it to judge.
+    let filtered = &result["filtered"];
+    let kept = filtered["kept"]
+        .as_u64()
+        .expect("a filtered run counts what it kept");
+    let filtered_out = filtered["dropped"].as_u64().expect("and what it did not");
+    assert_eq!(kept, seen, "the series is what the filter kept");
+    let attempted = kept + filtered_out + dropped;
+
+    // The floor is the workload's: two hundred thousand `malloc`s of 4001
+    // bytes and the two hundred thousand `free`s that follow them, one record
+    // each. Before the fix this came to about three hundred and forty
+    // thousand -- sixty thousand records that were neither delivered nor
+    // counted, in a run that reported seven drops.
     assert!(
-        accounted < CHOSEN,
-        "\nseen plus dropped now comes to {accounted} against the {CHOSEN} allocations the \
-         workload made, which is the arithmetic this scenario is about and which used to be \
-         short by tens of thousands (D2 in docs/scenarios/mem.md).\n\
-         If the shim's drop accounting has been fixed, replace this with `assert_eq!(accounted, \
-         CHOSEN)` and delete D2 from the document.\n\
-         seen {seen}, dropped {dropped}\n"
+        attempted >= 2 * CHOSEN,
+        "\n`free(malloc(4001))` {CHOSEN} times is {} records the shim was asked to write, and \
+         the run accounts for {attempted} of them. The rest were neither delivered nor counted, \
+         which is the invariant this scenario exists for.\n\
+         kept {seen}, filtered out {filtered_out}, dropped {dropped}\n",
+        2 * CHOSEN
+    );
+
+    // And not much more than the floor, which is what says a drop is counted
+    // once rather than twice: everything above four hundred thousand is
+    // `python3`'s own allocation traffic around the loop, six thousand records
+    // of it here.
+    assert!(
+        attempted < 3 * CHOSEN,
+        "{attempted} records for a workload that causes {} is not the interpreter's overhead; \
+         a backlog counted twice looks exactly like this",
+        2 * CHOSEN
+    );
+
+    // The strongest form of the same statement, and the one that needs no
+    // number from outside: the deterministic program is run twice, the two
+    // runs lose wildly different amounts to a pipe that fills differently
+    // every time, and they account for *the same total*. Measured at 406018
+    // records on this machine across ten runs, with the drop count ranging
+    // from 62178 to 144753.
+    let again = run_example("mem-allocation-storm.yml");
+    assert!(again.status.success(), "{}", stderr(&again));
+    let repeated_run = json(&again);
+    let repeated = self::result(&repeated_run, "allocations");
+    let repeated_total = repeated["filtered"]["kept"].as_u64().unwrap()
+        + repeated["filtered"]["dropped"].as_u64().unwrap()
+        + losses(repeated, "dropped");
+    let apart = attempted.abs_diff(repeated_total);
+    assert!(
+        apart * 200 < attempted,
+        "\none program, run twice, causes the same records to be written both times: {attempted} \
+         and {repeated_total}. A total that moves with how much was lost is a loss that is not \
+         being counted -- which is D2 -- or one being counted twice.\n\
+         dropped {dropped} then {}\n",
+        losses(repeated, "dropped")
     );
 }
 

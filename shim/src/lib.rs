@@ -187,7 +187,13 @@ fn report(op: u8, ptr: *mut c_void, size: u64) {
     // backlog rides along with the next record that gets through.
     let dropped = DROPPED.swap(0, Ordering::Relaxed);
     if dropped > 0 && !write_record(fd, OP_DROPPED, std::ptr::null_mut(), dropped) {
-        DROPPED.fetch_add(dropped, Ordering::Relaxed);
+        // The pipe is full, so the record this call was for is not going to
+        // fit either: it goes back with the backlog rather than leaving
+        // through the `return` uncounted. Counting the backlog alone is how
+        // the counter came to report seven drops for thirty-one thousand lost
+        // records -- one per burst, because the first record of a burst
+        // incremented it and every record behind it fell out here.
+        DROPPED.fetch_add(dropped + 1, Ordering::Relaxed);
         return;
     }
 
@@ -195,6 +201,52 @@ fn report(op: u8, ptr: *mut c_void, size: u64) {
         DROPPED.fetch_add(1, Ordering::Relaxed);
     }
 }
+
+/// How many times the exit flush retries a full pipe, a millisecond apart.
+///
+/// The reader drains until the program is reaped, and this runs before that, so
+/// a full pipe here empties within a tick or two. The bound is what keeps a
+/// reader that has already gone from turning the end of a program into a hang.
+const FLUSH_ATTEMPTS: u32 = 200;
+
+/// Reports the backlog the program ends holding.
+///
+/// The backlog rides out on the next record that gets through, and at the end
+/// of a run there is no next record: whatever was dropped in the last burst is
+/// counted in `DROPPED` and never surfaces. On the two-hundred-thousand
+/// allocation storm that was up to six thousand records -- counted, and lost
+/// between the counter and the reader, which is the same invariant broken one
+/// step further along.
+///
+/// This is the one place the shim waits for the pipe, and it is allowed to:
+/// the program's last instruction has already run, so what is being delayed is
+/// the teardown of a process that has finished rather than the work being
+/// measured.
+extern "C" fn flush_at_exit() {
+    let fd = REPORT_FD.load(Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    let dropped = DROPPED.swap(0, Ordering::Relaxed);
+    if dropped == 0 {
+        return;
+    }
+    for _ in 0..FLUSH_ATTEMPTS {
+        if write_record(fd, OP_DROPPED, std::ptr::null_mut(), dropped) {
+            return;
+        }
+        // SAFETY: sleeping for a millisecond takes no memory and cannot fail
+        // in a way that matters here.
+        unsafe { libc::usleep(1_000) };
+    }
+    // Put it back rather than pretend: nothing else will read it, but a
+    // counter that silently zeroes itself is how this started.
+    DROPPED.fetch_add(dropped, Ordering::Relaxed);
+}
+
+#[used]
+#[link_section = ".fini_array"]
+static FLUSH_AT_EXIT: extern "C" fn() = flush_at_exit;
 
 fn write_record(fd: i32, op: u8, ptr: *mut c_void, size: u64) -> bool {
     let record = Record {

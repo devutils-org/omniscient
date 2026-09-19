@@ -188,14 +188,32 @@ impl FootprintCollector {
             // `size resident shared text lib data dt`, in pages. Resident size
             // and nothing else, which is why it is the fallback and not the
             // first choice.
-            Source::Statm => text
-                .split_whitespace()
-                .nth(1)
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|pages| pages * self.page_size)
-                .ok_or_else(|| {
-                    SampleError::Transient(format!("cannot parse {}", self.path.display()))
-                }),
+            Source::Statm => {
+                let mut fields = text.split_whitespace();
+                let parse = |value: Option<&str>| value.and_then(|value| value.parse::<u64>().ok());
+                let (Some(size), Some(resident)) = (parse(fields.next()), parse(fields.next()))
+                else {
+                    return Err(SampleError::Transient(format!(
+                        "cannot parse {}",
+                        self.path.display()
+                    )));
+                };
+                // A zombie keeps its `statm` and it reads `0 0 0 0 0 0 0`: the
+                // address space is gone, and the file has no way to say so.
+                // The same process's `smaps_rollup` answers ESRCH, so the
+                // rollup backend ends the run where this one used to parse the
+                // zero and publish it as a measurement -- the one answer a
+                // footprint must never invent. A process with an address space
+                // always has a non-zero total size, so the total is the tell
+                // and no history is needed to read it.
+                if size == 0 {
+                    return Err(SampleError::TargetGone(format!(
+                        "process {} has no address space left to measure",
+                        self.pid
+                    )));
+                }
+                Ok(resident * self.page_size)
+            }
             // `Rss:   12345 kB`, once in the rollup and once per mapping in
             // `smaps`. Summing both the same way is what makes the two backends
             // comparable.
@@ -305,6 +323,53 @@ mod tests {
             FootprintCollector::new(std::process::id() as i32, metric, source, Duration::ZERO);
         let events = collector.sample(0).ok()?;
         events[0].attr("bytes").unwrap().as_f64()
+    }
+
+    /// A zombie's `statm` reads `0 0 0 0 0 0 0`, and that is not a footprint.
+    ///
+    /// The zombie is made rather than described: a child that exits and is not
+    /// waited for. Nothing about the read fails -- the file opens, parses and
+    /// yields a number -- which is why the distinction has to be made on the
+    /// content, and why the collector used to publish a resident set of zero
+    /// bytes for a process that had already gone.
+    #[test]
+    fn a_process_with_no_address_space_left_ends_the_run_rather_than_reading_zero() {
+        // SAFETY: the child does nothing but `_exit`, which is
+        // async-signal-safe, so forking from a threaded test process is sound.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // SAFETY: the only call the child makes.
+            unsafe { libc::_exit(0) };
+        }
+
+        let mut collector =
+            FootprintCollector::new(pid, Metric::Rss, Source::Statm, Duration::ZERO);
+        let mut outcome = collector.sample(0);
+        for _ in 0..500 {
+            if matches!(outcome, Err(SampleError::TargetGone(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            outcome = collector.sample(0);
+        }
+
+        // Reaped before anything is asserted, so a failure here does not also
+        // leave a zombie behind for the rest of the suite.
+        // SAFETY: waiting on a child of this process.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+
+        match outcome {
+            Err(SampleError::TargetGone(reason)) => {
+                assert!(reason.contains("address space"), "{reason}")
+            }
+            Ok(events) => panic!(
+                "a departed process was measured as {:?}, which is the one answer a footprint \
+                 must never invent",
+                events[0].attr("bytes")
+            ),
+            other => panic!("expected the run to end, got {other:?}"),
+        }
     }
 
     #[test]
