@@ -1,37 +1,38 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh aggregation
-#   cd ../omniscient-aggregation && claude      # paste the prompt it printed
+#   scripts/spawn.sh bpf-attach
+#   cd ../omniscient-bpf-attach && claude      # paste the prompt it printed
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
-# conflicts means a stream edited something it does not own.
+# conflicts anywhere other than a family's registry line means a stream edited
+# something it does not own.
 set -euo pipefail
 
 declare -A OWNS=(
-    [aggregation]="src/emit.rs src/encode.rs src/format.rs"
-    [stacks]="src/stack.rs (new) and the callchain parts of src/perf.rs"
-    [join]="src/join.rs"
-    [catalog-model]="src/catalog.rs src/resolve.rs src/validate.rs src/event.rs src/request.rs, and the targets:/filter_fields:/keys: fields of catalog/*.yaml"
-    [bpf]="src/bpf/** src/collect/sched/**"
-    [small]="src/collect/mod.rs src/main.rs src/capabilities.rs src/cli.rs"
-)
-declare -A STREAM=(
-    [aggregation]="A"
-    [stacks]="B"
-    [join]="C"
-    [catalog-model]="D"
-    [bpf]="E"
-    [small]="F"
+    [bpf-attach]="src/bpf/** src/collect/sched/**"
+    [mem-breadth]="src/collect/mem/**"
+    [counters]="src/perf.rs src/collect/cpu/**"
+    [encoders]="src/encode.rs src/format.rs"
+    [budget]="src/collect/mod.rs src/main.rs"
+    [net-breadth]="src/collect/net/**"
 )
 declare -A TITLE=(
-    [aggregation]="Stream A -- aggregation and presentation"
-    [stacks]="Stream B -- stack capture"
-    [join]="Stream C -- the join engine"
-    [catalog-model]="Stream D -- the catalog model"
-    [bpf]="Stream E -- eBPF attachment"
-    [small]="Stream F -- the honest small ones"
+    [bpf-attach]="Stream A -- eBPF attach kinds"
+    [mem-breadth]="Stream B -- memory breadth"
+    [counters]="Stream C -- hardware counters and per-cpu perf"
+    [encoders]="Stream D -- profile and trace encoders"
+    [budget]="Stream E -- cost, budget and the self-benchmark"
+    [net-breadth]="Stream F -- network breadth"
+)
+declare -A LOG=(
+    [bpf-attach]="LOG_A.md"
+    [mem-breadth]="LOG_B.md"
+    [counters]="LOG_C.md"
+    [encoders]="LOG_D.md"
+    [budget]="LOG_E.md"
+    [net-breadth]="LOG_F.md"
 )
 
 stream="${1:-}"
@@ -66,7 +67,8 @@ Read these first, in this order:
 
 You own, and may only edit:
   ${OWNS[$stream]}
-  plus tests for what you add, and docs/open-findings.md
+  plus tests for what you add, the entries of your own sources in catalog/*.yaml,
+  docs/open-findings.md, and ${LOG[$stream]}
 
 Everything else is read-only to you. Needing something from another stream's
 files is not a reason to edit them: write the request under a "## Needs from
@@ -81,6 +83,10 @@ available, which reads like the machine changed rather than the binary.
 You are done when \`make check\` is clean, everything you added has a test that
 would fail without it, and anything you discovered that belongs to another
 stream is written down rather than fixed in passing.
+
+Finish by writing ${LOG[$stream]} at the repository root: what you landed, what
+you measured, what you found and left alone, and what the next person needs to
+know that is not in the code. The coordinator reads that, not your diff.
 
 Ground truth is the bar: a test that checks the code returns what the code
 computed proves nothing. Check against something independently known -- a kernel
