@@ -432,3 +432,299 @@ fn reads_that_must_reach_the_device_are_uninterruptible_waits() {
          turns a disk problem into a program doing nothing:\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// sched.runqlat
+// ---------------------------------------------------------------------------
+
+/// Only one test may contend a cpu at a time.
+///
+/// Two of them do, and `cargo test` runs the tests of one binary in parallel
+/// threads. A test that measures what one task alone on a cpu waits for cannot
+/// share that cpu with another test's three spinners -- it would measure a
+/// contended cpu and call it an idle one. Serialising them is the fix; giving
+/// each its own cpu is not, because the interference is the machine's, not the
+/// test's.
+static CONTENDED_CPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A copy of `/bin/sh` under a name nothing else on the machine has.
+///
+/// The load has to be findable in a system-wide run, and `comm` is the only
+/// thing that distinguishes it. A shell called `sh` cannot be told apart from
+/// every other shell on the machine, and a system-wide measurement that cannot
+/// name its own workload is measuring the machine. Each test gets its own
+/// name, so that one of them can never count the other's load as its own.
+fn distinctly_named_shell(name: &str) -> Option<std::path::PathBuf> {
+    // Fifteen characters is what the kernel keeps of a name, so the file is
+    // named inside that: a workload whose `comm` is truncated is one the
+    // filter cannot match.
+    assert!(name.len() <= 15, "`{name}` is longer than a comm");
+    let path = std::env::temp_dir().join(name);
+    if !path.exists() {
+        std::fs::copy("/bin/sh", &path).ok()?;
+        let mut mode = std::fs::metadata(&path).ok()?.permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        std::fs::set_permissions(&path, mode).ok()?;
+    }
+    Some(path)
+}
+
+/// Busy tasks, all pinned to one cpu, that spin until they are killed.
+///
+/// The last cpu rather than the first, only so that a suite running its own
+/// tests in parallel is disturbed as little as possible.
+struct PinnedSpinners(Vec<std::process::Child>);
+
+impl PinnedSpinners {
+    fn start(count: usize, name: &str) -> Option<Self> {
+        let shell = distinctly_named_shell(name)?;
+        let cpu = std::thread::available_parallelism().ok()?.get() - 1;
+        let children: Vec<_> = (0..count)
+            .filter_map(|_| {
+                Command::new("taskset")
+                    .args([
+                        "-c",
+                        &cpu.to_string(),
+                        shell.to_str()?,
+                        "-c",
+                        "while :; do :; done",
+                    ])
+                    .spawn()
+                    .ok()
+            })
+            .collect();
+        if children.len() != count {
+            return None;
+        }
+        // Long enough for every one of them to be running before the
+        // measurement opens; a task that had not started yet would spend the
+        // first part of the window not competing for anything.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        Some(Self(children))
+    }
+}
+
+impl Drop for PinnedSpinners {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The waits of the pinned tasks, in nanoseconds, by thread.
+fn waits_by_task(text: &str) -> std::collections::BTreeMap<u64, u64> {
+    let mut totals = std::collections::BTreeMap::new();
+    for line in text.lines().filter(|line| line.contains("sched.runqlat")) {
+        let field = |name: &str| {
+            let needle = format!("{name}=");
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix(&needle))
+                .and_then(|value| value.parse::<u64>().ok())
+        };
+        if let (Some(tid), Some(total)) = (field("tid"), field("total_ns")) {
+            *totals.entry(tid).or_insert(0) += total;
+        }
+    }
+    totals
+}
+
+/// Ground truth, and the only kind this source can have: the expected number
+/// comes from the scheduler's own fair-share arithmetic, not from anything this
+/// code computed.
+///
+/// *N* cpu-bound tasks pinned to one cpu each get `1/N` of it, so each one is
+/// runnable and not running for `(N-1)/N` of the window. One task alone on a
+/// cpu never queues at all; three of them queue for two thirds of the run,
+/// each. Nothing about that prediction comes from the tracer, and it separates
+/// a measurement of run queue latency from a measurement of anything else: a
+/// program that reported blocked time, or on-cpu time, or the whole window,
+/// fails at least one of the two cases.
+#[test]
+fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
+    const WINDOW_NS: f64 = 1_000_000_000.0;
+    let mut measured = Vec::new();
+
+    let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
+    for spinners in [1usize, 3] {
+        let Some(_load) = PinnedSpinners::start(spinners, "omnrunqshare") else {
+            eprintln!("skipped: this machine has no `taskset`, so no cpu can be contended");
+            return;
+        };
+        let output = run(&[
+            "sched.runqlat",
+            "--system",
+            "--duration",
+            "1s",
+            "--emit",
+            "raw",
+            "--filter",
+            "comm == 'omnrunqshare'",
+        ]);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        if refused_for_capabilities(&text) {
+            return;
+        }
+        assert!(output.status.success(), "{text}");
+
+        let waits = waits_by_task(&text);
+        assert_eq!(
+            waits.len(),
+            spinners,
+            "{spinners} pinned tasks must each appear once, saw {waits:?}:\n{text}"
+        );
+        let share = waits.values().sum::<u64>() as f64 / spinners as f64 / WINDOW_NS;
+        measured.push(share);
+    }
+
+    let (alone, contended) = (measured[0], measured[1]);
+    assert!(
+        alone < 0.25,
+        "a task alone on a cpu waits for nothing, and this one waited {:.0} % of the window",
+        alone * 100.0
+    );
+    // Two thirds is the prediction; the band is wide enough for a machine that
+    // is also doing something else on that cpu, and far too narrow for any of
+    // the numbers this source could be confused with.
+    assert!(
+        (0.45..0.90).contains(&contended),
+        "three tasks sharing one cpu each wait two thirds of the window, and these waited \
+         {:.0} %",
+        contended * 100.0
+    );
+    assert!(
+        contended > alone * 3.0,
+        "contending for a cpu must show up as waiting for one: alone {:.1} %, contended {:.1} %",
+        alone * 100.0,
+        contended * 100.0
+    );
+}
+
+/// The bucket the kernel chose and the bucket the emit layer draws must be the
+/// same bucket.
+///
+/// This is what makes building the histogram in the kernel viable at all. The
+/// program computes a log2 index with an unrolled binary search over eight
+/// registers; `emit::BucketLayout::Log2` computes one from a `f64` in
+/// userspace. Nothing but a test crosses those two, and if they disagree by one
+/// every wait is reported a factor of two away from where it happened, with
+/// nothing anywhere saying so.
+///
+/// The bridge is the value on the event: each row travels as the low bound of
+/// its own bucket, so re-bucketing it has to land it back where it started.
+/// Checked through the real renderer rather than against a copy of the formula.
+#[test]
+fn the_kernels_buckets_are_the_emit_layers_buckets() {
+    let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
+    let Some(_load) = PinnedSpinners::start(3, "omnrunqbkt") else {
+        eprintln!("skipped: this machine has no `taskset`, so no cpu can be contended");
+        return;
+    };
+    let output = run(&[
+        "sched.runqlat",
+        "--system",
+        "--duration",
+        "1s",
+        "--emit",
+        "hist",
+        "--emit",
+        "raw",
+        "--filter",
+        "comm == 'omnrunqbkt'",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+
+    // What the kernel said: the low bound of every bucket it put a wait in,
+    // and -- the part that ties the bucket to a real duration -- the exact
+    // total of the waits it put there.
+    //
+    // `total_ns` is the one number on the event that owes nothing to the
+    // bucketing: it is a sum of differences between two `bpf_ktime_get_ns`
+    // readings. So the mean of a row has to fall inside the bucket the row
+    // claims, and a search that is off by one puts it outside by a factor of
+    // two. Checking only that the emit layer agrees with `wait_ns` would not
+    // catch that: both sides would shift together and still agree.
+    let mut from_kernel = std::collections::BTreeSet::new();
+    for line in text
+        .lines()
+        .filter(|line| line.contains("sched.runqlat") && line.contains("wait_ns="))
+    {
+        let field = |name: &str| {
+            let needle = format!("{name}=");
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix(&needle))
+                .and_then(|value| value.parse::<u64>().ok())
+        };
+        let (Some(low), Some(count), Some(total)) =
+            (field("wait_ns"), field("count"), field("total_ns"))
+        else {
+            continue;
+        };
+        assert!(count > 0, "a row stands for no waits at all:\n{line}");
+        let mean = total as f64 / count as f64;
+        if low == 0 {
+            assert_eq!(total, 0, "bucket zero holds only a wait of zero:\n{line}");
+        } else {
+            assert!(
+                (low as f64..(low * 2) as f64).contains(&mean),
+                "the kernel put {count} waits averaging {mean} ns in the bucket \
+                 [{low}, {}), which does not contain them:\n{line}",
+                low * 2
+            );
+        }
+        from_kernel.insert(low);
+    }
+    assert!(
+        !from_kernel.is_empty(),
+        "three tasks sharing a cpu must have queued:\n{text}"
+    );
+
+    // What the emit layer drew: the bounds of every bucket it put anything in.
+    let mut from_emit = std::collections::BTreeSet::new();
+    for line in text.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
+        };
+        let Some((range, tail)) = rest.split_once(')') else {
+            continue;
+        };
+        let Some((low, high)) = range.split_once(", ") else {
+            continue;
+        };
+        let (Some(low), Some(high)) = (
+            low.strip_suffix("ns").and_then(|n| n.parse::<u64>().ok()),
+            high.strip_suffix("ns").and_then(|n| n.parse::<u64>().ok()),
+        ) else {
+            continue;
+        };
+        // A log2 bucket is exactly one doubling wide, and the lowest one holds
+        // only zero. A bucket of any other width is not the layout the program
+        // was written against.
+        assert_eq!(
+            high,
+            if low == 0 { 1 } else { low * 2 },
+            "`[{low}ns, {high}ns)` is not a log2 bucket:\n{text}"
+        );
+        if tail
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse::<u64>().ok())
+            > Some(0)
+        {
+            from_emit.insert(low);
+        }
+    }
+
+    assert_eq!(
+        from_kernel, from_emit,
+        "the kernel bucketed waits at {from_kernel:?} and the emit layer drew them at \
+         {from_emit:?}; the two log2 definitions have drifted apart:\n{text}"
+    );
+}

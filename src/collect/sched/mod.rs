@@ -13,6 +13,7 @@
 //! needs no privileges, and can only say that a switch happened.
 
 mod offcpu;
+mod runqlat;
 mod switches;
 mod wakeup;
 
@@ -26,6 +27,15 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("sched.offcpu", "bpf:raw_tp", |resolved| {
             Ok(Box::new(offcpu::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("sched.runqlat", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(runqlat::Prepare {
+                mode: resolved.request.mode,
+                // Carried into the collector because the resolver credits every
+                // `bpf` backend with filtering in the kernel and then leaves
+                // its events alone; see `runqlat::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
             Ok(Box::new(switches::Prepare(resolved.request.mode)))

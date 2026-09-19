@@ -31,12 +31,14 @@ mod insn;
 mod map;
 mod offcpu;
 mod ring;
+mod runqlat;
 mod syscall;
 mod wakeup;
 
 use std::sync::OnceLock;
 
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
+pub use runqlat::{RunqLat, RunqLatProgram};
 pub use wakeup::{Wakeup, WakeupProgram};
 
 use btf::Btf;
