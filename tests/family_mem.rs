@@ -11,6 +11,16 @@ use std::process::{Command, Output, Stdio};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 
+/// What the tool returns for a request it refuses before measuring anything.
+const EXIT_REJECTED: i32 = 2;
+
+fn run(args: &[&str]) -> Output {
+    Command::new(BINARY)
+        .args(args)
+        .output()
+        .expect("omn should run")
+}
+
 fn run_session(session: &str) -> Output {
     let mut child = Command::new(BINARY)
         .args(["-f", "-", "--input-format", "yaml"])
@@ -410,4 +420,335 @@ fn freeing_half_the_heap_moves_the_live_total_and_not_the_resident_size() {
         "{freed} bytes were freed into holes, {} reported as retained",
         attr(last, "bytes")
     );
+}
+
+// --- The sources that need no privileges at all -------------------------
+//
+// Six sources read a file and say what is in it: pressure, swap, huge pages,
+// cgroup accounting, per-node placement and the working set. The unit tests
+// beside each collector check its arithmetic against a kernel counter; what is
+// checked here is the whole tool -- the catalog entry, the resolver, the
+// collector and the emit layer -- against a program whose memory behaviour the
+// test chose.
+
+/// The six sources this stream added, with the backend each one is expected to
+/// be collected through.
+const BREADTH_SOURCES: [(&str, &str); 6] = [
+    ("mem.pressure", "fs:proc, fs:cgroup"),
+    ("mem.swap", "fs:proc, fs:cgroup"),
+    ("mem.thp", "fs:sys, fs:proc"),
+    ("mem.cgroup", "fs:cgroup"),
+    ("mem.numa", "fs:proc"),
+    ("mem.wss", "fs:proc:clear_refs"),
+];
+
+#[test]
+fn every_file_reading_source_has_a_collector_in_this_build() {
+    let implemented = omn::collect::implemented().join("; ");
+    for (source, backends) in BREADTH_SOURCES {
+        assert!(
+            implemented.contains(&format!("{source} ({backends})")),
+            "`{source}` has no collector on `{backends}`: {implemented}"
+        );
+    }
+}
+
+/// A fallback that loses something has to say what, or the reader takes the
+/// second-best number for the best one.
+#[test]
+fn every_mem_fallback_states_what_it_degrades() {
+    let catalog = omn::catalog::Catalog::embedded().expect("the embedded catalog loads");
+    for entry in catalog.family("mem") {
+        for backend in entry.backends.iter().skip(1) {
+            assert!(
+                backend.degraded.is_some() || backend.equivalent,
+                "`{}` falls back to `{}` without saying what that costs",
+                entry.id,
+                backend.id
+            );
+        }
+    }
+}
+
+/// Backend ids are how `--backend force:` names one and how a collector is
+/// looked up; two with the same id inside one chain cannot be told apart.
+#[test]
+fn backend_ids_are_unique_within_each_mem_chain() {
+    let catalog = omn::catalog::Catalog::embedded().expect("the embedded catalog loads");
+    for entry in catalog.family("mem") {
+        let mut seen = Vec::new();
+        for backend in &entry.backends {
+            assert!(
+                !seen.contains(&backend.id),
+                "`{}` lists `{}` twice",
+                entry.id,
+                backend.id
+            );
+            seen.push(backend.id.clone());
+        }
+    }
+}
+
+/// This family's cardinal rule is that the accounting metric is explicit, and a
+/// caveat is where a source says what its number is *not*. Every one of these
+/// six reports something that is routinely mistaken for something else.
+#[test]
+fn every_new_source_says_what_its_number_is_not() {
+    let catalog = omn::catalog::Catalog::embedded().expect("the embedded catalog loads");
+    for (source, _) in BREADTH_SOURCES {
+        let entry = catalog
+            .get(&source.parse().expect("a source id"))
+            .unwrap_or_else(|| panic!("`{source}` is in the catalog"));
+        assert!(
+            !entry.caveats.is_empty(),
+            "`{source}` states no caveat, so nothing warns the reader what it is not"
+        );
+    }
+}
+
+/// Huge page promotion is counted for the machine and cannot be attributed to a
+/// process. The refusal comes from the catalog, before anything is attached.
+#[test]
+fn a_machine_wide_source_refuses_a_process_target() {
+    let refused = run(&["mem.thp", "--pid", "1", "-m", "snapshot", "-e", "raw"]);
+    let message = stderr(&refused);
+    assert_eq!(refused.status.code(), Some(EXIT_REJECTED), "{message}");
+    assert!(
+        stdout(&refused).is_empty(),
+        "a machine-wide total must not be produced for a process target:\n{}",
+        stdout(&refused)
+    );
+    assert!(message.contains("system"), "{message}");
+}
+
+/// A working set is what is touched over a window, so a single read has nothing
+/// to report. The refusal names the mode that does work.
+#[test]
+fn a_working_set_over_no_window_is_refused_with_the_mode_that_works() {
+    let refused = run(&["mem.wss", "--pid", "1", "-m", "snapshot", "-e", "raw"]);
+    let message = stderr(&refused);
+    assert_eq!(refused.status.code(), Some(EXIT_REJECTED), "{message}");
+    assert!(message.contains("poll"), "{message}");
+}
+
+/// The listing is the catalog seen through this machine, and the two must not
+/// disagree about a file either one can look at.
+#[test]
+fn the_listing_agrees_with_what_this_machine_holds() {
+    let listing = stdout(&run(&["list", "mem"]));
+    let capabilities = omn::capabilities::Capabilities::detect();
+    let readable = capabilities
+        .probe("/proc/pressure/memory", None)
+        .is_available();
+    let row = listing
+        .lines()
+        .find(|line| line.starts_with("mem.pressure"))
+        .expect("mem.pressure is listed");
+    let expected = if readable { "yes" } else { "no" };
+    assert!(
+        row.contains(expected),
+        "/proc/pressure/memory is {}, and the listing says otherwise: {row}",
+        if readable { "readable" } else { "not readable" }
+    );
+}
+
+/// Ground truth through the whole tool: a program that *holds* a lot of memory
+/// and *touches* very little of it.
+///
+/// The program makes 256 MiB resident and then spends a second walking only the
+/// first 16 MiB of it. Resident size and working set are then two numbers about
+/// the same process that differ by more than a factor of ten, and `mem.rss` and
+/// `mem.wss` have to report them the right way round. A collector returning the
+/// resident set under either name passes nothing here.
+#[test]
+fn the_working_set_is_what_was_touched_and_not_what_was_held() {
+    const RESIDENT: usize = 256 * 1024 * 1024;
+    const WORKING: usize = 16 * 1024 * 1024;
+
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = format!(
+        "import time\n\
+         held = bytearray({RESIDENT})\n\
+         working = memoryview(held)[:{WORKING}]\n\
+         deadline = time.time() + 2.5\n\
+         while time.time() < deadline:\n\
+         \x20   for offset in range(0, {WORKING}, 4096): working[offset] = 1\n"
+    );
+    let session = format!(
+        "format: json\nrequests:\n  \
+         - source: mem.wss\n    \
+         target: {{launch: [python3, -c, {program:?}]}}\n    \
+         mode: poll@250ms\n    emit: [timeline]\n  \
+         - source: mem.rss\n    \
+         target: {{launch: [python3, -c, {program:?}]}}\n    \
+         mode: poll@250ms\n    emit: [timeline]\n"
+    );
+
+    let output = run_session(&session);
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+
+    let points = |index: usize| -> Vec<f64> {
+        run["results"][index]["outputs"][0]["series"][0]["points"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a timeline in result {index}: {run}"))
+            .iter()
+            .map(|point| point["value"].as_f64().expect("a value"))
+            .collect()
+    };
+    let working_set = points(0);
+    let resident = points(1);
+
+    // Two points are excluded. The first window covers the allocation itself,
+    // when every page is touched for the first time. The last covers a window
+    // the program's exit cut short, so it holds a fraction of an interval's
+    // work and is not a rate over one.
+    //
+    // What is left is compared on its *busiest* window rather than its
+    // quietest, and that is not a convenience. The suite runs its tests in
+    // parallel, a dozen of them holding hundreds of megabytes at once, and a
+    // starved interpreter can go most of a 250 ms window without running at
+    // all -- which is a fact about the machine, not about the collector. The
+    // busiest window is the one the claim is actually about: even at its most
+    // active this program touches a small fraction of what it holds, and a
+    // collector reporting the resident set under this name fails on exactly
+    // that window.
+    assert!(
+        working_set.len() >= 5,
+        "two and a half seconds at 250 ms is several points, not {}",
+        working_set.len()
+    );
+    let interior = &working_set[2..working_set.len() - 1];
+    let busiest = interior.iter().copied().fold(0.0_f64, f64::max);
+    let held = resident.iter().copied().fold(0.0_f64, f64::max);
+
+    assert!(
+        held >= 0.9 * RESIDENT as f64,
+        "the program holds {RESIDENT} bytes and mem.rss reported at most {held}"
+    );
+    assert!(
+        busiest >= 0.5 * WORKING as f64,
+        "the program walks {WORKING} bytes over and over, and its busiest full window came back \
+         as {busiest}: {interior:?}"
+    );
+    assert!(
+        busiest < 0.25 * held,
+        "the program touches a sixteenth of what it holds, and its busiest window came back as \
+         {busiest} against a resident set of {held}"
+    );
+}
+
+/// Ground truth through the whole tool: per-node placement accounts for memory
+/// the program made resident, and agrees with the resident size measured beside
+/// it in the same window.
+///
+/// Every resident page is on exactly one node, so the per-node residency summed
+/// over the nodes is the resident set -- which `mem.rss` reads from an entirely
+/// different file. Two sources, two files, one number.
+#[test]
+fn per_node_placement_accounts_for_the_resident_set() {
+    const TOUCHED: usize = 64 * 1024 * 1024;
+
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = format!(
+        "import time\n\
+         block = bytearray({TOUCHED})\n\
+         time.sleep(0.6)\n"
+    );
+    let session = format!(
+        "format: json\nrequests:\n  \
+         - source: mem.numa\n    \
+         target: {{launch: [python3, -c, {program:?}]}}\n    \
+         mode: poll@200ms\n    emit: [raw]\n  \
+         - source: mem.rss\n    \
+         target: {{launch: [python3, -c, {program:?}]}}\n    \
+         mode: poll@200ms\n    emit: [summary]\n"
+    );
+
+    let output = run_session(&session);
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+
+    // The last tick of the raw stream: one event per node, all at one instant.
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("raw events: {run}"));
+    assert!(!events.is_empty(), "a running process holds resident pages");
+    let last_ts = events
+        .last()
+        .and_then(|event| event["ts_ns"].as_u64())
+        .expect("a timestamp");
+    let placed: f64 = events
+        .iter()
+        .filter(|event| event["ts_ns"].as_u64() == Some(last_ts))
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .expect("attributes")
+                .iter()
+                .find(|attr| attr["name"] == "bytes")
+                .and_then(|attr| attr["value"].as_f64())
+                .expect("bytes on every node event")
+        })
+        .sum();
+
+    let (_, resident) = summary(&run, 1);
+    assert!(
+        placed >= TOUCHED as f64,
+        "the program made {TOUCHED} bytes resident and the per-node placement adds up to {placed}"
+    );
+    let ratio = placed / resident;
+    assert!(
+        (0.9..1.1).contains(&ratio),
+        "numa_maps places {placed} bytes and smaps_rollup reports a resident set of {resident}"
+    );
+}
+
+/// A system-wide file reader runs, produces a point per tick, and loses
+/// nothing. Three of the six answer for the machine, and all three go through
+/// the same shape of counter read.
+#[test]
+fn the_machine_wide_readers_run_clean() {
+    for source in ["mem.pressure", "mem.swap", "mem.thp"] {
+        let session = format!(
+            "format: json\nrequests:\n  \
+             - source: {source}\n    target: system\n    mode: poll@100ms\n    \
+             emit: [timeline]\nduration: 500ms\n"
+        );
+        let output = run_session(&session);
+        if let Some(reason) = unavailable(&output) {
+            eprintln!("skipped: {source}: {reason}");
+            continue;
+        }
+        assert!(output.status.success(), "{source}: {}", stderr(&output));
+        let run: serde_json::Value =
+            serde_json::from_str(&stdout(&output)).expect("one json document");
+        let points = run["results"][0]["outputs"][0]["series"][0]["points"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a timeline for {source}: {run}"));
+        assert!(
+            points.len() >= 3,
+            "half a second at 100 ms is four or five points for {source}, not {}",
+            points.len()
+        );
+        assert_eq!(
+            run["results"][0]["losses"]["failed_reads"].as_u64(),
+            Some(0),
+            "{source} lost a read: {run}"
+        );
+    }
 }

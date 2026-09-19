@@ -1364,3 +1364,121 @@ it; re-read it on the drain, from `/proc/<tid>/comm`, which is a different
 process's file and may be gone; or attach `sched_process_exec` and correct the
 rows it names. The third is the one that is actually correct and it costs a
 fourth program.
+
+---
+
+## 21. A requirement can only be probed by reading, and some are written
+
+Found by stream B (memory breadth) while landing `mem.wss`.
+
+`capabilities.rs` answers a requirement that starts with `/` by calling
+`access(R_OK)` on the path, and reports three outcomes: readable, restricted,
+absent. That covers every requirement in the catalog but one, and the exception
+is not exotic — it is how half of procfs's *controls* work.
+
+`/proc/[pid]/clear_refs` is mode `--w-------`. It is the file a process writes
+to reset the kernel's referenced bits, which is the only unprivileged way to
+measure a working set, and it is writable by the owner of the process and by
+nobody else. Probed by reading, it comes back as
+
+```
+/proc/2517642/clear_refs exists but is not readable by uid 1000:
+reading it needs root, or a mode that lets this user read the file
+```
+
+which is true, useless, and exactly backwards: the file is usable and the probe
+says it is out of reach. `mem.wss` resolved past its only implemented backend
+onto `fs:sys:damon` and the run failed with "no collector is written".
+
+**What is needed**, from whoever owns `src/capabilities.rs`: a requirement
+prefix that asks the other question.
+
+```rust
+// in Capabilities::probe, beside the `/` branch
+if let Some(path) = requirement.strip_prefix("writable:") {
+    return probe_writable(&substitute_pid(path, pid));
+}
+```
+
+with `probe_writable` calling `access(W_OK)` and keeping the same three
+outcomes — `Available`, `Missing("… exists but is not writable by uid N")`,
+`Missing("… does not exist")`. One branch and one function, and the `[pid]`
+substitution it needs already exists.
+
+Until then `mem.wss`'s `fs:proc:clear_refs` backend declares only
+`/proc/[pid]/smaps_rollup`, which is the file it *reads*, and checks the write
+at attach time with a refusal that names the file and the reason. That works
+and is honest at the point of use, but it is a requirement the catalog does not
+state, so `omn list mem` cannot tell a user whose process it is from a user
+whose process it is not. Two other sources will want the same prefix the moment
+they are written: `mem.wss` through `page_idle` writes the idle bitmap, and any
+soft-dirty tracker writes the same `clear_refs`.
+
+## 22. A NUMA node has no key, so per-node series cannot be told apart
+
+Found by stream B while landing `mem.numa`.
+
+`KeyValue` is a closed set, deliberately, and it has no variant for a memory
+node. `mem.numa` through `/proc/[pid]/numa_maps` produces one event per node per
+tick — which is the right shape, because a process with two thirds of its pages
+on node 0 may be doing all of its work from node 1, and one total would hide
+exactly that — but every one of those events has `task` as its primary key, so
+`SeriesKey::of` folds them into a single series and a `timeline` interleaves the
+nodes.
+
+The node is on the event as an attribute and is a declared filter field, so
+`--filter node==1` recovers one node's series. That is a workaround, not the
+model: the same request over two nodes should be two series, the way two devices
+are two series for `io.bytes`.
+
+**What is needed**, from whoever owns `src/event.rs`:
+
+```rust
+/// A memory node, as the kernel numbers them.
+Node { node: u32 },
+```
+
+plus `KeyValue::node(node)` and a `Display` of `node:N`, and the `node` entry in
+whatever `KeyKind` enumerates. `mem.numa` would then put it first on each event
+and the emit layer needs no change at all. `power` and `cpu` will want it too:
+per-node uncore and per-node memory bandwidth have the same shape, and
+`mem.bandwidth`'s uncore backend is package-scoped for the same reason.
+
+This is the same gap `power.cstate` has with `state`, named in `STATE.md`: a
+source that produces one measurement per member of a set the key model does not
+know about.
+
+## 23. The PSI reader now exists twice, in two families
+
+`io.pressure` and `mem.pressure` read the same file format — `some`/`full`,
+three decayed averages and a microsecond counter — and there are now two
+readers of it, `src/collect/io/pressure.rs` and `src/collect/mem/pressure.rs`.
+The second was written rather than shared because the wave's rules give each
+stream only its own family's directory, and the honest alternative to
+duplicating was to leave `mem.pressure` unwritten.
+
+They agree today, deliberately: the same field names on the events
+(`stall_ratio`, `full_stall_ratio`, `stalled_ns`, `some_avg10`…), the same
+first-read-is-a-baseline rule, the same "a snapshot reports the kernel's
+averages and says so". That agreement is a convention nothing enforces, and
+`cpu.pressure` makes three — `irq.pressure` would make four, and the kernel
+publishes it.
+
+**What is needed**, from whoever owns `src/collect/mod.rs`: a `psi` module
+beside `task.rs`, which is the precedent — `comm` was read by each family
+separately until it was not. The shape is already settled by the two copies:
+
+```rust
+pub struct Psi { /* avg10, avg60, avg300, total_us */ }
+pub struct Reading { pub ts_ns: u64, pub some: Psi, pub full: Option<Psi> }
+impl Reading {
+    pub fn parse(text: &str, ts_ns: u64) -> Option<Self>;
+    pub fn average_attrs(&self) -> Vec<Attr>;
+}
+```
+
+The `full` line stays optional there for the reason both copies already give:
+a cgroup on an older kernel writes no `full` line, and zero would claim nothing
+was ever fully stalled.
+
+Not urgent, and worth doing before the fourth copy rather than after.

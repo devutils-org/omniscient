@@ -85,6 +85,149 @@ published on the run's tick since it was written. Reading and publishing are now
 separate: the collectors read whenever they are asked and publish on the grid
 the request named.
 
+### Six sources that needed no privileges, and what each one is not
+
+The cheapest breadth in the project, and the reason it kept being skipped is
+that none of it is interesting until you write down what each number is *not*.
+
+`mem.pressure` is the only source in this family that is not a quantity of
+memory: it is time lost because there was not enough. `some` and `full` are not
+two precisions of one number -- `some` is at least one task stalled, `full` is
+every runnable task stalled, which is the machine having stopped -- and the gap
+between them is the diagnosis. A poll divides the counter's increase by its own
+window; a snapshot observes no window and reports the kernel's decayed averages
+under their own names, which is the convention `io.pressure` set.
+
+`mem.swap` measures the **flow**, not the stock. A cgroup that paged a gigabyte
+out and read it all back has a flow of two gigabytes and a stock of nothing, and
+`memory.swap.current` -- which is what the catalog's requirement names -- reports
+the second. So the flow comes from `pswpin`/`pswpout`, in `/proc/vmstat` for the
+machine and in the cgroup's own `memory.stat` for a cgroup, and the stock rides
+along as `swapped_bytes`. Those two counters are in *pages* while almost every
+neighbouring field in both files is in bytes or kilobytes; getting that wrong
+scales the answer by the page size and looks entirely plausible.
+
+`mem.thp` reports the PMD-sized huge page and says so on every event. Recent
+kernels also allocate smaller multi-size huge pages -- 16 KiB through 1 MiB on
+this machine -- and count each size in its own directory; adding them up would
+give a "number of huge pages" that is a quantity of nothing, which is the same
+mistake as reading a fault count as an amount of memory. The per-size statistics
+arrived in 6.8, so the `fs:sys` backend requires `kernel>=6.8` and older kernels
+fall through to `/proc/vmstat` -- which counts the same promotions and cannot see
+the configured mode, which is exactly what its `degraded` line says.
+
+`mem.cgroup` is not a footprint. Page cache the process read is charged there
+and is in nobody's RSS; kernel memory -- stacks, page tables, slab -- is charged
+there and appears in no userspace footprint at all; a page shared across cgroups
+is charged once, to whoever faulted it first. It is also the number the OOM
+killer compares against, which is why it is worth having beside the three
+footprints rather than instead of them.
+
+`mem.numa` through `numa_maps` is page *placement*, not accesses: a page on the
+wrong node that is never touched costs nothing, and this backend cannot tell the
+two apart. It emits one event per node, never a locality ratio computed from
+placement.
+
+`mem.wss` is the only one that changes what it measures, and it earns its place
+anyway: resident size says how much memory a process has, and this says how much
+of it the process uses. On the example session that ships with it, a program
+holding 265 MiB and walking 16 MiB of them reports 265 MiB of RSS flat and
+16-19 MiB of working set, every window.
+
+### A zero-filled page is never written to a swap device
+
+The best surprise of this stream, and it was found by a test disagreeing with a
+hand-run of the same thing.
+
+Forcing a cgroup to swap with a Python `bytearray` moves `memory.swap.current`
+to 170 MB and leaves the cgroup's `pswpout` at **1**. The same arrangement with
+a child that writes `0xA5` into every page moves `pswpout` by 41 110 pages --
+160 MiB -- for the same 170 MB of stock. The kernel notices a page of zeros on
+its way to being reclaimed, records that it was zero, and writes nothing: the
+page is counted in `swpout_zero` instead, and read back from nowhere on the next
+fault.
+
+Two consequences. The flow and the stock disagreeing is not a bug, and
+`mem.swap` says so in a caveat and carries `out_zero_bytes` beside `out_bytes`
+so that the gap is visible rather than inferred. And a swap test that allocates
+a `bytearray` measures nothing: it would pass a collector reading entirely the
+wrong field. `Scratch::spawn_toucher` fills with `0xA5` for that reason, and
+`spawn_zero_toucher` exists to make the difference the subject of its own test.
+
+### A cgroup path is not a target, and the root cgroup is a different answer
+
+`mem.cgroup --pid`, `mem.swap --pid` and `mem.pressure --pid` all resolve the
+process's own cgroup out of `/proc/[pid]/cgroup`, because "what is this
+container charged?" is the question people are asking when they name a process.
+`0::/` is not a parse failure: it is a process nobody moved, and it resolves to
+the hierarchy root like any other path.
+
+The root is then refused, by name, for `mem.cgroup` alone: the kernel does not
+charge the root cgroup and publishes no `memory.current` there. `memory.stat`
+and `memory.pressure` *do* exist at the root, so the other two answer for the
+machine through the cgroup file -- which is the same number by another route,
+and the event says which file it came from.
+
+### A working set cannot be measured without perturbing the thing measured
+
+There is no counter for a working set. The kernel keeps a referenced bit per
+page for its own reclaim decisions, and the only way to read a working set is to
+clear the bit, wait, and see which pages got it back. Two consequences, both of
+which reach the user rather than living here:
+
+The clear is process-wide and visible. A second reader of the same process sees
+windows it did not open, and there is no way to take this measurement privately.
+
+The bit is reclaim's own input. Clearing it makes every page of the process look
+cold until the process touches it again, so under memory pressure this is a
+measurement that causes eviction. The run says so in a `note`, which reaches the
+output beside the numbers, and the source says so in a caveat, which reaches the
+user with the request.
+
+The `page_idle` backend the catalog prefers has neither problem and cannot be
+written for an unprivileged user at all: the bitmap is root-only, and an
+unprivileged reader of `/proc/[pid]/pagemap` is handed zeroed page frame
+numbers, which index nothing. It needs `CAP_SYS_ADMIN` twice over. That is why
+`fs:proc:clear_refs` was added to the chain rather than `page_idle` being
+implemented against a machine that cannot run it.
+
+### The suite is the trap, again
+
+Three of these tests were first written against the test binary's own address
+space, and two of them failed for the same reason: `cargo test` runs its tests
+in parallel threads of one process, and a dozen of them hold hundreds of
+megabytes at once.
+
+`mem.numa`'s first ground truth touched 64 MiB and watched the per-node
+residency grow by 42 MiB, because other tests freed 22 MiB in between. It now
+measures a forked child that touches a known amount and then holds still, and
+checks two things that are not this code's arithmetic: the residency accounts
+for what the child made resident, and summed over the nodes it equals the
+`Rss:` the kernel publishes in `smaps_rollup` -- the same pages, counted by a
+different subsystem through a different file.
+
+`mem.wss`'s end-to-end test failed on its *quietest* window, which under a
+loaded suite is a starved interpreter rather than a small working set. It now
+compares the busiest interior window, which is the window the claim is actually
+about, and excludes the last point outright: the program's exit truncates that
+window, so it holds a fraction of an interval's work and is not a rate over one.
+
+### Causing the thing, rather than waiting for it
+
+Four of the six have ground truth that needed the condition to be *made*, and
+systemd delegates enough to make it without privileges: `user@<uid>.service` is
+owned by the user, so a cgroup created under it can be given a `memory.max` and
+a process.
+
+That is the whole apparatus behind these tests. A cgroup limited to 32 MiB with
+a process touching 192 MiB inside it has to reclaim continuously -- which is
+memory pressure by construction, and `mem.pressure` reads a stall where the same
+collector on the same empty cgroup a moment earlier read none. The same
+arrangement forces swap, and what `mem.swap` reports is then checked against two
+other accountings of the same event: `memory.swap.current`, and the process's
+own `Swap:` line in `smaps_rollup`, which is the same fact counted by a
+different subsystem and keyed on the process rather than on the cgroup.
+
 ## Needs from the shared layer
 
 ### `src/perf.rs`: the page-fault sampling test is flaky under a parallel suite
@@ -133,6 +276,13 @@ does not need two sources.
 
 ### A run binds one pid, so the machine-wide sources of this family cannot start
 
+**Closed.** `Prepared::attach` takes the whole `Target`, and `mem.thp`,
+`mem.swap`, `mem.pressure` and `mem.cgroup` are written against it: each refuses
+by name the targets it cannot serve, and `mem.cgroup`'s refusal for a `system`
+target names the source that *can* measure a process. What follows is kept for
+the reasoning.
+
+
 `run_all` resolves the target to a single pid and refuses anything else, so
 `mem.thp`, `mem.swap` and `mem.pressure` — which are `system` sources reading
 `/sys/kernel/mm/transparent_hugepage`, `/proc/vmstat` and
@@ -146,10 +296,15 @@ sources of this family, and every source of `power`, plus most of `net`.
 
 ## What is still blocked, and on what
 
+Thirteen of this family's twenty-three sources now collect. What is left, and
+why:
+
 | Sources | Blocked on |
 |---|---|
-| `thp`, `swap`, `pressure`, `cgroup` | a target that is not a pid (above) |
-| `cache_l1`, `cache_llc`, `cache_tlb`, `bandwidth`, `latency`, `sharing`, `numa` | the perf layer in counting mode, hardware events and uncore PMUs |
-| `wss` | `page_idle` and DAMON probe classes |
-| `page_alloc`, `kmalloc`, `reclaim`, `compaction` | the eBPF layer, Wave 2 |
-| `heap.alloc` by call site | stack capture and symbolisation |
+| `cache_l1`, `cache_llc`, `cache_tlb` | rows in `cpu/counters.rs`'s `SPECS` using `PERF_TYPE_HW_CACHE`. They are named `mem.*` and they belong to whoever owns the counters table; the mechanism decides. |
+| `bandwidth` | uncore PMUs: a different sysfs layout and a different privilege story. Package-scoped, so `--pid` must be refused rather than degraded. |
+| `latency`, `sharing` | PEBS load-latency and IBS: `perf_event_open` sampling with a data-source payload nothing in this build decodes yet. |
+| `numa` through `pmu` | the same PEBS data-source information. The `fs:proc` fallback is written and says plainly that it measures placement rather than accesses. |
+| `page_alloc`, `kmalloc`, `reclaim`, `compaction` | `bpf:tp`, which is the classic tracepoint attach the eBPF layer does not have. |
+| `wss` through `page_idle` and DAMON | `CAP_SYS_ADMIN`, twice over for `page_idle` (see above), and a DAMON probe class nothing answers. The `fs:proc:clear_refs` backend serves an unprivileged user today. |
+| `heap.alloc` by call site | stack capture, which exists now; wiring the shim's frames through it has not been done. |

@@ -1,0 +1,42 @@
+# How much of what it holds does a program actually use?
+#
+#   omn -f examples/mem-working-set.yml
+#
+# Resident size is the number everybody quotes and the one that decides nothing
+# on its own. A service holding four gigabytes and touching two hundred
+# megabytes of them every second is not short of memory, and moving it to a
+# larger machine changes nothing; a service holding the same four gigabytes and
+# walking all of them is a different problem with the same RSS.
+#
+# The two numbers here are what tells them apart:
+#
+#   mem.rss   what the process has in memory
+#   mem.wss   what it touched during the last window -- measured by clearing the
+#             kernel's referenced bits and reading back which pages got them again
+#
+# Read the second as a fraction of the first. Near one means the program is
+# using what it holds. Far below one means the rest is ballast: it is paged in,
+# it counts against every limit, and nothing is reading it.
+#
+# Two things to know before believing the number. The first window is always
+# large, because it contains the program making its memory resident in the
+# first place -- that is a real working set and it is not the steady state.
+# And this measurement perturbs: clearing the referenced bits is process-wide,
+# visible to anything else reading them, and makes every page of the process
+# look cold to the kernel's own reclaim for as long as it takes the program to
+# touch them again.
+name: how much of what it holds does it use
+format: text
+
+requests:
+  - label: held
+    source: mem.rss
+    target: {launch: [python3, -c, "import time\nheld = bytearray(256 * 1024 * 1024)\nworking = memoryview(held)[:16 * 1024 * 1024]\ndeadline = time.time() + 3\nwhile time.time() < deadline:\n    for offset in range(0, len(working), 4096):\n        working[offset] = 1\n"]}
+    mode: poll@250ms
+    emit: [timeline, summary]
+
+  - label: touched
+    source: mem.wss
+    target: {launch: [python3, -c, "import time\nheld = bytearray(256 * 1024 * 1024)\nworking = memoryview(held)[:16 * 1024 * 1024]\ndeadline = time.time() + 3\nwhile time.time() < deadline:\n    for offset in range(0, len(working), 4096):\n        working[offset] = 1\n"]}
+    mode: poll@250ms
+    emit: [timeline, summary]
