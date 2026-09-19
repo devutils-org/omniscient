@@ -173,8 +173,13 @@ How long to observe. Required unless a program is launched or the mode is
 .TP
 .BI \-b ", " \-\-budget " PERCENT"
 An overhead ceiling, as
-.BR 2% .
-Parsed and recorded; not yet enforced.
+.BR 2% ,
+read as a percentage of the observed workload's own CPU time. The run weighs
+itself ten times a second against that; over the ceiling it moves to a cheaper
+backend in the chain, or, where there is none, stops. Either way the reason is
+in
+.I stopped_because
+and on standard error. Every run reports what it cost, budget or no budget.
 .TP
 .BI \-\-stack " MODE"
 .BR fp ", " dwarf ", " lbr " or " none .
@@ -224,7 +229,9 @@ when the extension does not say or the input is standard input.
 .BI \-\-backend " force:ID"
 Pin a backend instead of resolving one. For the comparison bench: a result
 obtained this way is not the result the tool would have produced, and the record
-says so.
+says so. A session naming one source several times, each pinned to a different
+backend, is the self-benchmark: one target, one window, and a table of what each
+backend cost and whether they agreed.
 .TP
 .BI \-\-catalog " DIR"
 Load the catalog from a directory instead of the one compiled in. For iterating
@@ -339,6 +346,12 @@ The backend selected, every requirement and how it was probed, what was
 degraded, and the machine's kernel, governor, THP mode, SMT state and
 clocksource. Two measurements taken through different backends are not
 comparable, and this is what says which was used.
+.TP
+.I <out>/cost.json
+What the measurement itself cost: the CPU time this tool burned, the CPU time
+the target burned over the same window and where that number was read, what
+weighing the run cost, and the band the backend declared set beside the
+percentage it actually came to.
 .SH EXAMPLES
 .TP
 Resident memory of a program, as it runs:

@@ -184,7 +184,14 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    measure(&catalog, &session, &report, &defaulted, &resolutions)
+    measure(
+        &catalog,
+        &capabilities,
+        &session,
+        &report,
+        &defaulted,
+        &resolutions,
+    )
 }
 
 /// Whether a refusal means "this build does not do that yet" rather than
@@ -204,20 +211,19 @@ fn not_built_yet(error: &collect::CollectError) -> bool {
     )
 }
 
-/// What `--budget` did, which today is nothing, said out loud.
+/// What `--budget` implies before anything has been measured.
 ///
-/// The flag is parsed, validated and carried into the resolved request, and
-/// the resolver does not yet consult it. A reader who passes `--budget 1%` and
-/// sees a measurement come back has been told, by omission, that the overhead
-/// was under one percent -- so the omission is the bug, not the missing
-/// enforcement. Until phase 8 measures what a backend actually costs, this
-/// says what the declared costs imply and what enforcement would have to
-/// change.
+/// The flag is now enforced against a measurement, and the measurement does not
+/// exist until the run is over -- so this is the part that can be said in
+/// advance: what the selected backend *declares* it costs, whether that claim
+/// fits the ceiling, and what the run will do if the measurement agrees. It is
+/// printed on the dumps too, where the reader is deciding whether the request
+/// says what they meant.
 ///
-/// The comparison is against the *worst case* of the band a backend declares:
-/// `med` means "1 to 5 %", so it fits a 5 % budget and cannot be promised
-/// against a 2 % one. Erring the other way would let a budget look satisfied
-/// by a backend that may well exceed it.
+/// The comparison is against the *worst case* of the declared band: `med` means
+/// "1 to 5 %", so it fits a 5 % budget and cannot be promised against a 2 % one.
+/// Erring the other way would let a budget look satisfied by a backend that may
+/// well exceed it.
 fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> {
     let budget = resolved.request.budget?;
     let source = &resolved.request.source;
@@ -226,8 +232,8 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
 
     if worst_case_percent(selected.cost) <= ceiling {
         return Some(format!(
-            "[{source}] --budget {budget} is recorded and not yet enforced; `{}` declares \
-             `{}` ({}), which is within it, so enforcing it would change nothing here",
+            "[{source}] --budget {budget}: `{}` declares `{}` ({}), which is within it. \
+             What it actually cost is measured over the run and reported when it ends",
             selected.id,
             selected.cost,
             band(selected.cost),
@@ -248,17 +254,16 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
 
     Some(match cheaper.as_slice() {
         [] => format!(
-            "[{source}] --budget {budget} is recorded and not yet enforced; `{}` declares `{}` \
-             ({}), and nothing below it in the chain declares less, so enforcement could only \
-             refuse this request",
+            "[{source}] --budget {budget}: `{}` declares `{}` ({}), and nothing below it in the \
+             chain declares less, so a run that exceeds the ceiling will stop rather than degrade",
             selected.id,
             selected.cost,
             band(selected.cost),
         ),
         candidates => format!(
-            "[{source}] --budget {budget} is recorded and not yet enforced; `{}` declares `{}` \
-             ({}), so enforcement would degrade onto {} -- which was never probed, because a \
-             better backend was selected first",
+            "[{source}] --budget {budget}: `{}` declares `{}` ({}), so a run that exceeds the \
+             ceiling will degrade onto {} -- which was never probed, because a better backend \
+             was selected first",
             selected.id,
             selected.cost,
             band(selected.cost),
@@ -267,12 +272,216 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
     })
 }
 
+/// The backends a budget may fall back onto, resolved against this machine.
+///
+/// The runner knows it is over budget and nothing else. What is cheaper than
+/// the backend in use is a question about the catalog, and whether this machine
+/// can serve it is a question for the resolver; both live here, which is what
+/// keeps `src/collect/` from reaching back into either.
+///
+/// The candidates are the backends *below* the selected one in the chain. The
+/// ones above were rejected by this machine and a budget cannot make them
+/// reachable; the ones below were never probed, because a better backend was
+/// selected first -- so each is resolved for real before it is offered, and one
+/// this build has no collector for is not offered at all.
+struct Ladder<'a> {
+    catalog: &'a Catalog,
+    capabilities: &'a Capabilities,
+    /// The resolved request each collection is being served by, replaced when a
+    /// budget moves it. This, not the file written before the run, is what
+    /// names the backend that produced the numbers.
+    serving: Vec<ResolvedRequest>,
+}
+
+impl<'a> Ladder<'a> {
+    fn new(
+        catalog: &'a Catalog,
+        capabilities: &'a Capabilities,
+        resolved: &[ResolvedRequest],
+    ) -> Self {
+        Self {
+            catalog,
+            capabilities,
+            serving: resolved.to_vec(),
+        }
+    }
+
+    /// The resolved request that was serving collection `index` when the run
+    /// ended, which is the one to keep beside its numbers.
+    ///
+    /// A degradation that could not be started leaves the run on the backend it
+    /// had, and `self.serving` has already moved on; the collection is the only
+    /// thing that knows which backend actually produced the events, so it is
+    /// the one asked.
+    fn record(&self, index: usize, backend: &str, original: &ResolvedRequest) -> ResolvedRequest {
+        if original.backend.id == backend {
+            return original.clone();
+        }
+        if let Some(serving) = self.serving.get(index) {
+            if serving.backend.id == backend {
+                return serving.clone();
+            }
+        }
+        let mut amended = original.clone();
+        amended.backend.id = backend.to_owned();
+        amended
+    }
+
+    /// Every backend below `from` in the chain whose declared band fits the
+    /// ceiling, in chain order.
+    fn candidates(&self, source: &omn::request::SourceId, from: &str, ceiling: f64) -> Vec<String> {
+        self.catalog
+            .get(source)
+            .into_iter()
+            .flat_map(|entry| entry.backends.iter())
+            .skip_while(|backend| backend.id != from)
+            .skip(1)
+            .filter(|backend| worst_case_percent(backend.cost) <= ceiling)
+            .map(|backend| backend.id.clone())
+            .collect()
+    }
+}
+
+impl collect::Cheaper for Ladder<'_> {
+    fn next(
+        &mut self,
+        index: usize,
+        _spent: &collect::Overhead,
+        ceiling: f64,
+    ) -> Option<ResolvedRequest> {
+        let serving = self.serving.get(index)?.clone();
+        let source = serving.request.source.clone();
+        for id in self.candidates(&source, &serving.backend.id, ceiling) {
+            if !collect::implements(source.as_str(), &id) {
+                continue;
+            }
+            let Ok(pinned) = format!("force:{id}").parse() else {
+                continue;
+            };
+            let mut request = serving.request.clone();
+            request.backend = Some(pinned);
+            // Resolved for real: a backend further down the chain was never
+            // probed, and offering one this machine cannot serve would turn a
+            // budget into a failed run.
+            let Ok(resolved) = resolve::resolve(self.catalog, self.capabilities, &request) else {
+                continue;
+            };
+            self.serving[index] = resolved.clone();
+            return Some(resolved);
+        }
+        None
+    }
+}
+
+/// What one collection cost, as the record written beside the numbers.
+#[derive(Serialize)]
+struct MeasuredCost {
+    label: String,
+    source: String,
+    /// How the source was observed. It belongs beside the price because it is
+    /// most of what sets it: the same backend polled every millisecond and
+    /// every second costs a thousandfold different, and only one of those
+    /// numbers can be what a band declared per backend meant.
+    mode: String,
+    /// The backend that produced the events, which is not the one the resolved
+    /// file names when a budget moved the collection mid-run.
+    backend: String,
+    /// Every backend the collection ran through, in order. Longer than one only
+    /// when a budget degraded it part way through the window.
+    served_by: Vec<String>,
+    /// The band the catalog declares for that backend, so the claim and the
+    /// measurement sit side by side.
+    declared: &'static str,
+    declared_worst_case_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_percent: Option<f64>,
+    /// Whether the measurement came in under the ceiling. Absent when there was
+    /// no ceiling, or no workload to be a percentage of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    within_budget: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    measured_percent: Option<f64>,
+    overhead: collect::Overhead,
+    stopped_because: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
+}
+
+impl MeasuredCost {
+    /// The one line a reader gets for free at the end of every run.
+    fn line(&self) -> String {
+        let overhead = &self.overhead;
+        let against = match (overhead.observed_cpu_ns, self.measured_percent) {
+            (Some(observed), Some(percent)) => format!(
+                "against the target's {} ({percent:.2} %, declared `{}`)",
+                span(observed),
+                self.declared
+            ),
+            (Some(_), None) => format!(
+                "against a target that burned no cpu at all, so there is nothing for it to be \
+                 a percentage of ({})",
+                overhead.observed_from
+            ),
+            (None, _) => format!("against nothing measurable: {}", overhead.observed_from),
+        };
+        format!(
+            "{} ({}) via `{}` spent {} of cpu {against}, over {} of wall time; measuring that \
+             cost {} across {} read(s)",
+            self.source,
+            self.mode,
+            self.served_by.join("` then `"),
+            span(overhead.attributed_cpu_ns),
+            span(overhead.wall_ns),
+            span(overhead.measurement_ns),
+            overhead.measurements,
+        )
+    }
+
+    /// What the ceiling made of it, when there was one.
+    fn verdict(&self) -> Option<String> {
+        let budget = self.budget_percent?;
+        Some(match (self.within_budget, self.measured_percent) {
+            (Some(true), Some(percent)) => format!(
+                "[{}] --budget {budget}% held: {percent:.2} % measured",
+                self.source
+            ),
+            (Some(false), Some(percent)) => format!(
+                "[{}] --budget {budget}% was exceeded: {percent:.2} % measured over the whole \
+                 window. {}",
+                self.source, self.stopped_because
+            ),
+            _ => format!(
+                "[{}] --budget {budget}% could not be checked: {}",
+                self.source, self.overhead.observed_from
+            ),
+        })
+    }
+}
+
+/// Nanoseconds a human can read, down to the microsecond: what a budget check
+/// costs is measured there and rounding it away would hide the answer.
+fn span(ns: u64) -> String {
+    match ns {
+        0 => "nothing".to_owned(),
+        ns if ns < 1_000 => format!("{ns}ns"),
+        ns if ns < 1_000_000 => format!("{:.1}us", ns as f64 / 1e3),
+        ns if ns < 1_000_000_000 => format!("{:.1}ms", ns as f64 / 1e6),
+        ns => format!("{:.2}s", ns as f64 / 1e9),
+    }
+}
+
 /// The top of the overhead band a declared cost stands for, as `catalog::Cost`
 /// documents it. `extreme` is "over 10x" and no percentage bounds it.
+///
+/// `free` is documented as "a counter read, about zero", which as a number has
+/// to be *something*: at exactly zero the claim can never be met by any real
+/// measurement, so every `free` backend would read as having broken its own
+/// promise the moment the promise became checkable. A tenth of a percent is the
+/// reading that makes "about zero" an assertion rather than a figure of speech.
 fn worst_case_percent(cost: omn::catalog::Cost) -> f64 {
     use omn::catalog::Cost;
     match cost {
-        Cost::Free => 0.0,
+        Cost::Free => 0.1,
         Cost::Low => 1.0,
         Cost::Med => 5.0,
         Cost::High => 20.0,
@@ -283,7 +492,7 @@ fn worst_case_percent(cost: omn::catalog::Cost) -> f64 {
 fn band(cost: omn::catalog::Cost) -> &'static str {
     use omn::catalog::Cost;
     match cost {
-        Cost::Free => "about zero",
+        Cost::Free => "about zero, under 0.1 %",
         Cost::Low => "under 1 %",
         Cost::Med => "1 to 5 %",
         Cost::High => "5 to 20 %",
@@ -294,6 +503,7 @@ fn band(cost: omn::catalog::Cost) -> &'static str {
 /// Runs the session's requests over one window and prints what they produced.
 fn measure(
     catalog: &Catalog,
+    capabilities: &Capabilities,
     session: &Session,
     report: &Report,
     defaulted: &Defaulted,
@@ -306,7 +516,8 @@ fn measure(
         eprintln!("warning: {warning}");
     }
 
-    let collections = match collect::run_all(resolved) {
+    let mut ladder = Ladder::new(catalog, capabilities, resolved);
+    let collections = match collect::run_all_within(resolved, &mut ladder) {
         Ok(collections) => collections,
         Err(error) if not_built_yet(&error) => {
             eprintln!("error: {error}");
@@ -348,17 +559,25 @@ fn measure(
         results: Vec::new(),
         joins: Vec::new(),
     };
+    let mut costs: Vec<MeasuredCost> = Vec::new();
+    let mut served_by: Vec<ResolvedRequest> = Vec::new();
 
     for (index, collection) in collections.into_iter().enumerate() {
-        let resolved = &resolved[index];
+        // The record of how these events were obtained is the request that was
+        // serving when they arrived, which a budget may have moved. Handing
+        // `aggregate` the file written before the run would name a backend that
+        // stopped producing half way through it.
+        let serving = ladder.record(index, served_last(&collection), &resolved[index]);
         merged.extend(collection.events.iter().cloned());
         let unit = catalog
-            .get(&resolved.request.source)
+            .get(&serving.request.source)
             .map(|entry| entry.unit)
             .unwrap_or(omn::catalog::Unit::Count);
         let value_attr = collection.value_attr.clone();
+        costs.push(measured_cost(catalog, &serving, &collection));
         run.results
-            .push(emit::aggregate(resolved, collection, unit, &value_attr)?);
+            .push(emit::aggregate(&serving, collection, unit, &value_attr)?);
+        served_by.push(serving);
     }
 
     for rule in &session.joins {
@@ -381,19 +600,194 @@ fn measure(
         std::io::stdout().write_all(&output)?;
     }
 
+    // What the measurement cost, on every run rather than only on the ones that
+    // asked. A tool that reports what a program spends and never its own price
+    // is asking to be trusted about the one number it never shows.
+    for cost in &costs {
+        eprintln!("cost: {}", cost.line());
+        if let Some(verdict) = cost.verdict() {
+            eprintln!("budget: {verdict}");
+        }
+    }
+    if let Some(comparison) = compare_backends(&costs, &run.results) {
+        eprint!("{comparison}");
+    }
+
     for caveat in report.caveats() {
         eprintln!("caveat: {caveat}");
     }
 
     if let Some(directory) = &session.out {
-        write_artifacts(directory, session.format, resolved, &output)?;
+        write_artifacts(directory, session.format, &served_by, &costs, &output)?;
         eprintln!(
-            "\nwrote results and the resolved requests to {}",
+            "\nwrote results, the resolved requests and what they cost to {}",
             directory.display()
         );
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// The backend a collection ended on, which is the one its numbers came from.
+fn served_last(collection: &collect::Collection) -> &str {
+    collection
+        .served_by
+        .last()
+        .map(String::as_str)
+        .unwrap_or_default()
+}
+
+/// Pairs what one collection cost with what its backend claimed it would.
+fn measured_cost(
+    catalog: &Catalog,
+    resolved: &ResolvedRequest,
+    collection: &collect::Collection,
+) -> MeasuredCost {
+    let declared = catalog
+        .get(&resolved.request.source)
+        .and_then(|entry| entry.backend(served_last(collection)))
+        .map(|backend| backend.cost)
+        .unwrap_or(resolved.backend.cost);
+    let measured_percent = collection.overhead.percent();
+    let budget_percent = resolved.request.budget.map(|budget| budget.percent());
+    MeasuredCost {
+        label: resolved
+            .request
+            .label
+            .clone()
+            .unwrap_or_else(|| resolved.request.source.to_string()),
+        source: resolved.request.source.to_string(),
+        mode: resolved.request.mode.to_string(),
+        backend: served_last(collection).to_owned(),
+        served_by: collection.served_by.clone(),
+        declared: declared.as_str(),
+        declared_worst_case_percent: worst_case_percent(declared),
+        budget_percent,
+        within_budget: budget_percent
+            .and_then(|ceiling| measured_percent.map(|percent| percent <= ceiling)),
+        measured_percent,
+        overhead: collection.overhead.clone(),
+        stopped_because: collection.stopped_because.clone(),
+        notes: collection.notes.clone(),
+    }
+}
+
+/// The self-benchmark: one source measured through several backends at once,
+/// and what each of them cost.
+///
+/// Running one backend, then another, and comparing the two is *not* this. Two
+/// sequential runs observe two different workloads, and most of the difference
+/// between them is the difference between the moments. A session that names the
+/// same source twice with `--backend force:` puts both backends on the same
+/// target, in the same window, against the same clock -- which is the only
+/// arrangement in which "one cost more" and "they disagreed" mean anything.
+fn compare_backends(costs: &[MeasuredCost], results: &[emit::Results]) -> Option<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fmt::Write;
+
+    let mut by_source: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, cost) in costs.iter().enumerate() {
+        by_source
+            .entry(cost.source.as_str())
+            .or_default()
+            .push(index);
+    }
+
+    let mut out = String::new();
+    for (source, indices) in by_source {
+        let backends: BTreeSet<&str> = indices
+            .iter()
+            .map(|index| costs[*index].backend.as_str())
+            .collect();
+        if backends.len() < 2 {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "self-benchmark: `{source}` through {} backends, one target, one window",
+            backends.len()
+        );
+        let _ = writeln!(
+            out,
+            "  {:<24} {:>8} {:>10} {:>8} {:>14}",
+            "BACKEND", "DECLARED", "MEASURED", "EVENTS", "MEAN"
+        );
+        for index in &indices {
+            let cost = &costs[*index];
+            let _ = writeln!(
+                out,
+                "  {:<24} {:>8} {:>10} {:>8} {:>14}",
+                cost.backend,
+                cost.declared,
+                cost.measured_percent
+                    .map_or_else(|| "--".to_owned(), |percent| format!("{percent:.3} %")),
+                results[*index].events_seen,
+                summary_mean(&results[*index])
+                    .map_or_else(|| "--".to_owned(), |mean| format!("{mean:.4e}")),
+            );
+        }
+
+        let means: Vec<f64> = indices
+            .iter()
+            .filter_map(|index| summary_mean(&results[*index]))
+            .collect();
+        match means.as_slice() {
+            [] | [_] => {
+                let _ = writeln!(
+                    out,
+                    "  whether they agree was not checked: that needs `--emit summary` on each"
+                );
+            }
+            means => {
+                let low = means.iter().cloned().fold(f64::INFINITY, f64::min);
+                let high = means.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let spread = if high.abs() > 0.0 {
+                    (high - low) / high.abs() * 100.0
+                } else {
+                    0.0
+                };
+                let _ = writeln!(
+                    out,
+                    "  the backends agree to within {spread:.2} % on the value they report"
+                );
+            }
+        }
+
+        // The declared band is a claim; this is the line that checks it.
+        for index in &indices {
+            let cost = &costs[*index];
+            if let Some(percent) = cost.measured_percent {
+                if percent > cost.declared_worst_case_percent {
+                    let _ = writeln!(
+                        out,
+                        "  `{}` declares `{}` and measured {percent:.3} % at {}: a band is \
+                         declared per backend, and what a poll costs is set by how often it is \
+                         asked",
+                        cost.backend, cost.declared, cost.mode
+                    );
+                }
+            }
+        }
+    }
+
+    (!out.is_empty()).then_some(out)
+}
+
+/// One number for a whole result, so two backends can be asked whether they
+/// agree: the count-weighted mean over every series a `summary` produced.
+fn summary_mean(results: &emit::Results) -> Option<f64> {
+    let series = results.outputs.iter().find_map(|output| match output {
+        emit::Output::Summary { series } => Some(series),
+        _ => None,
+    })?;
+    let count: usize = series.iter().map(|one| one.count).sum();
+    (count > 0).then(|| {
+        series
+            .iter()
+            .map(|one| one.mean * one.count as f64)
+            .sum::<f64>()
+            / count as f64
+    })
 }
 
 /// Writes the numbers and, beside them, the record of how they were obtained.
@@ -404,6 +798,7 @@ fn write_artifacts(
     directory: &Path,
     format: OutputFormat,
     resolved: &[ResolvedRequest],
+    costs: &[MeasuredCost],
     encoded: &[u8],
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
@@ -411,6 +806,16 @@ fn write_artifacts(
         directory.join("resolved.json"),
         serde_json::to_string_pretty(resolved)?,
     )?;
+    // Always JSON, like `resolved.json` and for the same reason: what a
+    // measurement cost is part of its provenance, and a reader comparing two
+    // runs needs it in a shape a script can read.
+    std::fs::write(
+        directory.join("cost.json"),
+        serde_json::to_string_pretty(costs)?,
+    )?;
+    // The extension comes from the format rather than from a match here,
+    // because one of the nine is a gzipped protobuf whose bytes are not a
+    // `String` and whose extension is not its own name.
     std::fs::write(
         directory.join(format!("results.{}", format.extension())),
         encoded,

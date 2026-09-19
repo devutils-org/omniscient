@@ -4,11 +4,14 @@
 //! that cannot mean anything is refused (exit 2). A request that is valid and
 //! that this build cannot serve is unimplemented (exit 3), and no privilege,
 //! retry or different machine will change that. Anything else is a failure of
-//! this run (exit 1). A flag that is parsed and ignored is a fourth: it
-//! produces no exit code at all, and the silence reads as agreement.
+//! this run (exit 1).
 //!
 //! These are end-to-end on the binary, because the exit code and what goes to
 //! stderr are the whole of the contract a script sees.
+//!
+//! `--budget` used to be the fourth answer -- parsed, carried and consulted by
+//! nothing. It is enforced now, and what it says and does lives in
+//! `tests/budget.rs`.
 
 use std::process::{Command, Output};
 
@@ -120,131 +123,6 @@ fn a_request_that_cannot_mean_anything_is_still_refused_rather_than_deferred() {
         Some(EXIT_REJECTED),
         "stderr was: {}",
         stderr(&output)
-    );
-}
-
-/// `--budget` is parsed, validated, carried into the resolved request, and
-/// consulted by nothing. A caller who passes `--budget 0.1%` and gets numbers
-/// back has been told, by silence, that the overhead was under a tenth of a
-/// percent.
-///
-/// The check does not trust the wording: it asks the same question twice with
-/// budgets on either side of the band the backend declares, and requires the
-/// two answers to differ in the direction the numbers demand. `fs:tracefs`
-/// declares `med`, which is "1 to 5 %": 0.1 % cannot be met by it and 100 %
-/// obviously can.
-#[test]
-fn a_budget_that_enforces_nothing_says_so_and_says_what_it_would_have_changed() {
-    let ask = |budget: &str| {
-        let output = run(&[
-            "io.latency",
-            "--system",
-            "-m",
-            "trace",
-            "-e",
-            "hist",
-            "--budget",
-            budget,
-            "--dump-request",
-        ]);
-        assert!(output.status.success(), "{}", stderr(&output));
-        stderr(&output)
-    };
-
-    let tight = ask("0.1%");
-    assert!(
-        tight.contains("not yet enforced"),
-        "a flag that does nothing has to say it does nothing: {tight}"
-    );
-    assert!(
-        tight.contains("would degrade onto"),
-        "and what it would do once it does something: {tight}"
-    );
-
-    let loose = ask("100%");
-    assert!(
-        loose.contains("not yet enforced"),
-        "still not enforced: {loose}"
-    );
-    assert!(
-        loose.contains("would change nothing"),
-        "a budget nothing exceeds must not claim it would degrade anything: {loose}"
-    );
-}
-
-/// The third answer: a chain with nothing cheaper below the selected backend.
-/// Saying "it would degrade onto" there would name a backend that does not
-/// exist; the honest answer is that the budget and the request are
-/// incompatible.
-#[test]
-fn a_budget_no_backend_in_the_chain_can_meet_says_that_rather_than_inventing_one() {
-    let output = run(&[
-        "mem.heap.alloc",
-        "--pid",
-        "1",
-        "-e",
-        "summary",
-        "--budget",
-        "0.1%",
-        "--dump-request",
-    ]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    let note = stderr(&output);
-    assert!(
-        note.contains("could only refuse this request"),
-        "every backend of `mem.heap.alloc` declares med or high, so a 0.1 % budget has nowhere \
-         to go: {note}"
-    );
-}
-
-/// A request with no budget says nothing about one. The note exists because a
-/// silence was misleading; adding a different silence-shaped line to every
-/// other run would be its own noise.
-#[test]
-fn a_request_without_a_budget_is_not_told_about_budgets() {
-    let output = run(&[
-        "io.latency",
-        "--system",
-        "-m",
-        "trace",
-        "-e",
-        "hist",
-        "--dump-request",
-    ]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(!stderr(&output).contains("budget"), "{}", stderr(&output));
-}
-
-/// The help and the run must tell the same story about `--budget`.
-///
-/// The help used to read "the resolver degrades to stay under it and reports
-/// what it degraded", which describes a tool that does not exist. Someone
-/// reading only the help had every reason to believe a measurement came back
-/// within their ceiling. The two places that talk about the flag are checked
-/// against each other so that whoever implements enforcement has to change
-/// both, or this fails.
-#[test]
-fn the_help_and_the_run_agree_that_a_budget_is_not_enforced_yet() {
-    let help = String::from_utf8_lossy(&run(&["trace", "--help"]).stdout).into_owned();
-    assert!(
-        help.contains("Not yet enforced"),
-        "the help must not promise what the resolver does not do: {help}"
-    );
-
-    let note = stderr(&run(&[
-        "io.latency",
-        "--system",
-        "-m",
-        "trace",
-        "-e",
-        "hist",
-        "--budget",
-        "2%",
-        "--dump-request",
-    ]));
-    assert!(
-        note.contains("not yet enforced"),
-        "and the run must say the same thing the help says: {note}"
     );
 }
 

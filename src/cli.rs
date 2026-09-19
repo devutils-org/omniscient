@@ -123,8 +123,9 @@ pub struct TraceArgs {
     #[arg(short = 'd', long, value_name = "DURATION")]
     pub duration: Option<Duration>,
 
-    /// Overhead ceiling. Not yet enforced: recorded with the request, and reported
-    /// against what the chosen backend declares it costs.
+    /// Overhead ceiling, as a percentage of the observed workload's own CPU time.
+    /// Enforced against a measurement taken during the run: over it, the collection
+    /// moves to a cheaper backend or the run stops, and says which.
     #[arg(short = 'b', long, value_name = "PERCENT")]
     pub budget: Option<Budget>,
 
