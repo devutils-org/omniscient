@@ -1,9 +1,17 @@
 //! Collectors for the `mem` family.
 
 mod cadence;
+mod cgroup;
 mod footprint;
 pub mod heap;
+mod numa;
 mod page_faults;
+mod pressure;
+mod swap;
+#[cfg(test)]
+mod testing;
+mod thp;
+mod wss;
 
 use super::Factory;
 use footprint::{Metric, Source};
@@ -78,6 +86,51 @@ pub fn factories() -> Vec<Factory> {
                 Which::Retained,
                 resolved.request.mode,
             )?))
+        }),
+        Factory::new("mem.cgroup", "fs:cgroup", |resolved| {
+            Ok(Box::new(cgroup::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("mem.pressure", "fs:proc", |resolved| {
+            Ok(Box::new(pressure::Prepare::new(
+                pressure::Scope::Machine,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.pressure", "fs:cgroup", |resolved| {
+            Ok(Box::new(pressure::Prepare::new(
+                pressure::Scope::Cgroup,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.swap", "fs:proc", |resolved| {
+            Ok(Box::new(swap::Prepare::new(
+                swap::Scope::Machine,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.swap", "fs:cgroup", |resolved| {
+            Ok(Box::new(swap::Prepare::new(
+                swap::Scope::Cgroup,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.thp", "fs:sys", |resolved| {
+            Ok(Box::new(thp::Prepare::new(
+                thp::Source::Sys,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.thp", "fs:proc", |resolved| {
+            Ok(Box::new(thp::Prepare::new(
+                thp::Source::Proc,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.numa", "fs:proc", |resolved| {
+            Ok(Box::new(numa::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("mem.wss", "fs:proc:clear_refs", |resolved| {
+            Ok(Box::new(wss::Prepare::new(resolved.request.mode)?))
         }),
     ]
 }

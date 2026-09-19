@@ -69,10 +69,22 @@
     - {id: "fs:cgroup", requires: ["cgroup2:memory.current"], cost: free}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {cgroup: native, container: native}
+  targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}
   keys: [cgroup]
   filter_fields: []
   determinism: medium
+  caveats:
+    - "A pid names a cgroup here: the process's own cgroup is resolved and the
+       whole of it is reported, which includes every other process placed there.
+       This is the number the OOM killer compares against, and it is not a
+       property of the process."
+    - "This is not a footprint. Page cache the process read is charged here and
+       is in nobody's RSS; kernel memory -- stacks, page tables, slab -- is
+       charged here and appears in no userspace footprint at all; and a page
+       shared across cgroups is charged once, to whoever faulted it first."
+    - "The root cgroup is not accounted: it publishes no memory.current, so a
+       process that nobody moved into a cgroup is refused rather than answered
+       with the machine's total."
 
 - id: mem.faults
   family: mem
@@ -284,15 +296,21 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:pebs:mem-loads"], cost: med}
-    - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: free,
-       targets: {pid: native, launch: native}, filter_fields: [comm, node],
-       degraded: "page placement, not accesses"}
+    - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: low,
+       targets: {pid: native, tid: native, launch: native}, filter_fields: [comm, node],
+       degraded: "page placement, not accesses: a page on the wrong node that is never touched costs nothing, and this cannot tell the two apart"}
   modes: [sample, poll]
   emits: [topk, hist, raw, summary, timeline]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
   keys: [task, mem, cpu]
   filter_fields: [comm, cpu, node]
   determinism: low
+  caveats:
+    - "One event per node, never a locality ratio computed from placement: a
+       process with two thirds of its pages on node 0 may be doing all of its
+       work from node 1, and one number would hide exactly that."
+    - "numa_maps counts each mapping in its own page size, so a transparently
+       promoted region is counted in 2 MiB pages and not in 4 KiB ones."
 
 - id: mem.wss
   family: mem
@@ -300,14 +318,32 @@
   unit: bytes
   backends:
     - {id: "fs:sys:damon", requires: ["damon"], cost: low}
-    - {id: "fs:sys:page_idle", requires: ["/sys/kernel/mm/page_idle"], cost: low,
+    - {id: "fs:sys:page_idle", requires: ["/sys/kernel/mm/page_idle/bitmap", "/proc/[pid]/pagemap"], cost: low,
        degraded: "expensive scan, perturbs reclaim"}
+    - {id: "fs:proc:clear_refs", requires: ["/proc/[pid]/smaps_rollup"], cost: low,
+       targets: {pid: native, tid: native, launch: native},
+       degraded: "one number for the whole process, not which pages: the kernel's referenced bits are cleared and Referenced: is read back, so the working set is a size and not a set"}
   modes: [poll]
   emits: [timeline, raw, summary]
-  targets: {system: native, cgroup: native, pid: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
   keys: [task, cgroup, mem]
   filter_fields: []
   determinism: medium
+  caveats:
+    - "This measurement changes what it measures. Clearing the referenced bits
+       is process-wide and visible to anything else reading them, and it is the
+       kernel's own input to reclaim: for as long as it takes the process to
+       touch its pages again, all of them look cold."
+    - "A snapshot is refused. A working set is what gets touched over a window,
+       and a single read observes none."
+    - "page_idle needs CAP_SYS_ADMIN twice over -- the bitmap is root-only, and
+       an unprivileged reader of /proc/[pid]/pagemap is handed zeroed page frame
+       numbers, which index nothing."
+    - "clear_refs also needs /proc/[pid]/clear_refs to be writable, which it is
+       for this user's own processes and is not for anyone else's. It is not in
+       the requirements above because a requirement is probed by reading, and
+       clear_refs is write-only; the refusal happens at attach instead, and says
+       so."
 
 - id: mem.reclaim
   family: mem
@@ -340,7 +376,7 @@
   summary: "Transparent huge pages: promotions and current mode"
   unit: count
   backends:
-    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage"], cost: free}
+    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "kernel>=6.8"], cost: free}
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free,
        degraded: "promotion counters only, not the configured mode"}
   modes: [poll, snapshot]
@@ -351,6 +387,12 @@
   determinism: low
   caveats:
     - "The THP mode must be frozen and logged just like clock frequencies."
+    - "This is the PMD-sized huge page, and every event says how large that is.
+       Recent kernels also allocate smaller multi-size huge pages and count each
+       size apart; adding the sizes together would give a number of huge pages
+       that is a quantity of nothing."
+    - "The counters are the machine's. A promotion cannot be attributed to a
+       process, which is why the only target is the machine."
 
 - id: mem.swap
   family: mem
@@ -359,13 +401,29 @@
   backends:
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, targets: {system: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current"], cost: free, equivalent: true,
-       targets: {cgroup: native, container: native}}
+       targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
   modes: [poll, snapshot]
   emits: [timeline, rate, raw, summary]
-  targets: {system: native, cgroup: native, container: native}
+  targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
   keys: [cgroup]
   filter_fields: []
   determinism: low
+  caveats:
+    - "What moved is not what is out. This source measures the flow -- pages
+       written to, or read back from, a swap device during the window -- because
+       that is what costs time. The stock is carried beside it as
+       swapped_bytes where the kernel publishes one, and a cgroup that paged a
+       gigabyte out and read it all back has a flow of two gigabytes and a stock
+       of nothing."
+    - "pswpin and pswpout are in pages, while almost every neighbouring counter
+       in the same files is in bytes or in kilobytes."
+    - "A zero-filled page is never written to a swap device. The kernel records
+       that it was zero and counts it in swpout_zero, reported here as
+       out_zero_bytes, so a process that allocates a gigabyte and leaves it
+       untouched grows swapped_bytes by a gigabyte with no traffic at all. The
+       flow and the stock disagreeing is not a bug."
+    - "A pid names a cgroup for the fs:cgroup backend: swap is accounted per
+       cgroup, never per process."
 
 - id: mem.pressure
   family: mem
@@ -374,10 +432,25 @@
   backends:
     - {id: "fs:proc", requires: ["/proc/pressure/memory"], cost: free, targets: {system: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:memory.pressure"], cost: free, equivalent: true,
-       targets: {cgroup: native, container: native}}
+       targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {system: native, cgroup: native, container: native}
+  targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
   keys: [cgroup]
   filter_fields: []
   determinism: low
+  caveats:
+    - "`some` and `full` are not two precisions of one number. `some` is time
+       during which at least one task was stalled on memory; `full` is time
+       during which every runnable task was, which is the machine having
+       stopped. The gap between them is the diagnosis."
+    - "A poll reports the share of its own window, computed from the counter.
+       A snapshot observes no window and reports the kernel's decayed averages
+       under their own names -- they describe the last ten seconds to five
+       minutes, which overlaps the run without being about it."
+    - "Absent is not zero: a kernel built without CONFIG_PSI and a machine under
+       no memory pressure are different answers, and only the second is a
+       number."
+    - "A pid names a cgroup here: pressure is accounted per cgroup, never per
+       process."
+
