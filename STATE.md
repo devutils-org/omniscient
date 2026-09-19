@@ -32,7 +32,7 @@ expensive parts are done.
 ## What the numbers say
 
 ```
-100 sources: 79 usable here, 15 unverified, 6 out of reach on this machine.
+100 sources: 80 usable here, 15 unverified, 5 out of reach on this machine.
 44 of them have a collector, covering 48 of their 165 backends.
 ```
 
@@ -40,11 +40,11 @@ Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 79 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this machine serve? | 80 | probed now: the file is readable, the event opens, the tracepoint is there |
 | What can this build collect? | 44 sources, 48 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `79` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. The same
+That `80` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. The same
 binary without them reports `53`: the difference is the whole eBPF and per-cpu
 perf surface, and it is why `make` reapplies the capabilities that every relink
 drops. Nothing announces the loss — the tool reports fewer sources, which reads
