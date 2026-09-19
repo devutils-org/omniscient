@@ -49,10 +49,19 @@
   summary: "Run queue wait: wakeup -> on-CPU"
   unit: ns
   backends:
+    # The same two events, attached the way this tool attaches: by name,
+    # through BPF_RAW_TRACEPOINT_OPEN, against the kernel's own BTF. The
+    # classic path below needs a numeric id out of tracefs and sees exactly
+    # the same events, which is the ordering DECISIONS.md settled.
+    - id: "bpf:raw_tp"
+      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup", "raw_tracepoint:sched_switch", "kernel>=6.1"]
+      join: {key: "task:tid", match: eq, ttl: 10s}
+      cost: med
     - id: "bpf:tp"
       requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_switch", "bpf"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
+      equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only, container: bpf_only}
@@ -110,7 +119,8 @@
   summary: "Context switches"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
        degraded: "one sample per switch for the observed task, with no second party:
                   it says a switch happened and when, never what ran next or why
@@ -124,14 +134,16 @@
   caveats:
     - "A switch count is a symptom, not a cause: a voluntary switch is a task
        blocking on something and an involuntary one is the scheduler taking the
-       cpu away. Only `bpf:tp` can tell them apart; `pmu:sw` counts both as one."
+       cpu away. Only a `sched_switch` backend can tell them apart, because only
+       it sees the outgoing task's state; `pmu:sw` counts both as one."
 
 - id: sched.migrations
   family: sched
   summary: "Task migrations between cores"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
@@ -144,7 +156,8 @@
   summary: "Kernel lock contention"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin", "raw_tracepoint:contention_end", "kernel>=6.1"], cost: med}
+    - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med, equivalent: true}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "older kernels: futex and uprobe fallback, partial coverage"}
   modes: [trace]
@@ -159,7 +172,8 @@
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
   targets: {pid: native, tid: native, launch: native, cgroup: bpf_only}
@@ -187,7 +201,8 @@
   summary: "Time spent in hard and soft interrupt handlers"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "bpf"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry", "raw_tracepoint:irq_handler_exit", "kernel>=5.8"], cost: med}
+    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cpu: native}
@@ -200,7 +215,8 @@
   summary: "Automatic NUMA balancing decisions"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native}
