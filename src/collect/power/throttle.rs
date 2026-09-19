@@ -16,11 +16,12 @@
 //! still: the catalog requires the file, and a machine without it is told that
 //! this source is out of reach here.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event};
+use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
 use super::sysfs;
@@ -69,11 +70,15 @@ impl Prepared for Prepare {
 }
 
 /// Throttle counts summed over the cpus being watched.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Reading {
     ts_ns: u64,
-    core: u64,
-    package: u64,
+    /// Per cpu, not summed. A machine-wide throttle count says a core was held
+    /// back somewhere; which core is the question, because a single core
+    /// throttling under an AVX-512 licence and a package throttling under a
+    /// thermal limit are different problems with the same total. `cpu` is also
+    /// a declared filter field here, which a sum cannot carry.
+    per_cpu: BTreeMap<u32, (u64, u64)>,
 }
 
 pub struct Throttling {
@@ -113,8 +118,7 @@ impl Throttling {
     fn read(&mut self) -> Result<Reading, SampleError> {
         let mut reading = Reading {
             ts_ns: 0,
-            core: 0,
-            package: 0,
+            per_cpu: BTreeMap::new(),
         };
         let mut read_any = false;
         for &cpu in &self.cpus {
@@ -125,12 +129,18 @@ impl Throttling {
             // A cpu that has the directory but not one of the counters is not
             // the same as a cpu with no counters: the package count is absent
             // on parts that report throttling per core only.
+            let mut counts = (0u64, 0u64);
+            let mut seen = false;
             if let Ok(core) = sysfs::number(&directory.join("core_throttle_count")) {
-                reading.core += core;
-                read_any = true;
+                counts.0 = core;
+                seen = true;
             }
             if let Ok(package) = sysfs::number(&directory.join("package_throttle_count")) {
-                reading.package += package;
+                counts.1 = package;
+                seen = true;
+            }
+            if seen {
+                reading.per_cpu.insert(cpu, counts);
                 read_any = true;
             }
         }
@@ -174,39 +184,42 @@ impl Collector for Throttling {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let after = self.read()?;
-        let Some(before) = self.previous.replace(after) else {
+        let Some(before) = self.previous.replace(after.clone()) else {
             // The first read is a baseline: the counts it holds are from boot.
             return Ok(Vec::new());
         };
         let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        let (Some(core), Some(package)) = (
-            after.core.checked_sub(before.core),
-            after.package.checked_sub(before.package),
-        ) else {
-            self.losses.undecoded += 1;
-            self.losses.note(
-                "a throttle counter went backwards, which means a cpu went offline and came back; \
-                 this interval cannot be attributed"
-                    .to_owned(),
-            );
-            return Ok(Vec::new());
-        };
-
-        Ok(vec![Event {
-            ts_ns: after.ts_ns,
-            ts_err_ns: 0,
-            kind: "power.throttle".to_owned(),
-            keys: Vec::new(),
-            attrs: vec![
-                Attr::uint("throttles", core + package),
-                Attr::uint("core_throttles", core),
-                Attr::uint("package_throttles", package),
-                Attr::uint("cpus", self.covered() as u64),
-                Attr::uint("interval_ns", interval_ns),
-            ],
-            collector_id: self.id.clone(),
-            seq,
-        }])
+        let mut events = Vec::new();
+        for (cpu, (core_after, package_after)) in &after.per_cpu {
+            let (core_before, package_before) = before.per_cpu.get(cpu).copied().unwrap_or((0, 0));
+            let (Some(core), Some(package)) = (
+                core_after.checked_sub(core_before),
+                package_after.checked_sub(package_before),
+            ) else {
+                self.losses.undecoded += 1;
+                self.losses.note(format!(
+                    "the throttle counter for cpu{cpu} went backwards, which means it went \
+                     offline and came back; this interval cannot be attributed"
+                ));
+                continue;
+            };
+            events.push(Event {
+                ts_ns: after.ts_ns,
+                ts_err_ns: 0,
+                kind: "power.throttle".to_owned(),
+                keys: vec![KeyValue::cpu(*cpu)],
+                attrs: vec![
+                    Attr::uint("throttles", core + package),
+                    Attr::uint("core_throttles", core),
+                    Attr::uint("package_throttles", package),
+                    Attr::uint("cpu", u64::from(*cpu)),
+                    Attr::uint("interval_ns", interval_ns),
+                ],
+                collector_id: self.id.clone(),
+                seq: seq + events.len() as u64,
+            });
+        }
+        Ok(events)
     }
 
     fn losses(&self) -> Losses {
@@ -261,17 +274,16 @@ mod tests {
         }
         let events = collector.sample(1).expect("a second read");
 
-        assert_eq!(events.len(), 1);
-        // Three more on each of the two cpus.
-        assert_eq!(events[0].attr("throttles").unwrap().as_f64(), Some(6.0));
-        assert_eq!(
-            events[0].attr("core_throttles").unwrap().as_f64(),
-            Some(6.0)
-        );
-        assert_eq!(
-            events[0].attr("package_throttles").unwrap().as_f64(),
-            Some(0.0)
-        );
+        assert_eq!(events.len(), 2, "one event per cpu");
+        // Three more on each of the two cpus, reported against each of them
+        // rather than as a machine total of six that names no core.
+        for (offset, event) in events.iter().enumerate() {
+            assert_eq!(event.keys[0].to_string(), format!("cpu:{offset}"));
+            assert_eq!(event.attr("throttles").unwrap().as_f64(), Some(3.0));
+            assert_eq!(event.attr("core_throttles").unwrap().as_f64(), Some(3.0));
+            assert_eq!(event.attr("package_throttles").unwrap().as_f64(), Some(0.0));
+            assert_eq!(event.attr("cpu").unwrap().as_f64(), Some(offset as f64));
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -292,7 +304,12 @@ mod tests {
     }
 
     /// A cpu that went offline and came back restarts its counters; the
-    /// interval that straddles it is void rather than enormous.
+    /// interval that straddles it is void for that cpu rather than enormous.
+    ///
+    /// Both cpus are reset here, so both intervals are void and the count of
+    /// losses is two -- one per cpu, which is the granularity the reading now
+    /// has. Resetting one would leave the other measurable, which is the point
+    /// of keeping them apart.
     #[test]
     fn a_counter_that_goes_backwards_is_a_counted_loss() {
         let root = throttle_tree("throttle-backwards", 50, 4);
@@ -308,7 +325,7 @@ mod tests {
             );
         }
         assert!(collector.sample(1).expect("a read").is_empty());
-        assert_eq!(collector.losses().undecoded, 1);
+        assert_eq!(collector.losses().undecoded, 2);
         assert!(collector
             .losses()
             .reasons

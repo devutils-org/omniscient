@@ -102,6 +102,12 @@ impl WakeupCollector {
                         Attr::uint("waker_tid", wakeup.waker_tid as u64),
                         Attr::uint("waker_pid", wakeup.waker_pid as u64),
                         Attr::uint("cpu", wakeup.cpu as u64),
+                        // The catalog declares the filter field as `pid`, and
+                        // the event is keyed on the wakee, so `pid` is the
+                        // wakee's process. `waker_pid` is beside it for the
+                        // other half, which is a different question and gets a
+                        // different name.
+                        Attr::uint("pid", wakeup.wakee_pid as u64),
                         Attr::text("comm", wakeup.wakee_comm()),
                     ],
                     collector_id: id.clone(),

@@ -12,6 +12,7 @@ use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
 
+use crate::collect::task::{Comms, Tgids};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Record, SampledEvent, Scope};
@@ -42,6 +43,12 @@ pub struct SwitchCollector {
     pid: i32,
     mode: Mode,
     event: Option<SampledEvent>,
+    /// `comm` and `pid` are declared filter fields on this source, and the
+    /// samples name a thread: a per-task perf event opened over a process is
+    /// still one task, but the tid on the sample is what the attributes have
+    /// to be about.
+    comms: Comms,
+    tgids: Tgids,
     losses: Losses,
 }
 
@@ -52,6 +59,8 @@ impl SwitchCollector {
             pid,
             mode,
             event: None,
+            comms: Comms::new(),
+            tgids: Tgids::new(),
             losses: Losses::default(),
         }
     }
@@ -61,6 +70,8 @@ impl SwitchCollector {
             return;
         };
         let id = self.id.clone();
+        let comms = &mut self.comms;
+        let tgids = &mut self.tgids;
         let mut index = seq;
         let mut dropped = 0u64;
         let mut throttles = 0u64;
@@ -72,13 +83,24 @@ impl SwitchCollector {
                     ts_err_ns: 0,
                     kind: "sched.switches".to_owned(),
                     keys: vec![KeyValue::task(sample.tid as i32)],
-                    attrs: vec![
-                        Attr::uint("count", 1),
-                        // Where the task was when it left the cpu. Without a
-                        // stack this is one frame, but it is the frame that
-                        // blocked.
-                        Attr::uint("ip", sample.ip),
-                    ],
+                    attrs: {
+                        let tid = sample.tid as i32;
+                        let mut attrs = vec![
+                            Attr::uint("count", 1),
+                            // Where the task was when it left the cpu. Without
+                            // a stack this is one frame, but it is the frame
+                            // that blocked.
+                            Attr::uint("ip", sample.ip),
+                            Attr::uint("tid", u64::from(sample.tid)),
+                        ];
+                        if let Some(pid) = tgids.get(tid) {
+                            attrs.push(Attr::uint("pid", pid as u64));
+                        }
+                        if let Some(comm) = comms.get(tid) {
+                            attrs.push(Attr::text("comm", comm));
+                        }
+                        attrs
+                    },
                     collector_id: id.clone(),
                     seq: index,
                 });

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use super::cadence::Cadence;
 use crate::clock::monotonic_ns;
+use crate::collect::task::Comm;
 use crate::collect::{Collector, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::Mode;
@@ -141,6 +142,8 @@ pub struct FootprintCollector {
     source: Source,
     path: PathBuf,
     page_size: u64,
+    /// `comm` is a declared filter field on all three footprint sources.
+    comm: Comm,
     /// When to publish, which is not how often the run asks: a session whose
     /// fastest collector drains a ring every ten milliseconds asks everyone
     /// else just as often.
@@ -156,6 +159,7 @@ impl FootprintCollector {
             source,
             path: source.path(pid),
             page_size: page_size(),
+            comm: Comm::of(pid),
             cadence: Cadence::new(interval),
         }
     }
@@ -224,15 +228,19 @@ impl Collector for FootprintCollector {
         // than preceding it: the value existed at or before this instant.
         let bytes = self.read_bytes()?;
         let ts_ns = monotonic_ns();
+        let mut attrs = vec![
+            Attr::uint("bytes", bytes),
+            Attr::text("read_from", self.source.label()),
+        ];
+        if let Some(comm) = self.comm.get() {
+            attrs.push(Attr::text("comm", comm));
+        }
         Ok(vec![Event {
             ts_ns,
             ts_err_ns: 0,
             kind: self.metric.source_id().to_owned(),
             keys: vec![KeyValue::task(self.pid)],
-            attrs: vec![
-                Attr::uint("bytes", bytes),
-                Attr::text("read_from", self.source.label()),
-            ],
+            attrs,
             collector_id: self.id.clone(),
             seq,
         }])

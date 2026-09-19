@@ -16,7 +16,7 @@
        degraded: "no per-task attribution, no pushed-down filter"}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
        targets: {system: native}, filter_fields: [dev],
-       degraded: "aggregated per device, no per-request latency"}
+       degraded: "per device, not per request: no latency, no submitter"}
   modes: [trace, count]
   emits: [hist, raw, rate, topk, summary]
   targets: {system: native, cgroup: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, container: bpf_only}
@@ -73,10 +73,11 @@
        asked for. Readahead, filesystem metadata and journal writes are in the
        number, page cache hits never reach it, and the gap between this and
        io.syscall is the diagnosis rather than an error."
-    - "`fs:proc` adds up the devices nothing is stacked on. A partition's I/O
-       is counted again on the disk holding it and a dm or md device's on its
-       members, so summing every line of /proc/diskstats reports the same bytes
-       two or three times."
+    - "`fs:proc` reports one series per device, and only the devices nothing is
+       stacked on. A partition's I/O is counted again on the disk holding it
+       and a dm or md device's on its members, so the derived ones are left out
+       -- summing every line of /proc/diskstats reports the same bytes two or
+       three times."
     - "/proc/diskstats counts 512-byte sectors whatever the device's logical
        block size is; the kernel normalizes before writing the file."
 

@@ -13,6 +13,7 @@ use std::time::Duration;
 use super::super::cadence::Cadence;
 use super::{state::LiveSet, Stream, OP_ALLOC};
 use crate::clock::monotonic_ns;
+use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
@@ -22,16 +23,20 @@ pub struct LiveCollector {
     live: LiveSet,
     /// When a value is published, as opposed to how often the pipe is drained.
     cadence: Cadence,
+    /// `comm` is a declared filter field on this source.
+    comm: Comm,
     emitted: u64,
 }
 
 impl LiveCollector {
     pub fn new(stream: Stream, interval: Duration) -> Self {
+        let comm = Comm::of(stream.pid());
         Self {
             id: CollectorId::new("mem.heap.live/preload"),
             stream,
             live: LiveSet::default(),
             cadence: Cadence::new(interval),
+            comm,
             emitted: 0,
         }
     }
@@ -53,14 +58,21 @@ impl LiveCollector {
             ts_err_ns: 0,
             kind: "mem.heap.live".to_owned(),
             keys: vec![KeyValue::task(self.stream.pid())],
-            attrs: vec![
-                Attr::uint("bytes", self.live.bytes()),
-                Attr::uint("allocations", self.live.count() as u64),
-                // Frees of blocks allocated before the shim could report them:
-                // they are not in the total, and saying how many there were is
-                // how a reader knows whether that matters here.
-                Attr::uint("untracked_frees", self.live.untracked_frees()),
-            ],
+            attrs: {
+                let mut attrs = vec![
+                    Attr::uint("bytes", self.live.bytes()),
+                    Attr::uint("allocations", self.live.count() as u64),
+                    // Frees of blocks allocated before the shim could report
+                    // them: they are not in the total, and saying how many
+                    // there were is how a reader knows whether that matters
+                    // here.
+                    Attr::uint("untracked_frees", self.live.untracked_frees()),
+                ];
+                if let Some(comm) = self.comm.get() {
+                    attrs.push(Attr::text("comm", comm));
+                }
+                attrs
+            },
             collector_id: self.id.clone(),
             seq: self.emitted,
         };

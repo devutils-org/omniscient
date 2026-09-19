@@ -28,6 +28,7 @@ mod power;
 mod proc;
 mod runtime;
 mod sched;
+mod task;
 
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;

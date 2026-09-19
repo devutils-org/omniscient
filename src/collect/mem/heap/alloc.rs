@@ -6,12 +6,16 @@
 //! source exists for; on its own it is an allocation log.
 
 use super::{Stream, OP_ALLOC};
+use crate::collect::task::Comms;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
 pub struct AllocCollector {
     id: CollectorId,
     stream: Stream,
+    /// By tid: the shim reports the thread that allocated, and a thread pool
+    /// that names its workers is exactly the case `comm` is filtered on.
+    comms: Comms,
 }
 
 impl AllocCollector {
@@ -19,11 +23,13 @@ impl AllocCollector {
         Self {
             id: CollectorId::new("mem.heap.alloc/preload"),
             stream,
+            comms: Comms::new(),
         }
     }
 
     fn events(&mut self, seq: u64) -> Vec<Event> {
         let records = self.stream.drain();
+        let comms = &mut self.comms;
         let mut index = seq;
         records
             .into_iter()
@@ -43,11 +49,17 @@ impl AllocCollector {
                             len: if allocated { record.size.max(1) } else { 1 },
                         },
                     ],
-                    attrs: vec![
-                        Attr::uint("bytes", if allocated { record.size } else { 0 }),
-                        Attr::text("op", if allocated { "alloc" } else { "free" }),
-                        Attr::uint("ptr", record.ptr),
-                    ],
+                    attrs: {
+                        let mut attrs = vec![
+                            Attr::uint("bytes", if allocated { record.size } else { 0 }),
+                            Attr::text("op", if allocated { "alloc" } else { "free" }),
+                            Attr::uint("ptr", record.ptr),
+                        ];
+                        if let Some(comm) = comms.get(record.tid as i32) {
+                            attrs.push(Attr::text("comm", comm));
+                        }
+                        attrs
+                    },
                     collector_id: self.id.clone(),
                     seq: index,
                 };

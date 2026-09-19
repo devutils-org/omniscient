@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, AttrValue, CollectorId, Event};
+use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
 use super::sysfs;
@@ -207,47 +207,42 @@ impl Collector for Frequencies {
         }
         let ts_ns = monotonic_ns();
 
-        let hertz: Vec<f64> = per_cpu.iter().map(|(_, hertz)| *hertz).collect();
-        let mean = hertz.iter().sum::<f64>() / hertz.len() as f64;
-        let min = hertz.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = hertz.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
         let float = |name: &str, value: f64| Attr {
             name: name.to_owned(),
             value: AttrValue::Float(value),
         };
-        let mut attrs = vec![
-            // One cpu: its frequency. Several: their mean, which is why `min`
-            // and `max` are beside it -- one boosted core among twenty-three
-            // idle ones is a mean that describes no core at all.
-            float("hz", mean),
-            float("min_hz", min),
-            float("max_hz", max),
-            Attr::uint("cpus", per_cpu.len() as u64),
-            Attr::text("driver", self.driver.clone()),
-            Attr::text("basis", source.basis(&self.driver)),
-            Attr::text(
-                "measures",
-                if source.is_effective() {
-                    "effective"
-                } else {
-                    "requested"
-                },
-            ),
-        ];
-        for (cpu, hertz) in &per_cpu {
-            attrs.push(float(&format!("cpu{cpu}"), *hertz));
-        }
+        let basis = source.basis(&self.driver);
+        let measures = if source.is_effective() {
+            "effective"
+        } else {
+            "requested"
+        };
 
-        Ok(vec![Event {
-            ts_ns,
-            ts_err_ns: 0,
-            kind: "power.freq".to_owned(),
-            keys: Vec::new(),
-            attrs,
-            collector_id: self.id.clone(),
-            seq,
-        }])
+        // One event per cpu, keyed on it. The mean of twenty-four cores
+        // describes none of them -- one boosted core among twenty-three idle
+        // ones reads as a machine at a middling clock -- and a reader asking
+        // which core is hot cannot get there from a single number. The mean is
+        // still available, because averaging a series is something the emit
+        // layer does and splitting one apart is not.
+        Ok(per_cpu
+            .iter()
+            .enumerate()
+            .map(|(offset, (cpu, hertz))| Event {
+                ts_ns,
+                ts_err_ns: 0,
+                kind: "power.freq".to_owned(),
+                keys: vec![KeyValue::cpu(*cpu)],
+                attrs: vec![
+                    float("hz", *hertz),
+                    Attr::uint("cpu", u64::from(*cpu)),
+                    Attr::text("driver", self.driver.clone()),
+                    Attr::text("basis", basis.clone()),
+                    Attr::text("measures", measures),
+                ],
+                collector_id: self.id.clone(),
+                seq: seq + offset as u64,
+            })
+            .collect())
     }
 
     fn losses(&self) -> Losses {
@@ -346,10 +341,14 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A mean over cpus is not a core's frequency, so the spread travels with
-    /// it rather than being left to be assumed away.
+    /// Two cores at different frequencies are two series, not one mean.
+    ///
+    /// This used to report `hz = 3.3 GHz` with the spread beside it, which is
+    /// a frequency neither core ran at. The mean is still obtainable -- the
+    /// emit layer averages a series -- and the per-core answer is not
+    /// obtainable from a mean, which is why the split goes this way round.
     #[test]
-    fn a_system_wide_reading_carries_the_spread_it_averaged() {
+    fn two_cores_at_different_frequencies_are_two_series() {
         let root = scratch::tree("freq-spread");
         scratch::write(&root, "cpu0/cpufreq/scaling_driver", "amd_pstate");
         scratch::write(&root, "cpu0/cpufreq/cpuinfo_avg_freq", "4400000");
@@ -360,14 +359,13 @@ mod tests {
         collector.start().expect("a cpufreq directory");
         let events = collector.sample(0).expect("a read");
 
-        assert_eq!(
-            events[0].attr("hz").unwrap().as_f64(),
-            Some(3_300_000_000.0)
-        );
-        assert_eq!(events[0].attr("min_hz").unwrap().as_f64(), Some(2.2e9));
-        assert_eq!(events[0].attr("max_hz").unwrap().as_f64(), Some(4.4e9));
-        assert_eq!(events[0].attr("cpu0").unwrap().as_f64(), Some(4.4e9));
-        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(2.0));
+        assert_eq!(events.len(), 2, "one event per cpu");
+        assert_eq!(events[0].keys[0].to_string(), "cpu:0");
+        assert_eq!(events[0].attr("hz").unwrap().as_f64(), Some(4.4e9));
+        assert_eq!(events[1].keys[0].to_string(), "cpu:1");
+        assert_eq!(events[1].attr("hz").unwrap().as_f64(), Some(2.2e9));
+        // `cpu` is a declared filter field, and a key is not a filter field.
+        assert_eq!(events[1].attr("cpu").unwrap().as_f64(), Some(1.0));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -403,15 +401,17 @@ mod tests {
         collector.start().expect("a cpufreq directory");
         let events = collector.sample(0).expect("a read");
 
-        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(2.0));
-        assert_eq!(events[0].attr("cpu2").unwrap().as_f64(), Some(3e9));
-        assert_eq!(events[0].attr("cpu3").unwrap().as_f64(), Some(4e9));
+        assert_eq!(events.len(), 2, "two cpus were asked for");
+        assert_eq!(events[0].keys[0].to_string(), "cpu:2");
+        assert_eq!(events[0].attr("hz").unwrap().as_f64(), Some(3e9));
+        assert_eq!(events[1].keys[0].to_string(), "cpu:3");
+        assert_eq!(events[1].attr("hz").unwrap().as_f64(), Some(4e9));
         assert!(
-            events[0].attr("cpu0").is_none(),
+            events
+                .iter()
+                .all(|event| event.keys[0].to_string() != "cpu:0"),
             "a cpu that was not asked for must not be in the reading"
         );
-        // The mean is over what was watched, not over the machine.
-        assert_eq!(events[0].attr("hz").unwrap().as_f64(), Some(3.5e9));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -430,7 +430,8 @@ mod tests {
         std::fs::remove_file(root.join("cpu1/cpufreq/cpuinfo_avg_freq")).expect("cpu1 goes away");
         let events = collector.sample(0).expect("cpu0 still answers");
 
-        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(1.0));
+        assert_eq!(events.len(), 1, "only cpu0 still answers");
+        assert_eq!(events[0].keys[0].to_string(), "cpu:0");
         let losses = collector.losses();
         assert_eq!(losses.failed_reads, 1);
         assert!(!losses.is_clean());

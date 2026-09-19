@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event};
+use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
 /// `/proc/diskstats` counts in 512-byte sectors whatever the device's own
@@ -54,6 +54,51 @@ pub enum Metric {
 }
 
 impl Metric {
+    /// The attributes this metric reads out of one device's increase.
+    ///
+    /// `None` for a gauge, which has no increase to report: a queue depth is
+    /// read at an instant and the difference between two depths is not a depth.
+    fn attrs(self, delta: &DeviceCounters) -> Option<Vec<Attr>> {
+        let mut attrs = match self {
+            Metric::Bytes => {
+                let mut attrs = vec![
+                    Attr::uint("bytes", delta.bytes()),
+                    Attr::uint("read_bytes", delta.sectors_read * SECTOR_BYTES),
+                    Attr::uint("write_bytes", delta.sectors_written * SECTOR_BYTES),
+                    Attr::uint("sector_bytes", SECTOR_BYTES),
+                ];
+                // Absent on kernels that do not write this column, and absent
+                // is not zero: zero would claim the device discarded nothing.
+                if let Some(sectors) = delta.sectors_discarded {
+                    attrs.push(Attr::uint("discarded_bytes", sectors * SECTOR_BYTES));
+                }
+                attrs
+            }
+            Metric::Iops => {
+                let mut attrs = vec![
+                    Attr::uint("ops", delta.reads + delta.writes),
+                    Attr::uint("reads", delta.reads),
+                    Attr::uint("writes", delta.writes),
+                ];
+                if let Some(discards) = delta.discards {
+                    attrs.push(Attr::uint("discards", discards));
+                }
+                if let Some(flushes) = delta.flushes {
+                    attrs.push(Attr::uint("flushes", flushes));
+                }
+                attrs
+            }
+            Metric::Merges => vec![
+                Attr::uint("merges", delta.reads_merged + delta.writes_merged),
+                Attr::uint("read_merges", delta.reads_merged),
+                Attr::uint("write_merges", delta.writes_merged),
+            ],
+            Metric::Inflight => return None,
+        };
+        attrs.shrink_to_fit();
+        Some(attrs)
+    }
+
     fn source_id(self) -> &'static str {
         match self {
             Metric::Bytes => "io.bytes",
@@ -171,11 +216,10 @@ impl Diskstats {
         let text = std::fs::read_to_string(&self.path)
             .map_err(|error| SampleError::Transient(format!("{}: {error}", self.path.display())))?;
 
-        let mut totals = Totals::default();
-        let mut devices = Vec::new();
+        let mut devices: BTreeMap<DeviceId, DeviceCounters> = BTreeMap::new();
         let mut undecoded = Vec::new();
         for line in text.lines() {
-            let Some((name, numbers)) = split_line(line) else {
+            let Some((major, minor, name, numbers)) = split_line(line) else {
                 undecoded.push(format!("`{}` is not a diskstats line", line.trim()));
                 continue;
             };
@@ -202,8 +246,14 @@ impl Diskstats {
             }
             match DeviceCounters::parse(&numbers) {
                 Some(counters) => {
-                    totals.add(&counters);
-                    devices.push(name.to_owned());
+                    devices.insert(
+                        DeviceId {
+                            major,
+                            minor,
+                            name: name.to_owned(),
+                        },
+                        counters,
+                    );
                 }
                 None => undecoded.push(format!(
                     "`{name}` reports {} counters, fewer than the eleven every kernel since 2.6 \
@@ -220,97 +270,84 @@ impl Diskstats {
 
         Ok(Reading {
             ts_ns: monotonic_ns(),
-            totals,
             devices,
         })
     }
 
-    /// Builds the event for the increase between two readings, or explains why
-    /// there is none to build.
-    fn delta_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
-        if before.devices != after.devices {
-            self.losses.undecoded += 1;
-            self.losses.note(format!(
-                "the set of devices changed between two reads ({} then {}), so the increase \
-                 between them is not one machine's worth of I/O",
-                before.devices.join(","),
-                after.devices.join(",")
-            ));
-            return None;
-        }
-        let Some(delta) = after.totals.since(&before.totals) else {
-            self.losses.undecoded += 1;
-            self.losses.note(
-                "a counter in /proc/diskstats went backwards, which happens when a device is \
-                 removed and re-added; this interval cannot be attributed"
-                    .to_owned(),
-            );
-            return None;
-        };
-
+    /// Builds one event per device for the increase between two readings.
+    ///
+    /// A device that appears mid-run has no earlier reading to measure against
+    /// and contributes nothing to this interval rather than its counters since
+    /// boot; one that disappears contributes nothing either, because the
+    /// interval it would report has no end. Both used to void the whole
+    /// interval for every device, on the grounds that the sum was no longer
+    /// one machine's worth of I/O -- which was right about the sum and is not a
+    /// reason to drop the devices that were there throughout.
+    fn delta_events(&mut self, before: &Reading, after: &Reading, seq: u64) -> Vec<Event> {
         let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        let mut attrs = match self.metric {
-            Metric::Bytes => vec![
-                Attr::uint("bytes", delta.bytes()),
-                Attr::uint("read_bytes", delta.sectors_read * SECTOR_BYTES),
-                Attr::uint("write_bytes", delta.sectors_written * SECTOR_BYTES),
-                Attr::uint("sector_bytes", SECTOR_BYTES),
-            ],
-            Metric::Iops => vec![
-                Attr::uint("ops", delta.reads + delta.writes),
-                Attr::uint("reads", delta.reads),
-                Attr::uint("writes", delta.writes),
-            ],
-            Metric::Merges => vec![
-                Attr::uint("merges", delta.reads_merged + delta.writes_merged),
-                Attr::uint("read_merges", delta.reads_merged),
-                Attr::uint("write_merges", delta.writes_merged),
-            ],
-            // A gauge has no increase to report.
-            Metric::Inflight => return None,
-        };
-        // Absent on kernels that do not write these columns, and absent is not
-        // zero: zero would claim the device discarded nothing.
-        if self.metric == Metric::Bytes {
-            if let Some(sectors) = delta.sectors_discarded {
-                attrs.push(Attr::uint("discarded_bytes", sectors * SECTOR_BYTES));
-            }
+        let mut events = Vec::new();
+        let mut index = seq;
+        for (device, counters) in &after.devices {
+            let Some(earlier) = before.devices.get(device) else {
+                self.losses.note(format!(
+                    "`{}` appeared during the run, so this interval has nothing to measure its \
+                     counters against",
+                    device.name
+                ));
+                continue;
+            };
+            let Some(delta) = counters.since(earlier) else {
+                self.losses.undecoded += 1;
+                self.losses.note(format!(
+                    "a counter for `{}` in /proc/diskstats went backwards, which happens when a \
+                     device is removed and re-added; this interval cannot be attributed",
+                    device.name
+                ));
+                continue;
+            };
+            let Some(mut attrs) = self.metric.attrs(&delta) else {
+                return Vec::new();
+            };
+            attrs.push(Attr::uint("interval_ns", interval_ns));
+            attrs.push(Attr::text("dev", device.name.clone()));
+            events.push(Event {
+                ts_ns: after.ts_ns,
+                ts_err_ns: 0,
+                kind: self.metric.source_id().to_owned(),
+                keys: vec![KeyValue::Dev {
+                    major: device.major,
+                    minor: device.minor,
+                }],
+                attrs,
+                collector_id: self.id.clone(),
+                seq: index,
+            });
+            index += 1;
         }
-        if self.metric == Metric::Iops {
-            if let Some(discards) = delta.discards {
-                attrs.push(Attr::uint("discards", discards));
-            }
-            if let Some(flushes) = delta.flushes {
-                attrs.push(Attr::uint("flushes", flushes));
-            }
-        }
-        attrs.push(Attr::uint("interval_ns", interval_ns));
-        attrs.push(Attr::text("devices", after.devices.join(",")));
-
-        Some(Event {
-            ts_ns: after.ts_ns,
-            ts_err_ns: 0,
-            kind: self.metric.source_id().to_owned(),
-            keys: Vec::new(),
-            attrs,
-            collector_id: self.id.clone(),
-            seq,
-        })
+        events
     }
 
-    fn gauge_event(&self, reading: &Reading, seq: u64) -> Event {
-        Event {
-            ts_ns: reading.ts_ns,
-            ts_err_ns: 0,
-            kind: self.metric.source_id().to_owned(),
-            keys: Vec::new(),
-            attrs: vec![
-                Attr::uint("inflight", reading.totals.in_flight),
-                Attr::text("devices", reading.devices.join(",")),
-            ],
-            collector_id: self.id.clone(),
-            seq,
-        }
+    fn gauge_events(&self, reading: &Reading, seq: u64) -> Vec<Event> {
+        reading
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(offset, (device, counters))| Event {
+                ts_ns: reading.ts_ns,
+                ts_err_ns: 0,
+                kind: self.metric.source_id().to_owned(),
+                keys: vec![KeyValue::Dev {
+                    major: device.major,
+                    minor: device.minor,
+                }],
+                attrs: vec![
+                    Attr::uint("inflight", counters.in_flight),
+                    Attr::text("dev", device.name.clone()),
+                ],
+                collector_id: self.id.clone(),
+                seq: seq + offset as u64,
+            })
+            .collect()
     }
 }
 
@@ -345,9 +382,9 @@ impl Collector for Diskstats {
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         if self.metric.is_gauge() {
             let reading = self.read()?;
-            let event = self.gauge_event(&reading, seq);
+            let events = self.gauge_events(&reading, seq);
             self.previous = Some(reading);
-            return Ok(vec![event]);
+            return Ok(events);
         }
         // A counted run reports one total at the end; reading the file every
         // tick would cost something and answer nothing.
@@ -356,8 +393,9 @@ impl Collector for Diskstats {
         }
         let after = self.read()?;
         let before = self.previous.replace(after.clone());
-        let event = before.and_then(|before| self.delta_event(&before, &after, seq));
-        Ok(event.into_iter().collect())
+        Ok(before
+            .map(|before| self.delta_events(&before, &after, seq))
+            .unwrap_or_default())
     }
 
     /// A counted run reports its one total here, measured from the baseline
@@ -375,10 +413,7 @@ impl Collector for Diskstats {
             return Vec::new();
         };
         match self.read() {
-            Ok(after) => self
-                .delta_event(&before, &after, u64::MAX / 2)
-                .into_iter()
-                .collect(),
+            Ok(after) => self.delta_events(&before, &after, u64::MAX / 2),
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note(format!(
@@ -394,77 +429,30 @@ impl Collector for Diskstats {
     }
 }
 
-/// What one reading of the file adds up to.
+/// What one reading of the file holds, per device.
+///
+/// The counters were summed into one total until it became clear that the sum
+/// answers a question nobody asks. `/proc/diskstats` keeps them per device; the
+/// catalog declares `dev` as both a key and a filter field on every source
+/// here, and `io.bytes --emit topk` is the question "which device" -- which a
+/// single machine-wide number cannot answer at all. Keeping them apart is also
+/// what makes the sum available, since adding up series is something the emit
+/// layer can do and splitting one apart is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reading {
     ts_ns: u64,
-    totals: Totals,
-    /// The devices that were summed, in the order the file lists them, so an
-    /// event says what it covers instead of leaving it to be assumed.
-    devices: Vec<String>,
+    /// Keyed by the major:minor the kernel writes, because a device name is a
+    /// symlink away from meaning something else and the numbers are what the
+    /// key carries.
+    devices: BTreeMap<DeviceId, DeviceCounters>,
 }
 
-/// The counters of every device that stands on its own, added together.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Totals {
-    reads: u64,
-    reads_merged: u64,
-    sectors_read: u64,
-    writes: u64,
-    writes_merged: u64,
-    sectors_written: u64,
-    in_flight: u64,
-    discards: Option<u64>,
-    sectors_discarded: Option<u64>,
-    flushes: Option<u64>,
-}
-
-impl Totals {
-    fn add(&mut self, device: &DeviceCounters) {
-        self.reads += device.reads;
-        self.reads_merged += device.reads_merged;
-        self.sectors_read += device.sectors_read;
-        self.writes += device.writes;
-        self.writes_merged += device.writes_merged;
-        self.sectors_written += device.sectors_written;
-        self.in_flight += device.in_flight;
-        self.discards = sum_known(self.discards, device.discards);
-        self.sectors_discarded = sum_known(self.sectors_discarded, device.sectors_discarded);
-        self.flushes = sum_known(self.flushes, device.flushes);
-    }
-
-    fn bytes(&self) -> u64 {
-        (self.sectors_read + self.sectors_written) * SECTOR_BYTES
-    }
-
-    /// The increase since an earlier reading, or `None` when a counter went
-    /// backwards and the interval is therefore not measurable.
-    fn since(&self, before: &Totals) -> Option<Totals> {
-        Some(Totals {
-            reads: self.reads.checked_sub(before.reads)?,
-            reads_merged: self.reads_merged.checked_sub(before.reads_merged)?,
-            sectors_read: self.sectors_read.checked_sub(before.sectors_read)?,
-            writes: self.writes.checked_sub(before.writes)?,
-            writes_merged: self.writes_merged.checked_sub(before.writes_merged)?,
-            sectors_written: self.sectors_written.checked_sub(before.sectors_written)?,
-            // A gauge has no meaningful difference; the later value is kept so
-            // the field says what it said.
-            in_flight: self.in_flight,
-            discards: difference(self.discards, before.discards),
-            sectors_discarded: difference(self.sectors_discarded, before.sectors_discarded),
-            flushes: difference(self.flushes, before.flushes),
-        })
-    }
-}
-
-/// Adds a column only while every device reports it. One kernel writes it and
-/// another does not, and a partial sum would be a number about neither.
-fn sum_known(running: Option<u64>, device: Option<u64>) -> Option<u64> {
-    match (running, device) {
-        (None, value) => value,
-        (Some(running), Some(value)) => Some(running + value),
-        (Some(_), None) => None,
-    }
+/// A block device as `/proc/diskstats` identifies it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DeviceId {
+    major: u32,
+    minor: u32,
+    name: String,
 }
 
 fn difference(after: Option<u64>, before: Option<u64>) -> Option<u64> {
@@ -515,15 +503,15 @@ fn classify_under(root: &Path, name: &str) -> Role {
 }
 
 /// Splits `  259  0 nvme0n1 88820 1663 ...` into the name and its counters.
-fn split_line(line: &str) -> Option<(&str, Vec<u64>)> {
+fn split_line(line: &str) -> Option<(u32, u32, &str, Vec<u64>)> {
     let mut fields = line.split_whitespace();
-    let _major: u64 = fields.next()?.parse().ok()?;
-    let _minor: u64 = fields.next()?.parse().ok()?;
+    let major: u32 = fields.next()?.parse().ok()?;
+    let minor: u32 = fields.next()?.parse().ok()?;
     let name = fields.next()?;
     let numbers = fields
         .map(|field| field.parse().ok())
         .collect::<Option<_>>()?;
-    Some((name, numbers))
+    Some((major, minor, name, numbers))
 }
 
 /// One device's line, in the order the kernel writes the columns.
@@ -544,6 +532,31 @@ struct DeviceCounters {
 }
 
 impl DeviceCounters {
+    fn bytes(&self) -> u64 {
+        (self.sectors_read + self.sectors_written) * SECTOR_BYTES
+    }
+
+    /// The increase since an earlier reading of the same device, or `None` when
+    /// a counter went backwards -- which happens when a device is removed and
+    /// re-added under the same numbers, and makes the interval unmeasurable
+    /// rather than zero.
+    fn since(&self, before: &DeviceCounters) -> Option<DeviceCounters> {
+        Some(DeviceCounters {
+            reads: self.reads.checked_sub(before.reads)?,
+            reads_merged: self.reads_merged.checked_sub(before.reads_merged)?,
+            sectors_read: self.sectors_read.checked_sub(before.sectors_read)?,
+            writes: self.writes.checked_sub(before.writes)?,
+            writes_merged: self.writes_merged.checked_sub(before.writes_merged)?,
+            sectors_written: self.sectors_written.checked_sub(before.sectors_written)?,
+            // A gauge has no meaningful difference; the later value is kept so
+            // the field says what it said.
+            in_flight: self.in_flight,
+            discards: difference(self.discards, before.discards),
+            sectors_discarded: difference(self.sectors_discarded, before.sectors_discarded),
+            flushes: difference(self.flushes, before.flushes),
+        })
+    }
+
     /// The eleven classic columns are required; the discard and flush columns
     /// are taken when the kernel writes them.
     fn parse(numbers: &[u64]) -> Option<Self> {
@@ -587,7 +600,7 @@ mod tests {
     fn a_leaf_device() -> Option<String> {
         let text = std::fs::read_to_string("/proc/diskstats").ok()?;
         text.lines()
-            .filter_map(|line| split_line(line).map(|(name, _)| name.to_owned()))
+            .filter_map(|line| split_line(line).map(|(_, _, name, _)| name.to_owned()))
             .find(|name| classify(name) == Role::Leaf)
     }
 
@@ -621,7 +634,7 @@ mod tests {
 
     #[test]
     fn a_line_is_read_the_way_the_kernel_writes_it() {
-        let (name, numbers) = split_line(NVME_LINE).expect("a diskstats line");
+        let (_, _, name, numbers) = split_line(NVME_LINE).expect("a diskstats line");
         assert_eq!(name, "nvme0n1");
         let counters = DeviceCounters::parse(&numbers).expect("eleven columns at least");
         assert_eq!(counters.reads, 88_820);
@@ -637,7 +650,7 @@ mod tests {
     /// and absent is not zero: zero would say the device discarded nothing.
     #[test]
     fn a_kernel_that_does_not_report_discards_says_nothing_rather_than_zero() {
-        let (_, numbers) = split_line(&line("sda", 1, 2, 3, 4)).expect("a line");
+        let (_, _, _, numbers) = split_line(&line("sda", 1, 2, 3, 4)).expect("a line");
         let counters = DeviceCounters::parse(&numbers).expect("eleven columns");
         assert_eq!(counters.discards, None);
         assert_eq!(counters.flushes, None);
@@ -674,7 +687,7 @@ mod tests {
             Err(_) => return,
         };
         for line in text.lines() {
-            let Some((name, _)) = split_line(line) else {
+            let Some((_, _, name, _)) = split_line(line) else {
                 continue;
             };
             let sysfs = Path::new("/sys/class/block").join(name);
@@ -720,7 +733,7 @@ mod tests {
             event.attr("write_bytes").unwrap().as_f64(),
             Some(16.0 * 512.0)
         );
-        assert_eq!(event.attr("devices").unwrap().to_string(), device);
+        assert_eq!(event.attr("dev").unwrap().to_string(), device);
         assert!(event.attr("interval_ns").unwrap().as_f64().unwrap() > 0.0);
         assert!(collector.losses().is_clean());
         std::fs::remove_file(&path).ok();
@@ -780,10 +793,17 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// Two readings over different sets of devices do not subtract: the
-    /// difference would be part I/O and part hotplug.
+    /// A device that appears mid-run costs that device's first interval and
+    /// nothing else.
+    ///
+    /// This used to void the whole interval, for every device, on the grounds
+    /// that the difference between two sets was part I/O and part hotplug.
+    /// That was right about the *sum*, which no longer exists: the counters are
+    /// now reported per device, so a device that was there throughout has a
+    /// measurable interval whatever appeared beside it. Dropping it too would
+    /// lose real I/O to an event that did not involve it.
     #[test]
-    fn a_device_appearing_mid_run_voids_the_interval_rather_than_inflating_it() {
+    fn a_device_appearing_mid_run_costs_only_its_own_first_interval() {
         let Some(device) = a_leaf_device() else {
             return;
         };
@@ -791,7 +811,7 @@ mod tests {
             .ok()
             .and_then(|text| {
                 text.lines()
-                    .filter_map(|line| split_line(line).map(|(name, _)| name.to_owned()))
+                    .filter_map(|line| split_line(line).map(|(_, _, name, _)| name.to_owned()))
                     .find(|name| classify(name) == Role::Leaf && *name != device)
             })
         else {
@@ -808,12 +828,28 @@ mod tests {
             &[line(&device, 12, 108, 23, 216), line(&second, 1, 8, 1, 8)],
         );
 
-        assert!(collector.sample(1).expect("a read").is_empty());
-        assert!(collector
-            .losses()
-            .reasons
-            .keys()
-            .any(|reason| reason.contains("set of devices changed")));
+        let events = collector.sample(1).expect("a read");
+        assert_eq!(
+            events.len(),
+            1,
+            "the device that was there throughout is still measurable"
+        );
+        assert_eq!(
+            events[0].attr("dev").map(ToString::to_string),
+            Some(device.clone())
+        );
+        // 8 sectors read and 16 written, at 512 bytes each.
+        assert_eq!(
+            events[0].attr("bytes").map(ToString::to_string),
+            Some(((8 + 16) * SECTOR_BYTES).to_string())
+        );
+        assert!(
+            collector.losses().reasons.keys().any(
+                |reason| reason.contains(&second) && reason.contains("appeared during the run")
+            ),
+            "the device that could not be measured is named: {:?}",
+            collector.losses().reasons
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -889,8 +925,14 @@ mod tests {
         let after = independent_sectors_written(&stats);
         std::fs::remove_file(&scratch_file).ok();
 
-        assert_eq!(events.len(), 1, "one interval, one event");
-        let written = events[0].attr("write_bytes").unwrap().as_f64().unwrap();
+        // One event per device now, and the reference below counts every
+        // device that stands on its own, so the two sides are summed the same
+        // way. Which device the file landed on is not the subject.
+        assert!(!events.is_empty(), "one interval, at least one device");
+        let written: f64 = events
+            .iter()
+            .filter_map(|event| event.attr("write_bytes")?.as_f64())
+            .sum();
         assert!(
             written >= SIZE as f64,
             "{SIZE} bytes were flushed to the device but only {written} were reported"
@@ -991,18 +1033,19 @@ mod tests {
             !reading.devices.is_empty(),
             "this machine has block devices"
         );
-        for device in &reading.devices {
-            let sysfs = Path::new("/sys/class/block").join(device);
+        for device in reading.devices.keys() {
+            let name = &device.name;
+            let sysfs = Path::new("/sys/class/block").join(name);
             assert!(
                 !sysfs.join("partition").exists(),
-                "`{device}` is a partition and its I/O is counted again on its disk"
+                "`{name}` is a partition and its I/O is counted again on its disk"
             );
             let stacked = std::fs::read_dir(sysfs.join("slaves"))
                 .map(|mut entries| entries.next().is_some())
                 .unwrap_or(false);
             assert!(
                 !stacked,
-                "`{device}` is stacked on other devices and its I/O is counted again below it"
+                "`{name}` is stacked on other devices and its I/O is counted again below it"
             );
         }
     }
@@ -1017,7 +1060,7 @@ mod tests {
         let mut naive = 0u64;
         let mut leaves = 0u64;
         for line in text.lines() {
-            let Some((name, numbers)) = split_line(line) else {
+            let Some((_, _, name, numbers)) = split_line(line) else {
                 continue;
             };
             let Some(counters) = DeviceCounters::parse(&numbers) else {

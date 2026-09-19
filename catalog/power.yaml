@@ -68,9 +68,10 @@
        is what the core ran at, and they part company exactly when it matters --
        under a power or thermal limit, or under an instruction mix carrying a
        frequency licence such as AVX-512."
-    - "A system target reports the mean across the online cpus, with min and max
-       beside it. One boosted core among twenty-three idle ones is a mean that
-       describes no core; --cpu asks about a core."
+    - "A system target reports one series per online cpu, not a mean: one
+       boosted core among twenty-three idle ones is a mean that describes no
+       core. Averaging the series is something --emit does; recovering a core
+       from an average is not. --cpu narrows which cores are read."
 
 - id: power.cstate
   family: power
@@ -92,8 +93,11 @@
        belongs to earlier ticks, and a short tick can report more idle time than
        it contains. Measured here: 1.06 of one 300 ms tick, and 0.97 over two
        seconds, where /proc/stat's own idle accounting said 0.97 as well."
-    - "Residency is cpu-time. The value is the residency of the average watched
-       cpu, which cannot exceed the tick; `idle_ns_total` is the sum over them."
+    - "One series per cpu. `idle_ratio` is that cpu's residency over the tick
+       and is not bounded by one: because the credit lands when the cpu wakes,
+       a core that slept a second and woke inside a 200 ms tick reports a share
+       of five. Measured here: up to 5.0 on one tick, converging on the real
+       share over a window long enough for the crediting to wash out."
 
 - id: power.temp
   family: power

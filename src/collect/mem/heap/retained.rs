@@ -24,6 +24,7 @@ use super::super::cadence::Cadence;
 use super::state::{FreedRanges, LiveSet};
 use super::{pagemap::Pagemap, Stream, OP_ALLOC};
 use crate::clock::monotonic_ns;
+use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
@@ -44,6 +45,8 @@ pub struct RetainedCollector {
     pagemap: Pagemap,
     /// When a value is published, as opposed to how often the pipe is drained.
     cadence: Cadence,
+    /// `comm` is a declared filter field on this source.
+    comm: Comm,
     emitted: u64,
     losses: Losses,
     /// Evictions already counted, so the loss is reported once per range and
@@ -68,6 +71,7 @@ impl RetainedCollector {
                 stream.pid()
             )
         })?;
+        let comm = Comm::of(stream.pid());
         Ok(Box::new(Self {
             id: CollectorId::new("mem.heap.retained/preload"),
             stream,
@@ -75,6 +79,7 @@ impl RetainedCollector {
             freed: FreedRanges::new(capacity),
             pagemap,
             cadence: Cadence::new(interval),
+            comm,
             emitted: 0,
             losses: Losses::default(),
             evictions_reported: 0,
@@ -142,6 +147,9 @@ impl RetainedCollector {
         // For scale only. The retained number is not derived from it.
         if let Some(rss) = super::super::footprint::resident_bytes(self.stream.pid()) {
             attrs.push(Attr::uint("rss", rss));
+        }
+        if let Some(comm) = self.comm.get() {
+            attrs.push(Attr::text("comm", comm));
         }
 
         let event = Event {

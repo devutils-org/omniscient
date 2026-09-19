@@ -29,6 +29,7 @@ use std::time::Duration as StdDuration;
 use perf_event_open_sys::bindings as perf;
 
 use crate::clock::monotonic_ns;
+use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Counter, CounterGroup, Reading, Scope};
@@ -184,6 +185,9 @@ pub struct CounterCollector {
     pid: i32,
     spec: &'static Spec,
     group: Option<CounterGroup>,
+    /// The catalog declares `comm` as a filter field on every counting source
+    /// of this family, and a filter field nothing emits is false everywhere.
+    comm: Comm,
     losses: Losses,
     notes: Vec<String>,
 }
@@ -195,6 +199,7 @@ impl CounterCollector {
             pid,
             spec,
             group: None,
+            comm: Comm::of(pid),
             losses: Losses::default(),
             notes: Vec::new(),
         }
@@ -258,6 +263,9 @@ impl CounterCollector {
         // the last tick and the moment the run was noticed to be over.
         attrs.push(Attr::uint("enabled_ns", window.enabled_ns));
         attrs.push(Attr::uint("running_ns", window.running_ns));
+        if let Some(comm) = self.comm.get() {
+            attrs.push(Attr::text("comm", comm));
+        }
 
         Some(Event {
             ts_ns: monotonic_ns(),
@@ -303,8 +311,12 @@ impl Collector for CounterCollector {
     }
 
     fn sample(&mut self, _seq: u64) -> Result<Vec<Event>, SampleError> {
-        // A counted window has one value and it is read at the end. The only
-        // thing to do on a tick is notice that the thing being counted is gone.
+        // A counted window has one value and it is read at the end. Two things
+        // are worth doing on a tick: noticing that the thing being counted is
+        // gone, and keeping the task's name, which is read here rather than at
+        // `start` because at `start` a launched program has not execed yet and
+        // still carries this tool's own name.
+        self.comm.get();
         if self.pid > 0 && !Path::new(&format!("/proc/{}", self.pid)).exists() {
             return Err(SampleError::TargetGone(format!(
                 "process {} exited",

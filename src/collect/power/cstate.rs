@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, AttrValue, CollectorId, Event};
+use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
 use super::sysfs;
@@ -75,12 +75,27 @@ impl Prepared for Prepare {
     }
 }
 
-/// Time and entries per idle state, summed over the cpus being watched.
+/// One cpu's idling over an interval, before it becomes an event.
+#[derive(Default)]
+struct CpuResidency {
+    idle_ns: u64,
+    entries: u64,
+    /// State name, nanoseconds, entries.
+    per_state: Vec<(String, u64, u64)>,
+}
+
+/// Time and entries per idle state, for every cpu being watched.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Reading {
     ts_ns: u64,
-    /// State name to (microseconds of residency, entries).
-    states: BTreeMap<String, (u64, u64)>,
+    /// (cpu, state name) to (microseconds of residency, entries).
+    ///
+    /// Kept apart per cpu rather than summed. A residency averaged over
+    /// twenty-four cores says the machine was 90 % idle while one core was
+    /// pinned at 100 %, which is the shape of exactly the problem someone
+    /// reads this to find; and the catalog declares `cpu` as a filter field
+    /// here, which an aggregate cannot carry.
+    states: BTreeMap<(u32, String), (u64, u64)>,
 }
 
 pub struct Residency {
@@ -106,7 +121,7 @@ impl Residency {
     }
 
     fn read(&mut self) -> Result<Reading, SampleError> {
-        let mut states: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        let mut states: BTreeMap<(u32, String), (u64, u64)> = BTreeMap::new();
         let mut read_any = false;
         for &cpu in &self.cpus {
             let directory = self.root.join(format!("cpu{cpu}")).join("cpuidle");
@@ -129,7 +144,7 @@ impl Residency {
                     ));
                     continue;
                 };
-                let total = states.entry(name).or_insert((0, 0));
+                let total = states.entry((cpu, name)).or_insert((0, 0));
                 total.0 += time;
                 total.1 += usage;
                 read_any = true;
@@ -147,7 +162,8 @@ impl Residency {
         })
     }
 
-    fn delta_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
+    /// One event per cpu for the increase between two readings.
+    fn delta_events(&mut self, before: &Reading, after: &Reading, seq: u64) -> Vec<Event> {
         if before.states.keys().ne(after.states.keys()) {
             self.losses.undecoded += 1;
             self.losses.note(
@@ -155,65 +171,83 @@ impl Residency {
                  is not one machine's worth of idling"
                     .to_owned(),
             );
-            return None;
+            return Vec::new();
         }
         let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
         if interval_ns == 0 {
-            return None;
+            return Vec::new();
         }
 
-        let mut idle_ns = 0u64;
-        let mut entries = 0u64;
-        let mut per_state = Vec::new();
-        for (name, (time, usage)) in &after.states {
-            let (before_time, before_usage) = before.states.get(name).copied().unwrap_or((0, 0));
+        // Grouped by cpu, keeping the states of each together.
+        let mut per_cpu: BTreeMap<u32, CpuResidency> = BTreeMap::new();
+        for ((cpu, name), (time, usage)) in &after.states {
+            let (before_time, before_usage) = before
+                .states
+                .get(&(*cpu, name.clone()))
+                .copied()
+                .unwrap_or((0, 0));
             let (Some(time), Some(usage)) = (
                 time.checked_sub(before_time),
                 usage.checked_sub(before_usage),
             ) else {
                 self.losses.undecoded += 1;
                 self.losses.note(format!(
-                    "the residency counter for `{name}` went backwards, so this interval cannot \
-                     be attributed"
+                    "the residency counter for cpu{cpu} state `{name}` went backwards, so this \
+                     interval cannot be attributed"
                 ));
-                return None;
+                return Vec::new();
             };
             // cpuidle counts microseconds; everything in this tool is
             // nanoseconds.
             let nanos = time * 1_000;
-            idle_ns += nanos;
-            entries += usage;
-            per_state.push((name.clone(), nanos, usage));
+            let entry = per_cpu.entry(*cpu).or_default();
+            entry.idle_ns += nanos;
+            entry.entries += usage;
+            entry.per_state.push((name.clone(), nanos, usage));
         }
 
-        let cpus = self.cpus.len() as u64;
-        let available_ns = interval_ns as f64 * cpus as f64;
-        let mut attrs = vec![
-            Attr::uint("idle_ns", idle_ns / cpus.max(1)),
-            Attr::uint("idle_ns_total", idle_ns),
-            Attr {
-                name: "idle_ratio".to_owned(),
-                value: AttrValue::Float(idle_ns as f64 / available_ns),
-            },
-            Attr::uint("entries", entries),
-            Attr::uint("interval_ns", interval_ns),
-            Attr::uint("cpus", cpus),
-        ];
-        for (name, nanos, usage) in per_state {
-            let key = sysfs::attribute_name("state", &name);
-            attrs.push(Attr::uint(format!("{key}_ns"), nanos));
-            attrs.push(Attr::uint(format!("{key}_entries"), usage));
-        }
-
-        Some(Event {
-            ts_ns: after.ts_ns,
-            ts_err_ns: 0,
-            kind: "power.cstate".to_owned(),
-            keys: Vec::new(),
-            attrs,
-            collector_id: self.id.clone(),
-            seq,
-        })
+        per_cpu
+            .into_iter()
+            .enumerate()
+            .map(|(offset, (cpu, residency))| {
+                let CpuResidency {
+                    idle_ns,
+                    entries,
+                    per_state,
+                } = residency;
+                let mut attrs = vec![
+                    Attr::uint("idle_ns", idle_ns),
+                    // Not bounded by one. The kernel credits a residency when
+                    // the cpu leaves the idle state, so a core that slept for
+                    // a second and woke inside a 200 ms tick reports the whole
+                    // second against that tick. Over a window long enough for
+                    // the crediting to wash out it converges on the real share;
+                    // over one tick it is a share of the tick in which the
+                    // sleep was *accounted*, not one it happened in.
+                    Attr {
+                        name: "idle_ratio".to_owned(),
+                        value: AttrValue::Float(idle_ns as f64 / interval_ns as f64),
+                    },
+                    Attr::uint("entries", entries),
+                    Attr::uint("interval_ns", interval_ns),
+                    Attr::uint("cpu", u64::from(cpu)),
+                ];
+                for (name, nanos, usage) in per_state {
+                    let key = sysfs::attribute_name("state", &name);
+                    attrs.push(Attr::uint(format!("{key}_ns"), nanos));
+                    attrs.push(Attr::uint(format!("{key}_entries"), usage));
+                }
+                Event {
+                    ts_ns: after.ts_ns,
+                    ts_err_ns: 0,
+                    kind: "power.cstate".to_owned(),
+                    keys: vec![KeyValue::cpu(cpu)],
+                    attrs,
+                    collector_id: self.id.clone(),
+                    seq: seq + offset as u64,
+                }
+            })
+            .collect()
     }
 }
 
@@ -222,9 +256,8 @@ impl Collector for Residency {
         &self.id
     }
 
-    /// Nanoseconds the average watched cpu spent idle during the tick, which
-    /// is at most the tick itself. The sum over the cpus is `idle_ns_total`
-    /// and the same number as a fraction is `idle_ratio`.
+    /// Nanoseconds this cpu spent idle during the tick, which is at most the
+    /// tick itself. The same number as a fraction is `idle_ratio`.
     fn value_attr(&self) -> &'static str {
         "idle_ns"
     }
@@ -247,8 +280,9 @@ impl Collector for Residency {
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let after = self.read()?;
         let before = self.previous.replace(after.clone());
-        let event = before.and_then(|before| self.delta_event(&before, &after, seq));
-        Ok(event.into_iter().collect())
+        Ok(before
+            .map(|before| self.delta_events(&before, &after, seq))
+            .unwrap_or_default())
     }
 
     fn losses(&self) -> Losses {
@@ -304,21 +338,23 @@ mod tests {
         }
         let events = collector.sample(1).expect("a second read");
 
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        // 2 cpus x (50 ms + 1 ms) = 102 ms of cpu-time, 51 ms per cpu.
-        assert_eq!(
-            event.attr("idle_ns_total").unwrap().as_f64(),
-            Some(102_000_000.0)
-        );
-        assert_eq!(event.attr("idle_ns").unwrap().as_f64(), Some(51_000_000.0));
-        assert_eq!(
-            event.attr("state.c1_ns").unwrap().as_f64(),
-            Some(100_000_000.0)
-        );
-        assert_eq!(event.attr("state.c1_entries").unwrap().as_f64(), Some(4.0));
-        assert_eq!(event.attr("entries").unwrap().as_f64(), Some(6.0));
-        assert_eq!(event.attr("cpus").unwrap().as_f64(), Some(2.0));
+        assert_eq!(events.len(), 2, "one event per cpu");
+        for (offset, event) in events.iter().enumerate() {
+            assert_eq!(event.keys[0].to_string(), format!("cpu:{offset}"));
+            // 50 ms in C1 and 1 ms in POLL, for this cpu alone.
+            assert_eq!(event.attr("idle_ns").unwrap().as_f64(), Some(51_000_000.0));
+            assert_eq!(
+                event.attr("state.c1_ns").unwrap().as_f64(),
+                Some(50_000_000.0)
+            );
+            assert_eq!(event.attr("state.c1_entries").unwrap().as_f64(), Some(2.0));
+            assert_eq!(event.attr("entries").unwrap().as_f64(), Some(3.0));
+            assert_eq!(
+                event.attr("cpu").unwrap().as_f64(),
+                Some(offset as f64),
+                "`cpu` is a declared filter field, and a key is not one"
+            );
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -342,16 +378,14 @@ mod tests {
         }
         let events = collector.sample(1).expect("a second read");
 
-        // Two cpus of the four, ten milliseconds each.
-        assert_eq!(events[0].attr("cpus").unwrap().as_f64(), Some(2.0));
-        assert_eq!(
-            events[0].attr("idle_ns_total").unwrap().as_f64(),
-            Some(20_000_000.0)
-        );
-        assert_eq!(
-            events[0].attr("idle_ns").unwrap().as_f64(),
-            Some(10_000_000.0)
-        );
+        // Two cpus of the four, ten milliseconds each, and the other two are
+        // absent rather than averaged in.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].keys[0].to_string(), "cpu:0");
+        assert_eq!(events[1].keys[0].to_string(), "cpu:1");
+        for event in &events {
+            assert_eq!(event.attr("idle_ns").unwrap().as_f64(), Some(10_000_000.0));
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -445,7 +479,13 @@ mod tests {
             return;
         };
         let independent = (after - before) as f64;
-        let measured = events[0].attr("idle_ns_total").unwrap().as_f64().unwrap();
+        // One event per cpu now, and `/proc/stat`'s first line is the machine,
+        // so the comparison is against the sum of the cpus -- which is exactly
+        // what the single `idle_ns_total` attribute used to hold.
+        let measured: f64 = events
+            .iter()
+            .filter_map(|event| event.attr("idle_ns")?.as_f64())
+            .sum();
 
         // `/proc/stat` counts in ten-millisecond jiffies, per cpu, so on a
         // twenty-four cpu machine it can be a fifth of a second of cpu-time out

@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::clock::monotonic_ns;
+use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::Target;
@@ -76,6 +77,9 @@ pub struct JitMapCollector {
     /// those polls mean something -- that this run watched a program and saw
     /// nothing, which is not the same as a program that compiled nothing.
     absent_before_first_read: u64,
+    /// `comm` is a declared filter field on this source, and a run watching
+    /// several runtimes at once is exactly what it is for.
+    comm: Comm,
     losses: Losses,
 }
 
@@ -97,6 +101,7 @@ impl JitMapCollector {
             read_once: false,
             compilations: 0,
             absent_before_first_read: 0,
+            comm: Comm::of(pid),
             losses: Losses::default(),
         }
     }
@@ -212,6 +217,7 @@ impl JitMapCollector {
                 continue;
             };
             self.compilations += 1;
+            let comm = self.comm.get().map(str::to_owned);
             events.push(Event {
                 ts_ns: now_ns,
                 ts_err_ns,
@@ -232,7 +238,10 @@ impl JitMapCollector {
                     // could be declared, validated, and never match anything.
                     Attr::text("code_kind", entry.kind),
                     Attr::uint("first_read", u64::from(first_read)),
-                ],
+                ]
+                .into_iter()
+                .chain(comm.map(|comm| Attr::text("comm", comm)))
+                .collect(),
                 collector_id: self.id.clone(),
                 seq: index,
             });

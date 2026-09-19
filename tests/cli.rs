@@ -645,12 +645,18 @@ fn a_filter_that_cannot_be_pushed_down_runs_after_reading_and_says_what_it_remov
 /// A predicate over a field the collector never produces is false everywhere,
 /// which empties the series. That is a legitimate outcome and an easy one to
 /// misread, so the run says which field was never there.
+///
+/// `power.cstate --filter state` is the case, and it is not an oversight: one
+/// event covers every idle state of a cpu, with a residency per state in its
+/// own attribute, so there is no single `state` value the event could carry.
+/// The catalog declares the field for the eBPF backend, which sees transitions
+/// one at a time. This test used to use `comm` on `mem.rss`, which no longer
+/// works for it -- because that field is now emitted, which was the point.
 #[test]
 fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_series() {
     let output = run(&[
-        "mem.rss",
-        "--pid",
-        &std::process::id().to_string(),
+        "power.cstate",
+        "--system",
         "--mode",
         "poll@50ms",
         "--duration",
@@ -658,13 +664,13 @@ fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_se
         "--emit",
         "summary",
         "--filter",
-        "comm == 'nothing-here'",
+        "state == 'nothing-here'",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("kept 0 of"), "{text}");
     assert!(
-        text.contains("no event carried `comm`"),
+        text.contains("no event carried `state`"),
         "an empty series must explain itself: {text}"
     );
 }

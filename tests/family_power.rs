@@ -378,10 +378,23 @@ fn an_unreadable_energy_counter_asks_for_privileges_not_for_hardware() {
     );
 }
 
-/// Residency is cpu-time, and the value is the average watched cpu's share of
-/// the tick. It is allowed to exceed the tick, because the kernel credits
-/// residency when a cpu leaves an idle state -- but not by an order of
-/// magnitude, which is what a unit or a cpu-count error would produce.
+/// Residency is cpu-time, and the value is one cpu's share of the tick. It is
+/// allowed to exceed the tick, because the kernel credits the whole residency
+/// at the moment a cpu *leaves* an idle state: a core that slept for a second
+/// and woke inside a 200 ms tick reports a full second against that tick, for
+/// a share of five.
+///
+/// The bound is therefore generous, and what it still catches is the failure
+/// worth catching: microseconds left unconverted to nanoseconds is a factor of
+/// a thousand, and no amount of late crediting reaches that over a tick this
+/// long.
+///
+/// It used to be 1.5, which held only because the value was averaged over
+/// every watched cpu -- twenty-four of them here -- and one core's late credit
+/// divided by twenty-four is invisible. The events are per cpu now and the
+/// smoothing is gone with them, which is the point: a machine reported as 90 %
+/// idle while one core is pinned is the shape of the problem someone reads
+/// this to find.
 #[test]
 fn an_idle_share_stays_within_reach_of_the_window_it_covers() {
     if !usable("power.cstate") {
@@ -412,7 +425,7 @@ fn an_idle_share_stays_within_reach_of_the_window_it_covers() {
             .parse()
             .unwrap_or_else(|_| panic!("idle_ratio is a number: {line}"));
         assert!(
-            (0.0..1.5).contains(&ratio),
+            (0.0..50.0).contains(&ratio),
             "an idle share of {ratio} is not late crediting, it is an error of scale: {line}"
         );
         seen += 1;

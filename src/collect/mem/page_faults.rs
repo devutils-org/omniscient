@@ -14,6 +14,7 @@ use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
 
+use crate::collect::task::Comms;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Record, SampledEvent, Scope};
@@ -54,6 +55,10 @@ pub struct PageFaultCollector {
     pid: i32,
     mode: Mode,
     event: Option<SampledEvent>,
+    /// Names by tid, not by the collector's pid: an event opened over a process
+    /// receives samples from whichever of its threads faulted, and `comm` is a
+    /// declared filter field on this source.
+    comms: Comms,
     /// Counted here rather than in the ring so it survives `stop`.
     losses: Losses,
 }
@@ -65,6 +70,7 @@ impl PageFaultCollector {
             pid,
             mode,
             event: None,
+            comms: Comms::new(),
             losses: Losses::default(),
         }
     }
@@ -74,8 +80,10 @@ impl PageFaultCollector {
             return;
         };
         let id = self.id.clone();
+        let comms = &mut self.comms;
         let mut index = seq;
         let mut dropped = 0u64;
+        let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
             Record::Sample(sample) => {
@@ -95,20 +103,39 @@ impl PageFaultCollector {
                             len: 1,
                         },
                     ],
-                    attrs: vec![
-                        Attr::uint("count", 1),
-                        Attr::uint("addr", sample.addr),
-                        Attr::uint("ip", sample.ip),
-                    ],
+                    attrs: {
+                        let mut attrs = vec![
+                            Attr::uint("count", 1),
+                            Attr::uint("addr", sample.addr),
+                            Attr::uint("ip", sample.ip),
+                        ];
+                        if let Some(comm) = comms.get(sample.tid as i32) {
+                            attrs.push(Attr::text("comm", comm));
+                        }
+                        attrs
+                    },
                     collector_id: id.clone(),
                     seq: index,
                 });
                 index += 1;
             }
             Record::Lost { count } => dropped += count,
-            Record::Throttle { .. } => {}
+            Record::Throttle { throttled } => throttles += u64::from(throttled),
             Record::Other { .. } => undecoded += 1,
         });
+        // A throttle is the kernel deciding this event costs too much and
+        // delivering nothing for a while. How many faults happened inside that
+        // window is not knowable from userspace, so it is counted as a throttle
+        // rather than folded into `dropped`, which would claim a precision that
+        // does not exist. This source ignored it entirely until now, and a
+        // throttled run reported itself as clean.
+        if throttles > 0 {
+            self.losses.throttled += throttles;
+            self.losses.note(
+                "the kernel throttled page-fault sampling: an unknown number of faults in each \
+                 throttled period were not sampled (see kernel.perf_event_max_sample_rate)",
+            );
+        }
         if dropped > 0 {
             self.losses.dropped += dropped;
             self.losses
