@@ -347,7 +347,8 @@ a build is a test that will be deleted.
 ## Defects found
 
 Nine, none of them worked around. Each is reproducible with the session or
-command line given.
+command line given. One — 9, the loss headline — is fixed; its reproduction is
+left in place with what the run prints now beside it.
 
 ### 1. A declared mode, refused at attach, under the exit code for a failure
 
@@ -605,7 +606,12 @@ code, for filter fields it is caught and reported well — `--filter "comm == ..
 names the backend that would carry the field — and for keys it costs nothing at
 all until a join comes up empty.
 
-### 9. The loss headline names three of the five things that are counted
+### 9. The loss headline names three of the five things that are counted — **fixed**
+
+Fixed in `src/encode.rs` by the fifth wave, by stream C rather than by the
+stream this was given to: `Losses` is stream A's type and the headline is in
+`src/encode.rs`, which stream C owns and stream F has no share of. The
+reproduction below is the run as it was; what it prints now is at the end.
 
 ```console
 $ # a /proc/diskstats holding one device this machine cannot classify
@@ -617,13 +623,39 @@ io.bytes  via fs:proc  (io.bytes)
 ```
 
 `Losses` counts five things — dropped, failed reads, late ticks, undecoded and
-throttled — and `src/encode.rs` prints the first three. A run whose only loss
-is `undecoded`, which is this family's ordinary case, announces `LOSS` and then
-three zeros, and the reader has to infer the real count from how many reason
-lines follow. The structured formats carry all five, so this is the text
+throttled — and `src/encode.rs` printed the first three. A run whose only loss
+is `undecoded`, which is this family's ordinary case, announced `LOSS` and then
+three zeros, and the reader had to infer the real count from how many reason
+lines followed. The structured formats carry all five, so this was the text
 renderer alone; it is also the format in which someone is looking at the screen
 deciding whether to trust the numbers. `undecoded` is not a small category
 here: it is how `/proc/diskstats` says a line was left out of the total.
+
+Three renderers printed the three, not one: the text output, the comment block
+of a `pprof` profile, and the process label of a `chrome` trace.
+
+**What it prints now.** One `loss_headline` serves all three, so the next kind
+added to `Losses` is one edit rather than three:
+
+```console
+  LOSS: 0 dropped, 0 failed reads, 0 late ticks, 4 undecoded, 0 throttled
+    4x `sda` has no entry under /sys/class/block, so whether its counters are
+       its own could not be checked; it is left out of the total
+```
+
+The zeros are kept rather than elided. The line is only printed when something
+was lost, and which of the five is zero is the part that says where to look: a
+run losing only `undecoded` is a parsing gap and one losing only `throttled` is
+a kernel that declined to deliver. Printing the non-zero ones alone would make
+the vocabulary itself depend on the run.
+
+`a_line_left_out_of_the_total_reaches_the_reader_at_a_terminal` asserts that all
+five kinds are named and that `undecoded` carries a non-zero count. It fails
+against the old headline with the defect quoted back:
+
+```
+`undecoded` is named with a count in `  LOSS: 0 dropped, 0 failed reads, 0 late ticks`
+```
 
 ---
 

@@ -810,22 +810,30 @@ fn defect_1_topk_ranks_processes_rather_than_the_methods_that_were_compiled() {
     );
 }
 
-/// Defect 2: `=~` is a substring test, and nothing says so.
+/// Defect 2, fixed: `=~` is a substring test, and now it says so.
 ///
-/// The manual lists `=~` among the operators and leaves the reader to assume
-/// the meaning it has in every other tool that spells it this way. It is
-/// `str::contains`. A predicate written as a regular expression is parsed,
-/// validated, reported as applied, and keeps nothing -- the same silent-empty
-/// failure this source already had once, when its `code_kind` attribute was
-/// called `kind`.
+/// It is `str::contains`, and every other tool that spells a match operator
+/// this way -- Perl, Ruby, awk, bash's `[[ =~ ]]` -- means a regular
+/// expression. A regex written here used to be parsed, validated, reported as
+/// applied, and keep nothing: the same silent-empty failure this source already
+/// had once, when its `code_kind` attribute was called `kind`, and one an empty
+/// series over a quiet workload is indistinguishable from.
+///
+/// `filter::literal_only` now refuses the patterns that can only have been
+/// meant as a regex -- a character class, a group, an escape, and the two
+/// anchors where they anchor -- and the refusal is the one place in a run that
+/// has any reason to say what the operator does. The two halves asserted below
+/// are that a literal substring still matches and that a regex no longer runs
+/// silently. What is deliberately *not* widened is `.`, `+`, `*` and `?`:
+/// `a.js:3:1` and `libc.so.6+0x27781` are ordinary method and frame text.
 #[test]
-fn defect_2_the_match_operator_is_a_substring_test_and_says_nothing_about_it() {
+fn defect_2_the_match_operator_is_a_substring_test_and_says_so() {
     let workload = "map=/tmp/perf-$$.map; \
                     for i in 1 2 3 4; do \
                     printf '4000%s 10 JS:~omniscientSwept%s a.js:%s:1\\n' $i $i $i >> $map; \
                     done; sleep 0.05; rm -f $map";
-    let with = |filter: &str| {
-        let output = omn(&[
+    let run = |filter: &str| {
+        omn(&[
             "runtime.jit",
             "--mode",
             "trace",
@@ -839,7 +847,10 @@ fn defect_2_the_match_operator_is_a_substring_test_and_says_nothing_about_it() {
             "sh",
             "-c",
             workload,
-        ]);
+        ])
+    };
+    let with = |filter: &str| {
+        let output = run(filter);
         assert!(output.status.success(), "{}", stderr(&output));
         document(&output)["results"][0]["events_seen"]
             .as_u64()
@@ -853,20 +864,54 @@ fn defect_2_the_match_operator_is_a_substring_test_and_says_nothing_about_it() {
         "a plain substring matches, which is all this operator does"
     );
     assert_eq!(
-        with("method =~ 'Swept[1-4]'"),
-        0,
-        "DEFECT 2 IS FIXED: `=~` now evaluates a regular expression. Delete this test \
-         and defect 2 of docs/scenarios/runtime.md."
+        with("method =~ 'omniscientSwept1'"),
+        1,
+        "and a longer substring narrows it, which is the useful half of the operator"
     );
 
-    // And nothing in the tool's own help distinguishes it from a regex.
+    // A pattern that can only have been meant as a regular expression. It used
+    // to keep zero of four and report that as an ordinary empty result; it is
+    // now refused before anything is attached, and the refusal is what says
+    // that `=~` is a substring test.
+    for (pattern, meant) in [
+        ("Swept[1-4]", "a character class"),
+        ("(Swept1|Swept2)", "a group"),
+        ("Swept\\d", "an escape"),
+        ("^omniscientSwept1", "a leading anchor"),
+        ("omniscientSwept1$", "a trailing anchor"),
+    ] {
+        let output = run(&format!("method =~ '{pattern}'"));
+        assert!(
+            !output.status.success(),
+            "{meant} in `{pattern}` cannot match literally and must not run silently:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let said = stderr(&output);
+        assert!(
+            said.contains("substring test, not a regular expression"),
+            "the refusal is the only place that says what `=~` does:\n{said}"
+        );
+    }
+
+    // The anchored form names the exact predicate that was meant, since an
+    // anchor is a reader asking for equality in the only spelling they knew.
+    let anchored = stderr(&run("comm =~ '^sh$'"));
+    assert!(
+        anchored.contains("comm == 'sh'"),
+        "an anchored pattern is an exact match written in regex, and the refusal has to \
+         name the operator that is one:\n{anchored}"
+    );
+
+    // What is left of this defect: the manual still lists `=~` among the
+    // operators without saying what it does, and `man/omn.1` is nobody's file
+    // in this wave. `docs/open-findings.md`, "Needs from another stream".
     let manual = std::fs::read_to_string(root().join("man/omn.1")).expect("the manual page");
     let described = manual.lines().any(|line| {
         line.contains("=~") && (line.contains("substring") || line.contains("contains"))
     });
     assert!(
         !described,
-        "DEFECT 2 IS PARTLY FIXED: the manual now says what `=~` does. Update defect 2 \
-         of docs/scenarios/runtime.md."
+        "THE REST OF DEFECT 2 IS FIXED: the manual now says what `=~` does. Drop this \
+         assertion and the remaining half of defect 2 in docs/scenarios/runtime.md."
     );
 }

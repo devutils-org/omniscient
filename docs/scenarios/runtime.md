@@ -225,14 +225,20 @@ degradation that travels with every run.
 ## Defects found
 
 Two. Both are in the shared layer rather than in this family and were found
-through it; they are the coordinator's to route into `docs/open-findings.md`,
-which this stream does not own. See `docs/scenarios/proc.md` for four more,
-including one — the session tick — that would change how any multi-source
-`runtime` session behaves.
+through it. See `docs/scenarios/proc.md` for four more, including one — the
+session tick — that would change how any multi-source `runtime` session
+behaves.
 
-Each has a test in `tests/scenario_runtime.rs` named `defect_<n>_...` that
-asserts the *wrong* behaviour on purpose. When one starts failing, the defect is
-fixed: delete the test and the entry here together.
+Each has a test in `tests/scenario_runtime.rs` named `defect_<n>_...`. The one
+that is fixed now asserts the fixed behaviour and would fail against the old;
+the one that is not still asserts the *wrong* behaviour on purpose, and when it
+starts failing the defect is fixed — delete the test and the entry here
+together.
+
+| | State |
+|---|---|
+| 1 — `topk` ranks processes, not methods | open; the fix is in `src/request.rs`, which no stream owns |
+| 2 — `=~` is a substring test and nothing says so | **fixed** in `src/filter.rs`, except one line of manual |
 
 ### 1. `topk` ranks processes, not the methods that were compiled
 
@@ -274,10 +280,13 @@ The comment in `runtime-jit.yml` has been rewritten to say what is true now, and
 `topk` is deliberately absent from that session rather than present and
 misleading.
 
-### 2. `=~` is a substring test, and nothing says so
+### 2. `=~` is a substring test, and nothing says so — **fixed**
 
-The filter grammar's `=~` is `str::contains`. The manual lists it among the
-operators and never says what it does:
+Fixed in `src/filter.rs` by the fifth wave, except for one line of manual. The
+reproduction below is the run as it was; what it does now is at the end.
+
+The filter grammar's `=~` is `str::contains`. The manual listed it among the
+operators and never said what it does:
 
 ```troff
 Supports
@@ -303,3 +312,38 @@ Cheapest fix is one line of manual: say it is a substring test. The better one i
 to refuse a pattern containing regex metacharacters that cannot match literally,
 since `[`, `(` and `\` almost never appear in a symbol name and always appear in
 a misread predicate.
+
+**What it does now.** The better one, in `filter::literal_only`, raised at parse
+time so the answer is "this request cannot mean anything" and not "this machine
+cannot serve it":
+
+```console
+$ omn runtime.jit --filter "method =~ 'Swept[1-4]'" ...
+error: `=~` is a substring test, not a regular expression, so `Swept[1-4]` would only keep
+values containing `[` literally. `[` is a character class in a regular expression and
+nothing in a substring: write the text to look for, as in `method =~ 'text'`.
+
+$ omn runtime.jit --filter "method =~ '^omniscientSwept1$'" ...
+error: `=~` is a substring test, not a regular expression, so `^omniscientSwept1$` would
+only keep values containing `^` literally. It has no anchors: write
+`method == 'omniscientSwept1'` for an exact match, or `method =~ 'omniscientSwept1'` to
+find it anywhere in the value.
+```
+
+The refusal is the only place in a run that has any reason to mention what the
+operator does, which is why it was taken over the line of manual rather than
+instead of it.
+
+The set refused is a character class `[`, a group `(`, an escape `\`, and the
+two anchors in the positions where they anchor. `.`, `+`, `*` and `?` are
+excluded deliberately: `a.js:3:1`, `libc.so.6+0x27781` and `operator*` are
+ordinary method and frame text, and `daddr =~ '127.0.0.1'` is a working
+predicate `docs/scenarios/net.md` relies on. Refusing a pattern that matches
+something would be worse than the defect.
+
+**What is left** is the line of manual. `man/omn.1` still lists `=~` among the
+operators without saying what it is, and no stream of this wave owns that file;
+the troff wanted is in `docs/open-findings.md` under "Needs from another
+stream". `defect_2_the_match_operator_is_a_substring_test_and_says_so` asserts
+that the manual is still silent, and says in its own failure message to drop
+that assertion and this paragraph together.

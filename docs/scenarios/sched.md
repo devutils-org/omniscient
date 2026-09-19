@@ -373,7 +373,11 @@ below is in `examples/` and runs. The last is not in the tool at all — it is a
 test of this family that fails about one run in five, and it was found by
 running `make check` often enough to notice.
 
-### 1. `sched.offcpu --emit hist` renders a distribution that is not one
+### 1. `sched.offcpu --emit hist` renders a distribution that is not one — **half fixed**
+
+Still true as written. What changed in the fifth wave is that the emit layer can
+now be *told*, and the diagnosis `BRIEF.md` carried is ruled out; both are at the
+end of this entry.
 
 The workload performed 19 951 blocks of a few microseconds each. The histogram
 shows nine samples with a mean of 15.55 ms and a maximum of 29.01 ms — buckets
@@ -416,6 +420,34 @@ the key of the map the program keeps, as `runqlat` does, and the histogram falls
 out of the drain. Until then `hist` on this source should carry a degradation
 of its own or be refused, because a reader has no way to tell the two
 histograms apart.
+
+**What landed, and what did not.** `BRIEF.md` routed this to the emit layer with
+the guess that the cause is "the one `emit::WEIGHT_ATTR` was added for, in a
+source that does not yet carry it". It is not, and the arithmetic says so:
+`WEIGHT_ATTR` means *this value occurred N times*, which is true of a
+`sched.runqlat` row — `(task, bucket) -> count`, every wait behind it inside
+that bucket — and false here, where `total_ns` is the **sum** of `blocks`
+blocks. Weighing this row by its block count would report four hundred blocks of
+about twenty microseconds at the value of their sum, in a bucket none of them
+was ever in: a worse answer than the one above, not a better one.
+`emit::tests::a_row_that_is_a_total_over_its_measurements_says_what_it_is`
+carries that arithmetic so it is not re-derived.
+
+What the emit layer gained instead is the vocabulary it was missing:
+`emit::TOTAL_OF_ATTR`, a collector saying *this value is the sum over N
+measurements whose individual values do not reach here*. `raw`, `rate`,
+`timeline` and `topk` are unaffected by it, since a total is exactly what they
+add up or plot; `hist` and `summary` are the two that claim to describe
+individual measurements, and `emit::aggregate` puts a degradation beside them
+naming both counts — the degradation this entry asks for.
+
+It is inert until a collector carries the attribute, and
+`src/collect/sched/offcpu.rs` belongs to another stream of this wave, so the
+line is written out in `docs/open-findings.md` under "Needs from another
+stream". Nothing in the tool has changed yet, which is why this defect is half
+fixed and not fixed, and why there is no assertion on it here. The real fix is
+still the kernel-side bucket; when it lands, the row carries `WEIGHT_ATTR`
+instead and `TOTAL_OF_ATTR` comes off.
 
 ### 2. A blocking stack of a *launched* program comes back with no names
 

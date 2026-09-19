@@ -8,6 +8,7 @@
 use std::fmt::Write as _;
 
 use crate::catalog::{MatchKind, Unit};
+use crate::collect::Losses;
 use crate::emit::{Bucket, Output, Results, SeriesHist, SeriesKey, StackCount};
 use crate::error::ParseError;
 use crate::event::{Event, KeyValue};
@@ -394,6 +395,27 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
     Ok(out)
 }
 
+/// The one line that says what a run did not see.
+///
+/// All five counted kinds, named, in every format that has a line to put them
+/// on. Three of them used to be printed and the other two were left to be
+/// inferred from how many reason lines followed, which made the ordinary loss
+/// of `/proc/diskstats` -- a line this build cannot decode -- announce `LOSS`
+/// and then three zeros. A reader deciding whether to trust the numbers was
+/// reading a headline that disagreed with the run.
+///
+/// The zeros are kept rather than elided. The line is only printed when
+/// something was lost, and which of the five is zero is the part that says
+/// where to look: a run losing only `undecoded` is a parsing gap, and one
+/// losing only `throttled` is a kernel that declined to deliver. Printing the
+/// non-zero ones alone would make the vocabulary itself depend on the run.
+fn loss_headline(losses: &Losses) -> String {
+    format!(
+        "LOSS: {} dropped, {} failed reads, {} late ticks, {} undecoded, {} throttled",
+        losses.dropped, losses.failed_reads, losses.late_ticks, losses.undecoded, losses.throttled
+    )
+}
+
 fn text(results: &Results) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -412,11 +434,7 @@ fn text(results: &Results) -> String {
     if results.losses.is_clean() {
         let _ = writeln!(out, "  no loss: every read succeeded and no tick ran late");
     } else {
-        let _ = writeln!(
-            out,
-            "  LOSS: {} dropped, {} failed reads, {} late ticks",
-            results.losses.dropped, results.losses.failed_reads, results.losses.late_ticks
-        );
+        let _ = writeln!(out, "  {}", loss_headline(&results.losses));
         for (reason, count) in &results.losses.reasons {
             let _ = writeln!(out, "    {count}x {reason}");
         }
@@ -1149,10 +1167,7 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
         // Losses are counted and surfaced to the user, always -- including into
         // a format that has nowhere structural to put them.
         if !results.losses.is_clean() {
-            comments.push(format!(
-                "  LOSS: {} dropped, {} failed reads, {} late ticks",
-                results.losses.dropped, results.losses.failed_reads, results.losses.late_ticks
-            ));
+            comments.push(format!("  {}", loss_headline(&results.losses)));
             for (reason, count) in &results.losses.reasons {
                 comments.push(format!("    {count}x {reason}"));
             }
@@ -1601,11 +1616,7 @@ fn process_labels(results: &Results) -> String {
         approximate(results.observed_ns)
     );
     if !results.losses.is_clean() {
-        let _ = write!(
-            label,
-            " -- LOSS: {} dropped, {} failed reads, {} late ticks",
-            results.losses.dropped, results.losses.failed_reads, results.losses.late_ticks
-        );
+        let _ = write!(label, " -- {}", loss_headline(&results.losses));
     }
     label
 }

@@ -1551,12 +1551,12 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
 /// What a reader at a terminal is told when a line of the file was left out of
 /// the total.
 ///
-/// The counted categories are five and the rendered headline names three, so a
-/// run whose only loss is `undecoded` -- this family's ordinary case, and how
-/// `/proc/diskstats` says a device could not be classified -- announces `LOSS`
-/// followed by three zeros. What is asserted here is the part that holds: the
-/// run does not claim to be complete, and the reason reaches the text. The
-/// headline itself is `docs/scenarios/io.md`, "Defects found" 9.
+/// `Losses` counts five kinds and the rendered headline used to name three, so
+/// a run whose only loss is `undecoded` -- this family's ordinary case, and how
+/// `/proc/diskstats` says a device could not be classified -- announced `LOSS`
+/// followed by three zeros, leaving the real count to be inferred from how many
+/// reason lines followed. That was defect 9 of `docs/scenarios/io.md`, and the
+/// headline asserted below is the fix: all five kinds named, every time.
 #[test]
 fn a_line_left_out_of_the_total_reaches_the_reader_at_a_terminal() {
     if let Some(reason) = no_namespace_here() {
@@ -1594,6 +1594,35 @@ fn a_line_left_out_of_the_total_reaches_the_reader_at_a_terminal() {
     assert!(
         text.contains("a-device-no-machine-has"),
         "what was left out has to be named where a reader will see it:\n{text}"
+    );
+
+    // The headline, which is the line a reader trusts or does not. All five
+    // counted kinds are named, so the one that is not zero is in it: against
+    // the three-name headline this run announced `LOSS` and three zeros.
+    let headline = text
+        .lines()
+        .find(|line| line.contains("LOSS:"))
+        .unwrap_or_else(|| panic!("the run announces what it lost:\n{text}"));
+    let counted = |kind: &str| -> u64 {
+        headline
+            .split(", ")
+            .find_map(|part| part.strip_suffix(kind))
+            .and_then(|count| count.split_whitespace().next_back()?.parse().ok())
+            .unwrap_or_else(|| panic!("`{kind}` is named with a count in `{headline}`"))
+    };
+    for kind in [
+        "dropped",
+        "failed reads",
+        "late ticks",
+        "undecoded",
+        "throttled",
+    ] {
+        let _ = counted(kind);
+    }
+    assert!(
+        counted("undecoded") > 0,
+        "the only thing this run lost is the line it could not decode, and the headline \
+         has to carry that count rather than leave it to the reason lines:\n{headline}"
     );
 }
 

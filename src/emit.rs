@@ -55,6 +55,30 @@ pub const STACK_ATTR: &str = "stack";
 /// what makes the change invisible to every source that does not want it.
 pub const WEIGHT_ATTR: &str = "weight";
 
+/// The attribute that says an event's value is the *sum* over that many
+/// measurements, rather than one measurement repeated that many times.
+///
+/// The distinction is the whole difference between a histogram and a lie, and
+/// [`WEIGHT_ATTR`] cannot express it. A `sched.runqlat` row is
+/// `(task, bucket) -> count`: every wait behind it had a value inside that
+/// bucket, so weighing the row by its count puts each of them where it belongs.
+/// A `sched.offcpu` row is `(task, state, stack) -> total_ns` drained on a tick:
+/// the individual blocks are added up in the kernel and their values are gone.
+/// Weighing that row by its block count would not recover them -- it would put
+/// four hundred blocks in the bucket of their *sum*, which is a range no single
+/// one of them was in.
+///
+/// So a collector that carries this is saying the values behind the number do
+/// not exist up here. `raw`, `rate`, `timeline` and `topk` are unaffected, since
+/// a total is exactly what they add up or plot. `hist` and `summary` are of the
+/// rows rather than of the workload, and [`aggregate`] says so with the results
+/// -- which is what lets a reader tell the two shapes apart, `runqlat`'s
+/// buckets from `offcpu`'s drain windows, when the output does not otherwise.
+///
+/// The fix is always to move the bucketing into the kernel, as `runqlat` does,
+/// and then the row carries [`WEIGHT_ATTR`] and this attribute goes away.
+pub const TOTAL_OF_ATTR: &str = "total_of";
+
 /// Everything one request produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Results {
@@ -486,6 +510,10 @@ pub fn aggregate(
         });
     }
 
+    if let Some(note) = pre_aggregated(&request.emit, &collection.events) {
+        degradations.push(note);
+    }
+
     // Only built when something asked for stacks: it is a scan of every event
     // for a table nothing else reads.
     //
@@ -792,6 +820,74 @@ fn weight_of(event: &Event) -> f64 {
     }
 }
 
+/// How many measurements an event's value is the sum of, when it says so.
+///
+/// `None` for the ordinary event, whose value is a measurement. See
+/// [`TOTAL_OF_ATTR`] for why this is not a weight.
+fn total_of(event: &Event) -> Option<u64> {
+    match event.attr(TOTAL_OF_ATTR)? {
+        crate::event::AttrValue::Uint(count) => Some(*count),
+        crate::event::AttrValue::Int(count) => u64::try_from(*count).ok(),
+        _ => None,
+    }
+}
+
+/// Says, beside the results, when the distribution the reader is looking at is
+/// of the rows a backend handed up rather than of the workload.
+///
+/// `hist` and `summary` are the two emits that claim to describe individual
+/// measurements: a bucket is a range values fell in, and `n=`, `min`, `mean`
+/// and `max` are about the values themselves. A backend that adds its values up
+/// before they reach this layer leaves both describing the totals, and there is
+/// nothing in the output to tell that histogram from an honest one -- which is
+/// what made `sched.offcpu --emit hist` show nine samples with a mean of
+/// 15.55 ms for a workload of twenty thousand blocks of a few microseconds.
+///
+/// The numbers are not changed, because there is no honest number to change
+/// them to: the values that went into a kernel-side total are gone. What is
+/// added is the sentence that lets a reader tell the two apart, which is the
+/// same thing `sched.runqlat` says about its own bucketing.
+///
+/// Silent when every row stands for a single measurement: a total of one is a
+/// measurement, and a run that happened to drain one at a time is not degraded.
+fn pre_aggregated(emits: &[Emit], events: &[Event]) -> Option<String> {
+    let mut rows = 0_u64;
+    let mut measurements = 0_u64;
+    for event in events {
+        let Some(count) = total_of(event) else {
+            continue;
+        };
+        rows += 1;
+        measurements = measurements.saturating_add(count);
+    }
+    if rows == 0 || measurements <= rows {
+        return None;
+    }
+
+    let affected: Vec<&str> = emits
+        .iter()
+        .filter_map(|emit| match emit {
+            Emit::Hist(_) => Some("`hist`"),
+            Emit::Summary => Some("`summary`"),
+            _ => None,
+        })
+        .collect();
+    let (named, verb) = match affected.as_slice() {
+        [] => return None,
+        [one] => ((*one).to_owned(), "describes"),
+        many => (many.join(" and "), "describe"),
+    };
+
+    let row_word = if rows == 1 { "row" } else { "rows" };
+    Some(format!(
+        "{named} {verb} the {rows} {row_word} this backend handed up and not the {measurements} \
+         measurements behind them: the values are added together before they reach the emit \
+         layer, so every bucket, mean and extreme here is of a total over a drain window \
+         rather than of a measurement. `{TOTAL_OF_ATTR}` on each row says how many it stands \
+         for"
+    ))
+}
+
 fn stack_id(event: &Event) -> Option<u64> {
     match event.attr(STACK_ID_ATTR)? {
         crate::event::AttrValue::Uint(id) => Some(*id),
@@ -915,6 +1011,64 @@ mod tests {
         negative.attrs.push(Attr::int(WEIGHT_ATTR, -5));
         let events = vec![zero, negative];
         assert_eq!(summary(&events, "bytes").expect("a summary")[0].count, 2);
+    }
+
+    /// A row whose value is a *sum* over its measurements says so, and the two
+    /// emits that claim to describe measurements say what they are describing.
+    ///
+    /// This is `sched.offcpu --emit hist` in miniature: the kernel keeps
+    /// `(task, state, stack) -> total_ns` and a drain hands up one row per
+    /// window, so a workload of twenty thousand blocks of a few microseconds
+    /// rendered as nine samples with a mean of 15.55 ms -- buckets no block was
+    /// ever in. `docs/scenarios/sched.md`, "Defects found" 1.
+    ///
+    /// The second half is why [`WEIGHT_ATTR`], which the defect was filed
+    /// against, is not the answer: weighing the row by its block count is
+    /// arithmetic on a number that is already a total, and it puts every one of
+    /// those blocks in the bucket of their sum.
+    #[test]
+    fn a_row_that_is_a_total_over_its_measurements_says_what_it_is() {
+        // One drain: four hundred blocks whose durations added up to 8ms.
+        let mut row = event(0, 7, 8_000_000);
+        row.attrs.push(Attr::uint(TOTAL_OF_ATTR, 400));
+        let events = vec![row];
+
+        let note = pre_aggregated(&[Emit::Hist(HistScale::Log2), Emit::Summary], &events)
+            .expect("a distribution of drain windows is a degradation of itself");
+        assert!(
+            note.contains("`hist` and `summary` describe")
+                && note.contains("the 1 row this backend")
+                && note.contains("400 measurements"),
+            "both counts have to be in it, or a reader cannot tell this histogram from one \
+             whose rows are measurements: {note}"
+        );
+
+        // The emits that add or plot a total are not degraded by it: a total is
+        // exactly what they were going to sum.
+        assert!(pre_aggregated(&[Emit::Rate, Emit::TopK(3), Emit::Raw], &events).is_none());
+        // Nor is a row that stands for one measurement, which is one.
+        let mut single = event(0, 7, 8_000_000);
+        single.attrs.push(Attr::uint(TOTAL_OF_ATTR, 1));
+        assert!(pre_aggregated(&[Emit::Summary], &[single]).is_none());
+
+        // And the arithmetic that the weight attribute would do instead. The
+        // four hundred blocks averaged 20us each; weighing the row by four
+        // hundred reports four hundred measurements of 8ms, in a bucket two
+        // hundred times too high.
+        let mut weighted = event(0, 7, 8_000_000);
+        weighted.attrs.push(Attr::uint(WEIGHT_ATTR, 400));
+        let hists = hist(&[weighted], "bytes", BucketLayout::Log2).expect("a histogram");
+        assert_eq!(hists[0].count, 400, "the count would be right");
+        assert_eq!(
+            hists[0].buckets.len(),
+            1,
+            "and all four hundred would land in one bucket"
+        );
+        assert!(
+            hists[0].buckets[0].low >= 4_000_000,
+            "which is the bucket of their sum, not of any block: {:?}",
+            hists[0].buckets[0]
+        );
     }
 
     #[test]
