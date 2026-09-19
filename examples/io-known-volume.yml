@@ -1,0 +1,76 @@
+# How much did the devices actually move, and in how many requests?
+#
+#   omn -f examples/io-known-volume.yml
+#
+# This is the session the `io` ground truth rests on. It measures nothing by
+# itself: the numbers it reports are whatever the machine did during its two
+# seconds, and what makes them checkable is that you put a known quantity of
+# I/O through a device while it ran.
+#
+# Two workloads, either of which gives an answer known before the run. Start
+# one about half a second after this session, so that it falls inside the
+# window:
+#
+#   # 64 MiB that has to reach the platter, because fsync does not return
+#   # until it has. The device moves at least 67108864 bytes, plus the
+#   # filesystem's own metadata -- a few hundred kilobytes here.
+#   dd if=/dev/urandom of=scratch.bin bs=1M count=64 conv=fsync
+#
+#   # 64 MiB that has to come off it, because the page cache was told to
+#   # forget the file first. The device moves exactly 67108864 bytes when
+#   # nothing else is reading, in exactly 64 MiB / max_sectors_kb requests.
+#   python3 -c "import os; fd=os.open('scratch.bin', os.O_RDONLY); \
+#     os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED); os.close(fd); \
+#     open('scratch.bin','rb').read()"
+#
+# `count` rather than `poll`: one total for the window, measured from a
+# baseline taken before the run and a reading taken after it, which is the
+# shape a "how much in total" question has. A polled series answers a
+# different question and `examples/io-device-load.yml` asks it.
+#
+# The three sources are one measurement, not three. Volume alone cannot tell
+# a few large transfers from many small ones; the operation count alone cannot
+# tell a busy device from a fast one; and the quotient of the two is the mean
+# request size, which is the number that says which of the two you have. Merges
+# are what account for the difference between the requests an application
+# issued and the ones the device completed.
+#
+# All three come from `/proc/diskstats`, which counts per device for the whole
+# machine -- so the target is `system`, and the series are keyed by device.
+# Read the one that backs the file you wrote; the others are the rest of the
+# machine.
+name: how much did the devices move
+format: text
+duration: 2s
+
+requests:
+  # Bytes, as the increase over the window rather than the counter's value:
+  # /proc/diskstats has been counting since boot.
+  - label: volume
+    source: io.bytes
+    target: system
+    mode: count
+    emit: [summary, rate]
+    keys: [dev]
+
+  # Operations the devices completed, after the block layer merged what it
+  # could. A device declares the largest request it will take in
+  # /sys/block/<dev>/queue/max_sectors_kb, so a known number of bytes puts a
+  # floor under this count that arithmetic alone gives: bytes / that size.
+  - label: operations
+    source: io.iops
+    target: system
+    mode: count
+    emit: [summary, rate]
+    keys: [dev]
+
+  # What the block layer coalesced. On a multi-queue device with the `none`
+  # scheduler this is zero and zero is the right answer, which is worth
+  # checking: a collector that invented a plausible number would pass every
+  # test that only asks for a number.
+  - label: merges
+    source: io.merges
+    target: system
+    mode: count
+    emit: [summary]
+    keys: [dev]

@@ -1,0 +1,60 @@
+# Counters that lie, and what the tool does about it.
+#
+# This session is the ordinary one -- one polled counter, one timeline. What
+# makes it a scenario is what it is pointed at: a `/proc/diskstats` written by
+# hand, mounted over the real one in a private mount namespace, so that every
+# number the tool reports is a number chosen in advance.
+#
+#   printf ' 259 0 nvme0n1 10 0 2048 0 0 0 0 0 0 0 0\n' > /tmp/fake.diskstats
+#   unshare -Urm sh -c 'mount --bind /tmp/fake.diskstats /proc/diskstats &&
+#       exec omn -f examples/io-substituted-counters.yml'
+#
+# and, from another shell, while that runs, rewrite /tmp/fake.diskstats to make
+# each of the four things below happen. Unprivileged user namespaces are what
+# this needs, and nothing else: no root, no device, no loopback.
+#
+# Why bother, when the real device is right there. Because three of the four
+# cases cannot be produced on demand on a running machine -- a disk does not
+# vanish because a test would like it to -- and because the fourth is the only
+# way to check the arithmetic exactly. Everything else in this family is
+# checked against a workload; this is checked against a file.
+#
+# What to write, and what must come back:
+#
+#   1. Arithmetic. Raise `sectors read` by 2048 between two ticks. The point
+#      for that tick must be 1048576 bytes exactly: /proc/diskstats counts
+#      512-byte sectors whatever the device's own block size is, and the
+#      point is the increase, never the counter.
+#
+#   2. A device nobody can classify. Give the file a line for `sda` on a
+#      machine that has no `sda`. It is left out of the total -- and counted
+#      as a loss, with the reason, because a device whose counters cannot be
+#      shown to be its own would be double counting if it were added in.
+#
+#   3. A counter that goes backwards. Lower `sectors read`. This happens for
+#      real when a device is removed and re-added under the same numbers, and
+#      the interval cannot be attributed: it is counted and named, rather than
+#      wrapping around into a number the size of the machine's lifetime.
+#
+#   4. A device that appears mid-run. Add a line that was not there before. It
+#      has no earlier reading to be measured against, so its first interval is
+#      dropped -- see `docs/scenarios/io.md`, which records that this one is
+#      noted and *not* counted, so the run still reports `no loss`.
+#
+# The device named below has to be one this machine has under
+# /sys/class/block, or case 2 is what happens instead of case 1: the collector
+# asks sysfs whether a device's counters are its own, because a name cannot be
+# trusted to say -- `nvme0n1p6` looks like a partition and is one, `dm-0` looks
+# like a disk and is stacked on others, `zram0` looks synthetic and is genuinely
+# its own device.
+name: counters that lie
+format: text
+duration: 650ms
+
+requests:
+  - label: substituted
+    source: io.bytes
+    target: system
+    mode: poll@100ms
+    emit: [timeline]
+    keys: [dev]

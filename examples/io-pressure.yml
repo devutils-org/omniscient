@@ -12,20 +12,42 @@
 # every runnable task was. Read the two together -- volume flat and pressure
 # high means the device is the constraint; volume high and pressure near zero
 # means it is keeping up.
+#
+# To see the two move, block on the device on purpose:
+#
+#   dd if=/dev/urandom of=scratch.bin bs=1M count=64 conv=fsync
+#
+# `fsync` does not return until the data is on the platter, so the writing task
+# is stalled on I/O for as long as that takes, and the stall counter moves by
+# about as much.
+#
+# Two things this measurement cannot do, both of which matter more than they
+# look. Pressure is kept for the whole machine, so it is not yours: on a
+# machine where anything else is reading or writing, the share you see is
+# everyone's, and no workload can be told apart from the rest by this number
+# alone. And pressure says time was lost waiting, not which device or which
+# file lost it -- it is where an investigation starts, never where it ends.
+#
+# The two emits are two different measurements, and the tool says which is
+# which on every event. A poll reports the share of its own window, computed
+# from the increase of the stall counter over that tick. A snapshot has no
+# window, so it reports the kernel's decayed ten-second, one-minute and
+# five-minute averages instead, under their own names and with no ratio at all.
 name: is the disk the bottleneck
 format: text
+duration: 2s
 
 requests:
   - label: stall
     source: io.pressure
     target: system
-    mode: poll@500ms
+    mode: poll@100ms
     emit: [timeline, summary]
+    keys: [cgroup]
 
   - label: volume
     source: io.bytes
     target: system
-    mode: poll@500ms
+    mode: poll@100ms
     emit: [timeline, summary]
-
-duration: 10s
+    keys: [dev]

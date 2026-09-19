@@ -1,0 +1,46 @@
+# Which of these bytes were mine? -- and why this build says it cannot tell.
+#
+#   omn -f examples/io-per-process.yml    # exits 3, on purpose
+#
+# This is the first question anybody asks of an I/O tool, and on this build the
+# answer is a refusal. It is here as a session rather than as a sentence in a
+# document because the refusal is the measurement: what matters is that it
+# names the right missing thing, and that is something a reader can check by
+# running it.
+#
+# What comes back:
+#
+#   error: no collector is written for `io.bytes` on backend `bpf:tp` yet
+#     `fs:cgroup` was passed over: `fs:cgroup` cannot attribute per pid: it
+#                would answer with a number scoped to cgroup, container
+#     `fs:proc` was passed over: `fs:proc` cannot attribute per pid: it would
+#                answer with a number scoped to system
+#
+# Three things are true in that answer and worth separating. The request is
+# valid: the catalog declares `pid` for this source, through the eBPF backend.
+# This machine can serve it: the tracepoints are there and the capabilities are
+# granted. It is this *build* that has no collector for that backend, which is
+# why the exit code is 3 and not 1 -- retrying, raising privileges or changing
+# the machine will not help, and the two answers must not be confused.
+#
+# The alternative would have been to answer from `/proc/diskstats`, which is
+# readable, free and right there. It counts per device for the whole machine,
+# so the number it would return under a process's name is the number for
+# everything else on the machine too. That is the worst thing this tool could
+# do, and it is worth more than a comment: a wrong number that looks right
+# survives every review, and this one would be wrong by whatever else the
+# machine happened to be doing.
+#
+# Replace the pid below with your own. Any pid gives the same answer; the
+# refusal is about the backend, not about the process.
+name: which of these bytes were mine
+format: text
+duration: 1s
+
+requests:
+  - label: mine
+    source: io.bytes
+    target: {pid: 1}
+    mode: poll@100ms
+    emit: [timeline]
+    keys: [dev, task]

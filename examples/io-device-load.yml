@@ -1,4 +1,4 @@
-# What the disks of this machine are actually doing.
+# What the disks of this machine are actually doing, over time.
 #
 #   omn -f examples/io-device-load.yml
 #
@@ -7,13 +7,30 @@
 # alone cannot tell a busy device from a fast one; queue depth is what says
 # whether the requests were waiting on each other.
 #
+# Run a burst of I/O while it is watching, and the three curves separate:
+#
+#   dd if=/dev/urandom of=scratch.bin bs=1M count=64 conv=fsync
+#
+# The 64 MiB arrive as about five hundred requests of 128 KiB -- the largest
+# this device takes -- and the queue holds tens of them at once while they are
+# in flight. That last number is the one no counter can give: it is a gauge,
+# read at an instant.
+#
+# The interval is deliberately short. Queue depth is not accumulated, so a
+# queue that fills and drains between two reads leaves no trace at all: at
+# 20 ms a burst that lasts 200 ms is sampled ten times, at 1 s it is a coin
+# toss. The series then describes the sampling rather than the device, which
+# is the one way this source lies, and it lies quietly.
+#
 # All three come from `/proc/diskstats`, which counts per device for the whole
 # machine. There is no process in this measurement: the block layer does not
 # record who asked, and the source that does is the eBPF one. So the target is
-# `system`, and a `--pid` against these backends is refused rather than answered
-# with the machine's total.
+# `system`, and a `--pid` against these backends is refused rather than
+# answered with the machine's total -- `examples/io-per-process.yml` is that
+# refusal, written down.
 name: what the disks are doing
 format: text
+duration: 2s
 
 requests:
   # Bytes the devices moved, as an increase per tick rather than the counter's
@@ -22,23 +39,25 @@ requests:
   - label: volume
     source: io.bytes
     target: system
-    mode: poll@500ms
+    mode: poll@20ms
     emit: [timeline, summary]
+    keys: [dev]
 
   # Operations the devices completed, after the block layer merged what it
-  # could. Compare with the volume: the quotient is the average transfer size.
+  # could. Compare with the volume: the quotient is the mean transfer size.
   - label: operations
     source: io.iops
     target: system
-    mode: poll@500ms
+    mode: poll@20ms
     emit: [timeline, summary]
+    keys: [dev]
 
-  # What was outstanding at each read. A gauge, not a counter: a queue that
-  # fills and drains between two polls leaves no trace here.
+  # What was outstanding at each read. A gauge, not a counter: the maximum of
+  # this series is the deepest queue the sampling happened to catch, and never
+  # more than the deepest queue there was.
   - label: queue depth
     source: io.inflight
     target: system
-    mode: poll@500ms
+    mode: poll@20ms
     emit: [timeline, summary]
-
-duration: 10s
+    keys: [dev]
