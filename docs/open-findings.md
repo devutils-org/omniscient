@@ -433,6 +433,29 @@ thirty-five are a catalog change nobody owns in this wave, and they are worth
 doing in one pass rather than one at a time, because each one also needs its
 `requires` checked against what the raw path actually needs.
 
+**Wave three, stream A: the whole `sched` family is done** — `runqlat`,
+`switches`, `migrations`, `lock`, `futex`, `irq` and `numa_balance` each carry
+a `bpf:raw_tp` backend ahead of an `equivalent: true` classic one. The audit
+was re-run against this kernel's BTF and is worth stating as a number, because
+it settles how much of a mechanism the classic path still is: **thirty-nine of
+the forty-one tracepoints the catalog names under `bpf:tp` publish a
+`btf_trace_` type**, and the two that do not are the `gpu` pair this table
+already calls out. So the premise that twenty-seven sources wait on a new
+attach kind is not right: they wait on collectors. The mechanism they need is
+the one `sched.wakeup` has used since wave two.
+
+Reproducing the audit takes one command, and it is worth re-running per kernel
+rather than trusted from here:
+
+```console
+$ comm -13 \
+    <(strings -n 6 /sys/kernel/btf/vmlinux | sed -n 's/^btf_trace_//p' | sort -u) \
+    <(grep -oh 'tracepoint:[a-z_0-9]*:[a-z_0-9]*' catalog/*.yaml |
+      sed 's/^tracepoint:[a-z_0-9]*://' | sort -u)
+drm_run_job
+drm_sched_process_job
+```
+
 ---
 
 ## 10. The sudoers line the Makefile documents cannot match, twice over
@@ -1083,3 +1106,261 @@ rather than a target's is measuring a process whose procfs ownership depends on
 how the binary was installed. There are no others today; `capabilities.rs`
 substitutes `[pid]` with `self` when a requirement names no target, and that is
 exactly where this surfaced.
+
+---
+
+## 15. A `bpf:tp` requirement is reported available when only its directory is
+
+From stream A, wave three. This is finding 9 seen from the other side, and it
+is the sharper half: the catalog is not the only place the classic tracepoint
+path is wrong about itself.
+
+`capabilities.rs` answers `tracepoint:<category>:<name>` by probing the event's
+**directory** under tracefs:
+
+```rust
+probe_path(&root.join("events").join(event.replace(':', "/")))
+```
+
+On this machine `/sys/kernel/tracing` is `drwx---r-x root root`, so uid 1000
+traverses and lists it freely, while the file the attach actually needs is
+`-r--r----- root root`:
+
+```console
+$ ls -ld /sys/kernel/tracing/events/sched/sched_switch
+drwxr-xr-x 2 root root 0 ...                      # listable by anyone
+$ cat /sys/kernel/tracing/events/sched/sched_switch/id
+cat: .../id: Permission denied
+```
+
+So the probe says **available**, the resolver selects the backend, the run
+launches its target, attaches its other collectors, and only then discovers it
+cannot read the number. That is precisely the trap `BRIEF.md` names for this
+stream: *"a `bpf:tp` backend that needs a file this user cannot read must say so
+as a missing requirement, not fail at attach time."*
+
+Reproduced now, with the capabilities granted:
+
+```console
+$ omn list sched.lock
+    2. bpf:tp                 cost med    no collector yet
+       needs    tracepoint:lock:contention_begin       available
+       needs    tracepoint:lock:contention_end         available
+```
+
+Neither is available. Nothing on this machine can read either id.
+
+One consequence is already in the tree and is not a defect: `sched.offcpu`
+orders `bpf:tp:stacks` ahead of `bpf:raw_tp`, correctly, because it offers the
+kernel side of a blocking stack that the raw path gives up. That backend has no
+collector today, so the resolver falls through and the run works. **The day
+someone writes it, it will be selected on this machine and fail at attach**,
+because its `tracepoint:sched:sched_switch` requirement probes as available.
+The ordering is right; the probe is what is wrong.
+
+### Needs from another stream: the probe `src/capabilities.rs` should call
+
+Written and tested in `src/bpf/attach.rs`, which is stream A's file; the probe
+that would use it is not.
+
+```rust
+/// Whether the classic path can attach to `<category>:<name>` here.
+pub fn classic_tracepoint_support(event: &str) -> crate::bpf::Support;
+```
+
+It reads the `id` file the attach reads, and distinguishes the three cases that
+call for different answers: absent (a different kernel), unreadable (root or
+`CAP_DAC_READ_SEARCH`, which is more than this project asks for), and tracefs
+not mounted. The change in `capabilities.rs` is one arm:
+
+```rust
+if let Some(event) = requirement.strip_prefix("tracepoint:") {
+    return Probe::from(crate::bpf::attach::classic_tracepoint_support(event));
+}
+```
+
+The same file has no probe at all for `kprobe` and `uprobe`, which
+`sched.lock` and `sched.mutex` declare and which therefore read `unverified`.
+`crate::bpf::attach::probe_type_support(kind)` answers both, by reading the PMU
+type the kernel publishes at boot.
+
+---
+
+## 16. Every `bpf` backend is credited with a filter it does not apply
+
+From stream A, wave three. `resolve::placement` decides where a predicate runs
+from the backend's **name**:
+
+```rust
+fn placement(backend: &Backend, entry: &Entry) -> FilterPlacement {
+    if backend.id.starts_with("bpf") {
+        FilterPlacement::Kernel(...)
+```
+
+and `collect::apply_filter` then leaves those events alone, deliberately and
+with a comment saying why: *"running the filter twice would hide the bug if it
+had not."* The bug it was guarding against is the one that is there. No eBPF
+collector in the tree applies a predicate, so the filter is applied by nothing:
+
+```console
+$ omn sched.wakeup --system --duration 1s --emit summary \
+      --filter "comm == 'definitely_not_a_comm'"
+  1341 events over 1.01s
+```
+
+A predicate that matches nothing kept everything, and the run said `no loss`
+and reported no filtering at all. `sched.offcpu` behaves the same way.
+
+This is not a small wrongness. A filter is how someone narrows a machine-wide
+trace to the thing they are investigating, and a filter that silently does
+nothing answers a different question under the name of the one asked.
+
+`sched.runqlat` applies its own predicate over the drained rows and says so in
+the run's output — *"the filter kept 417 waits and removed 2922; it ran here,
+over the drained rows, not in the kernel"*. That makes the numbers right and
+leaves the resolver's claim about the *cost* untrue.
+
+### Needs from whoever owns `src/resolve.rs` and `src/collect/mod.rs`
+
+The credit should come from the collector, not from the backend id. Two shapes,
+either of which closes it:
+
+1. `Collector` grows `fn filters_in_kernel(&self) -> bool { false }`, and
+   `apply_filter` runs the predicate unless the collector claims it. A
+   collector that pushes the predicate down opts out; every other one is
+   correct by default, which is the right direction for a default to point.
+2. `placement` consults the registry rather than the name. Harder, because
+   placement is decided before anything is built.
+
+Until then, an eBPF collector that does not apply its request's predicate is
+returning events the user asked to be rid of, and the resolved file says the
+kernel removed them.
+
+---
+
+## 17. The emit layer cannot weigh an event, so a kernel-built histogram renders wrong
+
+From stream A, wave three, and it is the one thing `sched.runqlat` gives up.
+
+`BucketLayout::Log2`'s own doc comment anticipates this: *"this is the layout an
+eBPF array map builds for free ... which is what makes moving a histogram into
+the kernel viable later."* The layout does; the consumer does not. `emit::hist`
+counts one per event:
+
+```rust
+*counts.entry(layout.index(value)).or_insert(0) += 1;
+```
+
+A source that bucketed in the kernel drains `(key, bucket) -> count` and has to
+present each row as one event. The buckets come out in the right places — that
+is checked end to end in `tests/family_sched.rs` — and each is one unit high
+instead of `count`.
+
+### Needs from stream D, or whoever owns `src/emit.rs`
+
+A reserved attribute, exactly like `STACK_ID_ATTR` already is:
+
+```rust
+/// How many measurements this event stands for. Absent means one.
+pub const WEIGHT_ATTR: &str = "count";
+```
+
+honoured by `hist` (add `weight` rather than 1 to the bucket), `summary`
+(`count`, `sum`, and therefore `mean`), `rate` and `topk`. `min` and `max` are
+already right, since every measurement behind a row is inside its bucket.
+
+`sched.runqlat` emits `count` on every event today, so the day this lands the
+source is correct with no change on its side. Until then the run says what it
+is giving up, in the words above — but a `degraded:` line is a weaker thing
+than a right number.
+
+Two sources already want this and a third will: `sched.runqlat`,
+`sched.migrations` (whose `migrations` attribute is a count over an interval),
+and any `--emit hist` that a budget moves into the kernel, which is stream E's
+whole premise.
+
+---
+
+## 18. Two claims the tool makes about kernel-side histograms are now false
+
+Both are one line each, and both are in files stream A does not own.
+
+**The validator's warning.** `omn sched.runqlat --emit hist` prints:
+
+> `trace` with `hist` aggregates in userspace unless a budget lets the resolver
+> move the histogram into the kernel; consider --budget
+
+The histogram *is* in the kernel, unconditionally, and no budget is involved.
+The warning should be conditioned on the selected backend rather than on the
+pair `(trace, hist)`.
+
+**`docs/bpf-layer.md`'s "What is not here yet"** lists *"a log2 bucket in an
+aggregation key ... about twenty more instructions"*. It is there now, in
+`src/bpf/runqlat.rs`, as an unrolled six-step binary search — thirty
+instructions, no loop, and `LOG2_STEPS` is the table. The entry should point at
+it rather than describe it as future work. The same section's first bullet,
+*"kprobes, uprobes, fentry and USDT: only raw tracepoints attach today"*, is
+half done: `src/bpf/attach.rs` has the first three attach kinds, and fentry and
+USDT are still absent.
+
+---
+
+## 19. Symbolising a machine-wide run costs two minutes per second observed
+
+From stream A, wave three, found while fixing the half of it that was waste.
+
+`sched.offcpu --system --duration 1s --emit summary` did not finish in ninety
+seconds. Half the cause was a defect in `src/collect/sched/offcpu.rs` and is
+**fixed**: the collector symbolised every stack it drained whether or not the
+request asked for frames, and the emit layer discards the table unless `stack`
+was asked for. That run now takes 1.2 seconds.
+
+What is left is not waste and is not fixed. The same run with `--emit stack`
+takes **1 minute 57 seconds** for one second of observation, all of it in
+`src/stack.rs`: a machine-wide run meets every process on the machine, and each
+one costs a read of `/proc/<pid>/maps` and then of its binaries' symbol tables.
+
+That is roughly 0.4 seconds per process, and it is worth someone's attention
+because the ratio is what makes a source unusable rather than slow. Three
+things that would each help, in the order they look cheapest:
+
+- **Cache by binary, not by process.** Every process on a machine maps the same
+  handful of libraries; the symbol table of `libc.so.6` is read once per
+  process today.
+- **Resolve only the ids that survive.** A machine-wide run drains thousands of
+  rows and a reader looks at the top few; resolving is currently eager because
+  the maps disappear when the process does, which is real but applies to the
+  launched target rather than to every process on the machine.
+- **Bound it, and say so.** A run that symbolised four hundred processes and
+  gave up on the rest is a degradation with a name, which is this project's
+  usual answer.
+
+---
+
+## 20. `comm` is the name a task had when its row was created
+
+From stream A, wave three. `sched.offcpu`, `sched.runqlat` and
+`sched.migrations` all read `task_struct.comm` once, when a row is first put in
+the map, rather than on every event — deliberately, because that path runs tens
+of thousands of times a second and a name does not change.
+
+Except at `exec`, which is exactly the moment a launched target acquires the
+name anyone would recognise. A short run of a launched program reports the
+first rows as `comm=omn`:
+
+```console
+$ omn sched.runqlat --emit raw -- /bin/sh -c 'sleep 0.02'
+    ... wait_ns=4096 count=2 ... comm=omn cpu=1 prio=120
+```
+
+The child is held at the launch gate before its first instruction, so it is
+still a fork of `omn` when it first joins a run queue. Rows are drained and
+recreated every interval, so the name corrects itself within one tick — which
+is why this is a note rather than a defect, and why a run shorter than a tick
+gets it wrong for every row it produces.
+
+Three ways out, none obviously right: read `comm` on every event and pay for
+it; re-read it on the drain, from `/proc/<tid>/comm`, which is a different
+process's file and may be gone; or attach `sched_process_exec` and correct the
+rows it names. The third is the one that is actually correct and it costs a
+fourth program.

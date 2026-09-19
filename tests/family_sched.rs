@@ -897,3 +897,94 @@ fn a_machine_wide_run_that_asked_for_no_stacks_does_not_symbolise_the_machine() 
         "a request that did not ask for stacks carries stack ids nothing can resolve:\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The family's own attach ordering
+// ---------------------------------------------------------------------------
+
+/// The classic tracepoint path is never the first thing tried for an event a
+/// raw tracepoint reaches just as well.
+///
+/// `DECISIONS.md` settled the ordering: `bpf:raw_tp` has strictly fewer
+/// requirements than `bpf:tp` and goes ahead of it. What makes that more than a
+/// preference on this machine is finding 15 -- a `bpf:tp` requirement probes as
+/// *available* when only its directory is readable, so a chain that leads with
+/// one resolves and then fails at attach time, after a target has been
+/// launched.
+///
+/// The rule is about `bpf:tp`, the backend that declares itself `equivalent`
+/// and therefore offers nothing the raw path does not. A backend ahead of
+/// `bpf:raw_tp` that offers *more* -- `sched.offcpu`'s `bpf:tp:stacks`, which
+/// adds the kernel side of a blocking stack -- is the chain working as
+/// `docs/contributing.md` says it should: best first, and the resolver handles
+/// availability.
+///
+/// The second half is checked against the running kernel rather than against
+/// the catalog: a raw tracepoint exists exactly when the kernel publishes a
+/// `btf_trace_<name>` type for it, which is what the probe reads, so an entry
+/// naming one this kernel does not have would be ordering its chain in front
+/// of nothing.
+#[test]
+fn no_sched_backend_needs_tracefs_before_one_that_does_not() {
+    let listing = run(&["list", "sched"]);
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let sources: Vec<String> = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|word| word.starts_with("sched."))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        sources.len() >= 10,
+        "the family has ten sources: {sources:?}"
+    );
+
+    let mut checked = 0;
+    for source in sources {
+        let output = run(&["list", &source]);
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        // The chain, in the order the resolver walks it. A backend line starts
+        // with its position: `1. bpf:raw_tp  cost med ...`.
+        let chain: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(|c: char| c.is_ascii_digit()) && line.contains(". "))
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect();
+
+        for line in text.lines().map(str::trim) {
+            if let Some(rest) = line.strip_prefix("needs    raw_tracepoint:") {
+                // The probe reads the kernel's own BTF and needs no
+                // privileges, so this is an answer on any machine.
+                assert!(
+                    rest.contains("available"),
+                    "{source} orders a raw tracepoint this kernel does not have ahead of the \
+                     classic path, which is ordering it ahead of nothing:\n{line}"
+                );
+            }
+        }
+
+        let Some(classic) = chain.iter().position(|id| *id == "bpf:tp") else {
+            continue;
+        };
+        checked += 1;
+        let raw = chain.iter().position(|id| *id == "bpf:raw_tp");
+        assert!(
+            raw.is_some_and(|raw| raw < classic),
+            "{source} reaches a tracepoint through tracefs at position {} and by name at {raw:?}; \
+             `bpf:tp` declares itself equivalent, so it offers nothing to be ahead for. Chain: \
+             {chain:?}",
+            classic + 1
+        );
+    }
+    assert!(
+        checked >= 7,
+        "only {checked} sources in this family declare a classic tracepoint backend, and the \
+         rule this test exists for applies to seven of them"
+    );
+}
