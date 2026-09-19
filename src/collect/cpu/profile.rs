@@ -13,7 +13,7 @@
 //! cpu time spent there, and a request for 199 Hz asks for one sample per
 //! 5.025 ms of cpu, not one per 5.025 ms of wall clock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
@@ -54,6 +54,10 @@ impl Prepared for Prepare {
             pid,
             self.mode,
             self.callchain,
+            // A `--tid` target is one task because that is what was asked for.
+            // Every other target that names a process is a task *and whatever
+            // it starts*, and a sampling event follows none of them.
+            !matches!(target, Target::Tid(_)),
         )))
     }
 }
@@ -64,14 +68,31 @@ pub struct ProfileCollector {
     mode: Mode,
     callchain: Callchain,
     event: Option<SampledEvent>,
-    /// Built at construction rather than at `start`, because a symbolizer reads
-    /// the target's `/proc/<pid>/maps` and those are gone the moment it exits.
+    /// Built at construction and re-read every tick. A symbolizer reads the
+    /// target's `/proc/<pid>/maps`, and those are gone the moment it exits --
+    /// but for a launched program they are also not yet the target's when this
+    /// is built, because the child is still a fork of this process waiting at
+    /// the gate. See [`Unwinder::refresh_symbols`].
     unwinder: Unwinder,
     losses: Losses,
+    /// Whether the target names more than the one task this event can follow.
+    more_than_one_task: bool,
+    /// The tasks samples actually arrived from.
+    ///
+    /// The measured half of the disclosure below: the limit is structural, but
+    /// how many tasks a run really saw is a number, and one task out of a
+    /// program that was plainly doing work elsewhere is what a reader needs to
+    /// be told.
+    sampled_tasks: BTreeSet<i32>,
+    /// What the open event does and does not see, and whether it was asked to
+    /// unwind. Both are read at `start` and kept, because `stop` closes the
+    /// event and the notes are gathered after it.
+    disclosure: Option<&'static str>,
+    unwinding: bool,
 }
 
 impl ProfileCollector {
-    pub fn new(pid: i32, mode: Mode, callchain: Callchain) -> Self {
+    pub fn new(pid: i32, mode: Mode, callchain: Callchain, more_than_one_task: bool) -> Self {
         Self {
             id: CollectorId::new("cpu.profile/pmu:sw"),
             pid,
@@ -80,6 +101,10 @@ impl ProfileCollector {
             event: None,
             unwinder: Unwinder::for_process(pid),
             losses: Losses::default(),
+            more_than_one_task,
+            sampled_tasks: BTreeSet::new(),
+            disclosure: None,
+            unwinding: true,
         }
     }
 
@@ -89,12 +114,14 @@ impl ProfileCollector {
         };
         let id = self.id.clone();
         let unwinder = &mut self.unwinder;
+        let seen = &mut self.sampled_tasks;
         let mut index = seq;
         let mut dropped = 0u64;
         let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
             Record::Sample(sample) => {
+                seen.insert(sample.tid as i32);
                 let mut attrs = vec![Attr::uint("count", 1), Attr::uint("ip", sample.ip)];
                 // Symbolized here, while the target is alive, and stored once:
                 // the event carries the identity and the table travels beside
@@ -124,8 +151,14 @@ impl ProfileCollector {
                  here are a biased subset -- the busy phases are the ones that overflow",
             );
         }
+        // A throttle is the kernel declining to deliver for a while, not a
+        // number of samples the ring reported losing. How many samples were not
+        // taken inside that window is not knowable from userspace, so counting
+        // one throttle as one drop states a precision nobody has -- and leaves
+        // `losses.throttled`, the field a consumer filters on, at zero on a run
+        // that was throttled twenty times.
         if throttles > 0 {
-            self.losses.dropped += throttles;
+            self.losses.throttled += throttles;
             self.losses.note(
                 "the kernel throttled profile sampling: an unknown number of samples in each \
                  throttled period were not taken (see kernel.perf_event_max_sample_rate)",
@@ -170,11 +203,19 @@ impl Collector for ProfileCollector {
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
+        // Read while the event is open and kept: `stop` closes it, and the
+        // notes are gathered afterwards.
+        self.disclosure = Some(event.sampled_threads());
+        self.unwinding = event.callchain() != Callchain::Off;
         self.event = Some(event);
         Ok(())
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        // Before the drain, so that the stacks interned from this tick's
+        // samples are symbolized against mappings read while the target was
+        // alive rather than against whatever was there when it was launched.
+        self.unwinder.refresh_symbols();
         let mut events = Vec::new();
         self.drain_into(&mut events, seq);
         Ok(events)
@@ -221,14 +262,29 @@ impl Collector for ProfileCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.unwinder.notes();
-        if let Some(event) = self.event.as_ref() {
-            if event.callchain() == Callchain::Off {
-                notes.push(
-                    "no unwind mode was asked for, so each sample is one instruction pointer and \
-                     there are no stacks to aggregate"
-                        .to_owned(),
-                );
-            }
+        // What this event never saw. The kernel refuses to map a ring for an
+        // inherited per-task event, so `inherit` is off and the profile follows
+        // the one task it was opened on: a thread pool profiles as the thread
+        // that started it, and a shell that forks its work profiles as a shell
+        // waiting. Nothing else in the run says so -- there is no drop to
+        // count, because the samples were never taken -- which is why this is a
+        // degradation attached to every profile of a target that is more than
+        // one task, and not a loss.
+        if let (true, Some(limit)) = (self.more_than_one_task, self.disclosure) {
+            let tasks = self.sampled_tasks.len();
+            notes.push(format!(
+                "a sampling event is not inherited, so this profile followed {limit}; it has \
+                 samples from {tasks} task{}, and cpu burned in a thread or a child process the \
+                 target started is in no number here",
+                if tasks == 1 { "" } else { "s" }
+            ));
+        }
+        if !self.unwinding {
+            notes.push(
+                "no unwind mode was asked for, so each sample is one instruction pointer and \
+                 there are no stacks to aggregate"
+                    .to_owned(),
+            );
         }
         notes
     }
@@ -264,6 +320,7 @@ mod tests {
                 freq: crate::scalar::Frequency::from_hz(997),
             },
             Callchain::FramePointers,
+            true,
         );
         if collector.start().is_err() {
             eprintln!("skipped: this machine refuses unprivileged perf sampling");
@@ -355,7 +412,7 @@ mod tests {
     /// silently profiling at a default rate nobody asked for.
     #[test]
     fn a_mode_that_is_not_sampling_is_refused_with_the_one_that_is() {
-        let error = ProfileCollector::new(0, Mode::Trace, Callchain::FramePointers)
+        let error = ProfileCollector::new(0, Mode::Trace, Callchain::FramePointers, true)
             .start()
             .unwrap_err();
         assert!(error.contains("--mode sample@99hz"), "{error}");

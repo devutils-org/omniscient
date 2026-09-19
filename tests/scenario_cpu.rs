@@ -445,10 +445,18 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
         .as_array()
         .is_none_or(|events| events.is_empty())
     {
+        // The sibling request above counted the workload in the same window, so
+        // the target demonstrably ran: a message that blames the target here is
+        // the defect `docs/scenarios/cpu.md` recorded as cpu 9.
+        let reasons = ratio["losses"]["reasons"].to_string();
+        assert!(
+            reasons.contains("could not fit on the pmu"),
+            "the ratio's group was crowded off a pmu that a counter beside it was using, \
+             and the run blames the target instead: {reasons}"
+        );
         eprintln!(
             "skipped: the ratio's counter group was never scheduled onto the pmu, so it \
-             reported no window: {}",
-            ratio["losses"]["reasons"]
+             reported no window: {reasons}"
         );
         return None;
     }
@@ -1016,9 +1024,10 @@ fn a_profile_renders_in_every_format_that_carries_stacks() {
          it was not sampled, more than the window allows means it was not cpu time"
     );
 
-    // Together rather than one after another: each of these runs costs a
-    // second of symbol reading before it samples anything, which is the defect
-    // `docs/scenarios/cpu.md` records under the cost of a profile.
+    // Together rather than one after another. Each of these runs used to cost
+    // a second of symbol reading before it sampled anything -- defect 7 of
+    // `docs/scenarios/cpu.md`, fixed in wave five -- so what the arrangement
+    // buys now is three windows instead of three windows and three seconds.
     std::thread::scope(|scope| {
         for format in ["folded", "speedscope", "pprof"] {
             scope.spawn(move || {
@@ -1494,22 +1503,39 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
     let reasons = losses["reasons"]
         .as_object()
         .expect("the losses carry their reasons");
-    let throttles: u64 = reasons
+    let throttled = losses["throttled"].as_u64().unwrap_or(0);
+    let named: u64 = reasons
         .iter()
         .filter(|(reason, _)| reason.contains("throttled"))
         .filter_map(|(_, count)| count.as_u64())
-        .sum::<u64>()
-        + losses["throttled"].as_u64().unwrap_or(0);
+        .sum();
     assert!(
-        throttles > 0,
+        throttled + named > 0,
         "a hundred thousand samples a second was not throttled on this machine, so this \
          scenario measured nothing: {losses}"
     );
+    // The field, not just the sentence. `losses.throttled` is what a consumer
+    // filters on, and a throttled run that leaves it at zero reads as clean to
+    // everything but a human.
     assert!(
-        losses["dropped"].as_u64().unwrap_or(0) > 0,
-        "the kernel throttled this run {throttles} times and nothing was counted as lost: \
-         {losses}"
+        throttled > 0,
+        "the reasons say this run was throttled {named} times and `losses.throttled` is \
+         zero: {losses}"
     );
+    // And the periods must not be counted as samples. How many samples were not
+    // taken inside a throttled window is not knowable from userspace, so a
+    // `dropped` count that nothing explains as a ring overflow is a precision
+    // nobody has.
+    let dropped = losses["dropped"].as_u64().unwrap_or(0);
+    if dropped > 0 {
+        assert!(
+            reasons
+                .keys()
+                .any(|reason| reason.contains("ring overflowed")),
+            "{dropped} samples are counted as dropped and no ring overflowed, so the \
+             {throttled} throttled periods are being reported as a number of samples: {losses}"
+        );
+    }
 
     // The same run, rendered for a person. A loss that only a JSON reader sees
     // is a loss most readers will not see.
@@ -1525,6 +1551,10 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         rendered.contains("perf_event_max_sample_rate"),
         "the run does not name the ceiling it hit, which is the one thing a reader can \
          act on:\n{rendered}"
+    );
+    eprintln!(
+        "the kernel throttled this profile over {throttled} periods, counted apart from \
+               the {dropped} samples the ring reported losing"
     );
 }
 
@@ -1543,11 +1573,13 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
 /// its utilisation is one whatever the cadence, and a collector that had
 /// reported those empty windows as idle would say something else.
 ///
-/// What the scenario checks after that is the disclosure, because the two
-/// sources that read the same tick do not agree about it: `cpu.oncpu_time`
-/// states the granularity and how far from the truth a reading can be, and
-/// `cpu.util` states nothing. The assertion is on the one that does; the one
-/// that does not is a defect in `docs/scenarios/cpu.md`.
+/// What the scenario checks after that is the disclosure, from both of the
+/// sources that read the same tick. `cpu.oncpu_time` states the granularity and
+/// how far from the truth a reading can be, predicted from the interval;
+/// `cpu.util` states what it actually delivered -- how many of the reads found
+/// the file unmoved -- which is the same disclosure with the measurement in it.
+/// Neither said anything at all until the defect this scenario recorded was
+/// fixed.
 #[test]
 fn a_poll_faster_than_the_kernels_tick_gets_the_kernels_resolution() {
     const REQUESTED: f64 = 500.0;
@@ -1585,6 +1617,61 @@ fn a_poll_faster_than_the_kernels_tick_gets_the_kernels_resolution() {
         .as_f64()
         .expect("a share");
 
+    // The shortfall, in the run's own words. A series that carries a tenth of
+    // the cadence it was asked for and says nothing is the failure this whole
+    // wave is against, and the number has to be the one that happened rather
+    // than one derived from the interval.
+    let disclosures = result["degradations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|note| note.as_str().map(str::to_owned));
+    let Some(shortfall) = disclosures
+        .into_iter()
+        .find(|note| note.contains("unmoved"))
+    else {
+        // A machine so loaded that a round of reads takes longer than the tick
+        // never reads twice inside one, and then there is no shortfall to
+        // disclose -- the run says that instead, as late ticks. That is a
+        // machine this scenario cannot be run on, not a missing disclosure.
+        let late = result["losses"]["late_ticks"].as_u64().unwrap_or(0);
+        assert!(
+            late > 0,
+            "{delivered} of {REQUESTED:.0} readings arrived, no tick ran late, and the run \
+             says nothing about the ones that did not arrive: {}",
+            result["degradations"]
+        );
+        eprintln!(
+            "skipped: {late} of the {REQUESTED:.0} one-millisecond rounds took longer than a \
+             millisecond, so this machine never polled inside the kernel's tick"
+        );
+        return;
+    };
+    assert!(
+        shortfall.contains("ticks of 10 ms"),
+        "the disclosure does not name the kernel tick that swallowed the readings: {shortfall}"
+    );
+    let unmoved: f64 = shortfall
+        .split_whitespace()
+        .next()
+        .and_then(|word| word.parse().ok())
+        .unwrap_or_else(|| panic!("the disclosure opens with the count: {shortfall}"));
+    // The disclosure has to be about the bulk of the reads, not a footnote.
+    // Ten reads per tick is nine tenths unmoved; what is asserted is two
+    // thirds, which a loaded machine taking fewer reads in total still meets
+    // and a disclosure of the odd stray read does not.
+    assert!(
+        unmoved > delivered * 2.0,
+        "the run reported {delivered} readings and calls {unmoved} of its reads unmoved: \
+         the disclosure is not about the resolution this source actually delivered"
+    );
+    assert!(
+        unmoved + delivered <= REQUESTED + 1.0,
+        "the run accounts for {} reads where {REQUESTED:.0} were asked for",
+        unmoved + delivered
+    );
+
     assert!(
         delivered <= REQUESTED + 1.0,
         "a request for one reading a millisecond over half a second produced {delivered} \
@@ -1617,9 +1704,199 @@ fn a_poll_faster_than_the_kernels_tick_gets_the_kernels_resolution() {
         "polling ten times faster than the kernel credits cpu time is not disclosed:\n{rendered}"
     );
     eprintln!(
-        "`cpu.util --cpu {cpu} -m poll@1ms` delivered {delivered} of {REQUESTED} readings \
-         and said nothing about the tick that swallowed the rest"
+        "`cpu.util --cpu {cpu} -m poll@1ms` delivered {delivered} of {REQUESTED} readings, \
+         and says so: {shortfall}"
     );
+}
+
+/// A profile costs its window and not a second more.
+///
+/// The reference is a counting run of the same length over the same target:
+/// same startup, same catalog, same probe, same teardown, differing only in
+/// the mechanism that measures. So the difference between the two wall clocks
+/// is what profiling costs beyond counting, and nothing here depends on how
+/// fast this machine is.
+///
+/// It used to be a second, flat -- independent of the window, the frequency,
+/// the target and whether stacks were asked for at all -- because every
+/// sampling collector parsed `/proc/kallsyms` when it built its symbolizer,
+/// and then the unwinder asked at the end whether the kernel's symbols were
+/// readable, which parsed it whatever the run had collected. Both are now paid
+/// only by a run that has kernel frames to name.
+///
+/// The minimum of two runs each, and the machine to itself while they run: a
+/// wall clock measured beside forty-eight spinners is a measurement of the
+/// spinners, and the fastest run is the one least disturbed.
+#[test]
+fn a_profile_costs_its_window_and_not_a_fixed_second() {
+    const WINDOW: &str = "300ms";
+    const LONGER: &str = "900ms";
+    const ROUNDS: usize = 2;
+    // A second was the defect. Half of one is far inside it and far outside
+    // anything the measurement itself costs, which is twenty milliseconds.
+    const SLACK: Duration = Duration::from_millis(500);
+
+    let _alone = machine_to_itself();
+    let Some(target) = Spinner::start("omnprofilecost", None) else {
+        eprintln!("skipped: /bin/sh could not be copied, so there is no target to measure");
+        return;
+    };
+    let pid = target.pid();
+
+    let fastest = |axes: &[&str]| -> Option<Duration> {
+        let mut best = None;
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            let outcome = run(axes);
+            let elapsed = started.elapsed();
+            if !matches!(outcome, Outcome::Measured { .. }) {
+                return None;
+            }
+            best = Some(best.map_or(elapsed, |held: Duration| held.min(elapsed)));
+        }
+        best
+    };
+
+    let Some(counting) = fastest(&[
+        "cpu.instructions",
+        "--pid",
+        &pid,
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "-d",
+        WINDOW,
+    ]) else {
+        eprintln!("skipped: this machine will not open a hardware counter");
+        return;
+    };
+    let Some(profiling) = fastest(&[
+        "cpu.profile",
+        "--pid",
+        &pid,
+        "-m",
+        "sample@99hz",
+        "-e",
+        "topk",
+        "--stack",
+        "none",
+        "-d",
+        WINDOW,
+    ]) else {
+        eprintln!("skipped: this machine will not sample at all");
+        return;
+    };
+
+    assert!(
+        profiling <= counting + SLACK,
+        "a {WINDOW} profile took {profiling:?} where a {WINDOW} count of the same target \
+         took {counting:?}: the profile is paying a fixed cost before it samples anything"
+    );
+
+    // And the cost is the window's, not a constant: a longer profile must cost
+    // the difference between the two windows, rather than the same flat second
+    // plus its window.
+    let Some(longer) = fastest(&[
+        "cpu.profile",
+        "--pid",
+        &pid,
+        "-m",
+        "sample@99hz",
+        "-e",
+        "topk",
+        "--stack",
+        "none",
+        "-d",
+        LONGER,
+    ]) else {
+        eprintln!("skipped: this machine will not sample at all");
+        return;
+    };
+    let overhead = longer.saturating_sub(Duration::from_millis(900));
+    assert!(
+        overhead <= SLACK,
+        "a {LONGER} profile took {longer:?}, which is {overhead:?} more than its own window"
+    );
+    eprintln!(
+        "a {WINDOW} profile took {profiling:?} against {counting:?} for a count of the same \
+         window; a {LONGER} profile overran its window by {overhead:?}"
+    );
+}
+
+/// A counter that never ran says which of the two reasons it was.
+///
+/// `running_ns == 0` has two causes and they need opposite responses: the
+/// target never got a cpu, or the target ran and the counter did not, because
+/// the pmu was full and a group is crowded out whole. The code used to pick the
+/// first and print it, so a reader whose program was plainly working was told
+/// it had not run.
+///
+/// The two are told apart by `enabled_ns`, which for a per-task event advances
+/// only while the task is on a cpu. This scenario drives the half a test can
+/// drive: a target that really is asleep for the whole window, whose message
+/// must now name the window it was enabled for -- no time at all -- rather than
+/// leaving the reader to guess which of the two happened. The other half is
+/// checked wherever this machine actually crowds a group out, in
+/// `example_counted` above, and against readings the kernel would produce in
+/// the unit tests of `src/collect/cpu/counters.rs`.
+#[test]
+fn a_counter_over_a_target_that_never_ran_says_that_is_what_happened() {
+    let Ok(mut asleep) = Command::new("/bin/sleep").arg("5").spawn() else {
+        eprintln!("skipped: this machine has no `/bin/sleep`, so nothing here is idle on purpose");
+        return;
+    };
+    let pid = asleep.id().to_string();
+    // Long enough that its exec is behind it: a process still starting up is a
+    // process that ran.
+    std::thread::sleep(Duration::from_millis(250));
+
+    let outcome = run(&[
+        "cpu.instructions",
+        "--pid",
+        &pid,
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "-d",
+        "300ms",
+        "--format",
+        "json",
+    ]);
+    let _ = asleep.kill();
+    let _ = asleep.wait();
+
+    let Outcome::Measured { document, .. } = outcome else {
+        eprintln!("skipped: this machine will not open a hardware counter");
+        return;
+    };
+    let losses = &document["results"][0]["losses"];
+    let reasons = losses["reasons"]
+        .as_object()
+        .expect("the losses carry their reasons");
+    let reason = reasons
+        .keys()
+        .next()
+        .unwrap_or_else(|| {
+            panic!("a counter over a process that slept through the window reported no reason: {losses}")
+        })
+        .clone();
+
+    assert!(
+        reason.contains("enabled for no time at all"),
+        "the counter over a sleeping target does not say that it was never enabled, so a \
+         reader cannot tell this from a pmu that had no room: {reason}"
+    );
+    assert!(
+        reason.contains("not the same as a count of zero"),
+        "an absent count is being offered as a count: {reason}"
+    );
+    assert!(
+        !reason.contains("pmu"),
+        "a target that slept through the window is being blamed on the hardware: {reason}"
+    );
+    eprintln!("a target that never ran is told from a pmu with no room: {reason}");
 }
 
 /// A program that exits before the window closes ends the run and says so.
@@ -1676,16 +1953,20 @@ fn a_target_that_exits_ends_the_window_and_names_the_reason() {
 /// kernel refuses to map a ring for an inherited per-task event -- so it
 /// samples the shell, which is blocked in `wait` for the whole run.
 ///
-/// `src/perf.rs` knows this and has `SampledEvent::sampled_threads` to say it,
-/// "for the record that travels with the numbers". Nothing calls it. So the
-/// run reports "no loss", and the flame graph of a thread pool is a flame graph
-/// of the thread that started it.
+/// `src/perf.rs` has `SampledEvent::sampled_threads` to say it, "for the record
+/// that travels with the numbers", and until this defect was fixed nothing
+/// called it: the run reported "no loss", and the flame graph of a thread pool
+/// was a flame graph of the thread that started it.
 ///
-/// **When this scenario fails, the defect has been fixed**: rewrite it to
-/// assert that the profile either finds the work or states that it did not see
-/// it, and take the entry out of `docs/scenarios/cpu.md`.
+/// So the invariant this now pins is the one the defect entry asked for: the
+/// profile either finds the work or states that it did not see it. It cannot
+/// find it -- the kernel refuses to map a ring for an inherited per-task event,
+/// which is a property of the mechanism and not of this build -- so what is
+/// asserted is the statement, and that it is a *degradation* rather than a
+/// loss. There is no drop to count here: the samples were never taken, and a
+/// number of them would be a precision nobody has.
 #[test]
-fn a_profile_of_work_done_in_another_task_finds_nothing_and_reports_no_loss() {
+fn a_profile_that_cannot_see_the_work_says_it_did_not_see_it() {
     let _load = may_load_the_machine();
     const WORK: &str =
         r#"[/bin/sh, -c, "(i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done) & wait"]"#;
@@ -1729,19 +2010,45 @@ requests:
     let expected = 997.0 * window / 1e9;
     assert!(
         samples < expected * 0.05,
-        "the profile took {samples} samples of a program that was on a cpu for {:.0} ms. \
-         That is the work being found, which means the defect in docs/scenarios/cpu.md was \
-         fixed -- rewrite this scenario to assert the invariant instead",
+        "the profile took {samples} samples of a program that was on a cpu for {:.0} ms, \
+         which is the work being found: a per-task sampling event has started following \
+         the tasks its target starts, and this scenario is measuring something else now",
         window / 1e6
     );
+
+    // The statement, in the record that travels with the numbers. Without it a
+    // reader has a flame graph of a shell blocked in `wait` and no way to know
+    // that the program's whole window is missing from it.
+    let said = results[1]["degradations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|note| note.as_str().map(str::to_owned))
+        .find(|note| note.contains("not inherited"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the profile saw {samples} samples of a program that retired \
+                 {instructions:.0} instructions in another task, and says nothing about \
+                 what it did not follow: {}",
+                results[1]["degradations"]
+            )
+        });
+    assert!(
+        said.contains("child process"),
+        "the disclosure names the threads it did not sample and not the child processes, \
+         which is where this workload's cpu went: {said}"
+    );
+    // Said as a degradation, not as a loss: nothing was dropped, because
+    // nothing was ever delivered to drop.
     assert_eq!(
         losses["dropped"], 0,
-        "a profile that missed every task but one now counts something as lost, so the \
-         disclosure exists: rewrite this scenario"
+        "samples that were never taken are being counted as samples that were lost, which \
+         states a number nobody can know: {losses}"
     );
     eprintln!(
         "a program that retired {instructions:.0} instructions over {:.0} ms was profiled \
-         with {samples} samples, and the run reported no loss",
+         with {samples} samples, and the run says why: {said}",
         window / 1e6
     );
 }

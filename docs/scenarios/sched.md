@@ -368,8 +368,14 @@ scheduler, and what the task was waiting for is the state, not the frames. So
 
 ## Defects found
 
-Ten, in the order they cost a reader most. None is worked around: each session
-below is in `examples/` and runs. The last is not in the tool at all — it is a
+Ten, in the order they cost a reader most, **three of them now fixed**: 2, 3
+and 4, in the fifth wave, by the stream that owns stacks and the two families
+that produce them. Each is marked below with what changed and the scenario that
+now asserts it, and the reproduction is left in place because that is what the
+assertion is written against. `docs/fixes/stacks.md` is that stream's log, and
+it also says what became of 10.
+
+None is worked around: each session below is in `examples/` and runs. The last is not in the tool at all — it is a
 test of this family that fails about one run in five, and it was found by
 running `make check` often enough to notice.
 
@@ -451,6 +457,52 @@ instead and `TOTAL_OF_ATTR` comes off.
 
 ### 2. A blocking stack of a *launched* program comes back with no names
 
+**Fixed** (wave five), and the diagnosis below was wrong about the cause. The
+child *is* readable: `collect/launch.rs` restores its dumpability before it
+execs, and `omn` — its parent — reads its mappings without trouble. What the
+`ls` and `head` below show is a *third* process being refused, which is Yama's
+`ptrace_scope`, not the child being non-dumpable.
+
+The real cause is timing, and the window `open_target_symbols` documented does
+not exist. The runner reads every collector once before it sleeps, so the first
+tick is not 100 ms after the launch: it is the instant after the gate opens,
+with the child inside `execve`, its old image torn down and its new one not yet
+mapped. Instrumented, the first read of `/proc/<pid>/maps` returned two lines —
+`[vsyscall]` and nothing else. The one-shot re-read that `Symbolizer::region_of`
+does when an address falls outside its snapshot then ran at the *other* wrong
+moment: for a program that blocks once and exits, the drain carrying that block
+happens in `stop`, after the program is gone, so the re-read returned nothing —
+and *adopted* it, replacing what little it had with none.
+
+Two changes, both in the shape the trap keeps taking:
+
+- **A symbolizer never adopts an empty read.** An empty `/proc/<pid>/maps` is
+  not a process with no mappings; it is a process mid-`execve` or a process that
+  has exited. `Symbolizer::refresh` keeps what it holds, and `region_of`'s
+  re-read does the same and retries a bounded number of times rather than
+  spending its one attempt on a read that answered nothing.
+- **There is no right moment, so both collectors take them all.**
+  `sched.offcpu` refreshes the target's mappings on every tick, and
+  `cpu.profile` does the same before each drain. The snapshot a stack is
+  resolved against is then the most recent one taken while the target was
+  alive, which is the best answer that exists.
+
+The launched run now reads:
+
+```
+  stack
+    300.05ms  1 events  _start;__libc_start_main;libc.so.6+0x27781;Py_BytesMain;
+                        Py_RunMain;…;clock_nanosleep
+```
+
+Pinned by `a_blocking_stack_names_the_call_that_blocked`, which now runs both
+targets. The launched half uses a program that blocks **once** and then exits,
+because that is the shape that fails: a workload sleeping every fifty
+milliseconds for a second symbolizes even on the old build, since some drain
+catches it alive. It asserts the leaf by name and that most of the twelve
+frames carry one, so a snapshot caught mid-`execve` resolving the odd address
+does not pass.
+
 Same program, same build, same request, two targets:
 
 ```
@@ -494,9 +546,30 @@ called from `sample`. The window is right; the permission is not.
 
 `cpu.profile --emit stack` against a launched `python3` does symbolize, so
 whatever it does to learn the target's mappings is the thing `sched.offcpu`
-should do too.
+should do too. That last observation was the useful half: what `cpu.profile`
+did differently was drain every 10 ms, so its one-shot re-read almost always
+landed while the target was alive. It was luck rather than method, and it is
+now method in both.
 
 ### 3. `--emit stack` costs about 0.65 s per process, and machine-wide never finishes
+
+**Fixed** (wave five), by the same change that closes defect 7 of
+`docs/scenarios/cpu.md`: `/proc/kallsyms` is read at most once per run, into a
+process-wide `OnceLock`, and only when a kernel frame is actually symbolized.
+This source asks the kernel for `BPF_F_USER_STACK` and never looks a kernel
+frame up, so it now never reads the file at all. Measured again:
+
+```
+omn sched.offcpu --emit raw   -- /usr/bin/sleep 0.2     0.445 s   (was 0.456 s)
+omn sched.offcpu --emit stack -- /usr/bin/sleep 0.2     0.455 s   (was 1.096 s)
+omn sched.offcpu --system --emit stack -d 200ms         2.3 s     (did not finish)
+```
+
+Pinned by `asking_for_stacks_costs_the_stacks_and_not_the_kernels_symbol_table`,
+whose reference is the same request without stacks over the same workload — so
+what is asserted is the difference between the two, not a wall clock this
+machine happens to produce — and which requires the machine-wide run to return
+at all.
 
 ```
 omn sched.offcpu --emit raw   -- /usr/bin/sleep 0.2     0.456 s
@@ -523,6 +596,31 @@ offset"*. So the whole cost is paid for a table that is deliberately unused.
 away. The case where they are actually asked for is still there.
 
 ### 4. `sched.migrations --mode count` is `--mode trace` under another name
+
+**Fixed** (wave five). `count` is now what `Collector::stop` says it is: the
+single measurement of one window. The drains still happen, because the kernel's
+map has to be emptied, but what they produce is accumulated per (task, cpu) and
+reported once at the end, over the window the request asked for. `trace` is
+unchanged — one row per pair per drain, each carrying the interval it covers.
+
+```console
+$ omn sched.migrations --mode trace --emit raw --system -d 400ms
+  … window_ns=250066670 …          # one row per pair per drain
+$ omn sched.migrations --mode count --emit raw --system -d 400ms
+  degraded: `count` reports one total per (task, cpu) over the whole window, so
+            there is no series here and `rate` over it is the window's mean;
+            `--mode trace` is the one that reports a count per drain
+  … window_ns=500701149 …          # one row per pair, one window
+```
+
+Pinned by `counting_migrations_is_one_window_and_tracing_them_is_a_series`. Its
+ground truth is the one this family already has — a task whose affinity no
+longer admits the core it is on is moved at once, and the loop rewrites it two
+hundred times — so both modes must report the *same total* in two different
+shapes. It drives the two modes from the command line rather than from the
+session, because `--mode` beside `-f` is accepted and discarded (cpu 5), and a
+scenario that asked the session for `count` would be handed `trace` and would
+check nothing.
 
 Both modes are declared, both are accepted, and they produce the same output.
 Diffing the two sections of one sweep run leaves only the `topk` block that
@@ -665,6 +763,33 @@ the `sched` instance of it. The test here checks the message and leaves the
 code to that work.
 
 ### 10. `tests/family_sched.rs` fails about one run in five, and takes a second test with it
+
+**Explained, not fixed** (wave five): it is a collision between worktrees, and
+the fix is one line in a file no stream of this wave owns.
+`distinctly_named_shell` builds its workload at `std::env::temp_dir()/<name>`,
+which is `/tmp/omnrunqshare` — a machine-wide path. Six worktrees of this wave
+ran the same suite on this machine, each copying `/bin/sh` there and each
+spinning a task that answers to that `comm`, and the filter the test uses is
+`comm == 'omnrunqshare'` machine-wide. Demonstrated directly: two processes
+started from `/tmp/omnrunqshare` give two tids under exactly that filter.
+
+That accounts for the whole table below — the test alone never failed, and it
+failed when the machine was busiest — without needing either of the two causes
+that were suspected. The collector is not at fault: `sched.runqlat` reads `comm`
+from `task_struct.comm` in the kernel at enqueue, so there is no per-tid cache
+to attribute a recycled tid to its previous occupant.
+
+The fix is to make the name unique per run rather than per test, so that one
+worktree cannot count another's load — the pid fits inside the fifteen
+characters a `comm` keeps:
+
+```rust
+let name = format!("{name}{}", std::process::id() % 100_000);
+```
+
+It belongs in `tests/family_sched.rs`, which stream D of this wave may not
+edit; the request is under "Needs from another stream" in
+`docs/open-findings.md`.
 
 Not a defect in the tool, and not this stream's file to fix, but it is what
 `make check` does on this machine and the next person to run it should know why.

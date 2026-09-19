@@ -2737,3 +2737,93 @@ parser, so it exits **1** — "this machine cannot serve it" — where it is pla
 "the request cannot mean anything", which is 2. It is the same fall-through
 `docs/scenarios/sched.md` defect 6 describes for a missing `--mode`, and it now
 has a second and more visible instance.
+
+---
+
+Written by wave five's stream D, which owns `src/stack.rs`,
+`src/collect/cpu/**`, `src/collect/sched/**` and `docs/fixes/stacks.md`.
+
+### To whoever owns `tests/family_sched.rs` — the one-in-five flake
+
+`tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them` fails about one
+run in five because `distinctly_named_shell` builds its workload at a
+machine-wide path, `/tmp/omnrunqshare`, and identifies it with a machine-wide
+`comm` filter. Six worktrees of this wave run that suite on this machine, and
+each one's spinner answers to the same name; the test then finds two tids where
+it pinned one. Demonstrated in `docs/fixes/stacks.md`, along with what it rules
+out — the collector is innocent, `sched.runqlat` reads `comm` from
+`task_struct.comm` in the kernel.
+
+The name has to be unique per *run*, not per test. A `comm` keeps fifteen
+characters, and the pid fits inside what the existing names leave:
+
+```rust
+fn distinctly_named_shell(name: &str) -> Option<std::path::PathBuf> {
+    let name = format!("{name}{}", std::process::id() % 100_000);
+    assert!(name.len() <= 15, "`{name}` is longer than a comm");
+    // … unchanged, with `&name` used for the path and returned to the caller
+}
+```
+
+Its three callers pass `"omnrunqshare"`, `"omnrunqbkt"` and `"omnmigrate"` and
+each also writes that string into a `--filter`, so the generated name has to
+reach the filter too — returning it beside the path, or having the helper
+return a small struct, is the shape. The same applies to
+`tests/scenario_cpu.rs::Spinner::started`, which builds `/tmp/omnprofilefmt` and
+friends the same way; it does not filter on `comm`, so it is a latent version of
+the same collision rather than an active one.
+
+### To stream E, for `src/collect/mem/page_faults.rs`
+
+`mem.faults` opens a per-task sampling event over a process, exactly as
+`cpu.profile` and `sched.switches` do, and the kernel will not inherit it: the
+faults of any thread or child the target starts afterwards are in no number the
+run reports. The other two now say so (`cpu` 1 in `docs/scenarios/cpu.md`);
+this one does not, and `STATE.md` claims it does.
+
+The disclosure already exists and needs one caller. Read it at `start`, because
+`stop` closes the event and the notes are gathered after it:
+
+```rust
+// in the collector, beside `event`
+disclosure: Option<&'static str>,
+more_than_one_task: bool,   // `!matches!(target, Target::Tid(_))`, from `attach`
+
+// in `start`, after `event.enable()`
+self.disclosure = Some(event.sampled_threads());
+
+// in `notes`
+if let (true, Some(limit)) = (self.more_than_one_task, self.disclosure) {
+    notes.push(format!(
+        "a sampling event is not inherited, so these faults are {limit}; …"
+    ));
+}
+```
+
+`src/collect/cpu/profile.rs` and `src/collect/sched/switches.rs` have the two
+worked examples, including the count of tasks the run actually saw, which is the
+measured half.
+
+### To whoever owns `tests/scenario_cpu.rs` — a scenario that measures a rate without the machine
+
+`a_profile_renders_in_every_format_that_carries_stacks` asserts that a 200 ms
+window at 997 Hz holds between forty and three hundred and twenty samples, and
+it holds `may_load_the_machine()` — the *shared* lock. `pressure_rises_when_
+there_are_more_runnable_tasks_than_cpus` holds the same shared lock and starts
+forty-eight spinners, so the two run together, and when they do the profile's
+own loop can be starved past its deadline: three failures in about eighteen
+full runs of that target during wave five, each with *too many* samples, the
+worst being 1483 — a second and a half of the target's cpu inside a window that
+asked for two hundred milliseconds.
+
+The rest of this file's duration and share scenarios take
+`machine_to_itself()` for exactly this reason, and the comment on that lock says
+why. This one measures a rate over a window and should take it too:
+
+```rust
+fn a_profile_renders_in_every_format_that_carries_stacks() {
+    let _alone = machine_to_itself();
+```
+
+Stream D of wave five did not make the change: the scenario does not name a
+defect that stream fixed, and the seam in `BRIEF.md` is narrower than that.

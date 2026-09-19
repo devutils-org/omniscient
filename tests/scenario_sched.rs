@@ -540,23 +540,37 @@ fn each_child_that_exits_is_named_as_the_one_that_released_the_shell() {
     );
 }
 
-/// Where a program blocked, not how long.
+/// Where a program blocked, not how long -- whoever started the program.
 ///
 /// The workload sleeps from one known call, so the leaf of the blocking stack
-/// is known too: `clock_nanosleep`, which is what `time.sleep` becomes. This
-/// attaches to a process it did not launch, because on a launched one the same
-/// request comes back with addresses and no names -- a defect of this build,
-/// written up in `docs/scenarios/sched.md`.
+/// is known too: `clock_nanosleep`, which is what `time.sleep` becomes. That
+/// name is ground truth twice over: it is in the workload's own source, and it
+/// is a libc symbol this tool has to find in the target's own mappings to
+/// print.
+///
+/// Both targets, because for a long time only one of them worked. A launched
+/// program came back with twelve bare addresses: a symbolizer snapshots
+/// `/proc/<pid>/maps` when it is built, and for a program this tool launches
+/// there is no single moment when that file says anything useful -- at `start`
+/// the child has not execed, at the first tick it is inside `execve` with its
+/// old image gone and its new one not yet mapped, and by the time the block
+/// that matters is drained the program has exited and the file is empty. The
+/// fix reads the maps every tick and keeps the last read that had anything in
+/// it, so what a stack is resolved against is the most recent mapping the
+/// target had while it was alive.
 #[test]
 fn a_blocking_stack_names_the_call_that_blocked() {
+    const SLEEPS: &str = "import time\nfor _ in range(20): time.sleep(0.05)";
     if !have("python3") {
         eprintln!(
             "skipped: this machine has no `python3`, which the sleeping workload is written in"
         );
         return;
     }
+
+    // Attached to a process this run did not start.
     let mut sleeper = Command::new("python3")
-        .args(["-c", "import time\nfor _ in range(20): time.sleep(0.05)"])
+        .args(["-c", SLEEPS])
         .spawn()
         .expect("the sleeping workload should start");
     let pid = sleeper.id().to_string();
@@ -580,6 +594,278 @@ fn a_blocking_stack_names_the_call_that_blocked() {
     assert!(
         text.contains("clock_nanosleep"),
         "the workload blocked in `clock_nanosleep` and the stack does not say so:\n{text}"
+    );
+
+    // The same call, launched by this run instead -- and blocking once, then
+    // exiting. That is the shape the defect needs and the shape a reader is
+    // most likely to bring: a program whose one block ends as it finishes, so
+    // the drain that carries the stack happens after the program is gone and
+    // there are no mappings left to read. A workload that blocks every fifty
+    // milliseconds for a second symbolizes either way, because some drain
+    // catches it alive.
+    let launched = omn(&[
+        "sched.offcpu",
+        "--emit",
+        "stack",
+        "--",
+        "python3",
+        "-c",
+        "import time\ntime.sleep(0.3)",
+    ]);
+    let code = exit_code(&launched);
+    let launched = spoken(&launched);
+    assert_eq!(code, 0, "{launched}");
+    assert!(
+        launched.contains("clock_nanosleep"),
+        "the same workload launched by this run blocked in the same call, and its stack \
+         comes back unsymbolized:\n{launched}"
+    );
+    // Not one name out of twelve frames either: a snapshot taken mid-`execve`
+    // resolves the odd address that happens to fall in what was left.
+    let frames: Vec<&str> = launched
+        .lines()
+        .find(|line| line.contains("clock_nanosleep"))
+        .map(|line| line.split(';').collect())
+        .unwrap_or_default();
+    let named = frames
+        .iter()
+        .filter(|frame| !frame.trim().starts_with("0x"))
+        .count();
+    assert!(
+        named * 2 > frames.len(),
+        "{named} of {} frames of a launched program's blocking stack carry a name: \n{launched}",
+        frames.len()
+    );
+}
+
+/// Asking for stacks costs the stacks and not a symbol table nobody reads.
+///
+/// `--emit stack` used to cost about 0.65 s per process, and machine-wide it
+/// did not finish: every symbolizer parsed `/proc/kallsyms` -- 395 318 lines on
+/// this machine -- and `sched.offcpu` builds one per process it sees. The table
+/// was then never consulted, because this source asks the kernel for
+/// `BPF_F_USER_STACK` and says so in as many words.
+///
+/// The reference is the same request without stacks, over the same workload:
+/// the difference between the two is what symbolizing costs, and it is the only
+/// number here that does not depend on how fast this machine is. The minimum of
+/// three runs each, because the machine is shared.
+#[test]
+fn asking_for_stacks_costs_the_stacks_and_not_the_kernels_symbol_table() {
+    use std::time::{Duration, Instant};
+
+    // Two thirds of a second was the defect, per process. A quarter of one is
+    // well inside it and well outside what reading a few dozen mappings and one
+    // shell's symbols costs.
+    const SLACK: Duration = Duration::from_millis(250);
+    const ROUNDS: usize = 3;
+
+    let fastest = |axes: &[&str]| -> Option<Duration> {
+        let mut best: Option<Duration> = None;
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            let output = omn(axes);
+            let elapsed = started.elapsed();
+            let text = spoken(&output);
+            if unprivileged(&text) {
+                return None;
+            }
+            assert_eq!(exit_code(&output), 0, "{text}");
+            best = Some(best.map_or(elapsed, |held| held.min(elapsed)));
+        }
+        best
+    };
+
+    let sleeper = ["--", "/usr/bin/sleep", "0.2"];
+    let mut raw = vec!["sched.offcpu", "--emit", "raw"];
+    raw.extend(sleeper);
+    let mut stacks = vec!["sched.offcpu", "--emit", "stack"];
+    stacks.extend(sleeper);
+
+    let Some(without) = fastest(&raw) else {
+        eprintln!("skipped: sched.offcpu needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    };
+    let Some(with) = fastest(&stacks) else {
+        eprintln!("skipped: sched.offcpu needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    };
+    assert!(
+        with <= without + SLACK,
+        "the same 200 ms workload took {with:?} with stacks and {without:?} without: the \
+         stacks are paying for something they do not use"
+    );
+
+    // And machine-wide, where the same cost was paid once per process that
+    // blocked. This used to not return at all; what is asserted is that it
+    // returns, inside a bound no working run comes near.
+    let started = Instant::now();
+    let output = omn(&["sched.offcpu", "--system", "--emit", "stack", "-d", "200ms"]);
+    let wide = started.elapsed();
+    let text = spoken(&output);
+    assert_eq!(exit_code(&output), 0, "{text}");
+    assert!(
+        wide < Duration::from_secs(20),
+        "a 200 ms machine-wide run with stacks took {wide:?}"
+    );
+    eprintln!(
+        "stacks cost {with:?} against {without:?} without them, and a machine-wide 200 ms \
+         window with stacks finished in {wide:?}"
+    );
+}
+
+/// `count` and `trace` are two answers, not one answer under two names.
+///
+/// `Collector::stop` says what `count` is: "the single measurement of a `count`
+/// window, which has no series and whose closing read **is** the result".
+/// `sched.migrations` declared both modes, took the mode, and discarded it, so
+/// the two produced the same events over the same windows -- and a mode that
+/// changes nothing is worse than one that is refused, because the refusal is
+/// visible.
+///
+/// The workload is the one `examples/sched-migrations.yml` uses and this file
+/// already has ground truth for: a task whose affinity no longer admits the
+/// core it is on is moved at once, and the loop rewrites it
+/// `AFFINITY_CHANGES` times. It is driven from the command line rather than
+/// from the session, because `--mode` beside `-f` is accepted and discarded
+/// (cpu 5 in `docs/scenarios/cpu.md`) and a scenario that asked the session for
+/// `count` would be handed `trace` and would check nothing.
+///
+/// So the two modes must report the same total -- the workload's -- in two
+/// shapes: a series of drains, and one window.
+#[test]
+fn counting_migrations_is_one_window_and_tracing_them_is_a_series() {
+    if !have("taskset") {
+        eprintln!("skipped: this machine has no `taskset`, which the migration workload uses to rewrite its own affinity");
+        return;
+    }
+    // The example's loop, stretched over several drains. The pauses do not
+    // touch the ground truth -- the task's affinity is still rewritten
+    // `AFFINITY_CHANGES` times, and each rewrite still moves it once -- and
+    // they are what makes the two shapes distinguishable: a run shorter than
+    // one drain interval is one drain, and one drain of `trace` looks like the
+    // single window of `count` however the mode is implemented.
+    let loop_body = format!(
+        "i=0\nwhile [ $i -lt {AFFINITY_CHANGES} ]; do\n  taskset -pc $(( (i % 4) * 5 )) $$ \
+         >/dev/null 2>&1\n  i=$((i + 1))\n  if [ $(( i % 40 )) -eq 0 ]; then sleep 0.15; fi\n\
+         done\n"
+    );
+    let moved_by = |mode: &str| -> Option<Value> {
+        let output = omn(&[
+            "sched.migrations",
+            "--mode",
+            mode,
+            "--emit",
+            "raw",
+            "--keys",
+            "task",
+            "--format",
+            "json",
+            "--",
+            "/bin/sh",
+            "-c",
+            &loop_body,
+        ]);
+        let text = spoken(&output);
+        if unprivileged(&text) {
+            return None;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        Some(results(&output)[0].clone())
+    };
+
+    let (Some(traced), Some(counted)) = (moved_by("trace"), moved_by("count")) else {
+        eprintln!("skipped: sched.migrations needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    };
+
+    // Same workload, same total: the mode changes the shape of the answer and
+    // not the answer.
+    for (mode, result) in [("trace", &traced), ("count", &counted)] {
+        let moved = total_attribute(result, "migrations");
+        assert!(
+            close_to(moved, AFFINITY_CHANGES),
+            "{AFFINITY_CHANGES} affinity rewrites move the task {AFFINITY_CHANGES} times, \
+             and `{mode}` saw {moved}"
+        );
+    }
+
+    // And a different shape. `count` reports one row per (task, cpu) over the
+    // whole window; `trace` reports one per drain, so a pair that moved in two
+    // intervals is two rows.
+    let windows = |result: &Value| -> Vec<u64> {
+        outputs(result, "raw")
+            .flat_map(|output| {
+                output["events"]
+                    .as_array()
+                    .expect("a raw output carries events")
+                    .clone()
+            })
+            .filter_map(|event| {
+                event["attrs"]
+                    .as_array()?
+                    .iter()
+                    .find(|attr| attr["name"] == "window_ns")
+                    .and_then(|attr| attr["value"].as_u64())
+            })
+            .collect()
+    };
+    let counted_windows = windows(&counted);
+    let traced_windows = windows(&traced);
+    assert!(
+        !counted_windows.is_empty() && !traced_windows.is_empty(),
+        "one of the two modes reported no rows at all"
+    );
+
+    // `sched.migrations` drains every 250 ms, so a workload that finishes
+    // inside one interval is one drain in either mode and there is nothing here
+    // to tell apart.
+    let observed = counted["observed_ns"]
+        .as_u64()
+        .expect("the run reports its window");
+    if observed < 750_000_000 {
+        eprintln!(
+            "skipped: the workload finished in {} ms, which is fewer than three of this \
+             source's 250 ms drains, so `trace` has no series to be",
+            observed / 1_000_000
+        );
+        return;
+    }
+    assert!(
+        traced_windows.len() > counted_windows.len(),
+        "`trace` reported {} rows and `count` reported {}: the two modes are producing the \
+         same events, which is the defect `docs/scenarios/sched.md` records as sched 4",
+        traced_windows.len(),
+        counted_windows.len()
+    );
+
+    // One measurement: every counted row covers the same window, and that
+    // window is the run's rather than a drain's. The run reports its own
+    // length, which is what the claim is checked against.
+    let counted_window = counted_windows[0];
+    assert!(
+        counted_windows
+            .iter()
+            .all(|window| *window == counted_window),
+        "the counted rows report different windows, so they are not one measurement: \
+         {counted_windows:?}"
+    );
+    assert!(
+        counted_window * 10 >= observed * 9,
+        "a counted row covers {counted_window} ns of a run that lasted {observed} ns: a \
+         `count` window is the whole run"
+    );
+    let drains = *traced_windows.iter().max().expect("a traced window");
+    assert!(
+        drains < observed,
+        "every traced row covers the whole run ({drains} ns of {observed} ns), so `trace` \
+         is not reporting a series either"
+    );
+    eprintln!(
+        "{AFFINITY_CHANGES} migrations, reported as {} rows over one {counted_window} ns \
+         window by `count` and as {} rows of at most {drains} ns by `trace`",
+        counted_windows.len(),
+        traced_windows.len()
     );
 }
 

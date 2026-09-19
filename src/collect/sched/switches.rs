@@ -8,6 +8,7 @@
 //! that blocked from one whose slice ran out. That distinction is the whole
 //! diagnosis, which is why `bpf:tp` is ahead of it in the chain.
 
+use std::collections::BTreeSet;
 use std::time::Duration as StdDuration;
 
 use perf_event_open_sys::bindings as perf;
@@ -34,7 +35,11 @@ impl Prepared for Prepare {
                 target.kind()
             )
         })?;
-        Ok(Box::new(SwitchCollector::new(pid, self.0)))
+        Ok(Box::new(SwitchCollector::new(pid, self.0).following(
+            // A `--tid` target is the one task that was asked for; anything
+            // else names a process, which is a task and whatever it starts.
+            !matches!(target, Target::Tid(_)),
+        )))
     }
 }
 
@@ -50,6 +55,13 @@ pub struct SwitchCollector {
     comms: Comms,
     tgids: Tgids,
     losses: Losses,
+    /// Whether the target names more than the one task this event can follow.
+    more_than_one_task: bool,
+    /// The tasks samples actually arrived from.
+    sampled_tasks: BTreeSet<i32>,
+    /// What the open event does and does not see, read at `start` and kept:
+    /// `stop` closes the event and the notes are gathered afterwards.
+    disclosure: Option<&'static str>,
 }
 
 impl SwitchCollector {
@@ -62,7 +74,16 @@ impl SwitchCollector {
             comms: Comms::new(),
             tgids: Tgids::new(),
             losses: Losses::default(),
+            more_than_one_task: false,
+            sampled_tasks: BTreeSet::new(),
+            disclosure: None,
         }
+    }
+
+    /// Records whether the target is more than the task this event follows.
+    fn following(mut self, more_than_one_task: bool) -> Self {
+        self.more_than_one_task = more_than_one_task;
+        self
     }
 
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
@@ -72,12 +93,14 @@ impl SwitchCollector {
         let id = self.id.clone();
         let comms = &mut self.comms;
         let tgids = &mut self.tgids;
+        let seen = &mut self.sampled_tasks;
         let mut index = seq;
         let mut dropped = 0u64;
         let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
             Record::Sample(sample) => {
+                seen.insert(sample.tid as i32);
                 events.push(Event {
                     ts_ns: sample.time_ns,
                     ts_err_ns: 0,
@@ -120,10 +143,12 @@ impl SwitchCollector {
         // sampling less of it, up to `kernel.perf_event_max_sample_rate`. It is
         // a loss like any other -- switches happened and are not here -- but
         // one whose size the kernel does not report, so it is counted in
-        // throttled periods and labelled as such. A run that hit it is not
-        // comparable to one that did not.
+        // throttled periods and labelled as such. Adding it to `dropped`
+        // instead, which is what this did while saying otherwise, reports a
+        // number of periods as a number of switches and leaves the field a
+        // consumer filters on at zero.
         if throttles > 0 {
-            self.losses.dropped += throttles;
+            self.losses.throttled += throttles;
             self.losses.note(
                 "the kernel throttled context-switch sampling: an unknown number of switches in \
                  each throttled period were not sampled (see kernel.perf_event_max_sample_rate)",
@@ -173,6 +198,7 @@ impl Collector for SwitchCollector {
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
+        self.disclosure = Some(event.sampled_threads());
         self.event = Some(event);
         Ok(())
     }
@@ -202,6 +228,22 @@ impl Collector for SwitchCollector {
 
     fn losses(&self) -> Losses {
         self.losses.clone()
+    }
+
+    /// The same limit `cpu.profile` states, for the same reason: this event is
+    /// not inherited either, so a process whose switching happens in its
+    /// threads or its children is counted as the one task that was opened on.
+    fn notes(&self) -> Vec<String> {
+        let Some(limit) = self.disclosure.filter(|_| self.more_than_one_task) else {
+            return Vec::new();
+        };
+        let tasks = self.sampled_tasks.len();
+        vec![format!(
+            "a sampling event is not inherited, so these switches are {limit}; they came from \
+             {tasks} task{}, and switches of a thread or a child process the target started are \
+             in no number here",
+            if tasks == 1 { "" } else { "s" }
+        )]
     }
 }
 
