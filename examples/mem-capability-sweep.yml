@@ -1,0 +1,78 @@
+# Every shape this family can produce, over one program.
+#
+#   omn -f examples/mem-capability-sweep.yml
+#   omn -f examples/mem-capability-sweep.yml --format ndjson | head
+#
+# The catalog is data and the command line is a projection of it, so every
+# combination of source, mode and emit that the catalog offers is a promise.
+# This session collects one of each shape a `mem` source can produce -- a
+# series over time, a distribution, a ranking, a rate, a single number -- and
+# it is deliberately heterogeneous: an emit that renders correctly on a
+# per-tick footprint can still be wrong on a source whose events arrive in
+# bursts and carry an address.
+#
+# Six sources, one launched program, one window. They see the same process,
+# which is what makes the outputs comparable: the resident size is the pages
+# the faults below it made real, and the working set is the part of those the
+# program came back to.
+#
+# `mem.heap.alloc` is alone here among the heap sources, and it has to be. Each
+# of the three opens its own pipe and asks the launched program for the same
+# `OMN_HEAP_FD`, so a session naming two of them is refused for disagreeing
+# about the environment. That is a real limitation of this build and not a
+# property of the measurement; `docs/families/mem.md` says what it would take
+# to lift.
+#
+# The full sweep -- every mode against every emit, for every `mem` source that
+# has a collector -- is not a session anybody would run. It lives in
+# `tests/scenario_mem.rs`, where a combination the catalog offers and the build
+# refuses is a failure rather than a surprise.
+name: one of every shape
+format: json
+
+requests:
+  - label: footprint over time
+    source: mem.rss
+    target: &workload
+      launch:
+        - python3
+        - -c
+        - "import time\nheld = bytearray(96 * 1024 * 1024)\nheld[::4096] = b'A' * len(held[::4096])\nworking = memoryview(held)[:8 * 1024 * 1024]\ndeadline = time.time() + 0.6\nwhile time.time() < deadline:\n    for offset in range(0, len(working), 4096):\n        working[offset] = 1\n"
+    mode: poll@100ms
+    emit: [timeline, summary]
+    keys: [task, cgroup, mem]
+
+  - label: private footprint, one number
+    source: mem.uss
+    target: *workload
+    mode: poll@100ms
+    emit: [summary]
+    keys: [task, mem]
+
+  - label: what it came back to
+    source: mem.wss
+    target: *workload
+    mode: poll@200ms
+    emit: [timeline, summary]
+    keys: [task, cgroup, mem]
+
+  - label: faults, several ways at once
+    source: mem.faults
+    target: *workload
+    mode: trace
+    emit: [hist:log2, topk:5, rate, summary]
+    keys: [task, mem, cgroup]
+
+  - label: allocation sizes
+    source: mem.heap.alloc
+    target: *workload
+    mode: trace
+    emit: [hist:log2, topk:5, summary]
+    keys: [task, mem]
+
+  - label: l1 misses, counted
+    source: mem.cache_l1
+    target: *workload
+    mode: count
+    emit: [summary, rate]
+    keys: [task, cpu]

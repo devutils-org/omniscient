@@ -1,0 +1,33 @@
+# Twenty thousand allocations of four thousand and one bytes.
+#
+#   omn -f examples/mem-allocation-exact.yml
+#
+# The point of this session is that there is nothing to interpret. The program
+# calls `malloc(4001)` exactly twenty thousand times and frees each block
+# immediately; 4001 is a size nothing else in a Python interpreter asks for, so
+# `--filter bytes == 4001` keeps this program's allocations and no others.
+#
+# What comes back must be twenty thousand events whose minimum, maximum and
+# mean are all 4001, with nothing dropped. Not "about twenty thousand": the
+# shim sees every call, and a number that is short is a number that lost
+# something and did not say so.
+#
+# Run `examples/mem-allocation-storm.yml` next. It is the same program with ten
+# times the work, which is where this backend starts losing records, and it is
+# the loss accounting rather than the allocation count that the second session
+# is about.
+name: an exact number of allocations, exactly reported
+format: json
+
+requests:
+  - label: allocations
+    source: mem.heap.alloc
+    target:
+      launch:
+        - python3
+        - -c
+        - "import ctypes\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nfor _ in range(20000):\n    libc.free(libc.malloc(4001))\n"
+    mode: trace
+    emit: [summary, hist]
+    keys: [task, mem]
+    filter: "bytes == 4001"

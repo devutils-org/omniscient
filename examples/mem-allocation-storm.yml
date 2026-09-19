@@ -1,0 +1,37 @@
+# Two hundred thousand allocations: more than the pipe can carry.
+#
+#   omn -f examples/mem-allocation-storm.yml
+#
+# This is `examples/mem-allocation-exact.yml` with ten times the work, and it
+# is here to be lost. The shim writes one thirty-two byte record per `malloc`
+# and per `free` into a non-blocking pipe and never waits for the reader: the
+# rule it obeys is that losing the measurement is acceptable and stalling the
+# measured program is not. When the pipe is full the record is thrown away, and
+# the shim is supposed to count what it threw away and report the count as soon
+# as there is room again.
+#
+# So the check is arithmetic, and the workload supplies both sides of it. The
+# program makes exactly two hundred thousand allocations of exactly 4001 bytes.
+# Whatever the run reports as seen, plus whatever it reports as dropped, must
+# come to two hundred thousand. A run that reports a hundred and sixty-nine
+# thousand seen and seven dropped has not measured this program; it has
+# measured part of it and called the rest nothing.
+#
+# That is what this session does today, and `docs/scenarios/mem.md` records the
+# numbers under "Defects found". Keep the session: it is how the fix is
+# checked.
+name: allocations faster than the pipe drains
+format: json
+
+requests:
+  - label: allocations
+    source: mem.heap.alloc
+    target:
+      launch:
+        - python3
+        - -c
+        - "import ctypes\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nfor _ in range(200000):\n    libc.free(libc.malloc(4001))\n"
+    mode: trace
+    emit: [summary]
+    keys: [task, mem]
+    filter: "bytes == 4001"

@@ -1,0 +1,45 @@
+# The program counts its own faults, and the tool has to find the same number.
+#
+#   omn -f examples/mem-faults-ground-truth.yml
+#
+# There is a counter for this that owes nothing to the tool. The kernel keeps a
+# minor-fault count per process and hands it back through `getrusage`, so a
+# program can report how many faults it took, and the run beside it can be
+# checked against that rather than against itself. The program prints its own
+# `ru_minflt` on standard error, which passes straight through, so the two
+# numbers appear in the same output a few lines apart.
+#
+# Two reasons they will not be exactly equal, both in one direction. The
+# interpreter faults while it starts, before the collector is attached; and the
+# program keeps faulting between the last drain and its own final read. Both
+# make the tool's count the smaller one, by a fraction of a percent on this
+# workload.
+#
+# What this session deliberately does *not* check is the size of the memory
+# against the number of faults, and the caveat on the source says why: a fault
+# is not a page. With multi-size anonymous huge pages the kernel picks a larger
+# folio for a larger region, so touching 256 MiB here costs about eleven
+# hundred faults rather than the sixty-five thousand a four-kibibyte page would
+# predict. Fault counts say where faults happened. They are not a quantity of
+# memory, and dividing them by a page size produces a number that is a quantity
+# of nothing.
+#
+# `keys: [task, mem]` is not decoration. Every fault carries the address that
+# faulted, and `examples/allocation-cost.yml` joins exactly this source to
+# `mem.heap.alloc` over the `mem:[base,len)` key to say which allocation the
+# fault belonged to. A run of this source without the key produces events that
+# can be counted and not attributed.
+name: page faults, against the kernel's own count of them
+format: json
+
+requests:
+  - label: faults
+    source: mem.faults
+    target:
+      launch:
+        - python3
+        - -c
+        - "import resource, sys\nbuffer = bytearray(256 * 1024 * 1024)\nbuffer[::4096] = b'A' * len(buffer[::4096])\nsys.stderr.write('MINFLT=%d\\n' % resource.getrusage(resource.RUSAGE_SELF).ru_minflt)\n"
+    mode: trace
+    emit: [summary, rate]
+    keys: [task, mem]

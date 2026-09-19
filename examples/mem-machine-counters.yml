@@ -1,0 +1,86 @@
+# The three machine-wide readers, and the one that reads the mode as well.
+#
+#   omn -f examples/mem-machine-counters.yml
+#
+# None of these is a footprint. `mem.thp` counts huge-page promotions and, on
+# one of its two backends, reports the configured mode; `mem.pressure` is time
+# lost because there was not enough memory; `mem.swap` is the flow to and from
+# a swap device during the window, never the stock sitting there.
+#
+# `mem.thp` is here twice, pinned to each of its backends. Both read the same
+# kernel counter -- `/sys/kernel/mm/transparent_hugepage/khugepaged` and
+# `/proc/vmstat` publish the same promotions -- so `promotions_since_boot` must
+# be the same number on both. What only the first can answer is what the mode
+# is set to, which is exactly what the second's `degraded` line declares it
+# loses. That is the whole of the comparison: the counter agrees, the mode does
+# not travel.
+#
+# The mode matters more than the counter. THP promotes in the background and
+# moves RSS in two-megabyte steps, so two runs taken under different modes are
+# not comparable and nothing in the numbers says so. Freeze it and log it.
+#
+# `mem.pressure` and `mem.swap` answer here for the machine, out of
+# `/proc/pressure/memory` and `/proc/vmstat`. Their cgroup backends answer the
+# same question through cgroup2, and at the root cgroup they are reading the
+# same kernel counters: `examples/mem-cgroup-counters.yml` is that session, and
+# the two must agree to the byte and to the nanosecond.
+name: what the machine says about its own memory
+format: json
+duration: 500ms
+
+requests:
+  - label: huge pages, with the mode
+    source: mem.thp
+    backend: force:fs:sys
+    target: system
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: huge pages, counters only
+    source: mem.thp
+    backend: force:fs:proc
+    target: system
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: huge pages since boot, with the mode
+    source: mem.thp
+    backend: force:fs:sys
+    target: system
+    mode: snapshot
+    emit: [raw]
+
+  - label: huge pages since boot, counters only
+    source: mem.thp
+    backend: force:fs:proc
+    target: system
+    mode: snapshot
+    emit: [raw]
+
+  - label: stall time over the window
+    source: mem.pressure
+    backend: force:fs:proc
+    target: system
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: stall time since boot
+    source: mem.pressure
+    backend: force:fs:proc
+    target: system
+    mode: snapshot
+    emit: [raw]
+
+  - label: swap flow over the window
+    source: mem.swap
+    backend: force:fs:proc
+    target: system
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: swap since boot
+    source: mem.swap
+    backend: force:fs:proc
+    target: system
+    mode: snapshot
+    emit: [raw]

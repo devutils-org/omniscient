@@ -1,0 +1,60 @@
+# A scan whose cache misses are known before it runs.
+#
+#   omn -f examples/mem-cache-lines.yml
+#
+# Cache counters are the hardest numbers in this family to believe, because
+# almost nothing about them is portable: the last level is not the same cache
+# on two machines, a miss is not a stall, and a miss count is not a miss rate.
+# What *is* portable is arithmetic. A buffer far larger than any cache, read
+# from end to end, has to bring in one line per sixty-four bytes, and a
+# hardware prefetcher can only decide when a line arrives, not whether it is
+# needed.
+#
+# So the workload chooses the number. It allocates 128 MiB -- twice this
+# machine's whole last-level cache, and four hundred times its L1 -- writes a
+# byte in every page so that nothing is a shared zero page, and then scans the
+# whole buffer eight times. That is one gibibyte of reads and 16 777 216
+# sixty-four-byte lines, and `mem.cache_l1` must report at least that many
+# misses. It reports about a quarter more, which is the interpreter's own
+# working set and the buffer being created; run it with four passes instead of
+# eight and the excess halves, which is what says the count tracks the scan
+# rather than the program.
+#
+# `mem.cache_tlb` is read beside it for the opposite reason: it must be small.
+# A gibibyte of scanning crosses 262 144 four-kibibyte pages, and with
+# transparent huge pages on it crosses five hundred and twelve two-mebibyte
+# ones instead. A TLB miss count anywhere near the first number would mean the
+# huge pages are not there, which is why `mem.thp` belongs in the same reading
+# and why the mode has to be frozen and logged before either number means
+# anything.
+#
+# `mem.cache_llc` is here and is not checked against the scan. See
+# "What cannot be verified here" in docs/scenarios/mem.md.
+name: one gibibyte of reads, counted in cache lines
+format: json
+
+requests:
+  - label: l1 misses
+    source: mem.cache_l1
+    target: &scan
+      launch:
+        - python3
+        - -c
+        - "size = 128 * 1024 * 1024\nbuffer = bytearray(size)\nbuffer[::4096] = b'A' * len(buffer[::4096])\ntotal = 0\nfor _ in range(8):\n    total += buffer.count(65)\n"
+    mode: count
+    emit: [raw, summary]
+    keys: [task, cpu]
+
+  - label: tlb misses
+    source: mem.cache_tlb
+    target: *scan
+    mode: count
+    emit: [raw, summary]
+    keys: [task, cpu]
+
+  - label: last-level misses
+    source: mem.cache_llc
+    target: *scan
+    mode: count
+    emit: [raw, summary]
+    keys: [task, cpu]

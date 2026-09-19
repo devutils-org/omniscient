@@ -1,0 +1,34 @@
+# A request this machine cannot serve, on a machine that cannot serve it.
+#
+#   omn -f examples/mem-refused-unavailable.yml        # exit 1 on AMD 17h, runs elsewhere
+#
+# `mem.cache_llc` has two backends. The first names the last-level cache
+# directly, through the kernel's `LLC-load-misses` and `LLC-loads` aliases; the
+# second is the architectural `PERF_COUNT_HW_CACHE_MISSES`, which every vendor
+# implements and each implements differently. The catalog says which machines
+# lose the first: "AMD family 17h exposes no last-level cache descriptor at
+# all, so the first backend is missing there and the architectural counter is
+# what answers."
+#
+# Left alone, the resolver does exactly that and the run succeeds through the
+# fallback. Pinning the first backend is what makes the limit visible, and the
+# limit is what this session is for: on a machine with the descriptor this
+# session runs and measures; on this one it stops with exit 1 and a message
+# about `perf_event_paranoid` and about whether the cpu exposes the counter at
+# all.
+#
+# That distinction is the whole of the exit-1 class. Nothing is wrong with the
+# request, and nothing is missing from the build. The hardware does not have
+# the counter.
+name: the last-level cache descriptor, where there is none
+format: text
+
+requests:
+  - label: named LLC counter
+    source: mem.cache_llc
+    backend: force:pmu
+    target:
+      launch: [python3, -c, "buffer = bytearray(64 * 1024 * 1024); buffer.count(0)"]
+    mode: count
+    emit: [summary]
+    keys: [task, cpu]
