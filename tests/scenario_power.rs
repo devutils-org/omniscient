@@ -725,12 +725,18 @@ fn every_axis_this_family_declares_is_served_or_refused_by_name() {
                         Answer::Refused
                     }
                     Some(EXIT_NO_COLLECTOR) => {
+                        // Two ways to reach this code, and they are the same
+                        // answer: no collector at all for the selected backend,
+                        // or a collector that has not written the mode that was
+                        // asked for. The second used to exit 1, which is the
+                        // fourth row of defect 2 in docs/scenarios/power.md.
+                        let no_collector = message.contains("no collector is written");
                         assert!(
-                            message.contains("no collector is written"),
+                            no_collector || message.contains("cannot start collecting"),
                             "{source} {mode} {emit}: {message}"
                         );
                         assert!(
-                            chain.iter().any(|backend| message.contains(backend)),
+                            !no_collector || chain.iter().any(|backend| message.contains(backend)),
                             "a build that does not implement something has to name which \
                              backend of {chain:?} it meant: {message}"
                         );
@@ -797,6 +803,160 @@ fn every_axis_this_family_declares_is_served_or_refused_by_name() {
             );
         }
     }
+}
+
+/// Two requests at two rates, in either order, each served at its own.
+///
+/// Every `power` collector takes the default `tick() == None`, so this family
+/// met the runner's fallback head on: where no collector declared a pace, the
+/// run took `resolved[0].request.mode` -- the *first* request's interval -- and
+/// applied it to everything. `poll@100ms` written second was served at 500 ms;
+/// `poll@500ms` written second was served at 100 ms; and the resolved record
+/// written beside the results still said what had been asked for. That is
+/// defect 4 of `docs/scenarios/power.md`, and the reproduction is the pair of
+/// files below.
+///
+/// The harmful direction was the slow-first one, because the window also
+/// overran its own duration by 70 %: the deadline is only checked once a full
+/// tick has elapsed, and the tick was five times the one that was asked for.
+#[test]
+fn two_requests_at_two_rates_are_each_served_at_their_own() {
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("power-two-rates");
+    std::fs::create_dir_all(&scratch).expect("a directory to write sessions into");
+
+    const SLOW: &str = "\x20 - label: slow\n\
+                        \x20   source: power.temp\n\
+                        \x20   target: system\n\
+                        \x20   mode: poll@500ms\n\
+                        \x20   emit: [summary]\n";
+    const FAST: &str = "\x20 - label: fast\n\
+                        \x20   source: power.temp\n\
+                        \x20   target: system\n\
+                        \x20   mode: poll@100ms\n\
+                        \x20   emit: [summary]\n";
+
+    let readings = |name: &str, requests: String| {
+        let path = scratch.join(name);
+        std::fs::write(
+            &path,
+            format!("format: json\nduration: 1s\nrequests:\n{requests}"),
+        )
+        .expect("the test owns this file");
+        let output = run(&["-f", &path.to_string_lossy(), "--format", "json"]);
+        assert!(output.status.success(), "{name}: {}", stderr(&output));
+        let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json out");
+        let of = |label: &str| {
+            document["results"]
+                .as_array()
+                .expect("results")
+                .iter()
+                .find(|result| result["label"] == label)
+                .unwrap_or_else(|| panic!("nothing labelled `{label}` in {name}"))["events_seen"]
+                .as_u64()
+                .expect("an event count")
+        };
+        (of("slow"), of("fast"))
+    };
+
+    for (name, requests) in [
+        ("slow-first.yml", format!("{SLOW}{FAST}")),
+        ("fast-first.yml", format!("{FAST}{SLOW}")),
+    ] {
+        let (slow, fast) = readings(name, requests);
+        // Over a second: about two readings at 500 ms and about ten at 100 ms.
+        // What is asserted is the separation, because a machine running eight
+        // suites at once reads late and the run says so when it does.
+        assert!(
+            fast > slow,
+            "{name}: `poll@100ms` took {fast} readings and `poll@500ms` took {slow}, so one \
+             request is still being served at the other's rate"
+        );
+        assert!(
+            slow <= 4,
+            "{name}: `poll@500ms` over a second is two or three readings, and this took {slow}"
+        );
+        assert!(
+            fast >= 5,
+            "{name}: `poll@100ms` over a second is about ten readings, and this took {fast}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// A `snapshot` beside a poll is a single read, and invents no losses.
+///
+/// Two things met here and the second is this family's alone. The run was a
+/// snapshot only when *every* request was one, so a snapshot written beside a
+/// poll was read on every tick; and `power.temp` is the only collector in
+/// `src/collect/` whose `tick()` returns `Some(ZERO)` in snapshot mode, so the
+/// window's interval -- the minimum over the collectors -- collapsed to zero
+/// and every round was then counted as late against a "0ns tick". A request
+/// that asked for one read got a hundred and fifty-nine, and the run reported
+/// 158 losses that had not happened, which is the one thing this project
+/// promises never to do in the other direction. Defect 3 of
+/// `docs/scenarios/power.md`.
+#[test]
+fn a_snapshot_beside_a_poll_is_one_read_and_invents_no_losses() {
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("power-mixed-modes");
+    std::fs::create_dir_all(&scratch).expect("a directory to write a session into");
+    let path = scratch.join("mixed.yml");
+    std::fs::write(
+        &path,
+        "format: json\n\
+         duration: 600ms\n\
+         requests:\n\
+         \x20 - label: a\n\
+         \x20   source: power.temp\n\
+         \x20   target: system\n\
+         \x20   mode: poll@200ms\n\
+         \x20   emit: [summary]\n\
+         \x20 - label: b\n\
+         \x20   source: power.temp\n\
+         \x20   target: system\n\
+         \x20   mode: snapshot\n\
+         \x20   emit: [summary]\n",
+    )
+    .expect("the test owns this file");
+
+    let output = run(&["-f", &path.to_string_lossy(), "--format", "json"]);
+    if !output.status.success() {
+        let message = stderr(&output);
+        assert!(
+            message.contains("no viable backend"),
+            "the mixed session failed for a reason other than a missing sensor: {message}"
+        );
+        eprintln!("skipped: this machine exposes no temperature sensor");
+        return;
+    }
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json out");
+    let of = |label: &str| {
+        document["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .find(|result| result["label"] == label)
+            .unwrap_or_else(|| panic!("nothing labelled `{label}`"))
+    };
+
+    assert_eq!(
+        of("b")["events_seen"].as_u64(),
+        Some(1),
+        "the snapshot asked for one read: {document}"
+    );
+    assert!(
+        of("a")["events_seen"].as_u64().unwrap_or(0) >= 2,
+        "and the polled request keeps its own 200 ms over 600 ms: {document}"
+    );
+    for label in ["a", "b"] {
+        assert_eq!(
+            of(label)["losses"]["late_ticks"].as_u64(),
+            Some(0),
+            "`{label}` reported ticks that ran late against a cadence nothing asked for: \
+             {document}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 /// A result survives every output format that claims it, and is refused by
@@ -1220,9 +1380,33 @@ fn a_tick_shorter_than_a_round_of_reads_is_counted_and_surfaced() {
         out.contains("LOSS:") && out.contains("late tick"),
         "a run that could not keep its own pace has to say so where it is read: {out}"
     );
+    // One line for all of them, naming the tick and carrying the count. The
+    // duration used to be in the reason itself, so a run that was late two
+    // hundred times printed two hundred lines and aggregated none of them.
     assert!(
-        out.contains("longer than the 1000000ns tick"),
+        out.contains("outran the 1.0ms tick"),
         "and has to name the tick it overran, not just that something was late: {out}"
+    );
+    assert_eq!(
+        out.matches("outran the 1.0ms tick").count(),
+        1,
+        "the late ticks have to share one line rather than get one each: {out}"
+    );
+    // The count is that run's own -- the structured figures above come from a
+    // second run of the same session, and two runs of a hurried poll are not
+    // late the same number of times -- so what is asserted is that the one line
+    // carries a count, and that the count is the many rather than one.
+    let counted: u64 = out
+        .lines()
+        .find_map(|line| {
+            let (count, _) = line.trim().split_once("x a round of reads outran")?;
+            count.parse().ok()
+        })
+        .unwrap_or_else(|| panic!("the reason line has to carry the count it explains: {out}"));
+    assert!(
+        counted > 1,
+        "a run late {late} times printed a reason counted {counted} time(s), which is the \
+         transcript this reason was collapsed to stop being: {out}"
     );
     // Every round was late, not a sample of them: the tick was chosen shorter
     // than a round, so there is no round that could have been on time.

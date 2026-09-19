@@ -43,6 +43,8 @@ use serde_json::Value;
 const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
+/// The request is valid and this machine cannot serve it.
+const EXIT_UNAVAILABLE: i32 = 1;
 /// A request was refused because it cannot mean what it asks for.
 const EXIT_REJECTED: i32 = 2;
 /// The request is valid, but nothing in this build collects it.
@@ -1392,10 +1394,11 @@ fn a_source_this_machine_cannot_serve_names_the_tracepoints_that_are_absent() {
     );
     assert_eq!(
         code(&output),
-        EXIT_REJECTED,
-        "this is the defect recorded in docs/scenarios/gpu.md: a machine that cannot \
-         serve a valid request exits 2, the same as a request that cannot mean anything. \
-         If this now exits 1, the defect is fixed and the entry should come out."
+        EXIT_UNAVAILABLE,
+        "a machine that cannot serve a valid request has its own exit code: it used to \
+         share 2 with a request that cannot mean anything, which is defect 4 of \
+         docs/scenarios/gpu.md, and a script that wants to skip what the machine cannot \
+         do and stop on what the user got wrong could not tell them apart"
     );
 }
 
@@ -1504,12 +1507,15 @@ fn this_family_holds_the_catalogs_only_rate_over_a_ratio() {
     );
 }
 
-/// Defect 5. The loss reason embeds the nanoseconds the tick took, so every
-/// late tick is its own reason and every count is one. `Losses::reasons` is
-/// documented as the reasons with how often each occurred; here it is a
-/// transcript.
+/// The loss report carries one reason for the late ticks, not one per tick.
+///
+/// `Losses::reasons` is documented as the reasons with how often each occurred.
+/// The late-tick reason used to embed the nanoseconds that tick took, so every
+/// occurrence was its own reason with a count of one and the table was a
+/// transcript -- 1024 distinct reasons and 80 KB of JSON for a 300 ms run, which
+/// is defect 5 of `docs/scenarios/gpu.md`. Same session, other answer.
 #[test]
-fn the_loss_report_carries_one_reason_for_every_late_tick() {
+fn the_loss_report_carries_one_reason_for_all_the_late_ticks() {
     if let Err(reason) = device() {
         return eprintln!("skipped: {reason}");
     }
@@ -1523,11 +1529,23 @@ fn the_loss_report_carries_one_reason_for_every_late_tick() {
         .as_object()
         .expect("the reasons ride with the counts");
     assert!(late > 20, "this scenario needs a run that was late a lot");
-    assert!(
-        reasons.len() * 2 > late as usize,
-        "the reason table has {} entries for {late} late ticks: if it is now a handful, \
-         the defect is fixed and the entry in docs/scenarios/gpu.md should come out",
+    assert_eq!(
+        reasons.len(),
+        1,
+        "{late} late ticks have to be one reason, not {}: {losses}",
         reasons.len()
+    );
+    assert_eq!(
+        reasons.values().next().and_then(Value::as_u64),
+        Some(late),
+        "and the reason has to carry the count it explains: {losses}"
+    );
+    // The nanoseconds are not gone, they are beside the count: a magnitude
+    // that aggregates rather than a key that cannot.
+    let overrun = &losses["overrun"];
+    assert!(
+        overrun["worst_ns"].as_u64().unwrap() > overrun["tick_ns"].as_u64().unwrap(),
+        "the worst overrun is what says how far off the cadence the series is: {losses}"
     );
 }
 

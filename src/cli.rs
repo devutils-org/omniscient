@@ -10,6 +10,14 @@
 //! says so. Where the catalog offers several, the flag is required. Guessing
 //! between two legitimate answers is how a tool ends up reporting one number
 //! while the user reads it as another.
+//!
+//! The same rule decides what may be written beside `-f`. A session file can
+//! hold many requests, so a flag that describes *one* request -- a target, a
+//! mode, an emit, a filter, a key, a stack mode, a backend, a label -- cannot
+//! mean anything next to a file, and is refused by name rather than accepted
+//! and dropped. What is left is exactly what a `Session` carries for the whole
+//! of itself: the duration, the budget, the output format and the output
+//! directory. Those are overrides, and the run says so.
 
 use std::path::PathBuf;
 
@@ -72,51 +80,85 @@ pub struct TraceArgs {
     pub input_format: Option<InputFormat>,
 
     /// Existing process or processes.
-    #[arg(long, value_name = "PID", value_delimiter = ',', group = "target")]
+    #[arg(
+        long,
+        value_name = "PID",
+        value_delimiter = ',',
+        group = "target",
+        conflicts_with = "file"
+    )]
     pub pid: Vec<i32>,
 
     /// Existing thread or threads.
-    #[arg(long, value_name = "TID", value_delimiter = ',', group = "target")]
+    #[arg(
+        long,
+        value_name = "TID",
+        value_delimiter = ',',
+        group = "target",
+        conflicts_with = "file"
+    )]
     pub tid: Vec<i32>,
 
     /// A cgroup v2 path.
-    #[arg(long, value_name = "PATH", group = "target")]
+    #[arg(long, value_name = "PATH", group = "target", conflicts_with = "file")]
     pub cgroup: Option<PathBuf>,
 
     /// Cores, written as the kernel writes them: 0-3,8.
-    #[arg(long, value_name = "SET", group = "target")]
+    #[arg(long, value_name = "SET", group = "target", conflicts_with = "file")]
     pub cpu: Option<CpuSet>,
 
     /// A network interface.
-    #[arg(long, value_name = "NAME", group = "target")]
+    #[arg(long, value_name = "NAME", group = "target", conflicts_with = "file")]
     pub iface: Option<String>,
 
     /// A container, resolved to a cgroup plus a pid namespace.
-    #[arg(long, value_name = "NAME", group = "target")]
+    #[arg(long, value_name = "NAME", group = "target", conflicts_with = "file")]
     pub container: Option<String>,
 
     /// The whole machine.
-    #[arg(long, group = "target")]
+    #[arg(long, group = "target", conflicts_with = "file")]
     pub system: bool,
 
     /// Program to launch and follow, after `--`.
-    #[arg(last = true, value_name = "PROGRAM", group = "target")]
+    #[arg(
+        last = true,
+        value_name = "PROGRAM",
+        group = "target",
+        conflicts_with = "file"
+    )]
     pub program: Vec<String>,
 
     /// How to observe: count, sample@997hz, trace, poll@100ms, snapshot.
-    #[arg(short = 'm', long, value_name = "MODE")]
+    #[arg(short = 'm', long, value_name = "MODE", conflicts_with = "file")]
     pub mode: Option<Mode>,
 
     /// What comes out: raw, hist[:log2|:linear:WIDTH], rate, topk[:N], stack, timeline, summary.
-    #[arg(short = 'e', long, value_name = "EMIT", value_delimiter = ',')]
+    #[arg(
+        short = 'e',
+        long,
+        value_name = "EMIT",
+        value_delimiter = ',',
+        conflicts_with = "file"
+    )]
     pub emit: Vec<Emit>,
 
     /// Correlation keys to attach.
-    #[arg(short = 'k', long, value_name = "KEY", value_delimiter = ',')]
+    #[arg(
+        short = 'k',
+        long,
+        value_name = "KEY",
+        value_delimiter = ',',
+        conflicts_with = "file"
+    )]
     pub keys: Vec<KeyKind>,
 
     /// Predicate, pushed into the kernel when the backend allows it.
-    #[arg(long, value_name = "EXPR", allow_hyphen_values = true)]
+    #[arg(
+        long,
+        value_name = "EXPR",
+        allow_hyphen_values = true,
+        conflicts_with = "file"
+    )]
     pub filter: Option<FilterExpr>,
 
     /// How long to observe.
@@ -130,11 +172,11 @@ pub struct TraceArgs {
     pub budget: Option<Budget>,
 
     /// Stack unwinding mode.
-    #[arg(long, value_name = "MODE")]
+    #[arg(long, value_name = "MODE", conflicts_with = "file")]
     pub stack: Option<StackMode>,
 
     /// Pin a backend instead of resolving one. For the comparison bench only.
-    #[arg(long, value_name = "force:ID")]
+    #[arg(long, value_name = "force:ID", conflicts_with = "file")]
     pub backend: Option<BackendOverride>,
 
     /// Where results and the resolved file are written.
@@ -160,7 +202,7 @@ pub struct TraceArgs {
     pub no_resolve: bool,
 
     /// Name this request in the output.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", conflicts_with = "file")]
     pub label: Option<String>,
 
     /// Load the catalog from this directory instead of the built-in one.
@@ -219,6 +261,13 @@ pub struct ValidateArgs {
 pub struct Defaulted(Vec<String>);
 
 impl Defaulted {
+    /// Records something the command line decided that the request itself does
+    /// not show: a default the catalog left no choice about, or a session-wide
+    /// value a flag replaced.
+    pub fn record(&mut self, note: impl Into<String>) {
+        self.0.push(note.into());
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
     }
@@ -248,7 +297,7 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
             let supported = entry.supported_targets();
             match supported.as_slice() {
                 [only] => {
-                    defaulted.0.push(format!(
+                    defaulted.record(format!(
                         "target defaulted to `{only}`, the only one `{source}` accepts"
                     ));
                     match only {
@@ -279,7 +328,7 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
             match entry.modes.as_slice() {
                 [only] => {
                     let mode = fill_mode(*only);
-                    defaulted.0.push(format!(
+                    defaulted.record(format!(
                         "mode defaulted to `{mode}`, the only one `{source}` supports"
                     ));
                     mode
@@ -309,7 +358,7 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         match usable.as_slice() {
             [only] => {
                 let emit = fill_emit(*only);
-                defaulted.0.push(format!(
+                defaulted.record(format!(
                     "emit defaulted to `{emit}`, the only one `{source}` produces in `{}` mode",
                     mode.kind()
                 ));

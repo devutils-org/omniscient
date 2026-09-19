@@ -843,6 +843,67 @@ fn a_capture_under_more_load_than_its_ring_accounts_for_every_frame() {
     );
 }
 
+/// A `snapshot` written beside a polled request is still a single read.
+///
+/// The snapshot used to be a property of the *session*: the runner set it only
+/// when every request was one, so a snapshot written next to a poll was read on
+/// every tick of the shared window and became a series. The output was not a
+/// lie -- `stopped_because` said what happened -- but the request's own mode
+/// had been reinterpreted without a word, which is defect 4 of
+/// `docs/scenarios/net.md`. Twenty-four entries across seven families declare
+/// both modes, so every one of them was a session away from the same silence.
+#[test]
+fn a_snapshot_beside_a_poll_is_still_a_single_read() {
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("net-mixed-modes");
+    std::fs::create_dir_all(&scratch).expect("a directory to write a session into");
+    let path = scratch.join("a-snapshot-beside-a-poll.yml");
+    std::fs::write(
+        &path,
+        "format: json\n\
+         duration: 500ms\n\
+         requests:\n\
+         \x20 - label: polled\n\
+         \x20   source: net.iface\n\
+         \x20   target: {iface: lo}\n\
+         \x20   mode: poll@50ms\n\
+         \x20   emit: [raw]\n\
+         \x20 - label: snapshotted\n\
+         \x20   source: net.iface\n\
+         \x20   target: {iface: lo}\n\
+         \x20   mode: snapshot\n\
+         \x20   emit: [raw]\n",
+    )
+    .expect("the test owns this file");
+
+    let outcome = omn(&["-f", &path.to_string_lossy(), "--format", "json"]);
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let document = results(&outcome);
+    let seen = |label: &str| {
+        document["results"]
+            .as_array()
+            .expect("a run carries results")
+            .iter()
+            .find(|result| result["label"] == label)
+            .unwrap_or_else(|| panic!("nothing in this session is labelled `{label}`"))
+            ["events_seen"]
+            .as_u64()
+            .expect("an event count")
+    };
+
+    assert_eq!(
+        seen("snapshotted"),
+        1,
+        "`snapshot` means one read, and the request beside it does not change that: \
+         {document}"
+    );
+    assert!(
+        seen("polled") >= 5,
+        "and the polled request keeps its own 50 ms over a 500 ms window: {document}"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// A poll that cannot keep its own cadence has to say so.
 ///
 /// A series is a claim about spacing as much as about values. Ten microseconds
@@ -868,21 +929,37 @@ fn a_poll_faster_than_its_own_read_counts_every_late_tick() {
          are a series claiming a spacing it did not have"
     );
 
-    // Every reason states the measurement behind it, and it has to exceed the
-    // tick it is being compared against, or the count means something else.
+    // One reason, naming the cadence that was missed, carrying the count it
+    // explains. It used to be one reason per late tick, because the duration
+    // was in the key: five hundred lines for a fifty-millisecond run, growing
+    // with the loss, which is defect 2 of docs/scenarios/net.md.
     let reasons = result["losses"]["reasons"]
         .as_object()
         .expect("the reasons behind the count");
-    assert!(
-        !reasons.is_empty(),
-        "late ticks were counted and not explained"
+    assert_eq!(
+        reasons.len(),
+        1,
+        "{late} late ticks were explained in {} reasons: {reasons:?}",
+        reasons.len()
     );
-    for reason in reasons.keys() {
-        assert!(
-            reason.contains("longer than the 10000ns tick"),
-            "a late tick blamed on something other than the cadence: {reason}"
-        );
-    }
+    let (reason, count) = reasons.iter().next().expect("just counted one");
+    assert!(
+        reason.contains("outran the 10.0us tick"),
+        "a late tick blamed on something other than the cadence: {reason}"
+    );
+    assert_eq!(
+        count.as_u64(),
+        Some(late),
+        "the reason has to carry the count it explains: {reasons:?}"
+    );
+    // And the measurement it used to be keyed by is beside it, where a reader
+    // can ask how late the ticks were rather than reading them one by one.
+    let overrun = &result["losses"]["overrun"];
+    assert_eq!(overrun["tick_ns"].as_u64(), Some(10_000));
+    assert!(
+        overrun["worst_ns"].as_u64().unwrap_or_default() > 10_000,
+        "a tick counted as late has to have overrun the tick: {overrun}"
+    );
 
     // Nothing else is claimed. A tick that ran late lost no event -- the read
     // happened, it was simply not on time -- and saying otherwise would send a
@@ -1149,16 +1226,15 @@ fn a_machine_that_cannot_serve_a_net_request_names_what_it_is_missing() {
         complaint.contains("privilege to grant") && complaint.contains("the request is valid"),
         "the refusal should separate a machine's limit from a bad request: {complaint}"
     );
-    // Recorded in docs/scenarios/net.md: this is exit 2, the same code as a
-    // request that cannot mean anything, although the message beside it says
-    // the request is valid. `man omn.1` documents the two as one code; the
-    // wave's brief asks for them to be told apart. Pinned here so that
-    // separating them is noticed rather than silently breaking a caller.
+    // The code says what the sentence beside it says. It used to be 2 -- the
+    // code for a request that cannot mean anything -- which is defect 8 of
+    // docs/scenarios/net.md, and the distinction is the one that matters to a
+    // caller that never reads the message: raising a privilege fixes this one
+    // and nothing fixes the other.
     assert_eq!(
         code(&outcome),
-        2,
-        "the exit code for `this machine cannot serve it` changed; if that was on purpose, \
-         update this assertion and the \"Defects found\" section of docs/scenarios/net.md"
+        1,
+        "a valid request this machine cannot serve has its own exit code: {complaint}"
     );
 
     let outcome = omn(&[
@@ -1749,10 +1825,13 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         complaint.contains("so_timestamping") && complaint.contains("not built"),
         "the refusal should name the backend a per-packet answer needs: {complaint}"
     );
+    // `DECISIONS.md` settled that "valid, and not built is exit 3, wherever it
+    // is discovered". A mode is the same answer and used to exit 1, which is
+    // defect 7 of docs/scenarios/net.md; the refusal is raised by the factory,
+    // before an interface has been touched, so it can only be about this build.
     assert_eq!(
         code(&outcome),
-        1,
-        "the exit code for a mode this build does not implement changed; if it is now 3, drop \
-         the entry from the \"Defects found\" section of docs/scenarios/net.md"
+        3,
+        "a mode that resolves and is then refused as not built is exit 3: {complaint}"
     );
 }

@@ -649,6 +649,17 @@ Pinned by `asking_the_shim_for_a_running_process_is_refused_by_the_build`.
 
 ### D5 — sixteen combinations blame the machine for a collector that was not written
 
+> **Fixed in part** (stream A): thirteen of the sixteen. The three cache sources'
+> `sample` combinations and the two heap sources' `snapshot` ones are refused by
+> the factory, which is reached with nothing launched and nothing opened, so they
+> exit 3. The three `mem.faults count` ones are not: `mem.faults` refuses from
+> `Collector::start`, against a target that already exists, where a refusal is
+> genuinely ambiguous between a mode nobody wrote and a counter that would not
+> open. The one-line change that settles it is in `docs/open-findings.md` under
+> "Needs from another stream". The four
+> `every_mode_and_emit_of_the_*_sources_is_served_or_refused_by_the_right_code`
+> sweeps carry what is left.
+
 **Class A and D together.** The sweep asks for every mode against every emit,
 for every `mem` source that collects, and sixteen come back with exit 1.
 
@@ -716,6 +727,15 @@ asserts the direction of the difference and says in its message that an equality
 means one of them was corrected.
 
 ### D7 — a sampling request answered with a single poll, reported as a success
+
+> **Fixed in part** (stream A). The run says which part of the request it could
+> not honour: a request in `sample` or `trace` mode whose collector declares no
+> cadence of its own is being read at a poll interval nobody asked for, and that
+> is now a degradation travelling with the results. The resolver still selects a
+> poll-only backend for a sampling request, which is the half this document calls
+> a shared-layer question and is written up in `docs/open-findings.md`. Asserted
+> by `a_sampling_request_that_no_backend_can_sample_is_not_answered_with_a_poll`,
+> which accepts either answer.
 
 **Class A.** `omn mem.numa -m sample@997hz -e topk -- <a program that touches 32 MiB and sleeps half a second>`
 

@@ -819,6 +819,50 @@ fn a_request_that_cannot_mean_anything_is_refused_by_name() {
     }
 }
 
+/// A request missing an axis nothing can fill in is exit 2, like every other
+/// request that cannot mean anything.
+///
+/// Two requests, both missing one required axis, both unanswerable for the same
+/// reason -- and they used to answer with two different codes. The missing emit
+/// is raised by the validator and reached `EXIT_REJECTED`; the missing mode is
+/// a `ParseError` from `cli.rs` and fell through `main`'s generic failure code,
+/// so a script branching on it sent its reader to look at the machine. That is
+/// defect 6 of `docs/scenarios/sched.md`, and it applied to every source with
+/// two modes -- `sched.irq` and `sched.numa_balance` answered the same way.
+#[test]
+fn an_under_specified_request_is_rejected_rather_than_failed() {
+    let under_specified: [(&[&str], &str); 3] = [
+        (
+            &["sched.switches", "--emit", "summary", "--", "/bin/true"],
+            "needs --mode",
+        ),
+        (
+            &["sched.switches", "--mode", "trace", "--", "/bin/true"],
+            "without an emit",
+        ),
+        (
+            &["sched.irq", "--emit", "summary", "--system", "-d", "50ms"],
+            "needs --mode",
+        ),
+    ];
+    for (args, expected) in under_specified {
+        let output = omn(args);
+        let text = spoken(&output);
+        assert_eq!(
+            exit_code(&output),
+            2,
+            "`{}` cannot mean anything as written, and that is exit 2 whichever layer \
+             notices it:\n{text}",
+            args.join(" ")
+        );
+        assert!(
+            text.contains(expected),
+            "`{}` was refused without saying `{expected}`:\n{text}",
+            args.join(" ")
+        );
+    }
+}
+
 /// A source this build describes and does not implement is exit 3, not exit 1.
 ///
 /// The difference matters to the reader more than to the script: exit 1 sends
@@ -886,6 +930,26 @@ fn pinning_a_backend_this_build_lacks_blames_the_build_and_not_the_machine() {
         text.contains("no collector is written for `sched.offcpu` on backend `bpf:tp:stacks`"),
         "the refusal must name the backend that was pinned:\n{text}"
     );
+
+    // Every one of them, not only the first. The validator has always answered
+    // for every rejection at once; this session's five pinned backends used to
+    // be reported one run at a time, so fixing the file took five runs -- same
+    // shape of file, same kind of answer, two behaviours. That is defect 8 of
+    // `docs/scenarios/sched.md`.
+    for (source, backend) in [
+        ("sched.offcpu", "bpf:tp:stacks"),
+        ("sched.offcpu", "bpf:tp"),
+        ("sched.switches", "bpf:raw_tp"),
+        ("sched.wakeup", "bpf:tp"),
+        ("sched.migrations", "bpf:tp"),
+    ] {
+        assert!(
+            text.contains(&format!(
+                "no collector is written for `{source}` on backend `{backend}`"
+            )),
+            "a session with five unserved requests has to name all five:\n{text}"
+        );
+    }
 
     // And the machine is not what is missing: the same backend's requirements
     // all probe available, which is what makes exit 1 the wrong answer.

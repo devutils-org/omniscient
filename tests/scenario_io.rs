@@ -41,13 +41,13 @@ const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 const EXIT_REJECTED: i32 = 2;
 /// The request is valid; this build does not implement the mechanism.
 const EXIT_NOT_IMPLEMENTED: i32 = 3;
-/// The request is valid and this machine cannot serve it. It returns the *same*
-/// code as a request that cannot mean anything, which is defect 3 of
-/// `docs/scenarios/io.md`: `src/main.rs` answers every resolver error with
-/// `EXIT_REJECTED`. Asserted as what it is rather than as what it should be, so
-/// that fixing the code does not have to fight this test -- the message, which
-/// is right, is what is checked below.
-const EXIT_NO_BACKEND: i32 = EXIT_REJECTED;
+/// The request is valid and this machine cannot serve it.
+///
+/// It used to return the same code as a request that cannot mean anything --
+/// `src/main.rs` answered every resolver error with `EXIT_REJECTED` -- which is
+/// defect 3 of `docs/scenarios/io.md`: a caller scripting around these three
+/// answers could not tell "fix your request" from "run this somewhere else".
+const EXIT_NO_BACKEND: i32 = 1;
 
 /// The quantity every ground-truth scenario here puts through a device. Large
 /// enough that the machine's own background I/O cannot account for it, small
@@ -1245,6 +1245,40 @@ fn a_poll_faster_than_the_file_can_be_read_counts_every_late_tick() {
         rendered.contains("late tick"),
         "the count has to reach the text output, which is what a reader sees:\n{rendered}"
     );
+
+    // And it reaches it as one line rather than as a transcript. The reason
+    // used to carry the measured duration, so every late tick was a reason of
+    // its own with a count of one: a 200 ms run printed some thirteen hundred
+    // lines, the count they explained was on line three, and the map grew
+    // without bound for the length of the run and into every structured
+    // output. That is defect 5 of `docs/scenarios/io.md`.
+    let reasons = losses["reasons"].as_object().expect("the reasons");
+    let about_the_tick: Vec<_> = reasons
+        .iter()
+        .filter(|(reason, _)| reason.contains("outran"))
+        .collect();
+    assert_eq!(
+        about_the_tick.len(),
+        1,
+        "{late} late ticks have to share one reason: {reasons:?}"
+    );
+    assert_eq!(
+        about_the_tick[0].1.as_u64(),
+        Some(late),
+        "and it has to carry the count it explains: {reasons:?}"
+    );
+    assert_eq!(
+        rendered.matches("outran the").count(),
+        1,
+        "one line in the text a reader sees, not one per tick:\n{rendered}"
+    );
+    // The durations are still there, beside the count instead of in the key.
+    let overrun = &losses["overrun"];
+    assert_eq!(overrun["tick_ns"].as_u64(), Some(10_000));
+    assert!(
+        overrun["worst_ns"].as_u64().unwrap_or_default() > 10_000,
+        "a tick counted as late has to have overrun it: {overrun}"
+    );
 }
 
 /// Counters written by this test, mounted over the real ones, are converted
@@ -1443,6 +1477,71 @@ fn a_real_leaf_device() -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A counting request written beside a polled one does not decide its rate.
+///
+/// `run_all` used to take one interval for the whole run: the smallest tick any
+/// collector declared, and where none did -- which is every collector in this
+/// family -- the mode of `resolved[0]`, whichever request happened to be
+/// written first. A `count` request has no cadence of its own, so its fallback
+/// was the default poll interval of one second, and a `poll@100ms` written
+/// after it was served at one second: two points instead of eleven, with no
+/// warning and no loss recorded. Written the other way round, the same file
+/// measured correctly. That is defect 6 of `docs/scenarios/io.md`.
+///
+/// The reproduction is the pair of files it was found with. What is asserted is
+/// that they now measure the same thing, because they describe the same
+/// measurement.
+#[test]
+fn request_order_does_not_decide_another_requests_rate() {
+    let scratch = scratch("io-request-order");
+    std::fs::create_dir_all(&scratch).expect("a directory to write sessions into");
+
+    const COUNTING: &str = "\x20 - label: counted\n\
+                            \x20   source: io.bytes\n\
+                            \x20   target: system\n\
+                            \x20   mode: count\n\
+                            \x20   emit: [summary]\n";
+    const POLLING: &str = "\x20 - label: polled\n\
+                           \x20   source: io.inflight\n\
+                           \x20   target: system\n\
+                           \x20   mode: poll@100ms\n\
+                           \x20   emit: [raw]\n";
+
+    // The same two requests, written in the two orders.
+    let readings = |name: &str, requests: String| {
+        let path = scratch.join(name);
+        write_now(
+            &path,
+            &format!("format: json\nduration: 1s\nrequests:\n{requests}"),
+        );
+        let output = run(&["-f", &path.to_string_lossy(), "--format", "json"]);
+        assert!(output.status.success(), "{name}: {}", stderr(&output));
+        result(&json(&output), "polled")["events_seen"]
+            .as_u64()
+            .expect("the run says how many events it saw")
+    };
+
+    let after = readings("counting-first.yml", format!("{COUNTING}{POLLING}"));
+    let before = readings("polling-first.yml", format!("{POLLING}{COUNTING}"));
+
+    // The polled request asks for 100 ms over a second in both files: about
+    // eleven readings, and never the two that a one-second fallback produced.
+    // The assertion is a floor rather than a count, because a loaded machine
+    // reads late and the tool says so when it does -- what cannot happen is
+    // one request being served at another request's cadence.
+    assert!(
+        after >= 5,
+        "`poll@100ms` over a second took {after} readings when written after a `count`, \
+         which is the counting request's one-second fallback rather than its own rate"
+    );
+    assert!(
+        before >= 5,
+        "`poll@100ms` over a second took {before} readings when written first"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 // ---------------------------------------------------------------------------
 // D. The refusal
 
@@ -1507,15 +1606,22 @@ fn each_refusal_names_the_thing_that_is_actually_missing() {
     }
 
     // A mode the catalog declares, resolved onto a backend that cannot serve
-    // it. The message is right and names the mechanism that would; the exit
-    // code is 1, which is the code for a run that failed -- see
-    // `docs/scenarios/io.md`, "Defects found". Only the part that is true is
-    // asserted, so that fixing the code does not have to fight this test.
+    // it. The message names the mechanism that would, and the code says the
+    // same thing: this build has not written it. It used to be 1, the code for
+    // a run that went wrong -- out of memory, a target that disappeared, a
+    // counter that would not open -- which is defect 1 of
+    // `docs/scenarios/io.md`, and it covered every `trace` request of the only
+    // source here that declares the mode.
     let at_attach = run(&[
         "io.bytes", "--system", "-m", "trace", "-e", "topk", "-d", "1s",
     ]);
-    assert_ne!(at_attach.status.code(), Some(0));
     let message = stderr(&at_attach);
+    assert_eq!(
+        at_attach.status.code(),
+        Some(EXIT_NOT_IMPLEMENTED),
+        "a valid request this machine can serve and this build has not written is exit \
+         {EXIT_NOT_IMPLEMENTED}:\n{message}"
+    );
     assert!(
         message.contains("needs the tracepoint backend"),
         "a mode `/proc/diskstats` cannot serve has to name the one that can:\n{message}"
@@ -1567,10 +1673,14 @@ fn a_machine_that_cannot_serve_pressure_says_which_file_it_wanted() {
         "nothing may be reported for a source no backend can serve:\n{}",
         stdout(&output)
     );
-    // The exit code here is 2, the code for a request that cannot mean
-    // anything, and this is a machine that cannot serve one that can --
-    // `docs/scenarios/io.md`, "Defects found". Asserting only that it failed
-    // keeps this scenario honest either way.
+    // And the code says what the message says. It used to be 2 -- the code for
+    // a request that cannot mean anything -- for a machine that cannot serve
+    // one that can, which is defect 3 of `docs/scenarios/io.md`.
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_NO_BACKEND),
+        "a kernel without PSI is a machine to change, not a request to rewrite:\n{message}"
+    );
 }
 
 // ---------------------------------------------------------------------------

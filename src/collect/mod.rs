@@ -42,6 +42,64 @@ use crate::resolve::{FilterPlacement, ResolvedRequest};
 
 pub use mem::heap::find_shim;
 
+/// Whose gap a refusal is, and therefore what the caller should do about it.
+///
+/// Three answers that lead to three different next steps -- rewrite the
+/// request, run it somewhere else, or wait for someone to write it -- and a
+/// caller scripting around them reads the exit code rather than the sentence.
+/// Every refusal this layer produces names one of these; nothing is left to be
+/// inferred from the wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Whose {
+    /// The request cannot mean what it asks for. Rewriting it is the only way
+    /// out, and it will fail the same way on every machine and every build.
+    Request,
+    /// The request is fine and this machine cannot serve it: a counter that
+    /// would not open, a file that is not there, a target that went away.
+    /// Another machine, or another privilege, may well serve it.
+    Machine,
+    /// The request is fine, this machine could serve it, and this build has not
+    /// written the part that would. Retrying, raising privileges and changing
+    /// the machine all change nothing.
+    Build,
+}
+
+/// How a collector marks whose gap its refusal is.
+///
+/// A factory's build function, [`Prepared::attach`] and [`Collector::start`]
+/// all answer with a `String`, which every collector in nine families returns
+/// from a few dozen places. Widening that to a typed error would be a change in
+/// fifty files to carry two bits, so the bits travel in front of the sentence
+/// instead: one control character no message would ever contain, put there by
+/// [`not_built`] or [`cannot_mean_anything`] and taken off again by
+/// [`CollectError::start`] before the reason is shown to anyone.
+///
+/// A refusal that carries no mark is classified by *where* it was raised, which
+/// is what [`CollectError::start`] documents.
+const MARK_BUILD: char = '\u{1}';
+const MARK_REQUEST: char = '\u{2}';
+
+/// Marks a refusal as a gap in this build rather than a failure of this run.
+///
+/// For the collector that refuses a mode, an emit or a target shape it has not
+/// implemented, from somewhere the default classification cannot see -- that
+/// is, from `attach` or `start` rather than from the factory. The reason
+/// reaches the user unchanged; the exit code becomes 3 rather than 1.
+pub fn not_built(reason: impl std::fmt::Display) -> String {
+    format!("{MARK_BUILD}{reason}")
+}
+
+/// Marks a refusal as a request that cannot mean anything, wherever it is
+/// raised.
+///
+/// A queue depth counted over a window and a since-boot counter read once are
+/// not gaps anybody can fill: no build and no machine makes them mean
+/// something. The exit code becomes 2, the validator's.
+pub fn cannot_mean_anything(reason: impl std::fmt::Display) -> String {
+    format!("{MARK_REQUEST}{reason}")
+}
+
 /// Why a collection could not start, or could not continue.
 #[derive(Debug, thiserror::Error)]
 pub enum CollectError {
@@ -56,7 +114,14 @@ pub enum CollectError {
     #[error("cannot launch {program}: {error}")]
     Launch { program: String, error: String },
     #[error("cannot start collecting `{source_id}`: {reason}")]
-    Start { source_id: String, reason: String },
+    Start {
+        source_id: String,
+        reason: String,
+        /// Whose gap this is. Not in the message: the sentence already says it
+        /// in words, and this is the same statement in the shape a script
+        /// reads.
+        whose: Whose,
+    },
     #[error(
         "one run observes one target, but this session asks for `{first}` and `{second}`; \
          use one session per target"
@@ -71,6 +136,79 @@ pub enum CollectError {
         first: String,
         second: String,
     },
+    /// Several requests of one session could not be served, each for its own
+    /// reason.
+    ///
+    /// Reported together, because a reader fixing a session should learn about
+    /// all of its problems in one run: the validator already answers for every
+    /// rejection at once, and stopping at the first missing collector made the
+    /// same file take five runs to fix.
+    #[error("{}", .refusals.iter().map(CollectError::to_string).collect::<Vec<_>>().join("\n"))]
+    Several { refusals: Vec<CollectError> },
+}
+
+impl CollectError {
+    /// Builds a `Start` refusal, reading the collector's mark when it left one
+    /// and falling back to where the refusal was raised when it did not.
+    ///
+    /// The fallback is the whole of the classification for most collectors, and
+    /// it is not a guess. A factory's build function is a pure function of the
+    /// resolved request: nothing has been launched, no counter has been opened
+    /// and no file has been read, so a refusal it produces cannot be about this
+    /// machine or this run -- it is this build's answer to the request as
+    /// written, which is exit 3. A refusal from `attach` or `start` happens
+    /// against a real target and is a failure of this run until the collector
+    /// says otherwise with [`not_built`].
+    fn start(source_id: impl Into<String>, reason: impl Into<String>, unmarked: Whose) -> Self {
+        let reason = reason.into();
+        let (whose, reason) = match reason.chars().next() {
+            Some(MARK_BUILD) => (Whose::Build, reason[MARK_BUILD.len_utf8()..].to_owned()),
+            Some(MARK_REQUEST) => (Whose::Request, reason[MARK_REQUEST.len_utf8()..].to_owned()),
+            _ => (unmarked, reason),
+        };
+        CollectError::Start {
+            source_id: source_id.into(),
+            reason,
+            whose,
+        }
+    }
+
+    /// Whose gap this refusal is, which is what the exit code is derived from.
+    ///
+    /// The order for a session that failed several ways at once is the order of
+    /// the work the reader has to do: a request that cannot mean anything has
+    /// to be rewritten before a build that lacks a collector is worth chasing,
+    /// and both come before moving to another machine.
+    pub fn whose(&self) -> Whose {
+        match self {
+            CollectError::NoCollector { .. } | CollectError::UnsupportedTarget { .. } => {
+                Whose::Build
+            }
+            CollectError::Start { whose, .. } => *whose,
+            CollectError::NoStopCondition
+            | CollectError::MixedTargets { .. }
+            | CollectError::ConflictingEnvironment { .. } => Whose::Request,
+            CollectError::Launch { .. } => Whose::Machine,
+            CollectError::Several { refusals } => refusals
+                .iter()
+                .map(CollectError::whose)
+                .min_by_key(|whose| match whose {
+                    Whose::Request => 0,
+                    Whose::Build => 1,
+                    Whose::Machine => 2,
+                })
+                .unwrap_or(Whose::Machine),
+        }
+    }
+
+    /// Every refusal behind this one, which is more than one only for
+    /// [`CollectError::Several`].
+    pub fn each(&self) -> Vec<&CollectError> {
+        match self {
+            CollectError::Several { refusals } => refusals.iter().collect(),
+            single => vec![single],
+        }
+    }
 }
 
 /// What a run produced, and what it lost.
@@ -171,6 +309,32 @@ pub struct Losses {
     /// The reasons behind the counts above, with how often each occurred.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reasons: BTreeMap<String, u64>,
+    /// By how much the late ticks were late, when any were.
+    ///
+    /// Separate from the reason because they are two different things. The
+    /// reason is a *kind* -- "a round of reads outran its tick" -- and the map
+    /// above counts kinds; the duration is a magnitude, and putting it in the
+    /// key made every occurrence its own kind with a count of one. A run that
+    /// was late two hundred times then printed two hundred lines, aggregated
+    /// none of them, and carried two hundred keys into every structured output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrun: Option<Overrun>,
+}
+
+/// How far a poll fell behind the cadence it was asked for.
+///
+/// Three numbers rather than one: the worst is what tells a reader whether the
+/// series is usable at all, the total is what says whether being late was the
+/// exception or the shape of the whole run, and the tick is what both are
+/// against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overrun {
+    /// The interval the reads were supposed to keep.
+    pub tick_ns: u64,
+    /// The longest single round of reads.
+    pub worst_ns: u64,
+    /// Every late round added up, so a mean can be taken against the count.
+    pub total_ns: u64,
 }
 
 impl Losses {
@@ -183,7 +347,51 @@ impl Losses {
     }
 
     pub fn note(&mut self, reason: impl Into<String>) {
-        *self.reasons.entry(reason.into()).or_insert(0) += 1;
+        self.note_times(reason, 1);
+    }
+
+    fn note_times(&mut self, reason: impl Into<String>, times: u64) {
+        *self.reasons.entry(reason.into()).or_insert(0) += times;
+    }
+
+    /// Records one round of reads that outran the interval it was given.
+    ///
+    /// The count and the magnitudes are kept apart here and joined again in
+    /// [`Losses::summarize`], once, when the run is over. Formatting the
+    /// duration into the reason at this point is what made a late run print one
+    /// line per late tick -- see [`Losses::overrun`].
+    pub fn late_tick(&mut self, spent_ns: u64, tick_ns: u64) {
+        self.late_ticks += 1;
+        let overrun = self.overrun.get_or_insert(Overrun {
+            tick_ns,
+            ..Overrun::default()
+        });
+        overrun.tick_ns = tick_ns;
+        overrun.worst_ns = overrun.worst_ns.max(spent_ns);
+        overrun.total_ns += spent_ns;
+    }
+
+    /// Turns the accumulated magnitudes into the one reason a reader sees.
+    ///
+    /// Called once, after everything has been absorbed, so that the reason is a
+    /// single key carrying the count it explains -- `77x a round of reads
+    /// outran the 1ms tick` -- with the worst and the average beside it rather
+    /// than in place of it.
+    pub fn summarize(&mut self) {
+        let Some(overrun) = self.overrun else {
+            return;
+        };
+        if self.late_ticks == 0 {
+            return;
+        }
+        let mean_ns = overrun.total_ns / self.late_ticks;
+        let reason = format!(
+            "a round of reads outran the {} tick: worst {}, {} on average",
+            span_ns(overrun.tick_ns),
+            span_ns(overrun.worst_ns),
+            span_ns(mean_ns),
+        );
+        self.note_times(reason, self.late_ticks);
     }
 
     /// Records one throttled period, with what the reader needs to know about
@@ -200,9 +408,34 @@ impl Losses {
         self.late_ticks += other.late_ticks;
         self.undecoded += other.undecoded;
         self.throttled += other.throttled;
+        self.overrun = match (self.overrun, other.overrun) {
+            (Some(mine), Some(theirs)) => Some(Overrun {
+                // The two halves of one collection are driven at one cadence,
+                // so the ticks agree; the larger is kept rather than averaged
+                // so that the reason never understates what it is against.
+                tick_ns: mine.tick_ns.max(theirs.tick_ns),
+                worst_ns: mine.worst_ns.max(theirs.worst_ns),
+                total_ns: mine.total_ns + theirs.total_ns,
+            }),
+            (mine, theirs) => mine.or(theirs),
+        };
         for (reason, count) in other.reasons {
             *self.reasons.entry(reason).or_insert(0) += count;
         }
+    }
+}
+
+/// Nanoseconds a reader can take in at a glance, for the loss reasons.
+///
+/// Deliberately not the raw count. "a round of reads took 104754353ns" is a
+/// number nobody reads as a tenth of a second, and the reason line exists to be
+/// read rather than parsed -- the structured output carries the nanoseconds.
+fn span_ns(ns: u64) -> String {
+    match ns {
+        ns if ns < 1_000 => format!("{ns}ns"),
+        ns if ns < 1_000_000 => format!("{:.1}us", ns as f64 / 1e3),
+        ns if ns < 1_000_000_000 => format!("{:.1}ms", ns as f64 / 1e6),
+        ns => format!("{:.2}s", ns as f64 / 1e9),
     }
 }
 
@@ -641,6 +874,30 @@ pub enum SampleError {
     Transient(String),
 }
 
+/// Collects every result, or every refusal.
+///
+/// `collect::<Result<_, _>>()` stops at the first error and throws away the
+/// questions it never asked, which is why a session used to report one missing
+/// collector at a time. One refusal is passed through as itself so that the
+/// common case reads unchanged.
+fn all_or_nothing<T>(
+    answers: impl Iterator<Item = Result<T, CollectError>>,
+) -> Result<Vec<T>, CollectError> {
+    let mut collected = Vec::new();
+    let mut refusals = Vec::new();
+    for answer in answers {
+        match answer {
+            Ok(one) => collected.push(one),
+            Err(refusal) => refusals.push(refusal),
+        }
+    }
+    match refusals.len() {
+        0 => Ok(collected),
+        1 => Err(refusals.remove(0)),
+        _ => Err(CollectError::Several { refusals }),
+    }
+}
+
 /// Runs one resolved request to completion.
 pub fn run(resolved: &ResolvedRequest) -> Result<Collection, CollectError> {
     let mut collections = run_all(std::slice::from_ref(resolved))?;
@@ -686,8 +943,12 @@ pub fn run_all_within(
     // Asked first, because "no collector exists for this backend" is a
     // different answer from "this target is not wired up yet", and reporting
     // the second when the first is true sends the reader to the wrong place.
-    let prepared: Vec<Box<dyn Prepared>> =
-        resolved.iter().map(prepare).collect::<Result<_, _>>()?;
+    //
+    // Every request is asked, not just requests up to the first refusal. A
+    // session with five unbuilt sources used to report one of them and stop,
+    // so fixing it took five runs; the validator has always answered for every
+    // rejection at once, and this is the same courtesy one layer down.
+    let prepared: Vec<Box<dyn Prepared>> = all_or_nothing(resolved.iter().map(prepare))?;
 
     let environment = merge_environments(&prepared)?;
 
@@ -755,17 +1016,18 @@ pub fn run_all_within(
     let mut collectors = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
         let source_id = resolved[index].request.source.to_string();
+        // These two happen against a real target -- a counter that would not
+        // open, a file that is not readable, a process that has gone -- so an
+        // unmarked refusal here is a failure of this run. A collector refusing
+        // a shape it has not implemented says so with `not_built`.
         let mut collector = prepared
             .attach(&bound)
-            .map_err(|reason| CollectError::Start {
-                source_id: source_id.clone(),
-                reason,
-            })?;
+            .map_err(|reason| CollectError::start(&source_id, reason, Whose::Machine))?;
         if let Err(reason) = collector.start() {
             if let Some(child) = child.as_mut() {
                 child.terminate();
             }
-            return Err(CollectError::Start { source_id, reason });
+            return Err(CollectError::start(source_id, reason, Whose::Machine));
         }
         collectors.push(collector);
     }
@@ -775,17 +1037,31 @@ pub fn run_all_within(
         child.release();
     }
 
-    // The fastest collector sets the pace: draining a ring every second loses
-    // events, and the cheap pollers do not mind being asked more often.
-    let interval = collectors
+    // Each request at its own pace, from its own mode and its own collector.
+    let paces: Vec<Pace> = collectors
         .iter()
-        .filter_map(|collector| collector.tick())
-        .min()
-        .unwrap_or_else(|| match resolved[0].request.mode {
-            Mode::Poll { interval } => StdDuration::from_nanos(interval.as_nanos()),
-            Mode::Snapshot => StdDuration::ZERO,
-            _ => StdDuration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
-        });
+        .zip(resolved)
+        .map(|(collector, resolved)| pace_of(collector.as_ref(), resolved.request.mode))
+        .collect();
+
+    // A request that asked to be sampled and is being served by a collector
+    // with no cadence of its own is being read at a poll interval nobody asked
+    // for. The number that comes back is a real measurement of something; it is
+    // simply not a thousand samples a second, and the two are told apart here
+    // rather than left to be guessed at from a plausible figure.
+    let mut degradations: Vec<Vec<String>> = vec![Vec::new(); collectors.len()];
+    for (index, pace) in paces.iter().enumerate() {
+        let mode = resolved[index].request.mode;
+        if matches!(mode, Mode::Sample { .. } | Mode::Trace) && collectors[index].tick().is_none() {
+            degradations[index].push(format!(
+                "`{}` was asked for in `{mode}` mode and `{}` has no sampling of its own: it was \
+                 read every {}, which is a poll and not the rate that was requested",
+                resolved[index].request.source,
+                resolved[index].backend.id,
+                span_ns(pace.interval.as_nanos() as u64),
+            ));
+        }
+    }
 
     let deadline_ns = duration_ns.map(|longest| monotonic_ns() + longest);
 
@@ -801,11 +1077,8 @@ pub fn run_all_within(
         cheaper,
     );
     let started_ns = spending.opened_ns;
-    let (mut events, mut losses, stopped_because) = drive(
-        &mut collectors,
-        Window { interval, snapshot },
-        &mut spending,
-        || {
+    let (mut events, mut losses, stopped_because) =
+        drive(&mut collectors, &paces, &mut spending, || {
             if let Some(child) = child.as_mut() {
                 if let Some(status) = child.finished() {
                     return Some(format!("the launched program exited with {status}"));
@@ -817,8 +1090,7 @@ pub fn run_all_within(
                 }
                 _ => None,
             }
-        },
-    );
+        });
 
     // Whatever the kernel or the shim published between the last tick and the
     // stop still belongs to this run.
@@ -850,13 +1122,19 @@ pub fn run_all_within(
             // The filter is the request's, and a degradation does not change
             // the request -- only how it was served.
             let filtered = apply_filter(&resolved[index], &mut collected);
-            let mut notes = std::mem::take(&mut spending.notes[index]);
+            let mut notes = std::mem::take(&mut degradations[index]);
+            notes.extend(std::mem::take(&mut spending.notes[index]));
             notes.extend(collector.notes());
+            // Everything is in: the runner's counts, what the collector knew it
+            // lost, and anything a budget added. The magnitudes become the one
+            // reason that carries them now, and not one reason each.
+            let mut losses = std::mem::take(&mut losses[index]);
+            losses.summarize();
             Collection {
                 observed_ns,
                 value_attr: collector.value_attr().to_owned(),
                 events: collected,
-                losses: std::mem::take(&mut losses[index]),
+                losses,
                 stopped_because: stopped_because.clone(),
                 notes,
                 stacks: collector.stacks(),
@@ -1193,30 +1471,74 @@ impl Spending<'static> {
     }
 }
 
-/// The pace of a run and what a single read means, as the runner sees them.
-struct Window {
+/// How one collector is driven: how often it is read, and whether one read is
+/// the whole of it.
+///
+/// One of these per request, not one per run. A session used to take a single
+/// interval -- the fastest collector's tick, or, where none declared one, the
+/// mode of whichever request happened to be written first -- and apply it to
+/// everything. So `poll@1s` beside `poll@10ms` was read every ten
+/// milliseconds, `poll@10ms` beside a `count` was read once a second, and a
+/// `snapshot` beside either became a series: request order decided another
+/// request's sampling rate, which is the one thing a declarative session must
+/// not do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pace {
     interval: StdDuration,
-    /// A single read, after which the run is over: there is no series and no
-    /// second round.
+    /// A single read, after which this collector is done: there is no series
+    /// and no second round. When every collector says so, the run itself is
+    /// over after one round.
     snapshot: bool,
+}
+
+/// How one request is driven, from the mode it asked for and what its collector
+/// needs.
+///
+/// A streaming collector's tick is not a preference: a ring drained less often
+/// than it fills loses events, and nothing a request says makes that
+/// acceptable, so it wins. A collector that declares none is read at the
+/// cadence the request named -- and a mode that names no cadence at all, which
+/// is `count`, `trace` and `sample` on a collector that does not stream, falls
+/// back to the default poll interval as it always did.
+fn pace_of(collector: &dyn Collector, mode: Mode) -> Pace {
+    if mode == Mode::Snapshot {
+        return Pace {
+            interval: StdDuration::ZERO,
+            snapshot: true,
+        };
+    }
+    let interval = collector.tick().unwrap_or(match mode {
+        Mode::Poll { interval } => StdDuration::from_nanos(interval.as_nanos()),
+        _ => StdDuration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
+    });
+    Pace {
+        interval,
+        snapshot: false,
+    }
 }
 
 /// Drives a set of collectors over one window, and closes it.
 ///
 /// The order inside a round is the whole of the edge convention: **read
-/// first, then decide**. A round reads every collector, and only then asks
-/// whether the run is over, so the last round of reads happens at the moment
-/// the run ends rather than one interval before it. That is what makes a
+/// first, then decide**. A round reads every collector that is due, and only
+/// then asks whether the run is over, so the last round of reads happens at the
+/// moment the run ends rather than one interval before it. That is what makes a
 /// polled counter's series complete without any collector reading again in
 /// `stop`, and `the_runner_closes_the_window` measures how little time is
 /// left over for such a read to cover.
+///
+/// *Due* is per collector, from its own [`Pace`]. A collector whose interval is
+/// longer than another's is simply not read on the rounds in between, which is
+/// what makes a session of several cadences mean what it says; the loop wakes
+/// at the earliest of them, so the run is no less responsive to its stop
+/// condition than when one interval governed everything.
 ///
 /// `ended` is consulted once per round and returns why the run should stop.
 /// It is a closure rather than a launched child and a deadline so that the
 /// convention can be tested against a stop condition a test controls.
 fn drive(
     collectors: &mut [Box<dyn Collector>],
-    window: Window,
+    paces: &[Pace],
     spending: &mut Spending<'_>,
     mut ended: impl FnMut() -> Option<String>,
 ) -> (Vec<Vec<Event>>, Vec<Losses>, String) {
@@ -1227,11 +1549,18 @@ fn drive(
     // between them, and only then are the two clock reads a round worth taking:
     // with one collector the share is the whole.
     let attributing = collectors.len() > 1;
+    // Everything is due at once on the first round: a series starts with a
+    // reading, and a counter's first read is the baseline the rest are against.
+    let mut due_ns = vec![monotonic_ns(); collectors.len()];
+    let mut done = vec![false; collectors.len()];
 
     let stopped_because = loop {
-        let tick_started_ns = monotonic_ns();
+        let round_started_ns = monotonic_ns();
         let mut gone = None;
         for (index, collector) in collectors.iter_mut().enumerate() {
+            if done[index] || round_started_ns < due_ns[index] {
+                continue;
+            }
             let entered_ns = if attributing { monotonic_ns() } else { 0 };
             match collector.sample(sequences[index]) {
                 Ok(mut sampled) => {
@@ -1247,12 +1576,35 @@ fn drive(
             if attributing {
                 spending.inside_ns[index] += monotonic_ns().saturating_sub(entered_ns);
             }
+
+            if paces[index].snapshot {
+                done[index] = true;
+                continue;
+            }
+            // When the next reading was due, and whether this one got in the
+            // way of it. A round that overran is counted as a late tick -- at
+            // that point the series no longer has the spacing it claims -- and
+            // the schedule is re-based on now, so that being late once does not
+            // leave every reading after it owing time it can never make up.
+            let interval_ns = paces[index].interval.as_nanos() as u64;
+            let finished_ns = monotonic_ns();
+            let took_ns = finished_ns.saturating_sub(due_ns[index]);
+            // An interval of zero is "as fast as this can be read", which is
+            // not a cadence and cannot be fallen behind. Counting every round
+            // of such a run as late is how a snapshot served as a poll came to
+            // report 158 losses that had not happened.
+            if interval_ns > 0 && took_ns > interval_ns {
+                losses[index].late_tick(took_ns, interval_ns);
+                due_ns[index] = finished_ns;
+            } else {
+                due_ns[index] += interval_ns;
+            }
         }
         if let Some(reason) = gone {
             break reason;
         }
 
-        if window.snapshot {
+        if done.iter().all(|done| *done) {
             break "snapshot: a single read".to_owned();
         }
 
@@ -1267,23 +1619,18 @@ fn drive(
             break reason;
         }
 
-        // Sleep for what is left of the interval, and count the tick as late
-        // when the reads themselves took longer than the interval: at that
-        // point the series no longer has the spacing it claims.
-        let spent_ns = monotonic_ns().saturating_sub(tick_started_ns);
-        match window
-            .interval
-            .checked_sub(StdDuration::from_nanos(spent_ns))
-        {
-            Some(remaining) => std::thread::sleep(remaining),
-            None => {
-                for losses in losses.iter_mut() {
-                    losses.late_ticks += 1;
-                    losses.note(format!(
-                        "a round of reads took {spent_ns}ns, longer than the {}ns tick",
-                        window.interval.as_nanos()
-                    ));
-                }
+        // Sleep until the next collector falls due. A collector already behind
+        // its own schedule puts that moment in the past, and the run goes
+        // straight round again.
+        let next_due_ns = due_ns
+            .iter()
+            .zip(&done)
+            .filter_map(|(due_ns, done)| (!done).then_some(*due_ns))
+            .min();
+        if let Some(next_due_ns) = next_due_ns {
+            let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
+            if remaining_ns > 0 {
+                std::thread::sleep(StdDuration::from_nanos(remaining_ns));
             }
         }
     };
@@ -1401,10 +1748,10 @@ fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError
             source_id: source_id.to_owned(),
             backend: backend.to_owned(),
         })?;
-    (factory.build)(resolved).map_err(|reason| CollectError::Start {
-        source_id: source_id.to_owned(),
-        reason,
-    })
+    // A factory refusal is this build's answer to the request as written: it is
+    // reached with nothing launched, nothing opened and nothing read, so it
+    // cannot be about this machine. `CollectError::start` has the argument.
+    (factory.build)(resolved).map_err(|reason| CollectError::start(source_id, reason, Whose::Build))
 }
 
 #[cfg(test)]
@@ -1690,6 +2037,218 @@ mod tests {
         }
     }
 
+    /// A collector that refuses before the target exists is refusing the
+    /// request, not the machine.
+    ///
+    /// The factory is a pure function of the resolved request: nothing has been
+    /// launched, no counter has been opened and no file has been read by the
+    /// time it answers, so a refusal it produces cannot be about this machine.
+    /// That is the whole of the default classification, and it is what moved
+    /// thirteen of `mem`'s sixteen combinations, `io.bytes --mode trace`,
+    /// `net.hwts --mode trace` and `power.freq --mode trace` off exit 1.
+    #[test]
+    fn a_refusal_raised_before_the_target_exists_is_this_builds_gap() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let request = crate::request::Request {
+            source: "io.bytes".parse().unwrap(),
+            target: Target::System,
+            mode: crate::request::Mode::Trace,
+            emit: vec![crate::request::Emit::TopK(4)],
+            keys: Vec::new(),
+            filter: None,
+            duration: Some("50ms".parse().unwrap()),
+            budget: None,
+            stack: None,
+            backend: Some("force:fs:proc".parse().unwrap()),
+            label: None,
+        };
+        let resolved =
+            crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves");
+        match prepare(&resolved) {
+            Err(error @ CollectError::Start { .. }) => assert_eq!(
+                error.whose(),
+                Whose::Build,
+                "`/proc/diskstats` cannot trace, and nothing about this machine is why: {error}"
+            ),
+            other => panic!(
+                "expected a refusal from the factory, got {:?}",
+                other.map(|_| "a prepared collector")
+            ),
+        }
+    }
+
+    /// A collector can override the classification either way, and the mark it
+    /// uses never reaches the reader.
+    ///
+    /// The bits travel in front of the sentence because `attach` and `start`
+    /// answer with a `String` in fifty files. What must never happen is the
+    /// control character showing up in a message, so the message is checked
+    /// rather than only the verdict.
+    #[test]
+    fn a_collector_can_say_whose_gap_a_refusal_is_without_showing_its_mark() {
+        let unmarked =
+            CollectError::start("io.bytes", "the counter would not open", Whose::Machine);
+        assert_eq!(unmarked.whose(), Whose::Machine);
+
+        let built = CollectError::start(
+            "io.bytes",
+            not_built("`trace` needs the tracepoint backend"),
+            Whose::Machine,
+        );
+        assert_eq!(
+            built.whose(),
+            Whose::Build,
+            "a collector that says the gap is this build's is believed over where it was raised"
+        );
+
+        let meaningless = CollectError::start(
+            "io.inflight",
+            cannot_mean_anything("a queue depth counts over no window"),
+            Whose::Build,
+        );
+        assert_eq!(meaningless.whose(), Whose::Request);
+
+        for refusal in [&built, &meaningless] {
+            let shown = refusal.to_string();
+            assert!(
+                !shown.contains(MARK_BUILD) && !shown.contains(MARK_REQUEST),
+                "the mark reached the reader: {shown:?}"
+            );
+            assert!(
+                shown.starts_with("cannot start collecting `"),
+                "and the sentence is unchanged: {shown}"
+            );
+        }
+        assert!(built.to_string().ends_with("needs the tracepoint backend"));
+    }
+
+    /// A session that fails several ways at once reports all of them, and
+    /// answers with the code for the work the reader has to do first.
+    #[test]
+    fn several_refusals_are_reported_together() {
+        let refusals = vec![
+            CollectError::NoCollector {
+                source_id: "sched.offcpu".to_owned(),
+                backend: "bpf:tp".to_owned(),
+            },
+            CollectError::NoCollector {
+                source_id: "sched.wakeup".to_owned(),
+                backend: "bpf:tp".to_owned(),
+            },
+        ];
+        let several = CollectError::Several { refusals };
+        let shown = several.to_string();
+        assert!(
+            shown.contains("sched.offcpu") && shown.contains("sched.wakeup"),
+            "both have to be named, or fixing the session takes one run each: {shown}"
+        );
+        assert_eq!(several.each().len(), 2);
+        assert_eq!(several.whose(), Whose::Build);
+
+        // A request that cannot mean anything has to be rewritten before a
+        // missing collector is worth chasing, so it decides the code.
+        let mixed = CollectError::Several {
+            refusals: vec![
+                CollectError::NoCollector {
+                    source_id: "sched.offcpu".to_owned(),
+                    backend: "bpf:tp".to_owned(),
+                },
+                CollectError::NoStopCondition,
+            ],
+        };
+        assert_eq!(mixed.whose(), Whose::Request);
+    }
+
+    /// A poll asked for faster than it can be served counts every round it
+    /// missed, and explains them once.
+    ///
+    /// The reason is a kind and the durations are magnitudes beside it. They
+    /// used to be the same thing: the reason carried the nanoseconds of the
+    /// round that overran, so no two were ever equal and a run that was late a
+    /// thousand times printed a thousand lines with a count of one each.
+    #[test]
+    fn late_ticks_are_one_reason_carrying_the_count_they_explain() {
+        let mut losses = Losses::default();
+        losses.late_tick(30_000_000, 10_000_000);
+        losses.late_tick(11_000_000, 10_000_000);
+        losses.late_tick(19_000_000, 10_000_000);
+        losses.summarize();
+
+        assert_eq!(losses.late_ticks, 3);
+        assert_eq!(
+            losses.reasons.len(),
+            1,
+            "three late ticks, one reason: {:?}",
+            losses.reasons
+        );
+        let (reason, count) = losses.reasons.iter().next().expect("one reason");
+        assert_eq!(*count, 3, "the reason carries the count it explains");
+        assert!(
+            reason.contains("10.0ms tick") && reason.contains("worst 30.0ms"),
+            "the magnitudes are reported, not enumerated: {reason}"
+        );
+        assert_eq!(
+            losses.overrun,
+            Some(Overrun {
+                tick_ns: 10_000_000,
+                worst_ns: 30_000_000,
+                total_ns: 60_000_000,
+            })
+        );
+        assert!(!losses.is_clean());
+    }
+
+    /// A collector is read at its own pace, and one that has a ring to drain
+    /// keeps it whatever the request asked for.
+    #[test]
+    fn each_request_is_paced_by_its_own_mode_and_its_own_collector() {
+        struct Streaming(CollectorId, Option<StdDuration>);
+        impl Collector for Streaming {
+            fn id(&self) -> &CollectorId {
+                &self.0
+            }
+            fn value_attr(&self) -> &'static str {
+                "count"
+            }
+            fn sample(&mut self, _: u64) -> Result<Vec<Event>, SampleError> {
+                Ok(Vec::new())
+            }
+            fn tick(&self) -> Option<StdDuration> {
+                self.1
+            }
+        }
+        let polling = Streaming(CollectorId::new("polling"), None);
+        let streaming = Streaming(
+            CollectorId::new("streaming"),
+            Some(StdDuration::from_millis(10)),
+        );
+
+        let poll = |ms: u64| crate::request::Mode::Poll {
+            interval: crate::scalar::Duration::from_nanos(ms * 1_000_000),
+        };
+        assert_eq!(
+            pace_of(&polling, poll(200)).interval,
+            StdDuration::from_millis(200),
+            "a collector with no cadence of its own is read at the one the request named"
+        );
+        assert!(
+            pace_of(&polling, Mode::Snapshot).snapshot,
+            "a snapshot is one read, and the session it is written in cannot change that"
+        );
+        assert_eq!(
+            pace_of(&polling, Mode::Count).interval,
+            StdDuration::from_nanos(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
+            "a mode that names no cadence falls back to the default poll interval"
+        );
+        assert_eq!(
+            pace_of(&streaming, poll(1_000)).interval,
+            StdDuration::from_millis(10),
+            "a ring drained less often than it fills loses events, so the collector's own \
+             need wins over the request's"
+        );
+    }
+
     #[test]
     fn losses_merge_without_losing_their_reasons() {
         let mut first = Losses {
@@ -1837,10 +2396,10 @@ mod tests {
             let deadline_ns = monotonic_ns() + 200_000_000;
             drive(
                 &mut collectors,
-                Window {
+                &[Pace {
                     interval: StdDuration::ZERO,
                     snapshot: false,
-                },
+                }],
                 &mut spending,
                 until(deadline_ns),
             );
@@ -1922,10 +2481,10 @@ mod tests {
             let deadline_ns = monotonic_ns() + 600_000_000;
             let (_, _, stopped_because) = drive(
                 &mut collectors,
-                Window {
+                &[Pace {
                     interval: StdDuration::ZERO,
                     snapshot: false,
-                },
+                }],
                 &mut spending,
                 until(deadline_ns),
             );
@@ -1974,10 +2533,10 @@ mod tests {
         let deadline_ns = monotonic_ns() + 600_000_000;
         drive(
             &mut collectors,
-            Window {
+            &[Pace {
                 interval: StdDuration::ZERO,
                 snapshot: false,
-            },
+            }],
             &mut spending,
             until(deadline_ns),
         );
@@ -2009,10 +2568,10 @@ mod tests {
         let deadline_ns = monotonic_ns() + 400_000_000;
         drive(
             &mut collectors,
-            Window {
+            &[Pace {
                 interval: StdDuration::ZERO,
                 snapshot: false,
-            },
+            }],
             &mut spending,
             until(deadline_ns),
         );
@@ -2151,10 +2710,10 @@ mod tests {
         let deadline_ns = monotonic_ns() + 90_000_000;
         let (_, _, stopped_because) = drive(
             &mut collectors,
-            Window {
+            &[Pace {
                 interval,
                 snapshot: false,
-            },
+            }],
             &mut Spending::unweighed(1),
             || (monotonic_ns() >= deadline_ns).then(|| "the deadline".to_owned()),
         );

@@ -299,7 +299,7 @@ program whose work is in another task finds none of it and reports no loss.
 ### Is the reason the right reason?
 
 `each_refusal_names_the_thing_that_is_missing` ·
-`a_mode_the_build_does_not_implement_exits_like_a_failure` ·
+`a_mode_the_build_does_not_implement_exits_as_unimplemented` ·
 `examples/cpu-out-of-reach.yml`
 
 Three different answers, which a reader acts on differently:
@@ -560,6 +560,12 @@ which asserts the accuracy and reports the shortfall.
 
 ### 4. A mode the build does not implement exits like a failure
 
+> **Fixed** (stream A). A refusal raised by a factory is a pure function of the
+> resolved request -- nothing has been launched, opened or read by the time it
+> answers -- so it cannot be about this machine, and it exits 3. The message is
+> unchanged and the reproduction below still produces it.
+> `a_mode_the_build_does_not_implement_exits_as_unimplemented` asserts the code.
+
 ```console
 $ omn cpu.cycles -m sample@99hz -e hist -- /bin/true
 error: cannot start collecting `cpu.cycles`: `cpu.cycles` in `sample@99hz` mode
@@ -581,9 +587,18 @@ uses it, and stacks with it — so a reader is sent to a mechanism that exists.
 What is missing now is a sampling collector for counting sources, which is a
 different sentence.
 
-Pinned by `a_mode_the_build_does_not_implement_exits_like_a_failure`.
+Pinned by `a_mode_the_build_does_not_implement_exits_as_unimplemented`.
 
 ### 5. `--duration` beside `-f` is accepted and discarded
+
+> **Fixed** (stream A). The command line may replace what a session holds for the
+> whole of itself -- `duration`, `budget`, `format`, `out` -- and every other axis
+> names one request, which a file may have many of, so the parser refuses those
+> beside `-f` by name. A replaced duration is reported as a note and reaches
+> `--dump-request`. Asserted by
+> `a_duration_beside_a_session_file_replaces_the_sessions_own`.
+> The consequence recorded below no longer holds: a scenario *can* shorten an
+> example's window from the command line.
 
 ```console
 $ time omn -f examples/cpu-known-work.yml -d 100ms
@@ -609,6 +624,11 @@ enough to be run as they stand — which is why `cpu-saturation.yml` is two
 seconds and `cpu-per-core.yml` is one.
 
 ### 6. A rejection and a machine that cannot serve the request share an exit code
+
+> **Fixed** (stream A). `has no viable backend` exits 1 and the hint is per case;
+> `exit_for` in `src/main.rs` is the one place the four answers map to codes.
+> `each_refusal_names_the_thing_that_is_missing` now asserts the code beside the
+> message it was already pinning.
 
 `BRIEF.md` gives three answers with three exit codes. The build has three
 answers and two codes:
@@ -676,6 +696,12 @@ does not spend measuring, which is most of the eight seconds
 
 ### 8. A loss reason that carries a measurement is a new reason every time
 
+> **Fixed** (stream A), and with it gpu 5, io 5, net 2 and proc 6: five families
+> found one line of `drive()`. The reason is the kind and the magnitudes live in
+> `Losses::overrun` -- the tick, the worst overrun, the total -- joined back into
+> one line when the run ends. Asserted by
+> `a_run_that_was_late_many_times_explains_it_once`.
+
 `Losses::reasons` is a map from the reason to how often it happened, and the
 late-tick reason embeds the duration that made it late:
 
@@ -735,6 +761,10 @@ stops with "the ratio's counter group was never scheduled onto the pmu" rather
 than believing either story.
 
 ### 10. A JSON run shares stdout with the program it launched
+
+> **Fixed** (stream A), as a warning rather than a refusal: the run is legitimate
+> and redirecting the target's output is the other way out. Text is left alone.
+> Asserted by `a_structured_run_that_launches_a_program_says_they_share_the_stdout`.
 
 ```console
 $ omn cpu.instructions -m count -e summary --format json -- /bin/sh -c 'echo NOISE'

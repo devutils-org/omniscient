@@ -371,6 +371,14 @@ Not fixed here: `src/` belongs to no scenario stream.
 
 ### 2. The three refusals are two exit codes
 
+> **Fixed** (stream A), both divergences. Row two -- `power.throttle` without
+> `CAP_BPF` -- exits 1; row four -- `power.freq -m trace` -- exits 3, because the
+> refusal comes from the factory and nothing about this machine is involved in
+> it. The man page is the document that now disagrees, and the replacement text
+> is in `docs/open-findings.md`. Asserted by
+> `every_axis_this_family_declares_is_served_or_refused_by_name`, whose exit-3 arm
+> now accepts both ways of reaching that code.
+
 `BRIEF.md` class D asks for three answers to be told apart, because they lead to
 three different next steps — change the request, change the machine, write the
 collector. Measured:
@@ -414,6 +422,13 @@ The tests assert what the messages must say, not what the codes are, so nothing
 here cements the current behaviour.
 
 ### 3. A `snapshot` request beside a polled one is served as a poll
+
+> **Fixed** (stream A), both halves. A snapshot is a property of the request, so
+> one written beside a poll is still a single read; and an interval of zero is
+> "as fast as this can be read", which is not a cadence and cannot be fallen
+> behind, so it no longer manufactures a late tick per round. The 158 losses that
+> had not happened are gone with it. Asserted by
+> `a_snapshot_beside_a_poll_is_one_read_and_invents_no_losses`.
 
 `snapshot` means "a single read, after which the run is over". Alone, or beside
 another snapshot, it is:
@@ -474,6 +489,14 @@ poll, quietly.
 the sweep exercises it from the command line, where it is correct.
 
 ### 4. A session is driven at its first request's pace, whatever the others ask for
+
+> **Fixed** (stream A). Each request keeps its own cadence, in either order, and
+> the related behaviour this entry is careful to separate is untouched: a
+> collector that declares a tick still keeps it, because a ring drained less
+> often than it fills loses events. Asserted by
+> `two_requests_at_two_rates_are_each_served_at_their_own`. The sessions this
+> family ships were written so the defect could not bite them, and they are left
+> as they are.
 
 When no collector declares a pace of its own, the runner falls back to
 `resolved[0].request.mode` — the **first** request's interval — and applies it to
