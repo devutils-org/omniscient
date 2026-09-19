@@ -14,13 +14,15 @@ for where the two meet.
 
 The request model, the catalog, the resolver, the validator, the collector
 layer, the emit and encode layers and a join engine all exist and are used by
-every source. Twelve sources across nine families collect for real, over five
+every source. Forty-four sources across nine families collect for real, over six
 mechanisms: procfs and sysfs, `perf_event_open` counting and sampling, netlink,
-an `LD_PRELOAD` shim, and eBPF raw tracepoints. The first correlation works:
-page faults attributed to the allocations whose ranges contain them, with
-`KEY` evidence. **499 tests pass**, and the suite is the project's main asset —
-several of its tests have found real defects in the code they were written
-against.
+an `LD_PRELOAD` shim, NVML through `dlopen`, and eBPF raw tracepoints. Every
+emit the catalog declares exists — `raw`, `timeline`, `summary`, `rate`,
+`hist`, `topk` and `stack` — and stacks are captured, symbolized and written as
+`folded` and `speedscope`. The first correlation works: page faults attributed
+to the allocations whose ranges contain them, with `KEY` evidence. **633 tests
+pass**, and the suite is the project's main asset — several of its tests have
+found real defects in the code they were written against.
 
 What is missing is breadth, not skeleton. Adding a source is additive; the
 expensive parts are done.
@@ -30,34 +32,37 @@ expensive parts are done.
 ## What the numbers say
 
 ```
-100 sources: 78 usable here, 16 unverified, 6 out of reach on this machine.
-42 of them have a collector, covering 46 of their 164 backends.
+100 sources: 53 usable here, 9 unverified, 38 out of reach on this machine.
+44 of them have a collector, covering 48 of their 165 backends.
 ```
 
 Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 78 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 42 sources, 46 backends | a collector is written and registered |
+| What can this machine serve? | 53 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this build collect? | 44 sources, 48 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-`78` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. Without them the
-same machine reports `52`, which is why `make` reapplies the capabilities that
-every relink drops.
+**That `53` was read off a binary with no capabilities**, which is the state
+every `cargo build` leaves behind. The same machine reports around `78` once
+`CAP_BPF` and `CAP_PERFMON` are granted and tracefs is readable — the difference
+is the whole eBPF and per-cpu perf surface. `make` reapplies them and says so
+when `sudo -n` will not let it, which is the case here; the numbers in this file
+are therefore the pessimistic ones.
 
 Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
-| `cpu` | 10 | 14 | 11 |
-| `mem` | 7 | 23 | 19 |
-| `io` | 5 | 14 | 11 |
-| `net` | 5 | 15 | 10 |
+| `cpu` | 11 | 14 | 12 |
+| `mem` | 7 | 23 | 17 |
 | `gpu` | 5 | 9 | 6 |
-| `power` | 5 | 5 | 4 |
-| `sched` | 2 | 10 | 9 |
-| `proc` | 2 | 6 | 6 |
+| `io` | 5 | 14 | 6 |
+| `net` | 5 | 15 | 5 |
+| `power` | 5 | 5 | 3 |
+| `sched` | 3 | 10 | 1 |
+| `proc` | 2 | 6 | 2 |
 | `runtime` | 1 | 4 | 1 |
 
 ---
@@ -85,6 +90,8 @@ known, not against what the code computed.
 | `runtime.jit` | `/tmp/perf-<pid>.map` | a map the test wrote |
 | `sched.wakeup` | eBPF raw tracepoint | the causal chain of a shell and its children, loaded and attached for real |
 | `sched.switches` | `perf_event_open` | against the kernel's own switch counter for the same thread |
+| `sched.offcpu` | eBPF raw tracepoint | a thread that sleeps a known 300 ms, whose off-cpu duration and interruptible state must both match |
+| `cpu.profile` | `perf_event_open`, sampling with `PERF_SAMPLE_CALLCHAIN` | a cpu-bound loop in the test binary, whose own symbols must appear in the table |
 
 The correlation, from `examples/allocation-cost.yml`:
 
@@ -104,10 +111,10 @@ join pages-of-allocation  mem.heap.alloc -> mem.faults  evidence KEY
 | 0 — decisions | **done**. Language, clock, scope, kernel floor 6.1, `CAP_BPF`+`CAP_PERFMON`, raw tracepoints first. |
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
-| 3 — first collectors and transport | **done, beyond its brief**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate. Missing from it: stacks and symbolization (G6), which is why `folded` and `speedscope` have no encoder. |
+| 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
 | 4 — the vertical case | **partly**. One real correlation exists and is checked. The HTTP-request decomposition it describes needs the eBPF backends of `io` and `net`, and the `wakeup` match kind. |
 | 5 — generalizing the join engine | **started**. Rules are declarative and evaluated; only `interval` matches. `eq`, `scoped_eq` and `wakeup` are refused by name. |
-| 6 — emit, aggregation, budget | **partly**. `raw`, `timeline`, `summary`, `rate` exist. `hist`, `topk` and `stack` do not, and the catalog asks for them 42, 52 and 19 times. `--budget` is parsed and not enforced. |
+| 6 — emit, aggregation, budget | **partly**. Every emit exists: `raw`, `timeline`, `summary`, `rate`, `hist`, `topk` and `stack`, with `folded` and `speedscope` encoders behind the last. `--budget` is still parsed and not enforced. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **not started**. `--backend force:` exists for it. |
 | 9 — breadth | in progress; see the table above. |
@@ -117,16 +124,18 @@ join pages-of-allocation  mem.heap.alloc -> mem.faults  evidence KEY
 
 ## What remains, in the order it is worth doing
 
-### 1. `hist`, `topk` and `stack`
+### 1. Stacks on the sources that declare them
 
-The catalog asks for them 113 times between them and none exists. Six families
-have sources they cannot express without one: `io.latency` is a histogram or it
-is nothing, `io.bytes --emit topk` is the question "which device", and every
-profile is stacks.
+`cpu.profile` is the only producer. The catalog declares `stack` on nineteen
+sources, and the rest of them — `sched.offcpu` above all, where the stack *is*
+the diagnosis of why a task blocked — need the collector to intern a callchain
+the same way. The seam is `Collector::stacks()`, and on the eBPF side it means
+`bpf_get_stackid` and a stack map rather than a perf callchain.
 
-`stack` needs frame-pointer unwinding and symbolization first — blazesym or
-libdw, never a hand-written DWARF unwinder — and it unblocks the `folded` and
-`speedscope` encoders, which are declared and refuse.
+The one unwind mode that works is `fp`. `--stack dwarf` and `--stack lbr` are
+refused by name with what they would need, which is the honest answer: frame
+pointers where the target has none report leaf functions as though they were
+stacks, and this build says so as a degradation when it detects it.
 
 ### 2. The `wakeup` match kind
 
