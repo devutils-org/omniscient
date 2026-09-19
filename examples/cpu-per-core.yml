@@ -1,0 +1,53 @@
+# Which core is doing the work, and what is it spending it on?
+#
+#   omn -f examples/cpu-per-core.yml
+#
+# A machine-wide number is the wrong shape for this question. Twenty-four cores
+# with one of them saturated average four per cent, which is indistinguishable
+# from twenty-four cores doing almost nothing -- and the difference between the
+# two is whether one thread is the whole bottleneck.
+#
+# So every request here is per core: one counter group opened on each cpu, one
+# series for each, keyed on its number. That counts every task that ran there
+# rather than one process -- the kernel, the interrupt handlers and every other
+# tenant included. It is a different measurement from the same source against
+# `--pid`, and it is the one that answers "what is this core busy with" instead
+# of "what did my program cost".
+#
+# Counting a cpu needs `perf_event_paranoid` at 0 or below, or `CAP_PERFMON` on
+# the binary, because it observes other people's work. Without either, the run
+# says which of the two is missing rather than quietly counting this process
+# instead.
+#
+# The companion to this is `omn cpu.util --cpu 0-3 -m poll@500ms -e timeline`,
+# which says how busy each of the same cores was. Run on its own rather than
+# here: a session polls every collector at the pace of its fastest one, and a
+# counter asks to be looked at every ten milliseconds.
+#
+# The mean over the cores is still available -- it is what the emit layer does
+# to a series on request. Recovering a core from a mean is not.
+name: which core, and on what
+format: text
+duration: 3s
+
+requests:
+  - label: what each core retired
+    source: cpu.instructions
+    target:
+      cpu: 0-3
+    mode: count
+    emit: [summary]
+
+  - label: how much it got per cycle
+    source: cpu.ipc
+    target:
+      cpu: 0-3
+    mode: count
+    emit: [summary]
+
+  - label: what it missed in the last-level cache
+    source: cpu.cache_misses
+    target:
+      cpu: 0-3
+    mode: count
+    emit: [summary]

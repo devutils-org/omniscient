@@ -11,15 +11,25 @@
 //! `busy` here excludes `iowait`. A cpu waiting for a disk is not doing work,
 //! and reporting it as busy is how a machine that is stalled on IO comes to
 //! look saturated. The state is still reported on its own, next to the others.
+//!
+//! A `--cpu` target reads the same file and keeps the cpus apart, one event
+//! each, keyed on the number. The mean of twenty-four cores describes none of
+//! them, and one saturated core among twenty-three idle ones reads exactly like
+//! a machine at four per cent; the mean is still available, because averaging a
+//! series is something the emit layer does and splitting one apart is not.
 
+use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event};
+use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
 const PATH: &str = "/proc/stat";
+
+/// The label `/proc/stat` gives the line that sums every cpu.
+const MACHINE: &str = "cpu";
 
 /// The states `/proc/stat` counts, in the order the file writes them.
 ///
@@ -105,16 +115,15 @@ pub struct Prepare(pub Mode);
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
-            Target::System => Ok(Box::new(UtilCollector::new(self.0))),
-            // Every cpu's line is in the same file, but the events would all
-            // land in one series: the event model has no `cpu` correlation key
-            // to separate them by, and a mean across cpus is a number that
-            // describes no cpu.
-            Target::Cpu(_) => Err(
-                "per-cpu utilisation needs a `cpu` correlation key, which the event model \
-                 does not have yet; `--system` reports the machine"
-                    .to_owned(),
-            ),
+            Target::System => Ok(Box::new(UtilCollector::new(self.0, Which::Machine))),
+            // Every cpu's line is in the same file, so this costs one read
+            // whichever scope was asked for. What it must not do is average
+            // them: `--cpu 3` is how someone asks about a core rather than
+            // about a mean, and the answer has to be that core's.
+            Target::Cpu(set) => Ok(Box::new(UtilCollector::new(
+                self.0,
+                Which::Cpus(set.cpus().to_vec()),
+            ))),
             other => Err(format!(
                 "`/proc/stat` counts the machine, and a {} target is a different scope: \
                  the cgroup backend is the one that answers it, and it is not built yet",
@@ -124,31 +133,68 @@ impl Prepared for Prepare {
     }
 }
 
-/// Reads the machine's cpu states, and reports what changed between reads.
+/// Which of the file's lines this run is about.
+pub enum Which {
+    /// The `cpu` line, which sums the machine.
+    Machine,
+    /// The `cpuN` lines of the cpus that were asked for.
+    Cpus(Vec<u32>),
+}
+
+impl Which {
+    /// The labels wanted, in the order they should be reported.
+    fn labels(&self) -> Vec<String> {
+        match self {
+            Which::Machine => vec![MACHINE.to_owned()],
+            Which::Cpus(cpus) => cpus.iter().map(|cpu| format!("cpu{cpu}")).collect(),
+        }
+    }
+}
+
+/// Reads the cpu states of a machine or of named cores, and reports what
+/// changed between reads.
 pub struct UtilCollector {
     id: CollectorId,
     mode: Mode,
-    previous: Option<Times>,
+    which: Which,
+    /// The last reading of each label. One entry for a machine target, one per
+    /// cpu otherwise -- a cpu's difference is against its own previous value
+    /// and against nothing else.
+    previous: BTreeMap<String, Times>,
 }
 
 impl UtilCollector {
-    pub fn new(mode: Mode) -> Self {
+    pub fn new(mode: Mode, which: Which) -> Self {
         Self {
             id: CollectorId::new("cpu.util/fs:proc"),
             mode,
-            previous: None,
+            which,
+            previous: BTreeMap::new(),
         }
     }
 
-    fn read(&self) -> Result<Times, SampleError> {
+    /// Every wanted line of the file, in the order the request named them.
+    ///
+    /// A label the file does not carry is a cpu that is not online: refused by
+    /// name, because a missing line and an idle core are different answers and
+    /// only one of them is a number.
+    fn read(&self) -> Result<Vec<(String, Times)>, SampleError> {
         let text = std::fs::read_to_string(PATH)
             .map_err(|error| SampleError::Transient(format!("{PATH}: {error}")))?;
-        text.lines()
-            .find_map(|line| match Times::parse(line) {
-                Some((label, times)) if label == "cpu" => Some(times),
-                _ => None,
+        let found: BTreeMap<String, Times> = text.lines().filter_map(Times::parse).collect();
+        self.which
+            .labels()
+            .into_iter()
+            .map(|label| {
+                let times = found.get(&label).copied().ok_or_else(|| {
+                    SampleError::Transient(format!(
+                        "{PATH} has no `{label}` line: that cpu is not online, which is not the \
+                         same as a cpu that is doing nothing"
+                    ))
+                })?;
+                Ok((label, times))
             })
-            .ok_or_else(|| SampleError::Transient(format!("no aggregate cpu line in {PATH}")))
+            .collect()
     }
 }
 
@@ -163,16 +209,29 @@ impl Collector for UtilCollector {
 
     fn start(&mut self) -> Result<(), String> {
         // The baseline is taken as the window opens, so the first poll already
-        // describes an interval and not the machine's uptime.
+        // describes an interval and not the machine's uptime. A cpu that is not
+        // online is discovered here, before anything is launched, rather than
+        // on the first tick.
+        let readings = self.read().map_err(|error| match error {
+            SampleError::Transient(reason) | SampleError::TargetGone(reason) => reason,
+        })?;
         if self.mode != Mode::Snapshot {
-            self.previous = Some(self.read().map_err(|error| format!("{error:?}"))?);
+            self.previous = readings.into_iter().collect();
         }
         Ok(())
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let now = self.read()?;
-        Ok(self.event_from(now, monotonic_ns(), seq))
+        let readings = self.read()?;
+        let ts_ns = monotonic_ns();
+        let mut events = Vec::with_capacity(readings.len());
+        for (label, now) in readings {
+            // One sequence number per event, so two cpus read in the same
+            // instant do not collapse into one another downstream.
+            let seq = seq + events.len() as u64;
+            events.extend(self.event_from(&label, now, ts_ns, seq));
+        }
+        Ok(events)
     }
 
     fn tick(&self) -> Option<StdDuration> {
@@ -187,11 +246,11 @@ impl UtilCollector {
     /// readings chosen for the cases that matter -- a cpu that went offline, a
     /// window where nothing moved -- rather than against whatever the machine
     /// happened to be doing.
-    fn event_from(&mut self, now: Times, ts_ns: u64, seq: u64) -> Vec<Event> {
+    fn event_from(&mut self, label: &str, now: Times, ts_ns: u64, seq: u64) -> Vec<Event> {
         // A snapshot of this file is a statement about the whole uptime, and
         // saying which window a share covers is the difference between a
         // reading and a guess.
-        let (window, delta) = match self.previous.replace(now) {
+        let (window, delta) = match self.previous.insert(label.to_owned(), now) {
             Some(previous) => ("since the previous read", now.since(&previous)),
             None => ("since boot", now),
         };
@@ -224,12 +283,25 @@ impl UtilCollector {
         if delta.steal > 0 {
             attrs.push(Attr::uint("steal_ticks", delta.steal));
         }
+        // `cpu` is a filter field the catalog declares, and a key is not a
+        // filter field: a predicate cannot read one. The machine line carries
+        // neither, because the machine is not a cpu.
+        let keys = match label
+            .strip_prefix(MACHINE)
+            .and_then(|rest| rest.parse().ok())
+        {
+            Some(cpu) => {
+                attrs.push(Attr::uint("cpu", u64::from(cpu)));
+                vec![KeyValue::cpu(cpu)]
+            }
+            None => Vec::new(),
+        };
 
         vec![Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "cpu.util".to_owned(),
-            keys: Vec::new(),
+            keys,
             attrs,
             collector_id: self.id.clone(),
             seq,
@@ -289,18 +361,27 @@ mod tests {
     }
 
     fn polling() -> UtilCollector {
-        UtilCollector::new(Mode::Poll {
-            interval: Mode::DEFAULT_POLL_INTERVAL,
-        })
+        UtilCollector::new(
+            Mode::Poll {
+                interval: Mode::DEFAULT_POLL_INTERVAL,
+            },
+            Which::Machine,
+        )
+    }
+
+    /// Seeds the machine line's previous reading, which is what a first poll
+    /// would otherwise have taken.
+    fn seed(collector: &mut UtilCollector, times: Times) {
+        collector.previous.insert(MACHINE.to_owned(), times);
     }
 
     #[test]
     fn the_shares_are_of_the_interval_and_not_of_the_uptime() {
         let mut collector = polling();
         // A machine that has been up a long while, mostly idle.
-        collector.previous = Some(times([1_000, 0, 0, 9_000, 0, 0, 0, 0]));
+        seed(&mut collector, times([1_000, 0, 0, 9_000, 0, 0, 0, 0]));
         // And a busy second: fifty ticks of work, fifty of idle.
-        let events = collector.event_from(times([1_050, 0, 0, 9_050, 0, 0, 0, 0]), 1, 0);
+        let events = collector.event_from(MACHINE, times([1_050, 0, 0, 9_050, 0, 0, 0, 0]), 1, 0);
 
         let event = &events[0];
         assert_eq!(event.attr("busy").unwrap().as_f64().unwrap(), 0.5);
@@ -315,10 +396,10 @@ mod tests {
     #[test]
     fn a_cpu_waiting_for_a_disk_is_not_reported_as_busy() {
         let mut collector = polling();
-        collector.previous = Some(Times::default());
+        seed(&mut collector, Times::default());
         // Half the window working, half of it waiting for IO and none of it
         // idle. A machine stalled on IO must not read as saturated.
-        let events = collector.event_from(times([50, 0, 0, 0, 50, 0, 0, 0]), 1, 0);
+        let events = collector.event_from(MACHINE, times([50, 0, 0, 0, 50, 0, 0, 0]), 1, 0);
 
         let event = &events[0];
         assert_eq!(event.attr("busy").unwrap().as_f64().unwrap(), 0.5);
@@ -330,27 +411,27 @@ mod tests {
     fn a_window_in_which_nothing_moved_reports_nothing() {
         let mut collector = polling();
         let reading = times([1_000, 0, 0, 9_000, 0, 0, 0, 0]);
-        collector.previous = Some(reading);
+        seed(&mut collector, reading);
         // Two reads inside one tick of the kernel's clock. Zero would read as a
         // perfectly idle machine, which is a claim nobody measured.
-        assert!(collector.event_from(reading, 1, 0).is_empty());
+        assert!(collector.event_from(MACHINE, reading, 1, 0).is_empty());
     }
 
     #[test]
     fn a_counter_that_went_backwards_does_not_become_an_enormous_share() {
         let mut collector = polling();
-        collector.previous = Some(times([1_000, 0, 0, 9_000, 0, 0, 0, 0]));
+        seed(&mut collector, times([1_000, 0, 0, 9_000, 0, 0, 0, 0]));
         // A cpu went offline and came back with its counters reset. Wrapping
         // would turn this into billions of ticks of work.
-        let events = collector.event_from(times([10, 0, 0, 90, 0, 0, 0, 0]), 1, 0);
+        let events = collector.event_from(MACHINE, times([10, 0, 0, 90, 0, 0, 0, 0]), 1, 0);
         assert!(events.is_empty());
     }
 
     #[test]
     fn stolen_time_is_called_out_rather_than_left_in_a_column() {
         let mut collector = polling();
-        collector.previous = Some(Times::default());
-        let events = collector.event_from(times([50, 0, 0, 40, 0, 0, 0, 10]), 1, 0);
+        seed(&mut collector, Times::default());
+        let events = collector.event_from(MACHINE, times([50, 0, 0, 40, 0, 0, 0, 10]), 1, 0);
 
         let event = &events[0];
         // The machine was taken away for a tenth of the window. That is not a
@@ -363,8 +444,8 @@ mod tests {
     #[test]
     fn a_machine_with_no_steal_time_carries_no_steal_column() {
         let mut collector = polling();
-        collector.previous = Some(Times::default());
-        let events = collector.event_from(times([50, 0, 0, 50, 0, 0, 0, 0]), 1, 0);
+        seed(&mut collector, Times::default());
+        let events = collector.event_from(MACHINE, times([50, 0, 0, 50, 0, 0, 0, 0]), 1, 0);
         assert!(events[0].attr("steal_ticks").is_none());
     }
 
@@ -396,9 +477,12 @@ mod tests {
         }
         let burners = cpus / 2;
 
-        let mut collector = UtilCollector::new(Mode::Poll {
-            interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
-        });
+        let mut collector = UtilCollector::new(
+            Mode::Poll {
+                interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+            },
+            Which::Machine,
+        );
         collector.start().expect("/proc/stat is readable");
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -438,9 +522,145 @@ mod tests {
         );
     }
 
+    /// One cpu's idle ticks, straight out of the file, parsed by hand.
+    ///
+    /// Deliberately not through `Times::parse`: this is the independent side of
+    /// the comparison below, and a check of the collector against the same
+    /// parser the collector uses would only prove the parser agrees with
+    /// itself.
+    fn idle_ticks_of(cpu: u32) -> u64 {
+        let text = std::fs::read_to_string(PATH).expect("/proc/stat is readable");
+        let wanted = format!("cpu{cpu}");
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
+            if fields.next() != Some(wanted.as_str()) {
+                continue;
+            }
+            // user nice system idle: the fourth number on the line.
+            return fields
+                .nth(3)
+                .and_then(|field| field.parse().ok())
+                .expect("the idle column is a number");
+        }
+        panic!("cpu{cpu} has no line in {PATH}");
+    }
+
+    /// Ground truth for the per-cpu scope: pin a spinner to one core, and that
+    /// core's event has to carry that core's numbers.
+    ///
+    /// Two independent things are checked, because the machine may be busy for
+    /// reasons that have nothing to do with this test -- the rest of the suite
+    /// runs in parallel threads on the other cores.
+    ///
+    /// The core the work was pinned to is chosen here rather than observed, so
+    /// it has to read as near fully busy. A collector handing back the
+    /// machine's average under a cpu's name fails that on an idle machine,
+    /// where one spinning core of twenty-four averages four per cent.
+    ///
+    /// And the idle ticks the collector reports for that core are compared
+    /// against the same column read straight out of the file by this test. That
+    /// is what says the event labelled `cpu:23` carries cpu 23's line and not
+    /// cpu 0's or the machine's, and it holds however loaded the machine is.
+    #[test]
+    fn a_core_with_a_spinner_pinned_to_it_carries_that_cores_own_numbers() {
+        let online = crate::perf::online_cpus().expect("online cpus");
+        if online.len() < 2 {
+            eprintln!("skipped: one cpu, so a per-cpu reading is the machine's");
+            return;
+        }
+        // The last one, which is the least likely to be carrying the rest of
+        // the suite.
+        let busy_cpu = online[online.len() - 1];
+        let neighbour = online[online.len() - 2];
+
+        let mut collector = UtilCollector::new(
+            Mode::Poll {
+                interval: Mode::DEFAULT_POLL_INTERVAL,
+            },
+            Which::Cpus(vec![busy_cpu, neighbour]),
+        );
+        collector.start().expect("/proc/stat is readable");
+        let idle_before = idle_ticks_of(busy_cpu);
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spinner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // SAFETY: setting this thread's own affinity mask.
+                unsafe {
+                    let mut set: libc::cpu_set_t = std::mem::zeroed();
+                    libc::CPU_ZERO(&mut set);
+                    libc::CPU_SET(busy_cpu as usize, &mut set);
+                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+                }
+                let mut total = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    total = total.wrapping_add(1);
+                }
+                std::hint::black_box(total);
+            })
+        };
+        std::thread::sleep(StdDuration::from_millis(500));
+        let events = collector.sample(0).expect("a second read");
+        let idle_after = idle_ticks_of(busy_cpu);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spinner.join().expect("the spinner finished");
+
+        assert_eq!(events.len(), 2, "two cpus were asked for, so two events");
+        assert_eq!(events[0].keys, vec![KeyValue::cpu(busy_cpu)]);
+        assert_eq!(events[1].keys, vec![KeyValue::cpu(neighbour)]);
+        // A key is for a join and an attribute is for a filter; the catalog
+        // declares `cpu` as the second and they are not the same thing.
+        assert_eq!(
+            events[0].attr("cpu").unwrap().as_f64(),
+            Some(f64::from(busy_cpu))
+        );
+
+        let busy = events[0].attr("busy").unwrap().as_f64().unwrap();
+        assert!(
+            busy > 0.8,
+            "a core with a spinner pinned to it for half a second reads {busy:.2} busy"
+        );
+
+        // A core that was spinning gained almost no idle ticks, and the file
+        // says so on its own.
+        assert!(
+            idle_after - idle_before < 20,
+            "cpu {busy_cpu} had a spinner pinned to it and the file credits it with {} idle \
+             ticks in half a second",
+            idle_after - idle_before
+        );
+        let reported_idle = events[0].attr("idle").unwrap().as_f64().unwrap();
+        assert!(
+            reported_idle < 0.2,
+            "the file credits cpu {busy_cpu} with {} idle ticks over this window and the \
+             event reports an idle share of {reported_idle:.2}: that event is not that cpu's",
+            idle_after - idle_before
+        );
+    }
+
+    /// A cpu that is not online has no line in the file, and that is a different
+    /// answer from a cpu that is doing nothing.
+    #[test]
+    fn a_cpu_that_is_not_online_is_refused_rather_than_reported_as_idle() {
+        let beyond = crate::perf::online_cpus()
+            .expect("online cpus")
+            .iter()
+            .max()
+            .copied()
+            .expect("a cpu")
+            + 1;
+        let mut collector = UtilCollector::new(Mode::Snapshot, Which::Cpus(vec![beyond]));
+        let reason = collector
+            .start()
+            .expect_err("a cpu with no line cannot be read");
+        assert!(reason.contains("not online"), "{reason}");
+        assert!(reason.contains("not the same as"), "{reason}");
+    }
+
     #[test]
     fn the_shares_of_one_read_add_up_to_the_whole() {
-        let mut collector = UtilCollector::new(Mode::Snapshot);
+        let mut collector = UtilCollector::new(Mode::Snapshot, Which::Machine);
         let events = collector.sample(0).expect("/proc/stat is readable");
         let event = &events[0];
         assert_eq!(event.attr("window").unwrap().to_string(), "since boot");

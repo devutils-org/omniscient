@@ -1482,3 +1482,198 @@ a cgroup on an older kernel writes no `full` line, and zero would claim nothing
 was ever fully stalled.
 
 Not urgent, and worth doing before the fourth copy rather than after.
+
+---
+
+## 24. A session polls every collector at the pace of its fastest one
+
+Found by stream C while writing `examples/cpu-per-core.yml`. It belongs to
+whoever owns `src/collect/mod.rs`.
+
+`run_all` picks one interval for the whole run:
+
+```rust
+let interval = collectors.iter().filter_map(|c| c.tick()).min().unwrap_or(…);
+```
+
+The comment above it is right about why -- "the fastest collector sets the pace:
+draining a ring every second loses events, and the cheap pollers do not mind
+being asked more often" -- but a poller does mind, for a reason that has nothing
+to do with cost. A counting collector returns `Some(10ms)` from `tick`, not
+because it wants to be read that often (it has nothing to give until the window
+closes) but so the run notices a target that exited. Any polled source sharing
+that session is then asked every 10 ms, whatever its request said.
+
+Measured, on this machine:
+
+```console
+$ omn cpu.util --cpu 0-3 -m poll@500ms -e timeline -d 3s
+  24 events over 3.00s          # six points per cpu, as asked
+    cpu:0  +0ns 0.078  +500ms 0.042  +1s 0.118  +1500ms 0.040  …
+
+$ omn -f examples/cpu-per-core.yml          # the same request beside two counters
+  1160 events over 3.01s        # two hundred and ninety points per cpu
+    cpu:0  +0ns 0.000  +10ms 0.000  +20ms 1.000  +30ms 0.000  …
+```
+
+Two things go wrong, and the second is the one that matters. The series has
+fifty times the points the request asked for, which is only noise. And each
+point is a share computed over one tick of the kernel's own accounting, so it
+can only be 0 or 1: the file credits a whole tick to whatever was running when
+the timer fired. A utilisation that reads `0.000, 0.000, 1.000, 0.000` is not a
+noisy version of `0.042` -- it is a different quantity, and its mean is only
+accidentally close.
+
+The same applies to `cpu.oncpu_time`, which says so on the event: it publishes
+`resolution_ns` and notes when the interval is close to a tick. A collector
+being polled faster than it was asked to be cannot emit that warning, because it
+does not know the interval changed.
+
+Two shapes of fix, and the choice is a decision rather than a patch:
+
+- **Per-collector cadence.** Each collector is asked at `max(its own tick, the
+  interval its request named)`. The runner already knows both. A ring still
+  drains at its own pace because its `tick` is the floor, not the ceiling.
+- **Separate "how often it must be drained" from "how often it has a value".**
+  `tick` means the first today and is being read as the second. A counting
+  collector wants to be *looked at* every 10 ms and has a value once.
+
+Stream C's example works around it by keeping the polled source out of the
+session and saying so in a comment, which is not a fix.
+
+---
+
+## 25. A `pmu:` requirement cannot be a glob, and a qualified one answers vaguely
+
+Two small things in `src/capabilities.rs`'s `probe_pmu`, found by stream C while
+making `cpu.topdown` collectable.
+
+**The glob.** `cpu.topdown` required `pmu:topdown-*`. Nothing expands it: the
+probe looks for a performance unit or an event called literally `topdown-*`,
+does not find one, and reports it missing -- which happened to be the right
+answer on this machine for the wrong reason, and would have been the wrong
+answer on an Icelake. Fixed in the entry by naming the four events, which is
+also what the collector opens.
+
+**Two more globs are still in the catalog, and they are reporting the wrong
+answer right now.** `io.fs` requires `tracepoint:ext4:*` and `io.readahead`
+requires `tracepoint:filemap:*`. That probe class checks a path under tracefs,
+so it checks a directory literally named `*`:
+
+```console
+$ omn io.readahead --system -m count -e summary -d 100ms
+error: `io.readahead` has no viable backend on this machine:
+  bpf:tp: tracepoint:filemap:*: missing:
+          /sys/kernel/tracing/events/filemap/* does not exist
+
+$ ls /sys/kernel/tracing/events/filemap/
+file_check_and_advance_wb_err   mm_filemap_add_to_page_cache
+filemap_set_wb_err              mm_filemap_delete_from_page_cache
+mm_filemap_fault                mm_filemap_get_pages
+mm_filemap_map_pages
+```
+
+Seven tracepoints, and the source reports the requirement missing by name. This
+is a false negative in the one table the tool exists to be trusted about, and it
+belongs to whoever owns the `io` entries -- it is fixed the same way
+`cpu.topdown` was, by naming the events the collector will actually attach to,
+since "any of them" is not a requirement a chain can be resolved against. A
+loader assertion refusing `*` in a requirement would keep all three from coming
+back, for a character that looks harmless in YAML.
+
+**The qualified form.** `probe_pmu` handles a bare name (`slots`) by scanning
+every unit's `events` directory, and a qualified one (`cpu/slots`) by reading
+that unit's files. When the qualified form finds nothing it falls through to
+`sysfs_device_state`, which returns `None` for any name containing `/`, so the
+answer is `Unknown`: "`pmu:cpu/slots` needs an event encoding this tool does not
+build yet". The truth is narrower and more useful -- this machine publishes no
+such event under that unit -- and the distinction is exactly the one the probe
+vocabulary exists to make, since `unknown` never counts as available while
+`missing` says whose problem it is. The bare form is used throughout the catalog
+and gives the right answer, so nothing is broken today.
+
+---
+
+## 26. Two readers of `/sys/devices/system/cpu/online`, in two families
+
+`power::sysfs::online_cpus` has parsed the kernel's cpu list since the first
+wave, and it is `mod sysfs` -- private to `src/collect/power/`. Stream C needed
+the same list to open one counter per cpu and could not reach it, so
+`perf::online_cpus` and `perf::parse_cpu_list` now exist beside it, with the
+same handling of holes in the numbering.
+
+Two copies of eight lines is not expensive; two copies that drift are. The
+question this poses is where it belongs: reading which cpus exist is not a
+`power` concern nor a `perf` one, and at least three of the streams in this wave
+want it. `src/capabilities.rs` already answers "what does this machine have" for
+everything else and is the obvious home, with both families calling it. Left
+alone here rather than moved, because moving it means editing a file stream C
+does not own -- but the next stream that needs a third copy should move it
+instead of writing one.
+
+---
+
+## Needs from another stream
+
+### For whoever updates `docs/families/cpu.md`
+
+Stream C did not edit it: the stream owns `src/perf.rs`, `src/collect/cpu/**`,
+its own catalog entries, this file and its log, and the family note is not on
+that list. Four passages in it are now false, and each has a replacement here so
+the edit is mechanical.
+
+1. **"What runs today" lists ten of fourteen sources.** It is thirteen. Add
+   `cpu.profile` (`pmu:sw`, sample, landed in wave two), `cpu.oncpu_time`
+   (`fs:proc`, poll, this wave) and `cpu.topdown` (`pmu`, count, this wave --
+   written and collectable, out of reach on this machine).
+
+2. **"Needs from the shared layer", item 1, "A `cpu` correlation key".** Closed
+   twice over: `KeyValue::Cpu` exists (finding 2 above), and `cpu.util --cpu`
+   now produces one event per core keyed on it. Delete the item.
+
+3. **"Needs from the shared layer", item 2, "Per-cpu counting".** Built.
+   `perf::PerCpuGroups` opens one group per cpu, `collect/cpu/percpu.rs` reports
+   one event each, and `--system` is every online cpu. Replace with what it
+   costs: the privilege refusal names `perf_event_paranoid` or `CAP_PERFMON`,
+   and a per-task count is never substituted for one.
+
+4. **"Not implemented yet, and why", the `cpu.topdown` paragraph.** It says the
+   requirements are "raw event encodings per microarchitecture" and that
+   `capabilities.rs` answers unverified. Neither holds: the five events are read
+   from what the kernel publishes under `/sys/bus/event_source/devices/cpu/
+   events`, which is how "map per CPU family, never hard-code event names" is
+   honoured, and the probe answers `missing` by name. What is true and worth
+   keeping: the method needs a pipeline that counts issue slots -- Intel from
+   Icelake, AMD from Zen 4 -- and the development machine is a Zen 2, so the
+   half of the ground-truth test that runs here is the refusal.
+
+   The same paragraph's `cpu.oncpu_time` line ("`bpf:tp` first, and the eBPF
+   layer is Wave 2") should say that the `fs:proc` backend now serves it in
+   `poll`, at the kernel's tick granularity, and that `trace` is still stream
+   A's to build.
+
+### For stream A, or whoever owns the `io` entries: two globbed requirements
+
+Finding 16 above, second half. `tracepoint:ext4:*` and `tracepoint:filemap:*`
+are probed as literal paths, so `io.fs` and `io.readahead` report a requirement
+missing that this machine has seven of. Naming the events the collector attaches
+to is the fix; stream C did the same to `cpu.topdown` and did not touch `io`.
+
+### For stream B, in `src/collect/mem/**`
+
+`mem.cache_l1`, `mem.cache_llc` and `mem.cache_tlb` are collected, and **not
+from your directory**. They are rows in `src/collect/cpu/counters.rs`'s `SPECS`,
+as `BRIEF.md` says they should be: the mechanism decides who writes a source. If
+`mem`'s `factories()` grows a line for any of the three there will be two
+factories for one `(source, backend)` pair. Their catalog entries in
+`catalog/mem.yaml` were edited by stream C -- requirements, emits and caveats --
+and `mem.cache_llc` gained a second backend, `pmu:generic`.
+
+### For the coordinator, on finding 10
+
+Confirmed again this wave, from a third worktree. `sudo -n setcap …
+target/debug/omn` still fails because `$(BINARY)` is relative and the sudoers
+rule is absolute; passing `$(abspath $(BINARY))` by hand succeeds immediately.
+Every stream in this wave that needs `CAP_PERFMON` is granting it by hand or
+running without it, and a suite that is green without it is not evidence about
+the privileged paths. One word in the Makefile.

@@ -48,9 +48,55 @@ const INSTRUCTIONS: Counter = Counter::hardware("instructions", perf::PERF_COUNT
 const BRANCH_MISSES: Counter =
     Counter::hardware("branch_misses", perf::PERF_COUNT_HW_BRANCH_MISSES);
 const CACHE_MISSES: Counter = Counter::hardware("cache_misses", perf::PERF_COUNT_HW_CACHE_MISSES);
+const CACHE_REFERENCES: Counter =
+    Counter::hardware("cache_references", perf::PERF_COUNT_HW_CACHE_REFERENCES);
 const CONTEXT_SWITCHES: Counter =
     Counter::software("context_switches", perf::PERF_COUNT_SW_CONTEXT_SWITCHES);
 const MIGRATIONS: Counter = Counter::software("migrations", perf::PERF_COUNT_SW_CPU_MIGRATIONS);
+
+// The cache descriptors. These are the `mem.cache_*` sources, and they are
+// here rather than under `src/collect/mem/` because the mechanism decides who
+// writes a source: they are rows in this table, read through this group, with
+// nothing of their own but a config. A second counters table beside this one,
+// for the sake of the first word of an id, would be two copies of the
+// multiplexing and window arithmetic that only one of them would be tested
+// against.
+const L1D_LOAD_MISSES: Counter = Counter::cache(
+    "l1d_load_misses",
+    perf::PERF_COUNT_HW_CACHE_L1D,
+    perf::PERF_COUNT_HW_CACHE_OP_READ,
+    perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+);
+const L1D_LOADS: Counter = Counter::cache(
+    "l1d_loads",
+    perf::PERF_COUNT_HW_CACHE_L1D,
+    perf::PERF_COUNT_HW_CACHE_OP_READ,
+    perf::PERF_COUNT_HW_CACHE_RESULT_ACCESS,
+);
+const LLC_LOAD_MISSES: Counter = Counter::cache(
+    "llc_load_misses",
+    perf::PERF_COUNT_HW_CACHE_LL,
+    perf::PERF_COUNT_HW_CACHE_OP_READ,
+    perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+);
+const LLC_LOADS: Counter = Counter::cache(
+    "llc_loads",
+    perf::PERF_COUNT_HW_CACHE_LL,
+    perf::PERF_COUNT_HW_CACHE_OP_READ,
+    perf::PERF_COUNT_HW_CACHE_RESULT_ACCESS,
+);
+const DTLB_LOAD_MISSES: Counter = Counter::cache(
+    "dtlb_load_misses",
+    perf::PERF_COUNT_HW_CACHE_DTLB,
+    perf::PERF_COUNT_HW_CACHE_OP_READ,
+    perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+);
+const ITLB_LOAD_MISSES: Counter = Counter::cache(
+    "itlb_load_misses",
+    perf::PERF_COUNT_HW_CACHE_ITLB,
+    perf::PERF_COUNT_HW_CACHE_OP_READ,
+    perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+);
 
 /// What a source's value is, once the counters have been read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +107,16 @@ pub enum Value {
     /// own metric. A derived source states what it is derived from rather than
     /// pretending to be a counter of its own.
     Ratio { name: &'static str },
+    /// Every counter added together, under the name `count`, with each term
+    /// published beside it.
+    ///
+    /// For the one shape where a source is genuinely two counters of the same
+    /// thing -- a TLB has an instruction side and a data side, and the catalog
+    /// entry names both. The terms travel with the total for the same reason
+    /// they travel with a ratio: a number nobody can decompose cannot be
+    /// checked, and "which of the two moved" is the first question anyone asks
+    /// of it.
+    Total,
 }
 
 /// One catalog source, as a set of counters and a way to read a value from them.
@@ -76,7 +132,7 @@ impl Spec {
     /// The attribute that holds this source's measured value.
     pub fn value_attr(&self) -> &'static str {
         match self.value {
-            Value::Count => "count",
+            Value::Count | Value::Total => "count",
             Value::Ratio { name } => name,
         }
     }
@@ -127,6 +183,40 @@ pub const SPECS: &[Spec] = &[
         counters: &[INSTRUCTIONS, CYCLES],
         value: Value::Ratio { name: "ipc" },
     },
+    // A miss count alone says nothing: a program that does twice the work
+    // misses twice as often and is no worse for it. The accesses are counted in
+    // the same group so the rate can be had from the event rather than from a
+    // second run.
+    Spec {
+        source: "mem.cache_l1",
+        backend: "pmu",
+        counters: &[L1D_LOAD_MISSES, L1D_LOADS],
+        value: Value::Count,
+    },
+    Spec {
+        source: "mem.cache_llc",
+        backend: "pmu",
+        counters: &[LLC_LOAD_MISSES, LLC_LOADS],
+        value: Value::Count,
+    },
+    // The architectural cache-miss counter, which is a different measurement
+    // and says so in the catalog: it counts every last-level access that
+    // missed, not loads only, and what the vendor puts in it varies.
+    Spec {
+        source: "mem.cache_llc",
+        backend: "pmu:generic",
+        counters: &[CACHE_MISSES, CACHE_REFERENCES],
+        value: Value::Count,
+    },
+    // The one source whose value is genuinely two counters: a TLB miss on the
+    // instruction side and one on the data side are the same event to the
+    // program and different events to the hardware.
+    Spec {
+        source: "mem.cache_tlb",
+        backend: "pmu",
+        counters: &[DTLB_LOAD_MISSES, ITLB_LOAD_MISSES],
+        value: Value::Total,
+    },
 ];
 
 /// The source and backend a counting spec serves, or nothing when the pair is
@@ -163,20 +253,146 @@ impl Prepare {
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        // A counter is opened over a task. Counting a cpu or the whole machine
-        // means one event per cpu -- `Scope::Cpu` in `src/perf.rs` -- and the
-        // privileges for it, which is a different thing to build and not one to
-        // approximate with a per-process number.
-        let pid = target.first_pid().ok_or_else(|| {
-            format!(
-                "`{}` counts a task, and a {} target names none: counting every cpu needs \
-                 one event per cpu and the privileges for it, which is not built yet",
-                self.0.source,
-                target.kind()
-            )
-        })?;
-        Ok(Box::new(CounterCollector::new(pid, self.0)))
+        // A counter follows either a task or a cpu, and the kernel offers no
+        // third shape. Which one a target means is decided here, once, so that
+        // neither collector has to hold a target it cannot serve.
+        match target {
+            Target::Cpu(set) => Ok(Box::new(super::percpu::PerCpuCounters::new(
+                set.cpus().to_vec(),
+                self.0,
+            ))),
+            Target::System => {
+                let cpus = crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?;
+                Ok(Box::new(super::percpu::PerCpuCounters::new(cpus, self.0)))
+            }
+            other => {
+                let pid = other.first_pid().ok_or_else(|| {
+                    format!(
+                        "`{}` counts a task or a cpu, and a {} target is neither: name a \
+                         process with --pid or --tid, a core with --cpu, or the machine with \
+                         --system",
+                        self.0.source,
+                        other.kind()
+                    )
+                })?;
+                Ok(Box::new(CounterCollector::new(pid, self.0)))
+            }
+        }
     }
+}
+
+/// Turns one cpu's or one task's readings into the attributes of an event, or
+/// into nothing with the reason recorded.
+///
+/// Shared by the two collectors deliberately. A per-cpu count and a per-task
+/// count are the same measurement over a different scope, and the parts that
+/// decide what the number *means* -- a counter that never ran, a ratio over
+/// zero, a value the kernel extrapolated -- have to be the same in both or one
+/// of them is only as honest as its own tests.
+pub(super) fn measured(
+    spec: &Spec,
+    readings: &[Reading],
+    losses: &mut Losses,
+) -> Option<Vec<Attr>> {
+    let window = readings.first()?;
+    if window.never_ran() {
+        losses.failed_reads += 1;
+        losses.note(format!(
+            "`{}` was never scheduled onto a cpu during the window -- the target did not \
+             run -- so there is no count, which is not the same as a count of zero",
+            spec.source
+        ));
+        return None;
+    }
+
+    let mut attrs = Vec::with_capacity(readings.len() + 4);
+    match spec.value {
+        Value::Count => {
+            attrs.push(Attr::uint("count", window.value));
+            attrs.push(Attr::text("counter", window.name));
+            // Anything counted beside the value is what the value is read
+            // against: a miss count without its accesses is not a rate, and
+            // asking for the second in another run would measure another
+            // window.
+            for reading in &readings[1..] {
+                attrs.push(Attr::uint(reading.name, reading.value));
+            }
+        }
+        Value::Ratio { name } => {
+            let denominator = readings.get(1)?;
+            if denominator.value == 0 {
+                losses.failed_reads += 1;
+                losses.note(format!(
+                    "`{}` counted zero, so `{}` has no value",
+                    denominator.name, spec.source
+                ));
+                return None;
+            }
+            attrs.push(Attr::float(
+                name,
+                window.value as f64 / denominator.value as f64,
+            ));
+            // Both terms travel with the ratio: a ratio whose terms are
+            // invisible cannot be checked against anything.
+            for reading in readings {
+                attrs.push(Attr::uint(reading.name, reading.value));
+            }
+        }
+        Value::Total => {
+            attrs.push(Attr::uint(
+                "count",
+                readings.iter().map(|reading| reading.value).sum(),
+            ));
+            attrs.push(Attr::text(
+                "counter",
+                readings
+                    .iter()
+                    .map(|reading| reading.name)
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+            ));
+            for reading in readings {
+                attrs.push(Attr::uint(reading.name, reading.value));
+            }
+        }
+    }
+
+    // What was actually counted, whenever the reported value is an
+    // extrapolation from it.
+    for reading in readings {
+        if reading.was_multiplexed() {
+            attrs.push(Attr::uint(format!("{}_raw", reading.name), reading.raw));
+        }
+    }
+
+    // The window the counter itself measured, which is the honest denominator
+    // for a rate: the wall clock also contains the time between the last tick
+    // and the moment the run was noticed to be over.
+    attrs.push(Attr::uint("enabled_ns", window.enabled_ns));
+    attrs.push(Attr::uint("running_ns", window.running_ns));
+    Some(attrs)
+}
+
+/// What the readings had to give up, in words that reach the user.
+///
+/// A counter that shared the hardware reports a value it did not count, and
+/// `where` says which cpu or task that happened on: on a busy machine it
+/// happens to some and not others, and one note for the whole run would leave
+/// the reader guessing which numbers are estimates.
+pub(super) fn multiplexing_notes(readings: &[Reading], whose: &str) -> Vec<String> {
+    readings
+        .iter()
+        .filter(|reading| reading.was_multiplexed() && !reading.never_ran())
+        .map(|reading| {
+            format!(
+                "`{}` on {whose} shared the hardware with other counters and was on for \
+                 {:.0} % of the window: its value is scaled from what was counted, not counted",
+                reading.name,
+                reading.duty() * 100.0
+            )
+        })
+        .collect()
 }
 
 /// Reads one source's counters over one window.
@@ -211,58 +427,7 @@ impl CounterCollector {
     /// inventing intermediate points would suggest a resolution the mode does
     /// not have.
     fn event(&mut self, readings: &[Reading], seq: u64) -> Option<Event> {
-        let window = readings.first()?;
-        if window.never_ran() {
-            self.losses.failed_reads += 1;
-            self.losses.note(format!(
-                "`{}` was never scheduled onto a cpu during the window -- the target did not \
-                 run -- so there is no count, which is not the same as a count of zero",
-                self.spec.source
-            ));
-            return None;
-        }
-
-        let mut attrs = Vec::with_capacity(readings.len() + 4);
-        match self.spec.value {
-            Value::Count => {
-                attrs.push(Attr::uint("count", window.value));
-                attrs.push(Attr::text("counter", window.name));
-            }
-            Value::Ratio { name } => {
-                let denominator = readings.get(1)?;
-                if denominator.value == 0 {
-                    self.losses.failed_reads += 1;
-                    self.losses.note(format!(
-                        "`{}` counted zero, so `{}` has no value",
-                        denominator.name, self.spec.source
-                    ));
-                    return None;
-                }
-                attrs.push(Attr::float(
-                    name,
-                    window.value as f64 / denominator.value as f64,
-                ));
-                // Both terms travel with the ratio: a ratio whose terms are
-                // invisible cannot be checked against anything.
-                for reading in readings {
-                    attrs.push(Attr::uint(reading.name, reading.value));
-                }
-            }
-        }
-
-        // What was actually counted, whenever the reported value is an
-        // extrapolation from it.
-        for reading in readings {
-            if reading.was_multiplexed() {
-                attrs.push(Attr::uint(format!("{}_raw", reading.name), reading.raw));
-            }
-        }
-
-        // The window the counter itself measured, which is the honest
-        // denominator for a rate: the wall clock also contains the time between
-        // the last tick and the moment the run was noticed to be over.
-        attrs.push(Attr::uint("enabled_ns", window.enabled_ns));
-        attrs.push(Attr::uint("running_ns", window.running_ns));
+        let mut attrs = measured(self.spec, readings, &mut self.losses)?;
         if let Some(comm) = self.comm.get() {
             attrs.push(Attr::text("comm", comm));
         }
@@ -340,16 +505,8 @@ impl Collector for CounterCollector {
             }
         };
 
-        for reading in &readings {
-            if reading.was_multiplexed() && !reading.never_ran() {
-                self.notes.push(format!(
-                    "`{}` shared the hardware with other counters and was on for {:.0} % of \
-                     the window: its value is scaled from what was counted, not counted",
-                    reading.name,
-                    reading.duty() * 100.0
-                ));
-            }
-        }
+        self.notes
+            .extend(multiplexing_notes(&readings, &format!("task {}", self.pid)));
 
         self.event(&readings, 0).into_iter().collect()
     }
@@ -376,6 +533,267 @@ mod tests {
             .iter()
             .find(|spec| spec.source == source)
             .expect("the source is in the table")
+    }
+
+    /// A mapping of `bytes`, on pages the kernel has been told not to collapse.
+    ///
+    /// The `MADV_NOHUGEPAGE` is what makes the TLB half of the test below mean
+    /// something on any machine rather than on a busy one. Transparent huge
+    /// pages turn sixty-four megabytes into thirty-two entries, which every TLB
+    /// holds without effort, so the same walk misses a hundred times less on a
+    /// quiet machine -- where the kernel can find 2 MiB of contiguous memory --
+    /// than on a loaded one, where it cannot. That is a real property of the
+    /// hardware and the reason `mem.cache_tlb`'s catalog entry says to read it
+    /// beside `mem.thp`; it is also a variable this test has no business
+    /// leaving to chance, so it is pinned rather than tolerated.
+    struct Pages {
+        base: *mut libc::c_void,
+        len: usize,
+    }
+
+    impl Pages {
+        fn new(len: usize) -> Self {
+            // SAFETY: an anonymous private mapping of our own, unmapped in Drop.
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(base, libc::MAP_FAILED, "the mapping must succeed");
+            // SAFETY: advising the kernel about the mapping just made. A kernel
+            // built without transparent huge pages answers EINVAL, which is the
+            // state this asks for anyway.
+            unsafe { libc::madvise(base, len, libc::MADV_NOHUGEPAGE) };
+            // Touched, so every page is resident before anything is counted.
+            // SAFETY: writing inside the mapping.
+            unsafe { std::ptr::write_bytes(base.cast::<u8>(), 1, len) };
+            Self { base, len }
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: the mapping is readable and lives as long as `self`.
+            unsafe { std::slice::from_raw_parts(self.base.cast::<u8>(), self.len) }
+        }
+    }
+
+    impl Drop for Pages {
+        fn drop(&mut self) {
+            // SAFETY: unmapping what `new` mapped.
+            unsafe { libc::munmap(self.base, self.len) };
+        }
+    }
+
+    /// A buffer of `bytes` and an order in which to visit its cache lines that
+    /// the hardware cannot predict.
+    ///
+    /// The shuffle is what makes the walk below a memory test rather than a
+    /// bandwidth test: a sequential walk is prefetched and misses almost
+    /// nothing however large the array is, so a sequential version of this
+    /// would report a cache that never misses and would pass against a counter
+    /// that counts nothing at all.
+    ///
+    /// Built before the counters are opened, deliberately. Filling sixty-four
+    /// megabytes and shuffling a million indices is itself a great deal of
+    /// memory traffic, and counting it would mean the large walk was measured
+    /// partly on its own setup.
+    fn shuffled_lines(bytes: usize) -> (Vec<usize>, Pages) {
+        const LINE: usize = 64;
+        let lines = bytes / LINE;
+        let mut order: Vec<usize> = (0..lines).collect();
+        // A fixed seed, so a failure can be reproduced, and xorshift rather
+        // than a dependency.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for index in (1..lines).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            order.swap(index, (state % (index as u64 + 1)) as usize);
+        }
+        (order, Pages::new(bytes))
+    }
+
+    /// Touches one byte of every line, in the order given, `passes` times.
+    fn walk(order: &[usize], buffer: &Pages, passes: usize) -> usize {
+        let buffer = buffer.as_slice();
+        let mut total = 0u64;
+        for _ in 0..passes {
+            for &line in order {
+                total += u64::from(buffer[line * 64]);
+            }
+        }
+        std::hint::black_box(total);
+        order.len() * passes
+    }
+
+    /// What one spec's counters read over `work`, on this thread alone.
+    ///
+    /// This thread and not this process: `cargo test` runs its tests in
+    /// parallel threads of one process, and a process-wide counter would be
+    /// counting the other tests' memory traffic as well as this one's.
+    fn counted_on_this_thread(spec: &Spec, work: impl FnOnce()) -> Option<Vec<Reading>> {
+        // SAFETY: a read-only query of this thread's own id.
+        let tid = unsafe { libc::gettid() };
+        let group = CounterGroup::open(spec.counters, Scope::Process(tid)).ok()?;
+        group.enable().ok()?;
+        work();
+        group.read_final().ok()
+    }
+
+    /// The misses a spec counted, whichever shape its value takes.
+    fn misses(spec: &Spec, readings: &[Reading]) -> f64 {
+        match spec.value {
+            Value::Total => readings.iter().map(|reading| reading.value).sum::<u64>() as f64,
+            _ => readings[0].value as f64,
+        }
+    }
+
+    /// The ground truth of the cache counters: a walk over an array far larger
+    /// than any cache misses on nearly every access, and a walk over four
+    /// kilobytes misses on almost none.
+    ///
+    /// The check is the ratio between the two, not either count. An absolute
+    /// number depends on this machine's cache sizes, its prefetchers and its
+    /// page size; the ratio depends only on the counter counting the thing it
+    /// is named after. A counter with the three `PERF_TYPE_HW_CACHE` fields
+    /// packed wrongly opens, runs and returns a plausible number -- this is
+    /// what catches it, because whatever else it counts does not care how big
+    /// the array was.
+    ///
+    /// The denominator is the number of accesses the walk made, which the test
+    /// chose rather than measured.
+    #[test]
+    fn a_walk_that_cannot_fit_in_cache_misses_where_one_that_fits_does_not() {
+        // Larger than the 16 MiB a thread of this class of machine sees, by
+        // enough that a bigger part would change nothing.
+        const LARGE: usize = 64 * 1024 * 1024;
+        const SMALL: usize = 4096;
+        const ACCESSES: usize = 2 * 1024 * 1024;
+
+        let (far_order, far_buffer) = shuffled_lines(LARGE);
+        let (near_order, near_buffer) = shuffled_lines(SMALL);
+        let far_passes = ACCESSES / far_order.len();
+        let near_passes = ACCESSES / near_order.len();
+
+        let mut served = 0;
+        // Measured here at roughly one miss per access on the far walk for all
+        // three, against a few thousandths on the near one: ratios between 150
+        // and 8000 depending on what else the machine is doing. The bars below
+        // are set well under the worst of those rather than at the best.
+        for (source, backend, floor) in [
+            ("mem.cache_l1", "pmu", 0.3),
+            ("mem.cache_llc", "pmu", 0.3),
+            ("mem.cache_llc", "pmu:generic", 0.3),
+            // The TLB is the one that huge pages would otherwise decide, which
+            // is why the mapping above refuses them; with them, this same walk
+            // misses a hundred times less on a quiet machine than on a busy one.
+            ("mem.cache_tlb", "pmu", 0.1),
+        ] {
+            let Some(spec) = spec_for(source, backend) else {
+                panic!("`{source}` on `{backend}` is not in the table");
+            };
+            let Some(far) = counted_on_this_thread(spec, || {
+                assert_eq!(walk(&far_order, &far_buffer, far_passes), ACCESSES);
+            }) else {
+                // This machine has no such descriptor -- AMD family 17h
+                // publishes no last-level cache event at all, which is why the
+                // chain has a second backend. That is a machine's limit, and
+                // the backend below it is asserted in the same loop.
+                eprintln!("skipped: {source}/{backend} does not open on this machine");
+                continue;
+            };
+            let near = counted_on_this_thread(spec, || {
+                assert_eq!(walk(&near_order, &near_buffer, near_passes), ACCESSES);
+            })
+            .expect("the same counters opened a moment ago");
+            served += 1;
+
+            let per_access = |readings: &[Reading]| misses(spec, readings) / ACCESSES as f64;
+            let (loose, tight) = (per_access(&far), per_access(&near));
+            assert!(
+                loose > tight * 50.0,
+                "{source} via {backend}: {ACCESSES} accesses over {LARGE} bytes missed \
+                 {loose:.5} times each and the same number over {SMALL} bytes missed \
+                 {tight:.5} times each, which is not the difference a cache makes"
+            );
+            // And the far walk has to miss often in absolute terms as well: a
+            // ratio of two very small numbers is noise with a direction.
+            assert!(
+                loose > floor,
+                "{source} via {backend}: a shuffled walk over {LARGE} bytes missed only \
+                 {loose:.5} times per access, so this is not counting misses"
+            );
+        }
+        assert!(
+            served >= 3,
+            "only {served} of the four cache backends opened here, so the three sources are \
+             not all covered on this machine"
+        );
+    }
+
+    /// A miss count without its denominator is not a rate, and the whole point
+    /// of counting the accesses in the same group is that the denominator
+    /// describes the same window.
+    #[test]
+    fn a_cache_source_publishes_the_accesses_its_misses_are_out_of() {
+        let spec = spec_for("mem.cache_l1", "pmu").expect("in the table");
+        let mut collector = CounterCollector::new(0, spec);
+        if collector.start().is_err() {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        }
+        let (order, buffer) = shuffled_lines(1024 * 1024);
+        walk(&order, &buffer, 4);
+        let events = collector.stop();
+
+        let event = &events[0];
+        let misses = event.attr("count").unwrap().as_f64().unwrap();
+        let loads = event.attr("l1d_loads").unwrap().as_f64().unwrap();
+        assert_eq!(
+            event.attr("counter").unwrap().to_string(),
+            "l1d_load_misses"
+        );
+        assert!(
+            loads > misses,
+            "the cache missed {misses} times in {loads} loads, which is more misses than \
+             accesses: the two counters are not what they are labelled"
+        );
+    }
+
+    /// A total of two counters has to be that total, and both terms have to be
+    /// on the event: "the data side or the instruction side" is the first
+    /// question asked of a TLB number.
+    #[test]
+    fn a_total_is_the_sum_of_its_terms_and_carries_them() {
+        let spec = spec_for("mem.cache_tlb", "pmu").expect("in the table");
+        let mut losses = Losses::default();
+        let attrs = measured(
+            spec,
+            &[
+                reading("dtlb_load_misses", 700, 1_000, 1_000),
+                reading("itlb_load_misses", 30, 1_000, 1_000),
+            ],
+            &mut losses,
+        )
+        .expect("a full window is a measurement");
+
+        let named = |name: &str| {
+            attrs
+                .iter()
+                .find(|attr| attr.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is on the event"))
+        };
+        assert_eq!(named("count").value.as_f64(), Some(730.0));
+        assert_eq!(named("dtlb_load_misses").value.as_f64(), Some(700.0));
+        assert_eq!(named("itlb_load_misses").value.as_f64(), Some(30.0));
+        assert_eq!(
+            named("counter").value.to_string(),
+            "dtlb_load_misses + itlb_load_misses"
+        );
     }
 
     /// Counting is exact, so a collector that produced a number must have

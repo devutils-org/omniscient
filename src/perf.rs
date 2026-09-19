@@ -583,6 +583,22 @@ impl Counter {
         }
     }
 
+    /// Builds one of the cache descriptors, such as `LLC-load-misses`.
+    ///
+    /// `PERF_TYPE_HW_CACHE` is the one event type whose config is not a number
+    /// the kernel publishes but three small fields packed into one word: which
+    /// cache, which operation, and whether the count is of accesses or of
+    /// misses. Packing them wrongly does not fail -- the open succeeds and the
+    /// counter counts something else -- so the three are named here rather than
+    /// written as a literal at each call site.
+    pub const fn cache(name: &'static str, cache: u32, operation: u32, result: u32) -> Self {
+        Self {
+            name,
+            kind: sys::bindings::PERF_TYPE_HW_CACHE,
+            config: (cache as u64) | ((operation as u64) << 8) | ((result as u64) << 16),
+        }
+    }
+
     /// Builds a counter from a performance unit the kernel describes itself.
     ///
     /// Everything beyond the architectural events -- RAPL's energy domains, the
@@ -918,6 +934,198 @@ impl Drop for CounterGroup {
     }
 }
 
+/// Where the kernel lists the cpus it currently has.
+pub const ONLINE_CPUS: &str = "/sys/devices/system/cpu/online";
+
+/// The cpus this machine has right now, as the kernel numbers them.
+///
+/// Read rather than derived from a core count: the numbering has holes on a
+/// machine where a cpu was taken offline, and `nproc` would hand back a count
+/// that indexes cpus which do not exist. A per-cpu event opened on one of those
+/// fails with `ENODEV`, which reads like a permission problem and is not.
+pub fn online_cpus() -> io::Result<Vec<u32>> {
+    let list = std::fs::read_to_string(ONLINE_CPUS)?;
+    parse_cpu_list(&list).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{ONLINE_CPUS} does not read as a cpu list: `{}`",
+                list.trim()
+            ),
+        )
+    })
+}
+
+/// `0-3,8,10-11`, which is how the kernel writes every cpu list it publishes.
+pub fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
+    let mut cpus = Vec::new();
+    for part in list
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        match part.split_once('-') {
+            Some((first, last)) => {
+                let first: u32 = first.parse().ok()?;
+                let last: u32 = last.parse().ok()?;
+                if last < first {
+                    return None;
+                }
+                cpus.extend(first..=last);
+            }
+            None => cpus.push(part.parse().ok()?),
+        }
+    }
+    Some(cpus)
+}
+
+/// A cpu list as a person would say it, for a message about one that is not in
+/// it.
+fn describe_cpu_list(cpus: &[u32]) -> String {
+    match (cpus.first(), cpus.last()) {
+        (Some(first), Some(last)) if cpus.len() as u32 == last - first + 1 => {
+            format!("cpus {first} to {last}")
+        }
+        _ => format!(
+            "cpus {}",
+            cpus.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// What `/proc/sys/kernel/perf_event_paranoid` says, when it can be read.
+fn paranoid() -> Option<i32> {
+    std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Why a per-cpu event was refused, in terms of the two things that grant it.
+///
+/// Counting one cpu means counting every task on it, including tasks of other
+/// users, so the kernel asks for more than counting your own process does:
+/// `perf_event_paranoid` at zero or below, or `CAP_PERFMON` on this binary.
+/// Naming which one is missing is the difference between a message someone can
+/// act on and one that sends them to the wrong file -- and the alternative,
+/// falling back to a per-task count, would answer a different question under
+/// the same name.
+pub fn per_cpu_refusal(cpu: u32, error: &io::Error) -> String {
+    match error.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) => {
+            let level = match paranoid() {
+                Some(level) => format!("it is {level} here"),
+                None => "it could not be read here".to_owned(),
+            };
+            format!(
+                "counting cpu {cpu} observes every task on it, which needs \
+                 /proc/sys/kernel/perf_event_paranoid at 0 or below ({level}) or CAP_PERFMON on \
+                 this binary; a per-task count is not the same measurement and is not \
+                 substituted"
+            )
+        }
+        _ => format!(
+            "perf_event_open on cpu {cpu} was refused ({error}); this cpu is online, so it is \
+             the counter rather than the core that is not there"
+        ),
+    }
+}
+
+/// One counter group per cpu, opened and released together.
+///
+/// A counter follows either a task or a cpu, never both, so counting a machine
+/// is not one event but one per cpu. They are kept apart rather than added up:
+/// a sum over twenty-four cores describes no core, and one core saturated among
+/// twenty-three idle ones reads exactly like a machine at four percent.
+/// Aggregating a series is something the emit layer does on request; recovering
+/// a cpu from a sum is not something anything can do.
+pub struct PerCpuGroups {
+    groups: Vec<(u32, CounterGroup)>,
+}
+
+impl PerCpuGroups {
+    /// Opens the counters on every named cpu.
+    ///
+    /// Every cpu has to open, and the first refusal is the whole answer: a set
+    /// of cpus where some counted and some did not is not the measurement that
+    /// was asked for, and reporting the ones that worked would hide the ones
+    /// that did not behind a plausible number.
+    pub fn open(counters: &[Counter], cpus: &[u32]) -> Result<Self, String> {
+        if cpus.is_empty() {
+            return Err("no cpu to count".to_owned());
+        }
+        // Asked before opening anything, because the kernel answers `EINVAL`
+        // for a cpu that does not exist -- the same errno it gives for an
+        // attribute it cannot honour. Reading the list the kernel publishes
+        // tells the two apart, and they send the reader to different places:
+        // one is a cpu number, the other is a counter this hardware lacks.
+        if let Ok(online) = online_cpus() {
+            if let Some(offline) = cpus.iter().find(|cpu| !online.contains(cpu)) {
+                return Err(format!(
+                    "cpu {offline} is not online, so there is no counter to open on it; this \
+                     machine has {}",
+                    describe_cpu_list(&online)
+                ));
+            }
+        }
+        let mut groups = Vec::with_capacity(cpus.len());
+        for &cpu in cpus {
+            match CounterGroup::open(counters, Scope::Cpu(cpu)) {
+                Ok(group) => groups.push((cpu, group)),
+                Err(error) => return Err(per_cpu_refusal(cpu, &error)),
+            }
+        }
+        Ok(Self { groups })
+    }
+
+    /// True when the machine would only open these counters for user mode, so
+    /// what they count is a share of what was asked for.
+    pub fn kernel_excluded(&self) -> bool {
+        self.groups.iter().any(|(_, group)| group.kernel_excluded())
+    }
+
+    pub fn cpus(&self) -> Vec<u32> {
+        self.groups.iter().map(|(cpu, _)| *cpu).collect()
+    }
+
+    /// Starts every cpu's group.
+    ///
+    /// The groups are enabled one after another, so the windows differ by the
+    /// few microseconds between two ioctls. Each group reports the window it
+    /// was itself enabled for, which is what a rate has to be divided by --
+    /// using the wall clock instead would credit one cpu with a window it never
+    /// had.
+    pub fn enable(&self) -> Result<(), String> {
+        for (cpu, group) in &self.groups {
+            group
+                .enable()
+                .map_err(|error| format!("enabling the counters on cpu {cpu} failed: {error}"))?;
+        }
+        Ok(())
+    }
+
+    /// Stops and reads every cpu, keeping each cpu's answer with its number.
+    ///
+    /// A cpu that went offline mid-run is a read that failed, not a run that
+    /// failed: the others counted a real window and saying so beside the
+    /// failure is more useful than discarding them.
+    pub fn read_final(&self) -> Vec<(u32, io::Result<Vec<Reading>>)> {
+        // Every group is stopped before any is read, so the cpus describe one
+        // window rather than a staircase of them.
+        for (_, group) in &self.groups {
+            let _ = group.disable();
+        }
+        self.groups
+            .iter()
+            .map(|(cpu, group)| (*cpu, group.read()))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,6 +1321,124 @@ mod tests {
     const CYCLES: Counter = Counter::hardware("cycles", sys::bindings::PERF_COUNT_HW_CPU_CYCLES);
     const INSTRUCTIONS: Counter =
         Counter::hardware("instructions", sys::bindings::PERF_COUNT_HW_INSTRUCTIONS);
+
+    /// The kernel writes every cpu list it publishes this way, and a list read
+    /// wrongly opens counters on cpus that are not there.
+    #[test]
+    fn a_cpu_list_reads_the_way_the_kernel_writes_one() {
+        assert_eq!(parse_cpu_list("0-3"), Some(vec![0, 1, 2, 3]));
+        assert_eq!(parse_cpu_list("0"), Some(vec![0]));
+        // Holes are the whole reason this is read rather than counted: a
+        // machine with cpu 2 offline numbers the rest as it always did.
+        assert_eq!(parse_cpu_list("0-1,3,5-6"), Some(vec![0, 1, 3, 5, 6]));
+        assert_eq!(parse_cpu_list("0-3\n"), Some(vec![0, 1, 2, 3]));
+        assert_eq!(parse_cpu_list(""), Some(Vec::new()));
+        assert_eq!(parse_cpu_list("3-1"), None);
+        assert_eq!(parse_cpu_list("all"), None);
+    }
+
+    /// Every cpu the kernel says is online has to have a directory, or the list
+    /// being read is not the list of cpus.
+    #[test]
+    fn the_online_cpus_are_the_ones_this_machine_has() {
+        let cpus = online_cpus().expect("this kernel publishes its online cpus");
+        assert!(!cpus.is_empty(), "no cpu is online, which cannot be");
+        for cpu in &cpus {
+            assert!(
+                std::path::Path::new(&format!("/sys/devices/system/cpu/cpu{cpu}")).exists(),
+                "cpu{cpu} is listed as online and has no directory"
+            );
+        }
+        // The kernel's own count of possible cpus is the upper bound.
+        assert!(cpus.len() <= num_cpus_from_sysconf());
+    }
+
+    fn num_cpus_from_sysconf() -> usize {
+        // SAFETY: a read-only query of a configuration value.
+        let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) };
+        count.max(1) as usize
+    }
+
+    /// The refusal a per-cpu event gets is a privilege answer, and it has to
+    /// name the two things that grant it rather than the syscall that failed.
+    #[test]
+    fn a_refused_per_cpu_event_names_what_would_grant_it() {
+        let denied = io::Error::from_raw_os_error(libc::EACCES);
+        let message = per_cpu_refusal(3, &denied);
+        assert!(message.contains("perf_event_paranoid"), "{message}");
+        assert!(message.contains("CAP_PERFMON"), "{message}");
+        // And says what it will not do instead, because a per-task count under
+        // a per-cpu name is the failure this whole path exists to avoid.
+        assert!(
+            message.contains("per-task count is not the same"),
+            "{message}"
+        );
+
+        // Everything else is about the counter, not about permission, and must
+        // not send the reader to a sysctl that was never in the way.
+        let invalid = io::Error::from_raw_os_error(libc::EINVAL);
+        let message = per_cpu_refusal(3, &invalid);
+        assert!(!message.contains("CAP_PERFMON"), "{message}");
+        assert!(message.contains("this cpu is online"), "{message}");
+    }
+
+    /// A cpu that does not exist and a counter that does not exist come back
+    /// from the kernel as the same `EINVAL`. Only the published list of online
+    /// cpus tells them apart, and they send a reader to different places.
+    #[test]
+    fn a_cpu_that_is_not_online_is_refused_as_absent_rather_than_as_forbidden() {
+        let beyond = online_cpus()
+            .expect("online cpus")
+            .iter()
+            .max()
+            .copied()
+            .expect("a cpu")
+            + 1;
+        let Err(error) = PerCpuGroups::open(&[INSTRUCTIONS], &[beyond]) else {
+            panic!("a cpu this machine does not have cannot be counted");
+        };
+        assert!(
+            error.contains(&format!("cpu {beyond} is not online")),
+            "{error}"
+        );
+        assert!(error.contains("this machine has cpus"), "{error}");
+        assert!(!error.contains("perf_event_paranoid"), "{error}");
+    }
+
+    /// A per-cpu group counts a cpu, not a task: the work below happens on one
+    /// cpu of many, and the group still has to come back with a reading for
+    /// every cpu it was opened on.
+    #[test]
+    fn a_group_per_cpu_reports_one_reading_per_cpu() {
+        let cpus = online_cpus().expect("online cpus");
+        let Ok(groups) = PerCpuGroups::open(&[INSTRUCTIONS], &cpus) else {
+            eprintln!("skipped: this machine will not open a per-cpu counter");
+            return;
+        };
+        assert_eq!(groups.cpus(), cpus);
+        groups.enable().expect("enable");
+        busy();
+        let readings = groups.read_final();
+
+        assert_eq!(readings.len(), cpus.len());
+        let mut counted = 0u64;
+        for (cpu, reading) in &readings {
+            let reading = reading.as_ref().expect("a cpu that is online reads");
+            assert_eq!(reading.len(), 1);
+            assert!(
+                reading[0].enabled_ns > 0,
+                "cpu {cpu} reports a window of no length"
+            );
+            counted += reading[0].value;
+        }
+        // The work above ran somewhere, and a set covering every cpu contains
+        // wherever that was.
+        assert!(
+            counted > 1_000_000,
+            "every cpu of this machine together retired {counted} instructions while a \
+             two-million-iteration loop ran"
+        );
+    }
 
     /// Something to count that the compiler cannot delete.
     fn busy() {

@@ -87,16 +87,29 @@
   summary: "Top-down Microarchitecture Analysis: front-end / back-end / bad-spec / retiring"
   unit: ratio
   backends:
-    - {id: "pmu", requires: ["pmu:slots", "pmu:topdown-*"], cost: low}
+    - {id: "pmu", requires: ["pmu:slots", "pmu:topdown-retiring", "pmu:topdown-bad-spec",
+                             "pmu:topdown-fe-bound", "pmu:topdown-be-bound"], cost: low}
   modes: [count]
-  emits: [summary]
+  emits: [summary, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
   caveats:
     - "Heavily microarchitecture-dependent: map per CPU family, never hard-code
-       event names."
+       event names. The five events are read from what the kernel publishes
+       under /sys/bus/event_source/devices/cpu/events, so a machine either
+       offers the method or is told which of them it is missing."
+    - "Needs a pipeline that counts issue slots: Intel from Icelake, AMD from
+       Zen 4. Nothing on older hardware measures the same thing, and nothing is
+       substituted."
+    - "Four fractions of one denominator, so they sum to 1. `accounted` carries
+       that sum; anything but 1.0 means the five counters did not describe the
+       same window, and the fractions are reported as counted rather than
+       rescaled to hide it."
+    - "`summary` follows `retiring`, the one of the four that is better when it
+       is larger. The other three travel on the same event: read them with
+       --emit raw."
 
 - id: cpu.profile
   family: cpu
