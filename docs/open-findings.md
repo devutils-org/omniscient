@@ -2286,3 +2286,189 @@ leaving either wrong is the exact failure this repository keeps a test against.
   `<out>/cost.json`.
 
 No other stream in this wave owns either file.
+
+---
+
+## Needs from another stream
+
+Written by stream C of the fifth wave, which owns `src/emit.rs`,
+`src/filter.rs`, `src/encode.rs` and `src/render.rs`. Each of these is the other
+half of a defect this stream was given and could not reach from those four
+files; `docs/fixes/emit.md` has the reasoning, and what follows is only the
+shape wanted, so that landing it is a small edit rather than a rediscovery.
+
+### To stream D, in `src/collect/sched/offcpu.rs`: one attribute closes sched 1
+
+`emit::TOTAL_OF_ATTR` now exists. A collector that carries it is saying *this
+event's value is the sum over N measurements whose individual values do not
+reach the emit layer*, and `emit::aggregate` then puts a degradation beside
+`hist` and `summary` naming both counts. It is inert until a collector opts in,
+and `sched.offcpu` is the source it was built for.
+
+In `attributes()`, beside the `blocks` attribute that is already there:
+
+```rust
+// This row's `total_ns` is the sum of `blocks` blocks, and the durations
+// that went into it were added up in the kernel. `hist` and `summary` say
+// so rather than presenting the drain window as a measurement.
+Attr::uint(crate::emit::TOTAL_OF_ATTR, entry.blocks),
+```
+
+That makes defect 1 of `docs/scenarios/sched.md` visible instead of silent, and
+a scenario can then assert the degradation.
+
+It was exercised here before being written down: the line above was added to
+`offcpu.rs`, the workload of defect 1 was run, and the line was reverted, so
+nothing in this stream's diff touches that file. What it produces, on a drain of
+two blocks:
+
+```
+degraded: `hist` and `summary` describe the 1 row this backend handed up and not the 2
+measurements behind them: the values are added together before they reach the emit layer,
+so every bucket, mean and extreme here is of a total over a drain window rather than of a
+measurement. `total_of` on each row says how many it stands for
+
+  hist (log2)
+    task:595596  n=1  min 109.96ms  mean 109.96ms  max 109.96ms
+      [67108864ns, 134217728ns)             1  |################################|
+```
+
+The histogram is still wrong, which is the point: it now says so, and the run
+carries the number that says by how much.
+ It is not the fix. The fix is the
+one `docs/open-findings.md` §11 already named — *"the fix is in the key, not in
+the emit"*: a log2 bucket in the aggregation key, so the kernel counts
+`(task, state, bucket) -> blocks` and the histogram falls out of the map, as
+`sched.runqlat` does. When that lands, the row carries `WEIGHT_ATTR` instead and
+`TOTAL_OF_ATTR` comes off; the emit layer needs no further change either way.
+
+**Do not reach for `WEIGHT_ATTR` here**, which is what `BRIEF.md` suggests.
+`WEIGHT_ATTR` means *this value occurred N times*, which is true of a `runqlat`
+row and false of this one: weighting a drain of four hundred blocks by four
+hundred reports four hundred measurements at the value of their *sum*, in a
+bucket none of them was in. The arithmetic is pinned by
+`emit::tests::a_row_that_is_a_total_over_its_measurements_says_what_it_is`.
+
+### To stream A, in `src/collect/mod.rs` and `src/error.rs`: mem D4
+
+The refusal sentence pushed into a slot meant for one word. `src/collect/mod.rs`
+fills `CollectError::UnsupportedTarget`'s `{target}` with
+`format!("{} ({reason})", target.kind())`, so the message ends `"...an already
+running process) target yet"`. The variant wants the reason beside the target
+rather than inside it:
+
+```rust
+#[error("`{source_id}` cannot be collected for a {target} target yet: {reason}")]
+UnsupportedTarget {
+    source_id: String,
+    target: String,
+    reason: String,
+},
+```
+
+and the site at `src/collect/mod.rs:702` passes `target.kind().to_string()` and
+the sentence from `Prepared::requires_launch` separately. Nothing in this
+stream's four files formats this message. Pinned by
+`asking_the_shim_for_a_running_process_is_refused_by_the_build` in
+`tests/scenario_mem.rs`; every family with a launch-only collector reaches it.
+
+### To stream A, in `src/collect/mod.rs`: what would close net 6 generically
+
+net 6 is `daddr == '127.0.0.1'` keeping nothing forever, because the attribute
+holds `127.0.0.1:38402`. The narrow fix belongs to stream F and is written
+below. The general one is here, and it is the next case of something
+`apply_filter` already does.
+
+`Filtered::unseen_fields` exists because *"a predicate over a field nothing
+produces is false everywhere, which empties the series and looks exactly like a
+workload that did nothing"*. A predicate over a field that **is** carried, whose
+string values never equal the literal but do contain it, is the same silence for
+a nearly identical reason. `apply_filter` is the only place that still has the
+events the predicate rejected:
+
+```rust
+/// Predicates that kept nothing although the field was there, with what
+/// the values actually looked like. An exact match against an attribute
+/// that carries more than the value compared is the shape this catches.
+#[serde(default, skip_serializing_if = "Vec::is_empty")]
+pub near_misses: Vec<String>,
+```
+
+populated with a sentence per `Compare { operator: Eq, value: Str(text), .. }`
+that matched no event while at least one event's value for that field contained
+`text`, naming an example value. `src/encode.rs` will render it under the
+existing `filter ... kept N of M` line, beside `unseen_fields`, once the field
+is there — that side is one edit in this stream's file and is not blocked on
+anything else.
+
+### To stream F, in `src/collect/net/`: net 6 itself
+
+`net.tcp.rtt`'s `daddr` attribute carries the address and the port. `dport` and
+`sport` are already separate numeric attributes, so the port inside `daddr` buys
+nothing and costs the obvious filter — an equality against an address can never
+match, forever, and the run reports it as an ordinary empty result. Either
+`daddr` becomes the address alone, or `catalog/net.yaml` grows a caveat saying
+what it holds; the first is better and cheaper. Reproduction and both outputs
+are in defect 6 of `docs/scenarios/net.md`.
+
+### To whoever owns `src/request.rs`: runtime 1, and io 7 with it
+
+No stream in this wave owns `src/request.rs`, which is why runtime 1 is
+unfixed. It needs `topk` to be able to rank by an attribute rather than only by
+the series key:
+
+```rust
+pub enum Emit {
+    // ...
+    /// `topk:10` ranks series; `topk:10@method` ranks the distinct values of
+    /// an attribute. A series is a set of keys, so a source carrying one key
+    /// answers `topk` with one row however many distinct things it measured.
+    TopK { k: u32, by: Option<String> },
+}
+```
+
+with the parse accepting `topk`, `topk:N` and `topk:N@<attr>`, the `Display`
+round-tripping all three, and `EmitKind::TopK` unchanged. `src/emit.rs`'s
+`topk()` then groups by `event.attr(by)` instead of `SeriesKey::of`, which is a
+small change in a file this stream owns and will be made as soon as there is a
+way to ask for it. `src/validate.rs` should refuse an attribute the entry does
+not declare among its `filter_fields`, which is the only list of attribute names
+the catalog carries.
+
+**This is the same gap as io 7.** `io.bytes` puts `read_bytes`, `write_bytes`,
+`sector_bytes` and `discarded_bytes` on every event and declares
+`[rate, summary, timeline, topk]`, none of which can show any of them; so *was
+that reads or writes* is measured, attached, and unreachable. `io.iops` and
+`io.merges` are the same shape. Whoever takes one takes both — and the earlier
+request in §12, *"what would let `topk` answer the question `io` and `net`
+declare"*, is the third face of it, from the key side.
+
+### To whoever owns `man/omn.1`: the remaining half of runtime 2
+
+`=~` is now refused when its pattern could only have been meant as a regular
+expression, which is the only place a run has any reason to say what the
+operator is. The manual still lists it among the operators without saying. In
+the `--filter` entry, after the operator list:
+
+```troff
+.BR =~
+is a substring test rather than a regular expression:
+.RB ` "comm =~ 'python'" '
+keeps
+.BR python3 .
+A pattern that can only be a regex \(em a character class, a group, an escape,
+or an anchor \(em is refused rather than matched literally.
+```
+
+`tests/scenario_runtime.rs::defect_2_the_match_operator_is_a_substring_test_and_says_so`
+asserts that the manual is still silent, and says in its own message to drop
+that assertion when this lands. No stream in this wave owns the file.
+
+### To stream A, for the exit code of a filter that cannot mean anything
+
+Noticed while landing runtime 2 and left alone, because it is exactly stream A's
+class. A `--filter` that fails to parse is a `ParseError` raised by clap's value
+parser, so it exits **1** — "this machine cannot serve it" — where it is plainly
+"the request cannot mean anything", which is 2. It is the same fall-through
+`docs/scenarios/sched.md` defect 6 describes for a missing `--mode`, and it now
+has a second and more visible instance.

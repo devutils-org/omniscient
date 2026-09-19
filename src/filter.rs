@@ -83,7 +83,15 @@ pub enum CompareOp {
     Le,
     Gt,
     Ge,
-    /// Substring or glob match, for string fields such as `comm`.
+    /// Substring match, for string fields such as `comm`: `comm =~ 'python'`
+    /// keeps `python3`.
+    ///
+    /// It is not a regular expression, although every other tool that spells a
+    /// match operator this way means one. A pattern written as a regex parses,
+    /// validates, is reported as applied and keeps nothing, which looks exactly
+    /// like a workload that did nothing -- so the ones that can only have been
+    /// meant as a regex are refused by [`literal_only`] rather than evaluated
+    /// literally.
     Matches,
     /// Membership in a literal set.
     In,
@@ -418,6 +426,11 @@ impl<'a> Parser<'a> {
             }
         };
         let value = self.parse_value(&field)?;
+        if operator == CompareOp::Matches {
+            if let Value::Str(pattern) = &value {
+                literal_only(&field, pattern)?;
+            }
+        }
         if operator == CompareOp::In && !matches!(value, Value::List(_)) {
             return Err(ParseError::new(format!(
                 "`in` expects a list, as in `{field} in (1, 2)`"
@@ -473,6 +486,71 @@ impl<'a> Parser<'a> {
             ))),
         }
     }
+}
+
+/// Refuses a `=~` pattern that could only have been meant as a regular
+/// expression.
+///
+/// `=~` is `str::contains`. Perl, Ruby, awk and bash's `[[ =~ ]]` all spell a
+/// regular-expression match this way, so a reader has every reason to write
+/// one -- and a regex written here is parsed, validated, reported as applied,
+/// and keeps nothing. An empty series is also what a correct filter over a
+/// quiet workload produces, so the mistake is invisible at exactly the moment
+/// it matters.
+///
+/// Refusing is the only place the tool can say what the operator does, since
+/// nothing else in a run has a reason to mention it. It happens at parse time,
+/// before anything is attached: the request cannot mean what it says, which is
+/// not the same as a machine that cannot serve it.
+///
+/// The set is deliberately narrow -- what an attribute value almost never
+/// contains and a misread predicate almost always does. `.`, `+`, `*` and `?`
+/// are absent on purpose: `a.js:3:1`, `libc.so.6+0x27781` and `operator*` are
+/// ordinary method and frame text, and refusing them would break substring
+/// matches that work today.
+fn literal_only(field: &str, pattern: &str) -> Result<(), ParseError> {
+    let refuse = |what: &str, instead: String| {
+        Err(ParseError::new(format!(
+            "`=~` is a substring test, not a regular expression, so `{pattern}` would only keep \
+             values containing {what} literally. {instead}"
+        )))
+    };
+
+    if let Some(inner) = pattern
+        .strip_prefix('^')
+        .or_else(|| pattern.strip_suffix('$'))
+    {
+        let anchor = if pattern.starts_with('^') {
+            "`^`"
+        } else {
+            "`$`"
+        };
+        let inner = inner.trim_start_matches('^').trim_end_matches('$');
+        return refuse(
+            anchor,
+            format!(
+                "It has no anchors: write `{field} == '{inner}'` for an exact match, or \
+                 `{field} =~ '{inner}'` to find it anywhere in the value."
+            ),
+        );
+    }
+
+    for (character, means) in [
+        ('[', "a character class"),
+        ('(', "a group"),
+        ('\\', "an escape"),
+    ] {
+        if pattern.contains(character) {
+            return refuse(
+                &format!("`{character}`"),
+                format!(
+                    "`{character}` is {means} in a regular expression and nothing in a \
+                     substring: write the text to look for, as in `{field} =~ 'text'`."
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A bare word is an integer when it parses as one, a string otherwise, so
