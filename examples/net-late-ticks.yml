@@ -1,0 +1,34 @@
+# Does a poll that cannot keep its own cadence admit it?
+#
+#   omn -f examples/net-late-ticks.yml
+#
+# A series is a claim about spacing as much as about values. Ask for a reading
+# every ten microseconds from a file that takes about a hundred to read, and the
+# spacing the series claims is one the run never had.
+#
+# Ten microseconds is not a plausible request; that is the point. It is short
+# enough that no machine can serve it, so the scenario is the same everywhere
+# and needs nothing of the one it runs on. One run of it reported:
+#
+#   1247 events over 50.05ms
+#   LOSS: 0 dropped, 0 failed reads, 1246 late ticks
+#     1x a round of reads took 108202ns, longer than the 10000ns tick
+#     ... 514 more lines saying the same thing with a different number
+#
+# Both halves matter. The count is right -- essentially every tick was late, and
+# the tool says so rather than presenting a series spaced at ten microseconds.
+# The hundreds of near-identical lines are not: the reasons are collapsed by
+# exact text and the text carries the measured duration, so a loss that repeats
+# is printed once per occurrence. `docs/scenarios/net.md` records it under
+# "Defects found".
+name: a poll faster than its own read
+duration: 50ms
+format: text
+
+requests:
+  - label: too-fast
+    source: net.bytes
+    target: {iface: lo}
+    mode: poll@10us
+    emit: [summary]
+    keys: [iface]

@@ -1,0 +1,56 @@
+# What does the stack believe about this path, and is it right?
+#
+# The ground truth is injected. A network emulator on loopback delays every
+# packet by a known amount in each direction, so a round trip is twice that --
+# a number this session did not measure and cannot influence:
+#
+#   unshare --user --map-root-user --net -- bash -c '
+#     ip link set lo up
+#     tc qdisc add dev lo root netem delay 25ms
+#     python3 - <<PY &
+#   import socket, time
+#   s = socket.socket(); s.bind(("127.0.0.1", 40123)); s.listen(4)
+#   c = socket.create_connection(("127.0.0.1", 40123)); a, _ = s.accept()
+#   end = time.time() + 6
+#   while time.time() < end:
+#       c.sendall(b"x" * 64); a.recv(64); a.sendall(b"y" * 64); c.recv(64)
+#       time.sleep(0.05)
+#   PY
+#     sleep 1.5
+#     omn -f examples/net-injected-rtt.yml'
+#
+# 25 ms each way, so `net.tcp.rtt` has to report about 50 ms and nothing else.
+# It does, to within a tenth of a millisecond, which is the strongest statement
+# this family can make about its own numbers: the delay was chosen outside the
+# tool and the tool found it.
+#
+# The two requests are the two modes this source declares. They share one
+# window -- a session observes one target over one window -- so `trace` here is
+# read at the polled cadence rather than per RTT update; the netlink backend
+# has no other way to be told. That is the comparison worth making: both modes
+# must land on the same 50 ms.
+#
+# Without the emulator this still runs and still says something, just something
+# weaker: every established connection on the machine, with what the kernel
+# currently believes about its path. Loopback with no emulator is tens of
+# microseconds, and a connection off the machine is whatever the path is.
+name: an injected round trip
+duration: 1s
+format: text
+
+requests:
+  - label: polled
+    source: net.tcp.rtt
+    target: system
+    mode: poll@200ms
+    emit: [timeline, summary]
+    keys: [sock]
+    filter: "dport == 40123"
+
+  - label: traced
+    source: net.tcp.rtt
+    target: system
+    mode: trace
+    emit: [hist, summary]
+    keys: [sock]
+    filter: "dport == 40123"

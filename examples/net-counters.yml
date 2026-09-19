@@ -1,0 +1,59 @@
+# The `count` leg of the sweep, and what a counter source actually reports.
+#
+#   omn -f examples/net-counters.yml
+#
+# Four sources, all of them reading a kernel counter that only grows. `count` is
+# the mode for a counter aggregated over a window, and it is the only mode of
+# these four that can produce a `rate`: `poll` samples a level, where a rate
+# means nothing, and the validator keeps the two apart.
+#
+# Three things are true of every request here and are worth watching in the
+# output:
+#
+#   - the first read of the run is a baseline and produces no event, so a run
+#     shorter than one tick measures nothing and says so;
+#   - the run takes a final read when it stops, or the last interval is dropped
+#     and every run under-reports by up to one tick;
+#   - `count` has no cadence argument, so a run asked for less than a second
+#     still observes one. The header reports the window it actually observed.
+#
+# The ground truth for the two volume sources is whatever you push through
+# loopback while this runs -- and loopback counts every byte twice, once
+# received and once transmitted, because it is both:
+#
+#   dd if=/dev/zero bs=1M count=16 | nc -N 127.0.0.1 9999 &
+name: the count leg of the net capability sweep
+duration: 2s
+format: text
+
+requests:
+  - label: volume
+    source: net.bytes
+    target: system
+    mode: count
+    emit: [rate, summary]
+    keys: [iface]
+
+  - label: packets
+    source: net.packets
+    target: system
+    mode: count
+    emit: [rate, summary]
+    keys: [iface]
+
+  # `raw` is the only emit of this source that carries the drops. The measured
+  # value -- what `rate` and `summary` aggregate -- is errors, because a bad
+  # frame and a full queue are different failures and summing them would hide
+  # which one happened.
+  - label: links
+    source: net.iface
+    target: system
+    mode: count
+    emit: [rate, raw, summary]
+    keys: [iface]
+
+  - label: accept-queue
+    source: net.backlog
+    target: system
+    mode: count
+    emit: [rate, raw, summary]

@@ -1,0 +1,66 @@
+# Two roads to the same traffic, and they have to meet.
+#
+# No `net` source has two implemented backends, so the comparison this family
+# can make is not within a chain: it is between two *mechanisms* measuring one
+# wire over one window. `/proc/net/dev` is the kernel's own per-interface
+# accounting; `AF_PACKET` is every frame, copied out of a ring. They count the
+# same traffic and they are written by different people for different reasons,
+# which is exactly what makes the agreement worth anything.
+#
+# Run it where the only traffic on loopback is yours, or the numbers are the
+# machine's rather than the workload's:
+#
+#   unshare --user --map-root-user --net -- bash -c '
+#     ip link set lo up
+#     omn -f examples/net-two-mechanisms.yml &
+#     sleep 0.7
+#     python3 -c "
+#   import socket
+#   r = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); r.bind((\"127.0.0.1\", 40555))
+#   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#   for _ in range(2000): s.sendto(b\"x\" * 100, (\"127.0.0.1\", 40555))"
+#     wait'
+#
+# Two thousand datagrams of a hundred bytes, and loopback carries every one of
+# them twice because it is both the sender and the receiver. So the answer is
+# four thousand frames, and three numbers follow from constants the workload
+# knows:
+#
+#   net.packets   4000                       frames
+#   net.bytes     512000  = 4000 * 128       IP + UDP + payload
+#   net.capture   568000  = 4000 * 142       the same, plus loopback's 14-byte
+#                                            link header, which /proc/net/dev
+#                                            does not count
+#
+# The 56000-byte gap is not a disagreement. It is the one difference between
+# the two mechanisms, it is a constant, and a run where it is anything else is
+# a finding.
+#
+# `net.capture` needs CAP_NET_RAW, which the build does not grant -- the user
+# namespace above is where it comes from. Without it the third request refuses
+# by name and the first two still answer.
+name: two mechanisms, one wire
+duration: 2s
+format: text
+
+requests:
+  - label: volume
+    source: net.bytes
+    target: {iface: lo}
+    mode: count
+    emit: [rate, summary]
+    keys: [iface]
+
+  - label: packets
+    source: net.packets
+    target: {iface: lo}
+    mode: count
+    emit: [rate, summary]
+    keys: [iface]
+
+  - label: frames
+    source: net.capture
+    target: {iface: lo}
+    mode: trace
+    emit: [raw]
+    keys: [iface]

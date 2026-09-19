@@ -1,0 +1,54 @@
+# Valid, and not built. Exit 3, which is not exit 1.
+#
+#   omn -f examples/net-not-built.yml            # exit 3
+#   omn -f examples/net-not-built.yml --dump-request
+#
+# Eight of the fifteen `net` sources have no collector and seven of those eight
+# wait on the same thing: an eBPF layer that can attach to a tracepoint by its
+# numeric id, or `fentry` with BTF. The catalog describes them anyway, and that
+# is the point -- the request resolves, validates and dumps, and the refusal
+# says which backend is missing rather than pretending the source does not
+# exist.
+#
+# Exit 3 is a different answer from exit 1. Exit 1 is a problem with this run,
+# and retrying or raising privileges may help. Exit 3 is a problem with this
+# build, and neither will. A reader who cannot tell them apart raises privileges
+# against a collector nobody has written.
+#
+# The run answers for the first request and stops, because a session is one
+# window and one of its requests cannot be served in it. That is worth knowing
+# when reading the output: the validator reports every rejection at once, and
+# this stage reports one missing collector at a time. The other two requests are
+# here so that `--dump-request` shows all three, and so that this file stops
+# being an example the day they land.
+name: three sources this build does not collect
+duration: 500ms
+format: text
+
+requests:
+  # tracepoint:skb:kfree_skb, with the drop reason the recent kernels carry.
+  - label: drops
+    source: net.drops
+    target: system
+    mode: count
+    emit: [rate]
+    keys: [sock]
+
+  # tracepoint:qdisc:qdisc_dequeue -- the loss `net.iface` cannot see, because
+  # a frame dropped inside a queueing discipline never reaches the device
+  # counters.
+  - label: transmit-queue
+    source: net.qdisc
+    target: system
+    mode: trace
+    emit: [hist]
+    keys: [sock]
+
+  # Where a received packet is actually processed: softirq context, outside any
+  # process. This is why `sock:cookie` and not the pid is this family's key.
+  - label: softirq
+    source: net.softirq
+    target: system
+    mode: count
+    emit: [rate]
+    keys: [cpu]
