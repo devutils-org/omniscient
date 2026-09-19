@@ -241,12 +241,26 @@
   modes: [trace]
   emits: [raw, timeline]
   targets: {iface: native, system: native}
-  keys: [sock]
+  # A frame off the wire has no socket: the lookup that would give it one has
+  # not happened yet, and on receive it never happens in a process context at
+  # all. What a captured frame does have is the interface it crossed.
+  keys: [iface]
   filter_fields: [iface, protocol, dport, daddr]
   determinism: high
   caveats:
     - "Watch buffer drops. A capture that loses packets under load silently
        produces wrong conclusions."
+    - "The kernel is told to copy only the headers of each frame, through a
+       classic BPF filter on the socket, so no payload enters this process.
+       `bytes` is still the frame's length on the wire; `captured_bytes` is what
+       was copied."
+    - "A packet the snaplen cut short before its ports reports no ports, which
+       is not port zero."
+    - "Frames are stamped from CLOCK_REALTIME by the kernel and converted here,
+       so every event carries a non-zero ts_err_ns: the width of the calibration
+       plus what the realtime clock could have been slewed by since."
+    - "Needs CAP_NET_RAW. The build does not grant it, so this source reports
+       the privilege it is missing rather than collecting."
 
 - id: net.iface
   family: net
