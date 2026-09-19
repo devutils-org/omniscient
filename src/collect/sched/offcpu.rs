@@ -180,15 +180,22 @@ impl OffCpuCollector {
         }
     }
 
-    /// Reads the target's mappings while it still has some.
+    /// Reads the target's mappings while it still has some, every tick.
     ///
-    /// Not at `start`, and not when a stack first needs resolving. A symbolizer
-    /// snapshots `/proc/<pid>/maps` when it is built, and both of those moments
-    /// are wrong for a launched program: at `start` the child has not execed
-    /// yet, so the maps are this tool's own, and by the time a block is drained
-    /// the program has often exited and there are no maps at all. That is what
-    /// a stack of bare addresses looks like, and this is the only window in
-    /// between.
+    /// Not once, and not when a stack first needs resolving. A symbolizer
+    /// snapshots `/proc/<pid>/maps` when it is built, and for a launched
+    /// program *every* single moment is the wrong one: at `start` the child has
+    /// not execed, at the first tick it is inside `execve` with its old image
+    /// gone and its new one not yet mapped, and by the time the block that
+    /// matters is drained -- which for a program that sleeps and then exits is
+    /// at `stop` -- there are no maps at all. Each of those reads a launched
+    /// program's stack back as twelve bare addresses.
+    ///
+    /// There is no single right moment, so this takes them all: one read per
+    /// tick of a file of a few dozen lines, keeping the last one that had
+    /// anything in it. The snapshot a stack is symbolized against is then the
+    /// most recent one taken while the target was alive, which is the best
+    /// answer that exists.
     ///
     /// Processes this run did not launch are still resolved lazily, because
     /// there is no list of them to walk until one of them blocks.
@@ -197,9 +204,14 @@ impl OffCpuCollector {
             return;
         }
         let Some(tgid) = self.filter else { return };
-        self.symbolizers
-            .entry(tgid as i32)
-            .or_insert_with(|| Symbolizer::for_process(tgid as i32));
+        match self.symbolizers.entry(tgid as i32) {
+            std::collections::hash_map::Entry::Occupied(mut held) => {
+                held.get_mut().refresh();
+            }
+            std::collections::hash_map::Entry::Vacant(empty) => {
+                empty.insert(Symbolizer::for_process(tgid as i32));
+            }
+        }
     }
 
     /// Symbolizes the stack behind an entry, once per distinct id.

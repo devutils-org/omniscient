@@ -402,14 +402,39 @@ profiles that workload as almost nothing. That is defect 1, and it is why
 
 ## Defects found
 
-Ten. None of them was worked around: every scenario above runs against the
-tool as it is. Two of them hold a defect in place — the profile that finds
+Ten, **five of them now fixed**: 1, 2, 3, 7 and 9, in the fifth wave, by the
+stream that owns stacks and the two families that produce them. Each is marked
+below with what changed and the scenario that now asserts it, and the
+reproduction is left in place because that is what the assertion is written
+against. `docs/fixes/stacks.md` is that stream's log.
+
+None of them was worked around: every scenario above runs against the
+tool as it is. Two of them held a defect in place — the profile that finds
 nothing, and the exit code of an unimplemented mode — and each says in its own
 doc comment that a failure means the defect was fixed and the scenario has to
 be rewritten to the invariant. The rest check what is true today and survive
 the fix.
 
 ### 1. A profile follows one task, finds nothing, and reports no loss
+
+**Fixed** (wave five). Not by finding the work — a per-task sampling event
+cannot be inherited, which is a property of the mechanism and not of this build
+— but by saying so. `cpu.profile` now attaches `SampledEvent::sampled_threads`
+as a degradation whenever the target is more than the one task the event
+follows, with the number of tasks the run really took samples from beside it:
+
+```
+degraded: a sampling event is not inherited, so this profile followed the target
+task only: threads it starts afterwards are not sampled; it has samples from 1
+task, and cpu burned in a thread or a child process the target started is in no
+number here
+```
+
+A degradation and not a loss, on purpose: the samples were never taken, so
+there is no count of them, and `losses.dropped` staying zero is the honest
+answer. `sched.switches`, which opens the same shape of event over the same
+kind of target, now says the same thing. `mem.faults` is the third and belongs
+to another stream; the note is in `docs/open-findings.md`.
 
 The worst of the ten, and the one the loss class exists for. `cpu.profile`
 opens a sampling event, which the kernel will not inherit — it refuses to map a
@@ -475,9 +500,18 @@ target that can have more than one task, which costs nothing and is honest; or
 open one event per cpu and filter, which is what `perf record -a` does and what
 `cpu.profile --system` already refuses for want of privileges.
 
-Pinned by `a_profile_of_work_done_in_another_task_finds_nothing_and_reports_no_loss`.
+Was pinned by `a_profile_of_work_done_in_another_task_finds_nothing_and_reports_no_loss`;
+now by `a_profile_that_cannot_see_the_work_says_it_did_not_see_it`, which keeps
+the workload and the counting event beside it as the independent reference and
+asserts the sentence rather than the silence.
 
 ### 2. A throttled period is counted as a dropped sample, and `losses.throttled` stays zero
+
+**Fixed** (wave five). `cpu.profile` and `sched.switches` now write
+`self.losses.throttled += throttles`, which is what
+`src/collect/mem/page_faults.rs` already did and what the comment above the
+`sched.switches` line already claimed. A throttled run's JSON now carries
+`"throttled": 2`, and `dropped` counts only what a ring reported losing.
 
 `Losses::throttled` exists and documents exactly why it must not be folded into
 `dropped`:
@@ -517,10 +551,28 @@ the field is for, sees a clean run; the twenty periods are reported as a
 precision (`98` samples) that nobody has.
 
 Pinned by `a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take`,
-which counts a throttle whichever field it lands in, so the scenario survives
-the fix.
+which counted a throttle whichever field it landed in and so survived the fix.
+It now asserts the field as well — `losses.throttled` is what a consumer
+filters on — and that any `dropped` count is explained by a ring overflow, so
+a number of periods can never again be reported as a number of samples.
 
 ### 3. `cpu.util` loses nine tenths of its readings to the kernel's tick and says nothing
+
+**Fixed** (wave five). `cpu.util` counts its reads and the ones that found the
+file unmoved, and states the result — measured, rather than predicted from the
+interval:
+
+```
+degraded: 426 of 475 reads found `/proc/stat` unmoved and produced no share,
+because the kernel credits cpu time in ticks of 10 ms and a window where nothing
+moved is not a window that was idle; this polls every 1 ms, so the series
+carries the kernel's resolution and not the one that was asked for
+```
+
+`cpu.oncpu_time` keeps its own sentence, which is derived from the interval and
+made before the run rather than after it. The two are complementary, and what
+this defect was about is that only one of the two readers of this tick said
+anything at all.
 
 `/proc/stat` credits cpu time in ticks of 10 ms. `cpu.util` reads it, and when
 two reads fall inside one tick nothing has moved, so the collector emits no
@@ -556,7 +608,10 @@ cheapest fix is `cpu.util` borrowing that sentence; the honest one is the poll
 layer refusing, or reporting, an interval below what the source can resolve.
 
 Pinned by `a_poll_faster_than_the_kernels_tick_gets_the_kernels_resolution`,
-which asserts the accuracy and reports the shortfall.
+which asserts the accuracy, and now asserts the disclosure too: that it exists,
+that it names the tick, and that it is about the bulk of the reads rather than
+a stray one. On a machine so loaded that no two reads fall inside one tick the
+scenario skips, with the late-tick count that shows why.
 
 ### 4. A mode the build does not implement exits like a failure
 
@@ -646,6 +701,35 @@ messages and records the codes.
 
 ### 7. A profile costs a second of wall clock before it samples anything
 
+**Fixed** (wave five), and the candidate below was half of it. Measured again,
+same machine, same debug build:
+
+```
+cpu.profile -d 50ms  --stack none   0.085 s     (was 1.05 s)
+cpu.profile -d 400ms --stack fp     0.425 s     (was 1.41 s)
+cpu.instructions -d 400ms           0.430 s     (unchanged)
+```
+
+Two causes, and the second is why `--stack none` paid the same second:
+
+1. `KernelSymbols::read` ran inside every `Symbolizer::for_process`. It is now
+   a process-wide `OnceLock`, read at most once per run and only when a kernel
+   frame is actually looked up. The table describes the machine rather than a
+   process, so a second copy of it was a second copy of the same answer.
+2. `Unwinder::notes` asked `kernel_symbols_available()` at the end of every
+   run, and that question *is* the parse. A run with no kernel frames cannot
+   lose their names, so it is now asked only by a run that walked into the
+   kernel — which is what leaves the file unread by a profile that asked for no
+   stacks at all.
+
+This closes most of finding 19 of `docs/open-findings.md` as well; defect 3 of
+`docs/scenarios/sched.md` has the machine-wide measurement.
+
+Pinned by `a_profile_costs_its_window_and_not_a_fixed_second`, whose reference
+is a counting run of the same length over the same target — same startup, same
+probe, same teardown, differing only in the mechanism — so nothing in it
+depends on how fast this machine is.
+
 ```
 cpu.profile -d 50ms  --stack none   1.05 s
 cpu.profile -d 400ms --stack fp     1.41 s
@@ -699,6 +783,32 @@ three hundred milliseconds of a busy profile; nothing here has run for an hour.
 
 ### 9. A crowded pmu is reported as a target that never ran
 
+**Fixed** (wave five). The two causes of `running_ns == 0` are told apart by
+`enabled_ns`, which for a per-task event advances only while the task is on a
+cpu: zero is a target that never got one, and non-zero is a target that ran
+while its counters did not. The message now says which, and the second carries
+the window the target did run for:
+
+```
+`cpu.ipc` was never scheduled onto a cpu during the window, although the target
+ran for 140.93 ms of it: its counters could not fit on the pmu beside what else
+is open, and a group is crowded out whole. There is no count, which is not the
+same as a count of zero
+
+`cpu.instructions` was enabled for no time at all: the target did not run during
+the window, so there is no count, which is not the same as a count of zero
+```
+
+Pinned three ways, because only one of the two states can be produced on
+demand. `a_counter_over_a_target_that_never_ran_says_that_is_what_happened`
+drives the idle one — a process asleep for the whole window — and asserts that
+the message names it and does not blame the hardware. Two unit tests in
+`src/collect/cpu/counters.rs` drive both branches against readings the kernel
+would produce. And the scenario below asserts the crowded message wherever this
+machine really does evict the ratio's group, which it does under the fan-out
+and not on request: ten `cpu.ipc` groups over one workload are time-shared at
+20 % duty here rather than evicted.
+
 A single counter that shares the hardware is time-shared and scaled, and the
 run says so. A *group* of two, which is what `cpu.ipc` opens so that its ratio
 is a ratio of one window, is crowded out entirely — and what the run says then
@@ -732,7 +842,10 @@ program.
 
 The scenario reads it correctly: `a_known_number_of_retired_instructions_…`
 stops with "the ratio's counter group was never scheduled onto the pmu" rather
-than believing either story.
+than believing either story — and now asserts, before it stops, that the reason
+names the pmu. The request above it counted the workload in the same window, so
+the target demonstrably ran, which is what makes that assertion ground truth
+rather than a check on wording.
 
 ### 10. A JSON run shares stdout with the program it launched
 

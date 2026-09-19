@@ -298,11 +298,31 @@ pub(super) fn measured(
     let window = readings.first()?;
     if window.never_ran() {
         losses.failed_reads += 1;
-        losses.note(format!(
-            "`{}` was never scheduled onto a cpu during the window -- the target did not \
-             run -- so there is no count, which is not the same as a count of zero",
-            spec.source
-        ));
+        // Two different things produce `running_ns == 0`, and the pair is told
+        // apart by `enabled_ns`: for a per-task event both clocks advance only
+        // while the task is on a cpu, so a zero there is a target that never
+        // ran, and a non-zero one is a target that ran while the counter did
+        // not -- the pmu was full. A group of two, which is what a ratio opens
+        // so that both terms cover one window, is the first thing crowded out.
+        //
+        // Guessing the first and printing it was the defect: a reader whose
+        // program was plainly working was told it had not run.
+        losses.note(if window.enabled_ns == 0 {
+            format!(
+                "`{}` was enabled for no time at all: the target did not run during the \
+                 window, so there is no count, which is not the same as a count of zero",
+                spec.source
+            )
+        } else {
+            format!(
+                "`{}` was never scheduled onto a cpu during the window, although the target \
+                 ran for {:.2} ms of it: its counters could not fit on the pmu beside what \
+                 else is open, and a group is crowded out whole. There is no count, which is \
+                 not the same as a count of zero",
+                spec.source,
+                window.enabled_ns as f64 / 1e6,
+            )
+        });
         return None;
     }
 
@@ -1193,21 +1213,62 @@ mod tests {
         }
     }
 
+    /// Two different things produce `running_ns == 0`, and the message has to
+    /// say which. For a per-task event both clocks advance only while the task
+    /// is on a cpu, so `enabled_ns` is the discriminator: zero is a target that
+    /// never ran, and non-zero is a target that ran while its counters could
+    /// not fit on the pmu -- a group is crowded out whole, which is why a ratio
+    /// meets this where a single counter is only time-shared.
+    ///
+    /// Picking the first and printing it whichever had happened is the defect
+    /// `docs/scenarios/cpu.md` records as cpu 9: a reader whose program was
+    /// plainly working was told it had not run.
     #[test]
     fn a_window_the_counter_never_ran_in_produces_no_number_and_says_why() {
         let mut collector = CounterCollector::new(0, spec("cpu.instructions"));
-        let event = collector.event(&[reading("instructions", 0, 5_000_000, 0)], 0);
+        let event = collector.event(&[reading("instructions", 0, 0, 0)], 0);
 
         assert!(event.is_none(), "a counter that never ran reported a value");
         let losses = collector.losses();
         assert_eq!(losses.failed_reads, 1);
         let reason = losses.reasons.keys().next().expect("a reason").clone();
-        assert!(reason.contains("never scheduled"), "{reason}");
+        assert!(reason.contains("the target did not run"), "{reason}");
+        assert!(
+            !reason.contains("pmu"),
+            "a target that never got a cpu is being blamed on the hardware: {reason}"
+        );
         // The distinction this whole path exists for: an idle target has no
         // count, and a count of zero is a different statement.
         assert!(
             reason.contains("not the same as a count of zero"),
             "{reason}"
+        );
+    }
+
+    /// The other half of the same fork: the target ran for five milliseconds of
+    /// the window and the counter was on for none of it.
+    #[test]
+    fn a_counter_crowded_off_the_pmu_blames_the_pmu_and_not_the_target() {
+        let mut collector = CounterCollector::new(0, spec("cpu.instructions"));
+        let event = collector.event(&[reading("instructions", 0, 5_000_000, 0)], 0);
+
+        assert!(event.is_none(), "a counter that never ran reported a value");
+        let reason = collector
+            .losses()
+            .reasons
+            .keys()
+            .next()
+            .expect("a reason")
+            .clone();
+        assert!(reason.contains("could not fit on the pmu"), "{reason}");
+        assert!(
+            reason.contains("5.00 ms"),
+            "the window the target did run for is what tells the reader which of the two \
+             happened, and it is not in the message: {reason}"
+        );
+        assert!(
+            !reason.contains("the target did not run"),
+            "a target that ran is being reported as one that did not: {reason}"
         );
     }
 

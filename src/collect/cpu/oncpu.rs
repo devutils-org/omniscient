@@ -31,7 +31,7 @@ use crate::request::{Mode, Target};
 /// What the kernel counts cpu time in. `sysconf(_SC_CLK_TCK)` rather than a
 /// literal hundred: the two have agreed on every machine for decades and the
 /// day they stop, a literal turns every number here into a wrong one.
-fn ticks_per_second() -> u64 {
+pub(super) fn ticks_per_second() -> u64 {
     // SAFETY: a read-only query of a configuration value.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if ticks > 0 {

@@ -355,12 +355,25 @@ pub struct Symbolizer {
     /// Parsed once per file, by the path the map named. `None` for a file that
     /// could not be read or carries no symbols, so it is not retried per frame.
     modules: HashMap<PathBuf, Option<Module>>,
-    kernel: Option<KernelSymbols>,
-    /// Addresses that fell in no mapping, and whether the maps have already
-    /// been re-read because of one.
+    /// Addresses that fell in no mapping.
     unmapped: u64,
+    /// Whether a re-read has already found the mapping an address fell outside
+    /// of, and how many have been attempted without finding one.
+    ///
+    /// Two counters rather than one flag, because the two failures are
+    /// different. A re-read that returns mappings has answered the question
+    /// and there is nothing more to learn from another; a re-read that returns
+    /// none has answered nothing -- the process was inside `execve`, or it has
+    /// exited -- and the next frame deserves another try. Bounded, so that a
+    /// target that really is gone costs a handful of reads rather than one per
+    /// frame.
     remapped: bool,
+    failed_rereads: u32,
 }
+
+/// How many times a symbolizer goes back to a `/proc/<pid>/maps` that gave it
+/// nothing before it stops asking.
+const MAX_FAILED_REREADS: u32 = 8;
 
 impl Symbolizer {
     /// A symbolizer for one process: its mappings, and the kernel's.
@@ -374,10 +387,31 @@ impl Symbolizer {
             pid,
             regions: read_maps(pid),
             modules: HashMap::new(),
-            kernel: KernelSymbols::read(),
             unmapped: 0,
             remapped: false,
+            failed_rereads: 0,
         }
+    }
+
+    /// Re-reads the target's mappings, and says whether there were any.
+    ///
+    /// A collector calls this while the target is alive, because the moment a
+    /// symbolizer is built is rarely the moment its maps are worth reading. A
+    /// launched program is inside `execve` when the first tick comes round --
+    /// its old image torn down and its new one not yet mapped -- so the
+    /// snapshot taken then holds `[vsyscall]` and nothing else, and every frame
+    /// of every stack afterwards comes back as an address.
+    ///
+    /// An empty read is never adopted. It is not a process with no mappings: it
+    /// is a process caught mid-`execve`, or one that has exited, and replacing
+    /// a usable snapshot with it is the same defect from the other end.
+    pub fn refresh(&mut self) -> bool {
+        let fresh = read_maps(self.pid);
+        if fresh.is_empty() {
+            return false;
+        }
+        self.regions = fresh;
+        true
     }
 
     /// Whether this machine let the kernel's symbols be read at all.
@@ -387,7 +421,7 @@ impl Symbolizer {
     /// to the same symbol. That has to be detected, not discovered in a profile
     /// where the whole kernel is called `_stext`.
     pub fn kernel_symbols_available(&self) -> bool {
-        self.kernel.as_ref().is_some_and(KernelSymbols::is_usable)
+        kernel_symbols().is_some_and(KernelSymbols::is_usable)
     }
 
     /// Addresses no mapping covered.
@@ -414,9 +448,7 @@ impl Symbolizer {
     }
 
     fn kernel_frame(&mut self, addr: u64) -> Frame {
-        let named = self
-            .kernel
-            .as_ref()
+        let named = kernel_symbols()
             .filter(|symbols| symbols.is_usable())
             .and_then(|symbols| symbols.lookup(addr));
         match named {
@@ -489,9 +521,13 @@ impl Symbolizer {
     /// snapshot never saw, and a profile of a plugin that was `dlopen`ed
     /// halfway through would be all addresses and no names.
     fn region_of(&mut self, addr: u64) -> Option<&Region> {
-        if !self.remapped && !self.regions.iter().any(|region| region.contains(addr)) {
-            self.regions = read_maps(self.pid);
-            self.remapped = true;
+        let may_reread = !self.remapped && self.failed_rereads < MAX_FAILED_REREADS;
+        if may_reread && !self.regions.iter().any(|region| region.contains(addr)) {
+            if self.refresh() {
+                self.remapped = true;
+            } else {
+                self.failed_rereads += 1;
+            }
         }
         self.regions.iter().find(|region| region.contains(addr))
     }
@@ -574,6 +610,29 @@ fn parse_map_line(line: &str) -> Option<Region> {
         },
         path,
     })
+}
+
+/// The kernel's own symbol table, read at most once for the whole run.
+///
+/// `/proc/kallsyms` is 395 318 lines on the development machine, and parsing it
+/// took about a second of a debug build. Every sampling collector used to pay
+/// that when it built its symbolizer, whether or not a kernel frame was ever
+/// looked up: a profile cost a second of wall clock before it sampled anything,
+/// and `sched.offcpu --system --emit stack` -- one symbolizer per process that
+/// blocked -- did not finish at all.
+///
+/// So it is read lazily and shared. Lazily, because the table describes the
+/// kernel and a run that never symbolizes a kernel frame never needs it:
+/// `sched.offcpu` asks the kernel for `BPF_F_USER_STACK` and deliberately never
+/// consults it. Shared, because it describes the *machine* rather than any one
+/// process, and a second copy of it is a second copy of the same answer.
+///
+/// `None` means the file could not be read, which is a machine that does not
+/// publish it rather than a failure worth retrying: one attempt per run.
+static KERNEL_SYMBOLS: std::sync::OnceLock<Option<KernelSymbols>> = std::sync::OnceLock::new();
+
+fn kernel_symbols() -> Option<&'static KernelSymbols> {
+    KERNEL_SYMBOLS.get_or_init(KernelSymbols::read).as_ref()
 }
 
 /// The kernel's own symbol table.
@@ -952,6 +1011,15 @@ pub struct Unwinder {
     walkable_leaf: u64,
     /// Samples that arrived with no callchain at all.
     empty: u64,
+    /// Frames the kernel attributed to itself, over every sample.
+    ///
+    /// Counted so that the note about `kptr_restrict` is only made by a run
+    /// that has kernel frames to lose names from. It is also what keeps
+    /// `/proc/kallsyms` unread by a run that never needed it: asking whether
+    /// the kernel's symbols are readable is what parses them, and a profile
+    /// used to ask at the end whatever it had collected -- a second of wall
+    /// clock, flat, for an answer about frames it did not have.
+    kernel_frames: u64,
 }
 
 impl Unwinder {
@@ -964,6 +1032,7 @@ impl Unwinder {
             unwalkable_leaf: 0,
             walkable_leaf: 0,
             empty: 0,
+            kernel_frames: 0,
         }
     }
 
@@ -975,6 +1044,7 @@ impl Unwinder {
         let callchain = sample.callchain.as_deref()?;
         self.samples += 1;
         let raw = RawStack::split(callchain, sample.cpu_mode);
+        self.kernel_frames += raw.kernel.len() as u64;
         if raw.is_empty() {
             self.empty += 1;
         } else if raw.user.len() == 1 {
@@ -991,6 +1061,18 @@ impl Unwinder {
             self.table
                 .intern(callchain, sample.cpu_mode, &mut self.symbols),
         )
+    }
+
+    /// Re-reads the target's mappings, keeping the ones it has when there are
+    /// none to be had.
+    ///
+    /// Called once per tick by the collectors that follow a process, because
+    /// the moment an unwinder is built is not a moment its target's maps are
+    /// worth reading: a launched program has not execed yet at `attach`, and by
+    /// the time its last samples are drained it has often exited. See
+    /// [`Symbolizer::refresh`].
+    pub fn refresh_symbols(&mut self) -> bool {
+        self.symbols.refresh()
     }
 
     pub fn table(&self) -> &StackTable {
@@ -1050,7 +1132,10 @@ impl Unwinder {
                 self.symbols.unmapped()
             ));
         }
-        if !self.symbols.kernel_symbols_available() {
+        // Asked only of a run that walked into the kernel. The answer costs a
+        // parse of `/proc/kallsyms`, and a run with no kernel frames is not
+        // degraded by names it was never going to print.
+        if self.kernel_frames > 0 && !self.symbols.kernel_symbols_available() {
             notes.push(
                 "kernel addresses are hidden by `kernel.kptr_restrict`, so kernel frames carry \
                  no names"
@@ -1204,6 +1289,42 @@ mod tests {
             parse_map_line("400000-401000 r-xp 00000000 00:20 99 /tmp/prog (deleted)").unwrap();
         assert!(replaced.path.is_none());
         assert_eq!(replaced.name, "/tmp/prog (deleted)");
+    }
+
+    /// The mappings a symbolizer holds must survive the process they describe.
+    ///
+    /// Reading `/proc/<pid>/maps` of a process that has exited returns nothing,
+    /// and nothing is not "this process had no mappings": it is the file being
+    /// gone. Adopting it throws away the only snapshot a launched program's
+    /// stacks can be resolved against -- and the drain that carries the last
+    /// block of a program that blocks and then exits happens after it is gone,
+    /// which is exactly when this is asked.
+    #[test]
+    fn a_symbolizer_keeps_the_mappings_it_has_when_the_target_is_gone() {
+        let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("30").spawn() else {
+            eprintln!("skipped: this machine has no `/bin/sleep` to read the mappings of");
+            return;
+        };
+        let mut symbols = Symbolizer::for_process(child.id() as i32);
+        assert!(
+            symbols.refresh(),
+            "a live process has executable mappings to read"
+        );
+        let held = symbols.regions.len();
+        assert!(held > 0, "a running program maps at least its own text");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            !symbols.refresh(),
+            "a process that has been reaped reported mappings"
+        );
+        assert_eq!(
+            symbols.regions.len(),
+            held,
+            "the mappings read while the target lived were replaced by the empty read that \
+             followed its exit"
+        );
     }
 
     /// `kptr_restrict` publishes the file with every address zeroed rather than

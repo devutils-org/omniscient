@@ -13,6 +13,7 @@
 //! the same total and are different problems -- and because the origin is not
 //! available at all, which `src/bpf/migrate.rs` explains.
 
+use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{Migration, MigrationProgram};
@@ -51,31 +52,57 @@ impl Prepared for Prepare {
                 )
             })? as u32),
         };
-        Ok(Box::new(MigrationCollector::new(filter)))
+        Ok(Box::new(MigrationCollector::new(filter, self.0)))
     }
 }
 
 pub struct MigrationCollector {
     id: CollectorId,
     filter: Option<u32>,
+    /// What the two declared modes actually differ by.
+    ///
+    /// `trace` is a series: one event per (task, cpu) per drain, each covering
+    /// the interval between two drains. `count` is the single measurement of
+    /// one window, which is what [`Collector::stop`] calls "the closing read
+    /// **is** the result": the drains still happen, because the kernel's map
+    /// has to be emptied, but what they produce is added up and reported once,
+    /// over the window the request asked for.
+    ///
+    /// Taking the mode and discarding it -- which is what this did -- made
+    /// `count` an alias for `trace`, and a mode that changes nothing is worse
+    /// than one that is refused, because the refusal is visible.
+    mode: Mode,
     program: Option<MigrationProgram>,
     losses: Losses,
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,
     /// The end of the last interval, which is the start of this one.
     window_opened_ns: u64,
+    /// When the whole window opened, which is the one `count` reports over.
+    run_opened_ns: u64,
+    /// The totals a `count` run accumulates, by the pair that keys a series.
+    counted: BTreeMap<(u32, u32), Migration>,
 }
 
 impl MigrationCollector {
-    pub fn new(filter: Option<u32>) -> Self {
+    pub fn new(filter: Option<u32>, mode: Mode) -> Self {
         Self {
             id: CollectorId::new("sched.migrations/bpf:raw_tp"),
             filter,
+            mode,
             program: None,
             losses: Losses::default(),
             dropped: 0,
             window_opened_ns: 0,
+            run_opened_ns: 0,
+            counted: BTreeMap::new(),
         }
+    }
+
+    /// Whether this run reports one measurement at the end rather than a
+    /// series.
+    fn counting(&self) -> bool {
+        self.mode == Mode::Count
     }
 
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
@@ -102,6 +129,23 @@ impl MigrationCollector {
         if drain_losses.truncated {
             self.losses
                 .note("the migration map held more rows than one drain can walk");
+        }
+
+        if self.counting() {
+            // The map is still drained -- leaving it to fill would lose rows --
+            // but what comes out is added to the window's total rather than
+            // published as a slice of it.
+            for row in rows {
+                let key = (row.tid, row.dest_cpu);
+                self.counted
+                    .entry(key)
+                    .and_modify(|held| {
+                        held.count += row.count;
+                        held.comm.clone_from(&row.comm);
+                    })
+                    .or_insert(row);
+            }
+            return;
         }
 
         for (index, row) in rows.into_iter().enumerate() {
@@ -174,6 +218,7 @@ impl Collector for MigrationCollector {
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(MigrationProgram::load(self.filter)?);
         self.window_opened_ns = monotonic_ns();
+        self.run_opened_ns = self.window_opened_ns;
         Ok(())
     }
 
@@ -189,6 +234,25 @@ impl Collector for MigrationCollector {
         self.drain_into(&mut trailing, u64::MAX / 2);
         self.absorb_drops();
         self.program = None;
+        if self.counting() {
+            let closed_ns = monotonic_ns();
+            let window_ns = closed_ns.saturating_sub(self.run_opened_ns);
+            let seq = u64::MAX / 2;
+            trailing.extend(
+                std::mem::take(&mut self.counted)
+                    .into_values()
+                    .enumerate()
+                    .map(|(index, row)| Event {
+                        ts_ns: closed_ns,
+                        ts_err_ns: 0,
+                        kind: "sched.migrations".to_owned(),
+                        keys: vec![KeyValue::task(row.tid as i32), KeyValue::cpu(row.dest_cpu)],
+                        attrs: attributes(&row, window_ns),
+                        collector_id: self.id.clone(),
+                        seq: seq + index as u64,
+                    }),
+            );
+        }
         trailing
     }
 
@@ -198,6 +262,18 @@ impl Collector for MigrationCollector {
 
     fn losses(&self) -> Losses {
         self.losses.clone()
+    }
+
+    fn notes(&self) -> Vec<String> {
+        if !self.counting() {
+            return Vec::new();
+        }
+        vec![
+            "`count` reports one total per (task, cpu) over the whole window, so there is no \
+             series here and `rate` over it is the window's mean; `--mode trace` is the one \
+             that reports a count per drain"
+                .to_owned(),
+        ]
     }
 }
 

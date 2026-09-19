@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
+use super::oncpu::ticks_per_second;
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -161,6 +162,16 @@ pub struct UtilCollector {
     /// cpu otherwise -- a cpu's difference is against its own previous value
     /// and against nothing else.
     previous: BTreeMap<String, Times>,
+    /// Readings taken, and readings that found the file unmoved.
+    ///
+    /// The second is the resolution this source actually delivered, as opposed
+    /// to the one that was requested. `/proc/stat` moves once per kernel tick,
+    /// so a poll finer than a tick spends most of its reads finding nothing --
+    /// which is the right arithmetic and the wrong thing to leave unsaid: the
+    /// numbers that do arrive are accurate, and the series a reader plots has a
+    /// tenth of the cadence they asked for.
+    reads: u64,
+    unmoved: u64,
 }
 
 impl UtilCollector {
@@ -170,6 +181,8 @@ impl UtilCollector {
             mode,
             which,
             previous: BTreeMap::new(),
+            reads: 0,
+            unmoved: 0,
         }
     }
 
@@ -237,6 +250,38 @@ impl Collector for UtilCollector {
     fn tick(&self) -> Option<StdDuration> {
         None
     }
+
+    /// The resolution the reader is holding, measured rather than predicted.
+    ///
+    /// `cpu.oncpu_time` reads the same kernel tick and states its granularity
+    /// from the interval alone; this states it from what the run actually got,
+    /// which is the same disclosure with the number in it. Both are needed: two
+    /// readers of one tick reporting it two ways is how a reader comes to trust
+    /// a series that has a tenth of the cadence it claims.
+    fn notes(&self) -> Vec<String> {
+        if self.unmoved == 0 {
+            return Vec::new();
+        }
+        let per_tick_ns = 1_000_000_000 / ticks_per_second();
+        let mut note = format!(
+            "{} of {} reads found `/proc/stat` unmoved and produced no share, because the kernel \
+             credits cpu time in ticks of {:.0} ms and a window where nothing moved is not a \
+             window that was idle",
+            self.unmoved,
+            self.reads,
+            per_tick_ns as f64 / 1e6,
+        );
+        if let Mode::Poll { interval } = self.mode {
+            if interval.as_nanos() < per_tick_ns {
+                note.push_str(&format!(
+                    "; this polls every {:.0} ms, so the series carries the kernel's resolution \
+                     and not the one that was asked for",
+                    interval.as_nanos() as f64 / 1e6,
+                ));
+            }
+        }
+        vec![note]
+    }
 }
 
 impl UtilCollector {
@@ -255,8 +300,10 @@ impl UtilCollector {
             None => ("since boot", now),
         };
 
+        self.reads += 1;
         let total = delta.total();
         if total == 0 {
+            self.unmoved += 1;
             // Two reads inside one tick of the kernel's own clock, or a cpu
             // that went offline and took its counters with it. Nothing moved,
             // so there is no share to report -- and zero would read as a
