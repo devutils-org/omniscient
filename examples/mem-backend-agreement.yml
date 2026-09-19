@@ -1,0 +1,83 @@
+# Two roads to the same number: do they arrive at it?
+#
+#   omn -f examples/mem-backend-agreement.yml
+#
+# `mem.rss` has two backends. `/proc/[pid]/smaps_rollup` is the kernel's own
+# per-process rollup of every mapping; `/proc/[pid]/statm` is seven numbers in
+# pages, of which the second is the resident set. They are the same fact by two
+# routes, and the catalog says so: the second is a fallback whose only declared
+# degradation is that it carries no per-VMA breakdown and no PSS or USS beside
+# it. Neither of those changes the resident size.
+#
+# `--backend force:` bypasses the resolver, which is what makes this session a
+# comparison rather than a measurement. Every pinned request says so in its
+# output, and a session that pins several backends of one source over one
+# target gets the self-benchmark on standard error: what each backend cost,
+# what each reported, and how far apart they are.
+#
+# The workload chooses the number -- exactly 64 MiB made resident, a byte
+# written in every page -- so this session checks two things at once. Each
+# backend must see the 64 MiB, which is ground truth; and the two must agree
+# with each other, which is what the catalog is built for.
+#
+# The same shape applies to `mem.pss` and `mem.uss`, whose second backend walks
+# `smaps` mapping by mapping instead of reading the rollup. That walk is not
+# free and it is not instantaneous: reading either file for the first time
+# faults in pages of the reader's own, so the two reads legitimately see a
+# process of two different sizes. Compare the maxima, not the two series point
+# by point.
+name: two backends, one number
+format: json
+
+requests:
+  - label: rss via the rollup
+    source: mem.rss
+    backend: force:fs:proc:smaps_rollup
+    target: &touch64
+      launch:
+        - python3
+        - -c
+        - "import time\ntime.sleep(0.3)\nblock = bytearray(64 * 1024 * 1024)\nblock[::4096] = b'A' * len(block[::4096])\ntime.sleep(0.4)\n"
+    mode: poll@50ms
+    emit: [timeline, summary]
+    keys: [task, mem]
+
+  - label: rss via statm
+    source: mem.rss
+    backend: force:fs:proc:statm
+    target: *touch64
+    mode: poll@50ms
+    emit: [timeline, summary]
+    keys: [task, mem]
+
+  - label: pss via the rollup
+    source: mem.pss
+    backend: force:fs:proc:smaps_rollup
+    target: *touch64
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task, mem]
+
+  - label: pss via the per-mapping walk
+    source: mem.pss
+    backend: force:fs:proc:smaps
+    target: *touch64
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task, mem]
+
+  - label: uss via the rollup
+    source: mem.uss
+    backend: force:fs:proc:smaps_rollup
+    target: *touch64
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task, mem]
+
+  - label: uss via the per-mapping walk
+    source: mem.uss
+    backend: force:fs:proc:smaps
+    target: *touch64
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task, mem]

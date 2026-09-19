@@ -1,0 +1,50 @@
+# Three footprints of one program, over one window.
+#
+#   omn -f examples/mem-footprints.yml
+#
+# RSS, PSS and USS are three answers to "how much memory is this using", and
+# all three are correct. They differ only in how they count what the program
+# *shares*: RSS counts a shared page in full in every process that maps it, PSS
+# divides it by the number of mappers, USS ignores it entirely and reports what
+# would be freed if the process died now.
+#
+# The workload chooses the number. It sleeps first, so the run has a baseline
+# taken before anything is allocated; then it makes exactly 64 MiB resident, by
+# allocating a buffer of that size and writing one byte in every page of it --
+# `malloc` alone would move none of the three, which is what the first caveat
+# on `mem.rss` says; then it sleeps again, so the run is polled several times
+# after the memory exists.
+#
+# Sixty-four megabytes written by one process are private to it, so all three
+# metrics must see the same rise, and USS <= PSS <= RSS must hold at every
+# instant. The three collectors read the same `smaps_rollup` file, which is why
+# the session is written as three requests over one launch rather than three
+# runs: three runs would be three processes and three different 64 MiB.
+name: what "how much memory" means, three ways
+format: json
+
+requests:
+  - label: resident
+    source: mem.rss
+    target: &touch64
+      launch:
+        - python3
+        - -c
+        - "import time\ntime.sleep(0.3)\nblock = bytearray(64 * 1024 * 1024)\nblock[::4096] = b'A' * len(block[::4096])\ntime.sleep(0.4)\n"
+    mode: poll@50ms
+    emit: [timeline, summary]
+    keys: [task, mem]
+
+  - label: proportional
+    source: mem.pss
+    target: *touch64
+    mode: poll@50ms
+    emit: [timeline, summary]
+    keys: [task, mem]
+
+  - label: private
+    source: mem.uss
+    target: *touch64
+    mode: poll@50ms
+    emit: [timeline, summary]
+    keys: [task, mem]

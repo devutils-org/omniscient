@@ -35,6 +35,7 @@ requests:
         - "import ctypes, time\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nblocks = [libc.malloc(65536) for _ in range(1024)]\nfor block in blocks: ctypes.memset(block, 1, 65536)\ntime.sleep(0.3)\nfor block in blocks[::2]: libc.free(block)\ntime.sleep(0.5)\n"
     mode: poll@50ms
     emit: [timeline]
+    keys: [task, mem]
 
   - label: whole process
     source: mem.rss
@@ -45,3 +46,4 @@ requests:
         - "import ctypes, time\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nblocks = [libc.malloc(65536) for _ in range(1024)]\nfor block in blocks: ctypes.memset(block, 1, 65536)\ntime.sleep(0.3)\nfor block in blocks[::2]: libc.free(block)\ntime.sleep(0.5)\n"
     mode: poll@50ms
     emit: [timeline]
+    keys: [task, cgroup, mem]

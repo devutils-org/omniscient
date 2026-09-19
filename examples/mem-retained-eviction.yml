@@ -1,0 +1,40 @@
+# More freed ranges than the table can hold.
+#
+#   omn -f examples/mem-retained-eviction.yml
+#
+# `mem.heap.retained` measures what the allocator kept: the shim says which
+# ranges the program allocated and then freed, and `/proc/[pid]/pagemap` says
+# which pages of those ranges are still in memory. That table of freed ranges
+# is bounded -- a hundred and thirty-one thousand and seventy-two of them --
+# and a program can outrun it.
+#
+# What happens then is the whole reason the table is bounded rather than
+# unbounded: retained memory that is missing from the table looks exactly like
+# retained memory that does not exist. A number that quietly fell is worse than
+# a number with a loss beside it, so the eviction is counted and reported.
+#
+# The workload chooses the number. It allocates a hundred and forty thousand
+# blocks and frees every one, which is eight thousand nine hundred and
+# twenty-eight ranges more than the table holds, so at least that many have to
+# be evicted and said so. It paces itself with a millisecond of sleep every
+# four hundred calls, for one reason worth knowing: without the pacing the
+# shim's pipe overflows first and the records never reach the table at all.
+#
+# This session takes about a second and a half, which is long for a scenario.
+# Two hundred and eighty thousand allocator calls through ctypes is what it
+# costs to overflow a table of this size, and shrinking the table to make the
+# test quicker would be testing a different table.
+name: a freed-range table that overflows, and says so
+format: json
+
+requests:
+  - label: retained
+    source: mem.heap.retained
+    target:
+      launch:
+        - python3
+        - -c
+        - "import ctypes, time\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nblocks = []\nfor i in range(140000):\n    blocks.append(libc.malloc(4096))\n    if i % 400 == 0:\n        time.sleep(0.001)\nfor i, p in enumerate(blocks):\n    libc.free(p)\n    if i % 400 == 0:\n        time.sleep(0.001)\n"
+    mode: poll@200ms
+    emit: [timeline, summary]
+    keys: [task, mem]

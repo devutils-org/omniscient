@@ -1,0 +1,50 @@
+# The same two numbers, through cgroup2 instead of procfs.
+#
+#   omn -f examples/mem-cgroup-counters.yml
+#
+# `mem.pressure` and `mem.swap` each declare two backends, and the second is
+# marked `equivalent: true` -- it degrades nothing, it is the same accounting
+# reached through a different file. `/proc/pressure/memory` and a cgroup's
+# `memory.pressure` are the same PSI counters; `/proc/vmstat`'s `pswpin` and
+# `pswpout` and a cgroup's `memory.stat` are the same swap counters. At the
+# root cgroup the two even cover the same set of tasks, which is what makes
+# them checkable against each other: run this beside
+# `examples/mem-machine-counters.yml` and the totals must match exactly.
+#
+# The root is chosen on purpose, and it is not the ordinary use. `memory.stat`
+# and `memory.pressure` exist at the root; `memory.current` does not, which is
+# why `mem.cgroup` refuses the root by name rather than answering with the
+# machine's total. Point this at a real cgroup -- or at a pid, which resolves
+# to the cgroup that process was placed in -- to measure something.
+name: pressure and swap, by the other route
+format: json
+duration: 500ms
+
+requests:
+  - label: stall time over the window
+    source: mem.pressure
+    backend: force:fs:cgroup
+    target: {cgroup: /}
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: stall time since boot
+    source: mem.pressure
+    backend: force:fs:cgroup
+    target: {cgroup: /}
+    mode: snapshot
+    emit: [raw]
+
+  - label: swap flow over the window
+    source: mem.swap
+    backend: force:fs:cgroup
+    target: {cgroup: /}
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: swap since boot
+    source: mem.swap
+    backend: force:fs:cgroup
+    target: {cgroup: /}
+    mode: snapshot
+    emit: [raw]

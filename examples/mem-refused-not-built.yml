@@ -1,0 +1,33 @@
+# A request that is valid, and that this build cannot collect.
+#
+#   omn validate -f examples/mem-refused-not-built.yml  # says it is valid
+#   omn -f examples/mem-refused-not-built.yml           # refuses, exit 3
+#
+# Direct reclaim is the kernel doing the allocator's work in the allocating
+# thread: a page was needed, none was free, and the thread that asked went and
+# found one. It is one of the clearest memory problems there is, and it is
+# vocabulary here rather than a measurement -- `mem.reclaim` resolves, it
+# validates, every axis of it is checked, and nothing collects it.
+#
+# The reason is one mechanism. `mem.reclaim`, `mem.compaction`, `mem.kmalloc`
+# and `mem.page_alloc` all want `bpf:tp`, the classic tracepoint attach, and
+# `src/bpf/` has only `BPF_RAW_TRACEPOINT_OPEN`. Four of this family's
+# twenty-three sources wait on that one piece of work, and twenty-seven across
+# the catalog.
+#
+# So the code is 3 and not 1, and the difference is the difference between
+# "your machine cannot do this" and "we have not written it". This machine has
+# the tracepoints, has `CAP_BPF`, and has the kernel for it. Reading the wrong
+# one of those two answers sends a reader to look at their kernel config for an
+# afternoon.
+name: direct reclaim, which nothing here collects
+format: text
+duration: 1s
+
+requests:
+  - label: reclaim
+    source: mem.reclaim
+    target: system
+    mode: trace
+    emit: [hist]
+    keys: [task, cgroup]

@@ -1,0 +1,36 @@
+# A cadence the collector cannot keep.
+#
+#   omn -f examples/mem-poll-too-fast.yml
+#
+# `mem.pss` has two backends and the second one walks the address space:
+# `/proc/[pid]/smaps` prints a block per mapping, and the collector sums the
+# `Pss:` line of every one of them. The rollup answers the same question by
+# reading a single block the kernel maintains, which is why the resolver
+# prefers it and why this session has to pin the walk to reach it.
+#
+# The workload chooses the cost. Two thousand separate anonymous mappings make
+# a `smaps` file with two thousand blocks in it, and a poll every millisecond
+# asks for that walk a thousand times a second. It does not fit, and the point
+# of the session is what the tool does about not fitting: every round of reads
+# that overruns its tick is counted and named, with how long it took and how
+# long it had.
+#
+# Read the series with that in mind. It is not a sample every millisecond; it
+# is a sample whenever the walk finished, and dividing the run by the requested
+# interval would give a rate for points that were never taken. The late ticks
+# are the warning that the two are not the same.
+name: a poll faster than the file can be read
+format: json
+
+requests:
+  - label: proportional, the slow way
+    source: mem.pss
+    backend: force:fs:proc:smaps
+    target:
+      launch:
+        - python3
+        - -c
+        - "import mmap, time\nheld = [mmap.mmap(-1, 4096) for _ in range(2000)]\nfor region in held:\n    region[0] = 1\ntime.sleep(0.5)\n"
+    mode: poll@1ms
+    emit: [timeline, summary]
+    keys: [task, mem]
