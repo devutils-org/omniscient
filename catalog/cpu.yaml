@@ -13,7 +13,7 @@
   modes: [count, sample]
   emits: [summary, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
   caveats:
@@ -28,7 +28,7 @@
   modes: [count, sample]
   emits: [summary, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: high
   caveats:
@@ -47,7 +47,7 @@
   modes: [count]
   emits: [summary, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
   caveats:
@@ -65,7 +65,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
 
@@ -78,7 +78,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
 
@@ -91,7 +91,7 @@
   modes: [count]
   emits: [summary]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
   caveats:
@@ -109,7 +109,7 @@
   modes: [sample]
   emits: [stack, topk, hist, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -123,8 +123,10 @@
   backends:
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low}
     - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free,
+       targets: {cgroup: native, container: native}, filter_fields: [],
        degraded: "aggregated per cgroup, no stacks and no per-thread attribution"}
     - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: free,
+       targets: {pid: native, tid: native, launch: native},
        degraded: "tick granularity, no per-site attribution"}
   modes: [trace, poll]
   emits: [summary, timeline, hist, rate]
@@ -142,7 +144,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -168,13 +170,15 @@
   summary: "CPU utilization by state (user/sys/iowait/idle/steal)"
   unit: ratio
   backends:
-    - {id: "fs:proc", requires: ["/proc/stat"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/stat"], cost: free,
+       targets: {system: native, cpu: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free,
+       targets: {cgroup: native, container: native}, filter_fields: [],
        degraded: "scoped to one cgroup: no per-cpu breakdown and no steal time"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native, cgroup: native, cpu: native, container: native}
-  keys: [cgroup]
+  keys: [cgroup, cpu]
   filter_fields: [cpu]
   determinism: low
 
@@ -183,8 +187,9 @@
   summary: "PSI: CPU stall time"
   unit: ratio
   backends:
-    - {id: "fs:proc", requires: ["/proc/pressure/cpu"], cost: free}
-    - {id: "fs:cgroup", requires: ["cgroup2:cpu.pressure"], cost: free, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/pressure/cpu"], cost: free, targets: {system: native}}
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.pressure"], cost: free, equivalent: true,
+       targets: {cgroup: native, container: native}}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native, cgroup: native, container: native}
@@ -218,7 +223,7 @@
   modes: [trace]
   emits: [raw, timeline]
   targets: {pid: native, tid: native, cpu: native, launch: native}
-  keys: [task]
+  keys: [task, cpu]
   filter_fields: [comm, cpu]
   determinism: high
   caveats:

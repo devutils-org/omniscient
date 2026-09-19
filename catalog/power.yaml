@@ -60,7 +60,7 @@
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
   targets: {system: native, cpu: native}
-  keys: []
+  keys: [cpu]
   filter_fields: [cpu]
   determinism: low
   caveats:
@@ -83,7 +83,7 @@
   modes: [trace, poll]
   emits: [timeline, hist, summary, raw]
   targets: {system: native, cpu: native}
-  keys: []
+  keys: [cpu]
   filter_fields: [cpu, state]
   determinism: low
   caveats:
@@ -128,7 +128,7 @@
   modes: [poll, trace]
   emits: [timeline, rate, raw, summary]
   targets: {system: native}
-  keys: []
+  keys: [cpu]
   filter_fields: [cpu]
   determinism: medium
   caveats:

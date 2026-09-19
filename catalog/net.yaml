@@ -94,9 +94,17 @@
   summary: "Network volume"
   unit: bytes
   backends:
-    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, degraded: "per interface, system-wide"}
-    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true}
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_sendmsg"], cost: low, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free,
+       targets: {system: native, iface: native}, filter_fields: [iface],
+       degraded: "per interface, system-wide"}
+    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true,
+       targets: {system: native, iface: native}, filter_fields: [iface]}
+    # `comm` lives here and nowhere else: a socket send knows its process, and
+    # /proc/net/dev has no idea which one moved a byte. The interface is the
+    # other way round, so this backend does not claim it.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_sendmsg"], cost: low, equivalent: true,
+       targets: {system: native, pid: native, cgroup: native, container: native},
+       filter_fields: [comm]}
   modes: [poll, count]
   emits: [rate, timeline, summary, topk]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
@@ -189,7 +197,7 @@
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
   targets: {system: native, cpu: native}
-  keys: []
+  keys: [cpu]
   filter_fields: [cpu, vec]
   determinism: low
 

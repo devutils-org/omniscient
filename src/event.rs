@@ -134,6 +134,18 @@ pub enum KeyValue {
         index: u32,
         name: String,
     },
+    /// A block device, by the major and minor the kernel writes in
+    /// `/proc/diskstats`. The numbers rather than the name because a name is a
+    /// symlink away from meaning something else, and `dm-0` and `nvme0n1p2`
+    /// both resolve to a pair.
+    Dev {
+        major: u32,
+        minor: u32,
+    },
+    /// A logical cpu, as the kernel numbers them.
+    Cpu {
+        cpu: u32,
+    },
 }
 
 impl KeyValue {
@@ -142,6 +154,14 @@ impl KeyValue {
             index,
             name: name.into(),
         }
+    }
+
+    pub fn dev(major: u32, minor: u32) -> Self {
+        KeyValue::Dev { major, minor }
+    }
+
+    pub fn cpu(cpu: u32) -> Self {
+        KeyValue::Cpu { cpu }
     }
 
     pub fn task(tid: i32) -> Self {
@@ -164,6 +184,8 @@ impl KeyValue {
             KeyValue::Gpu { .. } => KeyKind::Gpu,
             KeyValue::Cgroup { .. } => KeyKind::Cgroup,
             KeyValue::Iface { .. } => KeyKind::Iface,
+            KeyValue::Dev { .. } => KeyKind::Dev,
+            KeyValue::Cpu { .. } => KeyKind::Cpu,
         }
     }
 }
@@ -181,6 +203,8 @@ impl fmt::Display for KeyValue {
             KeyValue::Gpu { fence_ctx, seqno } => write!(f, "gpu:{fence_ctx}+{seqno}"),
             KeyValue::Cgroup { id } => write!(f, "cgroup:{id}"),
             KeyValue::Iface { name, .. } => write!(f, "iface:{name}"),
+            KeyValue::Dev { major, minor } => write!(f, "dev:{major}+{minor}"),
+            KeyValue::Cpu { cpu } => write!(f, "cpu:{cpu}"),
         }
     }
 }

@@ -752,10 +752,23 @@ pub enum KeyKind {
     /// Not only a series label: a qdisc delay, a driver drop and a link error
     /// are three sources whose only shared identity is the interface.
     Iface,
+    /// `dev:major+minor`, the block device an event belongs to.
+    ///
+    /// Without it the diskstats sources have nowhere to put the device they
+    /// read, so they sum every one of them into a single number: a machine
+    /// with an NVMe and a spinning disk reports one figure for both, and the
+    /// `topk` over devices those entries declare cannot be expressed at all.
+    Dev,
+    /// `cpu:n`, the logical cpu an event belongs to.
+    ///
+    /// A frequency or an idle residency is per core and the mean across
+    /// twenty-four of them describes no core. This is what makes a per-cpu
+    /// series possible rather than a mean with a range beside it.
+    Cpu,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 10] = [
+    pub const ALL: [KeyKind; 12] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -766,6 +779,8 @@ impl KeyKind {
         KeyKind::Gpu,
         KeyKind::Cgroup,
         KeyKind::Iface,
+        KeyKind::Dev,
+        KeyKind::Cpu,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -780,6 +795,8 @@ impl KeyKind {
             KeyKind::Gpu => "gpu",
             KeyKind::Cgroup => "cgroup",
             KeyKind::Iface => "iface",
+            KeyKind::Dev => "dev",
+            KeyKind::Cpu => "cpu",
         }
     }
 }

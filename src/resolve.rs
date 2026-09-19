@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::capabilities::{Capabilities, Environment, Probe};
 use crate::catalog::{Backend, Catalog, Cost, Entry, TargetSupport};
-use crate::error::ParseError;
-use crate::request::{Request, Target};
+use crate::error::{one_of, ParseError};
+use crate::request::{Request, Target, TargetKind};
 
 /// A request plus every decision made about it. The lockfile of a measurement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +109,21 @@ pub enum ResolveError {
     },
     #[error("`{source_id}` has no backend `{backend}`")]
     UnknownBackend { source_id: String, backend: String },
+    #[error(
+        "`{source_id}` is filtered on `{field}`, which the selected backend `{backend}` does not \
+         carry:\n{}",
+        .elsewhere.as_ref().map_or_else(
+            || format!("  no backend of `{source_id}` carries it"),
+            |ids| format!("  `{ids}` does, and `--backend force:{ids}` is how to ask for it"),
+        )
+    )]
+    FilterFieldNotCarried {
+        source_id: String,
+        backend: String,
+        field: String,
+        /// The backend of the chain that does carry it, when one does.
+        elsewhere: Option<String>,
+    },
 }
 
 impl From<ResolveError> for ParseError {
@@ -197,6 +212,7 @@ pub fn resolve(
             .position(|candidate| candidate.id == backend.id)
             .unwrap_or(0)
             + 1;
+        check_filter_fields(entry, backend, request)?;
         let requirements = probe_all(capabilities, backend, pid);
         return Ok(build(
             entry,
@@ -209,11 +225,6 @@ pub fn resolve(
         ));
     }
 
-    // A target the catalog marks `bpf_only` can only be filtered inside an eBPF
-    // program, so the chain's non-eBPF backends cannot serve it whatever else
-    // they can do.
-    let needs_bpf = entry.target_support(request.target.kind()) == TargetSupport::BpfOnly;
-
     let mut chain = Vec::new();
     let mut unverified_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
     // A backend this machine can serve but this build cannot collect. Kept as a
@@ -223,14 +234,10 @@ pub fn resolve(
     let mut unimplemented_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
 
     for (index, backend) in entry.backends.iter().enumerate() {
-        if needs_bpf && !backend.id.starts_with("bpf") {
+        if let Some(reason) = cannot_serve_target(entry, backend, request.target.kind()) {
             chain.push(ConsideredBackend {
                 id: backend.id.clone(),
-                verdict: Verdict::Rejected(vec![format!(
-                    "a {} target needs in-program filtering, which `{}` cannot do",
-                    request.target.kind(),
-                    backend.id
-                )]),
+                verdict: Verdict::Rejected(vec![reason]),
             });
             continue;
         }
@@ -256,6 +263,7 @@ pub fn resolve(
         let implemented = crate::collect::implements(request.source.as_str(), &backend.id);
 
         if all_checked && implemented {
+            check_filter_fields(entry, backend, request)?;
             let mut resolved = build(
                 entry,
                 request,
@@ -301,6 +309,7 @@ pub fn resolve(
         let Some((index, backend, requirements)) = candidate else {
             continue;
         };
+        check_filter_fields(entry, backend, request)?;
         let mut resolved = build(
             entry,
             request,
@@ -403,6 +412,85 @@ fn build(
         unverified,
         environment: capabilities.environment().clone(),
     }
+}
+
+/// Why a backend cannot serve a target, or `None` when it can.
+///
+/// Two separate refusals. A backend the entry marks `bpf_only` for this target
+/// can only do the narrowing inside an eBPF program, so the chain's other
+/// backends are out whatever else they can do. A backend whose own `targets`
+/// map does not mention the kind cannot attribute at that granularity at all:
+/// `/proc/diskstats` knows the machine and `io.stat` knows a cgroup, and
+/// letting either answer for the other is the worst bug this tool can have --
+/// a number about something else, presented as the one that was asked for.
+fn cannot_serve_target(entry: &Entry, backend: &Backend, kind: TargetKind) -> Option<String> {
+    match entry.backend_target_support(backend, kind) {
+        TargetSupport::Native => None,
+        TargetSupport::BpfOnly if backend.id.starts_with("bpf") => None,
+        TargetSupport::BpfOnly => Some(format!(
+            "a {kind} target needs in-program filtering, which `{}` cannot do",
+            backend.id
+        )),
+        TargetSupport::No => Some(format!(
+            "`{}` cannot attribute per {kind}: it would answer with {}",
+            backend.id,
+            served_instead(entry, backend)
+        )),
+    }
+}
+
+/// What a backend would have answered with, named by the targets it does
+/// serve. "it would answer with a system-wide number" is the sentence that
+/// makes the refusal worth reading.
+fn served_instead(entry: &Entry, backend: &Backend) -> String {
+    let serves: Vec<&str> = TargetKind::ALL
+        .into_iter()
+        .filter(|kind| entry.backend_target_support(backend, *kind) != TargetSupport::No)
+        .map(|kind| kind.as_str())
+        .collect();
+    if serves.is_empty() {
+        "nothing this request asked about".to_owned()
+    } else {
+        format!("a number scoped to {}", one_of(serves.into_iter()))
+    }
+}
+
+/// Refuses a predicate over a field the selected backend never puts on an
+/// event.
+///
+/// The userspace filter runs, so such a predicate is false on every event and
+/// the run reports an empty series -- which reads as "nothing matched" when it
+/// means "this could never have matched". An invalid combination is refused
+/// with the reason, never answered with a plausible emptiness.
+///
+/// Only fields the entry itself offers are checked here. A field no backend of
+/// the source has ever heard of is a question about the request rather than
+/// about this machine, so it belongs to the validator, which answers it before
+/// anything is probed and with the source's own vocabulary to suggest from.
+fn check_filter_fields(
+    entry: &Entry,
+    backend: &Backend,
+    request: &Request,
+) -> Result<(), ResolveError> {
+    let Some(filter) = &request.filter else {
+        return Ok(());
+    };
+    let carried = entry.backend_filter_fields(backend);
+    for field in filter.fields() {
+        if carried.iter().any(|known| known == field)
+            || !entry.filter_fields.iter().any(|known| known == field)
+        {
+            continue;
+        }
+        let elsewhere = entry.backends_carrying(field);
+        return Err(ResolveError::FilterFieldNotCarried {
+            source_id: request.source.to_string(),
+            backend: backend.id.clone(),
+            field: field.to_owned(),
+            elsewhere: elsewhere.first().map(|id| (*id).to_string()),
+        });
+    }
+    Ok(())
 }
 
 /// Decides where a filter runs, from what the backend can do.
@@ -582,8 +670,41 @@ mod tests {
     /// A target the catalog marks `bpf_only` can only be filtered inside an
     /// eBPF program, so the chain's other backends cannot serve it whatever
     /// else they can do. The rejection has to name that, not a missing file.
+    ///
+    /// `net.tcp.rtt` is the case with nothing else in the way: the entry marks
+    /// `cgroup` as `bpf_only` and neither backend declares targets of its own,
+    /// so the only thing that can rule netlink out is the rule under test.
     #[test]
     fn a_bpf_only_target_rules_out_the_backends_that_cannot_filter_in_program() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("net.tcp.rtt", Target::Cgroup("/sys/fs/cgroup".into()));
+        request.mode = Mode::Poll {
+            interval: Mode::DEFAULT_POLL_INTERVAL,
+        };
+
+        match resolve(&catalog, &capabilities, &request) {
+            Ok(resolved) => assert!(
+                resolved.backend.id.starts_with("bpf"),
+                "a cgroup target on net.tcp.rtt needs in-program filtering, got `{}`",
+                resolved.backend.id
+            ),
+            Err(ResolveError::NoViableBackend { rejections, .. }) => assert!(
+                rejections
+                    .iter()
+                    .any(|rejection| rejection.contains("in-program filtering")),
+                "{rejections:?}"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The same request, refused for a stronger reason once the backend says
+    /// what it can attribute: `/proc/diskstats` is not held back because it
+    /// cannot filter in-program, it is held back because there is no
+    /// per-process number in the file at all.
+    #[test]
+    fn a_backend_that_cannot_attribute_per_target_says_what_it_would_have_answered() {
         let catalog = Catalog::embedded().unwrap();
         let capabilities = Capabilities::detect();
         let mut request = fixture("io.latency", Target::Pid(vec![1]));
@@ -593,15 +714,20 @@ mod tests {
         match resolve(&catalog, &capabilities, &request) {
             Ok(resolved) => assert!(
                 resolved.backend.id.starts_with("bpf"),
-                "a pid target on io.latency needs in-program filtering, got `{}`",
+                "only the eBPF backend can attribute io.latency to a pid, got `{}`",
                 resolved.backend.id
             ),
-            Err(ResolveError::NoViableBackend { rejections, .. }) => assert!(
-                rejections
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                let diskstats = rejections
                     .iter()
-                    .any(|rejection| rejection.contains("in-program filtering")),
-                "{rejections:?}"
-            ),
+                    .find(|rejection| rejection.contains("fs:proc"))
+                    .unwrap_or_else(|| panic!("the chain has to say why: {rejections:?}"));
+                assert!(
+                    diskstats.contains("cannot attribute per pid")
+                        && diskstats.contains("scoped to system"),
+                    "the refusal has to name the number it would have answered with: {diskstats}"
+                );
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

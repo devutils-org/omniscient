@@ -56,7 +56,7 @@
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only, container: bpf_only}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu, prio]
   determinism: low
 
@@ -113,7 +113,7 @@
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu]
   determinism: low
   caveats:
@@ -186,7 +186,7 @@
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cpu: native}
-  keys: []
+  keys: [cpu]
   filter_fields: [irq, cpu, name]
   determinism: low
 
