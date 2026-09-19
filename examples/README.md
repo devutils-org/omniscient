@@ -12,7 +12,7 @@ is how a measurement gets chosen.
 |---|---|
 | `allocation-cost.yml` | **Which allocation actually cost memory?** The correlation: allocation ranges joined to the page faults inside them. |
 | `mem-fragmentation.yml` | How much is the allocator holding that nothing is using? |
-| `rss-run.yml` | What is a program's resident footprint over its life? |
+| `mem-rss-run.yml` | What is a program's resident footprint over its life? |
 
 ## What is this machine doing?
 
