@@ -31,6 +31,12 @@ pub const BPF_MAP_TYPE_STACK_TRACE: u32 = 7;
 pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
 
 /// Program types.
+///
+/// A program's type is fixed at load time and has to match what it is attached
+/// to: the kernel reports a mismatch as `EINVAL` from the attach, not from the
+/// load, which is a long way from the line that chose the wrong one.
+pub const BPF_PROG_TYPE_KPROBE: u32 = 2;
+pub const BPF_PROG_TYPE_TRACEPOINT: u32 = 5;
 pub const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
 
 /// How much verifier log to keep. The interesting part of a rejection is the

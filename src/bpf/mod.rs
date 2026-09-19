@@ -26,6 +26,7 @@
 //!
 //! See `docs/bpf-layer.md` for what the other families have to call.
 
+pub mod attach;
 pub mod btf;
 mod insn;
 mod map;
