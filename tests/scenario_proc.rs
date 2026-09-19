@@ -456,9 +456,33 @@ fn a_poller_that_cannot_keep_up_counts_and_names_the_ticks_that_ran_late() {
     let reasons = losses["reasons"]
         .as_object()
         .expect("the reasons behind the counts");
+    let late = reasons
+        .iter()
+        .find(|(reason, _)| reason.contains("outran"))
+        .unwrap_or_else(|| panic!("the reason has to say the read outran the tick: {reasons:?}"));
+    // One reason for the whole run, carrying the count it explains. The
+    // magnitudes used to be in the key -- one reason per late tick, each with a
+    // count of one -- which is defect 6 of `docs/scenarios/proc.md`.
+    assert_eq!(
+        late.1.as_u64().unwrap(),
+        losses["late_ticks"].as_u64().unwrap(),
+        "the reason has to carry the count it explains: {reasons:?}"
+    );
+    assert_eq!(
+        reasons.len(),
+        1,
+        "a run whose only loss is late ticks has one reason, not one per tick: {reasons:?}"
+    );
+    // And the measurement is beside the count rather than in place of it: the
+    // worst overrun is what says whether the series is usable at all.
+    let overrun = &losses["overrun"];
     assert!(
-        reasons.keys().any(|reason| reason.contains("longer than")),
-        "the reason has to say the read outran the tick: {reasons:?}"
+        overrun["worst_ns"].as_u64().unwrap() >= overrun["tick_ns"].as_u64().unwrap(),
+        "a tick counted as late has to have overrun the tick: {overrun}"
+    );
+    assert!(
+        overrun["total_ns"].as_u64().unwrap() >= overrun["worst_ns"].as_u64().unwrap(),
+        "the total cannot be less than the worst one in it: {overrun}"
     );
 }
 
@@ -795,22 +819,25 @@ fn defect_2_the_last_reading_of_a_launched_target_reports_a_zombie_as_empty() {
     assert_eq!(result["losses"]["failed_reads"], 0);
 }
 
-/// Defect 3: a session takes its tick from the first request and discards
-/// every other request's mode.
+/// Every request in a session keeps the rate it asked for.
 ///
-/// The runner asks the collectors for a tick, and these pollers declare none,
-/// so it falls back to `resolved[0].request.mode` -- the *first* request --
-/// and applies it to all of them. Three consequences, all silent, and the
-/// project's own rule is that an invalid combination is refused with the
-/// reason and never degraded quietly:
+/// The runner used to ask the collectors for a tick and, where none declared
+/// one -- which is every poller in this family -- fall back to
+/// `resolved[0].request.mode`, the *first* request, and apply it to all of
+/// them. Three consequences, all silent, and all of them defect 3 of
+/// `docs/scenarios/proc.md`:
 ///
-///   - `poll@200ms` first, `poll@50ms` second: both run at 200 ms, and the
-///     second request is downsampled by four without being told.
-///   - `poll@50ms` first, `snapshot` second: the snapshot becomes a series.
-///   - `snapshot` first, `poll@50ms` second: the interval is zero and the run
-///     becomes a busy loop against procfs for every source in it.
+///   - `poll@200ms` first, `poll@50ms` second: both ran at 200 ms, and the
+///     second request was downsampled by four without being told.
+///   - `poll@50ms` first, `snapshot` second: the snapshot became a series.
+///   - `snapshot` first, `poll@50ms` second: the interval was zero and the run
+///     became a busy loop against procfs for every source in it.
+///
+/// The reproduction is kept and what it asserts is turned round: the three
+/// sessions below are the same three, and each now has to produce the
+/// measurement its file describes.
 #[test]
-fn defect_3_a_session_takes_its_tick_from_the_first_request_only() {
+fn every_request_in_a_session_keeps_the_rate_it_asked_for() {
     let scratch = std::env::temp_dir().join("omn-scenario-proc-defect-3");
     std::fs::create_dir_all(&scratch).expect("a directory to write sessions into");
 
@@ -849,54 +876,60 @@ fn defect_3_a_session_takes_its_tick_from_the_first_request_only() {
         (seen("first"), seen("second"))
     };
 
-    // A slow first request downsamples a fast second one.
+    // A slow first request no longer downsamples a fast second one. Over a
+    // 400 ms window `poll@200ms` is two or three readings and `poll@50ms` is
+    // eight or nine; the assertion is the separation rather than either
+    // number, because this machine runs eight suites at once and a reading
+    // that lands late is the tool being honest about a busy machine.
     let (slow, fast) = write("downsampled.yml", "poll@200ms", "poll@50ms");
-    assert_eq!(
-        slow, fast,
-        "DEFECT 3 IS FIXED: the two requests now keep their own rates. Delete this test \
-         and defect 3 of docs/scenarios/proc.md."
+    assert!(
+        fast > slow,
+        "`poll@50ms` took {fast} readings and `poll@200ms` took {slow}: the second \
+         request is still being served at the first one's rate"
     );
     assert!(
-        fast < 6,
-        "`poll@50ms` over 400ms is around nine readings, and this run took {fast} \
-         because the first request asked for 200ms"
+        fast >= 5,
+        "`poll@50ms` over 400ms is around nine readings, and this run took {fast}"
+    );
+    assert!(
+        slow <= 4,
+        "`poll@200ms` over 400ms is two or three readings, and this run took {slow}"
     );
 
-    // A `snapshot` beside a `poll` stops being a single read.
+    // A `snapshot` beside a `poll` is still a single read. The snapshot is a
+    // property of the request, not of the session that happens to hold it.
     let (_, snapshot) = write("not-a-snapshot.yml", "poll@50ms", "snapshot");
-    assert!(
-        snapshot > 1,
-        "a `snapshot` next to a `poll` produced {snapshot} readings, and `snapshot` \
-         means one"
+    assert_eq!(
+        snapshot, 1,
+        "`snapshot` means one read, whatever is written beside it"
     );
 
-    // And a `snapshot` first turns the whole session into a busy loop: the
-    // fallback interval for `Mode::Snapshot` is zero, and it is applied to
-    // every request.
-    // The threshold is deliberately far below what an idle machine produces --
-    // thousands of rounds in 400ms -- because the spinning thread's share of
-    // the cpu is whatever the rest of the suite leaves it. What is being
-    // claimed is not a rate but an order of magnitude: no request in this
-    // session asked for more than nine readings, and anything past fifty can
-    // only be an interval of zero.
-    let (spun, _) = write("busy-loop.yml", "snapshot", "poll@50ms");
+    // And a `snapshot` written first no longer turns the session into a busy
+    // loop: its zero interval used to become the interval of every request.
+    // The threshold is an order of magnitude rather than a rate, because the
+    // spinning thread's share of the cpu was whatever the rest of the suite
+    // left it: no request in this session asks for more than nine readings,
+    // and anything past fifty could only be an interval of zero.
+    let (spun, polled) = write("busy-loop.yml", "snapshot", "poll@50ms");
+    assert_eq!(spun, 1, "the snapshot is one read: {spun}");
     assert!(
-        spun > 50,
-        "a session led by a `snapshot` should spin: {spun} rounds where `poll@50ms` \
-         over 400ms asks for nine is what a zero interval looks like"
+        polled < 50,
+        "`poll@50ms` over 400ms asks for nine readings and took {polled}, which is what \
+         an interval of zero looks like"
     );
 
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// Defect 4: "this machine cannot serve it" exits 2, the code that means "the
-/// request cannot mean anything".
+/// "This machine cannot serve it" exits 1, and not 2.
 ///
-/// `BRIEF.md` defines three answers and three exit codes, and only two of the
-/// codes exist. `src/main.rs` returns `EXIT_REJECTED` when the resolver finds
-/// no viable backend, one line after printing a hint that says the opposite:
-/// "the request is valid; it is this machine that cannot serve it". A caller
-/// cannot tell a request it should rewrite from one it should run elsewhere.
+/// `BRIEF.md` defines three answers and three exit codes. Two of the codes used
+/// to do the work of three: `src/main.rs` returned `EXIT_REJECTED` when the
+/// resolver found no viable backend, one line after printing a hint saying the
+/// opposite -- "the request is valid; it is this machine that cannot serve it"
+/// -- so a caller could not tell a request it should rewrite from one it should
+/// run elsewhere. That was defect 4 of `docs/scenarios/proc.md`, and the
+/// reproduction is kept below.
 ///
 /// No `proc` or `runtime` source can reach this state on a real machine --
 /// every implemented backend needs only procfs or `/tmp` -- so the scenario
@@ -904,7 +937,7 @@ fn defect_3_a_session_takes_its_tick_from_the_first_request_only() {
 /// `proc.fd` asks for a file that does not exist. That is a supported flag and
 /// the resolver is the code under test either way.
 #[test]
-fn defect_4_no_viable_backend_exits_two_rather_than_one() {
+fn a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code() {
     let scratch = std::env::temp_dir().join("omn-scenario-proc-defect-4");
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).expect("a directory to write a catalog into");
@@ -947,12 +980,14 @@ fn defect_4_no_viable_backend_exits_two_rather_than_one() {
         "and must say which of the three answers it is: {message}"
     );
 
-    // The exit code is not.
+    // And the exit code says the same thing the sentence does. It used to say
+    // 2 -- the code for a request that cannot mean anything -- one line under
+    // the hint above, which is defect 4 of `docs/scenarios/proc.md`.
     assert_eq!(
         output.status.code(),
-        Some(2),
-        "DEFECT 4 IS FIXED: `no viable backend` no longer exits 2. Delete this test and \
-         defect 4 of docs/scenarios/proc.md."
+        Some(1),
+        "a valid request this machine cannot serve is not a request that cannot mean \
+         anything, and a caller that has only the code has to be able to tell them apart"
     );
 }
 
@@ -1020,17 +1055,21 @@ fn defect_5_the_file_key_the_catalog_declares_is_on_no_event() {
     );
 }
 
-/// Defect 6: a late-tick reason carries its own nanosecond count, so the loss
-/// summary never deduplicates.
+/// A late tick is one reason with a count, not one reason per tick.
 ///
 /// `Losses::note` counts identical reasons, which is what turns a thousand
-/// dropped events into one line saying `1000x`. The late-tick note embeds the
-/// exact duration of the round that overran, so no two are ever equal: a run
-/// with seventy-seven late ticks prints seventy-seven `1x` lines. Losses are
-/// surfaced to the user always, and this is the one place where surfacing them
-/// buries the count instead of reporting it.
+/// dropped events into one line saying `1000x`. The late-tick note used to
+/// embed the exact duration of the round that overran, so no two were ever
+/// equal: a run with seventy-seven late ticks printed seventy-seven `1x`
+/// lines, carried seventy-seven keys into its JSON, and buried the one count it
+/// existed to report. That was defect 6 of `docs/scenarios/proc.md`; the
+/// reproduction below is the session that found it.
+///
+/// The reason is the kind now and the durations are magnitudes beside it, in
+/// `losses.overrun`. This is the reproduction asserting the other answer: the
+/// same session, the same late ticks, and one reason carrying all of them.
 #[test]
-fn defect_6_late_tick_reasons_never_deduplicate() {
+fn a_late_tick_is_one_reason_with_a_count_rather_than_one_reason_each() {
     needs_python!();
     let output = session("proc-loss.yml");
     assert!(output.status.success(), "{}", stderr(&output));
@@ -1038,17 +1077,35 @@ fn defect_6_late_tick_reasons_never_deduplicate() {
     let losses = &result(&doc, "thirty-thousand-handles")["losses"];
 
     let late = losses["late_ticks"].as_u64().unwrap();
-    let distinct = losses["reasons"]
-        .as_object()
-        .unwrap()
+    let reasons = losses["reasons"].as_object().unwrap();
+    let distinct = reasons
         .keys()
-        .filter(|reason| reason.contains("longer than"))
+        .filter(|reason| reason.contains("outran"))
         .count() as u64;
 
     assert!(late > 10, "the scenario has to actually run late: {losses}");
+    assert_eq!(
+        distinct, 1,
+        "{late} late ticks have to collapse into one reason: {losses}"
+    );
+    assert_eq!(
+        reasons
+            .iter()
+            .find(|(reason, _)| reason.contains("outran"))
+            .and_then(|(_, count)| count.as_u64()),
+        Some(late),
+        "and that one reason has to carry the count it explains: {losses}"
+    );
+
+    // The measurement did not disappear with the key it was in: it moved
+    // beside the count, where it can be aggregated instead of enumerated.
+    let overrun = &losses["overrun"];
     assert!(
-        distinct > late / 2,
-        "DEFECT 6 IS FIXED: {late} late ticks now collapse into {distinct} reason(s). \
-         Delete this test and defect 6 of docs/scenarios/proc.md."
+        overrun["worst_ns"].as_u64().unwrap() > overrun["tick_ns"].as_u64().unwrap(),
+        "the worst overrun is what says whether the series is usable: {losses}"
+    );
+    assert!(
+        overrun["total_ns"].as_u64().unwrap() >= overrun["worst_ns"].as_u64().unwrap(),
+        "the total has to hold the worst one: {losses}"
     );
 }

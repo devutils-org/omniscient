@@ -473,6 +473,10 @@ Pinned by `this_family_holds_the_catalogs_only_rate_over_a_ratio`.
 
 ### 4. A machine that cannot serve a valid request exits 2, like a bad request
 
+> **Fixed** (stream A). Exit 1, from `exit_for` in `src/main.rs`.
+> `a_source_this_machine_cannot_serve_names_the_tracepoints_that_are_absent`
+> asserts the code; the reproduction below is unchanged.
+
 The brief keeps three answers apart: a rejection is 2, no viable backend is 1,
 no collector is 3. The middle one is not implemented. `src/main.rs` returns
 `EXIT_REJECTED` for a `NoViableBackend` resolve failure, one line after printing
@@ -500,6 +504,10 @@ Pinned by `a_source_this_machine_cannot_serve_names_the_tracepoints_that_are_abs
 
 ### 5. The loss report has one reason per late tick, not one reason
 
+> **Fixed** (stream A) in `src/collect/mod.rs`, for every family at once. The
+> reason is the kind, counted; the nanoseconds are in `losses.overrun` beside it.
+> Asserted by `the_loss_report_carries_one_reason_for_all_the_late_ticks`.
+
 `Losses::reasons` is documented as "the reasons behind the counts above, with
 how often each occurred". The late-tick reason embeds the nanoseconds that tick
 took, so every occurrence is its own reason and every count is one:
@@ -521,7 +529,7 @@ duration beside it — would say more in one line.
 This is `src/collect/mod.rs` in the shared layer, not a `gpu` collector, and any
 family that can be asked to poll faster than it can read will hit it.
 
-Pinned by `the_loss_report_carries_one_reason_for_every_late_tick`.
+Pinned by `the_loss_report_carries_one_reason_for_all_the_late_ticks`.
 
 ### 6. A target that exited but was not reaped is followed to the end of the run
 

@@ -385,6 +385,12 @@ fn blamed_on_the_machine(walked: &[Combination]) -> Vec<String> {
 /// refuses at attach time with exit 1 -- "this machine cannot serve it" -- for a
 /// reason that has nothing to do with the machine. Nothing is missing from this
 /// machine for any of them: the collector does not implement the mode.
+///
+/// Thirteen of the sixteen D5 recorded have left this list: a refusal raised
+/// before the target exists is now read as this build's gap and exits 3. What
+/// is left is the three raised from `Collector::start`, where the runner cannot
+/// tell a mode nobody wrote from a counter that would not open, and the
+/// collector has to say which with `collect::not_built`.
 fn assert_machine_blame_is_exactly(walked: &[Combination], expected: &[&str]) {
     let found = blamed_on_the_machine(walked);
     let expected: Vec<String> = expected.iter().map(|s| (*s).to_owned()).collect();
@@ -417,18 +423,15 @@ fn every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_
         "mem.cache_tlb",
     ]);
     assert_modes_and_emits_are_coherent(&walked);
+    // The nine cache combinations are gone: their refusal is raised by the
+    // factory, before anything is opened, so it is now read as this build's gap
+    // and exits 3. The three `mem.faults` ones remain, and the reason they do
+    // is worth knowing -- `mem.faults` refuses in `Collector::start`, against a
+    // target that already exists, where an unmarked refusal is a failure of the
+    // run. `docs/fixes/runner.md` has the one-line change that moves them.
     assert_machine_blame_is_exactly(
         &walked,
         &[
-            "mem.cache_l1 sample raw",
-            "mem.cache_l1 sample stack",
-            "mem.cache_l1 sample topk",
-            "mem.cache_llc sample raw",
-            "mem.cache_llc sample stack",
-            "mem.cache_llc sample topk",
-            "mem.cache_tlb sample raw",
-            "mem.cache_tlb sample stack",
-            "mem.cache_tlb sample topk",
             "mem.faults count rate",
             "mem.faults count raw",
             "mem.faults count summary",
@@ -447,15 +450,10 @@ fn every_mode_and_emit_of_the_machine_sources_is_served_or_refused_by_the_right_
 fn every_mode_and_emit_of_the_heap_sources_is_served_or_refused_by_the_right_code() {
     let walked = sweep(&["mem.heap.alloc", "mem.heap.live", "mem.heap.retained"]);
     assert_modes_and_emits_are_coherent(&walked);
-    assert_machine_blame_is_exactly(
-        &walked,
-        &[
-            "mem.heap.live snapshot raw",
-            "mem.heap.live snapshot summary",
-            "mem.heap.retained snapshot raw",
-            "mem.heap.retained snapshot summary",
-        ],
-    );
+    // Nothing here blames the machine any more: a snapshot the shim cannot
+    // serve is refused by the factory, which is where this build's own gaps are
+    // told from this machine's.
+    assert_machine_blame_is_exactly(&walked, &[]);
 }
 
 /// Whatever a combination did, it did not do it silently or by accident.
@@ -1357,8 +1355,26 @@ fn a_poll_faster_than_the_file_can_be_read_counts_its_late_ticks() {
         .map(|reasons| reasons.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     assert!(
-        reasons.iter().any(|reason| reason.contains("longer than")),
-        "a late tick has to say how long the round took and how long it had: {reasons:?}"
+        reasons.iter().any(|reason| reason.contains("outran")),
+        "a late tick has to say that the round outran its tick: {reasons:?}"
+    );
+    // One reason for however many late ticks there were. The duration used to
+    // be in the key, which made every occurrence a reason of its own. Other
+    // kinds of loss keep their own reasons; what is counted here is the late
+    // ticks' share of the table.
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|reason| reason.contains("outran"))
+            .count(),
+        1,
+        "the late ticks have to share one reason: {reasons:?}"
+    );
+    let overrun = &result["losses"]["overrun"];
+    assert!(
+        overrun["worst_ns"].as_u64().unwrap_or_default()
+            > overrun["tick_ns"].as_u64().unwrap_or_default(),
+        "and the magnitude has to travel beside the count: {overrun}"
     );
 }
 
@@ -1622,15 +1638,24 @@ fn asking_the_shim_for_a_running_process_is_refused_by_the_build() {
     );
 }
 
-/// A sampling request that lands on a backend that cannot sample.
+/// A sampling request that lands on a backend that cannot sample says so.
 ///
 /// `mem.numa` declares two modes. The first backend samples memory accesses
 /// through PEBS and is not written; the second reads `numa_maps`, which is a
 /// file, and a file has no sampling rate. The resolver falls through to it for
-/// a `sample@997hz` request and the run succeeds, reporting a single read of
-/// page placement as though it were a second of sampling.
+/// a `sample@997hz` request, and the run used to succeed, reporting a single
+/// read of page placement as though it were a second of sampling -- D7 of
+/// `docs/scenarios/mem.md`, and the reason it mattered more than a missing
+/// number is that the number it produced was *plausible*.
 ///
-/// See "Defects found", D7.
+/// The runner names it now. A request in `sample` or `trace` mode whose
+/// collector declares no cadence of its own is being read at a poll interval
+/// nobody asked for, and that is a degradation of the request rather than of
+/// the measurement: it travels with the results like every other one.
+///
+/// The reproduction is the session that found it; what it asserts is the other
+/// answer. Either honest answer passes -- a run that samples, or a run that
+/// says which part of the request it could not honour.
 #[test]
 fn a_sampling_request_that_no_backend_can_sample_is_not_answered_with_a_poll() {
     if !has_python() {
@@ -1676,18 +1701,30 @@ fn a_sampling_request_that_no_backend_can_sample_is_not_answered_with_a_poll() {
         .unwrap_or_default();
     let says_so = degradations
         .iter()
-        .any(|note| note.contains("sample") || note.contains("rate") || note.contains("poll"));
+        .any(|note| note.contains("has no sampling of its own"));
 
+    // Either the rate was served, or the run said it was not. What is refused
+    // is the third answer: three orders of magnitude fewer readings than were
+    // asked for, reported as a clean run.
     assert!(
-        events * 100 < asked_for && !says_so,
-        "\n`mem.numa -m sample@997hz` used to resolve onto the poll-only `fs:proc` backend and \
-         return a single read while reporting success, with nothing in the output about the \
-         sampling rate it did not serve (D7 in docs/scenarios/mem.md).\n\
-         If the run now either samples, or says which part of the request it could not honour, \
-         delete this and D7.\n\
-         {events} events over {observed_ns} ns, where {asked_for} were asked for; degradations \
-         {degradations:?}\n"
+        events * 100 >= asked_for || says_so,
+        "\n`mem.numa -m sample@997hz` resolved onto the poll-only `fs:proc` backend and \
+         answered with {events} events over {observed_ns} ns, where {asked_for} were asked \
+         for, and said nothing about the rate it could not serve. That is D7 of \
+         docs/scenarios/mem.md.\n\
+         degradations {degradations:?}\n"
     );
+    if says_so {
+        let note = degradations
+            .iter()
+            .find(|note| note.contains("has no sampling of its own"))
+            .expect("just found");
+        assert!(
+            note.contains("sample@997hz") && note.contains("fs:proc"),
+            "the degradation has to name the rate that was asked for and the backend that \
+             could not serve it: {note}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

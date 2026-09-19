@@ -529,6 +529,11 @@ itself contradicts.
 
 ### 6. An under-specified request exits 1 where the same kind exits 2
 
+> **Fixed** (stream A). A `ParseError` from `cli.rs` reaches exit 2, like the
+> validator's answer to the same kind of mistake; `sched.irq` and
+> `sched.numa_balance` answer the same way. Asserted by
+> `an_under_specified_request_is_rejected_rather_than_failed`.
+
 Two requests, both missing one required axis, both unanswerable for the same
 reason:
 
@@ -580,12 +585,26 @@ but it is visible in every session this family ships, so it is recorded here.
 
 ### 8. A session reports all its rejections and only its first no-collector
 
+> **Fixed** (stream A). Every request is asked and every refusal is reported
+> together, which is the courtesy the validator already extended one layer up.
+> Asserted inside
+> `pinning_a_backend_this_build_lacks_blames_the_build_and_not_the_machine`.
+
 `examples/sched-refusals.yml.rejected` has four invalid requests and prints four errors.
 `examples/sched-forced-backends.yml` has five requests with no collector and
 prints one, then stops. Same shape of file, same kind of answer, two behaviours;
 a reader fixing a session learns about its problems one run at a time.
 
 ### 9. `sched.switches --mode count` blames the machine for a gap in the build
+
+> **Left** (stream A), and it is the one defect of this group that the runner
+> cannot settle on its own. `sched.switches` refuses from `Collector::start`,
+> against a target that already exists, where a refusal is genuinely ambiguous
+> between a mode nobody wrote and a counter that would not open -- the same line
+> a real `perf_event_open` failure arrives on. `collect::not_built` exists for
+> the collector to say which; the one-line change is in
+> `docs/open-findings.md` under "Needs from another stream", in the file stream D
+> owns.
 
 ```
 $ omn sched.switches --mode count --emit summary -- /bin/true

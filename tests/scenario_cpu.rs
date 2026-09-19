@@ -1760,10 +1760,11 @@ requests:
 /// it, and the request is fine. A refusal that sends a reader to the wrong
 /// sysctl, the wrong capability or the wrong flag costs more than no message.
 ///
-/// Two of the three share exit code 2, which `docs/scenarios/cpu.md` records:
-/// a caller that has only the exit code cannot tell a request that cannot mean
-/// anything from a machine that cannot serve it. What it does have is the
-/// message, so this pins the message.
+/// So each carries its own exit code, and this pins both halves: the sentence a
+/// person reads and the number a script branches on. The three used to be two
+/// -- "no viable backend" exited 2, the same as a request that cannot mean
+/// anything, one line under a hint saying the opposite -- which was defect 6 of
+/// `docs/scenarios/cpu.md`.
 #[test]
 fn each_refusal_names_the_thing_that_is_missing() {
     // The request, the exit code, and what the message has to contain.
@@ -1878,7 +1879,14 @@ fn each_refusal_names_the_thing_that_is_missing() {
         ),
     ];
     for (args, requirement) in unserved {
-        let (_, message) = run(args).refusal();
+        let (code, message) = run(args).refusal();
+        assert_eq!(
+            code,
+            1,
+            "`{}` is a valid request this machine cannot serve, which is not the same answer \
+             as a request that cannot mean anything and must not share its code: {message}",
+            args.join(" ")
+        );
         assert!(
             message.contains("no viable backend"),
             "`{}` is not served here and does not say so: {message}",
@@ -1952,21 +1960,20 @@ fn each_refusal_names_the_thing_that_is_missing() {
     }
 }
 
-/// A mode the catalog offers and this build does not serve exits like a
-/// failure.
+/// A mode the catalog offers and this build does not serve exits 3, not 1.
 ///
 /// `cpu.cycles -m sample` is a valid request -- the catalog declares the mode,
 /// the machine has the counter -- that this build cannot serve because no
 /// collector implements sampling for a counting source. That is the same
-/// statement as "no collector is written", which exits 3; this exits 1, which
-/// is what a caller reads as a run that went wrong.
+/// statement as "no collector is written", and it now carries the same code.
 ///
-/// The scenario is here rather than in the table above because the answer is
-/// wrong in a way worth pinning: `STATE.md` has it as an open item, and
-/// `docs/scenarios/cpu.md` records the seven sources it affects. **When this
-/// fails, the exit code was fixed.**
+/// It used to exit 1, which is what a caller reads as a run that went wrong,
+/// and that was defect 4 of `docs/scenarios/cpu.md`. What decides it is where
+/// the refusal is raised: this one comes out of the factory, which is a pure
+/// function of the resolved request, so nothing about this machine or this run
+/// can be involved in it.
 #[test]
-fn a_mode_the_build_does_not_implement_exits_like_a_failure() {
+fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
     let (code, message) = run(&[
         "cpu.cycles",
         "-m",
@@ -1978,12 +1985,11 @@ fn a_mode_the_build_does_not_implement_exits_like_a_failure() {
     ])
     .refusal();
     assert_eq!(
-        code, 1,
-        "the exit code for an unimplemented mode changed to {code}: if it is now 3, this \
-         scenario and the defect in docs/scenarios/cpu.md are both fixed"
+        code, 3,
+        "a mode no collector implements is this build's gap, not this run's failure: {message}"
     );
-    // Whatever the code, the message has to name the mechanism and the way
-    // round it, and this one does.
+    // The code is the half a script reads; the message is the half a person
+    // reads, and it has to name the mechanism and the way round it.
     assert!(message.contains("sampling path"), "{message}");
     assert!(message.contains("--mode count"), "{message}");
 }
@@ -2117,6 +2123,220 @@ fn stalled_share() -> Option<f64> {
 // The examples are the scenarios, and they have to run
 // ---------------------------------------------------------------------------
 
+/// A run that was late many times explains it once.
+///
+/// `Losses::reasons` is a map from the reason to how often it happened, and the
+/// late-tick reason used to embed the duration that made it late -- so seven
+/// late ticks were seven reasons, each counted once, while the throttles and
+/// overflows beside them aggregated exactly as the map is meant to. A run long
+/// enough to be late a thousand times printed a thousand lines and carried a
+/// thousand keys into its JSON, and the one number a reader wants from them --
+/// *how* late were they -- was not there, because each was its own key. Defect
+/// 8 of `docs/scenarios/cpu.md`.
+///
+/// Ten microseconds is shorter than any machine reads `/proc/stat`, so the run
+/// is late on essentially every round and the scenario needs nothing of the
+/// machine it is on.
+#[test]
+fn a_run_that_was_late_many_times_explains_it_once() {
+    let document = run(&[
+        "cpu.util",
+        "--cpu",
+        "0",
+        "-m",
+        "poll@10us",
+        "-e",
+        "summary",
+        "-d",
+        "50ms",
+        "--format",
+        "json",
+    ])
+    .measured();
+    let losses = &document["results"][0]["losses"];
+    let late = losses["late_ticks"].as_u64().unwrap_or(0);
+    assert!(
+        late > 20,
+        "a ten-microsecond poll of /proc/stat cannot be kept, and this run was late \
+         {late} times: {losses}"
+    );
+
+    let reasons = losses["reasons"].as_object().expect("the reasons");
+    assert_eq!(
+        reasons.len(),
+        1,
+        "{late} late ticks have to share one reason: {reasons:?}"
+    );
+    let (reason, count) = reasons.iter().next().expect("just counted one");
+    assert_eq!(
+        count.as_u64(),
+        Some(late),
+        "and the reason has to carry the count it explains: {reasons:?}"
+    );
+    assert!(
+        reason.contains("outran the 10.0us tick"),
+        "naming the cadence that was missed: {reason}"
+    );
+
+    // The measurement is beside the count rather than in the key, which is
+    // what makes "how late were they" answerable at all.
+    let overrun = &losses["overrun"];
+    assert_eq!(overrun["tick_ns"].as_u64(), Some(10_000));
+    assert!(
+        overrun["worst_ns"].as_u64().unwrap_or_default() > 10_000,
+        "a tick counted as late has to have overrun it: {overrun}"
+    );
+    assert!(
+        overrun["total_ns"].as_u64().unwrap_or_default()
+            >= overrun["worst_ns"].as_u64().unwrap_or_default(),
+        "the total has to hold the worst one in it: {overrun}"
+    );
+}
+
+/// A `--duration` written beside `-f` shortens the session, and says so.
+///
+/// It used to be accepted and discarded: the session named no duration, the
+/// command line named 100 ms, the run lasted as long as the workload did, and
+/// `--dump-request` -- the thing a reader checks when they want to know what
+/// they asked for -- carried no duration at all. Where the session *did* name
+/// one, the file won and the flag was silently ignored. Either answer is
+/// defensible; being told is not optional, and a flag that leaves no trace is
+/// the silent case this repository refuses everywhere else. Defect 5 of
+/// `docs/scenarios/cpu.md`.
+///
+/// The rule that came out of it is the one a `Session` already describes: the
+/// command line may replace what a session holds for the whole of itself --
+/// the duration, the budget, the format, the output directory -- and every
+/// other axis names one request, which a file may have many of, so the parser
+/// refuses those rather than accepting and dropping them.
+#[test]
+fn a_duration_beside_a_session_file_replaces_the_sessions_own() {
+    let dumped = run(&[
+        "-f",
+        "examples/cpu-known-work.yml",
+        "-d",
+        "100ms",
+        "--dump-request",
+        "--format",
+        "json",
+    ]);
+    let (document, rendered) = match dumped {
+        Outcome::Measured { document, rendered } => (document, rendered),
+        Outcome::Refused { code, message } => {
+            panic!("dumping a request should not fail (exit {code}): {message}")
+        }
+    };
+    assert!(
+        rendered.contains("100ms"),
+        "the dumped request has to carry the duration that was asked for:\n{rendered}"
+    );
+    for request in document["requests"].as_array().expect("requests") {
+        assert_eq!(
+            request["duration"], "100ms",
+            "every request of the session takes the duration the command line named: \
+             {request}"
+        );
+    }
+
+    // And where the session names a duration of its own, the replacement is
+    // said out loud rather than happening quietly in either direction.
+    let noted = Command::new(BINARY)
+        .args([
+            "-f",
+            "examples/cpu-saturation.yml",
+            "-d",
+            "100ms",
+            "--dump-request",
+        ])
+        .output()
+        .expect("omn should run");
+    let notes = String::from_utf8_lossy(&noted.stderr).into_owned();
+    assert!(
+        notes.contains("--duration 100ms replaced"),
+        "a session that names its own duration has to be told which requests were \
+         moved:\n{notes}"
+    );
+
+    // An axis that describes one request cannot mean anything beside a file
+    // that may hold many, and is refused by name rather than dropped.
+    for axis in [["-m", "count"], ["-e", "raw"], ["--stack", "fp"]] {
+        let refused = Command::new(BINARY)
+            .args(["-f", "examples/cpu-known-work.yml"])
+            .args(axis)
+            .output()
+            .expect("omn should run");
+        let message = String::from_utf8_lossy(&refused.stderr).into_owned();
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "`{}` beside a session file cannot mean anything:\n{message}",
+            axis.join(" ")
+        );
+        assert!(
+            message.contains("cannot be used with"),
+            "and the refusal has to name both flags:\n{message}"
+        );
+    }
+}
+
+/// A run writing a structured document says that its target shares the stdout.
+///
+/// A launched program inherits this process's stdout -- its output is the
+/// user's, and swallowing it would be worse -- but a structured format is one
+/// document, so anything the target prints lands in the middle of it and
+/// `omn ... --format json -- ./prog | jq` works exactly until `./prog` says
+/// something. The way out existed and the run named it afterwards; nothing
+/// warned before. Defect 10 of `docs/scenarios/cpu.md`.
+#[test]
+fn a_structured_run_that_launches_a_program_says_they_share_the_stdout() {
+    let noisy = Command::new(BINARY)
+        .args([
+            "cpu.instructions",
+            "-m",
+            "count",
+            "-e",
+            "summary",
+            "--format",
+            "json",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo NOISE",
+        ])
+        .output()
+        .expect("omn should run");
+    let warning = String::from_utf8_lossy(&noisy.stderr).into_owned();
+    assert!(
+        warning.contains("same stdout") && warning.contains("-o DIR"),
+        "a structured run over a launched program has to say what will happen to its \
+         document, and where to put it instead:\n{warning}"
+    );
+    // It is a warning and not a refusal: the run is legitimate, and redirecting
+    // the program's output is the other way out.
+    assert!(noisy.status.success(), "{warning}");
+
+    // Text is a report for a person, who can see what came from where, and is
+    // what every run in a terminal uses. Warning there would be noise.
+    let plain = Command::new(BINARY)
+        .args([
+            "cpu.instructions",
+            "-m",
+            "count",
+            "-e",
+            "summary",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo NOISE",
+        ])
+        .output()
+        .expect("omn should run");
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains("same stdout"),
+        "text is not one document and must not be warned about"
+    );
+}
+
 /// Every session this family ships is validated, run, and made to answer.
 ///
 /// An example that stopped validating would be bad; one that validates and
@@ -2167,10 +2387,10 @@ fn every_example_of_this_family_validates_and_runs_or_names_what_it_needs() {
                     String::from_utf8_lossy(&validated.stderr)
                 );
 
-                // As it stands, with the window the file names: a
-                // command-line `--duration` beside `-f` is accepted and
-                // ignored, which `docs/scenarios/cpu.md` records. So the
-                // sessions of this family are written short enough to be run.
+                // With the window the file names. `-d` beside `-f` now
+                // shortens it and says so -- `a_duration_beside_a_session_file`
+                // below is where that is asserted -- but an example is worth
+                // running as a reader would run it.
                 match run(&["-f", &path, "--format", "json"]) {
                     Outcome::Measured { document, .. } => {
                         let results = document["results"]

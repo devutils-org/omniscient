@@ -224,11 +224,15 @@ Six. Three of them (3, 4, 6) are in the shared layer rather than in this family,
 and were found through it; they are the coordinator's to route into
 `docs/open-findings.md`, which this stream does not own.
 
-Each has a test in `tests/scenario_proc.rs` named `defect_<n>_...` that asserts
-the *wrong* behaviour on purpose. This stream may not edit `src/`, and a defect
-recorded only in prose is one that gets fixed silently or not at all. When one
-of those tests starts failing, the defect is fixed: delete the test and the
-entry here together.
+Each began as a test in `tests/scenario_proc.rs` named `defect_<n>_...` that
+asserted the *wrong* behaviour on purpose: that stream could not edit `src/`, and
+a defect recorded only in prose is one that gets fixed silently or not at all.
+
+Three of them are fixed now (3, 4 and 6, all stream A's), and the convention that
+replaced "delete the test" is `BRIEF.md`'s: **the reproduction stays and what it
+asserts is turned round**, so the scenario that found the defect is the one that
+would fail if it came back. Those three tests are renamed for what they now
+check, and each entry below says which test carries it.
 
 ### 1. The first reading of a launched target describes this tool, not the program
 
@@ -305,6 +309,12 @@ this stream may not write it.
 
 ### 3. A session takes its tick from the first request and discards the others
 
+> **Fixed** (stream A). Each request is driven by its own `Pace`, from its own
+> mode and its own collector; a snapshot is one read wherever it is written; and
+> an interval of zero no longer becomes the interval of everything else. The
+> reproduction is kept and `every_request_in_a_session_keeps_the_rate_it_asked_for`
+> asserts the other answer for all three of its faces.
+
 `run_all_within` computes one interval for the whole session: the minimum tick
 the collectors declare, and where none do — these pollers declare none — the
 mode of `resolved[0]`, the **first** request. Every other request's `mode` is
@@ -339,6 +349,10 @@ that ask for different rates is not an exotic session — it is the normal way t
 put a cheap poller beside an expensive one.
 
 ### 4. "This machine cannot serve it" exits 2, and there is no exit 1
+
+> **Fixed** (stream A). Exit 1, from `exit_for` in `src/main.rs`, which is the one
+> place the four answers map to codes. Asserted by
+> `a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code`.
 
 `BRIEF.md` defines three answers and three exit codes. Only two of the codes
 exist. `src/main.rs:162` returns `EXIT_REJECTED` — 2, the code that means the
@@ -388,6 +402,12 @@ caveat about walk cost suggests was considered and rejected — or the entry
 should not declare it.
 
 ### 6. A late-tick reason carries its own nanosecond count, so losses never deduplicate
+
+> **Fixed** (stream A). The reason is the shape and the counters carry the
+> magnitudes, which is what this entry asks for: `losses.overrun` holds the tick,
+> the worst overrun and the total, and the one reason carries the count it
+> explains. Asserted by
+> `a_late_tick_is_one_reason_with_a_count_rather_than_one_reason_each`.
 
 `Losses::note` counts identical reason strings, which is what turns a thousand
 dropped events into one line saying `1000x`. The late-tick note embeds the exact

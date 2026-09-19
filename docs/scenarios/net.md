@@ -398,6 +398,11 @@ whole family and pins this as the only one.
 
 ### 2. A loss that repeats is printed once per occurrence
 
+> **Fixed** (stream A) in `src/collect/mod.rs`, for every family at once. The
+> mechanism was never wrong, as this entry says; the note was, and the duration
+> has moved out of the key into `losses.overrun`. Asserted by
+> `a_poll_faster_than_its_own_read_counts_every_late_tick`.
+
 `Losses::reasons` is a map from reason to count, and the rendering prints `Nx`
 before each — which exists to collapse a repetition. The late-tick note defeats
 it by putting the measured duration in the key:
@@ -455,6 +460,10 @@ information. The totals since boot, which is what a snapshot of a counter would
 plausibly mean, are not reachable through any mode.
 
 ### 4. A `snapshot` request beside a polled one is silently polled
+
+> **Fixed** (stream A). A snapshot is a property of the request, not of the
+> session that happens to hold it: each request is driven by its own `Pace`.
+> Asserted by `a_snapshot_beside_a_poll_is_still_a_single_read`.
 
 The snapshot flag is a property of the session, not of the request: the runner
 sets it only when *every* request is a snapshot. One that is not gets read on
@@ -521,6 +530,10 @@ alone or the caveat should say what it holds.
 
 ### 7. `net.hwts --mode trace` says "not built" and exits 1
 
+> **Fixed** (stream A). Exit 3, which is what `DECISIONS.md` settled for "valid,
+> and not built, wherever it is discovered". Asserted by
+> `the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need`.
+
 `DECISIONS.md` settled that *"valid, and not built is exit 3, wherever it is
 discovered"*, and `UnsupportedTarget` joined `NoCollector` there. A mode is the
 same answer and was not moved:
@@ -541,6 +554,12 @@ This is the case the brief names — *a mode that resolves and then refuses at
 attach time* — and it is the only one in the family.
 
 ### 8. "This machine cannot serve it" and "this cannot mean anything" share exit 2
+
+> **Fixed** (stream A). Exit 1. This entry is right that it was a decision rather
+> than a bug and that the man page and the brief disagreed; the brief won, and
+> `man/omn.1` is the thing that has to move -- the replacement text is in
+> `docs/open-findings.md` for the coordinator, who owns it. Asserted by
+> `a_machine_that_cannot_serve_a_net_request_names_what_it_is_missing`.
 
 A resolver failure prints a hint saying the request is valid, and then exits with
 the code for a request that is not:

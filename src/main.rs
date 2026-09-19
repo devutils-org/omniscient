@@ -26,11 +26,34 @@ mod cli {
     pub use omn::cli::*;
 }
 
+/// Something went wrong while running -- a counter that would not open, a
+/// target that went away, a file that could not be written -- or this machine
+/// cannot serve the request at all.
+///
+/// One code because they are one answer: *this run cannot happen here*. Which
+/// of them it was is in the message; what a caller does next -- try another
+/// machine, or stop -- is the same either way, and is not what it does about
+/// the other two codes.
+const EXIT_UNAVAILABLE: u8 = 1;
 /// The request was refused: it cannot mean what it asks for.
 const EXIT_REJECTED: u8 = 2;
 /// The request is valid, but the part of the tool that would answer it does not
 /// exist yet.
 const EXIT_NOT_IMPLEMENTED: u8 = 3;
+
+/// The exit code for a refusal, from whose gap it is.
+///
+/// One function, so that the three answers cannot drift apart again: they did,
+/// and nine families found it independently. `man omn.1` and `GUIDE.md` carry
+/// the same table in words.
+fn exit_for(whose: omn::collect::Whose) -> u8 {
+    use omn::collect::Whose;
+    match whose {
+        Whose::Request => EXIT_REJECTED,
+        Whose::Machine => EXIT_UNAVAILABLE,
+        Whose::Build => EXIT_NOT_IMPLEMENTED,
+    }
+}
 
 /// Undoes the `dumpable = 0` that comes with carrying file capabilities.
 ///
@@ -67,7 +90,17 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => {
             let _ = error.print();
-            return ExitCode::from(u8::from(error.exit_code() != 0));
+            // `--help` and `--version` are not failures. Everything else the
+            // parser refuses -- a flag that does not exist, a value that does
+            // not parse, two flags that cannot both be meant -- is a request
+            // that cannot mean anything, which is the same answer the validator
+            // gives one layer in and now carries the same code. It used to be
+            // flattened to 1, so `--mode` misspelled and `--mode` missing
+            // exited differently while being the same mistake.
+            return match error.exit_code() {
+                0 => ExitCode::SUCCESS,
+                _ => ExitCode::from(EXIT_REJECTED),
+            };
         }
     };
 
@@ -75,7 +108,16 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error:#}");
-            ExitCode::FAILURE
+            // A request missing an axis the catalog cannot fill in -- no
+            // `--mode` where a source declares two, no target where it accepts
+            // several -- cannot mean anything, which is exit 2. It used to fall
+            // through here to the generic failure code and tell a script to go
+            // and look at the machine. `--emit`, raised one layer up by the
+            // validator, has always exited 2, and the two are the same answer.
+            match error.downcast_ref::<omn::error::ParseError>() {
+                Some(_) => ExitCode::from(EXIT_REJECTED),
+                None => ExitCode::from(EXIT_UNAVAILABLE),
+            }
         }
     }
 }
@@ -129,7 +171,15 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
             if args.out.is_some() {
                 session.out.clone_from(&args.out);
             }
-            (session, Defaulted::default())
+            // And so do the other two things a `Session` holds for the whole of
+            // itself. `--duration` used to be accepted here and dropped: the
+            // run lasted as long as the file said, and `--dump-request` -- the
+            // thing a reader checks when they want to know what they asked for
+            // -- carried no duration at all. A flag that leaves no trace is the
+            // silent degradation this project refuses everywhere else, so it is
+            // an override now and the run says which requests it moved.
+            let overridden = override_session_wide(&mut session, &args);
+            (session, overridden)
         }
         None => cli::to_session(&args, &catalog)?,
     };
@@ -155,11 +205,16 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
             Ok(resolved) => resolutions.push(resolved),
             Err(error) => {
                 eprintln!("error: {error}");
-                eprintln!(
-                    "  hint: the request is valid; it is this machine that cannot serve it. \
-                     Use --no-resolve to write it down for one that can."
-                );
-                return Ok(ExitCode::from(EXIT_REJECTED));
+                // The hint used to say "the request is valid; it is this
+                // machine that cannot serve it" under every resolver failure
+                // and one line above the code for a request that is *not*
+                // valid. Both halves are said per case now, and the code is
+                // derived from the same answer the sentence gives.
+                let whose = resolution_is(&error);
+                if let Some(hint) = resolution_hint(&error) {
+                    eprintln!("  hint: {hint}");
+                }
+                return Ok(ExitCode::from(exit_for(whose)));
             }
         }
     }
@@ -194,21 +249,91 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     )
 }
 
-/// Whether a refusal means "this build does not do that yet" rather than
-/// "this run failed".
+/// Applies the flags a session file's own fields can be replaced by, and says
+/// what was replaced.
 ///
-/// The two exit differently on purpose. A caller that ran out of memory, lost
-/// its target or could not open a counter has a problem with this run; a
-/// caller that asked for a mechanism nobody has written has a problem with
-/// this build, and retrying, raising privileges or changing the machine will
-/// not help. `NoCollector` has always said so with exit 3. A target a
-/// collector cannot serve *yet* -- the `yet` is in the message -- is the same
-/// answer and used to exit 1, indistinguishable from a real failure.
-fn not_built_yet(error: &collect::CollectError) -> bool {
-    matches!(
-        error,
-        collect::CollectError::NoCollector { .. } | collect::CollectError::UnsupportedTarget { .. }
-    )
+/// Only the two a [`Session`] carries for the whole of itself. `--format` and
+/// `--out` are the same kind of thing and were already handled where the file
+/// is loaded; every other axis names one request, which a file may have many
+/// of, and the parser refuses those beside `-f` rather than accepting them.
+///
+/// The replacement reaches the requests as well as the session, because
+/// `Session::apply_defaults` has already run by the time the file is loaded:
+/// setting the session field alone would leave every request holding the
+/// file's value and change nothing, which is how this was silent in the first
+/// place.
+fn override_session_wide(session: &mut Session, args: &TraceArgs) -> Defaulted {
+    let mut overridden = Defaulted::default();
+    if let Some(duration) = args.duration {
+        let replaced = session
+            .requests
+            .iter()
+            .filter(|request| request.duration.is_some_and(|own| own != duration))
+            .count();
+        session.duration = Some(duration);
+        for request in &mut session.requests {
+            request.duration = Some(duration);
+        }
+        overridden.record(match replaced {
+            0 => format!("--duration {duration} applied to every request of this session"),
+            replaced => format!(
+                "--duration {duration} replaced the duration that {replaced} request(s) of \
+                 this session named for themselves"
+            ),
+        });
+    }
+    if let Some(budget) = args.budget {
+        session.budget = Some(budget);
+        for request in &mut session.requests {
+            request.budget = Some(budget);
+        }
+        overridden.record(format!(
+            "--budget {budget} applied to every request of this session"
+        ));
+    }
+    overridden
+}
+
+/// Whose gap a resolver failure is.
+///
+/// `NoViableBackend` is the one that moved. Every backend of the chain was
+/// probed against this machine and every one of them was rejected for something
+/// this machine does not have -- a file, a counter, a capability. The request
+/// itself is untouched and will run unchanged on a machine that has them, which
+/// is a different answer from "this cannot mean anything" and needs a different
+/// code: a CI harness running a suite of sessions across a fleet has to tell
+/// *fix your session* from *this is the wrong machine for it*, and those need
+/// opposite responses.
+///
+/// The others stay where they were. A source that is not in the catalog and a
+/// backend that is not in its chain are misspellings; a filter field no backend
+/// carries is a request that cannot be served anywhere, and the one the
+/// selected backend does not carry names the `--backend force:` that would --
+/// which is a change to the request, not to the machine.
+fn resolution_is(error: &resolve::ResolveError) -> omn::collect::Whose {
+    use omn::collect::Whose;
+    match error {
+        resolve::ResolveError::NoViableBackend { .. } => Whose::Machine,
+        _ => Whose::Request,
+    }
+}
+
+/// What to do about a resolver failure, in one line, said per case.
+fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
+    match error {
+        resolve::ResolveError::NoViableBackend { .. } => Some(
+            "the request is valid; it is this machine that cannot serve it. \
+             Use --no-resolve to write it down for one that can."
+                .to_owned(),
+        ),
+        resolve::ResolveError::UnknownSource { .. } => {
+            Some("`omn list` names every source the catalog carries.".to_owned())
+        }
+        resolve::ResolveError::UnknownBackend { source_id, .. } => Some(format!(
+            "`omn list {source_id}` names the backends of its chain."
+        )),
+        resolve::ResolveError::FilterFieldNotCarried { .. } => None,
+    }
 }
 
 /// What `--budget` implies before anything has been measured.
@@ -500,6 +625,89 @@ fn band(cost: omn::catalog::Cost) -> &'static str {
     }
 }
 
+/// Says so when the document about to be written shares its stdout with the
+/// program being measured.
+///
+/// A launched program inherits this process's stdout, which is right: its
+/// output is the user's and swallowing it would be worse. But a structured
+/// format is one document, and anything the target prints lands in the middle
+/// of it -- so `omn ... --format json -- ./prog | jq` works exactly until
+/// `./prog` says something, and the failure arrives as a parse error in
+/// whatever consumed the pipe rather than as anything about this tool.
+///
+/// The way out already exists and the run already names it; what was missing
+/// was being told before rather than after. Text is left alone: it is a report
+/// for a person, who can see what came from where.
+fn shared_stdout_warning(session: &Session) -> Option<String> {
+    // Text is left out although it "renders documents": it is a report for a
+    // person, who can see what came from where, and it is the format every run
+    // launching a program in a terminal uses.
+    let structured = session.format != OutputFormat::Text;
+    let launches = session
+        .requests
+        .iter()
+        .any(|request| matches!(request.target, omn::request::Target::Launch(_)));
+    (structured && launches && session.out.is_none()).then(|| {
+        format!(
+            "`{}` is one document and the launched program writes to the same stdout, so \
+             anything it prints lands inside it; pass `-o DIR` to write results.{} beside the \
+             resolved request instead, or redirect the program's output",
+            session.format,
+            session.format.extension(),
+        )
+    })
+}
+
+/// Prints a refusal from the collect layer and answers with its own code.
+///
+/// The four answers the tool has are one table now, in [`exit_for`], and the
+/// collect layer names which of them it is giving. What is left here is the
+/// part a person reads: why the better backends were passed over, and what this
+/// build does have.
+fn refused_at_collect(error: &collect::CollectError, resolved: &[ResolvedRequest]) -> ExitCode {
+    use omn::collect::Whose;
+
+    eprintln!("error: {error}");
+    let refusals = error.each();
+
+    // The selected backend is often the last one standing, and why the better
+    // ones were passed over is the answer the reader actually needs: a counter
+    // that needs root reads as "no collector for `pmu`" unless the chain's own
+    // verdicts come with it.
+    if refusals
+        .iter()
+        .any(|refusal| matches!(refusal, collect::CollectError::NoCollector { .. }))
+    {
+        for resolved in resolved {
+            for considered in &resolved.chain {
+                if let omn::resolve::Verdict::Rejected(reasons) = &considered.verdict {
+                    eprintln!(
+                        "  `{}` was passed over: {}",
+                        considered.id,
+                        reasons.join("; ")
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "\nCollectors exist for: {}.",
+            collect::implemented().join(", ")
+        );
+    }
+
+    // Only the build's own gap gets a line here. A refusal against a real
+    // target has already said what went wrong in its own words, and a second
+    // sentence promising the request is fine would be a guess about a message
+    // this layer did not write.
+    if error.whose() == Whose::Build {
+        eprintln!(
+            "\nThe request itself is valid -- `--dump-request` shows how it would be \
+             obtained on a build that has it."
+        );
+    }
+    ExitCode::from(exit_for(error.whose()))
+}
+
 /// Runs the session's requests over one window and prints what they produced.
 fn measure(
     catalog: &Catalog,
@@ -515,40 +723,14 @@ fn measure(
     for warning in report.warnings() {
         eprintln!("warning: {warning}");
     }
+    if let Some(warning) = shared_stdout_warning(session) {
+        eprintln!("warning: {warning}");
+    }
 
     let mut ladder = Ladder::new(catalog, capabilities, resolved);
     let collections = match collect::run_all_within(resolved, &mut ladder) {
         Ok(collections) => collections,
-        Err(error) if not_built_yet(&error) => {
-            eprintln!("error: {error}");
-            // The selected backend is often the last one standing, and why the
-            // better ones were passed over is the answer the reader actually
-            // needs: a counter that needs root reads as "no collector for
-            // `pmu`" unless the chain's own verdicts come with it.
-            if matches!(error, collect::CollectError::NoCollector { .. }) {
-                for resolved in resolved {
-                    for considered in &resolved.chain {
-                        if let omn::resolve::Verdict::Rejected(reasons) = &considered.verdict {
-                            eprintln!(
-                                "  `{}` was passed over: {}",
-                                considered.id,
-                                reasons.join("; ")
-                            );
-                        }
-                    }
-                }
-                eprintln!(
-                    "\nCollectors exist for: {}.",
-                    collect::implemented().join(", ")
-                );
-            }
-            eprintln!(
-                "\nThe request itself is valid -- `--dump-request` shows how it would be \
-                 obtained on a build that has it."
-            );
-            return Ok(ExitCode::from(EXIT_NOT_IMPLEMENTED));
-        }
-        Err(error) => anyhow::bail!(error),
+        Err(error) => return Ok(refused_at_collect(&error, resolved)),
     };
 
     // Every source's events go into one stream for the joins: they were

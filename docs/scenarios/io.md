@@ -351,6 +351,13 @@ command line given.
 
 ### 1. A declared mode, refused at attach, under the exit code for a failure
 
+> **Fixed** (stream A). Exit 3. The sequence described below is unchanged -- the
+> resolver still passes over `bpf:tp` and selects `fs:proc` for a `trace` request,
+> which is finding 1 of `docs/open-findings.md` on the mode axis -- but the
+> refusal is raised by the factory, before a device has been touched, so it is
+> read as this build's gap. Asserted by
+> `each_refusal_names_the_thing_that_is_actually_missing`.
+
 ```console
 $ omn io.bytes --system -m trace -e topk -d 1s
 error: cannot start collecting `io.bytes`: `/proc/diskstats` holds the block layer's
@@ -401,6 +408,9 @@ day the hint is narrowed the scenario says so.
 
 ### 3. "No viable backend" and "this cannot mean anything" share an exit code
 
+> **Fixed** (stream A). Exit 1, asserted by
+> `a_machine_that_cannot_serve_pressure_says_which_file_it_wanted`.
+
 ```console
 $ unshare -Urm sh -c 'mount -t tmpfs none /proc/pressure &&
       exec omn io.pressure --system -m poll@100ms -d 200ms -e timeline'
@@ -446,6 +456,10 @@ fight the test.
 
 ### 5. Loss reasons are keyed by the measured duration, so they cannot aggregate
 
+> **Fixed** (stream A). One reason carrying the count it explains, with the
+> slowest and the mean beside it in `losses.overrun`. Asserted by
+> `a_poll_faster_than_the_file_can_be_read_counts_every_late_tick`.
+
 ```console
 $ omn -f examples/io-late-ticks.yml | wc -l
 1346
@@ -466,6 +480,12 @@ in every structured output. The duration belongs in a summary — slowest,
 median, how many — not in the key.
 
 ### 6. Request order in a session decides another request's sampling rate
+
+> **Fixed** (stream A). Each request is driven by its own `Pace`, from its own
+> mode and its own collector: a collector that declares a tick keeps it, and one
+> that declares none is read at the cadence the request named. This closes the
+> other side of it too -- §24 of `docs/open-findings.md`. Asserted by
+> `request_order_does_not_decide_another_requests_rate`.
 
 ```console
 $ cat counting-first.yml           # io.bytes count, then io.inflight poll@100ms

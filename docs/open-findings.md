@@ -2286,3 +2286,96 @@ leaving either wrong is the exact failure this repository keeps a test against.
   `<out>/cost.json`.
 
 No other stream in this wave owns either file.
+
+---
+
+## Needs from another stream
+
+Written by stream A, which owns `src/main.rs`, `src/cli.rs`,
+`src/collect/mod.rs` and `src/error.rs`. `docs/fixes/runner.md` has the
+reasoning; these are the exact edits.
+
+### To stream D, for `src/collect/sched/switches.rs`, and to stream E, for `src/collect/mem/page_faults.rs`
+
+Both refuse a mode this build has not written, from `Collector::start` rather
+than from the factory — and a refusal raised against a target that already
+exists is a failure of this run until the collector says otherwise, because a
+counter that would not open reaches the same line. So they still exit 1, which
+is sched 9 and three of mem D5's sixteen. One line each:
+
+```rust
+// src/collect/sched/switches.rs, in `start`
+other => return Err(collect::not_built(format!(
+    "`count` mode for `pmu:sw` needs the perf layer's counting support \
+     (see STATE.md); ask for `--mode trace` to get one event per switch"
+))),
+
+// src/collect/mem/page_faults.rs, in `start`
+other => return Err(crate::collect::not_built(format!(
+    "`{other}` mode does not sample page faults"
+))),
+```
+
+`collect::not_built` returns a `String`, so nothing about the signature moves;
+the sentence reaches the reader unchanged and the exit code becomes 3. Its
+sibling `collect::cannot_mean_anything` is for the other direction — a request
+no build and no machine can make mean something — and both are documented in
+`src/collect/mod.rs` beside `Whose`.
+
+The scenarios that pin these are `tests/scenario_sched.rs`'s
+`a_source_with_no_collector_is_refused_with_its_own_exit_code` (sched 9 belongs
+beside it) and `tests/scenario_mem.rs`'s
+`every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_code`,
+whose pinned list is down to the three `mem.faults` combinations and should
+become empty.
+
+### To stream B, for `catalog/io.yaml`
+
+Two `io` factory refusals are requests that cannot mean anything rather than
+gaps in this build: `io.inflight -m count` (a queue depth is read at an instant,
+so it counts over no window) and `io.bytes -m snapshot` (one read of
+`/proc/diskstats` is a counter rising since boot, not what the source did during
+a run). They exit 3 now, where they exited 1 before; neither is right. The
+honest fix is the entry, which declares a mode no backend of it can serve —
+this is finding 1 of this document seen on the mode axis. If the entries stay
+as they are, `collect::cannot_mean_anything` at the two refusal sites in
+`src/collect/io/diskstats.rs` gives them exit 2.
+
+### To whoever owns `src/resolve.rs`: a backend that cannot serve the requested mode
+
+mem D7. `mem.numa -m sample@997hz` resolves onto `fs:proc`, which reads a file
+and has no sampling rate, because modes are declared per entry and not per
+backend. The runner now says so in a degradation that travels with the results,
+which is the half this stream could reach; the resolver should not have selected
+it. Every source with a sampling backend it has not implemented and a polling
+fallback it has will do the same thing, so this is not `mem`'s.
+
+### To the coordinator, who owns `man/omn.1` and `GUIDE.md`
+
+The exit codes changed, and both documents carry the old table. A documented
+contract that has quietly stopped being true is the same kind of lie as a wrong
+number, so this is worth doing before the merge is announced rather than after.
+
+`man/omn.1`, `EXIT STATUS`:
+
+```troff
+.TP
+.B 1
+The request is valid and this machine cannot serve it, or a run failed.
+.TP
+.B 2
+The request was refused: it cannot mean what it asks for.
+.TP
+.B 3
+The request is valid and nothing in this build collects it yet.
+```
+
+`GUIDE.md`, "The refusal — *is the reason the right reason?*": the four-row
+table now reads 2, **1**, 3, **3**, the fourth row is "a collector was chosen
+and refused a shape this build has not written", and the two paragraphs below it
+that explain which two codes are wrong come out. `docs/fixes/runner.md` has the
+table as it now stands.
+
+Also: `STATE.md` §"What remains", item 1, opens with the two recurring defects —
+"A refusal's exit code does not match its message" and "A poll that cannot keep
+its cadence" — and both are closed.
