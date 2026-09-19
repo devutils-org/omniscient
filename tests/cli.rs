@@ -257,6 +257,9 @@ fn the_catalog_listing_is_machine_readable() {
 /// The assertion is about the distinction rather than about any one format:
 /// naming the format that happens to be unwritten today turns this into a test
 /// that fails the day it is written, which is the day it should say nothing.
+/// Every declared format has an encoder as of the profile and trace encoders,
+/// so what is left to check is that each one still answers the question --
+/// `planned_in` is present exactly when the encoder is not.
 #[test]
 fn every_declared_format_is_listed_with_whether_its_encoder_exists() {
     let output = run(&["formats", "--format", "json"]);
@@ -264,14 +267,17 @@ fn every_declared_format_is_listed_with_whether_its_encoder_exists() {
     let info: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
     let outputs = info["output"].as_array().expect("output formats");
 
-    assert!(
-        outputs.iter().any(|format| format["implemented"] == false),
-        "a format declared and not yet written is listed as such: {outputs:?}"
-    );
     for format in outputs {
-        assert!(
-            format["implemented"].is_boolean(),
-            "`{}` says nothing about whether it can be written: {format}",
+        let implemented = format["implemented"].as_bool().unwrap_or_else(|| {
+            panic!(
+                "`{}` says nothing about whether it can be written: {format}",
+                format["name"]
+            )
+        });
+        assert_eq!(
+            implemented,
+            format["planned_in"].is_null(),
+            "`{}` is listed as written and as planned at once: {format}",
             format["name"]
         );
     }

@@ -8,9 +8,9 @@
 use std::fmt::Write as _;
 
 use crate::catalog::{MatchKind, Unit};
-use crate::emit::{Bucket, Output, Results, SeriesHist, StackCount};
+use crate::emit::{Bucket, Output, Results, SeriesHist, SeriesKey, StackCount};
 use crate::error::ParseError;
-use crate::event::KeyValue;
+use crate::event::{Event, KeyValue};
 use crate::format::OutputFormat;
 use crate::join::{Correlation, Outcome};
 use crate::scalar::Duration;
@@ -57,11 +57,37 @@ pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, Pa
         }
         OutputFormat::Folded => folded(output),
         OutputFormat::Speedscope => speedscope(output),
+        OutputFormat::ChromeTrace => chrome(output),
+        // The one format whose file is not text. It is encoded all the same
+        // and the bytes dropped, so that a run with nothing to profile hears
+        // about the profile rather than about the pipe: a reader who asked for
+        // `pprof` and captured no stacks has to change the request.
+        format if format.is_binary() => {
+            run_output_bytes(format, output)?;
+            Err(ParseError::new(format!(
+                "`{format}` is {}, which is not text: write it to a file with `--out <dir>`",
+                format.describe()
+            )))
+        }
         format if format.renders_documents() => format.serialize_document(output),
         format => Err(ParseError::new(format!(
             "`{format}` has no encoder yet: {}",
             format.describe()
         ))),
+    }
+}
+
+/// Encodes a whole run in the format's own bytes.
+///
+/// The general entry point, and the only one that can carry every format:
+/// `pprof` is a gzipped protobuf and a `String` cannot hold one. Every other
+/// format is UTF-8 and comes through [`run_output`] unchanged, so a caller that
+/// writes bytes writes all nine and a caller that prints text writes eight and
+/// says why.
+pub fn run_output_bytes(format: OutputFormat, output: &RunOutput) -> Result<Vec<u8>, ParseError> {
+    match format {
+        OutputFormat::Pprof => pprof(output),
+        format => run_output(format, output).map(String::into_bytes),
     }
 }
 
@@ -235,8 +261,12 @@ pub fn results(format: OutputFormat, results: &Results) -> Result<String, ParseE
         OutputFormat::Text => Ok(text(results)),
         OutputFormat::Ndjson => ndjson(results),
         // A profile format is a file, not a fragment: it has a header, a shared
-        // frame table and a list of profiles. One result is a run of one.
-        OutputFormat::Folded | OutputFormat::Speedscope => run_output(
+        // frame table and a list of profiles. One result is a run of one, and
+        // so is one trace.
+        OutputFormat::Folded
+        | OutputFormat::Speedscope
+        | OutputFormat::Pprof
+        | OutputFormat::ChromeTrace => run_output(
             format,
             &RunOutput {
                 results: vec![results.clone()],
@@ -655,7 +685,8 @@ fn why_no_profile(output: &RunOutput) -> String {
         return "it emitted no stacks; use --emit stack, or json for what was measured".to_owned();
     }
     format!(
-        "`stack` was asked for and no event carried one, {unattributed} of them;          the backend that served this request captures no stacks"
+        "`stack` was asked for and no event carried one, {unattributed} of them; \
+         the backend that served this request captured none"
     )
 }
 
@@ -979,6 +1010,683 @@ fn bytes(value: f64) -> String {
         }
     }
     format!("{value:.0} B")
+}
+
+/// A gzipped `profile.proto`, the format `pprof`, Parca and Polar Signals read.
+///
+/// The whole format is a string table and indices into it, which is the same
+/// interning [`Results::stacks`] already does; what this adds is the wire
+/// encoding and a header that says what the numbers are. Nothing is aggregated
+/// here that was not aggregated already.
+///
+/// **Several requests become one profile with several sample types**, which is
+/// what pprof is for: a heap profile carries `alloc_space` and `alloc_objects`
+/// side by side, and a run that asked for `cpu.profile` and `sched.offcpu`
+/// carries both under their own names, each sample scoring in its own column
+/// and zero in the others. `folded` cannot do that and has to prefix a root
+/// frame instead.
+///
+/// **What is not written down is as deliberate as what is.** `time_nanos` is
+/// the wall-clock start of a profile and this tool has no wall clock --
+/// `CLOCK_MONOTONIC` is the only domain it admits -- so the field is left at
+/// zero, which pprof reads as unknown, and a comment says so. `period` is the
+/// sampling interval, which lives in the request and not in the results, so it
+/// is left out for the same reason.
+fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
+    let profiles: Vec<(&Results, &[StackCount], usize)> = output
+        .results
+        .iter()
+        .flat_map(|results| {
+            results.outputs.iter().filter_map(move |out| match out {
+                Output::Stack {
+                    stacks,
+                    unattributed,
+                } => Some((results, stacks.as_slice(), *unattributed)),
+                _ => None,
+            })
+        })
+        .collect();
+
+    if profiles.iter().all(|(_, stacks, _)| stacks.is_empty()) {
+        return Err(ParseError::new(format!(
+            "`pprof` describes a profile and this run has none to write: {}",
+            why_no_profile(output)
+        )));
+    }
+
+    let mut strings = StringTable::default();
+    let mut table = Symbols::default();
+
+    // One sample type per request, named as the request was. Two requests of
+    // the same source would otherwise produce two columns a reader cannot tell
+    // apart, and `pprof -sample_index=` selects a column by name.
+    let mut type_names: Vec<String> = Vec::new();
+    for (results, _, _) in &profiles {
+        let mut name = results.label.clone();
+        let mut nth = 2;
+        while type_names.contains(&name) {
+            name = format!("{} #{nth}", results.label);
+            nth += 1;
+        }
+        type_names.push(name);
+    }
+
+    let mut sample_types = Vec::new();
+    for (index, (results, _, _)) in profiles.iter().enumerate() {
+        let (unit, _) = pprof_unit(results.unit);
+        let mut value_type = Vec::new();
+        wire::int64(
+            &mut value_type,
+            1,
+            strings.intern(&type_names[index]) as i64,
+        );
+        wire::int64(&mut value_type, 2, strings.intern(unit) as i64);
+        sample_types.push(value_type);
+    }
+
+    let events_key = strings.intern("events") as i64;
+    let count_unit = strings.intern("count") as i64;
+
+    let mut samples = Vec::new();
+    for (column, (results, stacks, _)) in profiles.iter().enumerate() {
+        for stack in *stacks {
+            // pprof orders a sample's locations leaf first; this tool carries
+            // them root first, the way `folded` writes them.
+            let ids: Vec<u64> = frames(results, stack)
+                .iter()
+                .rev()
+                .map(|frame| table.location_of(frame, &mut strings))
+                .collect();
+            let mut values = vec![0i64; profiles.len()];
+            values[column] = stack.total.round() as i64;
+
+            // How many events went into a stack is a different number from what
+            // they came to, and only one of the two fits in the value column.
+            // A numeric label keeps the other rather than dropping it: `pprof
+            // -tagshow events` reads it back.
+            let mut label = Vec::new();
+            wire::int64(&mut label, 1, events_key);
+            wire::int64(&mut label, 3, stack.events as i64);
+            wire::int64(&mut label, 6, count_unit);
+
+            let mut sample = Vec::new();
+            wire::packed_uint64(&mut sample, 1, &ids);
+            wire::packed_int64(&mut sample, 2, &values);
+            wire::message(&mut sample, 3, &label);
+            samples.push(sample);
+        }
+    }
+
+    let mut comments = vec![
+        format!("exporter: omn {}", env!("CARGO_PKG_VERSION")),
+        "clock: CLOCK_MONOTONIC; time_nanos is left at zero because this tool has no wall clock"
+            .to_owned(),
+        "period is unset: the sampling interval belongs to the request, not to the results"
+            .to_owned(),
+    ];
+    for (index, (results, stacks, unattributed)) in profiles.iter().enumerate() {
+        comments.push(format!(
+            "sample type {} `{}`: source {}, via {}, {} stacks over {}",
+            index + 1,
+            type_names[index],
+            results.source,
+            results.backend,
+            stacks.len(),
+            approximate(results.observed_ns),
+        ));
+        let (unit, known) = pprof_unit(results.unit);
+        if !known {
+            comments.push(format!(
+                "  `{unit}` is not a unit pprof knows: the values are as measured, and no tool \
+                 will scale or label them",
+            ));
+        }
+        if *unattributed > 0 {
+            comments.push(format!(
+                "  {unattributed} events carried no stack and are not in this profile",
+            ));
+        }
+        // Losses are counted and surfaced to the user, always -- including into
+        // a format that has nowhere structural to put them.
+        if !results.losses.is_clean() {
+            comments.push(format!(
+                "  LOSS: {} dropped, {} failed reads, {} late ticks",
+                results.losses.dropped, results.losses.failed_reads, results.losses.late_ticks
+            ));
+            for (reason, count) in &results.losses.reasons {
+                comments.push(format!("    {count}x {reason}"));
+            }
+        }
+        for degradation in &results.degradations {
+            comments.push(format!("  degraded: {degradation}"));
+        }
+        for unverified in &results.unverified {
+            comments.push(format!("  unverified: {unverified}"));
+        }
+        if let Some(filtered) = &results.filtered {
+            comments.push(format!(
+                "  filtered: kept {} of {} events matching {}",
+                filtered.kept,
+                filtered.kept + filtered.dropped,
+                filtered.predicate
+            ));
+        }
+    }
+    let comments: Vec<i64> = comments
+        .iter()
+        .map(|line| strings.intern(line) as i64)
+        .collect();
+    let default_type = strings.intern(&type_names[0]) as i64;
+    let duration = profiles
+        .iter()
+        .map(|(results, _, _)| results.observed_ns)
+        .max()
+        .unwrap_or(0);
+
+    let mut profile = Vec::new();
+    for value_type in &sample_types {
+        wire::message(&mut profile, 1, value_type);
+    }
+    for sample in &samples {
+        wire::message(&mut profile, 2, sample);
+    }
+    for location in &table.locations {
+        wire::message(&mut profile, 4, location);
+    }
+    for function in &table.functions {
+        wire::message(&mut profile, 5, function);
+    }
+    // Written last, because interning a string is what the loops above were
+    // doing: the table is only complete once nothing else will add to it.
+    for entry in strings.entries() {
+        wire::string(&mut profile, 6, entry);
+    }
+    wire::int64(&mut profile, 10, duration as i64);
+    wire::packed_int64(&mut profile, 13, &comments);
+    wire::int64(&mut profile, 14, default_type);
+
+    Ok(wire::gzip(&profile))
+}
+
+/// The unit string pprof will read, and whether it is one pprof knows.
+///
+/// pprof scales and labels an axis from a fixed set of unit names, and this
+/// tool's units do not map onto them one to one. Three do. The rest are written
+/// under their own name rather than under the nearest one pprof would
+/// recognize: a ratio reported as `count` renders as a count, and a temperature
+/// reported as anything renders as a lie. The caller writes a comment saying so.
+fn pprof_unit(unit: Unit) -> (&'static str, bool) {
+    match unit {
+        Unit::Ns => ("nanoseconds", true),
+        Unit::Bytes => ("bytes", true),
+        Unit::Count => ("count", true),
+        Unit::Ratio => ("ratio", false),
+        Unit::Hz => ("hertz", false),
+        Unit::Joules => ("joules", false),
+        Unit::Celsius => ("celsius", false),
+    }
+}
+
+/// pprof's location and function tables, which this tool fills one frame name
+/// at a time.
+///
+/// One location per function and no addresses: the frames reaching this module
+/// are already symbolized strings, produced by `stack` against the target's own
+/// maps. Writing an address of zero on every frame would claim the profile
+/// happened at one instruction, and writing a mapping would claim a build id
+/// nothing here read.
+#[derive(Debug, Default)]
+struct Symbols {
+    /// pprof numbers locations and functions from one; zero means absent.
+    id_of: std::collections::HashMap<String, u64>,
+    functions: Vec<Vec<u8>>,
+    locations: Vec<Vec<u8>>,
+}
+
+impl Symbols {
+    fn location_of(&mut self, name: &str, strings: &mut StringTable) -> u64 {
+        if let Some(id) = self.id_of.get(name) {
+            return *id;
+        }
+        let id = self.functions.len() as u64 + 1;
+
+        // `system_name` is the mangled name and `name` the readable one. This
+        // tool symbolizes once and has only the one, so writing it into both
+        // would claim a demangling that did not happen.
+        let mut function = Vec::new();
+        wire::uint64(&mut function, 1, id);
+        wire::int64(&mut function, 2, strings.intern(name) as i64);
+        self.functions.push(function);
+
+        let mut line = Vec::new();
+        wire::uint64(&mut line, 1, id);
+        let mut location = Vec::new();
+        wire::uint64(&mut location, 1, id);
+        wire::message(&mut location, 4, &line);
+        self.locations.push(location);
+
+        self.id_of.insert(name.to_owned(), id);
+        id
+    }
+}
+
+/// pprof's string table: every string in the file is an index into it, and
+/// index zero is the empty string by definition of the format.
+#[derive(Debug)]
+struct StringTable {
+    entries: Vec<String>,
+    index_of: std::collections::HashMap<String, u64>,
+}
+
+impl Default for StringTable {
+    fn default() -> Self {
+        Self {
+            entries: vec![String::new()],
+            index_of: std::collections::HashMap::from([(String::new(), 0)]),
+        }
+    }
+}
+
+impl StringTable {
+    fn intern(&mut self, text: &str) -> u64 {
+        if let Some(index) = self.index_of.get(text) {
+            return *index;
+        }
+        let index = self.entries.len() as u64;
+        self.entries.push(text.to_owned());
+        self.index_of.insert(text.to_owned(), index);
+        index
+    }
+
+    fn entries(&self) -> &[String] {
+        &self.entries
+    }
+}
+
+/// Protocol-buffer and gzip encoding, which is all `pprof` needs from outside
+/// this crate and all this module implements of either.
+///
+/// Writing it by hand rather than taking a dependency: the subset a profile
+/// uses is varints, length-delimited fields and packed repeated integers, which
+/// is under a hundred lines, and a code generator for one `.proto` is a build
+/// step the rest of this project does not have.
+mod wire {
+    /// Base 128 varint, low group first.
+    fn varint(out: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn tag(out: &mut Vec<u8>, field: u32, wire_type: u8) {
+        varint(out, (u64::from(field) << 3) | u64::from(wire_type));
+    }
+
+    /// A varint field. Omitted when zero, which proto3 reads back as zero.
+    pub fn uint64(out: &mut Vec<u8>, field: u32, value: u64) {
+        if value != 0 {
+            tag(out, field, 0);
+            varint(out, value);
+        }
+    }
+
+    /// A signed varint field, encoded the way protobuf encodes `int64`: two's
+    /// complement, not zigzag. Every `int64` in `profile.proto` is an index or
+    /// a count and none is negative, but a negative value has to round-trip
+    /// rather than turn into a huge positive one.
+    pub fn int64(out: &mut Vec<u8>, field: u32, value: i64) {
+        if value != 0 {
+            tag(out, field, 0);
+            varint(out, value as u64);
+        }
+    }
+
+    /// A repeated string entry, always written: index two of the string table
+    /// is whatever was written third, so an empty entry that is skipped shifts
+    /// every index after it.
+    pub fn string(out: &mut Vec<u8>, field: u32, value: &str) {
+        tag(out, field, 2);
+        varint(out, value.len() as u64);
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    /// A nested message, always written even when its body is empty: a message
+    /// whose every field is at its default still has to exist for the reader to
+    /// count it.
+    pub fn message(out: &mut Vec<u8>, field: u32, body: &[u8]) {
+        tag(out, field, 2);
+        varint(out, body.len() as u64);
+        out.extend_from_slice(body);
+    }
+
+    pub fn packed_uint64(out: &mut Vec<u8>, field: u32, values: &[u64]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut body = Vec::new();
+        for value in values {
+            varint(&mut body, *value);
+        }
+        message(out, field, &body);
+    }
+
+    pub fn packed_int64(out: &mut Vec<u8>, field: u32, values: &[i64]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut body = Vec::new();
+        for value in values {
+            varint(&mut body, *value as u64);
+        }
+        message(out, field, &body);
+    }
+
+    /// A gzip stream, the container `profile.proto` is distributed in.
+    ///
+    /// The deflate payload is written as *stored* blocks -- the BTYPE 00 that
+    /// the format defines as uncompressed -- so this is a conformant gzip file
+    /// that every decoder reads, produced without a compressor. What it is not
+    /// is smaller: a profile costs about five bytes per 64 KiB more than its
+    /// protobuf. Compressing it would mean a deflate implementation or a
+    /// dependency, and neither buys anything a reader of this format notices.
+    pub fn gzip(data: &[u8]) -> Vec<u8> {
+        // Magic, CM=8 (deflate), FLG=0, MTIME=0, XFL=0, OS=255.
+        //
+        // MTIME zero is the format's own "no time available", which is the same
+        // answer `time_nanos` gives and for the same reason: this tool reads
+        // one clock and it is not the wall.
+        let mut out = vec![0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0xff];
+        let mut chunks = data.chunks(0xffff).peekable();
+        if chunks.peek().is_none() {
+            out.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
+        }
+        while let Some(chunk) = chunks.next() {
+            let last = u8::from(chunks.peek().is_none());
+            let len = chunk.len() as u16;
+            out.push(last);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(!len).to_le_bytes());
+            out.extend_from_slice(chunk);
+        }
+        out.extend_from_slice(&crc32(data).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out
+    }
+
+    /// CRC-32 as gzip specifies it: the reflected IEEE polynomial, which is the
+    /// same one `gzip -t` will check the trailer against.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let carry = crc & 1;
+                crc >>= 1;
+                if carry != 0 {
+                    crc ^= 0xedb8_8320;
+                }
+            }
+        }
+        !crc
+    }
+}
+
+/// Chrome Trace Event Format, which Perfetto UI and `chrome://tracing` read.
+///
+/// The first format here whose natural input is `timeline` rather than `stack`:
+/// it carries *when* things had which value, and has no way to say where in a
+/// program they happened. `--emit stack` is refused for it by the matrix in
+/// `format`, which is the point of that matrix.
+///
+/// Two shapes, one per emit it accepts. A timeline series becomes a **counter
+/// track** -- `ph: "C"`, one track per series, which is what Perfetto draws as
+/// a line -- and a raw event becomes an **instant event** on a thread of its
+/// own series. Each request is a process, so two requests in one run are two
+/// rows rather than one interleaved strip.
+///
+/// **The axis.** Chrome's `ts` is microseconds from an arbitrary origin, and
+/// this tool's origin is the first event of a collection. A run collects its
+/// requests over one window against one target, so their origins are the same
+/// to within the first tick; `otherData` says exactly that rather than leaving
+/// a reader to assume it. Raw events, which carry an absolute
+/// `CLOCK_MONOTONIC` timestamp, are placed against the earliest of them in the
+/// run so that they share the axis instead of sitting at the machine's uptime.
+fn chrome(output: &RunOutput) -> Result<String, ParseError> {
+    let origin_ns = output
+        .results
+        .iter()
+        .flat_map(|results| &results.outputs)
+        .filter_map(|out| match out {
+            Output::Raw { events } => events.iter().map(|event| event.ts_ns).min(),
+            _ => None,
+        })
+        .min();
+
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut described: Vec<serde_json::Value> = Vec::new();
+    let mut wrote_something = false;
+
+    for (index, results) in output.results.iter().enumerate() {
+        let carries = results
+            .outputs
+            .iter()
+            .any(|out| matches!(out, Output::Timeline { .. } | Output::Raw { .. }));
+        if !carries {
+            continue;
+        }
+        let pid = index + 1;
+
+        events.push(serde_json::json!({
+            "ph": "M", "name": "process_name", "pid": pid, "tid": 0,
+            "args": {"name": results.label},
+        }));
+        events.push(serde_json::json!({
+            "ph": "M", "name": "process_labels", "pid": pid, "tid": 0,
+            "args": {"labels": process_labels(results)},
+        }));
+        described.push(request_record(results));
+
+        let mut tid_of: Vec<String> = Vec::new();
+
+        for out in &results.outputs {
+            match out {
+                Output::Timeline { series } => {
+                    for series in series {
+                        for point in &series.points {
+                            events.push(serde_json::json!({
+                                "ph": "C",
+                                "name": series.key,
+                                "pid": pid,
+                                "ts": point.offset_ns as f64 / 1000.0,
+                                "args": {results.label.as_str(): point.value},
+                            }));
+                            wrote_something = true;
+                        }
+                    }
+                }
+                Output::Raw { events: raw } => {
+                    for event in raw {
+                        let key = SeriesKey::of(event);
+                        let thread = thread_of(key.as_str(), &mut tid_of);
+                        let at = origin_ns
+                            .map(|origin| event.ts_ns.saturating_sub(origin))
+                            .unwrap_or(event.ts_ns);
+                        events.push(serde_json::json!({
+                            "ph": "i",
+                            "s": "t",
+                            "name": event.kind,
+                            "pid": pid,
+                            "tid": thread,
+                            "ts": at as f64 / 1000.0,
+                            "args": instant_args(event),
+                        }));
+                        wrote_something = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (index, name) in tid_of.iter().enumerate() {
+            events.push(serde_json::json!({
+                "ph": "M", "name": "thread_name", "pid": pid, "tid": index + 1,
+                "args": {"name": name},
+            }));
+        }
+    }
+
+    if !wrote_something {
+        return Err(ParseError::new(format!(
+            "`chrome` carries a timeline and this run has none to write: {}",
+            why_no_timeline(output)
+        )));
+    }
+
+    // Chrome sorts by `ts` itself, but a trace whose events arrive in order
+    // reads the same in a text diff as it does in the UI, and the metadata
+    // events carry no time at all.
+    let document = serde_json::json!({
+        "displayTimeUnit": "ns",
+        "traceEvents": events,
+        "otherData": {
+            "exporter": concat!("omn ", env!("CARGO_PKG_VERSION")),
+            "clock": "CLOCK_MONOTONIC",
+            "time_origin": "microseconds from the first event of the run; a run collects its \
+                            requests over one window, so their tracks share this axis to within \
+                            the first tick",
+            "requests": described,
+            "joins": output
+                .joins
+                .iter()
+                .map(|join| format!(
+                    "{}: {} -> {}, {} of {} attributed (this format carries no correlations; \
+                     ask for json to read them)",
+                    join.rule,
+                    join.from,
+                    join.to,
+                    join.matched,
+                    join.matched + join.unmatched
+                ))
+                .collect::<Vec<_>>(),
+        },
+    });
+    serde_json::to_string_pretty(&document)
+        .map_err(|error| ParseError::new(format!("cannot encode the Chrome trace: {error}")))
+}
+
+/// The Chrome thread number a series key takes in one process, allocated in
+/// the order the keys are seen and named by a metadata event afterwards.
+///
+/// `tid` is a number in this format and a series is keyed by a device, an
+/// interface or a socket as often as by a thread, so the number is an index
+/// into this trace and the key is what it means.
+fn thread_of(key: &str, seen: &mut Vec<String>) -> usize {
+    if let Some(index) = seen.iter().position(|known| known == key) {
+        return index + 1;
+    }
+    seen.push(key.to_owned());
+    seen.len()
+}
+
+/// The one-line provenance Chrome shows beside a process name.
+fn process_labels(results: &Results) -> String {
+    let mut label = format!(
+        "{} via {} [{}], {} events over {}",
+        results.source,
+        results.backend,
+        results.unit,
+        results.events_seen,
+        approximate(results.observed_ns)
+    );
+    if !results.losses.is_clean() {
+        let _ = write!(
+            label,
+            " -- LOSS: {} dropped, {} failed reads, {} late ticks",
+            results.losses.dropped, results.losses.failed_reads, results.losses.late_ticks
+        );
+    }
+    label
+}
+
+/// Everything about one request that the trace events themselves cannot say.
+///
+/// Losses are counted and surfaced to the user, always, and a trace viewer has
+/// nowhere to draw them: they go here, where a reader who opens the file as
+/// JSON finds them and a reader who opens it in Perfetto still has the summary
+/// on the process label.
+fn request_record(results: &Results) -> serde_json::Value {
+    serde_json::json!({
+        "label": results.label,
+        "source": results.source,
+        "backend": results.backend,
+        "unit": results.unit.as_str(),
+        "events_seen": results.events_seen,
+        "observed_ns": results.observed_ns,
+        "stopped_because": results.stopped_because,
+        "losses": results.losses,
+        "degradations": results.degradations,
+        "unverified": results.unverified,
+        "filtered": results.filtered,
+    })
+}
+
+/// What an instant event carries: what was measured, and what it can be joined
+/// on. Both, because a raw trace is the emit a reader asks for when the
+/// aggregate lost the thing they were looking for.
+fn instant_args(event: &Event) -> serde_json::Value {
+    let mut args = serde_json::Map::new();
+    for attr in &event.attrs {
+        args.insert(
+            attr.name.clone(),
+            serde_json::to_value(&attr.value).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    for key in &event.keys {
+        args.insert(format!("key.{}", key.kind()), key.to_string().into());
+    }
+    args.insert("seq".to_owned(), event.seq.into());
+    if event.ts_err_ns != 0 {
+        // A timestamp converted from another domain, which is the only way this
+        // is non-zero. It belongs next to the event rather than in a footnote:
+        // the axis it was placed on is not the one it was taken on.
+        args.insert("ts_err_ns".to_owned(), event.ts_err_ns.into());
+    }
+    serde_json::Value::Object(args)
+}
+
+/// Why a run carries nothing a trace viewer can draw.
+///
+/// The same distinction `why_no_profile` draws, for the other half of the
+/// matrix: a request that asked for neither a timeline nor raw events, and one
+/// that asked and whose window held none.
+fn why_no_timeline(output: &RunOutput) -> String {
+    let mut asked = false;
+    for results in &output.results {
+        for out in &results.outputs {
+            match out {
+                Output::Timeline { series } => {
+                    asked = true;
+                    if series.iter().any(|series| !series.points.is_empty()) {
+                        return String::new();
+                    }
+                }
+                Output::Raw { events } => {
+                    asked = true;
+                    if !events.is_empty() {
+                        return String::new();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !asked {
+        return "it emitted no timeline; use --emit timeline, or json for what was measured"
+            .to_owned();
+    }
+    "a timeline was asked for and no event arrived in the window".to_owned()
 }
 
 #[cfg(test)]
@@ -1504,6 +2212,8 @@ mod tests {
     ///
     /// Each format is handed a run carrying an output it declares it can
     /// express, so that a refusal is about the encoder and not about the emit.
+    /// The bytes entry point is the one asked, because it is the only one that
+    /// can carry all nine: `pprof` is gzip and a `String` cannot hold it.
     #[test]
     fn every_format_does_what_its_declared_status_says() {
         let mut run = correlated_run();
@@ -1517,7 +2227,7 @@ mod tests {
                     .any(|output| format.supports_emit(output.kind()))),
                 "`{format}` was given nothing it declares it can carry"
             );
-            let encoded = run_output(format, &run);
+            let encoded = run_output_bytes(format, &run);
             match format.status() {
                 crate::format::FormatStatus::Ready => assert!(
                     encoded.is_ok(),
@@ -1532,10 +2242,31 @@ mod tests {
         }
     }
 
+    /// The gzipped protobuf is the one format the text path cannot carry, and
+    /// what it answers has to be the way out rather than a bare refusal.
     #[test]
-    fn a_format_without_an_encoder_says_so() {
-        let error = results(OutputFormat::Pprof, &sample()).unwrap_err();
-        assert!(error.message().contains("no encoder yet"), "{error}");
+    fn the_binary_format_says_how_to_get_it_rather_than_that_it_cannot() {
+        let run = RunOutput {
+            results: vec![profile()],
+            joins: Vec::new(),
+        };
+        let error = run_output(OutputFormat::Pprof, &run).unwrap_err();
+        assert!(error.message().contains("not text"), "{error}");
+        assert!(error.message().contains("--out"), "{error}");
+        assert!(run_output_bytes(OutputFormat::Pprof, &run).is_ok());
+    }
+
+    /// And a run with nothing to profile answers about the profile, not about
+    /// the encoding: a reader who asked for `pprof` and has no stacks needs to
+    /// change the request, and being told the file is binary would not say so.
+    #[test]
+    fn a_binary_format_with_nothing_to_write_still_answers_about_the_run() {
+        let run = RunOutput {
+            results: vec![ranked()],
+            joins: Vec::new(),
+        };
+        let error = run_output(OutputFormat::Pprof, &run).unwrap_err();
+        assert!(error.message().contains("emitted no stacks"), "{error}");
     }
 
     /// Every new emit reaches the stream too, and a consumer reading it must be
@@ -1560,6 +2291,125 @@ mod tests {
         assert!(
             profiled.contains("\"frames\":[\"main\",\"work\",\"read\"]"),
             "{profiled}"
+        );
+    }
+
+    /// Both profile formats draw the same distinction for the same reason, and
+    /// `pprof` has to draw it too: a request that never asked for stacks and a
+    /// collector that captured none are different answers.
+    #[test]
+    fn a_pprof_of_events_that_carried_no_stack_says_which_of_the_two_happened() {
+        let mut empty = profile();
+        empty.outputs = vec![Output::Stack {
+            stacks: Vec::new(),
+            unattributed: 91,
+        }];
+        empty.stacks = BTreeMap::new();
+        let error = run_output_bytes(
+            OutputFormat::Pprof,
+            &RunOutput {
+                results: vec![empty],
+                joins: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.message().contains("no event carried one, 91 of them"),
+            "{error}"
+        );
+    }
+
+    /// The trace format's half of the same distinction. A run that asked for a
+    /// histogram has nothing a viewer can draw and never did; a run that polled
+    /// and saw nothing is a measurement.
+    #[test]
+    fn a_chrome_trace_of_a_run_with_nothing_to_draw_says_which_of_the_two_happened() {
+        let never = run_output(
+            OutputFormat::ChromeTrace,
+            &RunOutput {
+                results: vec![histogram()],
+                joins: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(never.message().contains("emitted no timeline"), "{never}");
+
+        let mut empty = sample();
+        empty.outputs = vec![Output::Timeline { series: Vec::new() }];
+        let saw_nothing = run_output(
+            OutputFormat::ChromeTrace,
+            &RunOutput {
+                results: vec![empty],
+                joins: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            saw_nothing.message().contains("no event arrived"),
+            "{saw_nothing}"
+        );
+    }
+
+    /// A trace viewer has nowhere to draw a dropped event, which is not a
+    /// reason for the file not to carry it: losses are counted and surfaced to
+    /// the user, always.
+    #[test]
+    fn a_chrome_trace_carries_the_losses_and_the_degradations_it_cannot_draw() {
+        let mut lossy = sample();
+        lossy.losses.dropped = 12;
+        lossy.losses.late_ticks = 3;
+        let encoded = run_output(
+            OutputFormat::ChromeTrace,
+            &RunOutput {
+                results: vec![lossy],
+                joins: Vec::new(),
+            },
+        )
+        .expect("encoding");
+        let document: serde_json::Value = serde_json::from_str(&encoded).expect("chrome JSON");
+
+        let request = &document["otherData"]["requests"][0];
+        assert_eq!(request["losses"]["dropped"], 12);
+        assert_eq!(
+            request["degradations"][0],
+            "fs:proc:statm: resident pages only"
+        );
+
+        let labels = document["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["name"] == "process_labels")
+            .expect("a process label");
+        let labels = labels["args"]["labels"].as_str().unwrap();
+        assert!(
+            labels.contains("LOSS: 12 dropped"),
+            "the one line a viewer does show has to carry it: {labels}"
+        );
+    }
+
+    /// A run of several requests becomes one profile with one column each,
+    /// which is what `pprof` is for and what `folded` has to fake with a root
+    /// frame. Two requests of the same source would collide, so the second is
+    /// numbered.
+    #[test]
+    fn two_requests_become_two_columns_that_can_be_told_apart() {
+        let mut second = profile();
+        second.label = "offcpu".into();
+        let mut third = profile();
+        third.label = "profile".into();
+        let run = RunOutput {
+            results: vec![profile(), second, third],
+            joins: Vec::new(),
+        };
+        let bytes = run_output_bytes(OutputFormat::Pprof, &run).expect("encoding");
+        // The names are in the string table, which is not compressed away: the
+        // deflate blocks this writes are stored.
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("offcpu"), "the second column is missing");
+        assert!(
+            text.contains("profile #2"),
+            "two requests of one source are indistinguishable columns"
         );
     }
 
