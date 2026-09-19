@@ -45,15 +45,28 @@ use crate::stack::{Frame, RawStack, Symbolizer};
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(100);
 
 /// Holds the request until the target exists.
-pub struct Prepare(pub Mode);
+pub struct Prepare {
+    pub mode: Mode,
+    /// Whether anything downstream will read the frames.
+    ///
+    /// Symbolising a stack means reading a process's `/proc/<pid>/maps` and
+    /// then its binaries' symbol tables, and a machine-wide run meets every
+    /// process on the machine. The emit layer keeps the resolved table only
+    /// when the request asked for `stack`, and throws it away otherwise -- so
+    /// without this the work is not merely expensive, it is expensive and
+    /// discarded. Measured on this machine: `sched.offcpu --system --duration
+    /// 1s --emit summary` did not finish in ninety seconds, and finishes in
+    /// 1.2 with this.
+    pub wants_stacks: bool,
+}
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        if self.0 != Mode::Trace {
+        if self.mode != Mode::Trace {
             return Err(format!(
                 "`{}` mode cannot measure blocked time: a block has a beginning and an end, and \
                  a sample that catches one without the other has no duration to report",
-                self.0
+                self.mode
             ));
         }
         let filter = match target {
@@ -66,7 +79,7 @@ impl Prepared for Prepare {
                 )
             })? as u32),
         };
-        Ok(Box::new(OffCpuCollector::new(filter)))
+        Ok(Box::new(OffCpuCollector::new(filter, self.wants_stacks)))
     }
 }
 
@@ -96,10 +109,12 @@ pub struct OffCpuCollector {
     /// evicted by the time it was asked. Different failures, counted apart.
     unwalkable: u64,
     evicted_stacks: u64,
+    /// Whether the frames behind a stack id will be read by anyone.
+    wants_stacks: bool,
 }
 
 impl OffCpuCollector {
-    pub fn new(filter: Option<u32>) -> Self {
+    pub fn new(filter: Option<u32>, wants_stacks: bool) -> Self {
         Self {
             id: CollectorId::new("sched.offcpu/bpf:raw_tp"),
             filter,
@@ -113,6 +128,7 @@ impl OffCpuCollector {
             symbolizers: HashMap::new(),
             unwalkable: 0,
             evicted_stacks: 0,
+            wants_stacks,
         }
     }
 
@@ -177,6 +193,9 @@ impl OffCpuCollector {
     /// Processes this run did not launch are still resolved lazily, because
     /// there is no list of them to walk until one of them blocks.
     fn open_target_symbols(&mut self) {
+        if !self.wants_stacks {
+            return;
+        }
         let Some(tgid) = self.filter else { return };
         self.symbolizers
             .entry(tgid as i32)
@@ -191,6 +210,14 @@ impl OffCpuCollector {
     /// is an empty stack, which would read as a task that blocked at no call
     /// site at all.
     fn resolve_stack(&mut self, entry: &OffCpu) -> Option<u32> {
+        // Nothing downstream will read the frames, so there is no id worth
+        // putting on the event either: an id whose table is empty points at
+        // nothing. The kernel still walked the stack -- that happens in the
+        // program, at the switch -- and what is skipped here is reading a
+        // process's mappings and its binaries' symbols.
+        if !self.wants_stacks {
+            return None;
+        }
         let id = match entry.stack {
             Some(id) => id,
             None => {
@@ -375,9 +402,12 @@ mod tests {
     /// a duration.
     #[test]
     fn a_sampled_mode_is_refused_with_the_reason() {
-        let prepared = Box::new(Prepare(Mode::Sample {
-            freq: "997hz".parse().expect("a frequency"),
-        }));
+        let prepared = Box::new(Prepare {
+            mode: Mode::Sample {
+                freq: "997hz".parse().expect("a frequency"),
+            },
+            wants_stacks: false,
+        });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
         };
@@ -386,7 +416,10 @@ mod tests {
 
     #[test]
     fn a_target_without_a_process_is_refused_by_name() {
-        let prepared = Box::new(Prepare(Mode::Trace));
+        let prepared = Box::new(Prepare {
+            mode: Mode::Trace,
+            wants_stacks: false,
+        });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to attribute blocked time to");
         };
@@ -471,7 +504,7 @@ mod tests {
     #[test]
     fn a_thread_that_sleeps_a_known_time_is_off_cpu_for_it() {
         const SLEEP: StdDuration = StdDuration::from_millis(300);
-        let mut collector = OffCpuCollector::new(Some(std::process::id()));
+        let mut collector = OffCpuCollector::new(Some(std::process::id()), false);
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -505,7 +538,7 @@ mod tests {
     /// turn a program doing nothing into a program stuck on a device.
     #[test]
     fn a_timed_sleep_is_reported_as_interruptible() {
-        let mut collector = OffCpuCollector::new(Some(std::process::id()));
+        let mut collector = OffCpuCollector::new(Some(std::process::id()), false);
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -538,7 +571,7 @@ mod tests {
     /// its wait is run queue latency, which is a different source.
     #[test]
     fn a_thread_that_only_spins_is_not_reported_as_blocked() {
-        let mut collector = OffCpuCollector::new(Some(std::process::id()));
+        let mut collector = OffCpuCollector::new(Some(std::process::id()), false);
         if skip_without_bpf(&mut collector) {
             return;
         }

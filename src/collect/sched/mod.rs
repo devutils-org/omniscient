@@ -27,7 +27,13 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(wakeup::Prepare(resolved.request.mode)))
         }),
         Factory::new("sched.offcpu", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(offcpu::Prepare(resolved.request.mode)))
+            Ok(Box::new(offcpu::Prepare {
+                mode: resolved.request.mode,
+                // Symbolising costs a read of every process's mappings, and a
+                // machine-wide run meets every process; the emit layer keeps
+                // the table only when `stack` was asked for.
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+            }))
         }),
         Factory::new("sched.runqlat", "bpf:raw_tp", |resolved| {
             Ok(Box::new(runqlat::Prepare {

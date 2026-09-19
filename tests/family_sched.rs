@@ -849,3 +849,51 @@ fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
         "migrations lost to a full map cannot be checked against a known count:\n{text}"
     );
 }
+
+/// Symbolising a stack costs a read of a process's mappings and then of its
+/// binaries' symbol tables, and a machine-wide run meets every process on the
+/// machine. The emit layer keeps that table only when the request asked for
+/// `stack`, so a run that asked for anything else was paying for it and
+/// throwing it away.
+///
+/// Measured on this machine before the collector was told what the request
+/// wanted: `--system --duration 1s --emit summary` had not finished after
+/// ninety seconds, having spent seventy of them in user time. Afterwards it
+/// takes 1.2. The bound below is twenty times the measurement and a fraction of
+/// what it was, which is the shape a timing assertion has to have to be worth
+/// making at all.
+#[test]
+fn a_machine_wide_run_that_asked_for_no_stacks_does_not_symbolise_the_machine() {
+    let started = std::time::Instant::now();
+    let output = run(&[
+        "sched.offcpu",
+        "--system",
+        "--duration",
+        "1s",
+        "--emit",
+        "raw",
+    ]);
+    let elapsed = started.elapsed();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "a one-second machine-wide run took {elapsed:?}, which is the whole machine being \
+         symbolised for a table nothing will read"
+    );
+    assert!(
+        text.contains("sched.offcpu"),
+        "the run produced no events at all, so it proves nothing about what it skipped:\n{text}"
+    );
+    // The other half of the same fact, and the one that does not depend on a
+    // clock: an id whose table is empty points at nothing, so it is not put on
+    // the event either.
+    assert!(
+        !text.contains("stack_id"),
+        "a request that did not ask for stacks carries stack ids nothing can resolve:\n{text}"
+    );
+}
