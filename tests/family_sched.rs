@@ -454,10 +454,29 @@ static CONTENDED_CPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// every other shell on the machine, and a system-wide measurement that cannot
 /// name its own workload is measuring the machine. Each test gets its own
 /// name, so that one of them can never count the other's load as its own.
+/// The name this run's workload answers to, distinct from every other run's on
+/// the machine and not only from this suite's other tests.
+///
+/// `std::env::temp_dir()` is machine-wide. Six worktrees of one fan-out running
+/// this suite at once each copied `/bin/sh` to the same path and each spun a
+/// task answering to that `comm` -- and the filters below are `--system`. That
+/// is the whole of the flake this test was blamed for: it never failed alone,
+/// and it failed when the machine was busiest. The pid makes a run's workload
+/// its own, and has to fit inside the fifteen characters the kernel keeps.
+fn workload_name(stem: &str) -> String {
+    let name = format!("{stem}{}", std::process::id() % 100_000);
+    assert!(
+        name.len() <= 15,
+        "`{name}` is longer than a comm; shorten `{stem}`"
+    );
+    name
+}
+
 fn distinctly_named_shell(name: &str) -> Option<std::path::PathBuf> {
     // Fifteen characters is what the kernel keeps of a name, so the file is
     // named inside that: a workload whose `comm` is truncated is one the
     // filter cannot match.
+    //
     assert!(name.len() <= 15, "`{name}` is longer than a comm");
     let path = std::env::temp_dir().join(name);
     if !path.exists() {
@@ -469,6 +488,34 @@ fn distinctly_named_shell(name: &str) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// The share of a cpu's last tick that went to something other than idle.
+///
+/// `/proc/stat`'s per-cpu line, sampled twice: an independent answer to "is
+/// this core mine?", which a test pinning its workload to a core has to ask.
+/// `None` where the file cannot be read or the two samples land in one tick.
+fn cpu_busy_share(cpu: usize) -> Option<f64> {
+    let read = || -> Option<(u64, u64)> {
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        let line = stat
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some(&format!("cpu{cpu}")))?;
+        let fields: Vec<u64> = line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|field| field.parse().ok())
+            .collect();
+        // user nice system idle iowait ...; idle and iowait are both not-work.
+        let idle = fields.get(3)? + fields.get(4).copied().unwrap_or(0);
+        Some((fields.iter().sum(), idle))
+    };
+    let (total_before, idle_before) = read()?;
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let (total_after, idle_after) = read()?;
+    let total = total_after.checked_sub(total_before)?;
+    let idle = idle_after.checked_sub(idle_before)?;
+    (total > 0).then(|| 1.0 - idle as f64 / total as f64)
+}
+
 /// Busy tasks, all pinned to one cpu, that spin until they are killed.
 ///
 /// The last cpu rather than the first, only so that a suite running its own
@@ -476,9 +523,14 @@ fn distinctly_named_shell(name: &str) -> Option<std::path::PathBuf> {
 struct PinnedSpinners(Vec<std::process::Child>);
 
 impl PinnedSpinners {
+    /// The cpu these spinners contend, which is the whole of what they measure.
+    fn cpu() -> Option<usize> {
+        Some(std::thread::available_parallelism().ok()?.get() - 1)
+    }
+
     fn start(count: usize, name: &str) -> Option<Self> {
         let shell = distinctly_named_shell(name)?;
-        let cpu = std::thread::available_parallelism().ok()?.get() - 1;
+        let cpu = Self::cpu()?;
         let children: Vec<_> = (0..count)
             .filter_map(|_| {
                 Command::new("taskset")
@@ -547,8 +599,28 @@ fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
     let mut measured = Vec::new();
 
     let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
+    // The lock serializes this suite's own tests; it says nothing about the
+    // rest of the machine. This test pins its workload to one core and asserts
+    // what a task alone on that core waits for, so the core has to *be* alone
+    // -- and two copies of this suite pin to the same one, which is how "a task
+    // alone on a cpu waited 50 % of the window" happens.
+    if let (Some(cpu), Some(busy)) = (
+        PinnedSpinners::cpu(),
+        PinnedSpinners::cpu().and_then(cpu_busy_share),
+    ) {
+        if busy > 0.2 {
+            eprintln!(
+                "skipped: /proc/stat says cpu{cpu} was already {:.0} % busy before this test \
+                 started its own load, so what a task waits for there is not this test's to \
+                 measure",
+                busy * 100.0
+            );
+            return;
+        }
+    }
+    let name = workload_name("omnshare");
     for spinners in [1usize, 3] {
-        let Some(_load) = PinnedSpinners::start(spinners, "omnrunqshare") else {
+        let Some(_load) = PinnedSpinners::start(spinners, &name) else {
             eprintln!("skipped: this machine has no `taskset`, so no cpu can be contended");
             return;
         };
@@ -560,7 +632,7 @@ fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
             "--emit",
             "raw",
             "--filter",
-            "comm == 'omnrunqshare'",
+            &format!("comm == '{name}'"),
         ]);
         let text = String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr);
@@ -618,7 +690,8 @@ fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
 #[test]
 fn the_kernels_buckets_are_the_emit_layers_buckets() {
     let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
-    let Some(_load) = PinnedSpinners::start(3, "omnrunqbkt") else {
+    let name = workload_name("omnbkt");
+    let Some(_load) = PinnedSpinners::start(3, &name) else {
         eprintln!("skipped: this machine has no `taskset`, so no cpu can be contended");
         return;
     };
@@ -632,7 +705,7 @@ fn the_kernels_buckets_are_the_emit_layers_buckets() {
         "--emit",
         "raw",
         "--filter",
-        "comm == 'omnrunqbkt'",
+        &format!("comm == '{name}'"),
     ]);
     let text = String::from_utf8_lossy(&output.stdout).into_owned()
         + &String::from_utf8_lossy(&output.stderr);
@@ -763,7 +836,8 @@ fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
         eprintln!("skipped: one cpu, so nothing can be moved between two");
         return;
     }
-    let Some(shell) = distinctly_named_shell("omnmigrate") else {
+    let name = workload_name("omnmigr");
+    let Some(shell) = distinctly_named_shell(&name) else {
         eprintln!("skipped: /bin/sh cannot be copied, so there is no load to pin");
         return;
     };

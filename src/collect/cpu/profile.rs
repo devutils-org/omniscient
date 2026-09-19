@@ -178,6 +178,12 @@ impl Collector for ProfileCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        // Before the window, not inside a drain: see
+        // `stack::prime_kernel_symbols`. A profile walks into the kernel on
+        // almost any workload, and the runner's round is serial.
+        if self.callchain != Callchain::Off {
+            crate::stack::prime_kernel_symbols();
+        }
         let period = match self.mode {
             Mode::Sample { freq } => period_for(freq.as_hz()),
             other => {

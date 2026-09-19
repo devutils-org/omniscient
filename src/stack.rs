@@ -635,6 +635,23 @@ fn kernel_symbols() -> Option<&'static KernelSymbols> {
     KERNEL_SYMBOLS.get_or_init(KernelSymbols::read).as_ref()
 }
 
+/// Pays for the table now, before a window opens, if this run will want it.
+///
+/// Lazy is right and *lazy inside a drain* is not. The runner reads its
+/// collectors in one serial round, so a collector that spends nine hundred
+/// milliseconds parsing `/proc/kallsyms` is nine hundred milliseconds in which
+/// every other collector of that session is not read -- measured here as a
+/// session whose `cpu.oncpu_time` request got one reading of its baseline and
+/// nothing else, beside a `cpu.profile` that had to symbolize a kernel frame.
+///
+/// A fixed cost belongs before the window, which is where the target's own
+/// mappings are already read and for the same reason. A collector that will
+/// never look at a kernel frame -- `sched.offcpu` asks for `BPF_F_USER_STACK`
+/// and deliberately never consults this -- must not call it.
+pub fn prime_kernel_symbols() {
+    let _ = kernel_symbols();
+}
+
 /// The kernel's own symbol table.
 struct KernelSymbols {
     /// `(address, name)`, sorted by address.

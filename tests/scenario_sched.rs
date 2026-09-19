@@ -27,8 +27,9 @@
 //! measurement, so there is nothing to fall back to. A skip names what is
 //! missing; a request that cannot mean anything is never a reason to skip.
 
+use std::io::BufRead;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 
@@ -560,7 +561,14 @@ fn each_child_that_exits_is_named_as_the_one_that_released_the_shell() {
 /// target had while it was alive.
 #[test]
 fn a_blocking_stack_names_the_call_that_blocked() {
-    const SLEEPS: &str = "import time\nfor _ in range(20): time.sleep(0.05)";
+    // The workload says when it is ready, and the test waits for it to say so.
+    // Without that this attaches 400 ms to a python that has not finished
+    // starting: measured under the rest of this suite, the run saw four blocks
+    // of an interpreter still loading and none of the sleeps it was written
+    // for. Lengthening the window would have hidden the race rather than
+    // removing it.
+    const SLEEPS: &str =
+        "import sys, time\nprint('ready', flush=True)\nfor _ in range(20): time.sleep(0.05)";
     if !have("python3") {
         eprintln!(
             "skipped: this machine has no `python3`, which the sleeping workload is written in"
@@ -571,9 +579,20 @@ fn a_blocking_stack_names_the_call_that_blocked() {
     // Attached to a process this run did not start.
     let mut sleeper = Command::new("python3")
         .args(["-c", SLEEPS])
+        .stdout(Stdio::piped())
         .spawn()
         .expect("the sleeping workload should start");
+    let mut ready = String::new();
+    std::io::BufReader::new(sleeper.stdout.take().expect("a piped stdout"))
+        .read_line(&mut ready)
+        .expect("the workload announces itself before it sleeps");
+    assert_eq!(ready.trim(), "ready");
     let pid = sleeper.id().to_string();
+    // Six hundred milliseconds of a workload that sleeps for a thousand. The
+    // window is wider than the assertion needs on a quiet machine, because a
+    // loaded one spends some of it watching the interpreter block on something
+    // that is not the sleep -- and the assertion is that the sleep is *there*,
+    // not that it is all that is.
     let output = omn(&[
         "sched.offcpu",
         "--pid",
@@ -581,7 +600,7 @@ fn a_blocking_stack_names_the_call_that_blocked() {
         "--emit",
         "stack",
         "-d",
-        "400ms",
+        "600ms",
     ]);
     let _ = sleeper.wait();
 

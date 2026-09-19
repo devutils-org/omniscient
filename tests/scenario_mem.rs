@@ -1216,13 +1216,25 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
         pairs.push((
             sysfs["resident_huge_pages"].as_u64().expect("a count"),
             vmstat["resident_huge_pages"].as_u64().expect("a count"),
+            partial.expect("read a moment ago"),
         ));
     }
     let after = anon_huge_kilobytes();
     let partial = partial.expect("five runs read it");
-    let (theirs, ours) = *pairs
+    // How fast this machine's huge pages are moving, measured rather than
+    // assumed: the change in one backend's own answer between consecutive
+    // rounds. The two backends inside a pair are read one after the other, not
+    // at one instant, so whatever moves in that gap is in their difference --
+    // and under the rest of this suite it moves. Without this the test is a
+    // measurement of how busy the machine was.
+    let drift = pairs
+        .windows(2)
+        .map(|pair| pair[0].0.abs_diff(pair[1].0))
+        .max()
+        .unwrap_or(0);
+    let (theirs, ours, partial_then) = *pairs
         .iter()
-        .min_by_key(|(theirs, ours)| theirs.abs_diff(*ours))
+        .min_by_key(|(theirs, ours, _)| theirs.abs_diff(*ours))
         .expect("five runs");
 
     if partial == 0 {
@@ -1232,15 +1244,19 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
              did. Both said {theirs}"
         );
     } else {
-        // The bound is the size of the error, not a number chosen to pass: the
-        // gap between the two used to be exactly the partially-mapped count.
+        // The bound is the size of the error plus the size of the machine's own
+        // movement, and both are measured here rather than chosen to pass: the
+        // gap between the two used to be exactly the partially-mapped count,
+        // and the pages themselves move between the two reads of a pair.
+        let bound = partial_then / 2 + drift;
         assert!(
-            theirs.abs_diff(ours) <= partial / 2,
+            theirs.abs_diff(ours) <= bound,
             "\nnot one of {TRIES} pairs of reads of one kernel's huge pages, taken one round \
-             apart through the two backends of one source, came within {} of each other: \
-             {pairs:?}. The difference used to be exactly the {partial} partially-mapped huge \
-             pages that only `fs:sys` can see.\n",
-            partial / 2
+             apart through the two backends of one source, came within {bound} of each other \
+             ({} for the partially-mapped pages only `fs:sys` sees, {drift} for how far this \
+             machine's own count moved between rounds): {pairs:?}. The difference used to be \
+             exactly the partially-mapped count.\n",
+            partial_then / 2
         );
     }
 

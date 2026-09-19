@@ -12,6 +12,10 @@ const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 
 /// A request was refused because it cannot mean what it asks for.
 const EXIT_REJECTED: i32 = 2;
+/// The request is valid and this machine cannot serve it. Distinct from a
+/// rejection since the fifth wave: `omn::collect::Whose` says whether a refusal
+/// belongs to the request, the machine or the build, and the exit code follows.
+const EXIT_UNAVAILABLE: i32 = 1;
 /// The request is valid, but nothing collects it yet.
 const EXIT_NOT_IMPLEMENTED: i32 = 3;
 
@@ -120,7 +124,13 @@ fn a_request_this_machine_cannot_serve_is_refused_with_the_reason() {
     if output.status.success() {
         return; // this machine can serve it, which is also a valid outcome
     }
-    assert_eq!(output.status.code(), Some(EXIT_REJECTED));
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_UNAVAILABLE),
+        "a machine that cannot serve a valid request is not a request that cannot mean \
+         anything: {}",
+        stderr(&output)
+    );
     assert!(
         stderr(&output).contains("no viable backend"),
         "{}",

@@ -1709,6 +1709,59 @@ fn a_poll_faster_than_the_kernels_tick_gets_the_kernels_resolution() {
     );
 }
 
+/// A collector that pays a fixed cost pays it before the window, not inside a
+/// drain, so the other requests of its session are still read.
+///
+/// The runner reads its collectors in one serial round. Found when the fifth
+/// wave's streams met: a `cpu.profile` beside a `cpu.oncpu_time` in one session
+/// spent 915 ms of a single round parsing `/proc/kallsyms` to name a kernel
+/// frame, and in that time the polled request was not read at all -- it came
+/// back with one reading, its own baseline, worth zero. Neither stream could
+/// have seen it: one owned the runner and one owned the symbolizer, and the
+/// defect is the pair.
+///
+/// Two requests, two cadences, one window. What is asserted is that the slower
+/// one got the readings its cadence promised -- not a wall clock, which would
+/// be a measurement of this machine.
+#[test]
+fn a_session_reads_its_slow_requests_while_another_pays_a_fixed_cost() {
+    let session = format!(
+        r#"
+format: json
+requests:
+  - label: the expensive one
+    source: cpu.profile
+    target: {{launch: {LAUNCH}}}
+    mode: sample@997hz
+    emit: [topk]
+    stack: fp
+  - label: the polled one
+    source: cpu.oncpu_time
+    target: {{launch: {LAUNCH}}}
+    mode: poll@50ms
+    emit: [summary]
+"#,
+        LAUNCH = HALF_AND_HALF
+    );
+    let Some(document) = session_run(&session) else {
+        return;
+    };
+    let results = document["results"].as_array().expect("two results");
+    let window_ns = results[1]["observed_ns"].as_f64().expect("a window");
+    let readings = results[1]["events_seen"].as_f64().expect("a count");
+
+    // At 50 ms, a window of W nanoseconds owes about W/50ms readings. Half of
+    // that is far inside what scheduling explains and far outside one reading,
+    // which is what starvation looks like.
+    let owed = window_ns / 50e6;
+    assert!(
+        readings >= owed / 2.0,
+        "a poll@50ms request beside a profile got {readings} readings over a window of \
+         {:.0} ms, which owes about {owed:.0}: the expensive collector took the round with it",
+        window_ns / 1e6
+    );
+}
+
 /// A profile costs its window and not a second more.
 ///
 /// The reference is a counting run of the same length over the same target:

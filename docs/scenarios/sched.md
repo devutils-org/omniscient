@@ -764,14 +764,22 @@ code to that work.
 
 ### 10. `tests/family_sched.rs` fails about one run in five, and takes a second test with it
 
-**Explained, not fixed** (wave five): it is a collision between worktrees, and
-the fix is one line in a file no stream of this wave owns.
+**Fixed** by the coordinator, after stream D of wave five explained it. It is a
+collision between worktrees, in a file no stream of that wave owned.
 `distinctly_named_shell` builds its workload at `std::env::temp_dir()/<name>`,
 which is `/tmp/omnrunqshare` — a machine-wide path. Six worktrees of this wave
 ran the same suite on this machine, each copying `/bin/sh` there and each
 spinning a task that answers to that `comm`, and the filter the test uses is
 `comm == 'omnrunqshare'` machine-wide. Demonstrated directly: two processes
 started from `/tmp/omnrunqshare` give two tids under exactly that filter.
+
+The name now carries the test process's pid, so a run's workload is its own and
+the `--system` filter selects only it. That was not the whole of it: two copies
+of this suite also pin their spinners to *the same core*, so "a task alone on a
+cpu waits for nothing" was measuring the other copy's three. The test now reads
+`/proc/stat` for that core before it starts, and skips with the number when the
+core is already busy — the same shape as every other precondition in this
+project, and the reason the flake survived one fix.
 
 That accounts for the whole table below — the test alone never failed, and it
 failed when the machine was busiest — without needing either of the two causes
