@@ -1,0 +1,78 @@
+# Was core 1 busy, and was it busy at speed?
+#
+# Run it beside the session that supplies the load, which is also the oracle:
+#
+#   omn -f examples/power-load-on-one-core.yml &
+#   sleep 0.7 && omn -f examples/power-core-under-load.yml
+#   wait
+#
+# Two properties are chosen by that workload, not observed here:
+#
+#   1. Core 1 is occupied for the whole window. A spin loop never sleeps, so
+#      the core never enters an idle state, so `power.cstate` must report
+#      `idle_ns=0` and `entries=0` on every single tick. Not "close to zero":
+#      zero. Measured here, on six consecutive ticks: 0.
+#
+#   2. Core 1 therefore runs at a load frequency, not the idle floor. On the
+#      machine this was written on the floor is 1.75 GHz and the loaded core
+#      sat at 4.15-4.20 GHz over the whole window.
+#
+# The third request is the oracle, and it is in this session rather than beside
+# it. `cpu.cycles` opened against core 1 counts the cycles that *core* issued,
+# whoever was running on it -- and a core that never halts issues one cycle per
+# cycle of its clock, so the count divided by the window is the frequency the
+# core actually ran at. Two instruments that share nothing: a hardware cycle
+# counter against `cpuinfo_avg_freq`, which the processor derives from its
+# aperf/mperf ratio. Property (1) is what licenses the division, which is why
+# the residency has to be checked and not assumed. Measured here: 4.13 GHz of
+# cycles against 4.14 GHz of `power.freq`, two parts in a thousand.
+#
+# `--cpu 1` rather than `--system` on purpose. A system target reports one
+# series per online cpu, which is the honest shape; a mean over twenty-four
+# cores with one of them pinned describes no core at all, and would hide
+# exactly the thing this session is looking for. Run it with `target: system`
+# to see the difference: twenty-three series near the floor and one at boost.
+#
+# One surprise worth knowing before reading the output: the polled requests say
+# `poll@100ms` and are served about ten times faster than that. A run is driven
+# at the pace of its fastest collector -- the counted `cpu.cycles` group asks to
+# be read every ten milliseconds -- and the pollers are read along with it. Each
+# event carries the `interval_ns` it actually covers, so nothing is wrong; it is
+# simply not the tick that was asked for.
+#
+# The first two requests carry `keys: [cpu]`, so the events can be joined to anything
+# else keyed by core -- which is what phase two's P4 needs to ask whether the
+# machine's own state explains a cpu measurement.
+name: one core under a known load
+format: text
+duration: 1s
+
+requests:
+  # Which frequency this is -- effective or requested -- is in every event, in
+  # `measures`, with the file it came from in `basis`. Two machines whose
+  # `measures` differ are not comparable.
+  - label: core frequency
+    source: power.freq
+    target: {cpu: '1'}
+    mode: poll@100ms
+    emit: [timeline, summary]
+    keys: [cpu]
+
+  # `raw` and not just a summary: the check is on `idle_ns` per tick, and a
+  # summary of a series of zeroes cannot tell a core that never idled from one
+  # the collector never read.
+  - label: core idleness
+    source: power.cstate
+    target: {cpu: '1'}
+    mode: poll@100ms
+    emit: [raw, summary]
+    keys: [cpu]
+
+  # The oracle. Counted against the core rather than a task, so it is right
+  # however many things share core 1 -- what it measures is the core's clock,
+  # not one program's share of it.
+  - label: cycles the core issued
+    source: cpu.cycles
+    target: {cpu: '1'}
+    mode: count
+    emit: [rate]

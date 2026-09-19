@@ -1,0 +1,44 @@
+# The refusal: did this run throttle, and if the tool cannot tell, does it say
+# so instead of saying no?
+#
+#   omn -f examples/power-throttle.yml
+#
+# `power.throttle` is the one source in this family whose job is to invalidate
+# a run rather than describe it. A run that thermally throttled is not a slower
+# run, it is a different run, and averaging it in corrupts every cpu, memory
+# and gpu number taken beside it. Which makes a quiet zero here the most
+# expensive lie the tool can tell: it reads exactly like a clean run.
+#
+# So on a machine that cannot see throttling this session must fail, loudly,
+# naming what is missing. On the AMD machine this was written on it does:
+#
+#   error: no collector is written for `power.throttle` on backend `bpf:tp` yet
+#     `fs:sys` was passed over: /sys/devices/system/cpu/cpu0/thermal_throttle:
+#       missing: /sys/devices/system/cpu/cpu0/thermal_throttle does not exist
+#
+# Two different absences in two lines, which is the right answer: the sysfs
+# route is an x86 thermal-interrupt interface this part does not implement, and
+# the tracepoint route is there but nothing in this build attaches to it. The
+# first is about the machine, the second about the build, and a reader sent to
+# buy different hardware because of the second would have been misled.
+#
+# On an Intel machine with `thermal_throttle`, the same file measures. That is
+# why it ships: the scenario is not "this refuses", it is "this measures where
+# it can and refuses by name where it cannot".
+#
+# What cannot be checked anywhere: that the counts are right. Making a package
+# throttle on demand means holding it at its thermal limit, which is not
+# something a test suite may do to a machine it does not own. The scenario
+# verifies the refusal; the arithmetic behind the count is unverified, and
+# docs/scenarios/power.md says so under "What cannot be verified here".
+name: did this run throttle
+format: text
+duration: 1s
+
+requests:
+  - label: throttling events
+    source: power.throttle
+    target: system
+    mode: poll@200ms
+    emit: [timeline, summary]
+    keys: [cpu]

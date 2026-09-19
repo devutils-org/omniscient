@@ -1,0 +1,52 @@
+# Every axis this family declares and this build can serve, in one run.
+#
+#   omn -f examples/power-every-axis.yml
+#
+# The catalog is data and the CLI is a projection of it, so a combination the
+# catalog offers and the build cannot serve is a promise broken in the one
+# place nobody looks. This session is the positive half of that sweep: every
+# (mode, emit) pair of the three polled sources that resolves onto a written
+# collector here. tests/scenario_power.rs walks the catalog and takes the
+# negative half, where the answer must be a refusal that names what is missing.
+#
+# What is deliberately not here, and why:
+#
+#   power.energy    its own file, examples/power-energy.yml: `count` and
+#                   `poll` want different paces and a session has only one
+#   power.temp      `snapshot` cannot share a session with a polled request --
+#                   it is served as a poll instead, which is a defect, so the
+#                   snapshot is exercised from the command line and from the
+#                   test, never beside a poll
+#   power.throttle  examples/power-throttle.yml: nothing collects it on this
+#                   build, which is the point of that file
+#   hist            declared by `power.freq` and `power.cstate`, valid only in
+#                   `trace` mode, and no built backend serves `trace` for
+#                   either. Unreachable today; see docs/scenarios/power.md
+#
+# Every request polls at the same interval on purpose: a session is driven at
+# its first request's pace whatever the others ask for, so a session that mixes
+# intervals is a session where all but one of them is fiction.
+name: every axis of the power family
+format: text
+duration: 1s
+
+requests:
+  - label: frequency per core
+    source: power.freq
+    target: system
+    mode: poll@200ms
+    emit: [timeline, raw, summary]
+    keys: [cpu]
+
+  - label: idle residency per core
+    source: power.cstate
+    target: system
+    mode: poll@200ms
+    emit: [timeline, raw, summary]
+    keys: [cpu]
+
+  - label: the hottest processor sensor
+    source: power.temp
+    target: system
+    mode: poll@200ms
+    emit: [timeline, raw, summary]
