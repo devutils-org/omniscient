@@ -1,0 +1,40 @@
+# A task driven from core to core, a known number of times.
+#
+#   omn -f examples/sched-migrations.yml
+#
+# Migrations are usually read as a symptom -- a thread bouncing between cores
+# leaves its cache behind on each one -- and a symptom is hard to check, because
+# nothing chose how many times the scheduler would move the task. So this
+# workload chooses: it rewrites its own cpu affinity two hundred times, to a
+# different core each time, and a task whose affinity no longer admits the core
+# it is on is moved at once. Two hundred changes, two hundred migrations.
+#
+# Measured on this machine: 204. The four extra are the shell starting up and
+# being placed, which is a migration in the kernel's accounting too.
+#
+# `taskset` is util-linux; on a machine without it the same loop is
+# `os.sched_setaffinity(0, {core})` in three lines of Python, and
+# tests/scenario_sched.rs says which it used.
+#
+# One thing this source cannot tell you: the core the task *left*. The event
+# carries `cpu` and `dest_cpu` and both are the core it arrived on, deliberately
+# -- "the cpu" of a migration is ambiguous and this build resolves it one way
+# rather than carrying two numbers a filter could confuse. So a question of the
+# form "which core is shedding work" has no answer here.
+name: two hundred migrations, on purpose
+requests:
+  - label: migrations
+    source: sched.migrations
+    target:
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          i=0
+          while [ $i -lt 200 ]; do
+            taskset -pc $(( (i % 4) * 5 )) $$ >/dev/null 2>&1
+            i=$((i + 1))
+          done
+    mode: trace
+    emit: [raw, rate, summary]
+    keys: [task]

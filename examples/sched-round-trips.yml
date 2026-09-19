@@ -1,0 +1,67 @@
+# One workload, one number, four sources that must all find it.
+#
+#   omn -f examples/sched-round-trips.yml
+#
+# The program below is a pipe ping-pong: a driver writes one byte to a fifo and
+# then blocks reading the reply, and a responder does the mirror image. Two
+# thousand round trips is written into the loop, and that number is the ground
+# truth every request here is checked against -- nothing in the output is
+# compared with anything else the tool computed.
+#
+# What each source has to find, for N round trips:
+#
+#   sched.switches   N switches out. The driver leaves the cpu once per round
+#                    trip and for no other reason, and `pmu:sw` counts switches
+#                    out, not in -- so it is N, not 2N.
+#   sched.offcpu     N blocks. Every one of those switches was a block on a
+#                    read, never a preemption, so the two must agree. `blocks`
+#                    on the raw events is the count; the event rows are drains.
+#   sched.wakeup     2N wakeups. A process target keeps the wakeups it takes
+#                    part in at either end, and the driver is at one end of
+#                    every hand-off: it wakes the responder, the responder
+#                    wakes it back.
+#   sched.runqlat    N run queue waits. Each wakeup of the driver is followed
+#                    by one wait between becoming runnable and running.
+#
+# `sched.switches` goes through `perf_event_open` and `sched.offcpu` through a
+# raw tracepoint in the kernel. They are two different mechanisms counting the
+# same thing, which is the closest this family comes to a backend comparison --
+# see docs/scenarios/sched.md for why it has none of the real kind.
+name: a known number of blocking round trips
+requests:
+  - label: switches-out
+    source: sched.switches
+    target: &pingpong
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"; while read -r _ <&4; do echo y >&5; done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0; while [ $i -lt 2000 ]; do echo x >&3; read -r _ <&6; i=$((i+1)); done
+          exec 3>&- 6<&-; rm -rf "$D"
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: blocks
+    source: sched.offcpu
+    target: *pingpong
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+
+  - label: wakeups
+    source: sched.wakeup
+    target: *pingpong
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: run-queue-waits
+    source: sched.runqlat
+    target: *pingpong
+    mode: trace
+    emit: [hist, summary]
+    keys: [task]

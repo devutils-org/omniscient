@@ -1,0 +1,49 @@
+# Not how long a program waited -- where.
+#
+#   omn -f examples/sched-blocking-stack.yml
+#   omn sched.offcpu --emit stack --format folded -- python3 -c 'import time
+#   time.sleep(0.3)' > blocked.folded
+#
+# `folded` carries stacks and nothing else, so it refuses the `summary` this
+# session also asks for rather than dropping it -- which is why the folded form
+# above is a command line and not a `--format` on the file.
+#
+# `sched.offcpu --emit stack` walks the task's user stack in the kernel, at the
+# `sched_switch` where it leaves the cpu, and that is the only place the stack
+# exists: by the time the task is scheduled back in, what is under it is the
+# scheduler. The stacks are interned in a BPF map, so what travels with each
+# block is four bytes and a call site is walked once however often it blocks.
+#
+# The workload sleeps 300 ms, in one call, from a known place. A correct answer
+# names that call: on this machine, attached to a running interpreter, the leaf
+# frame is `clock_nanosleep` and the run reports 750.78 ms across the three
+# sleeps it caught.
+#
+# On a program this run *launched*, the same request comes back with twelve
+# frames and no names -- every one a bare address, `0x5630f5a62045;...`. That is
+# a defect in this build, not a property of the measurement, and it is written
+# up in docs/scenarios/sched.md under "Defects found" with the command that does
+# symbolize:
+#
+#   python3 -c 'import time
+#   for _ in range(20): time.sleep(0.05)' &
+#   omn sched.offcpu --pid $! --emit stack -d 400ms
+#
+# Cost, measured here: this request takes about 1.1 s whatever the workload
+# does, against 0.45 s for the same run without `stack`. Machine-wide it does
+# not finish at all -- `omn sched.offcpu --system --emit stack -d 200ms` was
+# still running after two minutes. Both are in the same write-up.
+name: where a program blocked
+requests:
+  - label: blocking-stacks
+    source: sched.offcpu
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import time
+          time.sleep(0.3)
+    mode: trace
+    emit: [stack, summary]
+    keys: [task]

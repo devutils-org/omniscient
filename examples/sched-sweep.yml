@@ -1,0 +1,80 @@
+# Every axis the catalog offers this family, exercised once.
+#
+#   omn -f examples/sched-sweep.yml
+#   omn -f examples/sched-sweep.yml --format json | jq '.results[].outputs[].emit'
+#
+# The catalog is data and the CLI is a projection of it, so a combination the
+# catalog offers and the build cannot serve is a promise broken in the one place
+# nobody looks. This session asks each source for every emit it declares, over
+# the same workload, so that a rendering which only goes wrong on one shape of
+# event has somewhere to go wrong.
+#
+# Two declared combinations are missing here because they are refused rather
+# than served, and both are named in examples/sched-refusals.yml.rejected and
+# examples/sched-blocking-stack.yml:
+#
+#   sched.switches --mode count    declared, refused at attach: `pmu:sw` has no
+#                                  counting path, and adding up one sample per
+#                                  switch would be a different, costlier
+#                                  measurement wearing the cheap one's name.
+#   sched.offcpu --emit stack      served, but only for a target this run did
+#                                  not launch; see examples/sched-blocking-stack.yml.
+#
+# `sched.migrations` does not declare `launch` and does not need to: the catalog
+# reads a target map through its documented fallbacks, and launching a program
+# is following the pid it created.
+name: every emit this family declares
+requests:
+  - label: wakeup-every-emit
+    source: sched.wakeup
+    target: &blocker
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"; while read -r _ <&4; do echo y >&5; done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0; while [ $i -lt 400 ]; do echo x >&3; read -r _ <&6; i=$((i+1)); done
+          exec 3>&- 6<&-; rm -rf "$D"
+    mode: trace
+    emit: [raw, topk:5, timeline, summary]
+    keys: [task]
+
+  - label: runqlat-every-emit
+    source: sched.runqlat
+    target: *blocker
+    mode: trace
+    emit: [hist, topk:5, raw, summary]
+    keys: [task]
+
+  - label: offcpu-every-emit
+    source: sched.offcpu
+    target: *blocker
+    mode: trace
+    emit: [hist, topk:5, raw, summary]
+    keys: [task]
+
+  - label: switches-every-emit
+    source: sched.switches
+    target: *blocker
+    mode: trace
+    emit: [rate, summary, topk:5, raw]
+    keys: [task]
+
+  - label: migrations-traced
+    source: sched.migrations
+    target: *blocker
+    mode: trace
+    emit: [rate, topk:5, raw, summary]
+    keys: [task]
+
+  # `topk` is declared on this source and refused in `count` mode, although the
+  # counted run below produces exactly the per-task series `topk` would rank.
+  # That is written up in docs/scenarios/sched.md under "Defects found".
+  - label: migrations-counted
+    source: sched.migrations
+    target: *blocker
+    mode: count
+    emit: [rate, raw, summary]
+    keys: [task]

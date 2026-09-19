@@ -1,0 +1,63 @@
+# Four requests that cannot mean anything, and the four reasons.
+#
+#   omn validate -f examples/sched-refusals.yml.rejected --input-format yaml
+#   omn -f examples/sched-refusals.yml.rejected --input-format yaml ; echo $?  # 2
+#
+# The extension is `.yml.rejected`, and that is not decoration. Every session in
+# `examples/` that ends in a format's extension is required to validate --
+# `tests/cli.rs::the_shipped_examples_validate` walks the directory so that no
+# example can ship broken by being left off a list. A session whose whole point
+# is to be rejected cannot satisfy that, and should not: it is not broken, it is
+# the class D scenario. Renaming it out of the walk is the smallest honest way
+# to hold both, and `--input-format yaml` is what a file with no recognised
+# extension needs. The better fix is two lines in that shared test, and belongs
+# to whoever owns it.
+#
+# A rejection is not a failure and not a missing feature: it is a request the
+# catalog cannot make sense of, and the exit code says which of the three it is.
+#
+#   2  a rejection          the request cannot mean anything
+#   1  no viable backend    this machine cannot serve it
+#   3  no collector         this build does not implement it
+#
+# The other two are in examples/sched-not-implemented.yml (exit 3) and, for this
+# family, nowhere: every `sched` backend this machine could lack is available
+# here, so exit 1 has no honest example. What does produce exit 1 here is
+# `omn sched.switches --mode count`, and that is a build gap wearing a machine
+# gap's exit code -- see docs/scenarios/sched.md under "Defects found".
+#
+# Each request below must be refused by name. A refusal that sends a reader to
+# the wrong flag costs more than no message at all.
+name: four reasons to say no
+requests:
+  # `sched.wakeup` reports one event per wakeup and a wakeup has no duration,
+  # so there is no distribution to bucket.
+  - label: an-emit-the-source-does-not-declare
+    source: sched.wakeup
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [hist]
+
+  # A block has a beginning and an end, and a sample that catches one without
+  # the other has no duration to report.
+  - label: a-mode-the-source-does-not-declare
+    source: sched.offcpu
+    target: {launch: ["/bin/true"]}
+    mode: count
+    emit: [summary]
+
+  # `sched.offcpu` filters on comm, pid and state. A block belongs to a task,
+  # not to a cpu: the cpu it left is not the cpu it comes back on.
+  - label: a-field-the-source-cannot-filter-on
+    source: sched.offcpu
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [summary]
+    filter: "cpu == 3"
+
+  # Blocked time is attributed per task, and an interface names none.
+  - label: a-target-the-source-cannot-observe
+    source: sched.offcpu
+    target: {iface: "lo"}
+    mode: trace
+    emit: [summary]

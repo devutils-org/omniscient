@@ -1,0 +1,66 @@
+# A program that is half on the cpu and half waiting, on purpose.
+#
+#   omn -f examples/sched-half-blocked.yml
+#
+# Most workloads are one or the other, and both are easy to measure wrongly
+# without noticing: a cpu profile of a program that mostly waits is a profile of
+# the small part that did not, and a blocked-time total for a program that
+# mostly computes is a rounding error presented as a finding. A workload that is
+# deliberately half of each is what tells the two apart.
+#
+# The shape: a driver and a responder pass a byte back and forth, and both spin
+# the same fixed number of shell iterations before answering. The driver is
+# therefore on the cpu for its own spin and blocked for the responder's, and the
+# two are equal by construction -- not by measurement.
+#
+# Measured on this machine, 600 round trips at 100 spins: the driver was blocked
+# 182.5 ms across 605 blocks and on the cpu 210.0 ms, so 46 % of the time it
+# accounted for was time it was not running.
+# `cpu.oncpu_time` is here beside `sched.offcpu` for exactly that reason: it is
+# the other half, and the two together have to add up to the program.
+#
+# This is the workload phase two's P2 asks phase one to leave behind -- "where
+# did the time go, on cpu or waiting?" needs a program whose answer is known to
+# be "both, equally". Every request carries `keys: [task]`, so `cpu.profile`
+# beside `sched.offcpu` and `sched.wakeup -> sched.offcpu` can both be joined
+# on it later without running the workload again.
+name: half on the cpu, half blocked
+requests:
+  - label: blocked
+    source: sched.offcpu
+    target: &halves
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"
+            while read -r _ <&4; do
+              j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+              echo y >&5
+            done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0
+          while [ $i -lt 600 ]; do
+            j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+            echo x >&3; read -r _ <&6
+            i=$((i + 1))
+          done
+          exec 3>&- 6<&-; rm -rf "$D"
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: *halves
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task]
+
+  - label: released-by
+    source: sched.wakeup
+    target: *halves
+    mode: trace
+    emit: [topk:3, summary]
+    keys: [task]
