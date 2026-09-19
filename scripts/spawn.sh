@@ -11,34 +11,28 @@
 set -euo pipefail
 
 declare -A OWNS=(
-    [cpu-scenarios]="examples/cpu-*.yml tests/scenario_cpu.rs docs/scenarios/cpu.md"
-    [mem-scenarios]="examples/mem-*.yml tests/scenario_mem.rs docs/scenarios/mem.md"
-    [io-scenarios]="examples/io-*.yml tests/scenario_io.rs docs/scenarios/io.md"
-    [net-scenarios]="examples/net-*.yml tests/scenario_net.rs docs/scenarios/net.md"
-    [sched-scenarios]="examples/sched-*.yml tests/scenario_sched.rs docs/scenarios/sched.md"
-    [power-scenarios]="examples/power-*.yml tests/scenario_power.rs docs/scenarios/power.md"
-    [gpu-scenarios]="examples/gpu-*.yml tests/scenario_gpu.rs docs/scenarios/gpu.md"
-    [proc-scenarios]="examples/proc-*.yml examples/runtime-*.yml tests/scenario_proc.rs tests/scenario_runtime.rs docs/scenarios/proc.md docs/scenarios/runtime.md"
+    [fix-runner]="src/main.rs src/cli.rs src/collect/mod.rs src/error.rs"
+    [fix-catalog]="catalog/*.yaml src/validate.rs"
+    [fix-emit]="src/emit.rs src/filter.rs src/encode.rs src/render.rs"
+    [fix-stacks]="src/stack.rs src/collect/cpu/** src/collect/sched/**"
+    [fix-mem]="src/collect/mem/** src/collect/proc/** src/collect/power/**"
+    [fix-net]="src/collect/net/** src/collect/io/** src/collect/gpu/** src/collect/runtime/**"
 )
 declare -A TITLE=(
-    [cpu-scenarios]="Stream A -- cpu scenarios"
-    [mem-scenarios]="Stream B -- mem scenarios"
-    [io-scenarios]="Stream C -- io scenarios"
-    [net-scenarios]="Stream D -- net scenarios"
-    [sched-scenarios]="Stream E -- sched scenarios"
-    [power-scenarios]="Stream F -- power scenarios"
-    [gpu-scenarios]="Stream G -- gpu scenarios"
-    [proc-scenarios]="Stream H -- proc and runtime scenarios"
+    [fix-runner]="Stream A -- exit codes and the runner"
+    [fix-catalog]="Stream B -- what the catalog claims"
+    [fix-emit]="Stream C -- emit, filter, render"
+    [fix-stacks]="Stream D -- stacks, and the two families that produce them"
+    [fix-mem]="Stream E -- mem, proc and power readings"
+    [fix-net]="Stream F -- net, io, gpu and runtime readings"
 )
 declare -A LOG=(
-    [cpu-scenarios]="docs/scenarios/cpu.md"
-    [mem-scenarios]="docs/scenarios/mem.md"
-    [io-scenarios]="docs/scenarios/io.md"
-    [net-scenarios]="docs/scenarios/net.md"
-    [sched-scenarios]="docs/scenarios/sched.md"
-    [power-scenarios]="docs/scenarios/power.md"
-    [gpu-scenarios]="docs/scenarios/gpu.md"
-    [proc-scenarios]="docs/scenarios/proc.md"
+    [fix-runner]="docs/fixes/runner.md"
+    [fix-catalog]="docs/fixes/catalog.md"
+    [fix-emit]="docs/fixes/emit.md"
+    [fix-stacks]="docs/fixes/stacks.md"
+    [fix-mem]="docs/fixes/mem.md"
+    [fix-net]="docs/fixes/net.md"
 )
 
 stream="${1:-}"
@@ -73,42 +67,41 @@ Read these first, in this order:
 
 You own, and may only edit:
   ${OWNS[$stream]}
+  plus ${LOG[$stream]}, and two things that belong to the defects you fix:
+    - any assertion in tests/scenario_*.rs that names a defect you fixed
+    - the entry for that defect in docs/scenarios/<family>.md, marked fixed
+      with its reproduction left in place
 
-Everything else is read-only to you -- including all of src/. A scenario that
-finds a defect has done its job: write it under a "## Defects found" heading in
-${LOG[$stream]}, with the session that shows it and the output it produced, and
-keep going. A scenario suite that quietly worked around three bugs has measured
-nothing.
-
-examples/README.md and scripts/demo.sh belong to the coordinator, who
-regenerates both from what lands. Do not edit them.
+Everything else is read-only. Needing something from another stream's files is
+not a reason to edit them: write it under "## Needs from another stream" in
+docs/open-findings.md with the exact signature you want, and carry on.
 
 Build with \`make\`, not \`cargo build\`: the preload shim is a workspace member
 nothing depends on, and the CAP_BPF and CAP_PERFMON file capabilities do not
 survive a relink. Both failures are silent -- the tool reports fewer sources as
 available, which reads like the machine changed rather than the binary.
 
-Cover all four scenario classes named in BRIEF.md -- the capability sweep, the
-backend comparison, the loss path and the refusal. Each is a different kind of
-lie and each catches a different one.
+Start from the defects themselves: docs/scenarios/<family>.md, under
+"## Defects found". Each carries the session that shows it and the output it
+produced. BRIEF.md groups them and tells you which are yours; it does not
+restate them.
 
-You are done when \`make check\` is clean and every scenario either checks its
-answer against a property the workload chose, or says in ${LOG[$stream]} what
-it cannot verify and why.
+**A defect is fixed when the scenario that found it asserts the new behaviour
+and would fail against the old.** A fix with no test is a claim. Some of what is
+listed will turn out to be something else once you look -- say so in
+${LOG[$stream]} rather than forcing a fix onto a diagnosis that was wrong.
 
-${LOG[$stream]} is your deliverable as much as the tests are: it is what a
-person reads to know what to measure in this family, and it is what the
-coordinator reads instead of your diff.
+You are done when \`make check\` is clean and every defect you were given is
+either fixed with its scenario updated, or explained in ${LOG[$stream]}.
 
-Ground truth is the bar, and in this wave it is the whole job: a scenario that
-checks the tool returned what the tool computed proves nothing. The workload
-chooses the number -- forty megabytes touched, a hundred million instructions
-retired, three hundred milliseconds asleep -- and the scenario checks the tool
-found it.
+Ground truth is the bar: a test that checks the code returns what the code
+computed proves nothing. The scenarios you are fixing already hold the
+independent reference -- a kernel counter, an injected delay, a program that
+reports its own state -- so keep it and change what is asserted about it.
 
 A test that skips is not a test that passes. Where this machine cannot serve a
-scenario, the skip must name what is missing, and the scenario must still be in
-examples/ and in your document so a machine that can serve it runs it.
+fix -- no GPU, no CAP_NET_RAW, no capabilities -- say so in ${LOG[$stream]}
+rather than claiming a fix you could not exercise.
 
 Commit on ${branch}. Do not merge; the coordinator does that.
 
