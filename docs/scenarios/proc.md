@@ -220,17 +220,22 @@ is `sched` territory.
 
 ## Defects found
 
-Six. Three of them (3, 4, 6) are in the shared layer rather than in this family,
-and were found through it; they are the coordinator's to route into
-`docs/open-findings.md`, which this stream does not own.
+Six, of which **two are fixed** — 1 and 2, by stream E of the fifth wave. Three
+of the remaining four (3, 4, 6) are in the shared layer rather than in this
+family and were found through it; they are the coordinator's to route into
+`docs/open-findings.md`, which the stream that found them did not own.
 
-Each has a test in `tests/scenario_proc.rs` named `defect_<n>_...` that asserts
-the *wrong* behaviour on purpose. This stream may not edit `src/`, and a defect
-recorded only in prose is one that gets fixed silently or not at all. When one
-of those tests starts failing, the defect is fixed: delete the test and the
-entry here together.
+Each has a test in `tests/scenario_proc.rs` named `defect_<n>_...`. The four
+that are still open assert the *wrong* behaviour on purpose, because a defect
+recorded only in prose is one that gets fixed silently or not at all; the two
+that are fixed assert the behaviour that replaced it and fail against the build
+that had the defect. Every entry keeps its reproduction: a record that is
+deleted is one nobody can tell was ever there. `docs/fixes/mem.md` has what
+became of each.
 
-### 1. The first reading of a launched target describes this tool, not the program
+### 1. The first reading of a launched target described this tool, not the program
+
+**Fixed** — `src/collect/proc/lifecycle.rs` and `src/collect/proc/status.rs`.
 
 The runner releases the child from its gate and reads immediately. The child has
 not reached its `execve` yet, so `/proc/<pid>/fd` is still the forked image of
@@ -277,7 +282,9 @@ select a program silently repairs this and a session without one does not. That
 is worse than the defect, because it makes the defect intermittent across
 sessions that look equivalent.
 
-### 2. The last reading of a launched target reports a zombie as holding nothing
+### 2. The last reading of a launched target reported a zombie as holding nothing
+
+**Fixed** — `src/collect/proc/lifecycle.rs` and `src/collect/proc/status.rs`.
 
 A process that has exited but has not been reaped still has a `/proc/<pid>/fd`,
 and it is an empty directory that reads *successfully* — neither the ESRCH nor
@@ -300,8 +307,26 @@ time, for every program.
 `proc.threads` has the same shape with a different number: it reads `1` from a
 zombie's `status`, not `0`, because the `Threads:` line survives.
 
-The fix is a third case in `classify()`, or a check on the process state, and
-this stream may not write it.
+**The fix** is the second of those: the collector reads the process state out of
+`/proc/<pid>/stat` -- from the last `)` rather than by counting fields, because
+a program may call itself `a b) c` -- and reports nothing for a target in `Z` or
+`X`.
+
+It reports nothing for one round rather than ending the run there, and that is
+deliberate. The runner asks its own stop condition after each round, and for a
+launched program that condition has the better reason: it knows the exit status,
+so the run still says `stopped because the launched program exited with exit
+status 0` rather than losing it to the collector's wording. A `--pid` target
+that nothing else is watching reaches the round after and is ended by the
+collector.
+
+`examples/proc-exit.yml` reported `min 0, mean 12.6, max 20, last 0` and now
+reports `min 4, mean 16, max 20, last 20`. Asserted by
+`defect_2_the_last_reading_of_a_launched_target_is_one_the_program_was_alive_for`,
+which checks the descriptor series by value and the thread series by point
+count -- a zombie's `Threads:` line says one, which is indistinguishable by
+value from the single-threaded program that was there a moment earlier, but the
+round that read it added a point to both series.
 
 ### 3. A session takes its tick from the first request and discards the others
 
