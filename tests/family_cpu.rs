@@ -236,15 +236,51 @@ fn utilisation_polls_the_machine_and_stays_a_share() {
     }
 }
 
-/// A per-cpu target is valid vocabulary and cannot be served yet. The refusal
-/// has to say what is missing rather than answer with the machine's average,
-/// which is a number that describes no cpu.
+/// `--cpu` is how someone asks about a core rather than about a mean, so the
+/// answer has to be per core: one series each, keyed on the number. A mean
+/// across cpus is a number that describes no cpu, and the emit layer can build
+/// one from these while nothing can recover a core from an average.
 #[test]
-fn a_per_cpu_target_is_refused_with_what_it_would_need() {
+fn per_cpu_utilisation_reports_one_series_for_each_core_asked_for() {
+    let Some(document) = measured(&[
+        "cpu.util",
+        "--cpu",
+        "0,1",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "-d",
+        "400ms",
+    ]) else {
+        return;
+    };
+    let series = document["results"][0]["outputs"][0]["series"]
+        .as_array()
+        .expect("one series per cpu");
+    assert_eq!(series.len(), 2, "two cpus were asked for");
+    for (entry, cpu) in series.iter().zip([0, 1]) {
+        assert_eq!(entry["key"], format!("cpu:{cpu}"));
+        for bound in ["min", "max"] {
+            let value = entry[bound].as_f64().expect("a share");
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "`{bound}` utilisation of cpu {cpu} is {value}, which is not a share of anything"
+            );
+        }
+    }
+}
+
+/// A cpu with no line in `/proc/stat` is not a cpu that is doing nothing, and
+/// the refusal has to say which of the two it is.
+#[test]
+fn utilisation_of_a_cpu_that_is_not_online_is_refused_rather_than_reported_as_idle() {
     let output = run(&[
         "cpu.util",
         "--cpu",
-        "0",
+        "4095",
         "-m",
         "poll@100ms",
         "-e",
@@ -254,8 +290,7 @@ fn a_per_cpu_target_is_refused_with_what_it_would_need() {
     ]);
     assert!(!output.status.success(), "{}", stdout(&output));
     let message = stderr(&output);
-    assert!(message.contains("correlation key"), "{message}");
-    assert!(message.contains("--system"), "{message}");
+    assert!(message.contains("not online"), "{message}");
 }
 
 /// Every counting source in the family, through the binary, on a program that
@@ -423,4 +458,262 @@ fn the_families_examples_validate() {
         checked += 1;
     }
     assert!(checked >= 2, "only {checked} cpu examples were found");
+}
+
+/// The cpus of a per-cpu count are kept apart, and each event says which cpu it
+/// describes.
+///
+/// A sum over twenty-four cores describes no core, so the collector never makes
+/// one; what this checks is that the parts it does produce are separable, which
+/// is what lets the emit layer build the sum for a reader who wants it.
+#[test]
+fn counting_a_set_of_cpus_reports_each_of_them_separately() {
+    let Some(document) = measured(&[
+        "cpu.instructions",
+        "--cpu",
+        "0,1",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "-d",
+        "200ms",
+    ]) else {
+        return;
+    };
+    let events = document["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("events");
+    assert_eq!(events.len(), 2, "two cpus were asked for");
+    for (event, cpu) in events.iter().zip([0, 1]) {
+        assert_eq!(event["keys"][0]["cpu"]["cpu"], cpu);
+        let attrs = event["attrs"].as_array().expect("attrs");
+        let named = |name: &str| {
+            attrs
+                .iter()
+                .find(|attr| attr["name"] == name)
+                .unwrap_or_else(|| panic!("`{name}` is on the event"))["value"]
+                .as_f64()
+                .expect("numeric")
+        };
+        // `cpu` as a key is for a join; `cpu` as an attribute is for a filter,
+        // which the catalog declares and a predicate can read.
+        assert_eq!(named("cpu"), f64::from(cpu));
+        assert!(named("enabled_ns") > 0.0);
+    }
+}
+
+/// `--system` for a counter is every online cpu, because there is no
+/// machine-wide counter in the interface to ask instead.
+#[test]
+fn counting_the_machine_opens_one_event_per_online_cpu() {
+    let online = std::fs::read_to_string("/sys/devices/system/cpu/online")
+        .expect("this kernel publishes its online cpus");
+    let expected: usize = online
+        .trim()
+        .split(',')
+        .map(|part| match part.split_once('-') {
+            Some((first, last)) => {
+                last.parse::<usize>().unwrap() - first.parse::<usize>().unwrap() + 1
+            }
+            None => 1,
+        })
+        .sum();
+
+    let Some(document) = measured(&[
+        "cpu.cycles",
+        "--system",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "-d",
+        "200ms",
+    ]) else {
+        return;
+    };
+    let series = document["results"][0]["outputs"][0]["series"]
+        .as_array()
+        .expect("one series per cpu");
+    assert_eq!(
+        series.len(),
+        expected,
+        "this machine has {expected} online cpus and the run produced {} series",
+        series.len()
+    );
+}
+
+/// A cpu number this machine does not have is not a permission problem, and the
+/// refusal must not send the reader to `perf_event_paranoid`.
+#[test]
+fn counting_a_cpu_that_does_not_exist_says_so_rather_than_blaming_privileges() {
+    let output = run(&[
+        "cpu.cycles",
+        "--cpu",
+        "4095",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "-d",
+        "100ms",
+    ]);
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let message = stderr(&output);
+    assert!(message.contains("not online"), "{message}");
+    assert!(!message.contains("perf_event_paranoid"), "{message}");
+}
+
+/// `cpu.oncpu_time` against the wall clock of the program it watched: a shell
+/// loop is on a cpu for its whole life, so almost all of the window has to come
+/// back as consumed time.
+#[test]
+fn cpu_time_of_a_program_that_never_blocks_is_most_of_its_wall_clock() {
+    let Some(document) = measured(&[
+        "cpu.oncpu_time",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &counting_loop(400_000),
+    ]) else {
+        return;
+    };
+    let result = &document["results"][0];
+    let observed = result["observed_ns"].as_f64().expect("a window");
+    let series = &result["outputs"][0]["series"][0];
+    let reads = series["count"].as_f64().expect("a polled series");
+    let mean = series["mean"].as_f64().expect("a mean");
+    let consumed = mean * reads;
+    assert!(
+        consumed > observed * 0.5,
+        "a shell loop ran for {:.0} ms of wall clock and is reported as having consumed \
+         {:.0} ms of cpu",
+        observed / 1e6,
+        consumed / 1e6
+    );
+    // The tick granularity the backend declares cannot exceed the window
+    // either: more cpu time than there was time is a parsing bug.
+    assert!(
+        consumed < observed * 1.5,
+        "{:.0} ms of cpu time in a {:.0} ms window from a single-threaded program",
+        consumed / 1e6,
+        observed / 1e6
+    );
+}
+
+/// The three `mem.cache_*` sources are rows in this family's counters table --
+/// the mechanism decides who writes a source, not the first word of its id --
+/// so they are exercised here, beside the counters they are built from.
+#[test]
+fn every_cache_source_counts_and_publishes_what_its_misses_are_out_of() {
+    for (source, accesses) in [
+        ("mem.cache_l1", Some("l1d_loads")),
+        ("mem.cache_llc", None),
+        ("mem.cache_tlb", None),
+    ] {
+        let Some(document) = measured(&[
+            source,
+            "-m",
+            "count",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "/bin/sh",
+            "-c",
+            &counting_loop(50_000),
+        ]) else {
+            continue;
+        };
+        let event = &document["results"][0]["outputs"][0]["events"][0];
+        let attrs = event["attrs"].as_array().expect("attrs");
+        let named = |name: &str| -> Option<f64> {
+            attrs.iter().find(|attr| attr["name"] == name)?["value"].as_f64()
+        };
+        let misses = named("count").unwrap_or_else(|| panic!("{source} reported no count"));
+        assert!(misses >= 0.0, "{source} reported {misses}");
+        if let Some(accesses) = accesses {
+            let accesses =
+                named(accesses).unwrap_or_else(|| panic!("{source} did not publish `{accesses}`"));
+            assert!(
+                accesses >= misses,
+                "{source} missed {misses} times in {accesses} accesses"
+            );
+        }
+        assert_eq!(
+            document["results"][0]["losses"]["failed_reads"], 0,
+            "{source}"
+        );
+    }
+}
+
+/// `cpu.topdown` is the one source of this family that needs hardware most
+/// machines here do not have. Either it measures -- and then its four
+/// categories are a partition of the issue slots, which is the whole claim of
+/// the method -- or it is refused by naming the events this cpu does not
+/// publish. Both are answers; neither is a skip.
+#[test]
+fn topdown_either_partitions_the_slots_or_names_what_this_cpu_lacks() {
+    let output = run(&[
+        "cpu.topdown",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &counting_loop(200_000),
+    ]);
+    if !output.status.success() {
+        let message = stderr(&output);
+        assert!(message.contains("no viable backend"), "{message}");
+        assert!(message.contains("slots"), "{message}");
+        eprintln!("skipped, and the refusal checked: this cpu has no issue-slot counter");
+        return;
+    }
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("the json output parses");
+    let attrs = document["results"][0]["outputs"][0]["events"][0]["attrs"]
+        .as_array()
+        .expect("attrs")
+        .clone();
+    let named = |name: &str| -> f64 {
+        attrs
+            .iter()
+            .find(|attr| attr["name"] == name)
+            .unwrap_or_else(|| panic!("`{name}` is on the event"))["value"]
+            .as_f64()
+            .expect("numeric")
+    };
+    let accounted = named("accounted");
+    assert!(
+        (accounted - 1.0).abs() < 0.02,
+        "the four categories account for {accounted} of the issue slots"
+    );
+    for category in [
+        "retiring",
+        "bad_speculation",
+        "frontend_bound",
+        "backend_bound",
+    ] {
+        let fraction = named(category);
+        assert!(
+            (0.0..=1.0).contains(&fraction),
+            "`{category}` is {fraction}, which is not a share of anything"
+        );
+    }
 }
