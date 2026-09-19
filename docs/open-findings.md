@@ -2286,3 +2286,98 @@ leaving either wrong is the exact failure this repository keeps a test against.
   `<out>/cost.json`.
 
 No other stream in this wave owns either file.
+
+---
+
+## Needs from another stream — the fifth wave, stream E
+
+Three things stream E (`mem`, `proc` and `power` readings) could not do from its
+own paths. Each is written out here with the exact change wanted rather than
+applied in passing. `docs/fixes/mem.md` has the reasoning behind all three.
+
+### From stream A, in `src/collect/mod.rs`: a unit test that fails under load
+
+`collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
+drives a spinning collector until a **wall** deadline 200 ms out, accumulates
+the **cpu** the collector actually burned, and refuses to conclude anything
+unless that came to at least 150 ms. On an idle machine the two are one number.
+On a busy one — eight streams running their suites at once, which is every wave
+this project has had — the child is descheduled, burns less than the floor, and
+the test fails with "the collector was asked to spin for 200 ms and did not, so
+this measured nothing". Measured here at one failure in eight runs of
+`cargo test --lib` alone. It is `power` 5 of `docs/scenarios/power.md`.
+
+What the test is for does not depend on the wall clock at all: it checks that
+the spending meter agrees with the collector's own account of the cpu it spent.
+So the stop condition should be that account rather than the clock:
+
+```rust
+// in what_a_run_reports_spending_is_the_cpu_it_actually_burned, in the child
+let (mut collectors, spun_ns) = burning(20_000_000);
+let burned = spun_ns.clone();
+drive(
+    &mut collectors,
+    Window { interval: StdDuration::ZERO, snapshot: false },
+    &mut spending,
+    move || (burned.get() >= 200_000_000).then(|| "the cpu was burned".to_owned()),
+);
+```
+
+`NOTHING_WAS_BURNED` then becomes unreachable rather than load-dependent, and
+the two ratios either side of it are unchanged. A busy machine makes the test
+take longer in wall time, which is the right way for it to notice load.
+
+### From stream A, in `src/collect/mod.rs`: a counted window rounds up to the tick
+
+`power.energy -m count -d 600ms` observes 1.0002 s. The collector asks for
+nothing between `start` and `stop` in `count` mode, so this is the runner: it
+checks its deadline once per round, and with no collector declaring a pace it
+takes the interval from `resolved[0].request.mode`, which for `Mode::Count`
+falls through to `Mode::DEFAULT_POLL_INTERVAL`.
+
+Stream E deliberately did not work around it by giving a counted collector a
+short `tick()`. The run's interval is the minimum over its collectors, so one
+counted `power.energy` request asking for 10 ms would drag every other request
+in the session down with it — which is `power` 4 and `proc` 3, made worse. The
+fix belongs with whoever gives the runner a per-request schedule: a request in
+`count` mode needs no reads at all, and its window should end when its duration
+does.
+
+### For the coordinator, in `examples/`: two sessions describe a defect that is gone
+
+`examples/` belongs to no stream in this wave, and both of these carry header
+comments explaining at length a defect that is now fixed.
+
+**`examples/proc-one-reading.yml`**, the paragraph beginning "Against a
+*launched* one it is not". The single read no longer describes `omn`; it
+describes the launched program at the instant it began, which for a `python3`
+that has not run its first statement is its three standard streams. Suggested
+replacement for that paragraph and the two lines after it:
+
+```
+# Against a *launched* one it is one read of the program's first instant. The
+# child is held at a gate, and the read waits for it to become the program
+# rather than the forked image of `omn` it starts as -- so `comm` names the
+# program and the count is the program's. What it is not is a reading of a
+# program that has done its startup: `python3` holds its three standard
+# streams at `execve` and opens its files milliseconds later. When the question
+# is "what is it holding now", ask it of a running process:
+#
+#   omn proc.fd --pid $(pgrep -n your-service) --mode snapshot --emit raw
+```
+
+**`examples/proc-exit.yml`**, the paragraph beginning "There is a third answer
+procfs gives that this collector does not yet handle". The collector now reads
+the process state and reports nothing for a target in `Z`, so the last point of
+the series is the last reading the program was alive for. Suggested replacement:
+
+```
+# There is a third answer procfs gives, and it is the one this file was written
+# for. A process that has exited but has not been reaped is a zombie, and a
+# zombie's `/proc/<pid>/fd` is neither ESRCH nor ENOENT: it is an empty
+# directory that reads successfully. Reported as a measurement it was a
+# truthful-looking zero -- no open descriptors, full headroom, no loss -- for a
+# program that never closed a handle in its life. The collector now reads the
+# process state, so that round publishes nothing and the run ends for the
+# reason the runner knows, which includes the exit status.
+```
