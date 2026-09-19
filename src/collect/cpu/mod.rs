@@ -6,6 +6,7 @@
 //! the table there is what a new counting source is added to.
 
 mod counters;
+mod percpu;
 mod pressure;
 mod profile;
 mod throttle;

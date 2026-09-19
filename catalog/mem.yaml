@@ -198,39 +198,59 @@
   summary: "L1 data cache misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:L1-dcache-load-misses"], cost: free}
+    - {id: "pmu", requires: ["pmu:L1-dcache-load-misses", "pmu:L1-dcache-loads"], cost: free}
   modes: [count, sample]
-  emits: [summary, rate, topk, stack]
+  emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
+  caveats:
+    - "A miss count is not a miss rate: twice the work misses twice as often and
+       is no worse for it. The loads are counted in the same group and travel on
+       the event, so the rate can be had without a second run."
 
 - id: mem.cache_llc
   family: mem
   summary: "Last-level cache misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:LLC-load-misses"], cost: free}
+    - {id: "pmu", requires: ["pmu:LLC-load-misses", "pmu:LLC-loads"], cost: free}
+    - {id: "pmu:generic", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES", "pmu:PERF_COUNT_HW_CACHE_REFERENCES"], cost: free,
+       degraded: "the architectural cache-miss counter: every last-level access that
+         missed, not loads only, and what each vendor puts in it differs"}
   modes: [count, sample]
-  emits: [summary, rate, topk, stack]
+  emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
+  caveats:
+    - "The last level is not the same cache on two machines: L3 on a desktop
+       part, a shared victim cache on a server one. Two runs are comparable only
+       on the same model."
+    - "AMD family 17h exposes no last-level cache descriptor at all, so the
+       first backend is missing there and the architectural counter is what
+       answers."
 
 - id: mem.cache_tlb
   family: mem
   summary: "Data and instruction TLB misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:dTLB-load-misses"], cost: free}
+    - {id: "pmu", requires: ["pmu:dTLB-load-misses", "pmu:iTLB-load-misses"], cost: free}
   modes: [count, sample]
-  emits: [summary, rate, topk, stack]
+  emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
+  caveats:
+    - "Two counters added: the data side and the instruction side. Both travel
+       on the event, because which of the two moved is the first question, and a
+       total that cannot be decomposed cannot answer it."
+    - "A miss is a page-table walk, not a stall: a hardware walker hides most of
+       them. Read it beside `mem.thp`, which is what usually changes the number."
 
 - id: mem.latency
   family: mem
