@@ -809,6 +809,70 @@ fn raw_events_reach_the_trace_with_what_they_measured() {
     assert_eq!(instants[0]["ts"].as_f64(), Some(0.0));
 }
 
+/// The whole point of the byte path: a format the tool declares it can write
+/// has to come out of the command line, not only out of the library. `pprof` is
+/// the one format that is not text, and both ways of asking for it -- a
+/// redirected stdout and `--out` -- have to produce the same file.
+#[test]
+fn the_command_line_writes_a_profile_and_a_trace_a_reader_can_open() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to profile");
+        return;
+    }
+    let directory = scratch("cli");
+    let program = "x = 0\nfor i in range(6_000_000): x += i";
+
+    let output = run(&[
+        "cpu.profile",
+        "-m",
+        "sample@997hz",
+        "-e",
+        "stack",
+        "--format",
+        "pprof",
+        "--out",
+        directory.to_str().unwrap(),
+        "--",
+        "python3",
+        "-c",
+        program,
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // `.pb.gz`, because that is the extension every reader of this format opens
+    // by, and `results.pprof` opens in nothing.
+    let written =
+        std::fs::read(directory.join("results.pb.gz")).expect("a profile beside its provenance");
+    assert_eq!(
+        written, output.stdout,
+        "the file and the stream are not the same profile"
+    );
+    let profile = decode_profile(&written);
+    assert!(!profile.samples.is_empty());
+    assert!(profile.strings.iter().any(|name| name.contains("Py")));
+
+    // The other new format is JSON under another name, and is written under it.
+    let directory = scratch("cli-chrome");
+    let output = run(&[
+        "mem.rss",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "timeline",
+        "--format",
+        "chrome",
+        "--out",
+        directory.to_str().unwrap(),
+        "--",
+        "python3",
+        "-c",
+        "import time; time.sleep(0.25)",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let written = std::fs::read_to_string(directory.join("results.json")).expect("a trace");
+    check_trace(&serde_json::from_str(&written).expect("chrome's own JSON"));
+}
+
 /// The matrix in `format.rs` is a claim about what a file can mean. A profile
 /// format cannot hold a timeline and a trace format cannot hold a profile, and
 /// both refusals name the emit rather than approximating it.
