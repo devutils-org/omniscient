@@ -2922,3 +2922,157 @@ the series is the last reading the program was alive for. Suggested replacement:
 # process state, so that round publishes nothing and the run ends for the
 # reason the runner knows, which includes the exit status.
 ```
+
+---
+
+Written by stream F, which owns `src/collect/{net,io,gpu,runtime}/**`. Four
+things a collector cannot reach, each behind a defect this stream was given.
+`docs/fixes/net.md` has what was done on this side of each.
+
+### To stream B, for `catalog/io.yaml` — the read/write split has no emit (io 7)
+
+`io.bytes` attaches `read_bytes`, `write_bytes`, `sector_bytes` and, where the
+kernel reports them, `discarded_bytes` to every event, and declares
+`emits: [rate, summary, timeline, topk]`. None of those carries an event's
+attributes; `raw`, which does, is not declared and is refused by name. So the
+first question anybody asks of a volume — *was that reads or writes?* — is
+measured, attached, and unreachable. `io.iops` hides `reads`, `writes`,
+`discards` and `flushes` inside `ops`, and `io.merges` hides `read_merges` and
+`write_merges` inside `merges`, in the same way.
+
+One word on three entries:
+
+```yaml
+- id: io.bytes
+  emits: [rate, summary, timeline, topk, raw]
+- id: io.iops
+  emits: [rate, summary, timeline, topk, raw]
+- id: io.merges
+  emits: [rate, summary, raw]
+```
+
+The alternative is the `count` → `raw` pairing the `cpu` thread added to the
+mode × emit matrix for exactly this reason, recorded in §5 above as needing to
+be promoted or reverted. Either closes io 7; this family is the second to want
+it, which is the argument for promoting rather than reverting.
+
+### To stream C, for `src/encode.rs` — the loss headline names three of five (io 9)
+
+`Losses` counts `dropped`, `failed_reads`, `late_ticks`, `undecoded` and
+`throttled`. The text renderer prints the first three, so a run whose only loss
+is `undecoded` — this family's ordinary case, and how `/proc/diskstats` says a
+line was left out of the total — announces `LOSS` and then three zeros, and the
+reader has to infer the real count from how many reason lines follow. Every
+structured format already carries all five, so this is the text renderer alone;
+it is also the format in which someone is deciding whether to trust the numbers.
+
+```
+  LOSS: 0 dropped, 0 failed reads, 0 late ticks, 4 undecoded
+```
+
+Zero-valued categories could be left out entirely, which would read better
+still; what cannot stand is a headline that names a fixed three of the five.
+Fixing io 4 — a device appearing mid-run is now counted rather than only noted —
+makes this more likely to bite rather than less.
+
+### To stream C, for `src/emit.rs` — a series cannot be split by which counter it is (net 5)
+
+`SeriesKey::of` is the first key of an event, and the key model has no variant
+for "which counter this number is". `net.iface` carries errors, drops, fifo
+overruns, collisions and carrier losses per interface; its measured value is
+errors, because the catalog's caveat forbids summing a bad frame with a full
+queue. The consequence is that `rate`, `timeline` and `summary` all answer about
+errors, and a link losing every frame given to it reads `0 count/s`.
+
+The collector cannot fix this. One event per counter kind, which is what the
+shape wants, would key every one of them `iface:veth0` and collapse them back
+into one summed series — the thing the caveat forbids. Writing the counter kind
+into the interface key's `name` would make the key a lie and break every join on
+it.
+
+What would work, smallest first:
+
+```rust
+/// A sub-series within one key: which of several counters this number is.
+/// Appended to the series key, so `iface:veth0` with `counter: "drops"`
+/// becomes the series `iface:veth0/drops`.
+pub struct Event {
+    ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
+}
+```
+
+with `SeriesKey::of` appending it when present. Every existing source leaves it
+`None` and nothing changes for them. `net.backlog` wants the same thing for
+drops against overflows, `io.bytes` for reads against writes (which would close
+io 7 the other way), and finding 22 above — a NUMA node has no key — is a third
+instance of the same shape. This stream has no standing to choose between this
+and a key variant; the point is that the collector layer cannot.
+
+Until then, `net.iface` states in the run's notes what its series is leaving
+out, which is visible but is not a number anyone can aggregate.
+
+### To stream C, for `src/emit.rs` — a timeline point cannot carry its error bar (gpu 1)
+
+`raw` is the only emit that serialises `ts_err_ns`. `gpu.engine_busy` records a
+one-second error on every event, because NVML averages occupancy over a window
+it chooses, and does not declare `raw` — so the invariant in `CLAUDE.md` is
+honoured in the event and lost in the emit. Four points 200 ms apart may all be
+one driver sample and nothing in the output says so.
+
+```rust
+pub struct Point {
+    pub offset_ns: u64,
+    pub value: f64,
+    /// How far the instant may be from the sample, when it is not zero. Carried
+    /// per point rather than per series: a collection can mix a stamped event
+    /// with a polled one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ts_err_ns: u32,
+}
+```
+
+The same field belongs on a `SeriesSummary` as the largest error over the series,
+for the same reason. Stream B declaring `raw` on `gpu.engine_busy` would also
+close it, and is a smaller change; the two are alternatives.
+
+Until then the collector states the error bar, with its size, as a degradation
+of the run, which reaches every format that carries one.
+
+### To stream B, for `catalog/net.yaml` — a caveat that is now true of two modes of three
+
+`net.iface` and `net.backlog` both carry:
+
+```
+- "These are counters, so a run reports the increment between two reads and
+   its first read is a baseline that produces nothing."
+```
+
+True of `poll` and `count`. Since net 3 was fixed it is not true of `snapshot`,
+which reports the counters as they stand under `*_since_boot` names and takes no
+closing read. Suggested:
+
+```
+- "These are counters. A `poll` or a `count` reports the increment between two
+   reads, and its first read is a baseline that produces nothing; a `snapshot`
+   observes no window of its own and reports the counters as they stand, under
+   names that say so."
+```
+
+### To stream B, or to whoever takes §1 — modes are declared per entry, not per backend
+
+Raised again from a third direction. `gpu.engine_busy` declares `count` because
+its first backends are kernel PMUs, where engine occupancy is a busy-nanosecond
+counter. The `vendor:nvml` fallback has no counter to difference: it reports a
+level the driver averaged over a window it chose. A `count` served from it is an
+integral of a sampled ratio, which is the arithmetic `gpu/device.rs` already
+refuses by name for energy.
+
+This stream wrote that refusal, ran it, and withdrew it — because a collector
+refusing a declared mode at attach is the pattern io 1 and net 7 record, and the
+family's own sweep exists to keep it out. The refusal belongs in the validator,
+which needs `modes:` to be declarable per backend the way `keys:` and
+`filter_fields:` already are. Until then `gpu.engine_busy --mode count` on NVML
+answers with a window that is now correct and a number that gpu 3 says should
+not exist.

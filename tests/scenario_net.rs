@@ -375,10 +375,12 @@ fn the_count_leg_of_the_sweep_finds_the_traffic_the_scenario_pushed() {
 
 /// The `snapshot` leg: one read, now.
 ///
-/// Every emit answers, and that is all this leg can be asked to prove -- the
-/// numbers themselves are structurally zero for two of the three sources, which
-/// `a_snapshot_of_the_accept_queue_reports_nothing_while_it_overflows` shows and
-/// `docs/scenarios/net.md` records.
+/// Every emit answers, and that is all this leg can be asked to prove. What the
+/// numbers mean is
+/// `a_snapshot_of_the_accept_queue_reports_the_queue_the_kernel_holds`: the two
+/// counter sources here report the counters as they stand rather than an
+/// increment over a microsecond window, which they used to and which
+/// `docs/scenarios/net.md` records under "Defects found" 3.
 #[test]
 fn the_snapshot_leg_of_the_sweep_answers_with_every_emit_it_promised() {
     let outcome = omn(&["-f", &session("net-snapshot.yml"), "--format", "json"]);
@@ -1516,30 +1518,52 @@ fn every_frame_a_down_peer_refuses_is_counted_as_a_drop_and_none_as_an_error() {
 
     // And the finding the scenario also produces: the measured value of this
     // source is errors, so every aggregating emit answers zero for a link that
-    // just lost a thousand frames. Recorded in docs/scenarios/net.md.
+    // just lost a thousand frames. That is still true -- errors and drops are
+    // kept apart on purpose, and the catalog's caveat says so -- but it is no
+    // longer silent.
     assert_eq!(
         rate_total(result, "iface:veth0"),
         0.0,
         "the rate stopped reporting errors alone; if drops are now in it, update the \
          \"Defects found\" section of docs/scenarios/net.md"
     );
+    let said = result["degradations"]
+        .as_array()
+        .map(|lines| {
+            lines
+                .iter()
+                .filter_map(|line| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    assert!(
+        said.contains("veth0") && said.contains(&format!("{DATAGRAMS} drops")),
+        "a rate of zero over {DATAGRAMS} dropped frames has to say what it is leaving out, and \
+         the run says:\n{said}"
+    );
+    assert!(
+        said.contains("every emit but `raw`"),
+        "the note has to say where the number it is leaving out can be read:\n{said}"
+    );
 }
 
-/// A snapshot of the accept queue reports nothing while the queue is
-/// overflowing.
+/// A snapshot of the accept queue reports the counters the kernel holds.
 ///
 /// The workload is the ground truth and it is unambiguous: a listener one deep,
-/// and far more connections than it will ever accept. `count` finds it. The
-/// same source in `snapshot` mode, against the same listener in the same state,
-/// reports zero drops and zero overflows -- because a counter source reports the
-/// increment between two reads, and a snapshot's two reads are a hundred
-/// microseconds apart.
+/// and far more connections than it will ever accept. `count` finds the drops
+/// over its window. The same source in `snapshot` mode used to report zero --
+/// a counter source reports the increment between two reads, and a snapshot's
+/// two reads were a hundred microseconds apart, so the answer was structurally
+/// zero however hard the queue was being hammered.
 ///
-/// Recorded in `docs/scenarios/net.md` under "Defects found". The scenario is
-/// here rather than in the document alone because the day `snapshot` starts
-/// answering, this is the test that says so.
+/// A snapshot now reports what a single read can honestly report: the counters
+/// as they stand, under names that say so. The check is two-sided, and neither
+/// side is the tool's own arithmetic -- the totals since boot must contain the
+/// drops `count` measured over its second, and they must be far larger than any
+/// increment over the snapshot's own microsecond window could be.
 #[test]
-fn a_snapshot_of_the_accept_queue_reports_nothing_while_it_overflows() {
+fn a_snapshot_of_the_accept_queue_reports_the_queue_the_kernel_holds() {
     let (listener, port) = listener_with_backlog(1);
     let overflowing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let keep_going = overflowing.clone();
@@ -1608,36 +1632,46 @@ fn a_snapshot_of_the_accept_queue_reports_nothing_while_it_overflows() {
     let result = &results(&snapshot)["results"][0];
     let window_ns = result["observed_ns"].as_u64().expect("a window");
     let event = &result["outputs"][0]["events"][0];
-    let drops = event["attrs"]
-        .as_array()
-        .expect("attributes")
-        .iter()
-        .find(|attr| attr["name"] == "drops")
-        .and_then(|attr| attr["value"].as_u64())
-        .expect("a drop count");
+    let attr = |name: &str| {
+        event["attrs"]
+            .as_array()
+            .expect("attributes")
+            .iter()
+            .find(|attr| attr["name"] == name)
+            .and_then(|attr| attr["value"].as_u64())
+    };
+    let drops = attr("drops_since_boot").expect("a snapshot names what it reports");
 
     overflowing.store(false, std::sync::atomic::Ordering::Relaxed);
     hammering.join().expect("the hammering");
     drop(listener);
 
-    // A snapshot of a counter source is two reads a few hundred microseconds
-    // apart, and what it reports is the increment between them.
+    // A snapshot is still one read: the window it observes is microseconds,
+    // and that is the point -- there is no interval in it to report.
     assert!(
         window_ns < 5_000_000,
         "a snapshot observed {window_ns} ns, which is not the microsecond window this is about"
     );
-
-    // So the number answers about that window and not about the queue. Two
-    // drops of slack, for a burst that lands between the two reads; the totals
-    // since boot, which is the other thing a snapshot could plausibly mean,
-    // are thousands and would fail this by a wide margin.
-    let plausible = over_a_second * (window_ns as f64 / 1e9) + 2.0;
     assert!(
-        drops as f64 <= plausible,
-        "`snapshot` reported {drops} drops over {window_ns} ns while `count` reported \
-         {over_a_second} over a second; if it now answers with the queue's state rather than \
-         with an increment over its own window, that is the fix, and this assertion and the \
-         \"Defects found\" section of docs/scenarios/net.md both need updating"
+        attr("drops").is_none(),
+        "an interval's name on a number that is not one is the lie this fixed: {event}"
+    );
+
+    // The kernel's own counter is the reference. The drops `count` measured
+    // over its second happened before this read, so the totals since boot
+    // contain them...
+    assert!(
+        drops as f64 >= over_a_second,
+        "`count` measured {over_a_second} drops over its second and the snapshot taken after \
+         it reports {drops} since boot, which cannot contain them"
+    );
+    // ...and they are far more than any increment over a microsecond window
+    // could be, which is what the old answer was and why it was always zero.
+    let an_increment_could_be = over_a_second * (window_ns as f64 / 1e9) + 2.0;
+    assert!(
+        drops as f64 > an_increment_could_be,
+        "the snapshot reported {drops}, which an increment over its own {window_ns} ns window \
+         could account for; it is supposed to be reporting the counter, not an interval"
     );
 }
 

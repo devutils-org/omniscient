@@ -562,39 +562,65 @@ fn every_output_format_either_carries_an_emit_or_refuses_it_by_name() {
 /// happen when they are timestamped: NVML averages occupancy over a window it
 /// chooses and does not report, up to a second wide, and the collector records
 /// that as a one-second `ts_err_ns` on every event. No emit the source declares
-/// can show it.
+/// serialises that field -- `raw` is the only one that does, and this source
+/// does not declare it -- so a reader of a timeline saw points 200 ms apart
+/// with nothing to say they might all be one driver sample.
 ///
-/// This pins the gap rather than asserting it away. The day `raw` is declared
-/// for this source, or a timeline carries its error bar, this test fails and
-/// the entry in `docs/scenarios/gpu.md` under "Defects found" comes out.
+/// The collector now states the error bar as a degradation of the run, which is
+/// the one channel every emit and every format that carries a run's notes
+/// carries. What it does not do is put the number on each point: that needs a
+/// timeline point able to hold its own error bar, which is recorded under
+/// "Needs from another stream" in `docs/open-findings.md`.
+///
+/// `ndjson` is deliberately not in the list. It is a stream of points and
+/// carries no run-level object at all, so a degradation has nowhere to go in
+/// it -- which is a property of the format rather than of this source.
 #[test]
-fn the_one_time_error_this_family_records_reaches_no_output_it_can_produce() {
+fn the_one_time_error_this_family_records_reaches_every_output_that_can_carry_it() {
     let entry = catalog()
         .into_iter()
         .find(|entry| entry["id"] == "gpu.engine_busy")
         .expect("gpu.engine_busy is in the catalog");
     let emits = strings(&entry, "emits");
-    assert!(
-        !emits.contains(&"raw".to_owned()),
-        "`raw` is the only emit that serialises ts_err_ns; if this source now \
-         declares it, the defect is fixed and the document should say so"
-    );
 
     if let Err(reason) = device() {
         return eprintln!("skipped: {reason}");
     }
     let _together = shared();
     for emit in emits {
-        for format in ["json", "ndjson", "chrome"] {
-            let output = measure(&entry, "poll", &emit, format);
+        let mut carried = 0;
+        for format in ["text", "json", "chrome"] {
+            // `rate` is reachable on this source only through `count`, and
+            // `timeline` only through `poll`, so each emit is asked for in a
+            // mode that can produce it rather than skipped where it cannot.
+            let mut output = measure(&entry, "poll", &emit, format);
+            if !output.status.success() {
+                output = measure(&entry, "count", &emit, format);
+            }
             if !output.status.success() {
                 continue;
             }
+            let rendered = stdout(&output);
             assert!(
-                !stdout(&output).contains("ts_err_ns"),
-                "`{emit}` as `{format}` now carries the error bar: the defect is fixed"
+                rendered.contains("averaged by the driver over a window it chooses"),
+                "`{emit}` as `{format}` says nothing about how far its timestamps may be from \
+                 the samples they carry:\n{rendered}"
             );
+            // And it says how far, not merely that there is a window: an
+            // uncertainty without a size is not one.
+            assert!(
+                rendered.contains("1000 ms"),
+                "`{emit}` as `{format}` names no size for the window:\n{rendered}"
+            );
+            carried += 1;
         }
+        // Not every emit reaches every format -- `chrome` carries what it can
+        // draw and refuses the rest by name -- but each emit this source
+        // declares has to reach at least one.
+        assert!(
+            carried > 0,
+            "`{emit}` was refused by every format, so nothing was checked for it"
+        );
     }
 }
 
@@ -1429,19 +1455,24 @@ fn the_listing_separates_what_this_machine_has_from_what_this_build_collects() {
 // scenario suite that quietly worked around three bugs has measured nothing;
 // one that leaves them unrecorded has measured them and then forgotten.
 
-/// Defect 2. `gpu.engine_busy` is the only source in this family declaring
-/// `count`, and no collector here has a tick of its own in that mode, so the
-/// run falls back to the default poll interval of one second. A launched
-/// program's exit is noticed at a tick boundary, so the window it reports is
-/// the program's life rounded up to the next second, and every emit that
-/// divides by a window divides by that one.
+/// Defect 2, fixed. `gpu.engine_busy` is the only source in this family
+/// declaring `count`, and a `count` names no cadence of its own -- so the run
+/// used to fall back to the default poll interval of one second, notice the
+/// launched program's exit at the next tick, and report a window that was the
+/// program's life rounded up to the next second. Every emit that divides by a
+/// window divided by that one.
 ///
-/// Measured through `summary` since defect 3 was fixed: this source used to
-/// declare `rate`, which is where the over-long window showed most sharply,
-/// and a rate of a ratio is a quantity of nothing. The window itself is what
-/// this scenario is about and it is reported whatever the emit.
+/// The collector now supplies a tick of ten milliseconds in this mode while
+/// keeping its reads a second apart, which is where the driver refreshes them.
+/// The ground truth is the program: `sleep 0.3` lives 300 ms, and the window
+/// the run reports has to be that and not a second.
+///
+/// Measured through `summary` rather than `rate`, because defect 3 took `rate`
+/// off this entry in the same wave: the sum of two occupancies is not a
+/// quantity. The window is what this scenario is about and it is reported
+/// whatever the emit.
 #[test]
-fn a_count_mode_run_reports_a_window_longer_than_the_program_it_watched() {
+fn a_count_mode_run_reports_the_window_of_the_program_it_watched() {
     if let Err(reason) = device() {
         return eprintln!("skipped: {reason}");
     }
@@ -1463,9 +1494,16 @@ fn a_count_mode_run_reports_a_window_longer_than_the_program_it_watched() {
     let result = &run["results"][0];
     let window = window_seconds(result);
     assert!(
-        window >= 0.9,
-        "the window over a 300 ms program is {window:.3} s: if this is now near 0.3, the \
-         defect is fixed and the entry in docs/scenarios/gpu.md should come out"
+        (0.28..0.45).contains(&window),
+        "`sleep 0.3` lived 300 ms and the run reports a window of {window:.3} s; a window near \
+         one second is the old behaviour, where the exit was noticed at the next tick"
+    );
+    assert!(
+        result["stopped_because"]
+            .as_str()
+            .unwrap_or("")
+            .contains("exited"),
+        "the run has to end because its program did, not because a tick came round"
     );
     // And the program it watched really did live for about 0.3 s, so the gap
     // is the runner's tick and not the workload's.
@@ -1568,13 +1606,17 @@ fn the_loss_report_carries_one_reason_for_all_the_late_ticks() {
     );
 }
 
-/// Defect 6. `gpu.mem` ends a run when its process goes and asks `/proc/<pid>`
-/// whether it has. A zombie has one, so a child nobody has reaped yet is
-/// followed to the end of the requested duration and reported as a program
-/// holding no video memory -- which is the series of zeros the collector's own
-/// comment says it exists to prevent.
+/// Defect 6, fixed. `gpu.mem` ends a run when its process goes, and used to ask
+/// `/proc/<pid>` whether it had. A zombie has one, so a child nobody had reaped
+/// yet was followed to the end of the requested duration and reported as a
+/// program holding no video memory -- which is the series of zeros the
+/// collector's own comment says it exists to prevent.
+///
+/// The state letter in `/proc/<pid>/stat` is what tells the two apart, and the
+/// ground truth is the child itself: it lives 200 ms, nothing reaps it, and the
+/// run must stop there rather than at the 800 ms it was given.
 #[test]
-fn a_target_that_exits_without_being_reaped_is_followed_to_the_end() {
+fn a_target_that_exits_without_being_reaped_ends_the_run() {
     if let Err(reason) = device() {
         return eprintln!("skipped: {reason}");
     }
@@ -1605,13 +1647,24 @@ fn a_target_that_exits_without_being_reaped_is_followed_to_the_end() {
 
     let stopped = result["stopped_because"].as_str().unwrap_or("");
     assert!(
-        stopped.contains("duration"),
-        "the run ended for `{stopped}`: if it now notices a zombie, the defect is fixed \
-         and the entry in docs/scenarios/gpu.md should come out"
+        stopped.contains("reaped"),
+        "the run ended for `{stopped}`: an unreaped child has exited, and the run has to say \
+         so rather than follow a process that is gone"
     );
+    let window = window_seconds(result);
     assert!(
-        window_seconds(result) >= 0.7,
-        "the target lived 200 ms and the run should have stopped there; it did not"
+        window < 0.6,
+        "the target lived 200 ms and the run observed {window:.3} s of the 800 ms it was \
+         given, so it went on polling a process that had exited"
+    );
+    // And what it did report is the process while it existed, not a tail of
+    // zeros for one that did not.
+    let series = &result["outputs"][0]["series"][0];
+    assert!(
+        series["n"].as_u64().unwrap_or(0) <= 3,
+        "a 200 ms process polled every 100 ms is two or three readings, and this run has \
+         {}",
+        series["n"]
     );
     let _ = child.wait();
 }

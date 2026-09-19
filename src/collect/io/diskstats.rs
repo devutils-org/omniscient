@@ -289,6 +289,13 @@ impl Diskstats {
         let mut index = seq;
         for (device, counters) in &after.devices {
             let Some(earlier) = before.devices.get(device) else {
+                // Counted, not only noted. An interval of this device's I/O is
+                // missing from the run, and a reason without a count leaves
+                // `Losses::is_clean` true -- so the run would print `no loss`
+                // while a device's first interval was quietly absent. The
+                // category is the one the line below uses for the same shape of
+                // gap: a reading the collector could not turn into an interval.
+                self.losses.undecoded += 1;
                 self.losses.note(format!(
                     "`{}` appeared during the run, so this interval has nothing to measure its \
                      counters against",
@@ -849,6 +856,17 @@ mod tests {
             ),
             "the device that could not be measured is named: {:?}",
             collector.losses().reasons
+        );
+        assert_eq!(
+            collector.losses().undecoded,
+            1,
+            "a named reason with nothing counted behind it leaves the run calling itself \
+             complete: {:?}",
+            collector.losses()
+        );
+        assert!(
+            !collector.losses().is_clean(),
+            "an interval of this device's I/O is missing, so the run is not complete"
         );
         std::fs::remove_file(&path).ok();
     }

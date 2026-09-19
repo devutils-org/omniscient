@@ -390,11 +390,25 @@ its workload.
 
 ## Defects found
 
-Six, none worked around. Each is pinned by a test that asserts today's
-behaviour, so fixing any one of them fails that test and brings whoever fixed it
-here.
+Six, none worked around. Each was pinned by a test that asserted today's
+behaviour, so fixing any one of them failed that test and brought whoever fixed
+it here.
 
-### 1. The one time error this family records reaches no output it can produce
+Three now carry a marker, with the reproduction left in place: the session and
+the output that found them are what says a regression has happened.
+`docs/fixes/net.md` has what was done and what it cost.
+
+### 1. The one time error this family records reaches no output it can produce — **half fixed**
+
+*Declaring `raw` is stream B's and putting an error bar on a timeline point is
+stream C's; both signatures are under "Needs from another stream" in*
+`docs/open-findings.md`. *What the collector can do, and now does, is state the
+error bar once — with its size — as a degradation of the run, which reaches
+`text`, `json` and `chrome` whatever emit was asked for.* `ndjson` *carries
+nothing of it, and that is a property of the format rather than of this source.
+The test is renamed* `the_one_time_error_this_family_records_reaches_every_output_that_can_carry_it`
+*and requires both the statement and the number: an uncertainty with no size is
+not one.*
 
 `gpu.engine_busy` is the only `gpu` source whose samples do not happen when they
 are timestamped: NVML averages occupancy over a window up to a second wide, and
@@ -422,9 +436,27 @@ from elsewhere carry a non-zero `ts_err_ns` — is honoured in the event and los
 in the emit. Either the source declares `raw`, or a timeline point carries its
 error bar.
 
-Pinned by `the_one_time_error_this_family_records_reaches_no_output_it_can_produce`.
+Pinned by `the_one_time_error_this_family_records_reaches_every_output_that_can_carry_it`.
 
-### 2. A `count`-mode run over-reports its own window by up to a second
+### 2. A `count`-mode run over-reports its own window by up to a second — **fixed**
+
+*Fixed by stream F. The collector now takes the mode and, in `count`, splits two
+things that were one: a ten-millisecond tick so the run notices its target
+going, and reads throttled to* `Mode::DEFAULT_POLL_INTERVAL`, *which is about
+where the driver refreshes them. Without the split, either the window stays
+rounded up or the driver is asked a hundred times for one sample, and an NVML
+read is milliseconds. The same tick for the same reason is in*
+`collect/cpu/counters.rs`. *After: `sleep 0.3` reports 0.303 s and `sleep 1.5`
+reports 1.510 s, with the event counts unchanged.
+`a_count_mode_run_reports_the_window_of_the_program_it_watched` requires the
+window to be the program's and the run to have stopped because its program did.*
+
+*A first attempt refused `count` on this backend outright — NVML has no counter
+to difference, and integrating a sampled ratio is the arithmetic this file
+already refuses for energy — and was withdrawn: it would have quietly closed
+defect 3, which is another stream's decision, and it would have added a ninth
+instance of the pattern this family's own mode × emit sweep exists to keep out.
+The reasoning is recorded as a need against* §1 *instead.*
 
 `gpu.engine_busy` is the only `gpu` source declaring `count`, and no collector in
 this family has a tick of its own in that mode, so the run falls back to
@@ -442,7 +474,7 @@ divides by the window, and `rate` is reachable on this source *only* through
 `count` mode, because `poll` cannot produce it. So the one number that uses the
 window is computed with a window that is 3.3× too long for a 300 ms program.
 
-Pinned by `a_count_mode_run_reports_a_window_longer_than_the_program_it_watched`.
+Pinned by `a_count_mode_run_reports_the_window_of_the_program_it_watched`.
 
 ### 3. `rate` of a ratio is a quantity of nothing
 
@@ -553,7 +585,17 @@ family that can be asked to poll faster than it can read will hit it.
 
 Pinned by `the_loss_report_carries_one_reason_for_all_the_late_ticks`.
 
-### 6. A target that exited but was not reaped is followed to the end of the run
+### 6. A target that exited but was not reaped is followed to the end of the run — **fixed**
+
+*Fixed by stream F. The state letter in `/proc/<pid>/stat` is what tells a
+zombie from a running process, and it is now what is read: `Z` and `X` are both
+departed, and the run ends naming which. The reproduction below is what the tool
+did before.* `a_target_that_exits_without_being_reaped_ends_the_run` *asserts the
+run stops at the child rather than at the duration, and that what it reported is
+the process while it existed rather than a tail of zeros for one that did not; a
+unit test beside the collector waits for a child of its own to reach `Z` and
+checks that its `/proc` entry is still there while the collector says it has
+gone.*
 
 `gpu.mem` ends a run when its process goes, and checks that by asking whether
 `/proc/<pid>` exists. A zombie has one. A parent that has not yet reaped its
@@ -582,7 +624,7 @@ supervisor, or anything using `posix_spawn` and deferring the `wait` does not.
 orphan its target through a shell that exits, so that init reaps it, for the
 positive case to be reachable at all.
 
-Pinned by `a_target_that_exits_without_being_reaped_is_followed_to_the_end`.
+Pinned by `a_target_that_exits_without_being_reaped_ends_the_run`.
 
 ---
 

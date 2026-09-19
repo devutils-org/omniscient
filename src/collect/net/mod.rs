@@ -27,8 +27,16 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(dev::Prepare(dev::Counted::Packets)))
         }),
         Factory::new("net.tcp.rtt", "netlink", |_| Ok(Box::new(tcp_rtt::Prepare))),
-        Factory::new("net.iface", "fs:proc", |_| Ok(Box::new(iface::Prepare))),
-        Factory::new("net.backlog", "fs:proc", |_| Ok(Box::new(backlog::Prepare))),
+        // Both of these read counters, and both declare `snapshot`. The mode
+        // reaches the collector because a single read of a counter cannot be an
+        // increment: what it can report is the counter itself, under a name
+        // that says so.
+        Factory::new("net.iface", "fs:proc", |resolved| {
+            Ok(Box::new(iface::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("net.backlog", "fs:proc", |resolved| {
+            Ok(Box::new(backlog::Prepare(resolved.request.mode)))
+        }),
         Factory::new("net.capture", "af_packet", |_| {
             Ok(Box::new(capture::Prepare))
         }),
