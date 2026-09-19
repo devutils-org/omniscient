@@ -133,6 +133,16 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         }
     }
 
+    // A budget that silently does nothing is worse than one that is refused,
+    // so it is reported before anything is measured -- including on the dumps,
+    // where the reader is deciding whether the request says what they meant.
+    for note in resolutions
+        .iter()
+        .filter_map(|resolved| budget_note(&catalog, resolved))
+    {
+        eprintln!("note: {note}");
+    }
+
     if args.dump_resolved {
         print_resolved(session.format, &resolutions)?;
         return Ok(ExitCode::SUCCESS);
@@ -144,6 +154,110 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     }
 
     measure(&catalog, &session, &report, &defaulted, &resolutions)
+}
+
+/// Whether a refusal means "this build does not do that yet" rather than
+/// "this run failed".
+///
+/// The two exit differently on purpose. A caller that ran out of memory, lost
+/// its target or could not open a counter has a problem with this run; a
+/// caller that asked for a mechanism nobody has written has a problem with
+/// this build, and retrying, raising privileges or changing the machine will
+/// not help. `NoCollector` has always said so with exit 3. A target a
+/// collector cannot serve *yet* -- the `yet` is in the message -- is the same
+/// answer and used to exit 1, indistinguishable from a real failure.
+fn not_built_yet(error: &collect::CollectError) -> bool {
+    matches!(
+        error,
+        collect::CollectError::NoCollector { .. } | collect::CollectError::UnsupportedTarget { .. }
+    )
+}
+
+/// What `--budget` did, which today is nothing, said out loud.
+///
+/// The flag is parsed, validated and carried into the resolved request, and
+/// the resolver does not yet consult it. A reader who passes `--budget 1%` and
+/// sees a measurement come back has been told, by omission, that the overhead
+/// was under one percent -- so the omission is the bug, not the missing
+/// enforcement. Until phase 8 measures what a backend actually costs, this
+/// says what the declared costs imply and what enforcement would have to
+/// change.
+///
+/// The comparison is against the *worst case* of the band a backend declares:
+/// `med` means "1 to 5 %", so it fits a 5 % budget and cannot be promised
+/// against a 2 % one. Erring the other way would let a budget look satisfied
+/// by a backend that may well exceed it.
+fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> {
+    let budget = resolved.request.budget?;
+    let source = &resolved.request.source;
+    let selected = &resolved.backend;
+    let ceiling = budget.percent();
+
+    if worst_case_percent(selected.cost) <= ceiling {
+        return Some(format!(
+            "[{source}] --budget {budget} is recorded and not yet enforced; `{}` declares \
+             `{}` ({}), which is within it, so enforcing it would change nothing here",
+            selected.id,
+            selected.cost,
+            band(selected.cost),
+        ));
+    }
+
+    // Only the backends below the selected one are candidates: the ones above
+    // were rejected by this machine, and a budget cannot make them reachable.
+    let cheaper: Vec<String> = catalog
+        .get(source)
+        .into_iter()
+        .flat_map(|entry| entry.backends.iter())
+        .skip_while(|backend| backend.id != selected.id)
+        .skip(1)
+        .filter(|backend| worst_case_percent(backend.cost) <= ceiling)
+        .map(|backend| format!("`{}` ({})", backend.id, backend.cost))
+        .collect();
+
+    Some(match cheaper.as_slice() {
+        [] => format!(
+            "[{source}] --budget {budget} is recorded and not yet enforced; `{}` declares `{}` \
+             ({}), and nothing below it in the chain declares less, so enforcement could only \
+             refuse this request",
+            selected.id,
+            selected.cost,
+            band(selected.cost),
+        ),
+        candidates => format!(
+            "[{source}] --budget {budget} is recorded and not yet enforced; `{}` declares `{}` \
+             ({}), so enforcement would degrade onto {} -- which was never probed, because a \
+             better backend was selected first",
+            selected.id,
+            selected.cost,
+            band(selected.cost),
+            candidates.join(" or "),
+        ),
+    })
+}
+
+/// The top of the overhead band a declared cost stands for, as `catalog::Cost`
+/// documents it. `extreme` is "over 10x" and no percentage bounds it.
+fn worst_case_percent(cost: omn::catalog::Cost) -> f64 {
+    use omn::catalog::Cost;
+    match cost {
+        Cost::Free => 0.0,
+        Cost::Low => 1.0,
+        Cost::Med => 5.0,
+        Cost::High => 20.0,
+        Cost::Extreme => f64::INFINITY,
+    }
+}
+
+fn band(cost: omn::catalog::Cost) -> &'static str {
+    use omn::catalog::Cost;
+    match cost {
+        Cost::Free => "about zero",
+        Cost::Low => "under 1 %",
+        Cost::Med => "1 to 5 %",
+        Cost::High => "5 to 20 %",
+        Cost::Extreme => "over 10x",
+    }
 }
 
 /// Runs the session's requests over one window and prints what they produced.
@@ -163,27 +277,32 @@ fn measure(
 
     let collections = match collect::run_all(resolved) {
         Ok(collections) => collections,
-        Err(error @ collect::CollectError::NoCollector { .. }) => {
+        Err(error) if not_built_yet(&error) => {
             eprintln!("error: {error}");
             // The selected backend is often the last one standing, and why the
             // better ones were passed over is the answer the reader actually
             // needs: a counter that needs root reads as "no collector for
             // `pmu`" unless the chain's own verdicts come with it.
-            for resolved in resolved {
-                for considered in &resolved.chain {
-                    if let omn::resolve::Verdict::Rejected(reasons) = &considered.verdict {
-                        eprintln!(
-                            "  `{}` was passed over: {}",
-                            considered.id,
-                            reasons.join("; ")
-                        );
+            if matches!(error, collect::CollectError::NoCollector { .. }) {
+                for resolved in resolved {
+                    for considered in &resolved.chain {
+                        if let omn::resolve::Verdict::Rejected(reasons) = &considered.verdict {
+                            eprintln!(
+                                "  `{}` was passed over: {}",
+                                considered.id,
+                                reasons.join("; ")
+                            );
+                        }
                     }
                 }
+                eprintln!(
+                    "\nCollectors exist for: {}.",
+                    collect::implemented().join(", ")
+                );
             }
             eprintln!(
-                "\nCollectors exist for: {}.\n\
-                 The request itself is valid -- `--dump-request` shows how it would be obtained.",
-                collect::implemented().join(", ")
+                "\nThe request itself is valid -- `--dump-request` shows how it would be \
+                 obtained on a build that has it."
             );
             return Ok(ExitCode::from(EXIT_NOT_IMPLEMENTED));
         }
