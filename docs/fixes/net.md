@@ -294,18 +294,24 @@ cargo test --test scenario_gpu        # about twelve, and it needs the device
 make check                            # everything, the way CI would
 ```
 
-`make check` was run three times against this branch. The first and third were
-clean end to end — 993 tests, clippy and fmt. The second failed one test, and
-none of the three failures seen across the runs is in a file this stream owns;
-all three are the species `STATE.md` already names, *a measurement of a shared
-machine is not repeatable inside a parallel test suite*, and the machine carried
-a load average between six and ten throughout because seven other worktrees were
-running their own suites.
+`make check` was run four times against this branch, two of them clean end to
+end — 993 tests, clippy and fmt. None of the failures seen across the four is in
+a file this stream owns, every one is the species `STATE.md` already names —
+*a measurement of a shared machine is not repeatable inside a parallel test
+suite* — and every one passes in isolation. The machine carried a load average
+between six and ten throughout, because seven other worktrees were running their
+own suites at the same time.
 
 - `collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
   (`src/collect/mod.rs`, the shared layer) — *"the collector was asked to spin
   for 200 ms and did not, so this measured nothing"*. Passes three times out of
   three in isolation.
+- `tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them`
+  (`tests/family_sched.rs`) — *"a task alone on a cpu waits for nothing, and
+  this one waited 44 % of the window"*, which is word for word what
+  `docs/scenarios/net.md` already records for this test under load, and
+  `the_kernels_buckets_are_the_emit_layers_buckets` failing behind it on the cpu
+  lock the first one poisoned. Both pass twice out of two in isolation.
 - `the_process_figure_and_the_device_figure_move_by_the_same_step` and
   `a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power`
   (`tests/scenario_gpu.rs`) — one each, in two earlier full-suite runs, a
