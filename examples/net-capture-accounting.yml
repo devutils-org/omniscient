@@ -1,0 +1,47 @@
+# Does the capture say what it did not see?
+#
+# A capture that loses frames under load produces wrong conclusions that look
+# right, which is the one failure this source's caveats lead with. So drive it
+# past what its ring can hold and check the arithmetic: the frames it kept plus
+# the frames it says the kernel dropped have to add up to the frames that
+# crossed the wire, and that number is the workload's to choose.
+#
+#   unshare --user --map-root-user --net -- bash -c '
+#     ip link set lo up
+#     omn -f examples/net-capture-accounting.yml --format json > /tmp/capture.json &
+#     sleep 0.5
+#     python3 -c "
+#   import socket
+#   r = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); r.bind((\"127.0.0.1\", 39998))
+#   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#   for _ in range(20000): s.sendto(b\"x\" * 100, (\"127.0.0.1\", 39998))"
+#     wait
+#     jq ".results[0] | {events_seen, dropped: .losses.dropped}" /tmp/capture.json'
+#
+# Twenty thousand datagrams, forty thousand frames -- loopback carries each one
+# twice -- against a one-mebibyte ring that holds five hundred and twelve at a
+# time. Roughly half the burst is lost, and the run reports:
+#
+#   events_seen 20302  dropped 19698      20302 + 19698 = 40000
+#
+# Twenty thousand and not five: at five the drain sometimes keeps up and nothing
+# is lost at all, which is a fine outcome for a capture and a useless one for a
+# scenario about losing.
+# Every frame is accounted for. The split between the two numbers moves from run
+# to run, because it depends on how the drain races the sender; the total does
+# not, and the total is the claim.
+#
+# The kernel counts these drops itself, through PACKET_STATISTICS, and the run
+# names both states it went through: the ring running out of blocks, which is
+# the moment before a loss, and the ring being full, which is the loss.
+name: a capture under more load than it can hold
+duration: 1500ms
+format: text
+
+requests:
+  - label: frames
+    source: net.capture
+    target: {iface: lo}
+    mode: trace
+    emit: [timeline]
+    keys: [iface]

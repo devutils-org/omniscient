@@ -1,0 +1,48 @@
+# Did this link drop anything, and was it a drop or an error?
+#
+# `net.iface` counts them apart on purpose: a bad frame and a full queue are
+# different failures and the fix differs. This session is the one that proves
+# the counters move at all, and it needs a link that drops on demand.
+#
+# A veth pair whose far end is never brought up is exactly that. Every frame
+# handed to `veth0` reaches a peer that is down and is dropped there, and a
+# static neighbour entry keeps address resolution out of it, so the count of
+# drops is the count of datagrams sent and nothing else:
+#
+#   unshare --user --map-root-user --net -- bash -c '
+#     ip link add veth0 type veth peer name veth1
+#     ip addr add 10.9.0.1/24 dev veth0
+#     ip link set veth0 up                      # veth1 stays down, on purpose
+#     ip neigh replace 10.9.0.2 dev veth0 nud permanent \
+#        lladdr $(ip -o link show veth1 | sed -n "s/.*link.ether \([0-9a-f:]*\).*/\1/p")
+#     omn -f examples/net-interface-drops.yml &
+#     sleep 0.5
+#     python3 -c "
+#   import socket
+#   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#   for _ in range(1000): s.sendto(b\"x\" * 100, (\"10.9.0.2\", 9))"
+#     wait'
+#
+# A thousand datagrams, so a thousand drops -- exactly, not approximately -- and
+# zero errors, because nothing was malformed. `raw` is where both of those are:
+# the aggregating emits of this source report errors, which is its measured
+# value, so `rate` answers `0 count/s` for a link that just lost a thousand
+# frames. That is recorded in `docs/scenarios/net.md` under "Defects found".
+#
+# What this does *not* reach is a drop inside a queueing discipline. The obvious
+# way to make an interface lose packets -- `tc qdisc add dev lo root netem
+# loss 50%` -- moves nothing here: netem frees the frame and reports success
+# upwards, so the loss is in the qdisc's own statistics and `/proc/net/dev`
+# never hears about it. `net.qdisc` is the source for that, and it has no
+# collector.
+name: a link that drops on demand
+duration: 1500ms
+format: text
+
+requests:
+  - label: drops
+    source: net.iface
+    target: {iface: veth0}
+    mode: count
+    emit: [raw, rate, summary]
+    keys: [iface]

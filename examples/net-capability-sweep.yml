@@ -1,0 +1,73 @@
+# Does every axis the `net` catalog declares actually work?
+#
+#   omn -f examples/net-capability-sweep.yml
+#   omn -f examples/net-capability-sweep.yml --format json | jq '.results[].outputs[].emit'
+#   omn -f examples/net-capability-sweep.yml --format chrome > /tmp/net.json
+#
+# Six of the seven `net` sources that have a collector, every emit their `poll`
+# mode can produce, over one window. The seventh is `net.capture`, which needs
+# CAP_NET_RAW and a `trace`; it is in `net-capture-accounting.yml`.
+#
+# `poll` is one leg of the sweep and not the whole of it: a session observes one
+# target over one window, and a `snapshot` request sharing a window with a polled
+# one is read on every tick like the others. So the sweep is three files --
+# this one, `net-counters.yml` and `net-snapshot.yml` -- plus the `trace` leg in
+# `net-injected-rtt.yml`. `docs/scenarios/net.md` has the whole matrix in a table.
+#
+# What this catches is the promise nobody looks at: a combination the catalog
+# offers and the build cannot serve. One is recorded there already --
+# `net.bytes` declares `topk` and neither of its two modes can produce it.
+name: the poll leg of the net capability sweep
+duration: 400ms
+format: text
+
+requests:
+  # Volume and packet counts, per interface. Both read /proc/net/dev, so both
+  # report the increment between two reads and both produce nothing on the first.
+  - label: volume
+    source: net.bytes
+    target: system
+    mode: poll@100ms
+    emit: [timeline, summary]
+    keys: [iface]
+
+  - label: packets
+    source: net.packets
+    target: system
+    mode: poll@100ms
+    emit: [timeline, summary]
+    keys: [iface]
+
+  # Errors and drops per link. `raw` is the only emit that carries the drops:
+  # the aggregating emits report errors, which is the source's measured value.
+  - label: links
+    source: net.iface
+    target: system
+    mode: poll@100ms
+    emit: [raw, timeline, summary]
+    keys: [iface]
+
+  # The machine's accept queue. No key: the queue belongs to the machine.
+  - label: accept-queue
+    source: net.backlog
+    target: system
+    mode: poll@100ms
+    emit: [raw, timeline, summary]
+
+  # One series per socket, keyed by the cookie that survives softirq processing.
+  - label: round-trip
+    source: net.tcp.rtt
+    target: system
+    mode: poll@100ms
+    emit: [raw, timeline, summary]
+    keys: [sock]
+
+  # How far each NIC's own clock has drifted from CLOCK_MONOTONIC. An interface
+  # with no hardware clock is named in the run's notes rather than reported as
+  # an offset of zero.
+  - label: nic-clocks
+    source: net.hwts
+    target: system
+    mode: poll@100ms
+    emit: [raw, timeline, summary]
+    keys: [iface]
