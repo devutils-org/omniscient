@@ -1083,3 +1083,226 @@ rather than a target's is measuring a process whose procfs ownership depends on
 how the binary was installed. There are no others today; `capabilities.rs`
 substitutes `[pid]` with `self` when a requirement names no target, and that is
 exactly where this surfaced.
+
+---
+
+## 15. A cost band is declared per backend, and what a run costs is not
+
+The first thing the measurement found, and it is a modelling gap rather than a
+bug. `catalog::Cost` is a property of a backend: `fs:proc:smaps_rollup` declares
+`free`, `fs:proc:smaps` declares `low`. What a run actually costs is that
+backend's price *per read*, multiplied by how often the request asks for one --
+and the request is where the rate lives.
+
+The same source, the same backend, the same program, three poll intervals:
+
+```
+$ omn mem.rss -e summary -m poll@200ms -- sh -c '<cpu-bound loop>'
+cost: mem.rss (poll@200ms) via `fs:proc:smaps_rollup` spent 1.6ms of cpu
+      against the target's 996.7ms (0.16 %, declared `free`)
+
+$ omn mem.rss -e summary -m poll@10ms -- sh -c '<the same loop>'
+cost: mem.rss (poll@10ms) via `fs:proc:smaps_rollup` spent 5.1ms of cpu
+      against the target's 272.1ms (1.86 %, declared `free`)
+
+$ omn mem.rss -e summary -m poll@1ms -- sh -c '<the same loop>'
+cost: mem.rss (poll@1ms) via `fs:proc:smaps_rollup` spent 9.4ms of cpu
+      against the target's 100.3ms (9.40 %, declared `free`)
+```
+
+Two orders of magnitude, one band. The self-benchmark says the same thing about
+`mem.pss`, where both backends exceed what they declare at a twenty-millisecond
+poll while keeping exactly the ordering the catalog claims:
+
+```
+self-benchmark: `mem.pss` through 2 backends, one target, one window
+  BACKEND                  DECLARED   MEASURED   EVENTS           MEAN
+  fs:proc:smaps_rollup         free    0.633 %       56       4.6987e5
+  fs:proc:smaps                 low    2.202 %       56       4.4869e5
+  the backends agree to within 4.51 % on the value they report
+```
+
+So the *ordering* the catalog declares is right -- walking every mapping costs
+about four times reading the kernel's rollup of them -- and the *absolute band*
+is a statement about a poll rate nobody wrote down.
+
+Two ways out, and this is a decision before it is code. Either a backend
+declares its cost per unit of work -- per read, per event -- and the tool
+multiplies by the rate the request asks for, which makes the declaration
+checkable and the prediction possible before the run; or the band keeps its
+present meaning and says out loud which rate it is a band *at*, which is cheaper
+and leaves `--budget` unable to predict anything in advance. **Belongs to
+whoever owns `catalog.rs` and `CATALOG.md`.** Nothing about the enforcement
+landed here depends on the answer: it compares against a measurement, not
+against the band.
+
+## 16. `Cost::Free` had no number, so its claim could not be checked
+
+`free` is documented as "a counter read, about zero". As a number that has to be
+*something*, and at exactly zero the claim can never be met by any real
+measurement -- every `free` backend would read as having broken its own promise
+the moment the promise became checkable.
+
+`main.rs::worst_case_percent` now reads it as "under 0.1 %", which makes "about
+zero" an assertion rather than a figure of speech. That is a number living in
+the CLI about a catalog concept, which is the wrong place for it: the bands
+belong beside the variants in `catalog.rs`, so the validator, the resolver and
+anything else that ever wants to check a declaration reads the same numbers.
+The other four already have documented bounds in the same doc comment and are
+duplicated in `main.rs` for the same reason.
+
+## 17. Exactly one implemented chain has a cheaper backend *below* the selected one
+
+Budget degradation moves a collection down its chain. Of the 44 sources with a
+collector, four have two:
+
+| Source | Chain, in order | Where the cheaper one is |
+|---|---|---|
+| `mem.rss` | `fs:proc:smaps_rollup` (free), `fs:proc:statm` (free) | below -- the one case |
+| `mem.pss` | `fs:proc:smaps_rollup` (free), `fs:proc:smaps` (low) | above |
+| `mem.uss` | `fs:proc:smaps_rollup` (free), `fs:proc:smaps` (low) | above |
+| `power.energy` | `pmu` (free), `fs:sys` (free) | neither |
+
+So the degradation path has one end-to-end customer in this build, and
+`tests/budget.rs` uses it. That is not an argument against the machinery --
+`STATE.md`'s phase 6 item is *"degrading `trace` to an in-kernel `hist` where
+the budget is exceeded"*, which is a mode degradation rather than a backend one
+and has no producer until stream A's `bpf:tp` lands. It is an argument for
+knowing that the first eBPF chain with a userspace fallback underneath it is
+what makes this feature general, and that nobody should be surprised by how
+little exercises it today.
+
+## 18. Instrumentation inside the target is charged to the target
+
+`getrusage(RUSAGE_SELF)` measures what *this process* spends, which is the right
+answer for every collector that reads a file, drains a ring or polls a counter.
+It is the wrong answer for `mem.heap.alloc`, `.live` and `.retained`: the
+`LD_PRELOAD` shim runs inside the observed program, so what it costs is charged
+to the program.
+
+That is worse than it being missing, because the same cpu is the denominator.
+An expensive shim inflates the workload it is measured against and therefore
+reads as *cheaper* the more it costs. The three heap sources currently report an
+overhead near zero for exactly this reason, and a `--budget` on them is
+measuring the wrong process.
+
+Every in-target mechanism has this shape -- the preload shim now, uprobes and
+USDT when stream A lands them. The fix is for the shim to accumulate its own cpu
+time and publish it through the ring it already owns, and for `Overhead` to grow
+an `in_target_cpu_ns` beside `collector_cpu_ns` so the two are never added up by
+accident. **Belongs to whoever owns `shim/` and `src/collect/mem/heap.rs`**; the
+`Overhead` half is a field and a line in `Spending::spent`.
+
+## 19. A target that burns no cpu has no denominator, and a budget over it cannot be checked
+
+`--iface lo` consumes no cpu of its own; a mostly-idle `--pid` consumes less than
+one clock tick over a short window. Both are reported rather than divided by:
+
+```
+cost: net.bytes (poll@50ms) via `fs:proc` spent 477.0us of cpu against nothing
+      measurable: a network interface consumes no cpu time of its own, so there
+      is nothing for an overhead to be a percentage of
+```
+
+The budget then holds vacuously -- it is never exceeded, because the ratio never
+exists -- and says so rather than reporting that the ceiling was met. The
+alternative was to fall back to wall time as the denominator, which would answer
+a different question under the same name: a collector costing one millisecond a
+second is 0.1 % of an idle machine and 0.1 % of a saturated one, and only one of
+those is a measurement anybody wants.
+
+Left as it is deliberately. If a wall-time ratio is wanted it should be a second
+number with its own name, not a fallback for this one.
+
+---
+
+## Needs from another stream
+
+Written by stream E, which owns `src/collect/mod.rs` and `src/main.rs`. Two
+edits outside that were made anyway and are declared at the end.
+
+### To whoever owns `src/request.rs`
+
+`Budget`'s doc comment describes a tool that does not exist:
+
+```rust
+/// The resolver degrades to stay under it (`trace` to in-kernel `hist` to
+/// `sample`) and reports what it degraded. It never silently drops events to
+/// fit.
+```
+
+It is the *runner* that degrades, not the resolver, and it moves along the
+backend chain rather than down the modes -- the mode degradation needs an
+in-kernel `hist` producer, which is stream A's. What is true now:
+
+```rust
+/// An overhead ceiling, as a percentage of the observed workload's own cpu
+/// time. The run weighs itself against it while it runs; over the ceiling it
+/// moves to a cheaper backend in the chain, and where there is none it stops.
+/// Either way it says which. It never silently drops events to fit.
+```
+
+### To whoever owns `src/catalog.rs`
+
+```rust
+impl Cost {
+    /// The top of the overhead band this stands for, as a percentage. `Extreme`
+    /// is "over 10x" and is not bounded.
+    pub fn worst_case_percent(self) -> f64;
+    /// The band in words, for a message: "1 to 5 %".
+    pub fn band(self) -> &'static str;
+}
+```
+
+Both exist in `main.rs` today, where the CLI is asserting numbers about a
+catalog concept. Finding 16 is why `Free` needs a number at all.
+
+### To stream D, who owns `src/emit.rs` and `src/encode.rs`
+
+`Results` has nowhere to carry what a measurement cost, so the cost reaches the
+user on standard error and in `<out>/cost.json`, and never in `--format json`
+results. A pipeline reading the results alone cannot tell a 0.1 % measurement
+from a 9 % one. What is wanted is one field, passed straight through from
+`Collection`:
+
+```rust
+pub struct Results {
+    ...
+    /// What this measurement cost, measured rather than declared.
+    #[serde(default)]
+    pub overhead: collect::Overhead,
+    /// The backends that produced it, in order; longer than one when a budget
+    /// moved the collection mid-run.
+    #[serde(default)]
+    pub served_by: Vec<String>,
+}
+```
+
+`aggregate` already takes the `Collection` by value and both fields are on it.
+`encode.rs`'s text renderer is where the `cost:` line would belong once it has
+somewhere to read it from, and `main.rs` would stop printing it separately.
+
+### To the coordinator
+
+- `ROADMAP.md` phase 6 item 3 and phase 8 are done and unticked. Phase 8's
+  "self-benchmark" is a session naming one source several times with
+  `--backend force:`, not a subcommand.
+- `CATALOG.md`'s flag table says `--budget 2%  overhead budget; the resolver
+  degrades and says so`. The resolver does not; the runner does.
+- `STATE.md` item 5, "`--budget` is parsed, explained, and not enforced", is
+  closed. Findings 15 and 17 are what replaces it.
+
+### Declared: two edits outside stream E's paths
+
+Both are one-line truths about a flag whose behaviour this stream changed, and
+leaving either wrong is the exact failure this repository keeps a test against.
+
+- `src/cli.rs`: the `--budget` doc comment said "Not yet enforced". The
+  integration test `the_help_and_the_run_agree_that_a_budget_is_enforced` exists
+  to make the help and the run change together, and it was written that way on
+  purpose by whoever wrote its predecessor.
+- `man/omn.1`: `--budget` said "Parsed and recorded; not yet enforced";
+  `--backend` now names the self-benchmark, and `FILES` documents
+  `<out>/cost.json`.
+
+No other stream in this wave owns either file.
