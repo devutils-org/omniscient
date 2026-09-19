@@ -593,3 +593,144 @@ fn bring_loopback_up() {
         libc::close(fd);
     }
 }
+
+// ---------------------------------------------------------------------------
+// `net.hwts`
+// ---------------------------------------------------------------------------
+
+/// An interface with no hardware clock has no offset to report, and reporting
+/// zero would be a number where there is no measurement.
+///
+/// Loopback is the case that is true on every machine: it is `ARPHRD_LOOPBACK`,
+/// a software interface with no card, so it cannot have a card's clock. The
+/// refusal has to say where its timestamps do come from, because "`lo` cannot
+/// do this" sends a reader looking for a flag and the actual answer is that the
+/// kernel stamped them from the realtime clock.
+#[test]
+fn an_interface_with_no_clock_of_its_own_is_refused_rather_than_answered_with_zero() {
+    let kind = std::fs::read_to_string("/sys/class/net/lo/type").expect("every machine has one");
+    assert_eq!(kind.trim(), "772", "ARPHRD_LOOPBACK");
+
+    let output = Command::new(BINARY)
+        .args([
+            "net.hwts", "--iface", "lo", "--mode", "snapshot", "--emit", "summary",
+        ])
+        .output()
+        .expect("omn should run");
+    assert!(!output.status.success());
+
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains("CLOCK_REALTIME"),
+        "the refusal should name the clock loopback's timestamps come from: {complaint}"
+    );
+    assert!(
+        !stdout(&output).contains("offset_ns"),
+        "no offset may be presented for an interface that has no clock"
+    );
+}
+
+/// `trace` on this source means a timestamp per packet, which is a different
+/// backend and is not built. Answering it with a per-interface reading would be
+/// the silent degradation the catalog exists to prevent.
+#[test]
+fn a_per_packet_request_names_the_backend_it_needs_instead_of_reading_an_interface() {
+    let output = Command::new(BINARY)
+        .args([
+            "net.hwts",
+            "--iface",
+            "lo",
+            "--mode",
+            "trace",
+            "--duration",
+            "200ms",
+            "--emit",
+            "raw",
+        ])
+        .output()
+        .expect("omn should run");
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("so_timestamping"),
+        "the refusal should name the backend a per-packet answer needs: {}",
+        stderr(&output)
+    );
+}
+
+/// Ground truth for `net.hwts`: two clocks and a known interval.
+///
+/// A NIC's clock and `CLOCK_MONOTONIC` are independent oscillators. Polled over
+/// a known window, the offset between them may drift -- a free-running clock is
+/// allowed to -- but it cannot move by anything like the window itself, because
+/// then one of the two is not ticking. That is a check against something this
+/// code does not produce: the passage of time.
+#[test]
+fn a_polled_hardware_clock_keeps_step_with_ours_over_a_known_window() {
+    const WINDOW_MS: u64 = 600;
+
+    let output = Command::new(BINARY)
+        .args([
+            "net.hwts",
+            "--system",
+            "--mode",
+            "poll@100ms",
+            "--duration",
+            &format!("{WINDOW_MS}ms"),
+            "--emit",
+            "timeline",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("omn should run");
+
+    if !output.status.success() {
+        let complaint = stderr(&output);
+        assert!(
+            complaint.contains("readable PTP hardware clock"),
+            "net.hwts failed for a reason other than this machine having no clock: {complaint}"
+        );
+        // A machine whose interfaces keep no clock, or keep one this user may
+        // not read, cannot serve this request at all. That is a fact about the
+        // machine and is reported as one, rather than passed over in silence.
+        eprintln!("this machine cannot serve `net.hwts --system`: {complaint}");
+        return;
+    }
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let series = run["results"][0]["outputs"][0]["series"]
+        .as_array()
+        .expect("a timeline per interface")
+        .clone();
+    assert!(
+        !series.is_empty(),
+        "the run succeeded, so at least one interface reported an offset"
+    );
+
+    for entry in &series {
+        let points = entry["points"].as_array().expect("points");
+        assert!(
+            points.len() >= 2,
+            "a {WINDOW_MS}ms poll at 100ms produced {} points for {}",
+            points.len(),
+            entry["key"]
+        );
+        let first = points.first().expect("a first point")["value"]
+            .as_f64()
+            .expect("an offset");
+        let last = points.last().expect("a last point")["value"]
+            .as_f64()
+            .expect("an offset");
+        let elapsed_ns = points.last().expect("a last point")["offset_ns"]
+            .as_f64()
+            .expect("when it was taken");
+
+        let moved = (last - first).abs();
+        assert!(
+            moved < elapsed_ns / 100.0,
+            "over {elapsed_ns} ns the offset to {}'s clock moved {moved} ns, which is more than \
+             one part in a hundred: that clock is not ticking at our rate",
+            entry["key"]
+        );
+    }
+}
