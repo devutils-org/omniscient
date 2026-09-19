@@ -13,7 +13,7 @@ core with one tenant — and asks whether the tool found it.
 
 The sessions are in `examples/cpu-*.yml`, the checks in
 `tests/scenario_cpu.rs`, and the defects they found are at the end of this
-document. There are nine, and three of them are the kind this wave exists to
+document. There are ten, and three of them are the kind this wave exists to
 find: a run that lost everything and said it lost nothing.
 
 ---
@@ -53,6 +53,16 @@ The example takes its workload from `$OMN_SCENARIO_WORKLOAD` when that is set,
 so a reader can point it at their own known loop; without it the workload is a
 shell loop, which shows the shape of the answer and is not ground truth. The
 file says so.
+
+The scenario also knows when it cannot check anything, and this is the tool
+telling it. When more counter groups are open on a machine than the pmu has,
+the kernel time-shares them and scales what it returns — an extrapolation from
+the slices the group was on for, which the run reports as a degradation. An
+extrapolation is not a count, so the scenario reads that degradation and stops,
+naming it. It fires on this machine when another worktree of this wave is
+running its own counter tests, and it is why the scenario is not flaky: the
+first version of it failed once with an `instructions` term 58 % below the
+workload's own number, which was a scaled value being checked as a counted one.
 
 ### Where did the time go — on a cpu, or waiting?
 
@@ -319,7 +329,7 @@ The third column is the defect: the first two answers share an exit code.
 | **A — the capability sweep** | 3 | eighteen (source, emit) pairs the catalog offers and this build cannot reach; the exit code an unimplemented mode uses |
 | **B — the backend comparison** | 2 | that this family has none to make, established rather than assumed; a per-core and a per-process file that must agree, and a session that cannot hold both |
 | **C — the loss path** | 4 | a profile that misses every task but one and reports no loss; a poll that loses nine tenths of its readings silently; throttled periods counted as dropped samples; a loss reason that never aggregates |
-| **D — the refusal** | 3 | two different answers sharing one exit code; a message pointing at a mechanism that has since landed |
+| **D — the refusal** | 3 | two different answers sharing one exit code; a message pointing at a mechanism that has since landed; a crowded pmu reported as a target that never ran |
 
 ---
 
@@ -377,6 +387,11 @@ profiles that workload as almost nothing. That is defect 1, and it is why
   rises with oversubscription and is near zero without it. That the number is
   the *right* stall share is the kernel's claim, and nothing here can
   independently produce it.
+- **Anything counted while the pmu is shared.** A time-shared counter group
+  returns an extrapolation, and the scenarios that check a count against ground
+  truth stop when the run says that happened. Nothing is lost — the tool's
+  disclosure is what they read — but on a machine running eight suites at once
+  those scenarios do sometimes decline to measure.
 - **`cpu.migrations` against a chosen number of migrations.** Forcing a known
   number of cross-core moves means controlling the scheduler, which a scenario
   that has to share this machine cannot do. It is covered by the sweep — it
@@ -387,7 +402,7 @@ profiles that workload as almost nothing. That is defect 1, and it is why
 
 ## Defects found
 
-Nine. None of them was worked around: every scenario above runs against the
+Ten. None of them was worked around: every scenario above runs against the
 tool as it is. Two of them hold a defect in place — the profile that finds
 nothing, and the exit code of an unimplemented mode — and each says in its own
 doc comment that a failure means the defect was fixed and the scenario has to
@@ -396,7 +411,7 @@ the fix.
 
 ### 1. A profile follows one task, finds nothing, and reports no loss
 
-The worst of the nine, and the one the loss class exists for. `cpu.profile`
+The worst of the ten, and the one the loss class exists for. `cpu.profile`
 opens a sampling event, which the kernel will not inherit — it refuses to map a
 ring for an inherited per-task event — so the profile sees the task it was
 opened on and nothing else. Nothing says so.
@@ -682,7 +697,44 @@ A reason and its measurement are two things: the reason belongs in the map, the
 duration belongs on the count — a longest, a total, or a histogram. This is
 three hundred milliseconds of a busy profile; nothing here has run for an hour.
 
-### 9. A JSON run shares stdout with the program it launched
+### 9. A crowded pmu is reported as a target that never ran
+
+A single counter that shares the hardware is time-shared and scaled, and the
+run says so. A *group* of two, which is what `cpu.ipc` opens so that its ratio
+is a ratio of one window, is crowded out entirely — and what the run says then
+is about the workload rather than about the pmu. Both requests below are the
+same session over one launched program:
+
+```console
+$ omn -f examples/cpu-known-work.yml        # with six other counter groups open
+what it retired  via pmu  (cpu.instructions)
+  1 events over 140.93ms, stopped because the launched program exited with exit status 0
+  degraded: `instructions` on task 3880813 shared the hardware with other counters
+            and was on for 50 % of the window: its value is scaled from what was
+            counted, not counted
+  summary
+    task:3880813 n=1  last 1011426627 count
+
+what it got per cycle  via pmu  (cpu.ipc)
+  0 events over 140.93ms, stopped because the launched program exited with exit status 0
+  LOSS: 0 dropped, 1 failed reads, 0 late ticks
+    1x `cpu.ipc` was never scheduled onto a cpu during the window -- the target
+       did not run -- so there is no count, which is not the same as a count of zero
+```
+
+The target ran: the request above it counted a thousand million instructions in
+the same window, of the workload that retires exactly that. The sentence "the
+target did not run" is one of two causes of `running_ns == 0` and the code picks
+it, and from those two numbers alone they cannot be told apart — so the message
+should name both, the way the multiplexing note four lines above it does. A
+reader who gets this while their program is plainly working will look at their
+program.
+
+The scenario reads it correctly: `a_known_number_of_retired_instructions_…`
+stops with "the ratio's counter group was never scheduled onto the pmu" rather
+than believing either story.
+
+### 10. A JSON run shares stdout with the program it launched
 
 ```console
 $ omn cpu.instructions -m count -e summary --format json -- /bin/sh -c 'echo NOISE'
@@ -699,7 +751,7 @@ failure appears as a parse error in whatever consumed the pipe. Redirecting the
 target's output is what every scenario in `tests/scenario_cpu.rs` that launches
 a program has to do.
 
-The mildest of the nine, and listed because a harness is the reader this format
+The mildest of the ten, and listed because a harness is the reader this format
 has.
 
 ---

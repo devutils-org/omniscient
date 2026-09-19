@@ -374,9 +374,18 @@ struct KnownWork {
 
 /// Runs the example that a reader would run, with this binary as the workload
 /// it offers to take.
+///
+/// `None` when the counters shared the hardware with somebody else's. The
+/// kernel time-shares counter groups when more are open than the pmu has, and
+/// what comes back is then an extrapolation from the slices the group was on
+/// for -- which the run says, in as many words. An extrapolation cannot be
+/// checked against ground truth to one per cent, so the scenario stops and
+/// says why rather than failing on somebody else's measurement. On this
+/// machine that happens when another worktree of this wave is running its own
+/// counter tests.
 fn example_counted(spec: &str) -> Option<KnownWork> {
     let exe = std::env::current_exe().expect("this test binary has a path");
-    let document = match Command::new(BINARY)
+    let output = Command::new(BINARY)
         .args(["-f", "examples/cpu-known-work.yml", "--format", "json"])
         .env(WORKLOAD_VAR, spec)
         .env(
@@ -388,9 +397,8 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
             ),
         )
         .output()
-        .map(into_outcome)
-        .expect("omn should run")
-    {
+        .expect("omn should run");
+    let document = match into_outcome(output) {
         Outcome::Measured { document, .. } => document,
         Outcome::Refused { message, .. } => {
             assert!(
@@ -401,10 +409,49 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
             return None;
         }
     };
+
+    let shared_the_hardware = document["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .flat_map(|result| {
+            result["degradations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .any(|note| {
+            note.as_str()
+                .unwrap_or_default()
+                .contains("shared the hardware")
+        });
+    if shared_the_hardware {
+        eprintln!(
+            "skipped: the counters shared the pmu with another process's, so what came back \
+             is scaled from the slices they were on for and is not a count to check ground \
+             truth against"
+        );
+        return None;
+    }
+
     let counted = document["results"][0]["outputs"][0]["series"][0]["last"]
         .as_f64()
         .expect("a counted value");
     let ratio = &document["results"][1];
+    // The same contention can leave the ratio's group never scheduled at all,
+    // and a group of two counters is crowded out where a single one is only
+    // time-shared. The run says so as a loss; there is nothing to check.
+    if ratio["outputs"][0]["events"]
+        .as_array()
+        .is_none_or(|events| events.is_empty())
+    {
+        eprintln!(
+            "skipped: the ratio's counter group was never scheduled onto the pmu, so it \
+             reported no window: {}",
+            ratio["losses"]["reasons"]
+        );
+        return None;
+    }
     let named = |name: &str| -> f64 {
         ratio["outputs"][0]["events"][0]["attrs"]
             .as_array()
@@ -421,11 +468,32 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
     })
 }
 
-/// The count for one launch of the workload, or nothing when this machine
-/// will not open the counter.
+/// The count for one launch of the workload, or nothing when this machine will
+/// not open the counter, or when the counter shared the hardware and what came
+/// back is an extrapolation rather than a count.
 fn counted(source: &str, spec: &str, axes: &[&str]) -> Option<f64> {
     match measure(source, spec, axes) {
-        Outcome::Measured { document, .. } => Some(last_of(&document)),
+        Outcome::Measured { document, .. } => {
+            let result = &document["results"][0];
+            let scaled = result["degradations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .any(|note| {
+                    note.as_str()
+                        .unwrap_or_default()
+                        .contains("shared the hardware")
+                });
+            if scaled {
+                eprintln!(
+                    "skipped: `{source}` shared the pmu with another process's counters, so \
+                     its value is scaled from the slices it was on for"
+                );
+                return None;
+            }
+            Some(last_of(&document))
+        }
         Outcome::Refused { message, .. } => {
             assert!(
                 machine_cannot_serve(&message),
