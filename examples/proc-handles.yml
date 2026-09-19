@@ -7,9 +7,23 @@
 # remaining headroom are reported beside it -- and a thread count is read
 # against what the program was designed to run.
 #
-# Both are free: one directory listing and one file read per tick. This is the
-# session to leave running next to a service that leaks handles slowly, where
-# the leak is only visible over hours.
+# These are the only two counts in the catalog that can be checked exactly: a
+# process holding seventeen descriptors holds seventeen, with no skid, no
+# sampling and no folio size in the way. So the workload here says what it
+# holds. It opens seventeen files on top of the three every process starts
+# with, and starts five worker threads beside its main one, and writes both
+# numbers to standard error before holding still. A reader can compare them to
+# the series without trusting this tool at all, and `tests/scenario_proc.rs`
+# does exactly that.
+#
+# Both sources are free: one directory listing and one file read per tick. This
+# is the session to leave running next to a service that leaks handles slowly,
+# where the leak is only visible over hours.
+#
+# Read the series from its second point, not its first, and ignore its last.
+# Defects 1 and 2 of docs/scenarios/proc.md: the first poll lands before the
+# launched program has replaced this tool's image, and the last one reads a
+# process that has already exited and reports it as holding nothing.
 name: handle pressure
 format: text
 
@@ -20,9 +34,21 @@ requests:
       launch:
         - python3
         - -c
-        # Open files steadily without closing them, the shape of a leak.
-        - "import time; held = []; [(held.append(open('/proc/self/status')), time.sleep(0.1)) for _ in range(20)]"
-    mode: poll@100ms
+        - |
+          import sys, threading, time
+          held = [open('/dev/null') for _ in range(17)]
+          stop = threading.Event()
+          workers = [threading.Thread(target=stop.wait) for _ in range(5)]
+          for worker in workers:
+              worker.start()
+          sys.stderr.write('HELD 20\nRUNNING 6\n')
+          sys.stderr.flush()
+          time.sleep(0.3)
+          stop.set()
+    mode: poll@50ms
+    # `task` is what phase two joins on: a descriptor count that cannot be
+    # attributed to a process is a number with nowhere to go.
+    keys: [task]
     emit: [timeline, summary]
 
   - label: threads
@@ -31,6 +57,17 @@ requests:
       launch:
         - python3
         - -c
-        - "import time; held = []; [(held.append(open('/proc/self/status')), time.sleep(0.1)) for _ in range(20)]"
-    mode: poll@100ms
+        - |
+          import sys, threading, time
+          held = [open('/dev/null') for _ in range(17)]
+          stop = threading.Event()
+          workers = [threading.Thread(target=stop.wait) for _ in range(5)]
+          for worker in workers:
+              worker.start()
+          sys.stderr.write('HELD 20\nRUNNING 6\n')
+          sys.stderr.flush()
+          time.sleep(0.3)
+          stop.set()
+    mode: poll@50ms
+    keys: [task]
     emit: [timeline, summary]

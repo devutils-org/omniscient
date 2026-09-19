@@ -1,0 +1,65 @@
+# Does this source say what it did not see?
+#
+#   omn -f examples/runtime-jit-loss.yml
+#
+# The loss path, and this source has four of them, all reachable in one run
+# because the map is a plain file the workload can abuse on purpose. The shell
+# program below writes its own `/tmp/perf-<pid>.map` and chooses every number
+# in it, so each counter has a right answer that is in the workload's source
+# rather than in the tool's output:
+#
+#   6 well-formed lines            -> 6 events, and nothing lost
+#   2 lines that are not the format -> undecoded == 2
+#   the file truncated to nothing   -> dropped >= 1, "shrank from N to 0 bytes"
+#   the file deleted, run continues -> failed_reads >= 1, "disappeared"
+#
+# Four counters, four different failures, and the reason each one is separate:
+#
+# `undecoded` is a line that arrived and could not be read. A map in a format
+# this build does not know would otherwise read as a program that compiled
+# nothing, which is the one thing this source exists not to say.
+#
+# `dropped` is the file having been replaced. The map is append-only by
+# convention, so shorter-than-what-was-already-read means a new process took
+# the pid or the runtime restarted its map, and everything written between the
+# two reads is gone and not recoverable.
+#
+# `failed_reads` is the map having gone away while the program is still
+# running. Whatever it wrote after the last read is lost.
+#
+# And the fourth is the absence that is *not* a loss: a map that has never been
+# read yet is not a gap, because a runtime creates its map as it starts and
+# looking a few milliseconds early costs nothing.
+#
+# The map is read every 10 ms, which is why each step below sleeps 30 ms: the
+# workload has to give the collector time to see a state before moving to the
+# next one, or the four failures collapse into one.
+name: four ways this source loses data
+format: text
+
+requests:
+  - source: runtime.jit
+    target:
+      launch:
+        - sh
+        - -c
+        - |
+          map=/tmp/perf-$$.map
+          # Six well-formed entries: address, size, symbol.
+          for i in 1 2 3 4 5 6; do
+              printf '%x 10 JS:~chosen%s chosen.js:%s:1\n' $((0x40000 + i)) $i $i >> $map
+          done
+          sleep 0.03
+          # Two lines in no format this build knows.
+          printf 'not a map line at all\nneither is this one\n' >> $map
+          sleep 0.03
+          # Replaced: shorter than what was already read.
+          : > $map
+          printf '50000 20 JS:~afterwards after.js:1:1\n' >> $map
+          sleep 0.03
+          # Gone, while the program is still running.
+          rm -f $map
+          sleep 0.03
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]

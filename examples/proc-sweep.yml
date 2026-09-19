@@ -1,0 +1,62 @@
+# Does every axis these two sources declare actually work?
+#
+#   omn -f examples/proc-sweep.yml
+#   omn -f examples/proc-sweep.yml --format json | jq '.results[].outputs[].emit'
+#
+# The capability sweep. `proc.fd` and `proc.threads` each declare two modes
+# (`poll`, `snapshot`), three emits (`timeline`, `raw`, `summary`) and the
+# formats every non-stack emit can carry. The catalog is data and the CLI is a
+# projection of it, so a combination the catalog offers and the build cannot
+# serve is a promise broken in the one place nobody looks.
+#
+# This file is the `poll` half. The `snapshot` half is `proc-one-reading.yml`,
+# and it is a separate file for a reason: a session whose requests do not all
+# ask for the same mode does not measure what it says. Defect 3 of
+# docs/scenarios/proc.md -- the session's tick is taken from the *first*
+# request and applied to all of them, so a `snapshot` sitting beside a
+# `poll@50ms` becomes a series, and a `poll@50ms` sitting beside a `poll@200ms`
+# is silently downsampled by four. Nothing is refused and nothing is reported.
+#
+# Both requests share one launched program, which is how a session works: one
+# target, one child, several sources watching it. The program holds a chosen
+# number of descriptors and runs a chosen number of threads, so the two series
+# can be checked against each other and against the program's own report.
+name: every axis these two sources declare
+format: text
+
+requests:
+  - label: descriptors
+    source: proc.fd
+    target: &workload
+      launch:
+        - python3
+        - -c
+        - |
+          import sys, threading, time
+          held = [open('/dev/null') for _ in range(17)]
+          stop = threading.Event()
+          workers = [threading.Thread(target=stop.wait) for _ in range(5)]
+          for worker in workers:
+              worker.start()
+          sys.stderr.write('HELD 20\nRUNNING 6\n')
+          sys.stderr.flush()
+          time.sleep(0.3)
+          stop.set()
+    mode: poll@50ms
+    keys: [task]
+    # All three emits this source declares, in one request: `timeline` for the
+    # shape, `raw` for the attributes the count is only meaningful against, and
+    # `summary` for the extremes.
+    emit: [timeline, raw, summary]
+    # `comm` is the one filter field both sources declare, and a filter field
+    # nothing emits is false everywhere -- which empties the series and reads
+    # exactly like a program that did nothing.
+    filter: "comm =~ 'python'"
+
+  - label: threads
+    source: proc.threads
+    target: *workload
+    mode: poll@50ms
+    keys: [task]
+    emit: [timeline, raw, summary]
+    filter: "comm =~ 'python'"

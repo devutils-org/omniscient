@@ -1,0 +1,50 @@
+# What is this process holding, right now?
+#
+#   omn -f examples/proc-one-reading.yml
+#
+# The `snapshot` half of the capability sweep, in a file of its own because
+# mixing it with a `poll` in one session does not do what it says (defect 3 of
+# docs/scenarios/proc.md). Every request here asks for `snapshot`, which is the
+# only arrangement in which `snapshot` means one read.
+#
+# A snapshot cannot produce a `timeline`, and the validator says so by name --
+# a series of one point is not a series. So the emits here are `raw` and
+# `summary`, which is every emit `snapshot` can carry.
+#
+# One read is the cheapest thing this tool does and the right answer to "how
+# many handles is it holding" when nobody wants a series. Against a *running*
+# process -- `--pid` -- it is exact and immediate.
+#
+# Against a *launched* one it is not, and this session shows why rather than
+# hiding it. The single read happens the instant the child is released from the
+# gate, before it has had time to replace this tool's image with the program's,
+# so the answer describes `omn` and says `comm=omn`. That is defect 1 of
+# docs/scenarios/proc.md. Until it is fixed, read `snapshot` against `--pid`:
+#
+#   omn proc.fd --pid $(pgrep -n your-service) --mode snapshot --emit raw
+name: one reading, not a series
+format: text
+
+requests:
+  - label: descriptors
+    source: proc.fd
+    target: &workload
+      launch:
+        - python3
+        - -c
+        - |
+          import sys, time
+          held = [open('/dev/null') for _ in range(17)]
+          sys.stderr.write('HELD 20\n')
+          sys.stderr.flush()
+          time.sleep(0.2)
+    mode: snapshot
+    keys: [task]
+    emit: [raw, summary]
+
+  - label: threads
+    source: proc.threads
+    target: *workload
+    mode: snapshot
+    keys: [task]
+    emit: [raw, summary]

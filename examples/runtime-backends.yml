@@ -1,0 +1,56 @@
+# Two roads to the same number -- where there are two.
+#
+#   omn -f examples/runtime-backends.yml
+#
+# The backend comparison. `--backend force:` bypasses the resolver so the same
+# workload can be measured through each backend of a chain and the answers
+# compared: equal, or different by an amount the declared degradation explains.
+#
+# `runtime.jit` has two backends and only one of them is written, so the
+# comparison this family can make is not between two numbers. It is between a
+# measurement and a refusal:
+#
+#   force:fs:jit-map   this file -- measures, and says what it degrades
+#   force:bpf:usdt     exits 3 and names what is missing, not 1 like a failure
+#
+# Run the other half by hand; it cannot share a session with this one, because
+# a session stops at the first source it cannot serve and nothing would print:
+#
+#   omn runtime.jit --backend force:bpf:usdt --mode trace --emit raw -- node -e ''
+#
+# Neither run is a measurement to keep. Pinning a backend says so twice -- once
+# as a warning before the run and once as a degradation in the output -- for
+# the reason the flag exists: this measures a backend, not what the resolver
+# would have chosen, and a number taken this way is not comparable with one
+# taken normally.
+#
+# What the pinned backend degrades is the whole of why it is second in the
+# chain. The map names the code that was compiled and when it was first seen.
+# It does not time the compilation -- the file records that code exists, never
+# when the compiler started -- and it carries no deoptimizations at all. A
+# source that timed a compilation from this file would be inventing the number,
+# and `bpf:usdt` is first in the chain because it would not have to.
+#
+# The workload chooses its own ground truth: six entries, named so that no
+# plausible constant could produce them, and no other writer of this map.
+name: the same map, through the backend that is written
+format: text
+
+requests:
+  - label: through-the-map
+    source: runtime.jit
+    target:
+      launch:
+        - sh
+        - -c
+        - |
+          map=/tmp/perf-$$.map
+          for i in 1 2 3 4 5 6; do
+              printf '%x 10 JS:~omniscientPinned%s pinned.js:%s:1\n' $((0x40000 + i)) $i $i >> $map
+          done
+          sleep 0.1
+          rm -f $map
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]
+    backend: force:fs:jit-map
