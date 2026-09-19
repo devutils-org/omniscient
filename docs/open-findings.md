@@ -199,3 +199,131 @@ From the threads that made them, on the development machine.
   sleep ended is paid time belonging to earlier ticks. Over two seconds it reads
   0.968 against `/proc/stat`'s independent 0.974. Reported as it is, because
   clamping it would hide the effect and break the sum.
+
+---
+
+## 7. What stack capture measured
+
+From the stream that built `src/stack.rs`, on the development machine. Three of
+these contradict something that was believed before it was measured.
+
+- **A page-fault sample has no kernel half.** The kernel records a software
+  page-fault event against the registers that took the fault, which for a fault
+  from user code are user registers, so `get_perf_callchain` skips the kernel
+  walk entirely: 64 fault samples, every one of them `PERF_RECORD_MISC_USER`,
+  zero kernel frames. A context switch is the opposite -- taken in the scheduler,
+  in kernel mode -- and its stack crosses the boundary every time. A test for the
+  kernel half has to use an event that fires in the kernel, which the fault
+  sampler is not.
+- **A target built without frame pointers does not yield one frame.** It yields
+  a short, plausible, wrong one. The same fixture built twice gave
+  `_start;__libc_start_main;lang_start;omn_fixture_a;omn_fixture_b;omn_fixture_c`
+  with frame pointers and `_start;__libc_start_main;lang_start;omn_fixture_c`
+  without: the walk followed whatever `%rbp` held, which was the frame the C
+  runtime last set up, and came back naming three callers that did not call
+  anything. Nothing in the addresses says so.
+- **The prologue says so.** `push %rbp; mov %rsp,%rbp` -- behind an `endbr64`
+  where indirect-branch tracking is on -- is four bytes read from the file the
+  leaf frame was sampled in, and it turns "the profile may be wrong" into a
+  count. 199 of 199 samples of the no-frame-pointer build landed in a function
+  that sets none up; none of the other build's did. This is what
+  `stack::Unwinder::notes` reports, and it is a measurement rather than a
+  suspicion.
+- **A Rust debug build omits frame pointers.** `-C opt-level=0` alone does not
+  keep them on `x86_64-unknown-linux-gnu`; `-C force-frame-pointers=yes` does.
+  Any fixture whose point is a call chain has to ask for them explicitly, or it
+  is testing this repository's profile settings.
+- **An unoptimised `for index in 0..n` is three calls per turn.** A profile of a
+  fixture that used one landed in `Iterator::next`, `RangeIteratorImpl::spec_next`
+  and `Step::forward_unchecked` more often than in the function under it. A
+  `while` loop over operators put 199 of 199 samples where the fixture says the
+  time goes.
+- **Symbols are not demangled.** `chain::main` appears as
+  `_RNvCsezHSzhuRag8_5chain4main`. Rust has two mangling schemes and C++ has
+  another, and half a demangler produces confident nonsense on the half it does
+  not know, so the symbolizer reports the linker's name. Worth doing properly,
+  and it belongs with the symbolizer rather than with any renderer.
+
+---
+
+## Needs from another stream
+
+### From stream B (stack capture), to stream A (aggregation and presentation)
+
+The seam the brief asked the two of us to agree on, now built on this side. A
+captured stack is an attribute on the event plus a side table, and `Event` is
+untouched.
+
+- The event carries `stack::STACK_ID_ATTR` (`"stack_id"`), an
+  `AttrValue::Uint`. The value indexes the table below and means nothing without
+  it.
+- `emit::Results` wants the table beside the outputs:
+
+  ```rust
+  /// The stacks the events of this run refer to by id. Empty unless something
+  /// captured any.
+  #[serde(default, skip_serializing_if = "StackTable::is_empty")]
+  pub stacks: crate::stack::StackTable,
+  ```
+
+  `StackTable` is `Clone + Debug + PartialEq + Serialize + Deserialize` and
+  serializes as a plain array of stacks, so a result file gains one field and no
+  new shape. `table.get(StackId)` is the lookup, `table.iter()` yields
+  `(StackId, &Stack)`.
+- `--emit stack` aggregates by id, never by frame list. The suggested shape, for
+  stream A to accept or replace:
+
+  ```rust
+  Output::Stack { profile: Vec<StackCount> }
+  pub struct StackCount { pub stack: StackId, pub samples: u64, pub value: f64 }
+  ```
+
+  Sorted descending by `value`, which is what every consumer of a profile wants
+  and what `topk` over stacks already means.
+- The `folded` encoder needs no stack logic: `stack::Stack` implements `Display`
+  as `main;work;read`, root first and semicolon separated, which is the whole of
+  that format's left-hand side. `format!("{stack} {count}")` per line.
+- `stack::Unwinder::notes()` returns the degradations of a capture, in the
+  wording `Collection::notes` already uses. They reach `Results::degradations`
+  through the collector, so nothing in `emit` has to know about them.
+
+### From stream B, to stream D (the catalog model)
+
+`validate::check_stack` warns that `--stack dwarf` is expensive. It is not
+expensive; it does not exist. `stack::callchain_for` refuses `dwarf` and `lbr`
+by name, and the validator should refuse them too rather than let a request get
+as far as a collector to be told there:
+
+```rust
+// in check_stack, replacing the `dwarf` cost note
+if let Err(reason) = crate::stack::callchain_for(stack) {
+    rejections.push(Rejection::new(reason));
+    return;
+}
+```
+
+The same function is the resolver's answer to "which unwind mode when none was
+given": `StackMode::Fp` where the request emits stacks, `StackMode::None`
+otherwise.
+
+### From stream B, to whoever writes the first profiling collector
+
+`src/stack.rs` and the callchain half of `src/perf.rs` are the capture layer and
+nothing calls them yet: this wave gave `src/collect/cpu/**` to no stream. A
+collector that wants stacks does four things, and `tests/stack_capture.rs` does
+all four:
+
+```rust
+let mut event = SampledEvent::open_software_with(
+    config, period, scope, ring_pages, stack::callchain_for(mode)?,
+)?;
+let mut unwinder = stack::Unwinder::for_process(pid);   // while the target lives
+// per sample, during the drain:
+let id = unwinder.record(&sample);                      // -> Option<StackId>
+// at the end: unwinder.notes() into `Collection::notes`, unwinder.into_table()
+// into the results.
+```
+
+The ordering constraint is the one that is easy to get wrong: symbolization
+reads `/proc/<pid>/maps`, which is gone the moment the target exits, so stacks
+must be interned as the ring is drained and not once at the end of the run.

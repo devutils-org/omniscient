@@ -55,7 +55,11 @@ pub enum Record {
 }
 
 /// A sample, with the fields this tool asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: a sample taken with a callchain owns the frames the kernel wrote
+/// for it. A sample taken without one carries `None` and costs no allocation,
+/// which is what keeps the fault sampler as cheap as it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sample {
     /// Instruction pointer at the time of the event.
     pub ip: u64,
@@ -66,6 +70,60 @@ pub struct Sample {
     /// The address the event is about. For a page fault, the address that
     /// faulted, which is what makes an interval join possible.
     pub addr: u64,
+    /// Where the sampled instruction itself was running.
+    ///
+    /// The kernel puts this in the record header, and it is what the frames
+    /// before the first context marker belong to. Without it a callchain that
+    /// begins in the kernel and a callchain that begins in userspace are
+    /// indistinguishable, and every kernel frame would be filed as user code.
+    pub cpu_mode: CpuMode,
+    /// The callchain exactly as the kernel wrote it, context markers included.
+    ///
+    /// `None` when the event did not ask for one, which is not the same as
+    /// `Some(empty)`: the second means the unwinder was asked and came back
+    /// with nothing. [`crate::stack`] is what turns this into frames.
+    pub callchain: Option<Vec<u64>>,
+}
+
+/// Which privilege level the sampled instruction was running at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CpuMode {
+    Kernel,
+    User,
+    /// Anything else the header reported: hypervisor, guest, or a mode this
+    /// build does not know. Named rather than folded into `User`, because
+    /// guessing here misattributes a whole stack.
+    #[default]
+    Unknown,
+}
+
+impl CpuMode {
+    fn from_misc(misc: u16) -> Self {
+        match u32::from(misc) & sys::bindings::PERF_RECORD_MISC_CPUMODE_MASK {
+            sys::bindings::PERF_RECORD_MISC_KERNEL => CpuMode::Kernel,
+            sys::bindings::PERF_RECORD_MISC_USER => CpuMode::User,
+            _ => CpuMode::Unknown,
+        }
+    }
+}
+
+/// Whether the kernel is asked to walk the stack at every sample.
+///
+/// This is a request to the kernel, not a post-processing choice: the walk
+/// happens in the interrupt handler, with the sampled task's registers still
+/// live, and nothing afterwards can recover a stack that was not taken then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Callchain {
+    /// No stack. A sample is an instruction pointer and nothing else.
+    #[default]
+    Off,
+    /// The kernel walks frame pointers, in kernel mode and then in the target's
+    /// own mode, and writes both chains with a marker between them.
+    ///
+    /// Cheap -- a few dozen loads per sample -- and worth exactly what the
+    /// target's build is worth: a program compiled without frame pointers has
+    /// no chain to walk and yields its leaf frame alone.
+    FramePointers,
 }
 
 /// The sample fields this reader requests, in the order the kernel writes them.
@@ -73,6 +131,21 @@ const SAMPLE_TYPE: u64 = (sys::bindings::PERF_SAMPLE_IP
     | sys::bindings::PERF_SAMPLE_TID
     | sys::bindings::PERF_SAMPLE_TIME
     | sys::bindings::PERF_SAMPLE_ADDR) as u64;
+
+/// The fixed fields above, counted in eight-byte words: `ip`, `pid`+`tid`,
+/// `time`, `addr`. The callchain's length follows them.
+const FIXED_FIELDS: usize = 4;
+
+/// What the kernel will let a callchain be, in frames.
+///
+/// Read rather than assumed: `sample_max_stack` above the machine's own
+/// `perf_event_max_stack` is refused with `EINVAL`, and a depth limit invented
+/// here would make the open fail on exactly the machines that restrict it.
+fn max_stack_depth() -> u16 {
+    read_trimmed("/proc/sys/kernel/perf_event_max_stack")
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(127)
+}
 
 /// The smallest ring worth trying. Below this, a burst of faults would be
 /// mostly loss, and a mostly-lost measurement is worse than a refusal.
@@ -94,6 +167,10 @@ pub struct SampledEvent {
     /// Ring overflows, accumulated across drains.
     lost: u64,
     undecoded: u64,
+    /// What was asked for at open time, because it decides the record layout:
+    /// a decoder that reads a callchain the kernel was never asked to write
+    /// reads whatever follows the record instead.
+    callchain: Callchain,
 }
 
 // The mapping belongs to this struct alone and is only read through `&mut self`.
@@ -112,9 +189,26 @@ impl SampledEvent {
         scope: Scope,
         ring_pages: usize,
     ) -> io::Result<Self> {
+        Self::open_software_with(config, period, scope, ring_pages, Callchain::Off)
+    }
+
+    /// The same, asking the kernel for a callchain with every sample.
+    ///
+    /// Separate from [`SampledEvent::open_software`] rather than a default
+    /// argument, because a callchain is not free: every sample grows by a word
+    /// per frame, so a ring that held a burst of bare samples holds a fraction
+    /// of that many once stacks are on. A caller that does not want stacks must
+    /// not pay for them by accident.
+    pub fn open_software_with(
+        config: u64,
+        period: u64,
+        scope: Scope,
+        ring_pages: usize,
+        callchain: Callchain,
+    ) -> io::Result<Self> {
         let mut pages = ring_pages.next_power_of_two();
         loop {
-            match Self::open_with_ring(config, period, scope, pages) {
+            match Self::open_with_ring(config, period, scope, pages, callchain) {
                 Ok(event) => return Ok(event),
                 Err(error) if pages > MIN_RING_PAGES && is_ring_too_large(&error) => {
                     pages /= 2;
@@ -122,6 +216,11 @@ impl SampledEvent {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Whether this event asks the kernel to unwind.
+    pub fn callchain(&self) -> Callchain {
+        self.callchain
     }
 
     /// The data pages this event's ring actually got.
@@ -140,6 +239,7 @@ impl SampledEvent {
         period: u64,
         scope: Scope,
         ring_pages: usize,
+        callchain: Callchain,
     ) -> io::Result<Self> {
         assert!(
             ring_pages.is_power_of_two(),
@@ -152,6 +252,14 @@ impl SampledEvent {
         attr.config = config;
         attr.__bindgen_anon_1.sample_period = period;
         attr.sample_type = SAMPLE_TYPE;
+        if callchain == Callchain::FramePointers {
+            attr.sample_type |= sys::bindings::PERF_SAMPLE_CALLCHAIN as u64;
+            // Both halves are asked for. A kernel chain without a user chain
+            // says a task is in `read`, and never which of its own functions
+            // called it; a user chain without a kernel one cannot tell work
+            // from waiting. `crate::stack` keeps them apart afterwards.
+            attr.sample_max_stack = max_stack_depth();
+        }
         attr.__bindgen_anon_2.wakeup_events = 1;
         // Start stopped: the caller decides when the window opens, which is how
         // a launched program can be sampled from its first instruction.
@@ -217,6 +325,7 @@ impl SampledEvent {
             data_size: (ring_pages * page) as u64,
             lost: 0,
             undecoded: 0,
+            callchain,
         })
     }
 
@@ -259,14 +368,14 @@ impl SampledEvent {
         let mut tail = unsafe { std::ptr::read_volatile(&(*header).data_tail) };
 
         while tail < head {
-            let (kind, size) = self.read_header(tail);
+            let (kind, misc, size) = self.read_header(tail);
             if size == 0 {
                 // A zero-length record would loop forever; treat the rest of
                 // the batch as unreadable rather than spin.
                 self.undecoded += 1;
                 break;
             }
-            let record = self.decode(kind, tail, size);
+            let record = self.decode(kind, misc, tail, size);
             match &record {
                 Record::Lost { count } => self.lost += count,
                 Record::Other { .. } => self.undecoded += 1,
@@ -293,14 +402,21 @@ impl SampledEvent {
         read_wrapped(ring, offset, len)
     }
 
-    fn read_header(&self, offset: u64) -> (u32, u64) {
+    /// The record's type, its `misc` bits and its length.
+    ///
+    /// `misc` is read here rather than ignored because it is the only place the
+    /// kernel says which mode the sampled instruction was in, and a callchain
+    /// cannot be split into its kernel and user halves without knowing where it
+    /// started.
+    fn read_header(&self, offset: u64) -> (u32, u16, u64) {
         let bytes = self.copy_out(offset, 8);
         let kind = u32::from_ne_bytes(bytes[0..4].try_into().expect("4 bytes"));
+        let misc = u16::from_ne_bytes(bytes[4..6].try_into().expect("2 bytes"));
         let size = u16::from_ne_bytes(bytes[6..8].try_into().expect("2 bytes")) as u64;
-        (kind, size)
+        (kind, misc, size)
     }
 
-    fn decode(&self, kind: u32, offset: u64, size: u64) -> Record {
+    fn decode(&self, kind: u32, misc: u16, offset: u64, size: u64) -> Record {
         let body = self.copy_out(offset, size as usize);
         let field = |index: usize| -> u64 {
             let start = 8 + index * 8;
@@ -317,6 +433,11 @@ impl SampledEvent {
                     tid: (tid_field >> 32) as u32,
                     time_ns: field(2),
                     addr: field(3),
+                    cpu_mode: CpuMode::from_misc(misc),
+                    callchain: match self.callchain {
+                        Callchain::Off => None,
+                        Callchain::FramePointers => Some(callchain_of(&body)),
+                    },
                 })
             }
             sys::bindings::PERF_RECORD_LOST => Record::Lost { count: field(1) },
@@ -334,6 +455,31 @@ impl Drop for SampledEvent {
             libc::close(self.fd);
         }
     }
+}
+
+/// The callchain of a sample record whose event asked for one.
+///
+/// It follows the fixed fields as a count and then that many addresses. The
+/// count is the kernel's, but the bound checked here is the record's own
+/// length: a decoder that trusted the count would walk off the end of a
+/// truncated record and hand back whatever the ring held next as frames.
+///
+/// Split out as a free function because, like the seam, it is a piece of this
+/// module whose correctness does not need a kernel to check.
+fn callchain_of(body: &[u8]) -> Vec<u64> {
+    let word = |index: usize| -> Option<u64> {
+        let start = 8 + index * 8;
+        body.get(start..start + 8)
+            .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("8 bytes")))
+    };
+    let Some(count) = word(FIXED_FIELDS) else {
+        return Vec::new();
+    };
+    let available = body.len().saturating_sub(8 + (FIXED_FIELDS + 1) * 8) / 8;
+    let depth = (count as usize).min(available);
+    (0..depth)
+        .filter_map(|index| word(FIXED_FIELDS + 1 + index))
+        .collect()
 }
 
 /// Copies `len` bytes from ring offset `offset`, following the wrap.
@@ -773,6 +919,100 @@ mod tests {
         // what the kernel's ever-growing head and tail mean.
         assert_eq!(read_wrapped(&ring, 16 + 14, 4), read_wrapped(&ring, 14, 4));
         assert_eq!(read_wrapped(&ring, 16 * 1000 + 3, 2), vec![3, 4]);
+    }
+
+    /// A record is length-prefixed and the count inside it is the kernel's.
+    /// Trusting the count over the length is how a decoder walks off the end of
+    /// a truncated record and reports the next record's bytes as frames.
+    #[test]
+    fn a_callchain_is_bounded_by_the_record_and_not_by_its_own_count() {
+        // header, ip, tid, time, addr, nr, then nr addresses.
+        let record = |depth: u64, frames: &[u64]| {
+            let mut body = vec![0u8; 8];
+            for word in [1u64, 2, 3, 4, depth].iter().chain(frames) {
+                body.extend_from_slice(&word.to_ne_bytes());
+            }
+            body
+        };
+
+        assert_eq!(
+            callchain_of(&record(3, &[0xa, 0xb, 0xc])),
+            vec![0xa, 0xb, 0xc]
+        );
+        // A count larger than the record can hold yields what the record holds.
+        assert_eq!(callchain_of(&record(99, &[0xa, 0xb])), vec![0xa, 0xb]);
+        assert_eq!(callchain_of(&record(0, &[])), Vec::<u64>::new());
+        // A record too short to even hold the count is not a callchain.
+        assert_eq!(callchain_of(&[0u8; 16]), Vec::<u64>::new());
+    }
+
+    /// The header says which mode the sampled instruction was in, and it is the
+    /// only thing that does. Reading it wrongly files kernel addresses as user
+    /// code, which symbolizes them through the wrong tables entirely.
+    #[test]
+    fn the_record_header_says_which_side_the_sample_was_taken_on() {
+        assert_eq!(
+            CpuMode::from_misc(sys::bindings::PERF_RECORD_MISC_KERNEL as u16),
+            CpuMode::Kernel
+        );
+        assert_eq!(
+            CpuMode::from_misc(sys::bindings::PERF_RECORD_MISC_USER as u16),
+            CpuMode::User
+        );
+        // The mode is the low three bits; the rest of `misc` is other flags and
+        // must not change the answer.
+        assert_eq!(
+            CpuMode::from_misc(0xff00 | sys::bindings::PERF_RECORD_MISC_USER as u16),
+            CpuMode::User
+        );
+        assert_eq!(CpuMode::from_misc(0), CpuMode::Unknown);
+    }
+
+    /// An event that did not ask for stacks must not come back with an empty
+    /// one: "no callchain" and "a callchain with nothing in it" are different
+    /// answers, and only the second says the unwinder ran.
+    #[test]
+    fn a_sample_from_an_event_that_asked_for_no_stack_carries_no_callchain() {
+        let Ok(mut event) = SampledEvent::open_software(PAGE_FAULTS, 1, Scope::Process(0), 16)
+        else {
+            eprintln!("skipped: this machine refuses unprivileged perf sampling");
+            return;
+        };
+        assert_eq!(event.callchain(), Callchain::Off);
+        event.enable().expect("enable");
+        // Mapped rather than allocated: pages the allocator already holds are
+        // resident, and a third identical `Vec` in this binary faults nothing.
+        const PAGES: usize = 64;
+        let size = PAGES * page_size();
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "the test needs a fresh mapping");
+        for index in 0..PAGES {
+            unsafe {
+                (block as *mut u8)
+                    .add(index * page_size())
+                    .write_volatile(1)
+            };
+        }
+        event.disable().expect("disable");
+
+        let mut seen = 0;
+        event.drain(|record| {
+            if let Record::Sample(sample) = record {
+                seen += 1;
+                assert_eq!(sample.callchain, None);
+            }
+        });
+        unsafe { libc::munmap(block, size) };
+        assert!(seen > 0, "no sample arrived to check");
     }
 
     #[test]
