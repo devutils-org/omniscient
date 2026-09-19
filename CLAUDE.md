@@ -22,6 +22,7 @@
 | `GUIDE.md` | how to run the demonstrations, and what each session shows |
 | `docs/scenarios/*.md` | per family: what is worth measuring, and the defects the scenarios found |
 | `BRIEF.md` | the current wave of work, one section per stream |
+| `BRIEF_NEXT.md` | the wave after it, written early so its shape is settled |
 | `docs/open-findings.md` | findings that cut across families |
 | `man/omn.1` | the manual page |
 
