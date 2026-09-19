@@ -535,6 +535,59 @@ mod tests {
             .expect("the source is in the table")
     }
 
+    /// A mapping of `bytes`, on pages the kernel has been told not to collapse.
+    ///
+    /// The `MADV_NOHUGEPAGE` is what makes the TLB half of the test below mean
+    /// something on any machine rather than on a busy one. Transparent huge
+    /// pages turn sixty-four megabytes into thirty-two entries, which every TLB
+    /// holds without effort, so the same walk misses a hundred times less on a
+    /// quiet machine -- where the kernel can find 2 MiB of contiguous memory --
+    /// than on a loaded one, where it cannot. That is a real property of the
+    /// hardware and the reason `mem.cache_tlb`'s catalog entry says to read it
+    /// beside `mem.thp`; it is also a variable this test has no business
+    /// leaving to chance, so it is pinned rather than tolerated.
+    struct Pages {
+        base: *mut libc::c_void,
+        len: usize,
+    }
+
+    impl Pages {
+        fn new(len: usize) -> Self {
+            // SAFETY: an anonymous private mapping of our own, unmapped in Drop.
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(base, libc::MAP_FAILED, "the mapping must succeed");
+            // SAFETY: advising the kernel about the mapping just made. A kernel
+            // built without transparent huge pages answers EINVAL, which is the
+            // state this asks for anyway.
+            unsafe { libc::madvise(base, len, libc::MADV_NOHUGEPAGE) };
+            // Touched, so every page is resident before anything is counted.
+            // SAFETY: writing inside the mapping.
+            unsafe { std::ptr::write_bytes(base.cast::<u8>(), 1, len) };
+            Self { base, len }
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: the mapping is readable and lives as long as `self`.
+            unsafe { std::slice::from_raw_parts(self.base.cast::<u8>(), self.len) }
+        }
+    }
+
+    impl Drop for Pages {
+        fn drop(&mut self) {
+            // SAFETY: unmapping what `new` mapped.
+            unsafe { libc::munmap(self.base, self.len) };
+        }
+    }
+
     /// A buffer of `bytes` and an order in which to visit its cache lines that
     /// the hardware cannot predict.
     ///
@@ -548,7 +601,7 @@ mod tests {
     /// megabytes and shuffling a million indices is itself a great deal of
     /// memory traffic, and counting it would mean the large walk was measured
     /// partly on its own setup.
-    fn shuffled_lines(bytes: usize) -> (Vec<usize>, Vec<u8>) {
+    fn shuffled_lines(bytes: usize) -> (Vec<usize>, Pages) {
         const LINE: usize = 64;
         let lines = bytes / LINE;
         let mut order: Vec<usize> = (0..lines).collect();
@@ -561,11 +614,12 @@ mod tests {
             state ^= state << 17;
             order.swap(index, (state % (index as u64 + 1)) as usize);
         }
-        (order, vec![1u8; bytes])
+        (order, Pages::new(bytes))
     }
 
     /// Touches one byte of every line, in the order given, `passes` times.
-    fn walk(order: &[usize], buffer: &[u8], passes: usize) -> usize {
+    fn walk(order: &[usize], buffer: &Pages, passes: usize) -> usize {
+        let buffer = buffer.as_slice();
         let mut total = 0u64;
         for _ in 0..passes {
             for &line in order {
@@ -626,19 +680,18 @@ mod tests {
         let near_passes = ACCESSES / near_order.len();
 
         let mut served = 0;
-        for (source, backend, ratio, floor) in [
-            ("mem.cache_l1", "pmu", 10.0, 0.2),
-            ("mem.cache_llc", "pmu", 10.0, 0.05),
-            ("mem.cache_llc", "pmu:generic", 10.0, 0.05),
-            // A TLB entry covers a whole page, so its contrast is by far the
-            // weakest of the three, and it is the one huge pages change: a
-            // transparent 2 MiB page makes this array thirty-two entries rather
-            // than sixteen thousand, which is why the catalog entry says to read
-            // it beside `mem.thp`. Measured here at 23x on a quiet machine and
-            // 10x under the full suite, where a contended core loses its
-            // entries to everything else running on it -- so the bar is set
-            // below both rather than at the better of them.
-            ("mem.cache_tlb", "pmu", 4.0, 0.001),
+        // Measured here at roughly one miss per access on the far walk for all
+        // three, against a few thousandths on the near one: ratios between 150
+        // and 8000 depending on what else the machine is doing. The bars below
+        // are set well under the worst of those rather than at the best.
+        for (source, backend, floor) in [
+            ("mem.cache_l1", "pmu", 0.3),
+            ("mem.cache_llc", "pmu", 0.3),
+            ("mem.cache_llc", "pmu:generic", 0.3),
+            // The TLB is the one that huge pages would otherwise decide, which
+            // is why the mapping above refuses them; with them, this same walk
+            // misses a hundred times less on a quiet machine than on a busy one.
+            ("mem.cache_tlb", "pmu", 0.1),
         ] {
             let Some(spec) = spec_for(source, backend) else {
                 panic!("`{source}` on `{backend}` is not in the table");
@@ -662,7 +715,7 @@ mod tests {
             let per_access = |readings: &[Reading]| misses(spec, readings) / ACCESSES as f64;
             let (loose, tight) = (per_access(&far), per_access(&near));
             assert!(
-                loose > tight * ratio,
+                loose > tight * 50.0,
                 "{source} via {backend}: {ACCESSES} accesses over {LARGE} bytes missed \
                  {loose:.5} times each and the same number over {SMALL} bytes missed \
                  {tight:.5} times each, which is not the difference a cache makes"
