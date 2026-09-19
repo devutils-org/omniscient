@@ -1,0 +1,45 @@
+# A poll that cannot keep up, and a tool that says so.
+#
+#   omn -f examples/io-late-ticks.yml
+#
+# Every polled source has the same failure: the reads themselves take time, and
+# once they take longer than the interval, the series no longer has the spacing
+# it claims. Nothing about the numbers looks wrong afterwards. Each point is a
+# true increase over a true interval; it is the interval that is not the one
+# that was asked for, and a run that says `poll@1ms` in its header while
+# sampling every 1300 us is a run whose rates are quietly out by a third.
+#
+# So it is made to happen on purpose. One read of `/proc/diskstats` costs about
+# twenty microseconds on this machine -- the kernel formats one line per block
+# device on every read, and this machine has ten of them. The interval below is
+# half that, so it is not a tick this file can be read at, and the right answer
+# is not to slow down quietly but to count the ticks that ran late and put the
+# count in the output. Time a read yourself and the arithmetic is checkable:
+#
+#   perf stat -r 100 cat /proc/diskstats     # or a loop in any language
+#
+# What has to come back, and what the scenario is looking for:
+#
+#   LOSS: 0 dropped, 0 failed reads, 2229 late ticks
+#
+# Every tick, because none of them can be met. A run that reports `no loss` at
+# an interval shorter than one read of the file is the case this scenario
+# exists to catch.
+#
+# Two hundred milliseconds is plenty: the loop then runs as fast as the file
+# can be read, which is a couple of thousand rounds, and every one of them is
+# late. It is also the run whose loss report is unreadable -- see
+# `docs/scenarios/io.md`, which records that the reasons are keyed by the
+# measured duration, so a run with two thousand late ticks prints more than a
+# thousand distinct explanations of them.
+name: a poll that cannot keep up
+format: text
+duration: 200ms
+
+requests:
+  - label: too fast to read
+    source: io.bytes
+    target: system
+    mode: poll@10us
+    emit: [summary]
+    keys: [dev]
