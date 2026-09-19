@@ -1,0 +1,55 @@
+# A program that ends is not a program that lost data.
+#
+#   omn -f examples/proc-exit.yml
+#
+# The counterexample to `proc-loss.yml`, and the reason the two are separate
+# files: a session shares one target, so a run that ends early ends for every
+# request in it.
+#
+# procfs answers a read of a departed process in two different ways and the
+# collector has to tell them apart. While the process is going, ESRCH; once the
+# directory is gone, ENOENT. Either one means the target left, which ends the
+# run cleanly -- `stopped_because` names it and every loss counter stays at
+# zero. Counting either as a lost read would make every clean run look lossy.
+#
+# The workload chooses when: it holds still for 150 ms and exits 0, while the
+# session asks for two seconds. The run must stop at the exit, not at the
+# deadline, and must say which.
+#
+# There is a third answer procfs gives that this collector does not yet handle,
+# and it is visible in every run of this file. A process that has exited but
+# has not been reaped is a zombie, and a zombie's `/proc/<pid>/fd` is neither
+# ESRCH nor ENOENT: it is an empty directory that reads successfully. So the
+# last point of the series is a truthful-looking zero -- no open descriptors,
+# full headroom, no loss -- for a program that never closed a handle in its
+# life. Defect 2 of docs/scenarios/proc.md.
+name: the target left
+duration: 2s
+format: text
+
+requests:
+  - label: descriptors
+    source: proc.fd
+    target: &leaving
+      launch:
+        - python3
+        - -c
+        - |
+          import sys, time
+          held = [open('/dev/null') for _ in range(17)]
+          sys.stderr.write('HELD 20\n')
+          sys.stderr.flush()
+          time.sleep(0.15)
+    mode: poll@50ms
+    keys: [task]
+    # `raw` as well as the two series, because the zombie reading is only
+    # visibly wrong in its attributes: zero open, and the whole limit reported
+    # as headroom.
+    emit: [timeline, raw, summary]
+
+  - label: threads
+    source: proc.threads
+    target: *leaving
+    mode: poll@50ms
+    keys: [task]
+    emit: [timeline, summary]

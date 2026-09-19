@@ -1,0 +1,48 @@
+# Did the poller keep up, and does it say so when it did not?
+#
+#   omn -f examples/proc-loss.yml
+#
+# The loss path. `proc.fd` has no ring to overflow and no kernel counter to be
+# throttled; the way it loses data is simpler and easier to miss. There is no
+# cheap count of open descriptors -- `FDSize` in `status` is the size of the
+# allocated table, not the number in use -- so the directory is walked, and the
+# walk costs one entry's work per open descriptor. A process holding thirty
+# thousand of them cannot be read in a millisecond, and a series that claims a
+# one-millisecond spacing it never had is a wrong number that looks right.
+#
+# So this session asks for a tick the read cannot meet, on purpose. The
+# workload chooses the number: it raises its own soft limit and opens exactly
+# 30000 descriptors, which with the three every process starts with makes
+# 30003, and it says so on standard error. The run must report 30003 at its
+# peak and must count the ticks that ran late.
+#
+# What it must NOT do is report the overrun as a gap in the data. A late tick
+# is a series whose spacing is not what it claims; a dropped event is a
+# measurement that happened and was not recorded. They are different failures
+# and this source can only have the first.
+#
+# The second request is the counterexample, and it is here so the two cannot be
+# confused: a program that simply exits ends the run, and that is not a loss.
+# `stopped_because` names the exit, and every loss counter stays at zero.
+name: what the poller could not keep up with
+format: text
+
+requests:
+  - label: thirty-thousand-handles
+    source: proc.fd
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import resource, sys, time
+          soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+          resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+          held = [open('/dev/null') for _ in range(30000)]
+          sys.stderr.write('OPEN 30003\n')
+          sys.stderr.flush()
+          time.sleep(0.3)
+    # Far below what a 30000-entry directory walk takes, which is the point.
+    mode: poll@1ms
+    keys: [task]
+    emit: [summary]

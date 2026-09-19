@@ -1,0 +1,72 @@
+# Does every axis `runtime.jit` declares actually work?
+#
+#   omn -f examples/runtime-jit-sweep.yml
+#   omn -f examples/runtime-jit-sweep.yml --format json | jq '.results[].outputs[].emit'
+#   omn -f examples/runtime-jit-sweep.yml --format ndjson | head
+#
+# The capability sweep. `runtime.jit` declares one mode (`trace`), five emits
+# (`raw`, `rate`, `topk`, `timeline`, `summary`) and four filter fields
+# (`comm`, `method`, `code_kind`, `bytes`). All of them are exercised here.
+#
+# The workload is a shell script rather than a real runtime, and deliberately:
+# it writes the map itself, so the number of entries, their sizes and their
+# names are chosen rather than observed. Eight entries of 0x10 bytes each,
+# named so that no plausible constant could produce them. `runtime-jit.yml` is
+# the same sweep against a real V8, where the names are the ground truth and
+# the count is not.
+#
+# One emit does not answer the question it looks like it answers. `topk` ranks
+# *series*, and a series is a distinct set of keys -- so on a source whose only
+# key is `task`, `topk` returns exactly one row per process however many
+# methods were compiled. "Which method cost the most" is not a question this
+# emit can be asked here. Defect 1 of docs/scenarios/runtime.md.
+name: every axis this source declares
+format: text
+
+requests:
+  - label: everything
+    source: runtime.jit
+    target: &eight-entries
+      launch:
+        - sh
+        - -c
+        - |
+          map=/tmp/perf-$$.map
+          for i in 1 2 3 4 5 6 7 8; do
+              printf '%x 10 JS:~omniscientSwept%s swept.js:%s:1\n' $((0x40000 + i)) $i $i >> $map
+              sleep 0.02
+          done
+          sleep 0.02
+          rm -f $map
+    mode: trace
+    keys: [task]
+    emit: [raw, rate, topk, timeline, summary]
+
+  # The same run, keeping only the entry the filter selects. Eight were written
+  # and one matches, so a filter that is reported as applied and keeps
+  # everything -- or nothing -- is visible by counting.
+  #
+  # `=~` is a substring test, not a regular expression, and nothing says so:
+  # the manual lists it among the operators and leaves the reader to assume the
+  # meaning it has in every other tool that spells it this way. `method =~
+  # 'Swept[1-4]'` is accepted, reported as applied, and keeps nothing. Defect 2
+  # of docs/scenarios/runtime.md.
+  - label: filtered-by-name
+    source: runtime.jit
+    target: *eight-entries
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]
+    filter: "method =~ 'omniscientSwept1'"
+
+  # And on the field whose name had to be chosen carefully: `code_kind` rather
+  # than `kind`, because the filter grammar reads `kind` as the event's source
+  # id, so an attribute called `kind` would be declared, validated, reported as
+  # applied, and match nothing.
+  - label: filtered-by-kind
+    source: runtime.jit
+    target: *eight-entries
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]
+    filter: "code_kind == 'js'"

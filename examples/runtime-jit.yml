@@ -39,6 +39,19 @@ requests:
         # Enough calls that V8 stops interpreting and compiles it.
         - "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\nlet total = 0;\nfor (let i = 0; i < 30; i++) total += fib(22);\nconsole.log('fib', total);\n"
     mode: trace
-    # Compilations per second over the run. A profile of *which* methods cost
-    # the most needs `topk`, which lands with the shared aggregation work.
-    emit: [rate, summary]
+    # `task` is what a compilation gets attributed to, and what phase two joins
+    # a compilation to the cpu time it bought.
+    keys: [task]
+    # `raw` carries the names, which is the ground truth here: `fib` is in the
+    # program's source and in no constant this tool could invent. `rate` is
+    # compilations per second over the run.
+    #
+    # `topk` is deliberately absent. It ranks *series*, and a series is a
+    # distinct set of keys -- so on a source whose only key is `task` it
+    # returns one row per process however many methods were compiled, and the
+    # question it looks like it answers, "which method cost the most", it
+    # cannot be asked here. Defect 1 of docs/scenarios/runtime.md.
+    emit: [raw, rate, summary]
+    # Most of a node map is V8's own precompiled builtins, arriving through the
+    # same file. They are not compilations this program caused.
+    filter: "code_kind == 'js'"
