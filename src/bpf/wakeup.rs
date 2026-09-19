@@ -17,8 +17,9 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::Counters;
 use super::ring::{ring_bytes, RingBuffer};
-use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_RINGBUF};
+use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// One wakeup, as the program writes it and userspace reads it.
 ///
@@ -189,8 +190,7 @@ fn instructions(
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct WakeupProgram {
     ring: RingBuffer,
-    drops: OwnedFd,
-    cpus: usize,
+    drops: Counters,
     _program: OwnedFd,
     _link: OwnedFd,
 }
@@ -211,7 +211,7 @@ impl WakeupProgram {
 
         let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_wakeups")
             .map_err(|error| format!("cannot create the wakeup ring buffer: {error}"))?;
-        let drops = syscall::map_create(BPF_MAP_TYPE_PERCPU_ARRAY, 4, 8, 1, "omn_wake_drop")
+        let drops = Counters::create(1, "omn_wake_drop")
             .map_err(|error| format!("cannot create the drop counter: {error}"))?;
 
         let instructions = instructions(btf, target_tgid, ring_map.as_raw_fd(), drops.as_raw_fd())?;
@@ -238,7 +238,6 @@ impl WakeupProgram {
         Ok(Self {
             ring,
             drops,
-            cpus: syscall::possible_cpus(),
             _program: program,
             _link: link,
         })
@@ -258,9 +257,7 @@ impl WakeupProgram {
     /// Summed across cpus, because the counter is per-cpu to keep the fast path
     /// free of atomics.
     pub fn dropped(&self) -> u64 {
-        syscall::map_lookup_percpu_u64(self.drops.as_raw_fd(), 0, self.cpus)
-            .map(|values| values.iter().sum())
-            .unwrap_or(0)
+        self.drops.read(0)
     }
 }
 

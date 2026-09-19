@@ -12,9 +12,11 @@ The family that also owns the eBPF layer: see `docs/bpf-layer.md`.
 | Source | Backend | State |
 |---|---|---|
 | `sched.wakeup` | `bpf:raw_tp` | implemented: one record per wakeup, both ends |
+| `sched.offcpu` | `bpf:raw_tp` | implemented: blocked nanoseconds per task, counted in the kernel |
+| `sched.offcpu` | `bpf:tp:stacks` | declared, not written: it needs stack capture |
 | `sched.switches` | `pmu:sw` | implemented: one sample per switch, unprivileged |
 | `sched.switches` | `bpf:tp` | declared, not written |
-| the other eight | `bpf:*` | declared, not written; they wait on what is listed at the end of `docs/bpf-layer.md` |
+| the other seven | `bpf:*` | declared, not written; they wait on what is listed at the end of `docs/bpf-layer.md` |
 
 ## Why `sched_waking` and not `sched_wakeup`
 
@@ -98,6 +100,105 @@ on x86 is a per-cpu `preempt_count` rather than a field of `task_struct`, so it
 needs `bpf_this_cpu_ptr` and a ksym lookup the layer does not have yet. Until
 then the waker is evidence, not proof.
 
+## Off cpu is blocked, not preempted
+
+`sched_switch` fires whenever a task leaves the cpu, and there are two reasons
+it can: it was waiting for something, or the scheduler took the cpu away. Only
+the first is blocked time. The second is run queue wait and belongs to
+`sched.runqlat`, whose whole subject it is.
+
+They are told apart by `prev_state`, the fourth argument of the tracepoint,
+which is zero exactly when the task was still runnable. The program drops that
+case in the kernel rather than carrying it to userspace to be filtered there,
+because on a busy machine preemptions outnumber blocks and carrying them is
+most of the cost.
+
+The state is then kept rather than reduced to a boolean, and it reaches the
+user as a word:
+
+| `state` | what it was | why it is worth separating |
+|---|---|---|
+| `sleeping` | `TASK_INTERRUPTIBLE` | waiting for something to happen: a timer, a pipe, a socket |
+| `uninterruptible` | `TASK_UNINTERRUPTIBLE` | usually waiting on a device, and usually the answer |
+| `idle` | `TASK_UNINTERRUPTIBLE \| TASK_NOLOAD` | an idle kernel worker, which the load average deliberately ignores |
+| `stopped`, `traced` | `__TASK_STOPPED`, `__TASK_TRACED` | stopped by a signal or by a debugger, which is not the program's own waiting |
+
+Lumping the third into the second is how a machine doing nothing comes to look
+like a machine in trouble, so `state_bits` carries the kernel's own value
+beside the name and a state this build does not recognise reads as `other`
+rather than as one it does.
+
+Two edges the numbers cannot show on their own, both stated as caveats on the
+source so they travel with the measurement:
+
+- **A task still blocked when the run ends is in no total**, because its block
+  has no end yet. A program that spends its life waiting would otherwise report
+  almost nothing, so the count of them is reported with the run.
+- **A task that leaves the cpu to die is dropped in the kernel.** `TASK_DEAD`
+  never comes back, and without that filter every short-lived child of an
+  observed program would sit in the in-flight map until the run ended.
+
+## What an aggregating collector changes
+
+`sched.offcpu` is the first source whose events are not one per thing that
+happened. The kernel counts, userspace drains, and each event is a total over
+the interval between two drains rather than one block.
+
+That has two consequences worth stating rather than discovering:
+
+- **The window is on the event.** `window_ns` says which interval the total
+  covers. A number aggregated over an interval that does not say which interval
+  cannot be compared with another.
+- **A distribution does not survive it.** `hist` is declared on this source and
+  a map holding a total and a count cannot produce one. The fix is in the key,
+  not in the emit: add a log2 bucket to it and the histogram falls out of the
+  map. That is written up under *Needs from the shared layer* below, because
+  the bucket layout has to be the one the emit expects.
+
+## What the first privileged off-cpu run measured
+
+Every number below is off this machine, with `CAP_BPF` and `CAP_PERFMON` on the
+binary.
+
+**A known delay comes back to five decimal places.** `omn sched.offcpu --emit
+raw -- /usr/bin/sleep 0.4` reports `total_ns=400053520` in one block: 400.05 ms
+against 400 ms asked for, which is the scheduler's own timer slack and not
+error in the measurement.
+
+**A known number of device waits comes back to within one.** 128 MiB read with
+`O_DIRECT` in 64 KiB blocks is 2048 reads that cannot be served from the page
+cache, and the run reports `blocks=2047`, `state=uninterruptible`,
+`state_bits=2` -- `TASK_UNINTERRUPTIBLE` exactly, with no other bit set. One
+read did not have to wait.
+
+**A program that only spins reports nothing.** Which is the assertion that
+preemption is not being counted, and the one that would fail loudly if the
+`prev_state` test were dropped.
+
+**Machine-wide, 400 ms produced 177 entries** across every task on the machine
+that blocked, including `omn`'s own tick sleep, and the thread-level split is
+real: `tailscaled` appears as tid 1051 under pid 965, an `io-reader` thread as
+tid 87458 under pid 87420.
+
+Two things the states showed that a table of constants would not have:
+
+- **`TASK_FREEZABLE` is set more often than not.** An ordinary `nanosleep`
+  reports `state_bits=8193`, which is `TASK_INTERRUPTIBLE | TASK_FREEZABLE`,
+  and a killable device wait reports `258`, which is `TASK_UNINTERRUPTIBLE |
+  TASK_WAKEKILL`. Any reading of the state has to be a mask test; comparing it
+  to `1` or `2` would classify almost nothing.
+- **`idle` is common and would have been alarming.** Kernel workers sit in
+  `TASK_UNINTERRUPTIBLE | TASK_NOLOAD` (`1026`), which the load average
+  deliberately ignores. Reported as `uninterruptible` it would make an idle
+  machine look like one stuck on a disk.
+
+And one trap found while writing the test for the second measurement, which is
+this project's recurring lesson in a new costume: **a file of zeros is not a
+file to read.** The first version wrote 32 MiB of zeros and expected 512 device
+reads; btrfs compressed them away and the run reported 133 waits. The collector
+was right and the premise was wrong. The test now writes bytes from an
+xorshift, and syncs them, so there is something on the device to wait for.
+
 ## Traps
 
 - A switch count is a symptom. A *voluntary* switch is a task blocking on
@@ -111,9 +212,11 @@ then the waker is evidence, not proof.
 - The perf event does not follow children: `inherit` cannot be combined with a
   per-task ring buffer (`src/perf.rs` states this). Observing a shell that
   forks measures the shell.
-- `sched.offcpu` with stacks is expensive on switch-heavy workloads and must
-  aggregate in the kernel — stack id to counter — rather than stream raw events.
-  It is not written yet for that reason, not for lack of a tracepoint.
+- `sched.offcpu` is expensive on switch-heavy workloads unless it aggregates in
+  the kernel, which is why it does: the program counts nanoseconds per
+  `(task, state)` in a hash map and userspace drains a few entries per tick
+  instead of reading a few million events. With stacks it will count per
+  `(task, state, stack)` instead, and the stacks are what is still missing.
 
 ## What this family carries, and what it does not
 
@@ -127,11 +230,16 @@ approximated.
 ## Needs from the shared layer
 
 - **G5, `hist` and `topk`.** `sched.runqlat` and `sched.offcpu` are histogram
-  sources; both are declared with `emits: [hist, ...]` and neither can land
-  usefully while `hist` does not exist.
+  sources; both are declared with `emits: [hist, ...]`. `sched.offcpu` collects
+  without it -- a total and a count per task are useful on their own -- but the
+  distribution needs the bucket in the aggregation key, so the layout `hist`
+  settles on is a decision this family is waiting for rather than a rendering
+  choice.
 - **G6, stack capture.** `sched.offcpu` without stacks tells you how long, not
   where, which the catalog already states as its degradation. The `bpf:tp:stacks`
-  backend needs `bpf_get_stackid`, a stack map, and symbolization.
+  backend needs `bpf_get_stackid`, a stack map, and symbolization. The
+  aggregation it has to feed now exists: the stack id belongs in the key of the
+  map the program already keeps.
 - **G8, perf counting mode.** `sched.switches --mode count` is refused today
   with that reason: a counting request should open no ring and read the counter
   at the end, and sampling every switch to add the samples up would be a

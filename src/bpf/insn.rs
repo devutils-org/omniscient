@@ -40,6 +40,8 @@ pub const BPF_DW: u8 = 0x18;
 /// Addressing modes.
 const BPF_IMM: u8 = 0x00;
 const BPF_MEM: u8 = 0x60;
+/// A read-modify-write the other cpus cannot interleave with.
+const BPF_ATOMIC: u8 = 0xc0;
 
 /// Where the second operand comes from.
 const BPF_K: u8 = 0x00;
@@ -47,11 +49,16 @@ const BPF_X: u8 = 0x08;
 
 /// ALU operations.
 const BPF_ADD: u8 = 0x00;
+const BPF_SUB: u8 = 0x10;
 const BPF_RSH: u8 = 0x70;
 const BPF_MOV: u8 = 0xb0;
 
 /// Jump operations.
+/// `BPF_JA` is zero, which is why an instruction whose jump operation was
+/// never filled in reads as an unconditional jump rather than as nonsense.
+const BPF_JA: u8 = 0x00;
 const BPF_JEQ: u8 = 0x10;
+const BPF_JSET: u8 = 0x40;
 const BPF_JNE: u8 = 0x50;
 const BPF_JSGE: u8 = 0x70;
 const BPF_CALL: u8 = 0x80;
@@ -64,6 +71,8 @@ const BPF_PSEUDO_MAP_FD: u8 = 1;
 /// The helpers this layer calls, by their number in `bpf_func_id`.
 pub mod helper {
     pub const MAP_LOOKUP_ELEM: i32 = 1;
+    pub const MAP_UPDATE_ELEM: i32 = 2;
+    pub const MAP_DELETE_ELEM: i32 = 3;
     pub const KTIME_GET_NS: i32 = 5;
     pub const GET_SMP_PROCESSOR_ID: i32 = 8;
     pub const GET_CURRENT_PID_TGID: i32 = 14;
@@ -99,6 +108,11 @@ impl Insn {
         Self::new(BPF_ALU64 | BPF_ADD | BPF_K, dst, 0, 0, imm)
     }
 
+    /// `dst -= src`
+    pub fn sub64_reg(dst: u8, src: u8) -> Self {
+        Self::new(BPF_ALU64 | BPF_SUB | BPF_X, dst, src, 0, 0)
+    }
+
     /// `dst >>= imm`, unsigned.
     pub fn rsh64_imm(dst: u8, imm: i32) -> Self {
         Self::new(BPF_ALU64 | BPF_RSH | BPF_K, dst, 0, 0, imm)
@@ -119,9 +133,36 @@ impl Insn {
         Self::new(BPF_ST | size | BPF_MEM, dst, 0, off, imm)
     }
 
+    /// `lock *(size *)(dst + off) += src`
+    ///
+    /// The increment an aggregating program needs. A map value in a
+    /// `BPF_MAP_TYPE_HASH` is one allocation shared by every cpu, so a plain
+    /// load-add-store loses whichever increment lands between the two halves
+    /// of another cpu's -- which shows up as an off-cpu total that is quietly
+    /// short on exactly the busy workloads the aggregation exists for. The
+    /// per-cpu maps do not need this; the shared ones cannot do without it.
+    pub fn atomic_add(size: u8, dst: u8, off: i16, src: u8) -> Self {
+        Self::new(BPF_STX | size | BPF_ATOMIC, dst, src, off, BPF_ADD as i32)
+    }
+
     /// `if dst == imm goto off`
     pub fn jeq_imm(dst: u8, imm: i32, off: i16) -> Self {
         Self::new(BPF_JMP | BPF_JEQ | BPF_K, dst, 0, off, imm)
+    }
+
+    /// `goto off`
+    pub fn ja() -> Self {
+        Self::new(BPF_JMP | BPF_JA, 0, 0, 0, 0)
+    }
+
+    /// `if dst & imm goto off`
+    ///
+    /// A task state is a bit set, not a number: `TASK_UNINTERRUPTIBLE` and
+    /// `TASK_UNINTERRUPTIBLE | TASK_NOLOAD` are both a task off the cpu and
+    /// are not equal to each other, so the question a program asks about one
+    /// is which bits are set and never which value it is.
+    pub fn jset_imm(dst: u8, imm: i32, off: i16) -> Self {
+        Self::new(BPF_JMP | BPF_JSET | BPF_K, dst, 0, off, imm)
     }
 
     /// `if dst != imm goto off`
@@ -425,6 +466,58 @@ mod tests {
         let error = audit(&[Insn::mov64_imm(0, 0)]).unwrap_err();
         assert!(error.contains("not `exit`"), "{error}");
         assert!(audit(&[]).is_err(), "and neither is an empty one a program");
+    }
+
+    /// The kernel decodes an atomic add by its opcode byte, and there is no
+    /// other way to tell it apart from an ordinary store: `0xdb` is
+    /// `lock *(u64 *)(dst + off) += src` and `0xc3` is the 32-bit form, both
+    /// with `BPF_ADD` in the immediate. A wrong byte here is a store that
+    /// overwrites a total instead of adding to it, which reads as a plausible
+    /// number rather than as an error.
+    #[test]
+    fn an_atomic_add_is_encoded_the_way_the_kernel_decodes_one() {
+        let wide = Insn::atomic_add(BPF_DW, 0, 16, 9);
+        assert_eq!(wide.code, 0xdb);
+        assert_eq!(wide.imm, 0, "the operation is BPF_ADD");
+        assert_eq!(wide.regs & 0xf, 0, "the destination holds the address");
+        assert_eq!(wide.regs >> 4, 9, "the source holds the addend");
+        assert_eq!(wide.off, 16);
+        assert_eq!(Insn::atomic_add(BPF_W, 1, 0, 2).code, 0xc3);
+        assert!(audit(&[wide, Insn::exit()]).is_ok());
+    }
+
+    /// An unconditional jump is the one whose operation bits are zero, so a
+    /// label resolved through `jump_to` is the only thing that distinguishes
+    /// it from an instruction nobody finished writing. The audit is what
+    /// catches the second case, and it has to catch it on the first too.
+    #[test]
+    fn an_unconditional_jump_is_bounded_like_any_other() {
+        let mut program = Program::new();
+        program.jump_to("end", Insn::ja());
+        program.push(Insn::mov64_imm(0, 1));
+        program.label("end");
+        program.push(Insn::exit());
+        let built = program.build();
+        assert_eq!(built[0].code, 0x05, "BPF_JMP | BPF_JA");
+        assert_eq!(built[0].off, 1);
+        assert!(audit(&built).is_ok());
+
+        let error = audit(&[Insn::new(0x05, 0, 0, 90, 0), Insn::exit()]).unwrap_err();
+        assert!(error.contains("outside a program of 2"), "{error}");
+    }
+
+    #[test]
+    fn a_bit_test_is_a_jump_on_the_mask_not_on_the_value() {
+        let insn = Insn::jset_imm(1, 0x80, 0);
+        assert_eq!(insn.code, 0x45, "BPF_JMP | BPF_JSET | BPF_K");
+        assert_eq!(insn.imm, 0x80);
+    }
+
+    #[test]
+    fn a_subtraction_between_registers_is_the_alu64_form() {
+        let insn = Insn::sub64_reg(9, 8);
+        assert_eq!(insn.code, 0x1f, "BPF_ALU64 | BPF_SUB | BPF_X");
+        assert_eq!((insn.regs & 0xf, insn.regs >> 4), (9, 8));
     }
 
     /// A call whose helper number was never filled in reads as `call 0`, which

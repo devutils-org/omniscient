@@ -38,7 +38,9 @@ the collector prints it.
 | `insn.rs` | The instruction encoding, and `Program`, which resolves jumps by label so inserting a line cannot silently break a jump that crosses it. |
 | `btf.rs` | The running kernel's types. Answers two questions: where is this field, and does this type exist. |
 | `ring.rs` | The `BPF_MAP_TYPE_RINGBUF` consumer: read the published records, then publish the consumer position once, after the batch is out. |
-| `wakeup.rs` | The first program: `sched_waking`, one record per wakeup. Read it as the worked example. |
+| `map.rs` | Maps shared with a program: a hash map to count in, a per-cpu array to count losses in, and the walk that drains one. |
+| `wakeup.rs` | The first program: `sched_waking`, one record per wakeup. Read it as the worked example for streaming. |
+| `offcpu.rs` | The first aggregating program: `sched_switch`, counting nanoseconds per task in a hash map. Read it as the worked example for counting. |
 
 ## Writing a program
 
@@ -67,6 +69,48 @@ Three rules that are not style:
    time. Mixing the two puts the stream in a different clock domain from every
    other collector and destroys every join with no error anywhere.
 
+## Streaming or counting
+
+Two shapes, and the choice is about volume rather than taste.
+
+A **streaming** program writes one record per event into a ring buffer and
+userspace reads them. It is the right shape when each event matters on its own
+-- a wakeup is a pair of task ids that a join needs individually, and there is
+nothing to add up. `wakeup.rs` is that shape.
+
+A **counting** program keeps the arithmetic in the kernel: a hash map keyed by
+whatever the series is keyed by, updated in place, drained by userspace on a
+tick. It is the only viable shape when the event rate is a property of the
+workload rather than of the question. `sched_switch` fires a few million times
+a minute on a busy machine; streaming it makes the cost of the measurement grow
+with the thing being measured, and the numbers then describe a machine running
+`omn`. `offcpu.rs` is that shape, and it turns those millions into a few
+hundred map entries.
+
+Three things about counting are not obvious, and each one is a wrong number
+rather than an error:
+
+1. **The accumulation has to be atomic.** A `BPF_MAP_TYPE_HASH` value is one
+   allocation shared by every cpu. A load, an add and a store loses whichever
+   increment lands between the first two, and loses more of them the busier the
+   machine is -- which is to say, most where the number matters most.
+   `Insn::atomic_add` is the increment; the per-cpu maps are the only ones that
+   do not need it.
+2. **Reading and removing must be one operation.** A drain that looks an entry
+   up and then deletes it loses whatever the program added in between.
+   `map_take` is `BPF_MAP_LOOKUP_AND_DELETE_ELEM`, which hash maps have served
+   since 5.14, below the kernel floor.
+3. **A drain is not a snapshot.** There is no cursor and no atomic iteration:
+   the walk asks for the key after this one until there are none, while the
+   program keeps writing. So a drain takes what it finds and leaves the rest
+   for the next pass, each drain is a delta over the interval between two of
+   them, and the interval belongs on the event -- a number aggregated over a
+   window that does not say which window cannot be compared with another.
+
+A map is bounded, and a full one is a loss like any other: the update helper
+returns an error, the event is not counted, and only the program's own drop
+counter records that it happened.
+
 ## Attaching
 
 Through `BPF_RAW_TRACEPOINT_OPEN`, which takes a tracepoint's name.
@@ -77,6 +121,17 @@ project's development machine, where `/sys/kernel/tracing/events/sched` is
 `Permission denied` at uid 1000. A raw tracepoint needs BTF and a name. So
 `bpf:raw_tp` is ordered ahead of `bpf:tp` in every chain, and `bpf:tp` declares
 `equivalent: true`: it sees the same events, it just demands more to attach.
+
+A raw tracepoint hands its program an array of `u64`, one per argument, and
+nothing in that array says what any of them is. A program reads slot two as a
+`task_struct *` because the tracepoint's prototype says so -- and prototypes
+change: `sched_switch` gained a fourth argument in 5.18, and a program written
+for the older shape reads a pointer out of a slot holding an integer and gets
+a plausible number back. So the prototype is checked before the program is
+built. The kernel publishes it as `typedef void (*btf_trace_<name>)(void *,
+args...)`, and `Btf::tracepoint_signature` returns the arguments after the
+leading data pointer, which `offcpu.rs` compares against the shape it was
+written for and refuses by name when they differ.
 
 Availability is probed without attaching anything, and without privileges:
 every tracepoint the kernel defines carries a `btf_trace_<name>` type in its own
@@ -139,11 +194,13 @@ in turn:
 
 - **kprobes, uprobes, fentry and USDT.** Only raw tracepoints attach today.
   `io`, `net` and `runtime` need the others.
-- **In-kernel aggregation.** `sched.offcpu` with stacks must count in a hash
-  map keyed by stack id rather than stream raw events; that needs
-  `BPF_MAP_TYPE_HASH`, `bpf_map_update_elem` and a way to walk a map from
-  userspace.
 - **Stack capture.** `bpf_get_stackid` and a stack map, which is groundwork G6
-  and lands with symbolization.
+  and lands with symbolization. The aggregation it needs now exists: the stack
+  id goes in the key of the hash map `offcpu.rs` already keeps, which is what
+  makes a profile of blocked time aggregate by stack rather than by task.
+- **A log2 bucket in an aggregation key.** The catalog asks four sources for a
+  histogram of a duration, and a map holding a total and a count cannot produce
+  one. Counting `(key, bucket) -> n` instead is about twenty more instructions
+  and is what makes `--emit hist` possible on a counted source at all.
 - **Per-cpu ring consumption in parallel.** One ring, drained on the tick loop,
   is enough at the volumes seen so far. A syscall tracer will not agree.

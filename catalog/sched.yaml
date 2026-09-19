@@ -66,6 +66,12 @@
   unit: ns
   backends:
     - {id: "bpf:tp:stacks", requires: ["tracepoint:sched:sched_switch", "bpf", "callchain"], cost: high}
+    # Same events as `bpf:tp`, attached the way this tool attaches: through
+    # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
+    # path needs a numeric id out of tracefs. Ordered ahead of it for the
+    # reason DECISIONS.md settled: strictly fewer requirements, same events.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: med,
+       degraded: "no stacks: tells you how long, not where"}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med,
        degraded: "no stacks: tells you how long, not where"}
   modes: [trace]
@@ -77,6 +83,22 @@
   caveats:
     - "Expensive on switch-heavy workloads: aggregate in the kernel (stack-id ->
        counter) rather than streaming a raw trace."
+    - "Blocked, not preempted. A task the scheduler took the cpu away from is
+       still runnable and its wait is run queue latency, which is
+       `sched.runqlat`; only a task that left because it was waiting for
+       something is counted here. The two are told apart by the task state at
+       the switch, and that state is on every event: `sleeping` is a program
+       waiting for something to happen, `uninterruptible` is usually one
+       waiting on a disk, and `idle` is a kernel worker the load average
+       deliberately ignores."
+    - "A task still blocked when the run ends is in no total: its block has no
+       end yet. The count of them is reported with the run, because a program
+       that spends its life waiting would otherwise show almost nothing."
+    - "A block is credited in full to the interval in which it *ended*, because
+       that is when its duration becomes known. So `total_ns` can exceed the
+       `window_ns` beside it -- a 400 ms wait drained on a 100 ms tick reports
+       400 ms against a 100 ms window -- and the pair is a total and the
+       interval it was collected over, never a share of it."
 
 - id: sched.switches
   family: sched
