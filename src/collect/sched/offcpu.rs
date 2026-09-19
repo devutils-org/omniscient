@@ -164,6 +164,25 @@ impl OffCpuCollector {
         }
     }
 
+    /// Reads the target's mappings while it still has some.
+    ///
+    /// Not at `start`, and not when a stack first needs resolving. A symbolizer
+    /// snapshots `/proc/<pid>/maps` when it is built, and both of those moments
+    /// are wrong for a launched program: at `start` the child has not execed
+    /// yet, so the maps are this tool's own, and by the time a block is drained
+    /// the program has often exited and there are no maps at all. That is what
+    /// a stack of bare addresses looks like, and this is the only window in
+    /// between.
+    ///
+    /// Processes this run did not launch are still resolved lazily, because
+    /// there is no list of them to walk until one of them blocks.
+    fn open_target_symbols(&mut self) {
+        let Some(tgid) = self.filter else { return };
+        self.symbolizers
+            .entry(tgid as i32)
+            .or_insert_with(|| Symbolizer::for_process(tgid as i32));
+    }
+
     /// Symbolizes the stack behind an entry, once per distinct id.
     ///
     /// Returns the id to put on the event, or `None` when there is nothing to
@@ -280,6 +299,7 @@ impl Collector for OffCpuCollector {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        self.open_target_symbols();
         let mut events = Vec::new();
         self.drain_into(&mut events, seq);
         self.absorb_drops();
