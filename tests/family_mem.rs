@@ -386,7 +386,26 @@ fn freeing_half_the_heap_moves_the_live_total_and_not_the_resident_size() {
         .iter()
         .map(|event| attr(event, "live"))
         .fold(0.0, f64::max);
-    let peak_rss = events
+    // `rss` is on the event for scale and only when it could be read: the
+    // collector takes it from `/proc/<pid>/statm`, and a poll that lands after
+    // the observed program exited finds no such file. Every other attribute
+    // here comes from the shim's own accounting and is always present, so the
+    // peak is taken over the events that carry it rather than demanding it of
+    // all of them -- asking for it unconditionally made this a test of whether
+    // the program outlived the last tick.
+    let with_rss: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| {
+            event["attrs"]
+                .as_array()
+                .is_some_and(|attrs| attrs.iter().any(|attr| attr["name"] == "rss"))
+        })
+        .collect();
+    assert!(
+        !with_rss.is_empty(),
+        "no poll of this run read the target's resident size at all: {events:?}"
+    );
+    let peak_rss = with_rss
         .iter()
         .map(|event| attr(event, "rss"))
         .fold(0.0, f64::max);

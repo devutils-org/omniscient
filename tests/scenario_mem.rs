@@ -1063,9 +1063,26 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     let sysfs = attrs(result(&run, "huge pages since boot, with the mode"));
     let vmstat = attrs(result(&run, "huge pages since boot, counters only"));
 
-    assert_eq!(
-        sysfs["promotions_since_boot"], vmstat["promotions_since_boot"],
-        "one kernel counter reached through two files has to be one number"
+    // Monotone and read moments apart, exactly like the PSI pair above: the
+    // two sessions are separate reads of one counter that has been rising since
+    // boot, so the later one is at least the earlier and the gap is whatever
+    // the machine promoted in between. Measured here at one page, under the
+    // rest of this suite. Asserting equality made the scenario a test of how
+    // busy the machine was.
+    let sysfs_promotions = sysfs["promotions_since_boot"].as_u64().expect("a count");
+    let vmstat_promotions = vmstat["promotions_since_boot"].as_u64().expect("a count");
+    assert!(
+        vmstat_promotions >= sysfs_promotions,
+        "one monotone kernel counter reached through two files cannot go backwards: \
+         {sysfs_promotions} then {vmstat_promotions}"
+    );
+    // And the two must be the same counter, not two plausible ones. A thousand
+    // promotions between two reads in the same run would mean they are not.
+    assert!(
+        vmstat_promotions - sysfs_promotions < 1_000,
+        "these are meant to be one counter through two files, and they are \
+         {} apart: {sysfs_promotions} then {vmstat_promotions}",
+        vmstat_promotions - sysfs_promotions
     );
     assert_eq!(
         sysfs["hpage_bytes"].as_u64(),

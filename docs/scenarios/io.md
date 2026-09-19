@@ -608,3 +608,24 @@ written into an unknown number stored. And the pressure comparison needs a
 machine that is not already stalled on I/O. None of them is a reason to stop
 asserting the rest, and every one stays in `examples/` and here, so that a
 machine which can serve it runs it.
+
+---
+
+## Found by the coordinator, after the merge
+
+### The kernel's own `full` can exceed its own `some`, by a microsecond
+
+```
+stalled_ns       39670000     # some
+full_stalled_ns  39671000     # full, one microsecond larger
+```
+
+One read of one file, under a saturated machine. `full` is a subset of `some` by
+definition — every task stalled is at least one task stalled — but the kernel
+keeps the two in separate accumulators and writes `/proc/pressure/io` in
+microseconds, so they can disagree by one quantum of that.
+
+Nothing in the tool is wrong here: it reported what the kernel said, which is
+what it is for. The scenario now asserts the invariant with the resolution of
+the thing that reports it, and a violation larger than a microsecond is the
+tool's rather than the kernel's.

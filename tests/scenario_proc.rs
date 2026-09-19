@@ -692,16 +692,39 @@ fn defect_1_the_first_reading_of_a_launched_target_is_this_tool_not_the_program(
 
     let event = &events(result(&doc, "descriptors"))[0];
     let measured = attr(event, "open").unwrap().as_u64().unwrap();
-    assert_ne!(
-        measured, held,
-        "DEFECT 1 IS FIXED: the single read of a launched target now finds the {held} \
-         descriptors the program holds. Delete this test and defect 1 of \
-         docs/scenarios/proc.md."
+    assert!(
+        measured <= held,
+        "the read lands somewhere inside the program's startup, so it cannot find more than the \
+         {held} descriptors that program ever holds: {event}"
     );
-    assert_eq!(
-        attr(event, "comm").unwrap(),
-        "omn",
-        "the reading lands before the exec, so it describes this tool: {event}"
+
+    // The defect is a race with three outcomes, not two, and a test must not
+    // assert which one a run got. The child is released from its gate and read
+    // immediately; it may not have reached `execve` (`comm=omn`, three
+    // descriptors), it may have exec'd and not yet opened its files
+    // (`comm=python3`, three descriptors -- seen under this suite, and the case
+    // the first version of this test did not expect), or it may occasionally
+    // have got further.
+    //
+    // What makes it a defect is that the answer is *unspecified*, so that is
+    // what is asserted: over several runs of the same session against the same
+    // program, at least one must disagree with what the program holds. A
+    // snapshot that always found twenty would be a reliable measurement, and
+    // this test would be telling the truth by failing.
+    const RUNS: usize = 5;
+    let mut readings = vec![measured];
+    for _ in 1..RUNS {
+        let again = session("proc-one-reading.yml");
+        assert!(again.status.success(), "{}", stderr(&again));
+        let doc = document(&again);
+        let event = &events(result(&doc, "descriptors"))[0];
+        readings.push(attr(event, "open").unwrap().as_u64().unwrap());
+    }
+    assert!(
+        readings.iter().any(|open| *open != held),
+        "DEFECT 1 IS FIXED: {RUNS} single reads of a launched target all found the {held} \
+         descriptors the program holds ({readings:?}). Delete this test and defect 1 of \
+         docs/scenarios/proc.md."
     );
 
     // The same reading is the first point of every polled launch too, where it

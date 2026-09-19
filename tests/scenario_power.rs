@@ -451,6 +451,22 @@ fn a_machine_with_every_core_busy_costs_more_than_an_idle_one() {
         "a package drawing {quiet} W means the RAPL scale was not read from the kernel"
     );
 
+    // Two different ways there is nothing to contrast, and the first is not
+    // the delta. A package has a power limit, and a machine already most of the
+    // way to it draws the same watts at 69 % busy as at 100 % -- measured here
+    // at 145.5 W for both, while the other nine hundred tests of this suite ran
+    // beside it. The baseline has to be an idle package, not merely a machine
+    // with a few cores spare.
+    if quiet_busyness > 0.25 {
+        eprintln!(
+            "skipped the contrast: /proc/stat says this machine was already {:.0} % busy before \
+             the spin loops started, so the package was near its power limit and adding load \
+             cannot raise it. This scenario needs an idle machine",
+            quiet_busyness * 100.0
+        );
+        return;
+    }
+
     let added = loaded_busyness - quiet_busyness;
     if added < 0.15 {
         eprintln!(
@@ -576,8 +592,17 @@ fn the_temperature_is_the_hottest_processor_sensor_hwmon_offers() {
     // of hwmon itself draw. The band is generous because the quantity moves;
     // what it still catches is everything structural -- a factor of a thousand
     // left in millidegrees, or the nvme controller thirty degrees below.
-    let floor = before.min(after) - 5.0;
-    let ceiling = before.max(after) + 5.0;
+    //
+    // Fifteen degrees, not five, and the difference is the sensor rather than
+    // the caution. The hottest processor sensor on this part is a per-CCD one,
+    // and a die's temperature swings several degrees between two reads
+    // milliseconds apart -- measured here at 62.25 from the tool between two
+    // reference reads of 55.375 and 56.75, with `Tctl`, the package average
+    // the narrower band was sized for, sitting at 55.5 throughout. A band that
+    // fits `Tctl` does not fit `Tccd1`, and the structural failures are all
+    // an order of magnitude away from either.
+    let floor = before.min(after) - 15.0;
+    let ceiling = before.max(after) + 15.0;
     assert!(
         (floor..=ceiling).contains(&reported),
         "hwmon read {before} then {after} celsius around this snapshot, and the tool says \

@@ -258,6 +258,19 @@ place: for a launched program, `start` is too early because the child has not
 exec'd. The first tick is the right moment there, and something like it is the
 right moment here.
 
+**It is a race with three outcomes, not two.** Under the full suite the same
+session reported `comm=python3` with `open=3` on about one run in five: the
+child had reached its `execve` and had not yet opened its files. So `comm` is
+not the tell it looks like — it says which image the pid is running, not whether
+the program has done anything.
+
+That makes the defect larger than it first read, not smaller. A measurement that
+is reliably wrong can be worked around; one whose subject depends on scheduling
+cannot. The test asserts exactly that: over five runs of the same session
+against the same program, at least one answer must differ from what the program
+holds. A snapshot that always found twenty would be a reliable measurement, and
+the test would be telling the truth by failing.
+
 A filter hides it. `proc-sweep.yml` carries `comm =~ 'python'`, which removes
 the pre-exec reading because that reading says `omn` — so a session written to
 select a program silently repairs this and a session without one does not. That

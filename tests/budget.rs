@@ -235,10 +235,20 @@ fn the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes() {
     // `times` rounds to ten milliseconds and the shell is doing a little of its
     // own work, so this is an order-of-magnitude agreement rather than an
     // equality -- which is still enough to catch a number that is made up.
+    //
+    // The rounding is carried explicitly rather than folded into the ratio.
+    // Two runs are two roundings, so the difference between them is a tenth of
+    // a second wide before anything else happens; measured under a loaded
+    // machine at 9 ms observed against 52 ms reported, which a pure ratio reads
+    // as a sixfold disagreement and is one quantum of the reference.
+    const TIMES_QUANTUM_NS: f64 = 10_000_000.0;
+    let slack = 2.0 * TIMES_QUANTUM_NS;
     assert!(
-        observed_extra_ns > reported_extra_ns * 0.4 && observed_extra_ns < reported_extra_ns * 3.0,
+        observed_extra_ns > reported_extra_ns * 0.4 - slack
+            && observed_extra_ns < reported_extra_ns * 3.0 + slack,
         "the shell saw {observed_extra_ns}ns more cpu in the faster run and the tool reported \
-         {reported_extra_ns}ns more"
+         {reported_extra_ns}ns more, which is further apart than the shell's own \
+         ten-millisecond resolution explains"
     );
 }
 
