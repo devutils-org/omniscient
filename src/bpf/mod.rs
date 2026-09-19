@@ -30,6 +30,7 @@ pub mod attach;
 pub mod btf;
 mod insn;
 mod map;
+mod migrate;
 mod offcpu;
 mod ring;
 mod runqlat;
@@ -38,6 +39,7 @@ mod wakeup;
 
 use std::sync::OnceLock;
 
+pub use migrate::{Migration, MigrationProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use runqlat::{RunqLat, RunqLatProgram};
 pub use wakeup::{Wakeup, WakeupProgram};

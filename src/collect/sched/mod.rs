@@ -12,6 +12,7 @@
 //! the measurement is worth. `sched.switches` goes through `perf_event_open`,
 //! needs no privileges, and can only say that a switch happened.
 
+mod migrations;
 mod offcpu;
 mod runqlat;
 mod switches;
@@ -36,6 +37,9 @@ pub fn factories() -> Vec<Factory> {
                 // its events alone; see `runqlat::Prepare`.
                 filter: resolved.request.filter.clone(),
             }))
+        }),
+        Factory::new("sched.migrations", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(migrations::Prepare(resolved.request.mode)))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
             Ok(Box::new(switches::Prepare(resolved.request.mode)))

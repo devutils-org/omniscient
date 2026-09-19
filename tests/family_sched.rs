@@ -728,3 +728,124 @@ fn the_kernels_buckets_are_the_emit_layers_buckets() {
          {from_emit:?}; the two log2 definitions have drifted apart:\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// sched.migrations
+// ---------------------------------------------------------------------------
+
+/// Sums one attribute over the `raw` rendering of a source.
+fn sum_over(text: &str, kind: &str, attribute: &str) -> u64 {
+    let needle = format!("{attribute}=");
+    text.lines()
+        .filter(|line| line.contains(kind))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix(&needle))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .sum()
+}
+
+/// Ground truth: a task moved between two cpus a known number of times must be
+/// counted that many times.
+///
+/// The independent quantity is `sched_setaffinity`, called from outside the
+/// tool by `taskset`. A cpu-bound task pinned to one cpu cannot migrate for any
+/// other reason -- it never sleeps, so it is never woken onto another cpu, and
+/// the load balancer cannot move it off the one cpu its mask allows. So every
+/// migration in the window is one this test caused, and the count is exact
+/// rather than a floor.
+#[test]
+fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
+    const MOVES: usize = 20;
+
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) < 2 {
+        eprintln!("skipped: one cpu, so nothing can be moved between two");
+        return;
+    }
+    let Some(shell) = distinctly_named_shell("omnmigrate") else {
+        eprintln!("skipped: /bin/sh cannot be copied, so there is no load to pin");
+        return;
+    };
+    let Ok(mut load) = Command::new("taskset")
+        .args([
+            "-c",
+            "0",
+            shell.to_str().expect("a path"),
+            "-c",
+            "while :; do :; done",
+        ])
+        .spawn()
+    else {
+        eprintln!("skipped: this machine has no `taskset`, so nothing can be pinned");
+        return;
+    };
+    let pid = load.id().to_string();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let measuring = Command::new(BINARY)
+        .args([
+            "sched.migrations",
+            "--pid",
+            &pid,
+            "--mode",
+            "trace",
+            "--duration",
+            "3s",
+            "--emit",
+            "raw",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let Ok(measuring) = measuring else {
+        let _ = load.kill();
+        panic!("omn should run");
+    };
+    // Long enough for the program to be loaded and attached before the first
+    // move: a migration that happens before the tracepoint is attached is one
+    // this test caused and cannot expect to see.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    let mut moved = 0;
+    for step in 1..=MOVES {
+        let cpu = (step % 2).to_string();
+        if Command::new("taskset")
+            .args(["-cp", &cpu, &pid])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            moved += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let output = measuring.wait_with_output().expect("omn should finish");
+    let _ = load.kill();
+    let _ = load.wait();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    assert_eq!(moved, MOVES, "every move must have been asked for:\n{text}");
+
+    let counted = sum_over(&text, "sched.migrations", "migrations");
+    assert!(
+        counted >= MOVES as u64,
+        "{MOVES} forced moves between two cpus are {MOVES} migrations, and {counted} were \
+         counted:\n{text}"
+    );
+    // A pinned cpu-bound task migrates for no other reason, so anything much
+    // above the number asked for is a migration being counted twice.
+    assert!(
+        counted <= MOVES as u64 + 4,
+        "{counted} migrations were counted for {MOVES} moves:\n{text}"
+    );
+    assert!(
+        text.contains("no loss"),
+        "migrations lost to a full map cannot be checked against a known count:\n{text}"
+    );
+}
