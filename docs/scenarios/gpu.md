@@ -446,6 +446,20 @@ Pinned by `a_count_mode_run_reports_a_window_longer_than_the_program_it_watched`
 
 ### 3. `rate` of a ratio is a quantity of nothing
 
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. The emit
+is out of the entry, which now carries the caveat that says why, and the rule
+is enforced rather than remembered: `src/validate.rs::check_catalog` refuses a
+`rate` over any unit that does not add up — `ratio`, `hz` and `celsius` —
+written as an exhaustive match so a unit added later has to answer the question.
+
+```console
+$ omn gpu.engine_busy --system --mode count --emit rate --duration 200ms
+error: [gpu.engine_busy #1] `gpu.engine_busy` cannot emit `rate`
+  hint: this source emits timeline, summary
+```
+
+What it used to answer:
+
 `gpu.engine_busy` has unit `ratio` and declares `rate`, which sums the value
 attribute and divides by the window:
 
@@ -469,7 +483,15 @@ correct rather than a question about what `rate` means. The invariant is the one
 in `CLAUDE.md`: an invalid combination is refused with the reason, never
 degraded silently.
 
-Pinned by `this_family_holds_the_catalogs_only_rate_over_a_ratio`.
+Pinned by `no_source_in_the_catalog_declares_a_rate_over_a_ratio`, which is the
+same sweep over the whole catalog and now requires none rather than one. It was
+`this_family_holds_the_catalogs_only_rate_over_a_ratio` while there was one.
+
+One thing moved with it, and it is declared in `docs/fixes/catalog.md`: defect 2
+above measured its over-long window through `--emit rate` on this source, which
+no longer exists. It measures the same window through `--emit summary` — the
+window is reported whatever the emit — and still fails if the window stops
+being the program's life rounded up to the next tick.
 
 ### 4. A machine that cannot serve a valid request exits 2, like a bad request
 

@@ -527,6 +527,16 @@ exactly the emit for ranking them. The catalog declares `topk` on this source
 and declares `count` as a mode, and the pair is refused by a rule that the run
 itself contradicts.
 
+Stream B of the fifth wave looked at this and left `catalog/sched.yaml` alone:
+the entry is not the thing that is wrong. `sched.migrations` declares `trace`
+too, so its `topk` is reachable in principle and the entry promises nothing no
+build could keep; deleting the mode or the emit would have removed the
+capability rather than the defect. What refuses it is one arm of
+`ModeKind::valid_emits` in `src/request.rs`, which is outside every stream's
+paths in this wave and is written out under "Needs from another stream" in
+`docs/open-findings.md`. The same line closes net 1 and the `--emit topk` half
+of io 1.
+
 ### 6. An under-specified request exits 1 where the same kind exits 2
 
 Two requests, both missing one required axis, both unanswerable for the same

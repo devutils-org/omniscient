@@ -366,6 +366,23 @@ other half of that same cleanup and was missed.
 
 ### 5. `proc.fd` declares the `file` key and no event carries it
 
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. The entry
+declares `keys: [task]`, so the promise and the events agree and the request is
+refused before anything is attached:
+
+```console
+$ omn proc.fd --mode poll@50ms --emit raw --keys task,file -- true
+error: [proc.fd #1] `proc.fd` does not carry the `file` key, so it cannot be joined on it
+  hint: `proc.fd` carries task
+```
+
+The other way out — one event per descriptor, carrying a `file` key — is what
+this entry's own caveat about walk cost refuses, and the entry now says so, so
+that the next reader does not have to rediscover the trade. The scenario is
+`the_only_key_proc_fd_declares_is_the_only_one_its_events_carry`, which
+replaces `defect_5_...` and asserts both halves: the refusal, and that the
+events carry exactly the key that is left. What was measured:
+
 The catalog says `keys: [task, file]`. The validator accepts `--keys task,file`,
 and when it refuses a key that is genuinely absent it tells the reader what is
 available:
@@ -385,7 +402,7 @@ could carry a key carries it, and a key the catalog promises and the build does
 not emit makes that impossible to check from the catalog alone. Either the
 collector should emit one event per descriptor with a `file` key — which the
 caveat about walk cost suggests was considered and rejected — or the entry
-should not declare it.
+should not declare it. The entry no longer declares it.
 
 ### 6. A late-tick reason carries its own nanosecond count, so losses never deduplicate
 

@@ -27,8 +27,9 @@ of the mode. The rest are tenths.
 | `net.hwts` | `netlink:ethtool` | poll, snapshot | raw, timeline, summary | two clocks, and the passage of time |
 | `net.capture` | `af_packet` | trace | raw, timeline | frames the scenario sent |
 
-`net.bytes` also declares `topk`, and no mode it declares can produce one. That
-is the first entry under **Defects found**.
+`net.bytes` also declared `topk`, and no mode it declares can produce one. That
+is the first entry under **Defects found**, and it is fixed: the emit is out of
+the entry until `count` mode can rank what it counted.
 
 The other eight sources are vocabulary: `net.tcp.connect`, `net.tcp.lifetime`,
 `net.tcp.retransmit`, `net.drops`, `net.socket`, `net.qdisc`, `net.softirq` and
@@ -374,6 +375,16 @@ than silently changing what a caller sees.
 
 ### 1. `net.bytes` declares an emit no mode it declares can produce
 
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. `topk` is
+out of the entry, so nothing promises it and the refusal names the source:
+`` `net.bytes` cannot emit `topk` ``, with the hint `this source emits rate,
+timeline, summary`. The reproduction below is what it used to say.
+
+It was removed rather than served because the decision that would serve it is
+not the catalog's: `count` mode refusing to rank what it counted is one arm of
+`ModeKind::valid_emits`, written up under "Needs from another stream" in
+`docs/open-findings.md`. The day it changes, `topk` goes back into the entry.
+
 The entry lists `topk`, `omn list net.bytes` prints it, and every request that
 could ask for it is refused:
 
@@ -394,7 +405,8 @@ the entry or `count` should be able to rank what it counted; the two are
 different decisions and neither is this stream's.
 
 `every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares` walks the
-whole family and pins this as the only one.
+whole family and pinned this as the only one; it now requires the set to be
+empty. `src/validate.rs::check_catalog` applies the same rule to every family.
 
 ### 2. A loss that repeats is printed once per occurrence
 
@@ -454,6 +466,14 @@ but the mode is still offered and still answers with a number that carries no
 information. The totals since boot, which is what a snapshot of a counter would
 plausibly mean, are not reachable through any mode.
 
+Stream B of the fifth wave left the mode in the catalog and wrote the contract
+up for whoever owns the collector, under "Needs from another stream" in
+`docs/open-findings.md`: on `snapshot`, report the absolute counter under its
+own name rather than a delta over a window the mode does not have. That is what
+`mem.swap --mode snapshot` already answers with, and what `io.pressure`'s caveat
+states as the rule. Dropping the mode instead would break
+`examples/net-snapshot.yml` and would refuse a question worth answering.
+
 ### 4. A `snapshot` request beside a polled one is silently polled
 
 The snapshot flag is a property of the session, not of the request: the runner
@@ -491,6 +511,12 @@ right; the way it is done makes one of them unreachable from every emit that
 aggregates. One event per counter kind, or a key that tells them apart, would
 keep the separation and make both visible — but that is a shape decision for
 whoever owns the collector.
+
+Stream B of the fifth wave found this to be a collector defect rather than a
+catalog one and left it there, with the request written up in
+`docs/open-findings.md`. `catalog/net.yaml` now carries the caveat that says
+what the aggregating emits answer about and where the other counters are, so
+that the `0 count/s` reaches a reader with its explanation attached.
 
 ### 6. `daddr ==` can never match
 
