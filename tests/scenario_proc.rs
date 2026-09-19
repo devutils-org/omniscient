@@ -677,31 +677,38 @@ fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
 // The defects this family found
 // ---------------------------------------------------------------------------
 //
-// Each of these asserts the wrong behaviour on purpose, because this stream
-// may not edit `src/` and a defect recorded only in prose is a defect that
-// gets fixed silently or not at all. When one of them starts failing, the
-// defect is fixed: delete the test and its entry in `docs/scenarios/proc.md`
-// together.
+// Each of these asserted the wrong behaviour on purpose, because the stream
+// that found them could not edit `src/`, and a defect recorded only in prose
+// is a defect that gets fixed silently or not at all.
+//
+// Defects 1 and 2 have since been fixed, and their tests now assert the
+// behaviour that replaced the defect -- each one fails against the build that
+// had it. The rest still hold their defect, because it belongs to a layer this
+// family does not own.
 
-/// Defect 1: the first reading of a launched target describes this tool.
+/// Defect 1, fixed: the first reading of a launched target is of the program.
 ///
-/// The runner releases the child from its gate and reads immediately, and the
-/// child has not reached its `execve` yet, so `/proc/<pid>/fd` is still the
-/// forked image of `omn`. The pid is right and everything else is wrong: the
-/// count is this tool's three descriptors and `comm` says `omn`.
+/// The runner released the child from its gate and read immediately, and the
+/// child had not reached its `execve` yet, so `/proc/<pid>/fd` was still the
+/// forked image of `omn`: the pid was right and everything else was wrong --
+/// the count was this tool's three descriptors and `comm` said `omn`. It was
+/// worst in `snapshot` mode, where that reading is the only one there is, and
+/// it was a race with three outcomes, so the answer was not merely wrong but
+/// *unspecified*.
 ///
-/// It is worst in `snapshot` mode, where that reading is the only one there
-/// is: `examples/proc-one-reading.yml` against a program holding twenty
-/// descriptors answers three.
+/// `proc.fd` now waits for the launched pid to stop being this tool's own
+/// image before its first read. What it does not do -- and what no measurement
+/// tool can do -- is wait for the program to have done something: a snapshot
+/// of a launched program is a reading of the instant it began, and that is
+/// three or four descriptors for a `python3` that has not yet run its first
+/// statement. The fix is that the reading is *of the program*, and that is
+/// what is asserted here.
 #[test]
-fn defect_1_the_first_reading_of_a_launched_target_is_this_tool_not_the_program() {
+fn defect_1_the_first_reading_of_a_launched_target_is_of_the_program() {
     needs_python!();
 
     // What the workload holds, established the only way a snapshot run cannot
-    // establish it: by polling the same program long enough for it to say. A
-    // `snapshot` run ends in microseconds, so the program it is measuring has
-    // not reached its first statement, let alone written to standard error --
-    // which is itself the shape of the defect.
+    // establish it: by polling the same program long enough for it to say.
     let polled = session("proc-sweep.yml");
     assert!(polled.status.success(), "{}", stderr(&polled));
     let held = reported(&polled, "HELD ");
@@ -710,82 +717,104 @@ fn defect_1_the_first_reading_of_a_launched_target_is_this_tool_not_the_program(
         "the workload opens seventeen files plus its three"
     );
 
-    let output = session("proc-one-reading.yml");
-    assert!(output.status.success(), "{}", stderr(&output));
-    let doc = document(&output);
-
-    let event = &events(result(&doc, "descriptors"))[0];
-    let measured = attr(event, "open").unwrap().as_u64().unwrap();
-    assert!(
-        measured <= held,
-        "the read lands somewhere inside the program's startup, so it cannot find more than the \
-         {held} descriptors that program ever holds: {event}"
-    );
-
-    // The defect is a race with three outcomes, not two, and a test must not
-    // assert which one a run got. The child is released from its gate and read
-    // immediately; it may not have reached `execve` (`comm=omn`, three
-    // descriptors), it may have exec'd and not yet opened its files
-    // (`comm=python3`, three descriptors -- seen under this suite, and the case
-    // the first version of this test did not expect), or it may occasionally
-    // have got further.
-    //
-    // What makes it a defect is that the answer is *unspecified*, so that is
-    // what is asserted: over several runs of the same session against the same
-    // program, at least one must disagree with what the program holds. A
-    // snapshot that always found twenty would be a reliable measurement, and
-    // this test would be telling the truth by failing.
+    // Five single reads of the same session. Every one of them has to be about
+    // the launched program: `comm` is the tell, because it says which image
+    // the pid is running, and before the fix it said `omn` on about four runs
+    // in five. And every one of them has to find no more than the program ever
+    // holds, because a reading of this tool's table is not bounded by that.
     const RUNS: usize = 5;
-    let mut readings = vec![measured];
-    for _ in 1..RUNS {
-        let again = session("proc-one-reading.yml");
-        assert!(again.status.success(), "{}", stderr(&again));
-        let doc = document(&again);
+    let mut readings = Vec::new();
+    for _ in 0..RUNS {
+        let output = session("proc-one-reading.yml");
+        assert!(output.status.success(), "{}", stderr(&output));
+        let doc = document(&output);
         let event = &events(result(&doc, "descriptors"))[0];
-        readings.push(attr(event, "open").unwrap().as_u64().unwrap());
+        let comm = attr(event, "comm")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .expect("`comm` travels on every event");
+        assert_eq!(
+            comm, "python3",
+            "the single read of a launched program named `{comm}`, which is this tool and not \
+             the program it launched: {event}"
+        );
+        let measured = attr(event, "open").unwrap().as_u64().unwrap();
+        assert!(
+            measured <= held,
+            "the read lands at the program's first instant, so it cannot find more than the \
+             {held} descriptors that program ever holds: {event}"
+        );
+        readings.push(measured);
     }
+
+    // And the answer is now specified rather than a race: five runs of one
+    // session against one program report the same count, give or take the one
+    // descriptor `python3 -c` opens and closes while it starts.
+    let (low, high) = (
+        *readings.iter().min().unwrap(),
+        *readings.iter().max().unwrap(),
+    );
     assert!(
-        readings.iter().any(|open| *open != held),
-        "DEFECT 1 IS FIXED: {RUNS} single reads of a launched target all found the {held} \
-         descriptors the program holds ({readings:?}). Delete this test and defect 1 of \
-         docs/scenarios/proc.md."
+        high - low <= 1,
+        "a snapshot of a launched program is meant to be a reading of one defined instant -- \
+         the exec -- and these five disagree: {readings:?}"
     );
 
-    // The same reading is the first point of every polled launch too, where it
-    // is merely the first of several -- which is why `proc-handles.yml` tells a
-    // reader to start from the second point rather than the first.
-    //
-    // `proc-sweep.yml` is not the file to show it in: its `comm =~ 'python'`
-    // filter removes the pre-exec reading, because that reading says `omn`.
-    // A filter written to select a program silently repairs this defect, and a
-    // session without one does not.
+    // The same wait is the first point of every polled launch too, where the
+    // reading used to be this tool's own three descriptors under the program's
+    // pid. `proc-handles.yml` is the file that shows it: `proc-sweep.yml`
+    // carries a `comm =~ 'python'` filter, which removed the pre-exec reading
+    // because that reading said `omn` -- so a session written to select a
+    // program repaired this defect and a session without one did not.
     let unfiltered = session("proc-handles.yml");
     assert!(unfiltered.status.success(), "{}", stderr(&unfiltered));
-    let points = emitted(result(&document(&unfiltered), "descriptors"), "timeline")["series"][0]
-        ["points"]
+    let doc = document(&unfiltered);
+    let points = emitted(self::result(&doc, "descriptors"), "timeline")["series"][0]["points"]
         .as_array()
         .expect("a series of readings")
         .clone();
-    assert_eq!(
-        points[0]["value"].as_f64().unwrap() as u64,
-        3,
-        "the first point is this tool's own three descriptors, not the program's {held}"
+    assert!(
+        points[0]["value"].as_f64().unwrap() as u64 <= held,
+        "the first point is the program at its first instant, not this tool's own table"
     );
     assert_eq!(points[1]["value"].as_f64().unwrap() as u64, held);
+
+    // And the filtered session now sees the same run as the unfiltered one:
+    // its `comm =~ 'python'` predicate has no pre-exec reading left to remove,
+    // so it drops nothing and the two sessions agree on how many readings
+    // there were.
+    let swept = document(&polled);
+    let filtered = self::result(&swept, "descriptors");
+    assert_eq!(
+        filtered["filtered"]["dropped"].as_u64(),
+        Some(0),
+        "a filter that selects the program used to repair this defect by removing the reading \
+         that said `omn`, which made the defect intermittent across sessions that look \
+         equivalent: {}",
+        filtered["filtered"]
+    );
+    assert_eq!(
+        filtered["filtered"]["kept"].as_u64(),
+        Some(points.len() as u64),
+        "the filtered and unfiltered sessions poll the same program at the same rate"
+    );
 }
 
-/// Defect 2: the last reading of a launched target reports a zombie as holding
-/// nothing.
+/// Defect 2, fixed: the run no longer ends on a zombie's empty directory.
 ///
 /// A process that has exited but has not been reaped still has a
-/// `/proc/<pid>/fd`, and it is an empty directory that reads successfully --
-/// neither the ESRCH nor the ENOENT the collector treats as "the target left".
-/// So the run takes one more sample and records zero open descriptors with
-/// full headroom, no loss, and a clean bill of health, for a program that
-/// never closed a handle in its life. `min` and `last` of every polled launch
-/// are that zero.
+/// `/proc/<pid>/fd`, and it is an empty directory that reads *successfully* --
+/// neither the ESRCH nor the ENOENT `classify()` treats as "the target left".
+/// So the run took one more sample and recorded zero open descriptors, with
+/// the whole limit as headroom, no loss and a clean bill of health, for a
+/// program that never closed a handle in its life. `min` and `last` of every
+/// polled launch were that zero, and only `max` was usable.
+///
+/// The collector now reads the process's state and reports nothing for a
+/// target that has departed, so `last` is the last reading the program was
+/// alive for -- which is the number a reader takes off a `summary` to answer
+/// "how many was it holding when it finished".
 #[test]
-fn defect_2_the_last_reading_of_a_launched_target_reports_a_zombie_as_empty() {
+fn defect_2_the_last_reading_of_a_launched_target_is_one_the_program_was_alive_for() {
     needs_python!();
     let output = session("proc-exit.yml");
     assert!(output.status.success(), "{}", stderr(&output));
@@ -797,26 +826,64 @@ fn defect_2_the_last_reading_of_a_launched_target_reports_a_zombie_as_empty() {
 
     assert_eq!(
         summary["last"].as_f64().unwrap() as u64,
-        0,
-        "DEFECT 2 IS FIXED: the series no longer ends on a zombie's empty directory. \
-         Delete this test and defect 2 of docs/scenarios/proc.md."
+        held,
+        "the program held {held} descriptors to the end and never closed one, so the last \
+         reading is {held}; a zero there is a departed process reported as an empty one"
     );
-    assert_eq!(summary["min"].as_f64().unwrap() as u64, 0);
     assert_eq!(
         summary["max"].as_f64().unwrap() as u64,
         held,
-        "the peak is still right, which is why only `max` can be trusted today"
+        "the peak was always right; it is the rest of the series that was not"
+    );
+    assert!(
+        summary["min"].as_f64().unwrap() as u64 > 0,
+        "no reading of a live process is zero open descriptors: it holds at least its own \
+         standard streams"
     );
 
-    // And the reading looks entirely healthy: full headroom, no loss reported.
-    let last = events(result).last().unwrap().clone();
-    assert_eq!(attr(&last, "open").unwrap(), 0);
-    assert_eq!(
-        attr(&last, "headroom").unwrap(),
-        attr(&last, "limit").unwrap(),
-        "a departed process reads as one with its whole limit available"
+    // No event of the run describes the departed process, and the run ends for
+    // the reason the runner knows -- which includes the exit status.
+    for event in events(result) {
+        assert!(
+            attr(&event, "open").unwrap().as_u64().unwrap() > 0,
+            "a reading of zero open descriptors is a zombie reported as a living process: \
+             {event}"
+        );
+    }
+    assert!(
+        result["stopped_because"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exited")),
+        "the run still ends when the program does: {}",
+        result["stopped_because"]
     );
     assert_eq!(result["losses"]["failed_reads"], 0);
+
+    // `proc.threads` had the same shape and a worse tell: a zombie's `status`
+    // keeps its `Threads:` line, so the extra reading said one thread rather
+    // than zero, which is indistinguishable by value from the single-threaded
+    // program that was there a moment earlier. What it is distinguishable by
+    // is the count: the two requests share one window and one target, so the
+    // round that read the zombie added a point to both series, and the round
+    // that no longer happens removes it from both.
+    let threads = self::result(&doc, "threads");
+    assert_eq!(
+        emitted(threads, "timeline")["series"][0]["points"]
+            .as_array()
+            .map(Vec::len),
+        emitted(result, "timeline")["series"][0]["points"]
+            .as_array()
+            .map(Vec::len),
+        "both requests are driven over one window against one process, so a round that reads \
+         the departed target adds a point to both series or to neither"
+    );
+    assert_eq!(
+        emitted(threads, "summary")["series"][0]["last"]
+            .as_f64()
+            .unwrap() as u64,
+        1,
+        "the workload is single-threaded from its first instant to its last"
+    );
 }
 
 /// Every request in a session keeps the rate it asked for.

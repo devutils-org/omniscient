@@ -73,8 +73,14 @@ struct Counters {
     fault_fallback: Option<u64>,
     collapse_alloc: Option<u64>,
     split: Option<u64>,
-    /// How many huge pages are mapped right now -- a level, not a flow.
+    /// How many huge pages are fully mapped right now -- a level, not a flow.
+    /// This is the number `/proc/meminfo` publishes as `AnonHugePages`, and
+    /// both backends have to reach it or say they cannot.
     resident: Option<u64>,
+    /// Huge pages that exist but have had subpages unmapped. Only the per-size
+    /// statistics count them, and they are the whole of the difference between
+    /// what the two backends used to call `resident_huge_pages`.
+    partially_mapped: Option<u64>,
 }
 
 impl Counters {
@@ -209,13 +215,31 @@ impl Thp {
                 .ok()
                 .and_then(|text| text.trim().parse::<u64>().ok())
         };
+        // `nr_anon` counts every anonymous huge page of this size, whether it
+        // is still whole or has had subpages unmapped;
+        // `nr_anon_transparent_hugepages` in /proc/vmstat -- which is what
+        // `/proc/meminfo` reports as `AnonHugePages` -- counts only the whole
+        // ones. Publishing the first under the same attribute name as the
+        // second made the two backends 8 % apart on this machine and said
+        // nothing about it. The subtraction is the kernel's own arithmetic:
+        // 412 - 30 = 382 here, against vmstat's 382.
+        let allocated = field("nr_anon");
+        let partially_mapped = field("nr_anon_partially_mapped");
         let counters = Counters {
             ts_ns: monotonic_ns(),
             fault_alloc: field("anon_fault_alloc"),
             fault_fallback: field("anon_fault_fallback"),
             collapse_alloc: field("collapse_alloc"),
             split: field("split"),
-            resident: field("nr_anon"),
+            // Absent rather than approximated: a kernel that publishes
+            // `nr_anon` without `nr_anon_partially_mapped` cannot say how many
+            // are whole, and answering with the larger count would be the
+            // defect again under a different name.
+            resident: match (allocated, partially_mapped) {
+                (Some(allocated), Some(partial)) => Some(allocated.saturating_sub(partial)),
+                _ => None,
+            },
+            partially_mapped,
         };
         if counters.promotions().is_none() {
             return Err(SampleError::Transient(format!(
@@ -238,6 +262,9 @@ impl Thp {
             collapse_alloc: stat_field(&fields, "thp_collapse_alloc"),
             split: stat_field(&fields, "thp_split_page"),
             resident: stat_field(&fields, "nr_anon_transparent_hugepages"),
+            // /proc/vmstat has no equivalent, and this backend declares that
+            // it sees less than the other rather than guessing.
+            partially_mapped: None,
         };
         if counters.promotions().is_none() {
             return Err(SampleError::Transient(format!(
@@ -279,6 +306,13 @@ impl Thp {
                     resident * self.hpage_bytes,
                 ));
             }
+        }
+        // Carried beside the comparable number rather than folded into it: a
+        // partially mapped huge page is still a huge page the machine cannot
+        // hand back, and only one of the two backends can see how many there
+        // are.
+        if let Some(partially_mapped) = counters.partially_mapped {
+            attrs.push(Attr::uint("partially_mapped_huge_pages", partially_mapped));
         }
         attrs.extend(self.mode_attrs());
         attrs
@@ -431,6 +465,74 @@ mod tests {
         let stats = root.join("hugepages-2048kB/stats");
         std::fs::write(stats.join("anon_fault_alloc"), format!("{fault_alloc}\n")).unwrap();
         std::fs::write(stats.join("collapse_alloc"), format!("{collapse_alloc}\n")).unwrap();
+    }
+
+    /// The resident count the two backends both answer with is the *fully
+    /// mapped* huge pages, which is what `/proc/vmstat` and `/proc/meminfo`
+    /// publish. `nr_anon` counts the partially mapped ones too, and reporting
+    /// it under the same name as the vmstat counter is what made the two
+    /// backends 8 % apart with nothing saying so.
+    #[test]
+    fn the_per_size_statistics_report_whole_huge_pages_and_the_broken_ones_apart() {
+        let root = tree("resident");
+        write_stats(&root, 1, 1);
+        let stats = root.join("hugepages-2048kB/stats");
+        std::fs::write(stats.join("nr_anon"), "412\n").unwrap();
+        std::fs::write(stats.join("nr_anon_partially_mapped"), "30\n").unwrap();
+
+        let mut collector = Thp::new(
+            Source::Sys,
+            Mode::Snapshot,
+            2 * 1024 * 1024,
+            std::time::Duration::ZERO,
+        )
+        .rooted(root.clone(), PathBuf::from(VMSTAT));
+        let events = collector.sample(0).expect("one read");
+        let event = &events[0];
+        assert_eq!(
+            event.attr("resident_huge_pages").unwrap().as_f64(),
+            Some(382.0),
+            "412 huge pages of which 30 are partially mapped is 382 whole ones, which is what \
+             /proc/vmstat's nr_anon_transparent_hugepages counts"
+        );
+        assert_eq!(
+            event.attr("partially_mapped_huge_pages").unwrap().as_f64(),
+            Some(30.0),
+            "and the other 30 travel beside it rather than inside it"
+        );
+        assert_eq!(
+            event.attr("resident_huge_bytes").unwrap().as_f64(),
+            Some(382.0 * 2.0 * 1024.0 * 1024.0)
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A kernel that counts huge pages without counting the partially mapped
+    /// ones cannot say how many are whole. Answering with `nr_anon` there
+    /// would be the same defect under a different kernel version, so the
+    /// attribute is absent -- the rule this collector already follows for
+    /// every counter a kernel does not publish.
+    #[test]
+    fn a_kernel_that_does_not_count_broken_huge_pages_reports_no_resident_count() {
+        let root = tree("no-partial");
+        write_stats(&root, 1, 1);
+        std::fs::write(root.join("hugepages-2048kB/stats/nr_anon"), "412\n").unwrap();
+
+        let mut collector = Thp::new(
+            Source::Sys,
+            Mode::Snapshot,
+            2 * 1024 * 1024,
+            std::time::Duration::ZERO,
+        )
+        .rooted(root.clone(), PathBuf::from(VMSTAT));
+        let events = collector.sample(0).expect("one read");
+        assert!(
+            events[0].attr("resident_huge_pages").is_none(),
+            "412 is every huge page, not the whole ones: {:?}",
+            events[0]
+        );
+        assert!(events[0].attr("resident_huge_bytes").is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

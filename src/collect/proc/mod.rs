@@ -1,5 +1,6 @@
 //! Collectors for the `proc` family.
 
+mod lifecycle;
 mod status;
 
 use super::Factory;

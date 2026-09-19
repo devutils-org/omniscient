@@ -480,14 +480,23 @@ whole of `tests/scenario_mem.rs` is 26 tests in 5.3 s.
 
 ## Defects found
 
-Seven. Each is reproducible from a session in this repository, each is pinned by
-a test that fails when it changes in either direction, and each test's failure
-message says what to do when it is fixed. None of them was worked around.
+Seven, of which **three are fixed** — D1, D2 and D6, by stream E of the fifth
+wave. Each entry keeps its reproduction: the session, the output it produced and
+the mechanism behind it, because a defect whose record is deleted is one nobody
+can tell was ever there. What changed is the last line of each, which now names
+the scenario that asserts the new behaviour and fails against the build that had
+the defect. `docs/fixes/mem.md` has what became of each.
 
-### D1 — `mem.rss` through `fs:proc:statm` invents a zero for a process that has gone
+Each is reproducible from a session in this repository, each is pinned by a test
+that fails when it changes in either direction, and none of them was worked
+around.
 
-**Class B.** `examples/mem-backend-agreement.yml`, or the two-request session
-below.
+### D1 — `mem.rss` through `fs:proc:statm` invented a zero for a process that had gone
+
+**Class B. Fixed** — `src/collect/mem/footprint.rs`.
+
+Reproduced by `examples/mem-backend-agreement.yml`, or by the two-request
+session below.
 
 ```yaml
 format: text
@@ -543,11 +552,25 @@ measurement.
 distinction has to be made on the content. An all-zero `statm` for a process
 that had a resident set a tick ago is a target that has gone.
 
-Pinned by `the_two_roads_to_a_footprint_arrive_at_the_same_number`.
+**The fix.** The distinction cannot be made on the open, which succeeds, so it
+is made on the content. The first field of `statm` is the total size of the
+address space, and a process that has one always has a non-zero total, so an
+all-zero `statm` is a target whose address space is gone — reported as
+`SampleError::TargetGone` with that reason. No history is needed, which matters:
+"zero where there was something a tick ago" would have been wrong for the first
+reading of any run.
 
-### D2 — the shim stops counting its drops as soon as it is dropping
+Asserted by `the_two_roads_to_a_footprint_arrive_at_the_same_number`, which now
+checks that no reading of a live process is zero bytes and that both roads
+publish the same number of points, and by
+`a_process_with_no_address_space_left_ends_the_run_rather_than_reading_zero` in
+`src/collect/mem/footprint.rs`, which makes a zombie rather than describing one.
 
-**Class C.** `examples/mem-allocation-storm.yml`. The workload makes exactly
+### D2 — the shim stopped counting its drops as soon as it was dropping
+
+**Class C. Fixed** — `shim/src/lib.rs`.
+
+Reproduced by `examples/mem-allocation-storm.yml`, whose workload makes exactly
 200 000 allocations of 4001 bytes.
 
 ```
@@ -704,9 +727,11 @@ Pinned, per group of sources, by the four
 `every_mode_and_emit_of_the_*_sources_is_served_or_refused_by_the_right_code`
 tests.
 
-### D6 — the two `mem.thp` backends disagree about resident huge pages, and nothing says so
+### D6 — the two `mem.thp` backends disagreed about resident huge pages, and nothing said so
 
-**Class B.** `examples/mem-machine-counters.yml`, the two `snapshot` requests.
+**Class B. Fixed** — `src/collect/mem/thp.rs`.
+
+Reproduced by `examples/mem-machine-counters.yml`, the two `snapshot` requests.
 
 ```
 fs:sys   :: promotions_since_boot 248885, resident_huge_pages 401, thp_mode 'always'
@@ -733,9 +758,26 @@ a caveat nobody wrote down". Either the fallback should report the same number,
 or `nr_anon_partially_mapped` should travel beside it, or the caveat should be
 written.
 
-Pinned by `both_huge_page_backends_read_the_same_promotion_counter`, which
-asserts the direction of the difference and says in its message that an equality
-means one of them was corrected.
+**The fix** takes the first two of the three ways out. `fs:sys` now subtracts
+`nr_anon_partially_mapped`, so both backends answer the same question under the
+same name — the fully mapped huge pages, which is what `/proc/meminfo` publishes
+as `AnonHugePages`; and what only `fs:sys` can see travels beside it as
+`partially_mapped_huge_pages` rather than inside it. A kernel that publishes
+`nr_anon` without `nr_anon_partially_mapped` cannot say how many are whole, so
+there the attribute is absent rather than approximated.
+
+Asserted by `both_huge_page_backends_read_the_same_promotion_counter`, which had
+to change shape as well as content. A resident count is a **level**, and
+`mem-machine-counters.yml` spreads its reads across half a second, over which
+this machine promotes and splits huge pages the whole time — under the full
+suite the two backends were six pages apart on movement alone. The comparison
+now runs in a session of its own in which every request is a `snapshot`, so the
+two reads are one round apart, and it is cross-checked against `/proc/meminfo`
+read either side of the run. A round apart is still not an instant on a loaded
+machine, so the session is run five times and the closest pair is the one
+asserted on: the drift is noise either way, and the defect was a bias -- the
+same 8 % in the same direction every time -- which can never produce a close
+pair.
 
 ### D7 — a sampling request answered with a single poll, reported as a success
 
@@ -797,9 +839,11 @@ the request it could not honour.
 
 Three things that are not `mem`'s to fix and that this stream found:
 
-- **D2 is a one-line fix in `shim/src/lib.rs` and it should go first.** It
-  breaks a standing invariant, it makes every `mem.heap.*` measurement of a busy
-  program wrong by an unknown amount, and it masks the loss paths underneath it.
+- **D2 was a fix in `shim/src/lib.rs` and it did go first.** It broke a standing
+  invariant, it made every `mem.heap.*` measurement of a busy program wrong by
+  an unknown amount, and it masked a second loss path underneath it -- the
+  backlog the program ends holding, which the entry above now records. Both
+  halves are in.
 - **D4 and D5 are the refusal vocabulary, not this family.** `UnsupportedTarget`
   wants a `reason` field; a collector refusing a mode it has not implemented
   wants `CollectError::NoCollector` rather than `Start`, so that it exits 3.

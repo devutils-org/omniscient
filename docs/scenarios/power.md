@@ -323,10 +323,14 @@ sees transitions one at a time — is where that becomes real.
 
 ## Defects found
 
-Four, none worked around. Each is reproduced below with the session that shows
-it and the output it produced.
+Four, none worked around, of which **one is fixed** -- defect 1, by stream E of
+the fifth wave. Each is reproduced below with the session that shows it and the
+output it produced; the fixed one keeps its reproduction and names the scenario
+that now asserts what replaced it. `docs/fixes/mem.md` has what became of it.
 
-### 1. `power.energy -m count` is a series plus a zero, and the two backends disagree about what `count` means
+### 1. `power.energy -m count` was a series plus a zero, and the two backends disagreed about what `count` meant
+
+**Fixed** -- `src/collect/power/energy_pmu.rs`.
 
 `count` should be one total for the window. Through the `pmu` backend — the one
 the resolver prefers, because it is the one that works without root — it is not:
@@ -367,7 +371,33 @@ Consequences a reader meets: `examples/power-energy.yml` used to recommend
 why. And a counted window rounds up to the next default poll interval, so
 `-d 600ms` observes 1.0002 s.
 
-Not fixed here: `src/` belongs to no scenario stream.
+**The fix.** `EnergyPmu` now follows the same convention as `EnergySysfs`: the
+baseline is taken in `start` once the counters are enabled, `sample` returns
+nothing in `count` mode, and `stop` emits one event per domain for the whole
+window. Every energy event from this backend also carries `interval_ns` now --
+the window its difference covers, which the sysfs backend has always carried --
+so a reader can divide by it without assuming the tick was the one asked for.
+
+`-m count -e summary -d 3s` reported `n=4 min 0.000 uJ mean 51.11 J last
+0.000 uJ` and now reports `n=1 min 270.80 J mean 270.80 J max 270.80 J last
+270.80 J` for a busier three seconds, with `rate` agreeing on the same run.
+
+Asserted by `a_counted_energy_window_is_one_total_and_not_a_series_with_a_zero`,
+which checks the shape, checks that nothing in it is the closing read's zero,
+and compares the counted window against a polled series over the same window:
+one monotone hardware counter differenced once and differenced ten times covers
+the same joules. Both requests share one session, because two consecutive
+two-second windows on a machine running the rest of the suite are two different
+machines -- measured at 145 W and 102 W, with nothing wrong at all. The `fs:sys`
+half of that comparison skips by naming root, because
+`/sys/class/powercap/.../energy_uj` is root-only here.
+
+**The last consequence is not fixed and is not this collector's.** A counted
+window still rounds up to the runner's tick, because the runner checks its
+deadline once per round and takes the interval from the first request's mode.
+Giving a counted collector a short `tick()` would drag every other request in
+the session down with it, which is defect 4 below made worse; it is written up
+in `docs/open-findings.md` for the stream that owns the runner.
 
 ### 2. The three refusals are two exit codes
 
@@ -550,6 +580,12 @@ Both say so in their headers, because a reader who copies a session and adds a
 request to it needs to know.
 
 ### 5. Not this family's, but this wave will meet it: a unit test that fails under load
+
+**Still open, and reproduced again by the fifth wave**: one failure in eight
+runs of `cargo test --lib` alone, on a machine building the rest of that wave.
+The precise cause and the one-line change wanted are written up in
+`docs/open-findings.md` under "Needs from another stream"; `src/collect/mod.rs`
+belongs to the runner stream.
 
 `collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
 forks a child, spins a collector for 200 ms and refuses to conclude anything

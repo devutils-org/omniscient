@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::lifecycle;
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -54,6 +55,8 @@ impl Prepared for Prepare {
             id: CollectorId::new(format!("{}/fs:proc", self.0.source())),
             counted: self.0,
             pid,
+            first_read: true,
+            departed: false,
             losses: Losses::default(),
         }))
     }
@@ -63,6 +66,17 @@ pub struct StatusCollector {
     id: CollectorId,
     counted: Counted,
     pid: i32,
+    /// Cleared by the first read, which is the one that has to wait for a
+    /// launched target to become the program it was asked to be.
+    first_read: bool,
+    /// Set by the round that first found the target departed.
+    ///
+    /// That round reports nothing, which is the fix, but it does not end the
+    /// run either: the runner asks its own stop condition once the round is
+    /// over, and for a launched program that condition has the better reason
+    /// -- it knows the exit status. Only a target nothing else is watching,
+    /// which is every `--pid` run, reaches the round after and is ended here.
+    departed: bool,
     losses: Losses,
 }
 
@@ -153,6 +167,38 @@ impl Collector for StatusCollector {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        // A launched target is released from its gate and read immediately, and
+        // until it reaches its `execve` the pid is right and everything the pid
+        // holds is this tool's. Counting that is not a measurement of the
+        // program at all, and in `snapshot` mode it is the only reading there
+        // is. So the first read waits for the program to exist.
+        if self.first_read {
+            self.first_read = false;
+            if lifecycle::wait_for_exec(self.pid).is_none() {
+                self.losses.note(format!(
+                    "process {} was still running this tool's own image when the run began, and \
+                     did not reach its `execve` in time; this reading may describe the tool \
+                     rather than the program",
+                    self.pid
+                ));
+            }
+        }
+
+        // A process that has exited and not been reaped keeps a readable
+        // `/proc/<pid>`: `fd` is an empty directory and `status` still says one
+        // thread. Neither read fails, so without this the run took one more
+        // sample and recorded a program that never closed a handle in its life
+        // as holding nothing -- zero open descriptors, the whole limit as
+        // headroom, and a clean bill of health.
+        match lifecycle::departed(self.pid) {
+            Some(reason) if self.departed => return Err(SampleError::TargetGone(reason)),
+            Some(_) => {
+                self.departed = true;
+                return Ok(Vec::new());
+            }
+            None => {}
+        }
+
         let mut attrs = Vec::new();
         match self.counted {
             Counted::Descriptors => {
@@ -285,6 +331,39 @@ mod tests {
             Err(SampleError::TargetGone(_)) => {}
             other => panic!("expected the run to end, got {other:?}"),
         }
+    }
+
+    /// The first reading of a launched program is of the program.
+    ///
+    /// The ground truth is the one thing procfs cannot get wrong about a pid:
+    /// which image it is running. A gated child is a fork of this test binary
+    /// until its `execve`, so a read taken the microsecond after the gate opens
+    /// used to report this binary's own command name and its own descriptors
+    /// under the launched program's pid. `/bin/sleep` is launched because it is
+    /// nothing like the suite: if `comm` says anything but `sleep`, the reading
+    /// is not about the program.
+    #[test]
+    fn the_first_reading_of_a_launched_program_is_of_the_program() {
+        let mut child =
+            crate::collect::launch::gated(&["/bin/sleep".to_owned(), "5".to_owned()], &[])
+                .expect("fork");
+        let mut collector = Box::new(Prepare(Counted::Descriptors))
+            .attach(&Target::Pid(vec![child.pid()]))
+            .expect("a pid target");
+
+        // Exactly what the runner does: release, then read immediately.
+        child.release();
+        let events = collector.sample(0).expect("the child is alive");
+
+        let comm = events[0]
+            .attr("comm")
+            .expect("`comm` travels on every event")
+            .to_string();
+        assert_eq!(
+            comm, "sleep",
+            "the first reading named `{comm}`, which is this tool rather than the program it \
+             launched"
+        );
     }
 
     #[test]

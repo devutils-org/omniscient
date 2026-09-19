@@ -60,6 +60,31 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Runs a session that is not shipped as a file, from standard input.
+///
+/// `tests/cli.rs::the_shipped_examples_validate` requires every session in
+/// `examples/` to validate and to be worth running, which is right; a session
+/// written to pin one comparison is neither, and lives here.
+fn written_session(session: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(BINARY)
+        .args(["-f", "-", "--input-format", "yaml"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin is piped")
+        .write_all(session.as_bytes())
+        .expect("writing the session");
+    child.wait_with_output().expect("omn should finish")
+}
+
 fn example(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
@@ -1117,6 +1142,194 @@ fn every_session_this_family_ships_validates_and_then_runs_or_refuses_by_name() 
 // ---------------------------------------------------------------------------
 // Class B -- the backend comparison: do two roads to the same number agree?
 // ---------------------------------------------------------------------------
+
+/// Defect 1, fixed: a counted energy window is one total, and it means the
+/// same thing through either backend of the chain.
+///
+/// `count` is "one number for the window". Through `pmu` it was not: the
+/// collector emitted a per-interval delta whether or not the mode was `count`,
+/// so a counted three-second window came back as a series at the runner's
+/// default poll interval, and `stop` then took a further closing read that
+/// covered microseconds and landed in it as a zero. A `summary` of that said
+/// the smallest interval was zero, the last was zero, and the mean was the
+/// window's energy divided by one event more than there were intervals --
+/// against a `rate` of the same window, which was right.
+///
+/// `EnergySysfs` already had the intended shape: nothing during the run, and
+/// one whole-window delta from a baseline taken in `start`. The same request
+/// meant two different things through the two backends of one chain, which is
+/// exactly what the backend comparison exists to find.
+///
+/// The ground truth here is the kernel's own counter read twice over. A RAPL
+/// domain is monotone, so the energy of a window is a difference and cannot
+/// depend on how many times it was looked at: the counted total of a window
+/// and the sum of a polled series over a window of the same length are the
+/// same measurement of the same machine, and they are compared as such.
+#[test]
+fn a_counted_energy_window_is_one_total_and_not_a_series_with_a_zero() {
+    if !usable("power.energy") {
+        eprintln!("skipped: this machine publishes no RAPL domain at all");
+        return;
+    }
+    let _alone = alone();
+
+    let counted = run(&[
+        "power.energy",
+        "--system",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "-d",
+        "2s",
+        "--backend",
+        "force:pmu",
+        "--format",
+        "json",
+    ]);
+    assert!(counted.status.success(), "{}", stderr(&counted));
+    let document: serde_json::Value = serde_json::from_str(&stdout(&counted)).expect("a json run");
+    let result = &document["results"][0];
+    let series = &result["outputs"][0]["series"][0];
+
+    // One event per domain, and this machine's chain opens one. A counted
+    // window that is a series is the defect: four events for three seconds,
+    // three of them intervals and the fourth a microsecond.
+    let events = result["events_seen"].as_u64().expect("a count of events");
+    assert_eq!(
+        events, 1,
+        "`count` asks for one number for the window and got {events}: {series}"
+    );
+
+    // And no part of it is the closing read's zero. min, max, mean and last
+    // are one value because there is one value.
+    for field in ["min", "max", "mean", "last"] {
+        let value = series[field].as_f64().expect("a number");
+        assert!(
+            value > 0.0,
+            "`{field}` of a counted window is {value} J; a zero there is a closing read that \
+             covered microseconds"
+        );
+        assert!(
+            (value - series["last"].as_f64().unwrap()).abs() < 1e-9,
+            "one event makes every one of these the same number: {series}"
+        );
+    }
+
+    // The same window asked for as a rate has to agree with it, which is the
+    // comparison the defect was found by: `rate` was right and `summary` was
+    // not, on one run of one machine.
+    let total = series["last"].as_f64().unwrap();
+    let window = result["observed_ns"].as_f64().expect("the window") / 1e9;
+    let watts = total / window;
+    assert!(
+        (0.1..2000.0).contains(&watts),
+        "a package drawing {watts} W over {window} s means this is not an energy measurement"
+    );
+
+    // Ground truth: the same counter, over *the same* window, read as a series
+    // instead. A monotone hardware counter differenced once and differenced
+    // ten times covers the same joules, and the only way to hold the load
+    // still enough for that to be a comparison is to put both requests in one
+    // session -- two consecutive two-second windows on a machine running the
+    // rest of this suite are two different machines, measured here at 145 W
+    // and 102 W with nothing wrong at all.
+    //
+    // The polled request leads, because a session is driven at its first
+    // request's pace and a counted one asks for none: `examples/power-energy.yml`
+    // is written the same way and says why. Defect 4.
+    let together = written_session(
+        "\
+name: one window, counted and polled
+duration: 2s
+format: json
+
+requests:
+  - label: polled
+    source: power.energy
+    backend: force:pmu
+    target: system
+    mode: poll@200ms
+    emit: [timeline]
+
+  - label: counted
+    source: power.energy
+    backend: force:pmu
+    target: system
+    mode: count
+    emit: [summary]
+",
+    );
+    assert!(together.status.success(), "{}", stderr(&together));
+    let together: serde_json::Value = serde_json::from_str(&stdout(&together)).expect("json");
+    let results = together["results"].as_array().expect("two results");
+    let counted_total = results[1]["outputs"][0]["series"][0]["last"]
+        .as_f64()
+        .expect("the counted window is one number");
+    let counted_window = results[1]["observed_ns"].as_f64().expect("the window") / 1e9;
+
+    let points = results[0]["outputs"][0]["series"][0]["points"]
+        .as_array()
+        .expect("a polled series")
+        .clone();
+    assert!(
+        points.len() >= 5,
+        "a two-second window polled every 200 ms is about ten intervals, and {} cannot be \
+         compared with anything",
+        points.len()
+    );
+    // Point `i` carries the joules of the interval that ended at its offset,
+    // so the points after the first cover exactly the span between the first
+    // offset and the last -- whatever spacing the runner actually used.
+    let joules: f64 = points[1..]
+        .iter()
+        .map(|point| point["value"].as_f64().unwrap_or_default())
+        .sum();
+    let span = (points[points.len() - 1]["offset_ns"].as_f64().unwrap()
+        - points[0]["offset_ns"].as_f64().unwrap())
+        / 1e9;
+    let polled_watts = joules / span;
+    let counted_watts = counted_total / counted_window;
+    let apart = (counted_watts - polled_watts).abs() / counted_watts.max(polled_watts);
+    assert!(
+        apart < 0.15,
+        "one window of one machine says {counted_watts:.1} W counted and {polled_watts:.1} W \
+         polled. These are one counter differenced two ways over the same seconds"
+    );
+
+    // The other half of the defect: the two backends of one chain have to mean
+    // the same thing by `count`. `fs:sys` is root-only on this kernel, so what
+    // can be checked here is that it is refused for that reason rather than
+    // answering with a different shape.
+    let through_sysfs = run(&[
+        "power.energy",
+        "--system",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "-d",
+        "300ms",
+        "--backend",
+        "force:fs:sys",
+        "--format",
+        "json",
+    ]);
+    if !through_sysfs.status.success() {
+        eprintln!(
+            "skipped the backend half: /sys/class/powercap is root-only on this kernel, so \
+             only `pmu` can be counted here. Run this suite as root to compare the shapes"
+        );
+        return;
+    }
+    let sysfs: serde_json::Value =
+        serde_json::from_str(&stdout(&through_sysfs)).expect("a json run");
+    assert_eq!(
+        sysfs["results"][0]["events_seen"].as_u64(),
+        Some(1),
+        "`-m count` means one number for the window through either road of this chain"
+    );
+}
 
 /// `power.energy` is reachable two ways, and where both are open they have to
 /// agree.

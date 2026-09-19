@@ -58,6 +58,7 @@ impl Prepared for Prepare {
                 packages: package_leaders(),
                 opened: Vec::new(),
                 previous: BTreeMap::new(),
+                baseline: BTreeMap::new(),
                 losses: Losses::default(),
             })),
             other => Err(format!(
@@ -120,14 +121,98 @@ struct Opened {
     unit: String,
 }
 
+/// One reading of one domain's counter.
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    ticks: u64,
+    ts_ns: u64,
+}
+
 pub struct EnergyPmu {
     id: CollectorId,
     mode: Mode,
     packages: Vec<(u32, u32)>,
     opened: Vec<Opened>,
     /// Last raw reading per (package, domain), for the difference.
-    previous: BTreeMap<(u32, &'static str), u64>,
+    previous: BTreeMap<(u32, &'static str), Reading>,
+    /// The opening reading of each domain, kept only in `count` mode: a counted
+    /// window is one difference, taken from here to the closing read.
+    baseline: BTreeMap<(u32, &'static str), Reading>,
     losses: Losses,
+}
+
+impl EnergyPmu {
+    /// Reads every open domain once, timestamping the round rather than each
+    /// counter: a difference is only as good as the window it is divided by,
+    /// and four counters read in a microsecond share one instant.
+    fn read_all(&mut self) -> BTreeMap<(u32, &'static str), Reading> {
+        let ts_ns = monotonic_ns();
+        let mut readings = BTreeMap::new();
+        for opened in &self.opened {
+            let Ok(values) = opened.group.read() else {
+                self.losses.failed_reads += 1;
+                self.losses.note(format!(
+                    "the `{}` energy counter of package {} could not be read",
+                    opened.domain, opened.package
+                ));
+                continue;
+            };
+            let Some(value) = values.first() else {
+                continue;
+            };
+            readings.insert(
+                (opened.package, opened.domain),
+                Reading {
+                    ticks: value.value,
+                    ts_ns,
+                },
+            );
+        }
+        readings
+    }
+
+    /// The energy between two readings of one domain, or nothing and a loss.
+    fn delta_event(
+        id: &CollectorId,
+        losses: &mut Losses,
+        opened: &Opened,
+        before: Reading,
+        after: Reading,
+        seq: u64,
+    ) -> Option<Event> {
+        // The counter wraps; the kernel hands back a 64-bit accumulation, so a
+        // decrease means the event was re-opened rather than that energy was
+        // returned.
+        if after.ticks < before.ticks {
+            losses.failed_reads += 1;
+            losses.note(format!(
+                "the `{}` counter of package {} went backwards, so that interval is not measured",
+                opened.domain, opened.package
+            ));
+            return None;
+        }
+        let ticks = after.ticks - before.ticks;
+        // The window each difference covers, so that a reader can divide by it
+        // without assuming the tick was the one requested. The sysfs backend
+        // has always carried it; the two agree now.
+        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
+        Some(Event {
+            ts_ns: after.ts_ns,
+            ts_err_ns: 0,
+            kind: "power.energy".to_owned(),
+            keys: Vec::new(),
+            attrs: vec![
+                Attr::float("joules", ticks as f64 * opened.scale),
+                Attr::text("domain", opened.label),
+                Attr::uint("package", opened.package as u64),
+                Attr::uint("ticks", ticks),
+                Attr::uint("interval_ns", interval_ns),
+                Attr::text("unit", opened.unit.clone()),
+            ],
+            collector_id: id.clone(),
+            seq,
+        })
+    }
 }
 
 impl Collector for EnergyPmu {
@@ -172,62 +257,43 @@ impl Collector for EnergyPmu {
                  refuses to open one; check /proc/sys/kernel/perf_event_paranoid"
             ));
         }
+
+        // A counted window is one difference over the whole run, and it starts
+        // here -- the same convention `EnergySysfs` follows, so that `-m count`
+        // means the same thing through either road of one chain.
+        if self.mode == Mode::Count {
+            self.baseline = self.read_all();
+        }
         Ok(())
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let ts_ns = monotonic_ns();
+        // In `count` mode there is no series: the run's answer is the one
+        // difference `stop` takes. Emitting a per-interval delta here is what
+        // turned a counted three-second window into four events, of which the
+        // last covered microseconds and read as zero energy.
+        if self.mode == Mode::Count {
+            return Ok(Vec::new());
+        }
+
+        let readings = self.read_all();
         let mut events = Vec::new();
         let mut index = seq;
-
         for opened in &self.opened {
-            let Ok(readings) = opened.group.read() else {
-                self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the `{}` energy counter of package {} could not be read",
-                    opened.domain, opened.package
-                ));
-                continue;
-            };
-            let Some(reading) = readings.first() else {
-                continue;
-            };
-
             let key = (opened.package, opened.domain);
-            let Some(previous) = self.previous.insert(key, reading.value) else {
+            let Some(reading) = readings.get(&key).copied() else {
+                continue;
+            };
+            let Some(previous) = self.previous.insert(key, reading) else {
                 // A counter's first reading is a baseline, not a measurement.
                 continue;
             };
-            // The counter wraps; the kernel hands back a 64-bit accumulation, so
-            // a decrease means the event was re-opened rather than that energy
-            // was returned.
-            if reading.value < previous {
-                self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the `{}` counter of package {} went backwards, so that interval is not \
-                     measured",
-                    opened.domain, opened.package
-                ));
-                continue;
+            if let Some(event) =
+                Self::delta_event(&self.id, &mut self.losses, opened, previous, reading, index)
+            {
+                events.push(event);
+                index += 1;
             }
-
-            let ticks = reading.value - previous;
-            events.push(Event {
-                ts_ns,
-                ts_err_ns: 0,
-                kind: "power.energy".to_owned(),
-                keys: Vec::new(),
-                attrs: vec![
-                    Attr::float("joules", ticks as f64 * opened.scale),
-                    Attr::text("domain", opened.label),
-                    Attr::uint("package", opened.package as u64),
-                    Attr::uint("ticks", ticks),
-                    Attr::text("unit", opened.unit.clone()),
-                ],
-                collector_id: self.id.clone(),
-                seq: index,
-            });
-            index += 1;
         }
         Ok(events)
     }
@@ -235,11 +301,29 @@ impl Collector for EnergyPmu {
     fn stop(&mut self) -> Vec<Event> {
         // A counted window's measurement *is* the closing read, so it is taken
         // here; a polled series already has its last interval from the tick
-        // before the stop.
-        if self.mode == Mode::Count {
-            return self.sample(u64::MAX / 2).unwrap_or_default();
+        // before the stop, and a further read there would cover microseconds
+        // and land in the series as a zero.
+        if self.mode != Mode::Count {
+            return Vec::new();
         }
-        Vec::new()
+        let closing = self.read_all();
+        let mut events = Vec::new();
+        let mut index = u64::MAX / 2;
+        for opened in &self.opened {
+            let key = (opened.package, opened.domain);
+            let (Some(baseline), Some(reading)) =
+                (self.baseline.get(&key).copied(), closing.get(&key).copied())
+            else {
+                continue;
+            };
+            if let Some(event) =
+                Self::delta_event(&self.id, &mut self.losses, opened, baseline, reading, index)
+            {
+                events.push(event);
+                index += 1;
+            }
+        }
+        events
     }
 
     fn losses(&self) -> Losses {
