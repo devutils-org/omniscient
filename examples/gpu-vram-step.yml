@@ -1,0 +1,34 @@
+# Video memory a program asked for, checked to the byte.
+#
+#   omn -f examples/gpu-vram-step.yml
+#
+# The workload creates a CUDA context, holds it for 400 ms with nothing
+# allocated, then allocates exactly 268435456 bytes -- 256 MiB -- and holds
+# that for 700 ms. The number is in `tests/gpu_workload.py`, which is what
+# makes it ground truth rather than an observation.
+#
+# What this session checks is the **step**, not the level. A CUDA context
+# reserves video memory before a single byte is asked for -- about 156 MiB on
+# the machine this was written against -- so the level says as much about the
+# driver as about the program. Both plateaus are inside this one run, so the
+# context's own reservation is in both and cancels: the series is flat, rises
+# once, and is flat again, and the rise is the allocation.
+#
+# Two figures come back from one read. `bytes` is this process's own video
+# memory, from the driver's process list; `device_used_bytes` is the whole
+# device's, this process included. They are never mixed into one series, and
+# they must step by the same amount -- 256 MiB arriving in a process is 256 MiB
+# arriving on the device. Where they disagree, something else on the machine
+# allocated during the window, and the run is not comparable to another.
+name: a video memory allocation, to the byte
+format: text
+
+requests:
+  - label: vram
+    source: gpu.mem
+    target: {launch: [python3, tests/gpu_workload.py, arena, "268435456", "400", "700"]}
+    mode: poll@50ms
+    # `raw` is the emit that carries the device figure riding beside the
+    # process one; `timeline` keeps only the series, which is half the check.
+    emit: [raw, timeline]
+    keys: [task]

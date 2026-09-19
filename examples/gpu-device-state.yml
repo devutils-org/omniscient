@@ -1,37 +1,56 @@
-# What the GPU is doing, for a bounded window.
+# What the device did while a kernel was resident on it.
 #
 #   omn -f examples/gpu-device-state.yml
+#   omn -f examples/gpu-device-state.yml --format json
 #
-# Three device figures over one window: the energy the board drew, the shader
-# clock it ran at, and the fraction of the time something was resident on it.
-# The target is the machine, because none of these three belongs to a process:
-# there is no per-process shader clock to report, and a GPU is shared with the
-# compositor, the browser and everything else holding a context.
+# Four device figures over one window -- the energy the board drew, the shader
+# clock it ran at, how hot it got, and the fraction of the window something was
+# executing -- taken while a workload keeps a compute kernel on the GPU from
+# one end of the window to the other.
 #
-# To measure a workload instead of a stretch of time, replace `system` with
-# `{launch: [./your-program]}`. The run then ends when the program does -- but
-# the numbers stay the device's, and every event says so in its `scope`
-# attribute. `gpu.mem` is the one source here that can say "this process",
-# because the driver keeps a per-process VRAM figure.
-name: gpu device state
+# None of these four belongs to a process, and the launched program does not
+# change that: it sets the window, not the scope. Every event says so in its
+# `scope` attribute, because a device figure taken while one program ran is not
+# that program's figure and the file has to say that without a reader who
+# remembers the command line.
+#
+# This session means nothing on its own. Read it against
+# `examples/gpu-idle-baseline.yml`, which is the same four figures over the same
+# kind of window with the GPU left alone: the pair is the measurement, and the
+# difference between them is the only part attributable to the workload.
+#
+# The workload is `tests/gpu_workload.py kernel`, which keeps launches queued
+# eight deep so the device never waits for the host between two of them. Its
+# chosen property is the one being checked: something was executing on the GPU
+# for the whole window.
+name: the device under a resident kernel
 format: text
-duration: 3s
 
 requests:
   - label: energy
     source: gpu.power
-    target: system
-    mode: poll@200ms
+    target: {launch: [python3, tests/gpu_workload.py, kernel, "1600"]}
+    mode: poll@100ms
     emit: [timeline, summary]
 
   - label: clock
     source: gpu.freq
-    target: system
-    mode: poll@200ms
+    target: {launch: [python3, tests/gpu_workload.py, kernel, "1600"]}
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: temperature
+    source: gpu.temp
+    target: {launch: [python3, tests/gpu_workload.py, kernel, "1600"]}
+    mode: poll@100ms
     emit: [summary]
 
+  # Polled at 100 ms and refreshed by the driver about once a second, so ten
+  # consecutive points here are one measurement repeated. The collector records
+  # that as a one-second `ts_err_ns` on every event; no emit this source
+  # declares can show it. `docs/scenarios/gpu.md` has the entry.
   - label: busy
     source: gpu.engine_busy
-    target: system
-    mode: poll@200ms
-    emit: [summary]
+    target: {launch: [python3, tests/gpu_workload.py, kernel, "1600"]}
+    mode: poll@100ms
+    emit: [timeline, summary]

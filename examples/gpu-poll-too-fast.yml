@@ -1,0 +1,33 @@
+# A poll asked to run faster than the driver can answer.
+#
+#   omn -f examples/gpu-poll-too-fast.yml
+#
+# Every `gpu` source this build collects goes through the NVIDIA management
+# library, and a call into it costs a fraction of a millisecond -- `gpu.mem`
+# most of all, because it walks the driver's process list on every read. Ask
+# for a reading every 200 microseconds and the reads themselves take longer
+# than the interval between them: the series stops having the spacing it
+# claims, and almost every tick is late.
+#
+# The point is not that this is a sensible request. It is that the run says so.
+# A collector that falls behind and reports a clean series produces a timeline
+# whose x axis is a fiction, and nothing downstream can tell. The loss block
+# here counts the late ticks and the text output leads with them.
+#
+# Compare with `examples/gpu-vram-step.yml`, which polls the same source at
+# 50 ms and reports no loss at all.
+#
+# Beware of one thing before reading the output: the reason attached to each
+# late tick embeds the nanoseconds that tick took, so a thousand late ticks
+# produce a thousand distinct reasons rather than one reason counted a thousand
+# times. `docs/scenarios/gpu.md` has the entry.
+name: a poll that cannot keep up
+format: text
+
+requests:
+  - label: too-fast
+    source: gpu.mem
+    target: {launch: [python3, tests/gpu_workload.py, idle, "300"]}
+    mode: poll@200us
+    emit: [summary]
+    keys: [task]

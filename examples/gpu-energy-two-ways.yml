@@ -1,0 +1,32 @@
+# Two roads to the same joules, and what they say about each other.
+#
+#   omn -f examples/gpu-energy-two-ways.yml --format json
+#
+# `gpu.power` reads one number and reports two. `joules` is the device's own
+# energy counter, rebased when the run starts, so it is a cumulative total and
+# the last point is the energy of the run. `watts` is the instantaneous board
+# draw at the moment of the read, which rides along beside the series under a
+# name that cannot be confused with it.
+#
+# Integrate the `watts` samples over the window and you have a second estimate
+# of the same energy. It does not agree with the first. On the machine this was
+# written against the sampled integral over-reads the counter by about a fifth,
+# on an idle device and on a busy one alike, and that is the catalog caveat made
+# visible: integrating a 100 ms poll is not an energy measurement, it is a
+# number with no error bar. When the two disagree, the counter is the one to
+# quote.
+#
+# The workload keeps a kernel resident so there is something to integrate. Read
+# `docs/scenarios/gpu.md` for the measured ratio and for what this scenario
+# cannot settle -- which of the two is right is not answerable from userspace.
+name: energy, counted and sampled
+format: text
+
+requests:
+  - label: energy
+    source: gpu.power
+    target: {launch: [python3, tests/gpu_workload.py, kernel, "1200"]}
+    mode: poll@100ms
+    # `raw` rather than `timeline`: the timeline carries the series alone, and
+    # this session is about the attribute travelling beside it.
+    emit: [raw, summary]
