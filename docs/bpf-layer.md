@@ -192,15 +192,23 @@ compiler would say:
 Named because a gap that is not written down gets rediscovered by each family
 in turn:
 
-- **kprobes, uprobes, fentry and USDT.** Only raw tracepoints attach today.
-  `io`, `net` and `runtime` need the others.
-- **Stack capture.** `bpf_get_stackid` and a stack map, which is groundwork G6
-  and lands with symbolization. The aggregation it needs now exists: the stack
-  id goes in the key of the hash map `offcpu.rs` already keeps, which is what
-  makes a profile of blocked time aggregate by stack rather than by task.
-- **A log2 bucket in an aggregation key.** The catalog asks four sources for a
-  histogram of a duration, and a map holding a total and a count cannot produce
-  one. Counting `(key, bucket) -> n` instead is about twenty more instructions
-  and is what makes `--emit hist` possible on a counted source at all.
+- **fentry and USDT.** `src/bpf/attach.rs` now has the classic tracepoint,
+  kprobe and uprobe paths, through `perf_event_open` and `PERF_EVENT_IOC_SET_BPF`.
+  What is still missing is BTF-typed attach (`BPF_PROG_TYPE_TRACING` with an
+  `attach_btf_id`) and reading a target's ELF notes to find its USDT probes.
+  `io`, `net` and `runtime` need both.
 - **Per-cpu ring consumption in parallel.** One ring, drained on the tick loop,
   is enough at the volumes seen so far. A syscall tracer will not agree.
+
+Two things this section used to list are here now, and are worth knowing about
+rather than rediscovering:
+
+- **Stack capture.** `bpf_get_stackid` into a `BPF_MAP_TYPE_STACK_TRACE`, with
+  the id in the *key* of the totals map so that two blocks of the same task from
+  different call sites are different entries. `src/bpf/offcpu.rs`.
+- **A log2 bucket in an aggregation key.** An unrolled six-step binary search,
+  thirty instructions and no loop; `LOG2_STEPS` in `src/bpf/runqlat.rs` is the
+  table. Counting `(key, bucket) -> n` is what makes `--emit hist` possible on
+  a source that never hands up one event per measurement -- and the emit layer
+  reads `emit::WEIGHT_ATTR` off each row so a bucket standing for four hundred
+  waits counts as four hundred.

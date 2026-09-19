@@ -288,6 +288,23 @@ fn check_mode(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>)
     ));
 }
 
+/// Whether this source's own collectors build the histogram in the kernel.
+///
+/// The validator runs before a backend is selected, so this asks the catalog
+/// rather than the resolution: a source every one of whose implemented backends
+/// buckets in the kernel cannot be told it is aggregating in userspace, whatever
+/// the resolver later picks.
+fn aggregates_in_kernel(entry: &Entry) -> bool {
+    // The mechanism, not the source: a `bpf:` backend with a collector is one
+    // that has a map to bucket into, and that is what makes the difference the
+    // warning is about.
+    entry
+        .backends
+        .iter()
+        .filter(|backend| crate::collect::implements(entry.id.as_str(), &backend.id))
+        .any(|backend| backend.id.starts_with("bpf:"))
+}
+
 fn check_emits(
     entry: &Entry,
     request: &Request,
@@ -336,8 +353,12 @@ fn check_emits(
             ));
             continue;
         }
+        // A source whose collector already buckets in the kernel is not
+        // waiting for a budget to move it there: `sched.runqlat` drains
+        // `(task, bucket) -> count` from a BPF map and always has. Saying
+        // otherwise sent a reader to a flag that would change nothing.
         if let (Emit::Hist(_), Mode::Trace) = (emit, request.mode) {
-            if request.budget.is_none() {
+            if request.budget.is_none() && !aggregates_in_kernel(entry) {
                 report.push(format!(
                     "`trace` with `{kind}` aggregates in userspace unless a budget lets the resolver \
                      move the histogram into the kernel; consider --budget"

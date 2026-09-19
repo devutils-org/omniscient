@@ -38,6 +38,23 @@ pub const STACK_ID_ATTR: &str = "stack_id";
 /// to aggregate than it cost to collect.
 pub const STACK_ATTR: &str = "stack";
 
+/// The attribute that says how many measurements an event stands for. Absent
+/// means one, which is what every event of a streaming collector is.
+///
+/// A collector that aggregates in the kernel does not hand up one event per
+/// measurement -- that is the cost it exists to avoid. `sched.runqlat` drains
+/// `(task, bucket) -> count` from a BPF map and publishes one event per row, so
+/// a row standing for four hundred waits must count as four hundred and not as
+/// one. Weighing every event as one made the buckets come out in the right
+/// places, each one unit high, which is a histogram of the *shape* of the
+/// kernel's map rather than of the workload.
+///
+/// Deliberately not `count`. That name is already the measured value of eleven
+/// sources, and for a `pmu` counter it holds billions: reading it as a weight
+/// would not be a rounding error. A name no collector used before this is also
+/// what makes the change invisible to every source that does not want it.
+pub const WEIGHT_ATTR: &str = "weight";
+
 /// Everything one request produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Results {
@@ -545,8 +562,8 @@ fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>,
     for (key, events) in grouped(events) {
         let total: f64 = events
             .iter()
-            .map(|event| value_of(event, attr))
-            .collect::<Result<Vec<_>, _>>()?
+            .map(|event| Ok(value_of(event, attr)? * weight_of(event)))
+            .collect::<Result<Vec<_>, EmitError>>()?
             .iter()
             .sum();
         rates.push(SeriesRate {
@@ -563,18 +580,33 @@ fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>,
 fn summary(events: &[Event], attr: &str) -> Result<Vec<SeriesSummary>, EmitError> {
     let mut summaries = Vec::new();
     for (key, events) in grouped(events) {
-        let values: Vec<f64> = events
+        let values: Vec<(f64, f64)> = events
             .iter()
-            .map(|event| value_of(event, attr))
-            .collect::<Result<_, _>>()?;
+            .map(|event| Ok((value_of(event, attr)?, weight_of(event))))
+            .collect::<Result<_, EmitError>>()?;
         if values.is_empty() {
             continue;
         }
-        let count = values.len();
-        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mean = values.iter().sum::<f64>() / count as f64;
-        let last = *values.last().expect("checked above");
+        // Weighted, because an event may stand for many measurements; see
+        // [`WEIGHT_ATTR`]. `count` is the number of measurements and not the
+        // number of events, which is the number a reader of a summary wants
+        // and the number `n=` has always claimed to be.
+        let weights: f64 = values.iter().map(|(_, weight)| *weight).sum();
+        let count = weights as usize;
+        let min = values
+            .iter()
+            .map(|(value, _)| *value)
+            .fold(f64::INFINITY, f64::min);
+        let max = values
+            .iter()
+            .map(|(value, _)| *value)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mean = values
+            .iter()
+            .map(|(value, weight)| value * weight)
+            .sum::<f64>()
+            / weights;
+        let last = values.last().expect("checked above").0;
         summaries.push(SeriesSummary {
             key,
             count,
@@ -605,9 +637,13 @@ fn hist(events: &[Event], attr: &str, layout: BucketLayout) -> Result<Vec<Series
                 unbucketable += 1;
                 continue;
             }
-            *counts.entry(layout.index(value)).or_insert(0) += 1;
-            count += 1;
-            sum += value;
+            // An event may stand for many measurements; see [`WEIGHT_ATTR`].
+            // `min` and `max` need no weight -- every measurement behind a row
+            // is inside its bucket, so the extremes are the row's own value.
+            let weight = weight_of(event);
+            *counts.entry(layout.index(value)).or_insert(0) += weight as usize;
+            count += weight as usize;
+            sum += value * weight;
             min = min.min(value);
             max = max.max(value);
         }
@@ -669,7 +705,7 @@ fn topk(events: &[Event], attr: &str, k: u32) -> Result<Output, EmitError> {
     for (key, events) in grouped(events) {
         let mut total = 0.0;
         for event in &events {
-            total += value_of(event, attr)?;
+            total += value_of(event, attr)? * weight_of(event);
         }
         totals.push(SeriesTotal {
             key,
@@ -740,6 +776,22 @@ fn stack(events: &[Event], attr: &str) -> Result<Output, EmitError> {
     })
 }
 
+/// How many measurements an event stands for.
+///
+/// One when it says nothing, and one when what it says cannot be a weight: a
+/// zero or a negative would silently delete a row from every total, which is a
+/// worse answer than ignoring a malformed attribute.
+fn weight_of(event: &Event) -> f64 {
+    match event.attr(WEIGHT_ATTR) {
+        Some(crate::event::AttrValue::Uint(weight)) if *weight > 0 => *weight as f64,
+        Some(crate::event::AttrValue::Int(weight)) if *weight > 0 => *weight as f64,
+        Some(crate::event::AttrValue::Float(weight)) if *weight > 0.0 && weight.is_finite() => {
+            *weight
+        }
+        _ => 1.0,
+    }
+}
+
 fn stack_id(event: &Event) -> Option<u64> {
     match event.attr(STACK_ID_ATTR)? {
         crate::event::AttrValue::Uint(id) => Some(*id),
@@ -786,6 +838,83 @@ mod tests {
             collector_id: CollectorId::new("test"),
             seq: 0,
         }
+    }
+
+    /// One event standing for four hundred measurements counts as four
+    /// hundred, in every emit that counts.
+    ///
+    /// This is what a collector that aggregates in the kernel produces:
+    /// `sched.runqlat` drains `(task, bucket) -> count` from a BPF map and
+    /// publishes one event per row, because not doing so is the whole reason
+    /// the map exists. Weighing each row as one put the buckets in the right
+    /// places and made every one of them a single unit high -- a histogram of
+    /// the shape of the kernel's map rather than of the workload.
+    #[test]
+    fn an_event_that_stands_for_many_measurements_counts_as_many() {
+        let weighted = |value: u64, weight: u64| {
+            let mut event = event(0, 7, value);
+            event.attrs.push(Attr::uint(WEIGHT_ATTR, weight));
+            event
+        };
+        // Three rows of a kernel-side histogram: 400 waits in one bucket, 100
+        // in another, 1 in a third.
+        let events = vec![weighted(8, 400), weighted(16, 100), weighted(64, 1)];
+        let weighted_sum = 8.0 * 400.0 + 16.0 * 100.0 + 64.0;
+
+        let hists = hist(&events, "bytes", BucketLayout::Log2).expect("a histogram");
+        assert_eq!(hists.len(), 1);
+        assert_eq!(
+            hists[0].count, 501,
+            "three rows stand for five hundred and one measurements"
+        );
+        assert_eq!(hists[0].sum, weighted_sum);
+        let heaviest = hists[0]
+            .buckets
+            .iter()
+            .max_by_key(|bucket| bucket.count)
+            .expect("a bucket");
+        assert_eq!(
+            heaviest.count, 400,
+            "the heaviest bucket holds the four hundred, not one row"
+        );
+
+        let summaries = summary(&events, "bytes").expect("a summary");
+        assert_eq!(summaries[0].count, 501);
+        assert!(
+            (summaries[0].mean - weighted_sum / 501.0).abs() < 1e-9,
+            "{}",
+            summaries[0].mean
+        );
+        assert_eq!(summaries[0].min, 8.0, "the extremes need no weight");
+        assert_eq!(summaries[0].max, 64.0);
+
+        let Output::TopK { series, .. } = topk(&events, "bytes", 1).expect("a ranking") else {
+            panic!("topk returns a TopK");
+        };
+        assert_eq!(series[0].total, weighted_sum);
+
+        let rates = rate(&events, 1_000_000_000, "bytes").expect("a rate");
+        assert_eq!(rates[0].total, weighted_sum);
+    }
+
+    /// An event that says nothing about its weight is one measurement, which
+    /// is what every streaming collector in this tool produces. The attribute
+    /// was new when this landed and no source but `sched.runqlat` emits it:
+    /// this is the test that keeps that true.
+    #[test]
+    fn an_event_without_a_weight_is_one_measurement() {
+        let events = vec![event(0, 7, 10), event(1, 7, 20)];
+        assert_eq!(summary(&events, "bytes").expect("a summary")[0].count, 2);
+
+        // And a weight that cannot be one is ignored rather than obeyed: zero
+        // would delete the row from every total, which is a worse answer than
+        // ignoring a malformed attribute.
+        let mut zero = event(0, 7, 10);
+        zero.attrs.push(Attr::uint(WEIGHT_ATTR, 0));
+        let mut negative = event(1, 7, 20);
+        negative.attrs.push(Attr::int(WEIGHT_ATTR, -5));
+        let events = vec![zero, negative];
+        assert_eq!(summary(&events, "bytes").expect("a summary")[0].count, 2);
     }
 
     #[test]

@@ -227,8 +227,11 @@ fn attributes(row: &RunqLat, window_ns: u64) -> Vec<Attr> {
         // one built in userspace from these events agree exactly.
         Attr::uint("wait_ns", row.bucket_low_ns()),
         // How many waits this event stands for. Every number derived from
-        // `wait_ns` is this many times over.
+        // `wait_ns` is this many times over, which is what the emit layer reads
+        // out of `weight`; `count` carries the same number under the name the
+        // filter grammar and a reader expect.
         Attr::uint("count", row.count),
+        Attr::uint(crate::emit::WEIGHT_ATTR, row.count),
         // The exact sum of those waits, which the bucket cannot give back: a
         // log2 bucket is a factor of two wide, so a total built from bounds
         // inherits that error and this does not.
@@ -314,16 +317,15 @@ impl Collector for RunqLatCollector {
             ));
         }
         if self.waits > 0 {
-            // The one thing a reader of these numbers has to know, said in the
-            // run's own output rather than left in documentation. It is not a
-            // loss -- every wait is counted, and `total_ns` is exact -- but a
-            // count of events is not a count of waits here, and every other
-            // source in the tool makes those the same thing.
+            // Said in the run's own output rather than left in documentation,
+            // because every other source in this tool makes one event one
+            // measurement and this one does not. It is not a loss: every wait
+            // is counted, the emit layer weighs each row by `weight`, and
+            // `total_ns` is the exact sum the buckets cannot give back.
             notes.push(format!(
-                "{} waits are reported as {} rows of a kernel-side log2 histogram: each event \
-                 carries the waits it stands for in `count`, and an emit that weighs every \
-                 event as one counts each bucket once instead. `total_ns` is the exact sum \
-                 either way",
+                "{} waits are reported as {} rows of a kernel-side log2 histogram, each \
+                 carrying the waits it stands for; a bucket is a factor of two wide, so every \
+                 number derived from `wait_ns` is bucketed and `total_ns` is the exact sum",
                 self.waits, self.rows,
             ));
         }
@@ -432,10 +434,14 @@ mod tests {
         assert_eq!(prio.value.as_f64(), Some(-1.0));
     }
 
-    /// The limitation has to reach the run's own output. A histogram whose
-    /// heights are the number of buckets rather than the number of waits is a
-    /// wrong number that looks right, which is what this project exists to
-    /// refuse -- so while the emit layer cannot weigh an event, the run says so.
+    /// One event here is not one measurement, and every other source in this
+    /// tool makes those the same thing -- so the run says which it is.
+    ///
+    /// It used to say something stronger, and worse: that the emit layer
+    /// weighed each row as one, so a histogram's heights were the number of
+    /// buckets rather than the number of waits. That is fixed --
+    /// `emit::WEIGHT_ATTR` is on every row and honoured by `hist`, `summary`,
+    /// `rate` and `topk` -- and what is left to say is the bucketing itself.
     #[test]
     fn the_run_says_that_an_event_stands_for_more_than_one_wait() {
         let mut collector = RunqLatCollector::new(None, None);
@@ -446,8 +452,36 @@ mod tests {
         collector.waits = 9;
         collector.rows = 2;
         let notes = collector.notes().join(" ");
-        assert!(notes.contains("count"), "{notes}");
+        assert!(notes.contains("9 waits"), "{notes}");
+        assert!(notes.contains("2 rows"), "{notes}");
         assert!(notes.contains("total_ns"), "{notes}");
+        assert!(
+            !notes.contains("weighs every"),
+            "the emit layer weighs a row now, and the run must not still claim it does not: \
+             {notes}"
+        );
+    }
+
+    /// Every row carries the weight the emit layer reads, which is what makes
+    /// a kernel-built histogram come out the right height.
+    #[test]
+    fn every_row_carries_the_waits_it_stands_for_as_a_weight() {
+        let row = RunqLat {
+            tid: 7,
+            tgid: 7,
+            cpu: 3,
+            prio: 120,
+            bucket: 4,
+            count: 400,
+            total_ns: 1_234_567,
+            comm: "worker".into(),
+        };
+        let attributes = attributes(&row, 100_000_000);
+        let weight = attributes
+            .iter()
+            .find(|attr| attr.name == crate::emit::WEIGHT_ATTR)
+            .expect("a weight attribute");
+        assert_eq!(weight.value.as_f64(), Some(400.0));
     }
 
     /// The resolver hands a `bpf` backend the credit for filtering in the

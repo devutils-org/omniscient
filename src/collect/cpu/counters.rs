@@ -783,6 +783,8 @@ mod tests {
         // absent. Three is enough for one of them to land in a quiet moment,
         // and cheap: the whole test is under a second.
         const ATTEMPTS: usize = 3;
+        // Above this, the control walk is not a control: see where it is used.
+        const CONTROL_CEILING: f64 = 0.005;
 
         let mut served = 0;
         // Measured here at roughly one miss per access on the far walk for all
@@ -854,7 +856,23 @@ mod tests {
                 //
                 // What this gives up is covered deterministically above, by the
                 // descriptor test that needs no cache of its own.
-                let measurable = loose > floor;
+                // Two conditions, because the contention shows at both ends.
+                // The far walk must have missed like a walk over sixty-four
+                // megabytes -- measured at 1.15 per intended access on a quiet
+                // machine, and between 0.03 and 0.35 under the full suite of
+                // this project. And the near walk must still be the control it
+                // is: four kilobytes is sixty-four lines and fits in any L1
+                // ever built, so more than one miss in two hundred accesses
+                // means the L1 belonged to something else -- another of the six
+                // hundred tests beside this one, or whatever shares this core's
+                // SMT sibling. Quiet, it reads 0.0008.
+                //
+                // An attempt failing either was not a measurement of how big
+                // its arrays were, and there is no bar low enough to survive
+                // that and high enough to mean anything. What this gives up is
+                // covered deterministically above, by the descriptor test that
+                // needs no cache of its own.
+                let measurable = loose > floor && tight <= CONTROL_CEILING;
                 attempts.push(format!(
                     "far {loose:.5}, near {tight:.5}, ratio {:.0}{}",
                     loose / tight.max(f64::MIN_POSITIVE),
@@ -883,10 +901,11 @@ mod tests {
                 // serve the measurement, not the measurement meaning nothing.
                 // The same test run on its own is the one that has an answer.
                 eprintln!(
-                    "skipped: {source}/{backend} -- in none of {ATTEMPTS} attempts did a \
-                     shuffled walk over {LARGE} bytes miss more than {floor} times per access, \
-                     so this machine's caches were not this thread's and neither walk says \
-                     anything about how big its array was. Attempts: {}",
+                    "skipped: {source}/{backend} -- in none of {ATTEMPTS} attempts did a walk \
+                     over {LARGE} bytes miss more than {floor} times per access while one over \
+                     {SMALL} stayed under {CONTROL_CEILING}, so this machine's caches were not \
+                     this thread's and neither walk says anything about how big its array was. \
+                     Attempts: {}",
                     attempts.join("; ")
                 );
                 continue;
