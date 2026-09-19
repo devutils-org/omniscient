@@ -469,10 +469,19 @@ pub fn aggregate(
         });
     }
 
-    // Only walked when something asked for stacks: it is a scan of every event
+    // Only built when something asked for stacks: it is a scan of every event
     // for a table nothing else reads.
+    //
+    // A collector that interns its own stacks hands the table over whole, which
+    // is the cheap path and the one a profiler takes. The scan is the fallback
+    // for a collector that writes the frames onto each event instead, and it
+    // never overwrites what the collector already said.
     let stacks = if request.emit.contains(&Emit::Stack) {
-        stack_table(&collection.events)
+        let mut stacks = collection.stacks;
+        for (id, frames) in stack_table(&collection.events) {
+            stacks.entry(id).or_insert(frames);
+        }
+        stacks
     } else {
         BTreeMap::new()
     };

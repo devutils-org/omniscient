@@ -411,6 +411,17 @@ impl Capabilities {
             // Asked by loading the smallest possible tracing program. The
             // answer depends on capabilities, on a sysctl and on how the kernel
             // was built, and only the kernel knows all three.
+            // Asked by opening the event a profile would open. Whether the
+            // kernel hands a callchain to this user depends on
+            // `perf_event_paranoid`, on `CAP_PERFMON` and on how the kernel was
+            // built, and the cheapest way to know all three is to ask for one.
+            "callchain" => match crate::perf::SampledEvent::callchain_supported() {
+                Ok(()) => Probe::Available,
+                Err(error) => Probe::Missing(format!(
+                    "perf_event_open refused a sampling event carrying a callchain ({error}); \
+                     check /proc/sys/kernel/perf_event_paranoid"
+                )),
+            },
             "bpf" => Probe::from(crate::bpf::load_support()),
             "btf" => match self.environment.kernel_btf {
                 Access::Readable => Probe::Available,

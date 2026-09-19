@@ -315,10 +315,7 @@ pub unsafe extern "C" fn posix_memalign(
     alignment: usize,
     size: usize,
 ) -> c_int {
-    let real = libc::dlsym(
-        libc::RTLD_NEXT,
-        b"posix_memalign\0".as_ptr().cast::<c_char>(),
-    );
+    let real = libc::dlsym(libc::RTLD_NEXT, c"posix_memalign".as_ptr());
     if real.is_null() {
         return libc::ENOMEM;
     }

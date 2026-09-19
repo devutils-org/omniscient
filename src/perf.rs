@@ -218,6 +218,26 @@ impl SampledEvent {
         }
     }
 
+    /// Whether this machine will hand this user a callchain with a sample.
+    ///
+    /// Answered by opening the event a profile opens and throwing it away,
+    /// because every cheaper answer is a guess: the sysctl, the capability and
+    /// the kernel's build options all have a veto, and only the kernel holds
+    /// all three. The event is over the calling process, so the probe measures
+    /// nothing and disturbs nothing.
+    pub fn callchain_supported() -> io::Result<()> {
+        Self::open_software_with(
+            sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
+            // Far longer than the probe lives: it is never enabled, and a
+            // period this long would not fire if it were.
+            u64::from(u32::MAX),
+            Scope::Process(0),
+            MIN_RING_PAGES,
+            Callchain::FramePointers,
+        )
+        .map(drop)
+    }
+
     /// Whether this event asks the kernel to unwind.
     pub fn callchain(&self) -> Callchain {
         self.callchain

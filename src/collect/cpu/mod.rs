@@ -7,10 +7,12 @@
 
 mod counters;
 mod pressure;
+mod profile;
 mod throttle;
 mod util;
 
 use super::Factory;
+use crate::request::StackMode;
 
 /// The collectors this family provides.
 ///
@@ -51,6 +53,18 @@ pub fn factories() -> Vec<Factory> {
             }),
             Factory::new("cpu.throttle", "fs:cgroup", |resolved| {
                 Ok(Box::new(throttle::Prepare(resolved.request.mode)))
+            }),
+            // The one source of this family that is not a counter: it samples,
+            // and what it reports is where the samples landed. The unwind mode
+            // is decided here rather than in the collector, because `--stack
+            // dwarf` is a refusal with a reason and a refusal belongs before
+            // the target is launched.
+            Factory::new("cpu.profile", "pmu:sw", |resolved| {
+                let mode = resolved.request.stack.unwrap_or(StackMode::Fp);
+                Ok(Box::new(profile::Prepare {
+                    mode: resolved.request.mode,
+                    callchain: crate::stack::callchain_for(mode)?,
+                }))
             }),
         ])
         .collect()

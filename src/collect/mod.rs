@@ -85,6 +85,14 @@ pub struct Collection {
     pub observed_ns: u64,
     /// Why the run stopped.
     pub stopped_because: String,
+    /// The frames behind each stack identity this run saw, root first.
+    ///
+    /// Carried here because a stack is interned by the collector that captured
+    /// it and rendered by the layer that aggregates it, and neither should have
+    /// to know about the other's types. The events name ids; this says what
+    /// they were.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stacks: BTreeMap<u64, Vec<String>>,
     /// What this collector had to give up, discovered while running rather than
     /// while resolving: a counter the machine would only open for user mode, a
     /// group the hardware had to time-share. The resolver cannot know these
@@ -231,6 +239,15 @@ pub trait Collector {
     /// What the collector itself knows it lost.
     fn losses(&self) -> Losses {
         Losses::default()
+    }
+
+    /// The frames behind each stack identity this collector interned.
+    ///
+    /// Empty for everything that does not capture stacks, which is most of
+    /// them. Read after `stop`, so a collector that finishes its symbolisation
+    /// at the end has somewhere to do it.
+    fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
+        BTreeMap::new()
     }
 
     /// What the collector had to give up to produce these numbers. Empty is the
@@ -504,6 +521,7 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
                 losses: std::mem::take(&mut losses[index]),
                 stopped_because: stopped_because.clone(),
                 notes: collector.notes(),
+                stacks: collector.stacks(),
                 filtered,
             }
         })
