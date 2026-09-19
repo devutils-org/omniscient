@@ -1,30 +1,53 @@
-# How much energy a window of work cost.
+# What a window of work cost, in joules.
 #
-#   sudo omn -f examples/power-energy.yml
+# The scenario is a contrast, not a single run: the same session twice, once
+# against an idle machine and once against one with every core spinning.
 #
-# `sudo` is not decoration here. RAPL's energy counter was shown to leak what
-# the machine was computing, so `energy_uj` is root-only on current kernels.
-# Without privileges this session refuses and says so, which is the point: a
-# tool that answered anyway would be reporting a number it did not read.
+#   omn -f examples/power-energy.yml                       # the idle reading
 #
-# The counted mode reports one total for the whole window rather than a value
-# per tick, which is what "what did this cost" means. The package's energy
-# includes the cores, the memory controller and the uncore; the sub-domains are
-# never added to it, because they are already inside it.
+#   for i in $(seq $(nproc)); do sh -c 'while :; do :; done' & done
+#   omn -f examples/power-energy.yml                       # the loaded reading
+#   kill $(jobs -p)
+#
+# The workload chooses the property: every core busy is more silicon switching
+# than no core busy, so the second reading must cost visibly more than the
+# first. On the machine this was written on, a 3900X, the two readings were
+# 64.4 J/s and 145.3 J/s -- eighty watts of difference that the tool has to
+# find, and a margin no measurement error reaches. That is what makes this a
+# check rather than a demonstration: the number is not compared against itself.
+#
+# It is also the family's scale test. RAPL counts in units of 2^-32 joules and
+# publishes what one tick is worth beside the counter; a collector that assumed
+# microjoules would be out by ten orders of magnitude, and a package that draws
+# 65 W rather than 65 nW or 65 GW is the evidence that the scale was read.
+#
+# `rate` and not `summary`, deliberately. In `count` mode the `pmu` backend
+# emits one event per default poll interval plus a zero-length closing read, so
+# `summary` reports `min 0`, `last 0` and a mean divided by one event more than
+# there were intervals. `rate` sums the intervals over the window and is right.
+#
+# The temperature is written first for a reason that is also a defect: a
+# session is driven at its *first* request's interval, whatever the others ask
+# for. Leading with the counted request would serve `poll@500ms` at one second
+# and say nothing. Both are under "Defects found" in docs/scenarios/power.md.
 name: energy of a window
 format: text
+duration: 2s
 
 requests:
+  # Read beside the energy, because a package close to its thermal limit draws
+  # its power differently from a cold one. This is the confounder, not the
+  # measurement -- and it leads only because the first request sets the pace.
+  - label: temperature
+    source: power.temp
+    target: system
+    mode: poll@500ms
+    emit: [summary]
+
+  # The window's total, and the watts it implies. `--pid` is refused here:
+  # RAPL counts a package, and a share of a package is an estimate.
   - label: energy
     source: power.energy
     target: system
     mode: count
-    emit: [summary, rate]
-
-  - label: temperature
-    source: power.temp
-    target: system
-    mode: poll@1s
-    emit: [summary]
-
-duration: 10s
+    emit: [rate]

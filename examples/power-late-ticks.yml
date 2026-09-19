@@ -1,0 +1,41 @@
+# The loss path: a pace the collector cannot keep, and whether it says so.
+#
+#   omn -f examples/power-late-ticks.yml
+#
+# This family loses data in one way, and it is not a ring buffer overflowing.
+# Everything here polls a filesystem, and a poll that asks for a tick shorter
+# than one round of reads takes cannot deliver the series it promises. The
+# spacing quietly becomes whatever the reads cost, and a series whose points
+# are not where it says they are is a wrong number that looks right.
+#
+# So the scenario chooses the failure. `power.cstate` on this machine reads
+# every idle state of every core -- twenty-four cores, three states, two files
+# each -- and one round of that takes about two milliseconds. Asked for a
+# millisecond tick it cannot keep up, and must count and report every tick it
+# missed rather than silently stretching the series.
+#
+# Measured here: 236 late ticks out of 236 rounds over 500 ms, every one of
+# them naming the round that overran and the tick it overran -- "a round of
+# reads took 2017311ns, longer than the 1000000ns tick". Not a sample of them:
+# all of them. The same session at `poll@200ms` reports no loss at all, and
+# that contrast is the check: the tool tells a pace it can keep from one it
+# cannot, rather than reporting the same clean series for both.
+#
+# Run it at 200ms to see the other half:
+#
+#   omn power.cstate --system -m poll@200ms -e summary -d 500ms
+#
+# On a machine with few cores or few idle states a round is cheaper and this
+# session may keep up, which is not a failure of the scenario: lower the tick
+# until it cannot, and the loss must appear at that point and not before.
+name: a tick shorter than a round of reads
+format: text
+duration: 500ms
+
+requests:
+  - label: idle residency, polled faster than it can be read
+    source: power.cstate
+    target: system
+    mode: poll@1ms
+    emit: [summary]
+    keys: [cpu]

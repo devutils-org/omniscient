@@ -8,22 +8,37 @@
 # them for a reason that is in none of those measurements. Collect this beside
 # whatever you are actually measuring, and read it first when two runs disagree.
 #
-# `power.throttle` is deliberately absent from this session: it exists, and on a
-# machine whose cpus expose `thermal_throttle` it is the one source that answers
-# the question directly. Add it -- it will refuse, by name, on a machine where
-# throttling cannot be seen, which is the honest answer rather than a series of
-# zeroes.
+# The check this session supports is a comparison between two runs of it, not a
+# threshold inside one. Take it once against an idle machine and once against
+# a loaded one; the loaded run must show cores at boost and idle residency
+# collapsing, and if it shows the same frequencies at a higher temperature then
+# the machine was limiting and whatever was measured beside it is suspect.
+# Measured here with one core pinned: that core at 4.14 GHz and `idle_ns=0`,
+# the others at the 1.75 GHz floor with residency above 0.97.
+#
+# `power.throttle` is deliberately absent: it has its own session, because on
+# this machine it is a refusal rather than a series, and a refusal in the
+# middle of a five-request session is easy to read past.
+#
+# All three requests carry `keys: [cpu]` where the source has it, so a run of
+# this can be joined to a cpu or gpu measurement taken beside it -- which is
+# what phase two's P4 asks for: does the machine's own state explain the
+# measurement?
 name: what the processor was doing meanwhile
 format: text
+duration: 2s
 
 requests:
   # Effective where the driver reports it, requested where it does not. Every
   # event says which it read; read `measures` before comparing two machines.
+  # One series per online cpu, never a mean: one boosted core among
+  # twenty-three idle ones is an average that describes no core.
   - label: frequency
     source: power.freq
     target: system
     mode: poll@500ms
     emit: [timeline, summary]
+    keys: [cpu]
 
   # The other half of a frequency reading: a core that idled through nine
   # tenths of the window and boosted through the tenth has a high average
@@ -33,6 +48,7 @@ requests:
     target: system
     mode: poll@500ms
     emit: [timeline, summary]
+    keys: [cpu]
 
   # The hottest processor sensor, which is what throttling follows. A disk
   # controller running hotter than the cpu is normal and is not this number.
@@ -41,5 +57,3 @@ requests:
     target: system
     mode: poll@500ms
     emit: [timeline, summary]
-
-duration: 5s

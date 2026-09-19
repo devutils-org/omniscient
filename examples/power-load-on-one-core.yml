@@ -1,0 +1,39 @@
+# The load, and the independent oracle for what the next session will measure.
+#
+# This session launches a spin loop pinned to core 1 and counts the cycles it
+# retires. It exists to be run *beside* examples/power-core-under-load.yml:
+#
+#   omn -f examples/power-load-on-one-core.yml &
+#   sleep 0.7 && omn -f examples/power-core-under-load.yml
+#   wait
+#
+# Its window is two seconds against the other's one, and the pause is there so
+# that the measured second sits wholly inside the loaded two: a core measured
+# while the spin loop is still being exec'd is a core that was idle, and the
+# first tick would report the idle floor for a reason that has nothing to do
+# with the processor.
+#
+# A task that never sleeps and never leaves core 1 runs for the whole window,
+# so its retired cycles divided by the window are the frequency that core
+# actually ran at -- counted by the core's own cycle counter, which knows
+# nothing about `cpufreq`. That is the oracle: `power.freq` reads
+# `cpuinfo_avg_freq`, which the processor derives from aperf/mperf, and the two
+# instruments must land on the same number. Measured here: 4.32 GHz from the
+# cycle counter against 4.27 GHz from `power.freq`, one percent apart.
+#
+# Change `1` to a core your machine has, in both sessions, and change it in
+# both or the comparison is between two different cores.
+#
+# `taskset` is what pins it, from outside the tool. Nothing in the tool chose
+# the core, which is what makes the core an independent fact about the run.
+name: a spin loop pinned to one core
+format: text
+duration: 2s
+
+requests:
+  - label: cycles
+    source: cpu.cycles
+    target:
+      launch: [taskset, -c, "1", /bin/sh, -c, "while :; do :; done"]
+    mode: count
+    emit: [summary, rate]
