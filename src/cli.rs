@@ -123,7 +123,8 @@ pub struct TraceArgs {
     #[arg(short = 'd', long, value_name = "DURATION")]
     pub duration: Option<Duration>,
 
-    /// Overhead ceiling; the resolver degrades to stay under it and reports what it degraded.
+    /// Overhead ceiling. Not yet enforced: recorded with the request, and reported
+    /// against what the chosen backend declares it costs.
     #[arg(short = 'b', long, value_name = "PERCENT")]
     pub budget: Option<Budget>,
 

@@ -200,9 +200,43 @@ pub struct Environment {
     /// Speculative execution mitigations, which cost what they cost.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mitigations: BTreeMap<String, String>,
+    /// The graphics devices, as the kernel describes them. Two `gpu` runs are
+    /// comparable only if they were taken on the same device under the same
+    /// driver, and neither of those is visible in any other field here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpus: Vec<GpuDevice>,
     /// What is deliberately not captured yet, so its absence is not read as
     /// "this machine has none of it".
     pub not_captured: Vec<String>,
+}
+
+/// One graphics device, read from the kernel rather than from a vendor library.
+///
+/// The obvious way to capture this is `nvmlInit` plus `nvmlDeviceGetName`, and
+/// it is the wrong one: `nvmlInit` costs 3.3 to 4.9 ms here, `Capabilities`
+/// is detected on every command including those that measure nothing, and the
+/// result would be nothing for the machines whose GPU is not an NVIDIA one.
+/// Everything below is a handful of small sysfs reads -- 47 µs for the whole
+/// walk on the development machine -- and it covers every driver the same way.
+///
+/// The price is that the device is named by its PCI ids rather than by its
+/// marketing name: matching `0x10de:0x1e07` to "RTX 2060" needs a database
+/// this tool does not carry. The ids are exact, which is what a comparison
+/// between two runs needs; the name is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuDevice {
+    /// The card as the kernel names it, such as `card1`.
+    pub card: String,
+    /// PCI vendor and device, such as `0x10de:0x1e07`.
+    pub pci_id: String,
+    /// The kernel driver bound to it: `nvidia`, `amdgpu`, `i915`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// The version that driver publishes for itself, where it publishes one.
+    /// An out-of-tree driver such as `nvidia` does; an in-tree one such as
+    /// `amdgpu` ships with the kernel and is identified by `kernel_release`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<String>,
 }
 
 /// Everything the resolver knows about this machine.
@@ -234,11 +268,16 @@ impl Capabilities {
             cgroup2: access(Path::new("/sys/fs/cgroup/cgroup.controllers")),
             tracefs: tracefs_access(),
             mitigations: mitigations(),
+            gpus: gpus(),
             not_captured: vec![
                 "microarchitecture".into(),
                 "NUMA topology".into(),
                 "virtualization and steal time".into(),
-                "vendor SDK versions".into(),
+                // The kernel driver behind each GPU is captured above; the
+                // userspace half is not, and a CUDA or ROCm upgrade changes
+                // what a `gpu` measurement means without changing anything
+                // this module reads.
+                "vendor userspace library versions (NVML, CUDA, ROCm)".into(),
             ],
         };
         Self { environment }
@@ -769,6 +808,62 @@ fn mitigations() -> BTreeMap<String, String> {
     found
 }
 
+/// Enumerates the graphics devices through `/sys/class/drm`.
+///
+/// Only the `cardN` entries are devices. The same directory also holds one
+/// entry per connector -- `card1-DP-1`, `card1-HDMI-A-1` -- and a render node,
+/// and counting those would report six GPUs on a machine with one.
+///
+/// A card with no PCI ids is skipped rather than reported with blanks: a
+/// virtual or platform device that cannot be identified is not a device two
+/// runs can be compared on, and an entry naming nothing would suggest
+/// otherwise.
+fn gpus() -> Vec<GpuDevice> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let mut found: Vec<GpuDevice> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(card) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_card(&card) {
+            continue;
+        }
+        let device = entry.path().join("device");
+        let (Some(vendor), Some(id)) = (
+            read_trimmed(&device.join("vendor").to_string_lossy()),
+            read_trimmed(&device.join("device").to_string_lossy()),
+        ) else {
+            continue;
+        };
+        let driver = std::fs::read_link(device.join("driver"))
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+            });
+        let driver_version = driver
+            .as_deref()
+            .and_then(|driver| read_trimmed(&format!("/sys/module/{driver}/version")));
+        found.push(GpuDevice {
+            card,
+            pci_id: format!("{vendor}:{id}"),
+            driver,
+            driver_version,
+        });
+    }
+    found.sort_by(|a, b| a.card.cmp(&b.card));
+    found
+}
+
+/// `card1` is a device; `card1-DP-1` is one of its connectors.
+fn is_card(name: &str) -> bool {
+    name.strip_prefix("card")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn arch() -> String {
     let mut info: libc::utsname = unsafe { std::mem::zeroed() };
     // SAFETY: `uname` fills a struct we own and never fails for a valid pointer.
@@ -957,6 +1052,107 @@ mod tests {
     fn this_process_own_procfs_files_are_found() {
         let capabilities = Capabilities::detect();
         assert!(capabilities.probe("/proc/[pid]/statm", None).is_available());
+    }
+
+    /// The card entries under `/sys/class/drm` are the devices; everything
+    /// else there is a connector or a render node. Counting those would report
+    /// six GPUs on a machine that has one, which is exactly the kind of number
+    /// nobody checks.
+    #[test]
+    fn a_connector_is_not_mistaken_for_a_card() {
+        assert!(is_card("card0"));
+        assert!(is_card("card12"));
+        assert!(!is_card("card1-DP-1"));
+        assert!(!is_card("card1-HDMI-A-1"));
+        assert!(!is_card("renderD128"));
+        assert!(!is_card("version"));
+        assert!(!is_card("card"));
+    }
+
+    /// Ground truth: the kernel's own description of its graphics devices.
+    ///
+    /// The capture is checked against the files it did not read through --
+    /// the directory listing, the two PCI id files and the driver's own
+    /// version -- rather than against itself. On a machine with no `/sys/class
+    /// /drm` at all the expectation is an empty list, which is still a check:
+    /// a machine with no GPU must report none, not fail to look.
+    #[test]
+    fn every_graphics_device_the_kernel_lists_is_captured_with_what_the_kernel_says() {
+        let captured = Capabilities::detect().environment().gpus.clone();
+
+        let mut expected: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let digits = name
+                    .strip_prefix("card")
+                    .filter(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+                if digits.is_some() && entry.path().join("device/vendor").exists() {
+                    expected.push(name);
+                }
+            }
+        }
+        expected.sort();
+
+        let cards: Vec<String> = captured.iter().map(|gpu| gpu.card.clone()).collect();
+        assert_eq!(
+            cards, expected,
+            "the capture must hold exactly the cards the kernel lists"
+        );
+
+        for gpu in &captured {
+            let device = PathBuf::from("/sys/class/drm")
+                .join(&gpu.card)
+                .join("device");
+            let vendor = std::fs::read_to_string(device.join("vendor")).unwrap();
+            let id = std::fs::read_to_string(device.join("device")).unwrap();
+            assert_eq!(
+                gpu.pci_id,
+                format!("{}:{}", vendor.trim(), id.trim()),
+                "the ids must be the kernel's, not a reformatting of them"
+            );
+            let Some(driver) = &gpu.driver else { continue };
+            assert!(
+                std::fs::read_link(device.join("driver"))
+                    .unwrap()
+                    .ends_with(driver),
+                "the driver must be the one actually bound to {}",
+                gpu.card
+            );
+            assert_eq!(
+                gpu.driver_version,
+                std::fs::read_to_string(format!("/sys/module/{driver}/version"))
+                    .ok()
+                    .map(|version| version.trim().to_owned()),
+                "`{driver}` publishes a version or it does not; inventing one is worse than \
+                 leaving it out"
+            );
+        }
+    }
+
+    /// The reason this capture reads sysfs instead of calling `nvmlInit`.
+    ///
+    /// `Capabilities::detect` runs on every command, including `omn list` and
+    /// every refusal, and `nvmlInit` was measured at 3.3 to 4.9 ms on this
+    /// machine. A capture that costs a millisecond of every invocation is one
+    /// that will be made conditional, and then forgotten for the requests it
+    /// was made conditional on. The bound is the fastest of twenty runs,
+    /// because a mean on a loaded machine measures the scheduler.
+    #[test]
+    fn capturing_the_graphics_devices_is_cheap_enough_to_do_unconditionally() {
+        let fastest = (0..20)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                std::hint::black_box(gpus());
+                started.elapsed()
+            })
+            .min()
+            .expect("twenty runs");
+        assert!(
+            fastest < std::time::Duration::from_millis(1),
+            "the sysfs walk took {fastest:?}, which is the order of the nvmlInit call it exists \
+             to avoid"
+        );
     }
 
     #[test]

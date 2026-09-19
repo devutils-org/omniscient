@@ -133,6 +133,20 @@ pub struct Losses {
     /// Records the reader did not know how to decode. Counted rather than
     /// skipped, because a record shape nobody handles is a gap in the data.
     pub undecoded: u64,
+    /// Periods in which the kernel throttled the event because it was costing
+    /// too much.
+    ///
+    /// Deliberately not folded into `dropped`. A drop count is a number of
+    /// events the ring reported losing; a throttle is the kernel declining to
+    /// deliver anything for a while, and how many events happened inside that
+    /// window is not knowable from userspace. Counting one throttle as one
+    /// drop claims a precision that does not exist, and is the reason a
+    /// throttled run of `sched.switches` under-reported its own loss rather
+    /// than saying it could not tell.
+    ///
+    /// `kernel.perf_event_max_sample_rate` is what decides this, and a run
+    /// with a non-zero count here is not comparable to one without.
+    pub throttled: u64,
     /// The reasons behind the counts above, with how often each occurred.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reasons: BTreeMap<String, u64>,
@@ -140,11 +154,23 @@ pub struct Losses {
 
 impl Losses {
     pub fn is_clean(&self) -> bool {
-        self.dropped == 0 && self.failed_reads == 0 && self.late_ticks == 0 && self.undecoded == 0
+        self.dropped == 0
+            && self.failed_reads == 0
+            && self.late_ticks == 0
+            && self.undecoded == 0
+            && self.throttled == 0
     }
 
     pub fn note(&mut self, reason: impl Into<String>) {
         *self.reasons.entry(reason.into()).or_insert(0) += 1;
+    }
+
+    /// Records one throttled period, with what the reader needs to know about
+    /// it. The count is of periods, not of events: the events are the part
+    /// nobody can count.
+    pub fn throttle(&mut self, reason: impl Into<String>) {
+        self.throttled += 1;
+        self.note(reason);
     }
 
     fn absorb(&mut self, other: Losses) {
@@ -152,6 +178,7 @@ impl Losses {
         self.failed_reads += other.failed_reads;
         self.late_ticks += other.late_ticks;
         self.undecoded += other.undecoded;
+        self.throttled += other.throttled;
         for (reason, count) in other.reasons {
             *self.reasons.entry(reason).or_insert(0) += count;
         }
@@ -178,6 +205,18 @@ pub trait Collector {
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError>;
 
     /// Closes the collector and returns anything still buffered.
+    ///
+    /// **This is not where a polled counter takes a closing read.** The runner
+    /// closes the window itself: its last round of `sample` calls happens at
+    /// the moment the stop condition is met, so the last interval of a series
+    /// is already measured by the time this is called. A further read here
+    /// covers the microseconds since -- `the_runner_closes_the_window` below
+    /// measures them -- and produces a second point at the same offset with a
+    /// value near zero, which drags every summary computed over the series.
+    ///
+    /// What does belong here: events a ring or a shim published since the last
+    /// drain, and the single measurement of a `count` window, which has no
+    /// series and whose closing read *is* the result.
     fn stop(&mut self) -> Vec<Event> {
         Vec::new()
     }
@@ -319,6 +358,22 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
 
     let environment = merge_environments(&prepared)?;
 
+    // A collector that can only be given to a program at exec is asked about
+    // next, and before the stop condition, because the two refusals send the
+    // reader to different places: "pass --duration" is advice for a request
+    // that can work, and this one cannot. Answering the shallower question
+    // first sent a caller off to add a flag that would change nothing.
+    if !matches!(target, Target::Launch(_)) {
+        for (index, prepared) in prepared.iter().enumerate() {
+            if let Some(reason) = prepared.requires_launch() {
+                return Err(CollectError::UnsupportedTarget {
+                    source_id: resolved[index].request.source.to_string(),
+                    target: format!("{} ({reason})", target.kind()),
+                });
+            }
+        }
+    }
+
     // A run that nothing will ever stop is refused before the target is
     // launched or anything is attached to it -- but after the collectors have
     // been asked for, because "no collector is written for this" is the deeper
@@ -354,17 +409,6 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
         }
         _ => None,
     };
-
-    if child.is_none() {
-        for (index, prepared) in prepared.iter().enumerate() {
-            if let Some(reason) = prepared.requires_launch() {
-                return Err(CollectError::UnsupportedTarget {
-                    source_id: resolved[index].request.source.to_string(),
-                    target: format!("{} ({reason})", target.kind()),
-                });
-            }
-        }
-    }
 
     // A launched program replaces the target's own identity: the collectors
     // observe the process that was just created, not a pid the request named.
@@ -413,68 +457,20 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
     let deadline_ns = duration_ns.map(|longest| monotonic_ns() + longest);
 
     let started_ns = monotonic_ns();
-    let mut events: Vec<Vec<Event>> = vec![Vec::new(); collectors.len()];
-    let mut losses: Vec<Losses> = vec![Losses::default(); collectors.len()];
-    let mut sequences = vec![0u64; collectors.len()];
-    let stopped_because;
-
-    loop {
-        let tick_started_ns = monotonic_ns();
-        let mut gone = None;
-        for (index, collector) in collectors.iter_mut().enumerate() {
-            match collector.sample(sequences[index]) {
-                Ok(mut sampled) => {
-                    sequences[index] += sampled.len() as u64;
-                    events[index].append(&mut sampled);
-                }
-                Err(SampleError::TargetGone(reason)) => gone = Some(reason),
-                Err(SampleError::Transient(reason)) => {
-                    losses[index].failed_reads += 1;
-                    losses[index].note(reason);
+    let (mut events, mut losses, stopped_because) =
+        drive(&mut collectors, Window { interval, snapshot }, || {
+            if let Some(child) = child.as_mut() {
+                if let Some(status) = child.finished() {
+                    return Some(format!("the launched program exited with {status}"));
                 }
             }
-        }
-        if let Some(reason) = gone {
-            stopped_because = reason;
-            break;
-        }
-
-        if snapshot {
-            stopped_because = "snapshot: a single read".to_owned();
-            break;
-        }
-
-        if let Some(child) = child.as_mut() {
-            if let Some(status) = child.finished() {
-                stopped_because = format!("the launched program exited with {status}");
-                break;
-            }
-        }
-
-        if let Some(deadline_ns) = deadline_ns {
-            if monotonic_ns() >= deadline_ns {
-                stopped_because = "the requested duration elapsed".to_owned();
-                break;
-            }
-        }
-
-        // Sleep for what is left of the interval, and count the tick as late
-        // when the reads themselves took longer than the interval: at that
-        // point the series no longer has the spacing it claims.
-        let spent_ns = monotonic_ns().saturating_sub(tick_started_ns);
-        match interval.checked_sub(StdDuration::from_nanos(spent_ns)) {
-            Some(remaining) => std::thread::sleep(remaining),
-            None => {
-                for losses in losses.iter_mut() {
-                    losses.late_ticks += 1;
-                    losses.note(format!(
-                        "a round of reads took {spent_ns}ns, longer than the {}ns tick",
-                        interval.as_nanos()
-                    ));
+            match deadline_ns {
+                Some(deadline_ns) if monotonic_ns() >= deadline_ns => {
+                    Some("the requested duration elapsed".to_owned())
                 }
+                _ => None,
             }
-        }
-    }
+        });
 
     // Whatever the kernel or the shim published between the last tick and the
     // stop still belongs to this run.
@@ -512,6 +508,88 @@ pub fn run_all(resolved: &[ResolvedRequest]) -> Result<Vec<Collection>, CollectE
             }
         })
         .collect())
+}
+
+/// The pace of a run and what a single read means, as the runner sees them.
+struct Window {
+    interval: StdDuration,
+    /// A single read, after which the run is over: there is no series and no
+    /// second round.
+    snapshot: bool,
+}
+
+/// Drives a set of collectors over one window, and closes it.
+///
+/// The order inside a round is the whole of the edge convention: **read
+/// first, then decide**. A round reads every collector, and only then asks
+/// whether the run is over, so the last round of reads happens at the moment
+/// the run ends rather than one interval before it. That is what makes a
+/// polled counter's series complete without any collector reading again in
+/// `stop`, and `the_runner_closes_the_window` measures how little time is
+/// left over for such a read to cover.
+///
+/// `ended` is consulted once per round and returns why the run should stop.
+/// It is a closure rather than a launched child and a deadline so that the
+/// convention can be tested against a stop condition a test controls.
+fn drive(
+    collectors: &mut [Box<dyn Collector>],
+    window: Window,
+    mut ended: impl FnMut() -> Option<String>,
+) -> (Vec<Vec<Event>>, Vec<Losses>, String) {
+    let mut events: Vec<Vec<Event>> = vec![Vec::new(); collectors.len()];
+    let mut losses: Vec<Losses> = vec![Losses::default(); collectors.len()];
+    let mut sequences = vec![0u64; collectors.len()];
+
+    let stopped_because = loop {
+        let tick_started_ns = monotonic_ns();
+        let mut gone = None;
+        for (index, collector) in collectors.iter_mut().enumerate() {
+            match collector.sample(sequences[index]) {
+                Ok(mut sampled) => {
+                    sequences[index] += sampled.len() as u64;
+                    events[index].append(&mut sampled);
+                }
+                Err(SampleError::TargetGone(reason)) => gone = Some(reason),
+                Err(SampleError::Transient(reason)) => {
+                    losses[index].failed_reads += 1;
+                    losses[index].note(reason);
+                }
+            }
+        }
+        if let Some(reason) = gone {
+            break reason;
+        }
+
+        if window.snapshot {
+            break "snapshot: a single read".to_owned();
+        }
+
+        if let Some(reason) = ended() {
+            break reason;
+        }
+
+        // Sleep for what is left of the interval, and count the tick as late
+        // when the reads themselves took longer than the interval: at that
+        // point the series no longer has the spacing it claims.
+        let spent_ns = monotonic_ns().saturating_sub(tick_started_ns);
+        match window
+            .interval
+            .checked_sub(StdDuration::from_nanos(spent_ns))
+        {
+            Some(remaining) => std::thread::sleep(remaining),
+            None => {
+                for losses in losses.iter_mut() {
+                    losses.late_ticks += 1;
+                    losses.note(format!(
+                        "a round of reads took {spent_ns}ns, longer than the {}ns tick",
+                        window.interval.as_nanos()
+                    ));
+                }
+            }
+        }
+    };
+
+    (events, losses, stopped_because)
 }
 
 /// Evaluates the request's filter over what was collected.
@@ -924,13 +1002,137 @@ mod tests {
             dropped: 5,
             ..Losses::default()
         };
-        second.note("a");
+        second.throttle("a");
         second.note("b");
 
         first.absorb(second);
         assert_eq!((first.dropped, first.failed_reads), (5, 1));
+        assert_eq!(
+            first.throttled, 1,
+            "a throttled period must survive being merged, like every other loss"
+        );
         assert_eq!(first.reasons.get("a"), Some(&2));
         assert_eq!(first.reasons.get("b"), Some(&1));
         assert!(!first.is_clean());
+    }
+
+    /// A throttled period is a loss whose size nobody knows.
+    ///
+    /// The kernel stops delivering for a while; how many events happened in
+    /// that while is not recorded anywhere. Adding one to `dropped` -- which
+    /// is what `sched.switches` did -- says "one event was lost", which is a
+    /// number, and the honest answer is that there is no number. So it is
+    /// counted apart, and a run that hit it is not clean.
+    #[test]
+    fn a_throttled_period_is_counted_apart_from_the_events_it_did_not_lose() {
+        let mut losses = Losses::default();
+        assert!(losses.is_clean(), "nothing has gone wrong yet");
+
+        losses.throttle("the kernel throttled this event: see kernel.perf_event_max_sample_rate");
+
+        assert_eq!(losses.throttled, 1, "one period, not one event");
+        assert_eq!(
+            losses.dropped, 0,
+            "a throttle is not a drop: folding it in would claim a count nobody has"
+        );
+        assert!(
+            !losses.is_clean(),
+            "a run the kernel throttled is not a complete run, and must not read as one"
+        );
+        assert!(
+            losses
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("perf_event_max_sample_rate")),
+            "the reader has to be told what to raise: {:?}",
+            losses.reasons
+        );
+    }
+
+    /// A collector that records nothing but the clock at every call.
+    struct Clocked {
+        id: CollectorId,
+        reads_ns: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+        stopped_ns: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Collector for Clocked {
+        fn id(&self) -> &CollectorId {
+            &self.id
+        }
+
+        fn value_attr(&self) -> &'static str {
+            "bytes"
+        }
+
+        fn sample(&mut self, _seq: u64) -> Result<Vec<Event>, SampleError> {
+            self.reads_ns.borrow_mut().push(monotonic_ns());
+            Ok(Vec::new())
+        }
+
+        fn stop(&mut self) -> Vec<Event> {
+            self.stopped_ns.set(monotonic_ns());
+            Vec::new()
+        }
+    }
+
+    /// The runner closes the window, so a collector must not close it again.
+    ///
+    /// This is the measurement behind that decision rather than an assertion
+    /// of it. A round of reads happens *before* the run asks whether it is
+    /// over, so the last round lands at the end of the window: here the
+    /// deadline falls at 90 ms between two 20 ms ticks, and the last read is
+    /// the one at 100 ms. What is left for a closing read in `stop` to cover
+    /// is the handful of microseconds after it -- and a point covering that,
+    /// with a counter delta of zero, is what dragged `io`'s summaries and is
+    /// what `net/dev.rs` still produces.
+    #[test]
+    fn the_runner_closes_the_window() {
+        let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let stopped_ns = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let mut collectors: Vec<Box<dyn Collector>> = vec![Box::new(Clocked {
+            id: CollectorId::new("clocked"),
+            reads_ns: reads_ns.clone(),
+            stopped_ns: stopped_ns.clone(),
+        })];
+
+        let interval = StdDuration::from_millis(20);
+        let deadline_ns = monotonic_ns() + 90_000_000;
+        let (_, _, stopped_because) = drive(
+            &mut collectors,
+            Window {
+                interval,
+                snapshot: false,
+            },
+            || (monotonic_ns() >= deadline_ns).then(|| "the deadline".to_owned()),
+        );
+        // The runner calls `stop` right after the loop; this stands in for it.
+        for collector in collectors.iter_mut() {
+            collector.stop();
+        }
+
+        assert_eq!(stopped_because, "the deadline");
+        let reads_ns = reads_ns.borrow();
+        assert!(
+            reads_ns.len() >= 5,
+            "a 90 ms window at a 20 ms tick is at least five reads, got {}",
+            reads_ns.len()
+        );
+
+        let last_read_ns = *reads_ns.last().expect("at least one read");
+        assert!(
+            last_read_ns >= deadline_ns,
+            "the last read must land at the end of the window, not one tick short of it: \
+             it came {} ns early",
+            deadline_ns - last_read_ns
+        );
+
+        let left_over_ns = stopped_ns.get().saturating_sub(last_read_ns);
+        assert!(
+            left_over_ns * 10 < interval.as_nanos() as u64,
+            "a closing read in `stop` would cover {left_over_ns} ns of a {} ns tick, which is \
+             not an interval: it is a second point at the same offset",
+            interval.as_nanos()
+        );
     }
 }
