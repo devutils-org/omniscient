@@ -199,3 +199,103 @@ From the threads that made them, on the development machine.
   sleep ended is paid time belonging to earlier ticks. Over two seconds it reads
   0.968 against `/proc/stat`'s independent 0.974. Reported as it is, because
   clamping it would hide the effect and break the sum.
+
+---
+
+## 7. What the join engine found outside itself
+
+From the thread that implemented `eq`, `scoped_eq` and `wakeup`.
+
+- **`--pid a,b` measures only `a`.** `Target::Pid` holds a list and every
+  collector reads it through `Target::first_pid`, which returns the first and
+  drops the rest silently: eleven call sites, every family. A run asking for two
+  processes reports one, with no note anywhere that the second was ignored — and
+  a join across two tasks, which is the case that distinguishes a correlator
+  from a counter, cannot be set up through one session at all. Either the
+  request refuses more than one pid until the collectors follow them, or
+  `attach` takes the list. The join engine's own two-task ground truth had to
+  run the tool four times and merge the streams to get around it.
+
+- **A state that opened and was never ended was losing its attributions.**
+  Found while generalizing, and it predates the generalization: opening a state
+  on an identity that already had one overwrote it, so `opened` counted it and
+  nothing else did. The engine now ends the state being replaced and counts it
+  in `StateStats::replaced`, and `opened` now equals
+  `closed + expired + overflowed + still_open` — an invariant the suite asserts
+  on every correlation it builds.
+
+- **`scoped_eq` has no producer yet.** Only `blk:rq@open_ts` carries a scope,
+  and no collector emits a `Blk` key, so the match is exercised against
+  constructed streams and the recycling it exists to prevent is demonstrated
+  rather than observed. When stream E's kprobes land on the block layer, the
+  first `io.latency` run is also the first real test of it: a completion whose
+  `open_ts` does not match the open request must be counted, not attributed.
+
+- **`examples/sched-wakeup.yml` can now declare its join.** It collects
+  `sched.wakeup` and `sched.switches` side by side and correlates neither. The
+  rule is three lines and belongs to whoever owns that file:
+
+  ```yaml
+  joins:
+    - id: who-released-this
+      from: sched.wakeup
+      to: sched.switches
+      via: task
+      match: wakeup
+      waker: waker_tid
+      window: 1s
+  ```
+
+---
+
+## Needs from another stream
+
+Written down rather than fixed in passing, with the signature wanted.
+
+### From stream A, in `src/encode.rs`: a correlation is not always a range
+
+`correlation_text` renders every join as the allocation-fault one. It prints a
+`heaviest ranges` heading, a `SIZE` column through `bytes(attribution.len)`, and
+a closing paragraph explaining that the count is faults rather than bytes. Three
+of the four matches have no extent, so `eq`, `scoped_eq` and `wakeup` all render
+their attributions at `0 B` under a heading that calls them ranges, and a
+wakeup chain is followed by a note about transparent huge pages.
+
+`Attribution::key` already carries what each match means — `mem:[base,len)`,
+`task:1234`, `blk:0xffff0000@99`, `task:99 -> task:100` — so what is wanted is
+for the table to key off the match kind. `Correlation` does not carry it today;
+it can, and the join thread will add it on request rather than guess the shape:
+
+```rust
+// in Correlation
+pub match_kind: crate::catalog::MatchKind,
+```
+
+Say the word and it lands with the same defaults everything else has. It was not
+added unasked because `Correlation` and `Attribution` are built as exhaustive
+struct literals in `encode.rs`'s own tests, so a field added on this side breaks
+the build on that one — which is also why `StateStats::replaced` could be added
+(that literal uses `..Default::default()`) and nothing else could.
+
+The same seam is why a `scoped_eq` run cannot yet report *why* a downstream
+event went unattributed. "The pointer was reissued and this completion belongs
+to the request before it" and "nothing ever opened that key" are different
+facts, and only the second is a workload the reader can do anything about.
+
+### From stream D, in `src/validate.rs`: refuse a malformed join before collecting
+
+`check_joins` verifies that a rule's two sides are in the session and that both
+carry the key. It cannot see the three ways a rule can fail against its own
+match kind: an `interval` on a key that is not a range, a `scoped_eq` on a key
+with no scope, and a `wakeup` that names no waker attribute or does not run on
+`task`. All three are caught — but by the engine, which runs after the
+measurement, so the cost of a malformed rule is the whole collection.
+
+The engine exposes the check separately for this:
+
+```rust
+pub fn check(rule: &join::Rule) -> Result<(), join::JoinError>;
+```
+
+One call per rule in `check_joins`, pushing the error's own text as a
+`Rejection`, and a session that cannot work is refused before anything attaches.
