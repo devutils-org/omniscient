@@ -76,6 +76,7 @@ pub mod helper {
     pub const KTIME_GET_NS: i32 = 5;
     pub const GET_SMP_PROCESSOR_ID: i32 = 8;
     pub const GET_CURRENT_PID_TGID: i32 = 14;
+    pub const GET_STACKID: i32 = 27;
     pub const PROBE_READ_KERNEL: i32 = 113;
     pub const RINGBUF_OUTPUT: i32 = 130;
 }

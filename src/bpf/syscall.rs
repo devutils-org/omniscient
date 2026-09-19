@@ -27,6 +27,7 @@ const BPF_MAP_LOOKUP_AND_DELETE_ELEM: i32 = 21;
 /// Map types, same header.
 pub const BPF_MAP_TYPE_HASH: u32 = 1;
 pub const BPF_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
+pub const BPF_MAP_TYPE_STACK_TRACE: u32 = 7;
 pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
 
 /// Program types.
@@ -306,6 +307,15 @@ pub fn map_update(map_fd: RawFd, key: &[u8], value: &[u8]) -> io::Result<()> {
 /// kernel floor.
 pub fn map_take(map_fd: RawFd, key: &[u8], value_bytes: usize) -> io::Result<Option<Vec<u8>>> {
     elem_or_absent(BPF_MAP_LOOKUP_AND_DELETE_ELEM, map_fd, key, value_bytes)
+}
+
+/// Reads a value without removing it.
+///
+/// Needed for a stack-trace map, whose entries are shared: many blocks resolve
+/// to the same stack, and taking one out on the first read would leave every
+/// later sighting of that stack unresolvable.
+pub fn map_lookup(map_fd: RawFd, key: &[u8], value_bytes: usize) -> io::Result<Option<Vec<u8>>> {
+    elem_or_absent(BPF_MAP_LOOKUP_ELEM, map_fd, key, value_bytes)
 }
 
 fn elem_or_absent(

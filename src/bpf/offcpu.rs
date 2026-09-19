@@ -40,7 +40,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{Counters, Hash, StackTraces};
 use super::syscall;
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context: one 64-bit
@@ -56,6 +56,15 @@ const ARG_PREV_STATE: i16 = 24;
 /// one that holds an integer, and what comes back is a plausible number.
 const SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "unsigned int"];
 
+/// `BPF_F_USER_STACK`: walk the task's own frames rather than the kernel's.
+///
+/// The kernel half of an off-cpu stack is always the same few frames of
+/// `__schedule`, and says nothing; what a reader wants is the line of their own
+/// program that waited. The kernel frames are where the *reason* is -- a futex,
+/// a page fault, a read -- but that is what the task state already says, in one
+/// word instead of eight addresses.
+const BPF_F_USER_STACK: i32 = 1 << 8;
+
 /// `TASK_RUNNING`: the task left the cpu and is still runnable, which is
 /// preemption and belongs to `sched.runqlat`.
 const TASK_RUNNING: i32 = 0;
@@ -65,6 +74,14 @@ const TASK_DEAD: i32 = 0x80;
 /// How many tasks may be off cpu at once before the program stops being able
 /// to record new ones. A machine has a few thousand tasks in total.
 const MAX_IN_FLIGHT: u32 = 16384;
+/// How many distinct stacks may be interned before the kernel starts evicting.
+/// A program blocks in a handful of places; the room is for the whole machine.
+const MAX_STACKS: u32 = 4096;
+/// How deep the kernel walks before it gives up. Deeper than the interpreter
+/// loops that make up most of a real user stack, and bounded because the value
+/// size of the map is this times eight and it is allocated per entry.
+const MAX_STACK_DEPTH: u32 = 64;
+
 /// How many distinct `(task, state)` pairs one drain interval may hold. This
 /// is the number the aggregation buys: the entries are pairs that blocked, not
 /// switches that happened.
@@ -80,9 +97,9 @@ const DROP_TOTALS: u32 = 1;
 /// reads and the map descriptors all come from the same place. Every byte of
 /// each is written before it is handed to a helper: an uninitialised byte in a
 /// key makes two identical blocks land in two different buckets.
-const TOTAL_VALUE: i16 = -72;
-const TOTAL_KEY: i16 = -40;
-const IN_FLIGHT_VALUE: i16 = -24;
+const TOTAL_VALUE: i16 = -80;
+const TOTAL_KEY: i16 = -48;
+const IN_FLIGHT_VALUE: i16 = -32;
 const IN_FLIGHT_KEY: i16 = -8;
 const DROP_KEY: i16 = -88;
 
@@ -96,9 +113,18 @@ const DROP_KEY: i16 = -88;
 const KEY_TID: i16 = 0;
 const KEY_TGID: i16 = 4;
 const KEY_STATE: i16 = 8;
-/// Padding, written explicitly: the kernel hashes the whole key, so a byte the
-/// program never wrote puts two identical blocks in two buckets.
-const KEY_PAD: i16 = 12;
+/// The stack that blocked, as an id into the stack-trace map.
+///
+/// Part of the key rather than of the value, which is what makes the question
+/// "where does this thread block" answerable: two blocks of the same thread in
+/// the same state from different call sites are different entries, and summing
+/// them would give back the number this source already had.
+///
+/// It also occupies the four bytes that used to be padding written as zero,
+/// so the key is the same size it was. The padding mattered for the same
+/// reason this does: the kernel hashes the whole key, and a byte the program
+/// never wrote puts two identical blocks in two buckets.
+const KEY_STACK: i16 = 12;
 const TOTAL_KEY_BYTES: usize = 16;
 
 /// The layout of a totals value, the same way.
@@ -115,8 +141,13 @@ const TOTAL_VALUE_BYTES: usize = 32;
 /// it was waiting for is no longer written anywhere.
 const IN_FLIGHT_TS: i16 = 0;
 const IN_FLIGHT_STATE: i16 = 8;
+/// The stack is captured when the task *leaves* the cpu, because that is the
+/// stack that blocked. By the time it comes back it is inside the scheduler
+/// and its own call site is gone, so the id is carried across the block the
+/// same way the state is.
+const IN_FLIGHT_STACK: i16 = 16;
 const IN_FLIGHT_KEY_BYTES: usize = 4;
-const IN_FLIGHT_VALUE_BYTES: usize = 16;
+const IN_FLIGHT_VALUE_BYTES: usize = 24;
 
 /// One `(task, state)` pair's blocked time over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +159,13 @@ pub struct OffCpu {
     /// How many separate blocks that time was spread over.
     pub blocks: u64,
     pub comm: String,
+    /// The stack that blocked, as an id into the program's stack-trace map.
+    ///
+    /// `None` when the walk failed, which is the ordinary case for a thread
+    /// blocked in a kernel worker with no user stack to walk, and for one whose
+    /// frames the kernel could not follow. The kernel returns a negative errno
+    /// there, and a failed walk is not stack zero.
+    pub stack: Option<u32>,
 }
 
 impl OffCpu {
@@ -178,6 +216,13 @@ impl OffCpu {
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             blocks: long(value, VALUE_BLOCKS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
+            stack: {
+                // Signed on the wire: `bpf_get_stackid` answers with an id or
+                // with a negative errno, and reading the latter as an unsigned
+                // id would look up a stack four billion entries in.
+                let raw = word(key, KEY_STACK as usize) as i32;
+                (raw >= 0).then_some(raw as u32)
+            },
         })
     }
 }
@@ -222,6 +267,7 @@ fn instructions(
     in_flight_fd: i32,
     totals_fd: i32,
     drops_fd: i32,
+    stacks_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     let signature = btf.tracepoint_signature("sched_switch")?;
     if signature != SIGNATURE {
@@ -256,6 +302,23 @@ fn instructions(
     program.jump_to("left", Insn::jset_imm(1, TASK_DEAD, 0));
     program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_TS, 8));
     program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_STATE, 1));
+    // The stack of the task that is leaving, taken here because here is the
+    // only place it exists. `sched_switch` runs in the outgoing task's context
+    // -- the scheduler has not switched the stack yet -- so the walk goes
+    // through its own frames; by the time it is scheduled back in, what is
+    // under it is the scheduler.
+    //
+    // The state was written to the stack first, because this call clobbers
+    // r1 through r5 and the state lives in r1.
+    program.push(Insn::mov64_reg(1, 6));
+    program.extend(Insn::load_map_fd(2, stacks_fd));
+    program.push(Insn::mov64_imm(3, BPF_F_USER_STACK));
+    program.push(Insn::call(helper::GET_STACKID));
+    // Stored whatever it is. A failure is a negative errno, kept as it came so
+    // that userspace can tell "no stack" from "stack zero" -- a task with no
+    // user stack to walk, which is every kernel worker, is the ordinary case
+    // and not an error to hide.
+    program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_STACK, 0));
     // The whole slot is cleared first: the key is four bytes in an eight-byte
     // slot, and the four the program does not write are still hashed.
     program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
@@ -302,7 +365,11 @@ fn instructions(
     program.push(Insn::mov64_reg(9, 8));
     program.push(Insn::sub64_reg(9, 1));
     program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STATE, 2));
-    program.push(Insn::st_imm(BPF_W, R10, TOTAL_KEY + KEY_PAD, 0));
+    // Read out of the in-flight value while the lookup's pointer is still in
+    // r0, and written to the stack straight away: the delete below clobbers
+    // r1 through r5 and there is no callee-saved register left to hold it.
+    program.push(Insn::ldx(BPF_W, 3, 0, IN_FLIGHT_STACK));
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STACK, 3));
 
     program.extend(Insn::load_map_fd(1, in_flight_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -365,6 +432,7 @@ pub struct OffCpuProgram {
     in_flight: Hash,
     totals: Hash,
     drops: Counters,
+    stacks: StackTraces,
     _program: OwnedFd,
     _link: OwnedFd,
 }
@@ -403,6 +471,8 @@ impl OffCpuProgram {
         .map_err(|error| format!("cannot create the off-cpu total map: {error}"))?;
         let drops = Counters::create(2, "omn_offcpu_drop")
             .map_err(|error| format!("cannot create the off-cpu drop counter: {error}"))?;
+        let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_offcpu_stk")
+            .map_err(|error| format!("cannot create the off-cpu stack map: {error}"))?;
 
         let instructions = instructions(
             btf,
@@ -410,6 +480,7 @@ impl OffCpuProgram {
             in_flight.as_raw_fd(),
             totals.as_raw_fd(),
             drops.as_raw_fd(),
+            stacks.as_raw_fd(),
         )?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
@@ -432,6 +503,7 @@ impl OffCpuProgram {
             in_flight,
             totals,
             drops,
+            stacks,
             _program: program,
             _link: link,
         })
@@ -466,6 +538,22 @@ impl OffCpuProgram {
         Ok((entries, losses))
     }
 
+    /// The addresses behind one stack id, leaf first.
+    ///
+    /// Read rather than taken: many blocks resolve to the same stack, and the
+    /// map outlives one drain. `None` means the kernel no longer has it, which
+    /// happens under eviction and leaves a measurement with an id and no
+    /// explanation -- worth reporting as that rather than as an empty stack.
+    pub fn stack(&self, id: u32) -> Option<Vec<u64>> {
+        self.stacks.get(id).ok().flatten()
+    }
+
+    /// How deep the kernel was asked to walk, which is what a stack of exactly
+    /// this many frames was probably truncated at.
+    pub fn stack_depth(&self) -> usize {
+        self.stacks.depth() as usize
+    }
+
     /// How many tasks were off cpu and had not come back.
     ///
     /// Their blocked time is real and is not in any total, because it has no
@@ -495,7 +583,7 @@ mod tests {
     /// buckets and halves both totals.
     #[test]
     fn every_byte_of_a_key_and_a_value_is_accounted_for() {
-        let key = [(KEY_TID, 4), (KEY_TGID, 4), (KEY_STATE, 4), (KEY_PAD, 4)];
+        let key = [(KEY_TID, 4), (KEY_TGID, 4), (KEY_STATE, 4), (KEY_STACK, 4)];
         let value = [
             (VALUE_TOTAL_NS, 8),
             (VALUE_BLOCKS, 8),
@@ -576,7 +664,7 @@ mod tests {
     #[test]
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
-        let called = helpers_called(&instructions(&btf, Some(1), 3, 4, 5).expect("a program"));
+        let called = helpers_called(&instructions(&btf, Some(1), 3, 4, 5, 6).expect("a program"));
         const KTIME_GET_BOOT_NS: i32 = 125;
         assert!(called.contains(&helper::KTIME_GET_NS));
         assert!(!called.contains(&KTIME_GET_BOOT_NS));
@@ -597,7 +685,7 @@ mod tests {
     #[test]
     fn the_duration_is_a_difference_and_not_a_timestamp() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4, 5).expect("a program");
+        let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
         assert!(
             program.iter().any(|insn| *insn == Insn::sub64_reg(9, 1)),
             "the program must subtract the moment the task left from the moment it came back"
@@ -610,7 +698,7 @@ mod tests {
     #[test]
     fn a_runnable_or_dying_task_is_not_recorded_as_blocked() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4, 5).expect("a program");
+        let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
         assert!(
             program
                 .iter()
@@ -632,7 +720,7 @@ mod tests {
     #[test]
     fn the_totals_are_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4, 5).expect("a program");
+        let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
         let atomics = program.iter().filter(|insn| insn.code == 0xdb).count();
         assert_eq!(atomics, 2, "the nanoseconds and the block count, both");
     }
@@ -640,9 +728,9 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide = instructions(&btf, None, 3, 4, 5).expect("a program");
+        let machine_wide = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
         assert!(!machine_wide.iter().any(|insn| insn.imm == 4242));
-        let filtered = instructions(&btf, Some(4242), 3, 4, 5).expect("a program");
+        let filtered = instructions(&btf, Some(4242), 3, 4, 5, 6).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
@@ -657,7 +745,7 @@ mod tests {
     fn a_kernel_with_another_prototype_is_refused_rather_than_read_wrong() {
         let Some(btf) = kernel_btf() else { return };
         assert!(
-            instructions(&btf, None, 3, 4, 5).is_ok(),
+            instructions(&btf, None, 3, 4, 5, 6).is_ok(),
             "this kernel's prototype is the one the program is written for"
         );
         assert_eq!(

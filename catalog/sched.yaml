@@ -71,7 +71,7 @@
     # path needs a numeric id out of tracefs. Ordered ahead of it for the
     # reason DECISIONS.md settled: strictly fewer requirements, same events.
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: med,
-       degraded: "no stacks: tells you how long, not where"}
+       degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med,
        degraded: "no stacks: tells you how long, not where"}
   modes: [trace]
@@ -81,8 +81,13 @@
   filter_fields: [comm, pid, state]
   determinism: low
   caveats:
-    - "Expensive on switch-heavy workloads: aggregate in the kernel (stack-id ->
-       counter) rather than streaming a raw trace."
+    - "Expensive on switch-heavy workloads, which is why the totals are kept in
+       the kernel keyed by (task, state, stack-id) rather than streamed as one
+       event per switch. The stack is walked once per distinct call site: what
+       travels with each block is four bytes."
+    - "The stack is taken where the task leaves the cpu, which is the only place
+       it exists -- `sched_switch` runs in the outgoing task's context. By the
+       time it is scheduled back in, what is under it is the scheduler."
     - "Blocked, not preempted. A task the scheduler took the cpu away from is
        still runnable and its wait is run queue latency, which is
        `sched.runqlat`; only a task that left because it was waiting for

@@ -24,13 +24,16 @@
 //! intervals it spans would need the kernel to walk its in-flight map on every
 //! drain, which is the cost this whole shape exists to avoid.
 
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{OffCpu, OffCpuProgram};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
+use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
+use crate::stack::{Frame, RawStack, Symbolizer};
 
 /// How often the totals are drained.
 ///
@@ -79,6 +82,20 @@ pub struct OffCpuCollector {
     dropped_totals: u64,
     /// The end of the last interval, which is the start of this one.
     window_opened_ns: u64,
+    /// Every stack the run resolved, by the id the kernel gave it.
+    ///
+    /// Resolved as the drains come in rather than at the end, because a
+    /// symbolizer reads the target's `/proc/<pid>/maps` and those are gone the
+    /// moment it exits -- and a program that blocks is often a program that
+    /// then finishes.
+    stacks: BTreeMap<u64, Vec<String>>,
+    /// One symbolizer per process seen, built lazily. A system-wide run sees
+    /// many, and each carries that process's own mappings.
+    symbolizers: HashMap<i32, Symbolizer>,
+    /// Blocks whose stack the kernel could not walk, and blocks whose id it had
+    /// evicted by the time it was asked. Different failures, counted apart.
+    unwalkable: u64,
+    evicted_stacks: u64,
 }
 
 impl OffCpuCollector {
@@ -92,6 +109,10 @@ impl OffCpuCollector {
             dropped_in_flight: 0,
             dropped_totals: 0,
             window_opened_ns: 0,
+            stacks: BTreeMap::new(),
+            symbolizers: HashMap::new(),
+            unwalkable: 0,
+            evicted_stacks: 0,
         }
     }
 
@@ -125,6 +146,10 @@ impl OffCpuCollector {
         }
 
         for (index, entry) in entries.into_iter().enumerate() {
+            let mut attrs = attributes(&entry, window_ns);
+            if let Some(id) = self.resolve_stack(&entry) {
+                attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
+            }
             events.push(Event {
                 ts_ns: closed_ns,
                 ts_err_ns: 0,
@@ -132,11 +157,58 @@ impl OffCpuCollector {
                 // The blocked task is the series: this is its time, not the
                 // machine's, and not the time of whatever it was waiting for.
                 keys: vec![KeyValue::task(entry.tid as i32)],
-                attrs: attributes(&entry, window_ns),
+                attrs,
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
             });
         }
+    }
+
+    /// Symbolizes the stack behind an entry, once per distinct id.
+    ///
+    /// Returns the id to put on the event, or `None` when there is nothing to
+    /// point at: the kernel could not walk the task's stack, or the stack it
+    /// walked is no longer in the map. Both are counted and reported; neither
+    /// is an empty stack, which would read as a task that blocked at no call
+    /// site at all.
+    fn resolve_stack(&mut self, entry: &OffCpu) -> Option<u32> {
+        let id = match entry.stack {
+            Some(id) => id,
+            None => {
+                self.unwalkable += entry.blocks;
+                return None;
+            }
+        };
+        if self.stacks.contains_key(&u64::from(id)) {
+            return Some(id);
+        }
+        let program = self.program.as_ref()?;
+        let Some(addresses) = program.stack(id) else {
+            self.evicted_stacks += entry.blocks;
+            return None;
+        };
+        let truncated = addresses.len() >= program.stack_depth();
+        let symbolizer = self
+            .symbolizers
+            .entry(entry.tgid as i32)
+            .or_insert_with(|| Symbolizer::for_process(entry.tgid as i32));
+        // User frames only: `BPF_F_USER_STACK` asked for the task's own, and
+        // putting them through kernel symbols would name them after whatever
+        // function lives at that offset in the kernel's tables.
+        let stack = symbolizer.symbolize(&RawStack {
+            kernel: Vec::new(),
+            user: addresses,
+            elsewhere: Vec::new(),
+        });
+        let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
+        if truncated {
+            // Root first, so the missing frames are the ones before the first
+            // one here. Said rather than left to be inferred from a stack that
+            // begins in the middle of a program.
+            frames.insert(0, "[truncated]".to_owned());
+        }
+        self.stacks.insert(u64::from(id), frames);
+        Some(id)
     }
 
     /// Reads the program's own counters of what it could not record.
@@ -241,12 +313,35 @@ impl Collector for OffCpuCollector {
         Some(DRAIN_INTERVAL)
     }
 
+    fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
+        self.stacks.clone()
+    }
+
     fn losses(&self) -> Losses {
         self.losses.clone()
     }
 
     fn notes(&self) -> Vec<String> {
-        self.notes.clone()
+        let mut notes = self.notes.clone();
+        // A stack that could not be walked is the ordinary case for a kernel
+        // worker, which has no user stack at all, and it must not be confused
+        // with one the kernel lost. Reported as a degradation because a flame
+        // graph of the blocks that *did* resolve looks complete either way.
+        if self.unwalkable > 0 {
+            notes.push(format!(
+                "{} blocks had no user stack to walk: a kernel thread has none, and a task built \
+                 without frame pointers may have none the kernel can follow",
+                self.unwalkable
+            ));
+        }
+        if self.evicted_stacks > 0 {
+            notes.push(format!(
+                "{} blocks named a stack the kernel had already evicted from its stack map, so \
+                 they are counted and cannot be placed",
+                self.evicted_stacks
+            ));
+        }
+        notes
     }
 }
 
@@ -290,6 +385,7 @@ mod tests {
             total_ns: 1_000,
             blocks: 2,
             comm: "sleep".to_owned(),
+            stack: None,
         };
         let attributes = attributes(&entry, 100_000);
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
@@ -320,6 +416,7 @@ mod tests {
             total_ns: 1,
             blocks: 1,
             comm: "kworker".to_owned(),
+            stack: None,
         };
         let attributes = attributes(&entry, 1);
         let named = attributes.iter().find(|attr| attr.name == "state");

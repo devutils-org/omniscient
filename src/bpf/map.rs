@@ -29,7 +29,9 @@
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
-use super::syscall::{self, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_ARRAY};
+use super::syscall::{
+    self, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_STACK_TRACE,
+};
 
 /// A `BPF_MAP_TYPE_HASH` shared with a program, addressed as bytes.
 ///
@@ -188,6 +190,70 @@ impl Counters {
         syscall::map_lookup_percpu_u64(self.fd.as_raw_fd(), slot, self.cpus)
             .map(|values| values.iter().sum())
             .unwrap_or(0)
+    }
+}
+
+/// The stacks a program interned with `bpf_get_stackid`.
+///
+/// A `BPF_MAP_TYPE_STACK_TRACE` is the kernel's own side table: the program
+/// asks for an id, the kernel walks the stack, hashes it and hands back a
+/// number, and the same stack always gets the same number. That is what makes
+/// a stack affordable on a path that runs tens of thousands of times a second
+/// -- the walk happens once per distinct stack, and what travels with each
+/// measurement is four bytes.
+///
+/// Entries are read and left in place. Many measurements resolve to the same
+/// stack, and taking one out on the first sighting would leave every later one
+/// unresolvable.
+pub struct StackTraces {
+    fd: OwnedFd,
+    depth: u32,
+}
+
+impl StackTraces {
+    /// `depth` is how many frames the kernel will walk before it gives up. The
+    /// value size is fixed at creation, so a stack deeper than this comes back
+    /// truncated rather than failing, and the truncation is invisible in the
+    /// map: what says so is the last slot being full.
+    pub fn create(slots: u32, depth: u32, name: &str) -> io::Result<Self> {
+        let fd = syscall::map_create(
+            BPF_MAP_TYPE_STACK_TRACE,
+            4,
+            depth * std::mem::size_of::<u64>() as u32,
+            slots,
+            name,
+        )?;
+        Ok(Self { fd, depth })
+    }
+
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// The addresses behind one id, leaf first, with the zero padding removed.
+    ///
+    /// `None` when the id is not in the map: the kernel evicts under pressure,
+    /// and an id whose stack is gone is a measurement that keeps its number and
+    /// loses its explanation, which is worth reporting as such rather than as
+    /// an empty stack.
+    pub fn get(&self, id: u32) -> io::Result<Option<Vec<u64>>> {
+        let bytes = self.depth as usize * std::mem::size_of::<u64>();
+        let Some(value) = syscall::map_lookup(self.fd.as_raw_fd(), &id.to_ne_bytes(), bytes)?
+        else {
+            return Ok(None);
+        };
+        let addresses: Vec<u64> = value
+            .chunks_exact(std::mem::size_of::<u64>())
+            .map(|chunk| u64::from_ne_bytes(chunk.try_into().expect("eight bytes")))
+            // The kernel zero-fills the slots it did not walk into. A zero is
+            // not an address, so the first one ends the stack.
+            .take_while(|address| *address != 0)
+            .collect();
+        Ok(Some(addresses))
     }
 }
 
