@@ -2379,3 +2379,177 @@ table as it now stands.
 Also: `STATE.md` §"What remains", item 1, opens with the two recurring defects —
 "A refusal's exit code does not match its message" and "A poll that cannot keep
 its cadence" — and both are closed.
+
+---
+
+Written by stream B, which owns `catalog/*.yaml` and `src/validate.rs`.
+
+Five of the eleven defects this stream was given cannot be closed inside those
+two files. Each is recorded here with the signature that would close it, and in
+`docs/fixes/catalog.md` with what the catalog did instead in the meantime.
+
+### To whoever owns `src/request.rs`: `count` mode must be able to rank
+
+```rust
+ModeKind::Count => &[EmitKind::Rate, EmitKind::Summary, EmitKind::Raw, EmitKind::TopK],
+```
+
+One arm of `ModeKind::valid_emits`, and it closes net 1, sched 5 and the
+`--emit topk` half of io 1.
+
+The reasoning is the one already written into that match for `raw`: a counted
+window is one event *per series*, not one number. `emit::topk` groups by series
+key and sums the value attribute; `emit::rate` groups by series key, sums the
+value attribute and divides by the window. They are the same function with one
+extra division, and only one of them is reachable from `count` -- so a counted
+run can be told what its heaviest series *rate* was and cannot be told which
+series was heaviest. `sched.migrations --mode count --emit summary` renders
+twenty-odd per-task series today and refuses to rank them; `net.bytes` produces
+one series per interface and refuses the same.
+
+Until that lands, two entries stopped promising a ranking no mode of theirs can
+reach: `net.bytes` no longer declares `topk`, and `docs/scenarios/net.md` keeps
+the reproduction. The day the arm changes, `topk` goes back into
+`catalog/net.yaml` and the `RECORDED` constant of
+`every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares` stays
+empty either way.
+
+### To whoever owns `src/catalog.rs`: two lines, one of them a field
+
+The first makes the check this stream wrote a refusal rather than a test:
+
+```rust
+// in Catalog::from_entries, after check_backend_filter_fields(entry)?
+let complaints = crate::validate::check_catalog_entry(entry);   // or over the whole catalog
+```
+
+`src/validate.rs::check_catalog` is written and covers two promises an entry can
+make that no build can keep -- an emit no declared mode can produce, and a
+`rate` over a unit that does not add up. It runs today from
+`validate::tests::the_catalog_promises_nothing_it_cannot_produce`, which guards
+the embedded catalog and nothing else; a catalog loaded with `--catalog <dir>`
+is not checked at all. The loader is where this belongs, beside
+`check_backend_targets` and `check_backend_filter_fields`, which are the same
+kind of check written the same way.
+
+The second is the field that io 8 needs:
+
+```rust
+pub struct Backend {
+    // ...
+    /// Which of the entry's keys *this* backend attaches to an event.
+    ///
+    /// Absent means all of them, as for `filter_fields`. Present, it is a
+    /// subset: a key the selected backend never attaches makes every join
+    /// over it attribute nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<KeyKind>>,
+}
+
+impl Entry {
+    pub fn backend_keys<'a>(&'a self, backend: &'a Backend) -> &'a [KeyKind];
+    pub fn backends_carrying_key(&self, key: KeyKind) -> Vec<&str>;
+}
+
+fn check_backend_keys(entry: &Entry) -> Result<(), ParseError>;   // both directions
+```
+
+Exactly the shape `filter_fields` already has, including the loader check in
+both directions. `io.bytes` is the entry that wants it: the chain carries `blk`,
+`task`, `cgroup` and `dev`, `fs:proc` attaches `dev` alone and `fs:cgroup` `dev`
+and `cgroup`, and only the tracepoint backend -- which this build does not
+implement -- carries `task`.
+
+### To whoever owns `src/resolve.rs`: refuse a key the selected backend cannot attach
+
+With the field above, the other half of io 8, beside `check_filter_fields`,
+which is the same function over the other list:
+
+```rust
+fn check_keys_carried(entry: &Entry, backend: &Backend, request: &Request) -> Result<(), ResolveError>;
+
+// and, in src/error.rs, the twin of FilterFieldNotCarried:
+ResolveError::KeyNotCarried { source_id, backend, key, elsewhere: Option<String> },
+```
+
+The validator cannot do this: it runs before a backend is chosen, and which keys
+are real depends on which one the resolver kept. `--keys task` on `io.bytes`
+resolved onto `/proc/diskstats` is accepted today and produces events with no
+task on them, which is the expensive silence -- a session written now to be
+joined later produces events that join to nothing, and re-running it is the same
+work twice. `--filter "comm == ..."` on the same backend is refused and names
+the backend that would carry the field; this is that message, for keys.
+
+### To stream F, for `src/collect/net/`: what a snapshot of a counter answers
+
+net 3. `net.iface --mode snapshot` and `net.backlog --mode snapshot` report the
+increment between their one read and the closing read that follows it about a
+hundred microseconds later, which on anything short of a saturated machine is
+zero. A reader taking a snapshot to ask *is this machine refusing connections
+right now* is told no.
+
+The answer this catalog already gives elsewhere is the totals since boot:
+`examples/mem-machine-counters.yml` has a request labelled "swap since boot"
+which is `mem.swap --mode snapshot --emit raw`, and `io.pressure` states the
+rule in its own caveat -- *"A poll reports the share of its own window... A
+snapshot has no window, so it reports the kernel's decayed ten-second average
+instead, under its own name: the two are different measurements and are never
+given the same one."*
+
+So: on `snapshot`, report the absolute counter under its own attribute name
+rather than a delta over a window the mode does not have. The catalog will carry
+the caveat that says which of the two a reader is holding, the way `io.pressure`
+does, once there is a second measurement to name.
+
+The alternative -- dropping `snapshot` from both entries -- was not taken
+because it breaks `examples/net-snapshot.yml`, which this stream does not own,
+and because a snapshot of a counter is a question worth answering rather than
+one worth refusing.
+
+### To stream F, for `src/collect/net/iface.rs`: one event per counter kind
+
+net 5. The event's value is the error count and drops, pause frames and the
+per-direction figures are attributes beside it, so `rate`, `timeline` and
+`summary` -- everything but `raw` -- answer about errors alone. A link that had
+just dropped exactly a thousand frames reads `0 count/s`.
+
+Keeping them apart is right and the catalog says so. What costs the aggregates
+is that the separation is made with attributes, which no aggregating emit
+carries. One event per counter kind would keep the separation and make all of
+them visible; the series need something to be told apart by, and `iface` is
+already the key, so this wants either a second key or the counter kind in the
+key's own name. `catalog/net.yaml` carries a caveat saying what the number
+answers about until then.
+
+### To stream C, for `src/emit.rs`: a ranking over an attribute
+
+runtime 1. `topk` ranks series, a series is a distinct set of keys, and
+`runtime.jit` carries `task` alone -- so a run answers `topk:10` with one row
+per process however many methods were compiled, and that row's total is the
+event count `summary` already gives. The question a JIT map exists to answer is
+*which methods dominated*.
+
+`method` is an attribute rather than a key, and making it a key is the larger
+change: a key is what joins across sources, and there is no `KeyKind` for a
+compiled method. The cheaper half is `topk` being able to group by an attribute
+-- `--emit topk:10@method` or equivalent -- which `io.bytes`, `io.iops` and
+`net.iface` all want too, for `rwbs`, for the operation kind and for the counter
+kind. Finding 8's "What would let `topk` answer the question `io` and `net`
+declare" is the same request from the other side.
+
+`catalog/runtime.yaml` carries a caveat saying what `topk` ranks here and what
+it does not, which is the honest half this stream can do.
+
+### To stream E, for `src/collect/mem/`: a counted window for `mem.swap`
+
+mem D3, the half that is a judgement rather than a deletion. `mem.swap` measures
+a flow -- pages written to, or read back from, a swap device during the window --
+and a rate is the natural thing to want from it. It declared `rate` and declared
+neither of the modes that can produce one, so the emit is out of the entry for
+now.
+
+The other fix is a `count` mode: two reads and one event carrying the window,
+which is what `net.bytes` and `net.packets` already do over `/proc/net/dev`, and
+what `mem.swap --mode snapshot` already does over `/proc/vmstat` for the totals.
+If that lands, `modes: [poll, snapshot, count]` and `rate` goes back into
+`catalog/mem.yaml`.

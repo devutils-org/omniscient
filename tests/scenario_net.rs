@@ -411,10 +411,17 @@ fn the_snapshot_leg_of_the_sweep_answers_with_every_emit_it_promised() {
 fn every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares() {
     use omn::catalog::Catalog;
 
-    /// The one the sweep found. `net.bytes` emits one event per interface, so a
-    /// ranking over interfaces is exactly what `topk` is for -- and `topk`
-    /// comes from `sample` or `trace`, neither of which this source declares.
-    const RECORDED: &[(&str, &str)] = &[("net.bytes", "topk")];
+    /// The one the sweep found, now fixed: `net.bytes` declared `topk`, which
+    /// comes from `sample` or `trace`, and declares neither. The emit is out of
+    /// the entry, so this family promises nothing it cannot reach.
+    ///
+    /// It was removed rather than served because the ranking is expressible --
+    /// the collector emits one event per interface, so the series exist -- and
+    /// what refuses it is the mode x emit matrix, which is not this stream's.
+    /// `docs/open-findings.md` asks for `count` to be able to rank what it
+    /// counted; the day it can, `topk` comes back to `catalog/net.yaml` and
+    /// this stays empty.
+    const RECORDED: &[(&str, &str)] = &[];
 
     let catalog = Catalog::embedded().expect("the embedded catalog");
     let mut unreachable = Vec::new();
@@ -441,8 +448,9 @@ fn every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares() {
          appeared, that is a promise the catalog now makes and no request can collect"
     );
 
-    // And the refusal a reader actually meets, which names the matrix rather
-    // than the source.
+    // And the refusal a reader actually meets, which now names the source and
+    // the emits it does have. Against the old entry this said `mode `count`
+    // cannot produce `topk``, which pointed at a rule in another file.
     let outcome = omn(&[
         "net.bytes",
         "--iface",
@@ -456,8 +464,13 @@ fn every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares() {
     ]);
     assert_eq!(code(&outcome), 2, "{}", stderr(&outcome));
     assert!(
-        stderr(&outcome).contains("mode `count` cannot produce `topk`"),
-        "the refusal should name the mode and the emit: {}",
+        stderr(&outcome).contains("`net.bytes` cannot emit `topk`"),
+        "the refusal should name the source and the emit: {}",
+        stderr(&outcome)
+    );
+    assert!(
+        stderr(&outcome).contains("this source emits rate, timeline, summary"),
+        "and the hint should be what the entry declares: {}",
         stderr(&outcome)
     );
 }
@@ -1107,7 +1120,8 @@ fn a_net_request_that_cannot_mean_anything_is_refused_with_the_axis_that_is_wron
             "`net.capture` cannot emit `summary`",
         ),
         (
-            // Declared by the source, reachable from neither of its modes.
+            // Not declared by the source at all, since the entry stopped
+            // promising a ranking neither of its modes can reach.
             &[
                 "net.bytes",
                 "--iface",
@@ -1117,7 +1131,7 @@ fn a_net_request_that_cannot_mean_anything_is_refused_with_the_axis_that_is_wron
                 "--emit",
                 "topk:5",
             ],
-            "mode `count` cannot produce `topk`",
+            "`net.bytes` cannot emit `topk`",
         ),
     ];
 

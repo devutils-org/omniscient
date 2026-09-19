@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-use crate::catalog::{Catalog, Entry, TargetSupport};
+use crate::catalog::{Catalog, Entry, TargetSupport, Unit};
 use crate::error::{nearest, one_of, DidYouMean};
 use crate::format::{FormatStatus, OutputFormat};
 use crate::request::{Emit, EmitKind, Mode, Request, Session, StackMode, TargetKind};
@@ -236,6 +236,62 @@ fn check_joins(
     }
 }
 
+/// Checks the catalog against itself, before any request exists.
+///
+/// The three checks above answer "can this request be served"; this one answers
+/// "could any request have been". An entry that promises something no build can
+/// keep is the quietest failure this tool has: the entry lists it, `omn list`
+/// prints it, the help offers it, and the refusal when someone asks comes from a
+/// rule that lives somewhere else entirely, so nothing ever points at the line
+/// of YAML that was wrong.
+///
+/// Returns one complaint per broken promise, empty when the catalog keeps all
+/// of them. It is a function rather than a load-time refusal because the loader
+/// is not this stream's to change; `the_catalog_promises_nothing_it_cannot_produce`
+/// runs it over the embedded catalog, and `docs/open-findings.md` asks for the
+/// one line in `Catalog::from_entries` that would make it a refusal.
+pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
+    let mut complaints = Vec::new();
+    for entry in catalog.entries() {
+        for emit in &entry.emits {
+            if entry
+                .modes
+                .iter()
+                .any(|mode| mode.valid_emits().contains(emit))
+            {
+                continue;
+            }
+            complaints.push(format!(
+                "catalog entry `{}` declares the emit `{emit}`, which none of the modes it \
+                 declares ({}) can produce: no request could ever reach it",
+                entry.id,
+                one_of(entry.modes.iter().map(|mode| mode.as_str()))
+            ));
+        }
+        if entry.emits.contains(&EmitKind::Rate) && !adds_up(entry.unit) {
+            complaints.push(format!(
+                "catalog entry `{}` declares `rate` over a `{}`, which does not add up: a sum \
+                 of them divided by a window is a quantity of nothing",
+                entry.id, entry.unit
+            ));
+        }
+    }
+    complaints
+}
+
+/// Whether two readings of this unit may be added together.
+///
+/// `rate` sums an attribute and divides by the window, and `topk` ranks the
+/// same sums, so both mean something for a quantity and nothing for a level.
+/// Written as an exhaustive match so that a unit added tomorrow has to answer
+/// the question rather than inherit an answer.
+fn adds_up(unit: Unit) -> bool {
+    match unit {
+        Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules => true,
+        Unit::Ratio | Unit::Hz | Unit::Celsius => false,
+    }
+}
+
 fn check_target(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>) {
     let kind = request.target.kind();
     if entry.target_support(kind) != TargetSupport::No {
@@ -337,12 +393,32 @@ fn check_emits(
             continue;
         }
         if !mode.valid_emits().contains(&kind) {
+            // The hint has to be the intersection, not the matrix. A hint
+            // listing what a mode can produce in the abstract sends a reader
+            // to an emit this source refuses by name, and the second refusal
+            // is the one that reads like the tool contradicting itself.
+            let reachable: Vec<EmitKind> = mode
+                .valid_emits()
+                .iter()
+                .copied()
+                .filter(|candidate| entry.emits.contains(candidate))
+                .collect();
+            let hint = if reachable.is_empty() {
+                format!(
+                    "`{}` declares no emit that `{mode}` mode can produce; it emits {}",
+                    entry.id,
+                    one_of(entry.emits.iter().map(|emit| emit.as_str()))
+                )
+            } else {
+                format!(
+                    "in `{mode}` mode `{}` emits {}",
+                    entry.id,
+                    one_of(reachable.iter().map(|emit| emit.as_str()))
+                )
+            };
             rejections.push(Rejection::with_hint(
                 format!("mode `{mode}` cannot produce `{kind}`"),
-                format!(
-                    "in `{mode}` mode the valid emits are {}",
-                    one_of(mode.valid_emits().iter().map(|emit| emit.as_str()))
-                ),
+                hint,
             ));
             continue;
         }
@@ -562,7 +638,7 @@ fn squash(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::{Budget, SourceId, Target};
+    use crate::request::{Budget, ModeKind, SourceId, Target};
 
     fn catalog() -> Catalog {
         Catalog::embedded().unwrap()
@@ -669,6 +745,82 @@ mod tests {
             rejections[0].message.contains("forbids unwinding"),
             "{}",
             rejections[0]
+        );
+    }
+
+    #[test]
+    fn the_mode_hint_names_only_what_the_source_declares() {
+        // `io.bytes` in `count` mode can produce `rate`, `summary` and `raw`
+        // in the abstract, and declares all three. It does not declare `hist`
+        // at all, and a hint that offered it would be advice leading to a
+        // second refusal.
+        let request = request("io.bytes", Target::System, "count", "timeline");
+        let rejections = reject(&request);
+        let hint = rejections
+            .iter()
+            .find_map(|rejection| rejection.hint.clone())
+            .expect("a refused emit always says what the source does produce");
+        assert!(
+            hint.starts_with("in `count` mode `io.bytes` emits"),
+            "the hint should name the source, not the matrix: {hint}"
+        );
+        let catalog = catalog();
+        let entry = catalog.get(&"io.bytes".parse().unwrap()).unwrap();
+        for offered in hint.rsplit("emits ").next().unwrap().split(", ") {
+            let offered = offered.trim().trim_start_matches("and ");
+            assert!(
+                entry.emits.iter().any(|emit| emit.as_str() == offered),
+                "the hint offered `{offered}`, which `io.bytes` refuses by name"
+            );
+            assert!(
+                ModeKind::Count
+                    .valid_emits()
+                    .iter()
+                    .any(|emit| emit.as_str() == offered),
+                "the hint offered `{offered}`, which `count` mode cannot produce"
+            );
+        }
+    }
+
+    #[test]
+    fn the_catalog_promises_nothing_it_cannot_produce() {
+        let complaints = check_catalog(&catalog());
+        assert!(
+            complaints.is_empty(),
+            "the catalog makes {} promise(s) no build can keep:\n  {}",
+            complaints.len(),
+            complaints.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn an_emit_no_declared_mode_can_produce_is_a_broken_promise() {
+        let mut entry = catalog().get(&"mem.swap".parse().unwrap()).unwrap().clone();
+        entry.emits.push(EmitKind::Rate);
+        let catalog = Catalog::from_entries(vec![entry]).expect("the loader still takes it");
+        let complaints = check_catalog(&catalog);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(
+            complaints[0].contains("none of the modes"),
+            "{}",
+            complaints[0]
+        );
+    }
+
+    #[test]
+    fn a_rate_over_a_unit_that_does_not_add_up_is_a_broken_promise() {
+        let mut entry = catalog()
+            .get(&"gpu.engine_busy".parse().unwrap())
+            .unwrap()
+            .clone();
+        entry.emits.push(EmitKind::Rate);
+        let catalog = Catalog::from_entries(vec![entry]).expect("the loader still takes it");
+        let complaints = check_catalog(&catalog);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(
+            complaints[0].contains("does not add up"),
+            "{}",
+            complaints[0]
         );
     }
 

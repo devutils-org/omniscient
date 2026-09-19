@@ -991,52 +991,26 @@ fn a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code() {
     );
 }
 
-/// Defect 5: `proc.fd` declares the `file` key and no event carries it.
+/// Defect 5, fixed: `proc.fd` declared the `file` key and no event carried it.
 ///
-/// The catalog says `keys: [task, file]`, the validator accepts `--keys file`
-/// and tells a reader that "`proc.fd` carries task, file", and every event this
-/// collector produces carries `task` alone. A join written on `file` matches
-/// nothing and reports that it attributed zero events, which reads as a
+/// The catalog said `keys: [task, file]`, the validator accepted `--keys file`
+/// and told a reader that "`proc.fd` carries task, file", and every event this
+/// collector produces carries `task` alone. A join written on `file` matched
+/// nothing and reported that it attributed zero events, which reads as a
 /// workload that did nothing rather than as a key that was never there.
+///
+/// The entry now declares `task` alone, so the promise and the events agree and
+/// the request is refused before anything is attached. Both halves are asserted
+/// here -- the refusal, and that the events carry exactly the key that is left
+/// -- because a fix that only edited the refusal would be the same lie the
+/// other way round.
 ///
 /// It matters beyond this family: phase two's premise is that every session
 /// which could carry a key carries it, and a key the catalog promises and the
 /// build does not emit makes that impossible to check from the catalog alone.
 #[test]
-fn defect_5_the_file_key_the_catalog_declares_is_on_no_event() {
+fn the_only_key_proc_fd_declares_is_the_only_one_its_events_carry() {
     needs_python!();
-    let output = omn(&[
-        "proc.fd",
-        "--mode",
-        "poll@50ms",
-        "--emit",
-        "raw",
-        "--keys",
-        "task,file",
-        "--format",
-        "json",
-        "--",
-        "python3",
-        "-c",
-        "import time; time.sleep(0.1)",
-    ]);
-    assert!(
-        output.status.success(),
-        "the request is accepted, which is the problem: {}",
-        stderr(&output)
-    );
-
-    let doc = document(&output);
-    let event = &doc["results"][0]["outputs"][0]["events"][0];
-    let keys = event["keys"].as_array().expect("keys");
-    assert!(
-        keys.iter().all(|key| key.get("file").is_none()),
-        "DEFECT 5 IS FIXED: `proc.fd` now carries the `file` key it declares. Delete \
-         this test and defect 5 of docs/scenarios/proc.md."
-    );
-    assert_eq!(keys.len(), 1, "only `task` is ever produced: {event}");
-
-    // And the validator states the promise the build does not keep.
     let refused = omn(&[
         "proc.fd",
         "--mode",
@@ -1044,15 +1018,53 @@ fn defect_5_the_file_key_the_catalog_declares_is_on_no_event() {
         "--emit",
         "raw",
         "--keys",
-        "mem",
+        "task,file",
         "--",
         "true",
     ]);
-    assert!(
-        stderr(&refused).contains("carries task, file"),
-        "the hint tells a reader `file` is available: {}",
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "`--keys file` on a source that carries no file is a request that cannot mean \
+         anything: {}",
         stderr(&refused)
     );
+    let complaint = stderr(&refused);
+    assert!(
+        complaint.contains("does not carry the `file` key"),
+        "the refusal has to name the key: {complaint}"
+    );
+    assert!(
+        complaint.contains("carries task") && !complaint.contains("carries task, file"),
+        "and the hint has to name what is left, without the key it just refused: {complaint}"
+    );
+
+    // And what the entry does declare is on every event.
+    let output = omn(&[
+        "proc.fd",
+        "--mode",
+        "poll@50ms",
+        "--emit",
+        "raw",
+        "--keys",
+        "task",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        "import time; time.sleep(0.1)",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    for event in events(&doc["results"][0]) {
+        let keys = event["keys"].as_array().expect("keys");
+        assert_eq!(keys.len(), 1, "one key per event, and it is task: {event}");
+        assert!(
+            keys[0].get("task").is_some(),
+            "the key on the event is not `task`: {event}"
+        );
+    }
 }
 
 /// A late tick is one reason with a count, not one reason per tick.

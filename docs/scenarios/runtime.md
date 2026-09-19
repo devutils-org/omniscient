@@ -255,6 +255,14 @@ Five distinct methods were compiled and the ranking names none of them. The
 question a JIT map exists to answer is *which methods dominated*, and `method`
 is an attribute rather than a key, so no emit can group on it.
 
+Stream B of the fifth wave found this is not an entry to correct: `topk` is
+delivered literally, a ranking over `--pid a,b,c` is real, and there is no
+`KeyKind` for a compiled method to promote `method` with. `catalog/runtime.yaml`
+now carries the caveat saying what `topk` ranks here and what it does not, and
+the cheaper of the two ways out — `topk` grouping by an attribute, which `io`
+and `net` want for the same reason — is written up under "Needs from another
+stream" in `docs/open-findings.md`.
+
 This is a promise that came due. `examples/runtime-jit.yml` said in an earlier
 wave that "a profile of *which* methods cost the most needs `topk`, which lands
 with the shared aggregation work". The aggregation landed; the question is still

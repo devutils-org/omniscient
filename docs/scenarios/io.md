@@ -389,6 +389,25 @@ where it would live, ends as above.
 
 ### 2. The mode's hint offers an emit the source refuses
 
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. The hint
+is now the intersection of the matrix and the entry, so it can only ever name
+emits this source declares:
+
+```console
+$ omn io.bytes --system -m count -e timeline
+error: [io.bytes #1] mode `count` cannot produce `timeline`
+  hint: in `count` mode `io.bytes` emits rate, summary, raw
+
+$ omn io.bytes --system -m count -e raw -d 1s
+  raw
+    88331025716875  io.bytes  dev:259+0  bytes=81920 read_bytes=0 write_bytes=81920 ...
+```
+
+Both halves moved: the hint narrowed, and `raw` is declared, which is defect 7
+below. `the_mode_hint_offers_only_what_the_source_declares` replaces the
+scenario named at the end of this entry, and follows the hint rather than only
+reading it. What it used to say:
+
 ```console
 $ omn io.bytes --system -m count -e timeline
 error: [io.bytes #1] mode `count` cannot produce `timeline`
@@ -403,8 +422,9 @@ The first hint lists what a `count` mode can produce in the abstract; the
 second refuses one of them for this source. A reader who follows the first hint
 gets the second refusal. The mode × emit matrix and the source's own `emits`
 are both right; nothing intersects them before printing advice.
-`the_mode_hint_offers_an_emit_the_source_refuses` holds both messages, so the
-day the hint is narrowed the scenario says so.
+`the_mode_hint_offers_an_emit_the_source_refuses` held both messages so that
+the day the hint was narrowed the scenario would say so. It did, and it is now
+`the_mode_hint_offers_only_what_the_source_declares`.
 
 ### 3. "No viable backend" and "this cannot mean anything" share an exit code
 
@@ -518,10 +538,29 @@ on it rather than a fix.
 ### 7. `io.bytes` measures the read/write split and no emit can show it
 
 The collector puts `read_bytes`, `write_bytes`, `sector_bytes` and, where the
-kernel reports them, `discarded_bytes` on every event. The catalog declares
+kernel reports them, `discarded_bytes` on every event. The catalog declared
 `emits: [rate, summary, timeline, topk]` for `io.bytes` — and none of those
-carries an event's attributes. `raw`, which does, is not declared, and is
+carries an event's attributes. `raw`, which does, was not declared, and was
 refused by name.
+
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. `raw` is
+declared on all three entries, which needed no new mode: it is producible from
+`count`, `poll` and `trace`, which is every mode these sources have. The split
+is now reachable in each of them, and each entry carries a caveat naming it.
+
+What pins it is ground truth rather than shape: the scenario
+`the_split_a_write_workload_made_is_reported_as_writes` runs the same `fsync`ed
+64 MiB past `io.bytes -m count -e raw`, requires `write_bytes` to carry it, caps
+each of the two columns with the same column of `/proc/diskstats` over a window
+enclosing the run, and requires them to add up to the total the aggregating
+emits answer with. That is the check the total could not make.
+
+Its first form asserted that a write workload reads nothing, and that measured
+the suite rather than the tool: run beside the cold-read scenario two entries
+above, which pulls 64 MiB off the same device, it failed with exactly 67108864
+bytes in the read column — the neighbour's. The brackets are what survive a
+shared machine, and on a quiet one the read cap is near zero and says the same
+thing.
 
 So the first question anybody asks of a volume — *was that reads or writes?* —
 is measured, attached to the event, and unreachable. It costs the scenarios
@@ -551,6 +590,14 @@ is the same work twice. Compare `io.inflight -k task`, which *is* refused —
 `io.inflight` does not carry the `task` key, so it cannot be joined on it —
 because there the catalog does not declare it either. The check is against the
 entry, never against the backend that was selected.
+
+Stream B of the fifth wave found this cannot be fixed in `catalog/*.yaml` at
+all: the per-backend `keys:` the brief says to use does not exist. `Backend`
+carries `targets` and `filter_fields` in exactly that shape and no `keys`, so
+`#[serde(deny_unknown_fields)]` refuses the data. The field, the two `Entry`
+accessors, the loader check and the resolver's refusal are written out under
+"Needs from another stream" in `docs/open-findings.md`; the entry meanwhile
+carries a caveat naming which backend attaches which key.
 
 This is `docs/open-findings.md` §1 ("the catalog declares per entry what
 actually varies per backend") in its sharpest form: for modes it costs an exit

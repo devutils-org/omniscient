@@ -106,7 +106,7 @@
        targets: {system: native, pid: native, cgroup: native, container: native},
        filter_fields: [comm]}
   modes: [poll, count]
-  emits: [rate, timeline, summary, topk]
+  emits: [rate, timeline, summary]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
   keys: [iface, sock, task, cgroup]
   filter_fields: [iface, comm]
@@ -308,6 +308,12 @@
     - "The procfs backend carries the counters every driver keeps. The long
        driver-specific list `ethtool -S` prints needs the ethtool netlink
        family, which is why that backend is first in the chain."
+    - "Counting them apart costs the aggregates: the event's value is the error
+       count, and drops, pause frames and the per-direction figures are
+       attributes beside it. So rate, timeline and summary answer about errors
+       alone, and a link dropping every frame it is given reads as zero through
+       all three. `raw` is where the other counters are, until the collector
+       emits one event per counter kind."
     - "These are counters, so a run reports the increment between two reads and
        its first read is a baseline that produces nothing."
 

@@ -584,35 +584,69 @@ fn collected_sources() -> [&'static str; 5] {
 }
 
 /// A mode and an emit are compatible in the abstract or not at all, and the
-/// hint that says which does not consult the source it is talking about.
+/// hint that says which now consults the source it is talking about.
 ///
-/// This is the sweep's own finding, kept as a test because the two messages
-/// contradicting each other is the part that matters: one sends a reader to
-/// `raw`, the other refuses `raw`. Both are asserted here so that the day the
-/// hint is narrowed to what the source declares, this test says so.
+/// This was the sweep's own finding: one message sent a reader to `raw` and the
+/// next refused `raw`, so following the advice cost a second refusal. Two
+/// things changed. The hint is the intersection of the matrix and the entry, so
+/// it can only ever name emits this source declares; and `io.bytes` declares
+/// `raw`, because the read/write split it measures is on the event and no
+/// aggregating emit carries an attribute.
+///
+/// Both halves are asserted, and the second is the one that matters: the hint
+/// is followed, and the run it leads to succeeds.
 #[test]
-fn the_mode_hint_offers_an_emit_the_source_refuses() {
+fn the_mode_hint_offers_only_what_the_source_declares() {
     let by_mode = run(&["io.bytes", "--system", "-m", "count", "-e", "timeline"]);
     assert_eq!(by_mode.status.code(), Some(EXIT_REJECTED));
     let hint = stderr(&by_mode);
     assert!(
-        hint.contains("in `count` mode the valid emits are"),
-        "{hint}"
+        hint.contains("in `count` mode `io.bytes` emits"),
+        "the hint should name the source rather than the matrix: {hint}"
     );
-
-    let by_source = run(&["io.bytes", "--system", "-m", "count", "-e", "raw"]);
-    assert_eq!(by_source.status.code(), Some(EXIT_REJECTED));
-    let refusal = stderr(&by_source);
-    assert!(refusal.contains("cannot emit `raw`"), "{refusal}");
-
-    // See `docs/scenarios/io.md`, "Defects found": the first message offers
-    // `raw` and the second refuses it, so following the hint leads to a second
-    // refusal.
     assert!(
-        hint.contains("raw"),
-        "the mode hint no longer offers `raw`; if it now intersects with what the source \
-         declares, this scenario has been fixed and should be removed:\n{hint}"
+        !hint.contains("the valid emits are"),
+        "the abstract form of the hint is what sent a reader in a circle: {hint}"
     );
+
+    // Every emit it offers is one the source declares. Against the old hint
+    // this failed on `raw`, which `io.bytes` refused by name.
+    let catalog = Catalog::embedded().expect("the embedded catalog loads");
+    let entry = catalog
+        .get(&"io.bytes".parse().expect("a source id"))
+        .expect("io.bytes is in the catalog");
+    let offered: Vec<&str> = hint
+        .rsplit("emits ")
+        .next()
+        .expect("the hint lists something")
+        .trim()
+        .split(", ")
+        .collect();
+    assert!(!offered.is_empty(), "{hint}");
+    for emit in &offered {
+        assert!(
+            entry.emits.iter().any(|known| known.as_str() == *emit),
+            "the hint offered `{emit}`, which `io.bytes` refuses by name:\n{hint}"
+        );
+    }
+
+    // And following it works, which is the whole point of a hint.
+    for emit in &offered {
+        let followed = run(&[
+            "io.bytes", "--system", "-m", "count", "-e", emit, "-d", "1s",
+        ]);
+        assert_eq!(
+            followed.status.code(),
+            Some(0),
+            "the hint offered `{emit}` and it was refused:\n{}",
+            stderr(&followed)
+        );
+        assert!(
+            stdout(&followed).contains(emit),
+            "`io.bytes -m count -e {emit}` produced no `{emit}`:\n{}",
+            stdout(&followed)
+        );
+    }
 }
 
 /// Every output format either carries what it was given or says it cannot.
@@ -879,6 +913,104 @@ fn a_known_volume_of_writes_reaches_the_device_and_the_session_finds_it() {
         "{KNOWN_BYTES} bytes through a device that takes {} at a time is at least {floor} \
          requests, and the session reports {ops}",
         device.max_request_bytes()
+    );
+}
+
+/// 64 MiB of writes are reported as writes, and the reader can see that they
+/// were.
+///
+/// Defect 7 of `docs/scenarios/io.md`: the collector measures the read/write
+/// split, puts it on every event, and the entry declared only emits that
+/// aggregate -- so the split was measured and unreachable, and the scenarios
+/// above could only ever check a total. A collector that credited every write
+/// as a read passed both of them.
+///
+/// `raw` is declared now, and this is the check the total could not make. The
+/// ground truth is the same `fsync`ed 64 MiB and the kernel's own two columns:
+/// the workload puts a floor under the write side, and each side is capped by
+/// what `/proc/diskstats` counted for that same column over a window that
+/// strictly encloses the tool's. Neither cap is the tool's own number.
+///
+/// Both columns are bracketed rather than the read side being required to be
+/// zero, and the reason is the trap `STATE.md` names: nine hundred tests share
+/// this machine's disks, and the read scenario below pulls its own 64 MiB off
+/// the same device while this one runs. Asserting "a write workload reads
+/// nothing" measured the suite and not the tool -- it failed with exactly
+/// 67108864 bytes in the read column, which was the neighbouring scenario's.
+/// What the brackets say instead is that the tool did not invent traffic in
+/// either column, which is true whatever else the machine is doing, and on a
+/// quiet machine the read cap is near zero and the check is as sharp as the
+/// first form was.
+#[test]
+fn the_split_a_write_workload_made_is_reported_as_writes() {
+    let file = scratch("io-write-split.bin");
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let device = backing_device(Path::new(env!("CARGO_TARGET_TMPDIR"))).expect("a block device");
+
+    let (output, enclosing) = measure_while(
+        &[
+            "io.bytes", "--system", "-m", "count", "-e", "raw", "-k", "dev", "-d", "2s",
+            "--format", "json",
+        ],
+        &device,
+        || write_and_sync(&file),
+    );
+    let _ = std::fs::remove_file(&file);
+    assert!(
+        output.status.success(),
+        "`io.bytes -e raw` is what defect 7 was about; it has to be served: {}",
+        stderr(&output)
+    );
+
+    let document = json(&output);
+    let raw = output_of(&document["results"][0], "raw");
+    let event = raw["events"]
+        .as_array()
+        .expect("a raw emit carries its events")
+        .iter()
+        .find(|event| {
+            event["attrs"].as_array().is_some_and(|attrs| {
+                attrs
+                    .iter()
+                    .any(|a| a["name"] == "dev" && a["value"] == device.leaf.as_str())
+            })
+        })
+        .unwrap_or_else(|| panic!("no event for {}: {raw}", device.leaf));
+
+    let written = attr(event, "write_bytes");
+    let read = attr(event, "read_bytes");
+    let total = attr(event, "bytes");
+
+    let kernel_written = (enclosing.write_sectors * 512) as f64;
+    let kernel_read = (enclosing.read_sectors * 512) as f64;
+
+    assert!(
+        written >= KNOWN_BYTES as f64,
+        "{KNOWN_BYTES} bytes were written and synced inside the window and the event credits \
+         {written} to writes on {}; the kernel counted {kernel_written} written over a longer \
+         window",
+        device.leaf
+    );
+    assert!(
+        written <= kernel_written,
+        "the event credits {written} bytes to writes on {}, more than the {kernel_written} the \
+         kernel counted in its own write column over a window enclosing this one",
+        device.leaf
+    );
+    assert!(
+        read <= kernel_read,
+        "the event credits {read} bytes to reads on {}, more than the {kernel_read} the kernel \
+         counted in its own read column over a window enclosing this one -- which is what a \
+         collector crediting writes as reads looks like, and is what defect 7 could not catch",
+        device.leaf
+    );
+    assert!(
+        (written + read - total).abs() <= total * 0.001,
+        "the halves do not add up to the total the aggregating emits answer with: \
+         {written} written + {read} read against {total}"
     );
 }
 

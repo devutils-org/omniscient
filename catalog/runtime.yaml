@@ -50,6 +50,12 @@
     - "A runtime publishes its own precompiled builtins through the same file.
        They are not compilations this run caused; filter on code_kind to
        separate them."
+    - "topk ranks series, and the only key here is task, so it ranks processes
+       and not methods: a run against one program answers with one row whose
+       total is the event count. The method is an attribute rather than a key,
+       so which methods dominated -- the question a JIT map exists to answer --
+       is not reachable through any emit. Filter on method to select one, and
+       read the compilations off raw."
 
 - id: runtime.alloc
   family: runtime

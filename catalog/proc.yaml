@@ -51,7 +51,7 @@
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
-  keys: [task, file]
+  keys: [task]
   filter_fields: [comm]
   determinism: medium
   caveats:
@@ -65,6 +65,10 @@
     - "Reading another process's table does not include the reader's own
        handle; reading one's own does. The collector accounts for which it is
        measuring, and getting that wrong is an off-by-one in either direction."
+    - "One event per process, keyed by task. The descriptors behind the count
+       are not enumerated -- that is one readlink per open descriptor, which is
+       the cost the caveat above refuses -- so there is no file key here to
+       join a descriptor to whatever else touched it."
 
 
 - id: proc.threads

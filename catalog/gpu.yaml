@@ -42,7 +42,7 @@
     - {id: "vendor:nvml", requires: ["nvml"], cost: low,
        degraded: "one whole-device figure instead of a per-engine breakdown, sampled by the driver over a window it chooses"}
   modes: [count, poll]
-  emits: [timeline, rate, summary]
+  emits: [timeline, summary]
   targets: {system: native, launch: native}
   keys: []
   filter_fields: [engine, device]
@@ -53,6 +53,10 @@
        one of 68 SMs and one using all of them both read 100 %."
     - "A launch target sets the window, not the scope. The figure is the whole
        device's, shared with everything else that was using it."
+    - "Occupancy is a ratio and ratios do not add up: two readings of 0.03 are
+       not 0.06 of anything, so this source declares no rate. The mean and the
+       maximum over a window are the aggregates that mean something, which is
+       what summary and timeline carry."
 
 - id: gpu.freq
   family: gpu

@@ -1433,8 +1433,13 @@ fn the_listing_separates_what_this_machine_has_from_what_this_build_collects() {
 /// `count`, and no collector here has a tick of its own in that mode, so the
 /// run falls back to the default poll interval of one second. A launched
 /// program's exit is noticed at a tick boundary, so the window it reports is
-/// the program's life rounded up to the next second -- and `rate`, which is
-/// reachable on this source only through `count`, divides by it.
+/// the program's life rounded up to the next second, and every emit that
+/// divides by a window divides by that one.
+///
+/// Measured through `summary` since defect 3 was fixed: this source used to
+/// declare `rate`, which is where the over-long window showed most sharply,
+/// and a rate of a ratio is a quantity of nothing. The window itself is what
+/// this scenario is about and it is reported whatever the emit.
 #[test]
 fn a_count_mode_run_reports_a_window_longer_than_the_program_it_watched() {
     if let Err(reason) = device() {
@@ -1446,7 +1451,7 @@ fn a_count_mode_run_reports_a_window_longer_than_the_program_it_watched() {
         "--mode",
         "count",
         "--emit",
-        "rate",
+        "summary",
         "--format",
         "json",
         "--",
@@ -1462,32 +1467,29 @@ fn a_count_mode_run_reports_a_window_longer_than_the_program_it_watched() {
         "the window over a 300 ms program is {window:.3} s: if this is now near 0.3, the \
          defect is fixed and the entry in docs/scenarios/gpu.md should come out"
     );
-    // And the rate is that window's, not the program's: the same reading over
-    // 0.3 s would be more than three times this.
-    let rate = output(result, "rate");
-    let per_second = rate["series"][0]["per_second"]
-        .as_f64()
-        .expect("a rate is per second");
-    let total = rate["series"][0]["total"]
-        .as_f64()
-        .expect("a rate carries what it divided");
+    // And the program it watched really did live for about 0.3 s, so the gap
+    // is the runner's tick and not the workload's.
     assert!(
-        (per_second - total / window).abs() <= 1e-6,
-        "the rate {per_second} is not the total {total} over the reported window {window}"
+        window <= 2.0,
+        "a 300 ms program reported a {window:.3} s window, which is more than one \
+         missed tick explains"
     );
 }
 
-/// Defect 3. `rate` sums the value attribute and divides by the window, which
-/// is a quantity for a count, for bytes, for nanoseconds and for joules --
-/// everything else in the catalog that declares it. `gpu.engine_busy` declares
-/// it over a `ratio`, and the sum of two occupancies is not a quantity.
+/// Defect 3, fixed. `rate` sums the value attribute and divides by the window,
+/// which is a quantity for a count, for bytes, for nanoseconds and for joules --
+/// everything else in the catalog that declares it. `gpu.engine_busy` declared
+/// it over a `ratio`, and the sum of two occupancies is not a quantity: the
+/// device was three per cent busy throughout and `0.060/s` was the only number
+/// offered for that.
 ///
-/// Asserted as a fact about the catalog rather than about one run, because that
-/// is where it has to be corrected: this is the only pairing of its kind in a
-/// hundred sources, so it is an entry to fix and not a question about what
-/// `rate` should mean.
+/// The emit is out of the entry, and the check is kept as a fact about the
+/// whole catalog rather than about this family: this was the only pairing of
+/// its kind in a hundred sources, and the value of the scenario is that a
+/// second one cannot arrive quietly. `src/validate.rs::check_catalog` enforces
+/// the same rule over every unit that does not add up.
 #[test]
-fn this_family_holds_the_catalogs_only_rate_over_a_ratio() {
+fn no_source_in_the_catalog_declares_a_rate_over_a_ratio() {
     let output = omn(&["list", "--format", "json"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let everything: Vec<Value> =
@@ -1499,11 +1501,28 @@ fn this_family_holds_the_catalogs_only_rate_over_a_ratio() {
         })
         .map(|entry| entry["id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(
-        offenders,
-        vec!["gpu.engine_busy".to_owned()],
-        "the catalog's ratio-with-a-rate entries have changed; docs/scenarios/gpu.md \
-         records why there should be none"
+    assert!(
+        offenders.is_empty(),
+        "a rate of a ratio is a quantity of nothing, and {offenders:?} declare one; \
+         docs/scenarios/gpu.md records why there should be none"
+    );
+
+    // And the refusal a reader meets, with the caveat that says why.
+    let refused = omn(&[
+        "gpu.engine_busy",
+        "--system",
+        "--mode",
+        "count",
+        "--emit",
+        "rate",
+        "--duration",
+        "200ms",
+    ]);
+    assert_eq!(code(&refused), 2, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("`gpu.engine_busy` cannot emit `rate`"),
+        "the refusal should name the source and the emit: {}",
+        stderr(&refused)
     );
 }
 

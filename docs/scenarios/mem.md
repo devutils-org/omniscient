@@ -591,6 +591,15 @@ Pinned by `the_shim_counts_every_record_it_could_not_carry`.
 
 ### D3 — two `mem` entries declare an emit no mode they declare can produce
 
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. Both emits
+are out of `catalog/mem.yaml`, and the refusal a reader meets now names the
+source rather than the matrix -- `` `mem.swap` cannot emit `rate` `` with the
+hint `this source emits timeline, raw, summary`. The reproduction below is what
+it used to say. `mem.swap` measures a flow and a rate is the natural thing to
+want from it, so the other fix -- a `count` mode for the source -- is written up
+under "Needs from another stream" in `docs/open-findings.md`; the emit returns
+with it.
+
 **Class A.** No workload needed; the catalog contradicts itself.
 
 ```console
@@ -620,7 +629,9 @@ HITM cache lines is close to meaningless and dropping it is the obvious call.
 
 Pinned by `every_emit_a_mem_source_declares_can_be_produced_by_a_mode_it_declares`,
 which also checks the matrix it uses against the tool so that the test cannot
-pass by being wrong in the same direction twice.
+pass by being wrong in the same direction twice. It now requires the set to be
+empty and requires each of the two to be refused by the source; the same rule
+over the whole catalog is `src/validate.rs::check_catalog`.
 
 ### D4 — a refusal sentence pushed into a slot meant for one word
 
