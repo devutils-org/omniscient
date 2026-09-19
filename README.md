@@ -25,9 +25,12 @@ parse and no second clock in the middle of the pipeline.
 
 ```console
 make          # build, and grant the capabilities a relink drops
-make demo     # every demonstration in this repository, against this machine
+make demo     # the guided tour: eight questions, against this machine
 make man      # the manual page
 ```
+
+`GUIDE.md` is where to go next: seventy-nine sessions, what each one shows, and
+how to run one, a family, or all of them.
 
 ## The number no single source can give
 
@@ -142,21 +145,26 @@ joins:
     window: 60s
 ```
 
-YAML, JSON and TOML are all accepted. See `examples/` — there is an index in
-`examples/README.md`, and `make demo` runs all of them.
+YAML, JSON and TOML are all accepted. `GUIDE.md` explains the seventy-nine
+sessions in `examples/` and what each one shows; `examples/README.md` is the
+index; `scripts/demo.sh <family>` runs one family's and `make demo-all` runs the
+lot.
 
 ## The record beside the numbers
 
 ```console
 $ omn proc.fd --pid 4242 -d 30s -e summary --out ./results
 $ ls results
-resolved.json  results.txt
+cost.json  resolved.json  results.txt
 ```
 
 `resolved.json` holds the backend that was selected, every requirement and how
 it was probed, what was degraded, and the machine's kernel, governor, THP mode,
 SMT state and clocksource. Two measurements taken through different backends are
 not comparable, and without that file nobody can tell that they were.
+`cost.json` holds what the measurement itself cost, in cpu, against the target's
+own — because an observation that changed the thing observed is a different
+kind of incomparable.
 
 ## Output formats
 

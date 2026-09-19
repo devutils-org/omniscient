@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
-# Runs every demonstration this repository ships, showing the command and its
+# Runs the demonstrations this repository ships, showing the command and its
 # output. Nothing here is staged: each block runs the real binary against this
 # machine, and a block that cannot run on it says why, which is half the point.
 #
-#   make demo
+#   make demo               the guided tour: eight questions, about seven seconds
+#   scripts/demo.sh --all   the tour and then every session, about ninety seconds
+#   scripts/demo.sh mem     one family's sessions
+#   scripts/demo.sh --list  what there is, without running any of it
 #
-# Takes about a minute. Nothing is written outside the scratch directory.
+# See GUIDE.md for what each session shows and why.
+#
+# Nothing is written outside the scratch directory.
 set -u
+
+MODE=tour
+FAMILY=""
+case "${1:-}" in
+    "")            MODE=tour ;;
+    --all)         MODE=all ;;
+    --list)        MODE=list ;;
+    --tour)        MODE=tour ;;
+    -h|--help)
+        sed -n "2,13p" "$0" | sed "s/^# \{0,1\}//"
+        exit 0 ;;
+    -*)
+        echo "unknown option: $1 -- try --help" >&2
+        exit 2 ;;
+    *)             MODE=family; FAMILY="$1" ;;
+esac
 
 BINARY="${BINARY:-target/debug/omn}"
 SCRATCH="$(mktemp -d)"
@@ -134,14 +155,61 @@ run "$BINARY" net.bytes --iface lo -m count -d 600ms -e rate --format json
 run "$BINARY" net.bytes --iface lo -m count -d 600ms -e rate --dump-request --format yaml
 
 # ---------------------------------------------------------------------------
-section "9. Every session this repository ships"
+# The `name:` a session gives itself, unquoted, for the listing.
+session_name() {
+    sed -n 's/^name: *//p' "$1" | head -1 | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
 
-for session in examples/*.yml examples/*.toml; do
-    case "$(basename "$session")" in
-        allocation-cost.yml) continue ;;   # shown in full above
+sessions_of() {
+    # The family prefix is how a session names what it is about; the five that
+    # carry none belong to no family and are listed under `general`.
+    case "$1" in
+        general) ls examples/allocation-cost.yml examples/web-latency.yml \
+                    examples/filters-and-formats.yml examples/saturation.toml 2>/dev/null ;;
+        *)       ls examples/"$1"-*.yml 2>/dev/null ;;
     esac
-    run "$BINARY" -f "$session"
-done
+}
+
+FAMILIES="cpu mem io net sched power gpu proc runtime general"
+
+if [ "$MODE" = list ] || [ "$MODE" = tour ]; then
+    section "9. Every session this repository ships" \
+"Each one is a measurement written down, and each is explained in GUIDE.md.
+Run one with \`omn -f <file>\`, a family with \`scripts/demo.sh <family>\`, or
+all of them with \`scripts/demo.sh --all\`."
+    for family in $FAMILIES; do
+        found="$(sessions_of "$family")"
+        [ -z "$found" ] && continue
+        printf '\n  %s%s%s\n' "$bold" "$family" "$reset"
+        for session in $found; do
+            name="$(session_name "$session")"
+            printf '    %-34s %s\n' "$(basename "$session")" "${name:-—}"
+        done
+    done
+fi
+
+if [ "$MODE" = all ] || [ "$MODE" = family ]; then
+    if [ "$MODE" = family ]; then
+        found="$(sessions_of "$FAMILY")"
+        if [ -z "$found" ]; then
+            echo "no sessions for \`$FAMILY\` -- families: $FAMILIES" >&2
+            exit 2
+        fi
+        section "The \`$FAMILY\` sessions"
+        for session in $found; do run "$BINARY" -f "$session"; done
+        printf '\n%sdone.%s\n' "$bold" "$reset"
+        exit 0
+    fi
+    section "9. Every session this repository ships"
+    for family in $FAMILIES; do
+        for session in $(sessions_of "$family"); do
+            case "$(basename "$session")" in
+                allocation-cost.yml) continue ;;   # shown in full above
+            esac
+            run "$BINARY" -f "$session"
+        done
+    done
+fi
 
 # ---------------------------------------------------------------------------
 section "10. And one that is written for a machine other than this one" \

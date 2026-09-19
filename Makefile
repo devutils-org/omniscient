@@ -2,14 +2,15 @@
 #
 # The eBPF and perf backends need CAP_BPF and CAP_PERFMON, and file
 # capabilities do not survive a relink: every `cargo build` drops them. On this
-# machine that is the difference between 78 usable sources and 52, and nothing
+# machine that is the difference between 80 usable sources and 53, and nothing
 # announces it -- the tool simply reports fewer things as available, which looks
 # like the machine changed rather than the binary. So the build grants them.
 #
 #   make            build the workspace and grant the capabilities
 #   make test       the full suite, after a build that has them
 #   make check      test, clippy and fmt, the way CI would
-#   make demo       every demonstration in this repository, against this machine
+#   make demo       the guided tour, against this machine (about seven seconds)
+#   make demo-all   the tour and then all 79 sessions (about ninety seconds)
 #   make man        the manual page
 #   make release    the same for an optimised build
 #
@@ -21,7 +22,7 @@ BINARY     = target/$(PROFILE)/omn
 CAPS       = cap_bpf,cap_perfmon+ep
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
-.PHONY: all build release caps test check demo man fmt clippy clean
+.PHONY: all build release caps test check demo demo-all man fmt clippy clean
 
 all: build
 
@@ -73,10 +74,16 @@ check: test
 	cargo clippy --all-targets -- -D warnings
 	cargo fmt --check
 
-# Every demonstration this repository ships, run against this machine. A block
-# that cannot run here says why, which is half of what is being demonstrated.
+# Eight questions, answered against this machine. A block that cannot run here
+# says why, which is half of what is being demonstrated.
+#
+# `scripts/demo.sh --list` names every session, `scripts/demo.sh <family>` runs
+# one family's, and GUIDE.md explains what each one shows.
 demo: build
 	@scripts/demo.sh
+
+demo-all: build
+	@scripts/demo.sh --all
 
 # The manual page, rendered.
 man:

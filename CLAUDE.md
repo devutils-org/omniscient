@@ -19,6 +19,8 @@
 | `DECISIONS.md` | what is settled, what is still open, and why |
 | `STATE.md` | what works today, measured, and what remains |
 | `docs/contributing.md` | what a family owns, and what ground truth means |
+| `GUIDE.md` | how to run the demonstrations, and what each session shows |
+| `docs/scenarios/*.md` | per family: what is worth measuring, and the defects the scenarios found |
 | `BRIEF.md` | the current wave of work, one section per stream |
 | `docs/open-findings.md` | findings that cut across families |
 | `man/omn.1` | the manual page |

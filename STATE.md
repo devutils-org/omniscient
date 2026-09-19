@@ -14,17 +14,20 @@ for where the two meet.
 
 The request model, the catalog, the resolver, the validator, the collector
 layer, the emit and encode layers and a join engine all exist and are used by
-every source. Forty-four sources across nine families collect for real, over six
-mechanisms: procfs and sysfs, `perf_event_open` counting and sampling, netlink,
-an `LD_PRELOAD` shim, NVML through `dlopen`, and eBPF raw tracepoints. Every
-emit the catalog declares exists — `raw`, `timeline`, `summary`, `rate`,
-`hist`, `topk` and `stack` — and stacks are captured two ways: from a
-`perf_event_open` callchain for `cpu.profile`, and in the kernel with
+every source. Fifty-nine sources across nine families collect for real, over
+eight mechanisms: procfs and sysfs, `perf_event_open` counting and sampling,
+netlink, an `LD_PRELOAD` shim, NVML through `dlopen`, `af_packet` with a
+`PACKET_MMAP` ring, and eBPF through raw tracepoints, classic tracepoints,
+kprobes and uprobes. Every emit the catalog declares exists, all nine output
+formats have an encoder, all four join match kinds work, stacks are captured
+two ways — a `perf_event_open` callchain for `cpu.profile` and
 `bpf_get_stackid` for `sched.offcpu`, which is the one that says *where* a task
-blocked. All four join match kinds work, and every filter field the catalog
-declares is now on an event or refused by name. **643 tests pass**, and the
-suite is the project's main asset — several of its tests have found real
-defects in the code they were written against.
+blocked — and a run measures and reports what it cost, against a ceiling it can
+be held to.
+
+**993 tests pass**, of which 159 are scenarios: a workload whose property the
+scenario chose, a session that measures it, and a check against that property.
+They found 63 defects, none worked around, recorded in `docs/scenarios/`.
 
 What is missing is breadth, not skeleton. Adding a source is additive; the
 expensive parts are done.
@@ -34,19 +37,19 @@ expensive parts are done.
 ## What the numbers say
 
 ```
-100 sources: 80 usable here, 15 unverified, 5 out of reach on this machine.
-44 of them have a collector, covering 48 of their 165 backends.
+100 sources: 81 usable here, 15 unverified, 4 out of reach on this machine.
+59 of them have a collector, covering 67 of their 175 backends.
 ```
 
 Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 80 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 44 sources, 48 backends | a collector is written and registered |
+| What can this machine serve? | 81 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this build collect? | 59 sources, 67 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `80` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. The same
+That `81` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. The same
 binary without them reports `53`: the difference is the whole eBPF and per-cpu
 perf surface, and it is why `make` reapplies the capabilities that every relink
 drops. Nothing announces the loss — the tool reports fewer sources, which reads
@@ -61,13 +64,13 @@ Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
-| `cpu` | 11 | 14 | 12 |
-| `mem` | 7 | 23 | 20 |
+| `mem` | 16 | 23 | 22 |
+| `cpu` | 13 | 14 | 12 |
+| `net` | 7 | 15 | 10 |
 | `gpu` | 5 | 9 | 6 |
 | `io` | 5 | 14 | 11 |
-| `net` | 5 | 15 | 10 |
 | `power` | 5 | 5 | 4 |
-| `sched` | 3 | 10 | 9 |
+| `sched` | 5 | 10 | 9 |
 | `proc` | 2 | 6 | 6 |
 | `runtime` | 1 | 4 | 1 |
 
@@ -99,6 +102,13 @@ known, not against what the code computed.
 | `sched.offcpu` | eBPF raw tracepoint | a thread that sleeps a known 300 ms, whose off-cpu duration and interruptible state must both match |
 | `cpu.profile` | `perf_event_open`, sampling with `PERF_SAMPLE_CALLCHAIN` | a cpu-bound loop in the test binary, whose own symbols must appear in the table |
 | `sched.offcpu --emit stack` | eBPF `bpf_get_stackid` into a stack map | the verifier accepting the hand-assembled program, and a 300 ms sleep coming back with the twelve frames that led to it |
+| `sched.runqlat` | eBPF, bucketed in the kernel | a known number of blocking round trips, found by four sources at once |
+| `sched.migrations` | eBPF classic tracepoint | two hundred migrations driven on purpose with `sched_setaffinity` |
+| `mem.pressure`, `.swap`, `.thp`, `.cgroup`, `.numa`, `.wss` | procfs, sysfs, cgroup2 | per-node residency against a known allocation; PSI against the kernel's own stall counters |
+| `mem.cache_l1`, `.cache_llc`, `.cache_tlb` | `perf_event_open`, `PERF_TYPE_HW_CACHE` | a shuffled walk over 64 MiB against one over 4 KiB, and the descriptor packing checked field by field |
+| `cpu.oncpu_time`, `cpu.util` per core | procfs, per-cpu perf | a spin loop pinned to one core with `taskset`, started from outside the tool |
+| `net.capture` | `af_packet` with a `PACKET_MMAP` ring | a known number of frames of a known size over loopback |
+| `net.hwts` | netlink `ethtool` | whose clock a NIC would stamp with, and where it is |
 
 The two correlations. From `examples/allocation-cost.yml`, an interval match:
 
@@ -131,115 +141,103 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
 | 4 — the vertical case | **partly**. Two real correlations exist and are checked, one per match kind that has a producer. The HTTP-request decomposition it describes needs the eBPF backends of `io` and `net`. |
 | 5 — generalizing the join engine | **done for the engine**. All four match kinds — `interval`, `eq`, `scoped_eq`, `wakeup` — are implemented and each reports in its own words. What is missing is producers: `scoped_eq` needs `blk:rq@open_ts`, which needs the `io` eBPF backends. |
-| 6 — emit, aggregation, budget | **partly**. Every emit exists: `raw`, `timeline`, `summary`, `rate`, `hist`, `topk` and `stack`, with `folded` and `speedscope` encoders behind the last. `--budget` is still parsed and not enforced. |
+| 6 — emit, aggregation, budget | **done**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
-| 8 — self-benchmark | **not started**. `--backend force:` exists for it. |
-| 9 — breadth | in progress; 44 of 100. The 56 without a collector are named below, and 27 of them wait on one thing. |
+| 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
+| 9 — breadth | in progress; 59 of 100. The 41 without a collector are named below, and 20 of them wait on one thing. |
 | 10 — intelligence layer | not started. |
 
 ---
 
 ## What remains, in the order it is worth doing
 
-Fifty-six sources have no collector. They are not fifty-six problems: **27 of
-them wait on one piece of work**, and the rest fall into a handful of groups
-that share nothing and can be built in any order.
+Forty-one sources have no collector, and **20 of them wait on one piece of
+work**. But the larger item is now new: sixty-three defects the scenario wave
+found, which are not breadth at all.
 
-### 1. eBPF beyond raw tracepoints — 27 sources
+### 1. The sixty-three defects — `docs/scenarios/`
 
-The single largest lever in the project. `src/bpf/` attaches exactly one way,
-`BPF_RAW_TRACEPOINT_OPEN`, which is why `sched.offcpu` and `sched.wakeup` work
-and nothing else does. What the catalog asks for beyond it:
+The output of the fourth wave, one document per family, none worked around.
+They are not a backlog of small things: several are the tool telling a reader
+something that is not true, which is the one failure this project is built
+against. Two that recur across families:
 
-| Attach | Sources | What it needs |
-|---|---|---|
-| `bpf:tp` | 27 | a numeric id out of tracefs and `PERF_EVENT_IOC_SET_BPF`, or the entry moved to `raw_tp` where the events are the same |
-| `bpf:fentry` | 5 | BTF-typed attach, `BPF_PROG_TYPE_TRACING` |
-| `bpf:usdt` | 3 | reading the ELF notes of the target, then a uprobe |
-| `bpf:kprobe`, `bpf:uprobe` | fallbacks | `perf_event_open` with `PERF_TYPE_KPROBE` |
+- **A refusal's exit code does not match its message.** "No viable backend"
+  returns 2, the same as a request that cannot mean anything; "cannot start
+  collecting" returns 1, where a mode the collector does not implement is 3.
+  The messages are right in every case. A caller scripting around the three
+  answers cannot tell them apart.
+- **A poll that cannot keep its cadence.** Several families report late ticks
+  as a note rather than counting them, so a run that ran at half the requested
+  rate can still say `no loss`.
 
-A second, cheaper half of the same lever: several `bpf:tp` entries name events
-that `raw_tp` can attach to just as well, and the entry orders them the way the
-project settled — strictly fewer requirements, same events. Moving those is a
-catalog change with a collector behind it, not a new mechanism.
+`GUIDE.md` names which sessions show which, and the per-family documents carry
+the session and the output for each.
 
-`docs/bpf-layer.md` has the calling conventions, and `offcpu.rs` is the worked
-example of in-kernel aggregation with a stack map.
+### 2. eBPF beyond what attaches today — 20 sources
 
-### 2. The sources that need no privileges at all — 7 sources
+`src/bpf/attach.rs` now has raw tracepoints, classic tracepoints, kprobes and
+uprobes. What is missing is **fentry** (BTF-typed attach, `BPF_PROG_TYPE_TRACING`
+with an `attach_btf_id`) and **USDT** (reading the target's ELF notes, then a
+uprobe). Between them they are the first backend of eight sources and the
+fallback for more; `io`, `net` and `runtime` are where they land.
 
-`mem.pressure`, `mem.swap`, `mem.thp`, `mem.numa`, `io.fs`, `proc.*` partly, and
-`power`'s remaining sysfs readers. Each is a procfs or sysfs file with a shape
-of its own, each is worth a day, and none of them touches anything another one
-touches. This is the cheapest breadth in the project and it is being left
-behind because eBPF is more interesting.
+A cheaper half of the same lever: 4 of the 41 name `bpf:raw_tp` first, which
+this build already attaches. Those are collectors to write, not mechanism.
 
-### 3. The counting sources that need per-cpu perf — 5 sources
+### 3. The sources nothing mechanical blocks — 6 sources
 
-`cpu.topdown`, `mem.cache_*`, `mem.bandwidth`: `perf_event_open` over a cpu
-rather than a task, which `src/perf.rs` has as `Scope::Cpu` and no collector
-uses. `mem.bandwidth` additionally needs uncore PMUs, which are a different
-sysfs layout and a different privilege story.
+`mem.page_alloc` and `mem.kmalloc` want the preload shim they already have;
+`mem.sharing` and `mem.latency` want PEBS or IBS; `mem.bandwidth` wants uncore
+PMUs; `cpu.flow` wants Intel PT. Each is independent of the others.
 
-### 4. `pprof` and `chrome` encoders
+### 4. Phase two of the scenarios — the crossings
 
-Declared, refused by name, and now unblocked: `folded` and `speedscope` both
-work, so the stack side has a producer and a shape to follow. `pprof` is a
-gzipped protobuf with its own string table; `chrome` is a timeline encoder and
-needs no stacks at all.
+Written up in `BRIEF.md` and not dispatched: four questions a single family
+cannot answer. `heap.alloc → mem.faults → mem.rss` for memory end to end;
+`cpu.profile` beside `sched.offcpu` for where the time went; the I/O path once
+`blk:rq@open_ts` has a producer; and the machine's own state as a confounder.
+Phase one left the workloads and the keys for them.
 
-### 5. `--budget` is parsed, explained, and not enforced
-
-It already says what it would do — which backend it would have chosen, and
-whether the selected one is within the ceiling. Enforcing it means measuring
-the collector's own cost during a run, which is phase 8's self-benchmark, and
-degrading `trace` to an in-kernel `hist` where the budget is exceeded.
-
-### 6. The smaller ones, each with its reason
+### 5. The smaller ones, each with its reason
 
 - **`Unit::Watts` does not exist**, which is part of why `gpu.power` reports an
   energy counter.
 - **The GPU is not in the environment capture**, and two runs are comparable
   only if they were taken on the same device under the same driver.
-- **An exit code for "valid, but this mechanism is not built"** — it returns 1,
-  like a real failure; `NoCollector` returns 3 and this belongs with it.
+- **`net.capture` needs `CAP_NET_RAW`**, which the build does not grant. That is
+  a decision rather than an omission: the capability lets the binary read every
+  frame on the machine, and the scenario wave deliberately left it to be made
+  rather than making it.
 - **The closing read of a polled counter.** `net` takes one and `io`/`power`
-  deliberately do not, for a reason each. Both cannot be right, and a reader
-  comparing two families gets a different convention in each.
-- **`power.cstate` declares `state` as a filter field and cannot carry it**:
-  one event covers every idle state of a cpu. The eBPF backend, which sees
-  transitions one at a time, is where that field becomes real.
+  deliberately do not, for a reason each. Both cannot be right.
 
 ---
 
 ## How this parallelizes
 
-The groups above were chosen so that they do. What they own, and where they
-collide:
+Four waves of parallel agents have run on this project, and each was divided
+differently because the work was shaped differently. What held every time:
 
-| Stream | Owns | Touches nothing else in | Blocked by |
-|---|---|---|---|
-| **A — eBPF attach kinds** | `src/bpf/*`, `docs/bpf-layer.md` | — | nothing |
-| **B — procfs/sysfs breadth** | `src/collect/{mem,io,proc,power}/` new files | shares only `catalog/*.yaml` | nothing |
-| **C — per-cpu perf** | `src/perf.rs`, `src/collect/cpu/`, `src/collect/mem/cache*` | — | nothing |
-| **D — encoders** | `src/encode.rs`, `src/format.rs` | — | nothing |
-| **E — budget and self-benchmark** | `src/collect/mod.rs` runner, `src/main.rs` | — | nothing to start; needs C to have something expensive to measure |
+- **The unit of ownership has to be a file set nobody else writes.** Wave one
+  split by family and had no conflicts. Wave two split by shared layer and had
+  a few, all in the one place two streams touched. Wave three had six streams
+  append to one findings file and produced six conflicts on it. Wave four used
+  a **file-name prefix** as the lock — `examples/<family>-*.yml`,
+  `tests/scenario_<family>.rs`, `docs/scenarios/<family>.md` — and had zero.
+- **The handoff must be a file only that stream can write.** A "write a log at
+  the end" instruction produced no logs in wave three: every stream put its
+  notes in the shared findings document instead. In wave four the document *was*
+  the deliverable, owned and prefixed, and all eight arrived.
+- **Registries are append seams and should be per family.** Collectors register
+  in `src/collect/<family>/mod.rs`, so a new source is a line in a file one
+  stream owns. A central `match` would be one conflict per agent.
 
-A and B are the two that matter and they are independent: A builds mechanism,
-B builds readers. C is independent of both. D touches one file nobody else
-does. E is the only one with an ordering constraint, and only a soft one.
-
-**The one shared file is `catalog/*.yaml`**, which every stream edits — each
-adding backends or caveats to its own sources. One file per family keeps that
-to an append per stream, which is the cheapest kind of conflict.
-
-**The one shared seam is `src/collect/mod.rs`**, where families register. It is
-a list of `Factory::new` calls per family module, deliberately so: nine agents
-editing one `match` arm is nine conflicts on the same three lines.
-
-So: **five streams, four of them fully parallel.** The honest ordering, if
-fewer hands are available, is A then B — A unlocks 27 sources and everything in
-phase 4's vertical case, B unlocks 7 for a fraction of the effort.
+For what remains, the honest division is by **defect class rather than by
+family**: the sixty-three are grouped by what is wrong, not by where, and two
+streams fixing "every refusal's exit code" and "every late-tick count" would
+each touch several families and few files. That is the opposite of every wave so
+far, and it is what the work now is.
 
 ---
 
@@ -284,3 +282,18 @@ tick.
 launched from a terminal has a terminal on stdout inside its own tests. Anything
 that asks the process about its own environment is testing how the suite was
 started.
+
+**A measurement of a shared machine is not repeatable inside a parallel test
+suite.** Nine hundred tests share this machine's caches, its SMT siblings, its
+package power limit and its disks, and six scenarios had to be rewritten after
+the fourth wave because each was asserting what the machine was doing rather
+than what the tool did. The pattern of the fix is always the same: assert the
+*separation* rather than a calibrated threshold, carry the reference's own
+resolution as slack, and where the measurement genuinely cannot be taken, skip
+loudly with the numbers that show why. A scenario that states its limit is
+worth more than one that hides it.
+
+**A test must not assert which way a race went.** `proc.fd` on a launched
+program has three outcomes depending on whether the child reached `execve` and
+whether it had opened its files — and the defect is that the answer is
+*unspecified*, so that is what the test asserts, over several runs.
