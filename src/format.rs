@@ -13,9 +13,13 @@
 //! matrix below is what keeps `--emit hist --format folded` from producing a
 //! file that parses but means nothing.
 //!
-//! Result encoders are declared here before they exist. They are reported as
-//! not yet implemented, with the phase that brings them, rather than silently
-//! falling back to another format.
+//! A result encoder is declared here before it is written, and reported as not
+//! yet implemented with the phase that brings it, rather than silently falling
+//! back to another format. Every format declared today has one; `FormatStatus`
+//! stays because that is the order the next one will arrive in, and because a
+//! claim about an encoder and the encoder itself live in different files --
+//! only a test crosses them, and a merge has reverted one and left the other
+//! behind before.
 
 use std::fmt;
 use std::path::Path;
@@ -210,10 +214,38 @@ impl OutputFormat {
             // neither needed a collector to exist. Where the stacks come from
             // is a separate question from whether this can write them down.
             OutputFormat::Folded | OutputFormat::Speedscope => FormatStatus::Ready,
-            OutputFormat::Pprof | OutputFormat::ChromeTrace => FormatStatus::Planned {
-                phase: "phase 4, with the correlated vertical case",
-            },
+            // Written once `folded` and `speedscope` had settled what a stack
+            // and a timeline look like on the way out. `pprof` reuses the
+            // former's aggregate and `chrome` the latter's series; neither
+            // needed a new collector, only a wire format.
+            OutputFormat::Pprof | OutputFormat::ChromeTrace => FormatStatus::Ready,
         }
+    }
+
+    /// The extension a file of this format takes.
+    ///
+    /// Not always the format's own name: a speedscope file and a Chrome trace
+    /// are both JSON and a tool that opens one by extension has to be handed
+    /// `.json`, and a `pprof` profile is `.pb.gz` everywhere the format is
+    /// read. `results.chrome` opens in nothing.
+    pub fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::Text => "txt",
+            OutputFormat::Speedscope => "speedscope.json",
+            OutputFormat::Pprof => "pb.gz",
+            OutputFormat::ChromeTrace => "json",
+            other => other.as_str(),
+        }
+    }
+
+    /// Whether the encoder produces bytes that are not text.
+    ///
+    /// Only `pprof` is: a gzipped protobuf is not a `String` and cannot be
+    /// printed through one. Everything else this tool writes is UTF-8, which is
+    /// why the encoder's ordinary entry point returns text and the binary one
+    /// has to be asked for by name.
+    pub fn is_binary(self) -> bool {
+        matches!(self, OutputFormat::Pprof)
     }
 
     pub fn serialize_document<T: Serialize>(self, value: &T) -> Result<String, ParseError> {
@@ -319,6 +351,35 @@ mod tests {
         assert!(OutputFormat::Yaml.renders_documents());
         assert!(!OutputFormat::Folded.renders_documents());
         assert!(OutputFormat::Pprof.serialize_document(&1).is_err());
+    }
+
+    /// A file is opened by its extension by every tool that reads these
+    /// formats, and two of them are JSON under another name.
+    #[test]
+    fn a_file_is_named_after_what_opens_it() {
+        assert_eq!(OutputFormat::ChromeTrace.extension(), "json");
+        assert_eq!(OutputFormat::Speedscope.extension(), "speedscope.json");
+        assert_eq!(OutputFormat::Pprof.extension(), "pb.gz");
+        assert_eq!(OutputFormat::Ndjson.extension(), "ndjson");
+        for format in OutputFormat::ALL {
+            assert!(
+                !format.extension().starts_with('.'),
+                "`{format}` names an extension with its own dot"
+            );
+        }
+    }
+
+    /// A binary format is the one thing the text path cannot carry, and the
+    /// distinction has to be askable rather than inferred from the name: a
+    /// caller that prints a `String` has no way to notice it is holding gzip.
+    #[test]
+    fn only_the_gzipped_protobuf_is_binary() {
+        assert!(OutputFormat::Pprof.is_binary());
+        for format in OutputFormat::ALL {
+            if format != OutputFormat::Pprof {
+                assert!(!format.is_binary(), "`{format}` is not gzip");
+            }
+        }
     }
 
     #[test]

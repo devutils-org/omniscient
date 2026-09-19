@@ -4,6 +4,7 @@
 //! which is also what a future API would call.
 
 use std::ffi::OsString;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -364,8 +365,21 @@ fn measure(
         run.joins.push(join::apply(rule, &merged)?);
     }
 
-    let output = encode::run_output(session.format, &run)?;
-    print!("{output}");
+    // Bytes rather than a `String`, because one of the nine formats is not
+    // text: a `pprof` profile is a gzipped protobuf. Everything else is UTF-8
+    // and reaches stdout unchanged.
+    let output = encode::run_output_bytes(session.format, &run)?;
+    let unshowable = session.format.is_binary() && std::io::stdout().is_terminal();
+    if unshowable && session.out.is_none() {
+        anyhow::bail!(
+            "`{}` is {}, which no terminal can show: redirect it to a file or pass --out <dir>",
+            session.format,
+            session.format.describe()
+        );
+    }
+    if !unshowable {
+        std::io::stdout().write_all(&output)?;
+    }
 
     for caveat in report.caveats() {
         eprintln!("caveat: {caveat}");
@@ -390,18 +404,17 @@ fn write_artifacts(
     directory: &Path,
     format: OutputFormat,
     resolved: &[ResolvedRequest],
-    encoded: &str,
+    encoded: &[u8],
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
     std::fs::write(
         directory.join("resolved.json"),
         serde_json::to_string_pretty(resolved)?,
     )?;
-    let extension = match format {
-        OutputFormat::Text => "txt",
-        other => other.as_str(),
-    };
-    std::fs::write(directory.join(format!("results.{extension}")), encoded)?;
+    std::fs::write(
+        directory.join(format!("results.{}", format.extension())),
+        encoded,
+    )?;
     Ok(())
 }
 
