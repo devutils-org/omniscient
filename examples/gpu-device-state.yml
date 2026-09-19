@@ -47,8 +47,11 @@ requests:
 
   # Polled at 100 ms and refreshed by the driver about once a second, so ten
   # consecutive points here are one measurement repeated. The collector records
-  # that as a one-second `ts_err_ns` on every event; no emit this source
-  # declares can show it. `docs/scenarios/gpu.md` has the entry.
+  # that as a one-second `ts_err_ns` on every event, and no emit this source
+  # declares serialises that field -- so the collector states the error bar as a
+  # degradation of the run instead, which every emit carries. What still has
+  # nowhere to go is the number on each point; `docs/scenarios/gpu.md` has the
+  # entry, under "Defects found" 1.
   - label: busy
     source: gpu.engine_busy
     target: {launch: [python3, tests/gpu_workload.py, kernel, "1600"]}

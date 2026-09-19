@@ -2,17 +2,20 @@
 #
 #   omn -f examples/net-snapshot.yml
 #
-# Three `net` sources declare `snapshot`, and all three are counter sources --
-# which is the whole difficulty. A counter source reports the *increment*
-# between two reads, and a snapshot's window is the time between its one read
-# and the closing read that follows it, which is on the order of a hundred
-# microseconds. So these numbers are increments over a hundred microseconds,
-# not the totals since boot, and on an idle machine every one of them is zero.
-#
-# That is not an idle machine reporting correctly. `docs/scenarios/net.md`
-# records it under "Defects found": an accept queue that is demonstrably
+# Three `net` sources declare `snapshot`, and two of them are counter sources --
+# which used to be the whole difficulty. A counter source reports the
+# *increment* between two reads, and a snapshot's window was the time between
+# its one read and the closing read that followed it, on the order of a hundred
+# microseconds; so these numbers were increments over a hundred microseconds and
+# every one of them was structurally zero. An accept queue that was demonstrably
 # overflowing -- `net.backlog --mode count` sees nineteen drops in a second --
-# reports zero drops and zero overflows through this file.
+# reported zero drops and zero overflows through this file.
+#
+# A snapshot now reports what a single read can honestly report: the counters as
+# they stand, under names that say so -- `drops_since_boot` rather than `drops`,
+# and a `basis` attribute on every event. There is no closing read, because
+# there is no window to close. `docs/scenarios/net.md` has the entry, under
+# "Defects found" 3, marked fixed.
 #
 # `net.hwts` is the one source here for which a snapshot means what it says: an
 # offset between two clocks is a level, not a counter, so reading it once is the

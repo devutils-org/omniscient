@@ -124,7 +124,9 @@ different failures, nothing here was malformed, and a drop counted as an error
 would send a reader looking for a cable.
 
 The same scenario found that the aggregating emits of this source answer `0
-count/s` for that link. That is under **Defects found**.
+count/s` for that link. That is under **Defects found** 5, and it is half fixed:
+the rate still reports errors alone, and the run now names the thousand frames
+it is leaving out of it.
 
 **What this does not reach is a drop inside a queueing discipline.** The obvious
 way to make an interface lose packets is `tc qdisc add dev lo root netem loss
@@ -142,9 +144,14 @@ mean no packets were lost on the path.**
 
 A listener one deep and far more connections than it will ever accept is the
 situation those counters exist to name. `count` finds it — nineteen drops in a
-second — and `snapshot` reports zero while the same queue is in the same state.
-That asymmetry is under **Defects found**; the scenario that shows it is
-`a_snapshot_of_the_accept_queue_reports_nothing_while_it_overflows`.
+second — and `snapshot` used to report zero while the same queue was in the same
+state, because a counter source reports an increment and a snapshot's window was
+microseconds wide. It now reports the counters as they stand. Both halves are
+checked by one scenario against one workload:
+`a_snapshot_of_the_accept_queue_reports_the_queue_the_kernel_holds` requires the
+totals to contain the drops `count` measured and to be far larger than any
+increment over the snapshot's own window could be. **Defects found** 3 has the
+entry.
 
 ### Did the capture see everything?
 
@@ -372,6 +379,10 @@ Eight, in the order a reader is likely to meet them. Each is pinned by an
 assertion in `tests/scenario_net.rs`, so that fixing one is noticed here rather
 than silently changing what a caller sees.
 
+Two carry a **fixed** marker, with the reproduction left in place: the session
+and the output that found them are what says a regression has happened.
+`docs/fixes/net.md` has what was done and what it cost.
+
 ### 1. `net.bytes` declares an emit no mode it declares can produce
 
 The entry lists `topk`, `omn list net.bytes` prints it, and every request that
@@ -420,7 +431,16 @@ least readable. A run of an hour at this cadence prints millions. The capture's 
 collapse correctly to `35x` — so the mechanism works and it is the note that is
 wrong.
 
-### 3. `snapshot` on a counter source can only ever answer zero
+### 3. `snapshot` on a counter source can only ever answer zero — **fixed**
+
+*Fixed by stream F. A snapshot now reports the counters as they stand, under
+`*_since_boot` names and with a `basis` attribute saying what the number is, and
+takes no closing read: there is no window to close. The reproduction below is
+what the tool did before, and*
+`a_snapshot_of_the_accept_queue_reports_the_queue_the_kernel_holds` *now
+requires the answer to contain the drops `count` measured and to be far larger
+than any increment over the snapshot's own microsecond window could be. The
+shape is `mem.swap`'s, which had solved the same problem for the same reason.*
 
 A counter source reports the increment between two reads. A snapshot's two reads
 are its one read and the closing read that follows it, about a hundred
@@ -471,7 +491,17 @@ The second request asked for one read and took five. The output is not a lie —
 reinterpreted without a word, and the run's notes are where a degradation of
 this kind belongs.
 
-### 5. Every aggregating emit of `net.iface` answers about errors alone
+### 5. Every aggregating emit of `net.iface` answers about errors alone — **half fixed**
+
+*Stream F could not split the series: a series is keyed on the first key of its
+events, and the key model has no variant for which counter a number is, so one
+event per counter kind would collapse back into one summed series — the thing
+the catalog's caveat forbids. The signature for the shared-layer change is under
+"Needs from another stream" in* `docs/open-findings.md`. *What the collector now
+does is stop the omission being silent: a run where an interface lost frames to
+a counter the series does not carry says so as a degradation, which every emit
+and every format that carries a note carries. The rate is still zero, and it is
+no longer quiet about it.*
 
 The collector's measured value is `errors`, deliberately: a bad frame and a full
 queue are different failures and summing them would hide which happened. The

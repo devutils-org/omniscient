@@ -18,12 +18,12 @@
 //! Every event says so in its `scope` attribute, so the distinction survives
 //! into the output file rather than living in the reader's memory.
 
-use std::path::Path;
+use std::time::Duration as StdDuration;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
-use crate::request::Target;
+use crate::request::{Mode, Target};
 
 use super::nvml::{DeviceHandle, Nvml, NvmlError};
 
@@ -31,6 +31,18 @@ use super::nvml::{DeviceHandle, Nvml, NvmlError};
 /// NVIDIA documents that window as at most one second, which is therefore how
 /// far from its timestamp such a sample may be.
 const UTILIZATION_WINDOW_NS: u32 = 1_000_000_000;
+
+/// How often a `count` run is asked for events.
+///
+/// It has almost none to give: a `count` has no cadence of its own, so the
+/// reads stay at [`Mode::DEFAULT_POLL_INTERVAL`], which is also about as often
+/// as the driver refreshes what these sources read. The tick exists so that the
+/// *run* notices a launched program that exited, and so that the window it
+/// reports is the program's life rather than that life rounded up to the next
+/// whole second -- which is what `rate`, reachable on `gpu.engine_busy` only
+/// through `count`, divides by. The same tick, for the same reason, is in
+/// `collect/cpu/counters.rs`.
+const COUNT_TICK: StdDuration = StdDuration::from_millis(10);
 
 /// Which number a collector reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,15 +80,24 @@ impl Metric {
     }
 }
 
-/// Holds the choice of metric until the target exists.
-pub struct Prepare(pub Metric);
+/// Holds the choice of metric and the mode until the target exists.
+pub struct Prepare {
+    metric: Metric,
+    mode: Mode,
+}
+
+impl Prepare {
+    pub fn new(metric: Metric, mode: Mode) -> Self {
+        Self { metric, mode }
+    }
+}
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         // A device figure needs no process, so no target is refused here. What
         // the target decides is `gpu.mem`: with a process it reports that
         // process's VRAM, without one the device's.
-        NvmlCollector::new(self.0, target.first_pid())
+        NvmlCollector::new(self.metric, self.mode, target.first_pid())
             .map(|collector| Box::new(collector) as Box<dyn Collector>)
     }
 }
@@ -98,6 +119,13 @@ struct Device {
 pub struct NvmlCollector {
     id: CollectorId,
     metric: Metric,
+    /// The mode the request named. Only `count` changes anything here: it has
+    /// no cadence of its own, so the collector supplies both the cadence of its
+    /// reads and the tick that lets the run end when its target does.
+    mode: Mode,
+    /// When the last read was taken, so a `count` run keeps reading at the
+    /// interval it would have had rather than at the tick.
+    last_read_ns: Option<u64>,
     nvml: Nvml,
     devices: Vec<Device>,
     /// The driver, which is part of what a number means: NVML's semantics are
@@ -110,7 +138,7 @@ pub struct NvmlCollector {
 }
 
 impl NvmlCollector {
-    fn new(metric: Metric, pid: Option<i32>) -> Result<Self, String> {
+    fn new(metric: Metric, mode: Mode, pid: Option<i32>) -> Result<Self, String> {
         let nvml = Nvml::open()?;
         let count = nvml
             .device_count()
@@ -148,6 +176,8 @@ impl NvmlCollector {
         Ok(Self {
             id: CollectorId::new(format!("{}/vendor:nvml", metric.source())),
             metric,
+            mode,
+            last_read_ns: None,
             nvml,
             devices,
             driver,
@@ -312,9 +342,26 @@ impl Collector for NvmlCollector {
         // A process target that has gone ends the run rather than producing a
         // series of zeros that looks like a program holding no memory.
         if let (Metric::Mem, Some(pid)) = (self.metric, self.pid) {
-            if !Path::new(&format!("/proc/{pid}")).exists() {
-                return Err(SampleError::TargetGone(format!("process {pid} exited")));
+            if let Some(gone) = departed(pid) {
+                return Err(SampleError::TargetGone(gone));
             }
+        }
+
+        // A `count` request names no cadence, so the collector keeps its own:
+        // the reads stay a second apart, which is about as often as the driver
+        // refreshes them, while the run is ticked far more finely so that it
+        // ends when its target does. Without the split, either the window is
+        // rounded up to a whole second or the driver is asked a hundred times
+        // for one sample.
+        if self.mode == Mode::Count {
+            let now_ns = monotonic_ns();
+            let due = self.last_read_ns.is_none_or(|last| {
+                now_ns.saturating_sub(last) >= Mode::DEFAULT_POLL_INTERVAL.as_nanos()
+            });
+            if !due {
+                return Ok(Vec::new());
+            }
+            self.last_read_ns = Some(now_ns);
         }
 
         let mut events = Vec::with_capacity(self.devices.len());
@@ -361,6 +408,80 @@ impl Collector for NvmlCollector {
         }
         Ok(events)
     }
+
+    /// How often the run asks this collector for events.
+    ///
+    /// Only in `count`, and not because there is anything to read that often:
+    /// the reads are throttled in `sample`. It is the *run* that needs the
+    /// tick, so that a launched program's exit is noticed when it happens
+    /// rather than at the next second -- the window is what `rate` divides by,
+    /// and `rate` is reachable on `gpu.engine_busy` only through this mode.
+    fn tick(&self) -> Option<StdDuration> {
+        (self.mode == Mode::Count).then_some(COUNT_TICK)
+    }
+
+    /// A `count` window is closed by a reading, not by the tick that happened
+    /// to be last: the run stops the moment its target does, and the occupancy
+    /// at that moment belongs to the series.
+    fn stop(&mut self) -> Vec<Event> {
+        if self.mode != Mode::Count {
+            return Vec::new();
+        }
+        self.last_read_ns = None;
+        self.sample(u64::MAX / 2).unwrap_or_default()
+    }
+
+    /// What this collector had to give up, in the one place every emit and
+    /// every format carries it.
+    ///
+    /// `gpu.engine_busy` is the only source here whose samples do not happen
+    /// when they are timestamped: NVML averages occupancy over a window it
+    /// chooses and does not report, documented as at most a second wide, and
+    /// every event says so in its `ts_err_ns`. Only `raw` serialises that
+    /// field, and this source does not declare `raw` -- so a reader of a
+    /// timeline sees points 200 ms apart with nothing to say they may all be
+    /// one driver sample. Until a timeline point can carry its own error bar,
+    /// the error bar is stated once, here, where it reaches the reader whatever
+    /// they asked for.
+    fn notes(&self) -> Vec<String> {
+        if self.metric != Metric::EngineBusy {
+            return Vec::new();
+        }
+        vec![format!(
+            "vendor:nvml: occupancy is averaged by the driver over a window it chooses, \
+             documented as up to {} ms wide, so every timestamp in this series is good only to \
+             that much and two points closer together than it may be one sample read twice",
+            UTILIZATION_WINDOW_NS / 1_000_000
+        )]
+    }
+}
+
+/// Whether a process this run is following has finished, and how it is known.
+///
+/// Asking whether `/proc/<pid>` exists is not the same question. A process that
+/// has exited and whose parent has not reaped it keeps its entry -- a supervisor
+/// or a test harness that defers the `wait` leaves one in exactly that state --
+/// and following it produces the series of zeros this check exists to prevent.
+/// The state letter in `/proc/<pid>/stat` is what tells the two apart, and it is
+/// the third field, counted from the last `)` because the command name is
+/// parenthesised and may contain spaces and parentheses of its own.
+fn departed(pid: i32) -> Option<String> {
+    let path = format!("/proc/{pid}/stat");
+    let Ok(stat) = std::fs::read_to_string(&path) else {
+        return Some(format!("process {pid} exited"));
+    };
+    let state = stat
+        .rfind(')')
+        .and_then(|end| stat[end + 1..].split_whitespace().next())
+        .unwrap_or("");
+    // `Z` is exited and unreaped; `X` is the brief state of one being torn down.
+    match state {
+        "Z" => Some(format!(
+            "process {pid} exited and has not been reaped, so its video memory is already gone"
+        )),
+        "X" => Some(format!("process {pid} exited")),
+        _ => None,
+    }
 }
 
 fn mhz_to_hz(mhz: u32) -> u64 {
@@ -383,7 +504,10 @@ mod tests {
     /// cannot run the test. Most machines have no NVIDIA device and must skip
     /// cleanly: a test that fails there says nothing about the code.
     fn collector(metric: Metric) -> Option<NvmlCollector> {
-        match NvmlCollector::new(metric, Some(std::process::id() as i32)) {
+        let polling = Mode::Poll {
+            interval: Mode::DEFAULT_POLL_INTERVAL,
+        };
+        match NvmlCollector::new(metric, polling, Some(std::process::id() as i32)) {
             Ok(collector) => Some(collector),
             Err(reason) => {
                 eprintln!("skipped: {reason}");
@@ -605,7 +729,10 @@ mod tests {
     #[test]
     fn a_process_that_no_longer_exists_ends_the_run_rather_than_reporting_zero() {
         // pid 0 never names a readable process directory.
-        let Ok(mut collector) = NvmlCollector::new(Metric::Mem, Some(0)) else {
+        let polling = Mode::Poll {
+            interval: Mode::DEFAULT_POLL_INTERVAL,
+        };
+        let Ok(mut collector) = NvmlCollector::new(Metric::Mem, polling, Some(0)) else {
             eprintln!("skipped: no NVIDIA device on this machine");
             return;
         };
@@ -613,6 +740,39 @@ mod tests {
             Err(SampleError::TargetGone(reason)) => assert!(reason.contains("exited"), "{reason}"),
             other => panic!("expected the run to end, got {other:?}"),
         }
+    }
+
+    /// A process that has exited and not been reaped still has a `/proc` entry,
+    /// so asking whether the directory is there answers yes about a process
+    /// that is gone. The ground truth is a child this test leaves unreaped on
+    /// purpose, which is the state a supervisor or a test harness leaves one
+    /// in, and the state letter the kernel writes for it.
+    #[test]
+    fn a_zombie_is_departed_although_its_proc_entry_is_still_there() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("`true` should start");
+        let pid = child.id() as i32;
+        // Waiting for the state rather than for a duration: the exit is the
+        // event, and a sleep long enough to be safe is a sleep in every run.
+        let stat = format!("/proc/{pid}/stat");
+        for _ in 0..1000 {
+            if std::fs::read_to_string(&stat).is_ok_and(|text| {
+                text.rfind(')')
+                    .and_then(|end| text[end + 1..].split_whitespace().next())
+                    == Some("Z")
+            }) {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(1));
+        }
+        assert!(
+            std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "an unreaped child keeps its /proc entry, which is what made this a defect"
+        );
+        let gone = departed(pid).expect("an unreaped child has exited");
+        assert!(gone.contains("reaped"), "{gone}");
+        child.wait().expect("reaping the child");
     }
 
     /// A device figure is averaged over a window the driver chooses and does

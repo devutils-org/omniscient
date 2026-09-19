@@ -24,20 +24,26 @@ use crate::capabilities::Probe;
 pub fn factories() -> Vec<Factory> {
     use device::{Metric, Prepare};
     vec![
-        Factory::new("gpu.freq", "vendor:nvml", |_| {
-            Ok(Box::new(Prepare(Metric::Freq)))
+        Factory::new("gpu.freq", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(Metric::Freq, resolved.request.mode)))
         }),
-        Factory::new("gpu.power", "vendor:nvml", |_| {
-            Ok(Box::new(Prepare(Metric::Power)))
+        Factory::new("gpu.power", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(Metric::Power, resolved.request.mode)))
         }),
-        Factory::new("gpu.temp", "vendor:nvml", |_| {
-            Ok(Box::new(Prepare(Metric::Temp)))
+        Factory::new("gpu.temp", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(Metric::Temp, resolved.request.mode)))
         }),
-        Factory::new("gpu.mem", "vendor:nvml", |_| {
-            Ok(Box::new(Prepare(Metric::Mem)))
+        Factory::new("gpu.mem", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(Metric::Mem, resolved.request.mode)))
         }),
-        Factory::new("gpu.engine_busy", "vendor:nvml", |_| {
-            Ok(Box::new(Prepare(Metric::EngineBusy)))
+        // The mode reaches this one because `count` has no cadence of its own:
+        // without it the run falls back to the default poll interval and a
+        // program's exit is noticed a whole second late. See `device.rs`.
+        Factory::new("gpu.engine_busy", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(
+                Metric::EngineBusy,
+                resolved.request.mode,
+            )))
         }),
     ]
 }

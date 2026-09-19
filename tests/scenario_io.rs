@@ -1371,14 +1371,46 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
         "a counter that rewound has to say so rather than wrap: \n{said}"
     );
 
-    // 4. A device that appears mid-run. It is named -- see
-    // `docs/scenarios/io.md`, "Defects found": it is *not* counted, so a run
-    // where this is the only gap still reports itself complete. The count is
-    // deliberately not asserted here, so that the day it is counted this
-    // scenario keeps passing and the document is what changes.
+    // 4. A device that appears mid-run. It is named, and it is counted: an
+    // interval of one device's I/O is missing from the run, and a reason with
+    // nothing counted behind it leaves `Losses::is_clean` true and the run
+    // printing `no loss`.
     assert!(
         said.contains("appeared during the run"),
         "a device with no earlier reading loses its first interval, and has to say so:\n{said}"
+    );
+
+    // The count is checked against the reasons rather than against a number,
+    // because how many ticks saw each gap depends on where the rewrites of the
+    // file land. Every reason recorded above is one of the three shapes that
+    // leave a reading out of the total, and `undecoded` is what counts all
+    // three -- so it cannot be smaller than the occurrences of them. Before
+    // this was fixed the device that appeared was noted and not counted, and
+    // this assertion failed by exactly those occurrences.
+    let occurrences = |needle: &str| -> u64 {
+        losses["reasons"]
+            .as_object()
+            .map(|reasons| {
+                reasons
+                    .iter()
+                    .filter(|(reason, _)| reason.contains(needle))
+                    .filter_map(|(_, count)| count.as_u64())
+                    .sum()
+            })
+            .unwrap_or(0)
+    };
+    let left_out = occurrences("appeared during the run")
+        + occurrences("no entry under /sys/class/block")
+        + occurrences("went backwards");
+    assert!(
+        occurrences("appeared during the run") > 0,
+        "this scenario has to provoke a device that appears mid-run: {losses}"
+    );
+    assert!(
+        losses["undecoded"].as_u64().unwrap_or(0) >= left_out,
+        "{left_out} readings were left out of the total and only {} are counted, so a run \
+         whose only gap is one of them would still call itself complete: {losses}",
+        losses["undecoded"]
     );
 }
 

@@ -420,7 +420,16 @@ returns `EXIT_REJECTED` for every resolver error. A caller that scripts around
 these three answers cannot tell "fix your request" from "run this somewhere
 else".
 
-### 4. A dropped interval, noted and not counted, in a run reporting `no loss`
+### 4. A dropped interval, noted and not counted, in a run reporting `no loss` — **fixed**
+
+*Fixed by stream F, in one line: the reason now increments `undecoded`, which is
+the category the sibling case one line further down in the same function already
+used for the same shape of gap. The reproduction below is what the tool did
+before.* `substituted_counters_are_converted_exactly_and_their_gaps_are_named`
+*now asserts the count as well as the reason, and does it in a way that
+discriminates — the occurrences of the three reasons that leave a reading out of
+the total are summed from the reasons map, and `undecoded` must be at least
+that. Reverting the one line makes it fail.*
 
 ```console
 $ # a device appears in /proc/diskstats mid-run, under a substituted file
@@ -495,7 +504,16 @@ request named)`, would close both. Both io sessions that poll more than one
 source use the same interval on every request, which is a way of not stepping
 on it rather than a fix.
 
-### 7. `io.bytes` measures the read/write split and no emit can show it
+### 7. `io.bytes` measures the read/write split and no emit can show it — **left**
+
+*Stream F looked and left it: every way out is a catalog or emit change. Either
+the three entries declare `raw`, or the `count` → `raw` pairing recorded in* §5
+*of* `docs/open-findings.md` *is promoted. Both signatures are under "Needs from
+another stream" there. Stating the split in a run's note, which is what net 5
+and gpu 1 now do for what they leave out, was considered and rejected: those two
+notes are honest because something went missing, and a split is detail rather
+than an omission — a note on every run that moved a byte is noise in the channel
+this project keeps for degradations.*
 
 The collector puts `read_bytes`, `write_bytes`, `sector_bytes` and, where the
 kernel reports them, `discarded_bytes` on every event. The catalog declares
@@ -538,7 +556,13 @@ code, for filter fields it is caught and reported well — `--filter "comm == ..
 names the backend that would carry the field — and for keys it costs nothing at
 all until a join comes up empty.
 
-### 9. The loss headline names three of the five things that are counted
+### 9. The loss headline names three of the five things that are counted — **left**
+
+*`src/encode.rs` is stream C's, and this is the text renderer alone: every
+structured format already carries all five. The line wanted is under "Needs from
+another stream" in* `docs/open-findings.md`. *Fixing defect 4 above made this
+sharper rather than softer — the ordinary `io` loss is now more likely to be the
+category the headline does not name.*
 
 ```console
 $ # a /proc/diskstats holding one device this machine cannot classify
