@@ -206,11 +206,24 @@
   summary: "NIC hardware timestamps (PHC domain)"
   unit: ns
   backends:
-    - {id: "netlink", requires: ["so_timestamping", "phc"], cost: free}
-  modes: [trace]
-  emits: [raw, hist, timeline, summary]
-  targets: {pid: native, launch: native, iface: native}
-  keys: [sock]
+    # Per packet, which is what the source is for and what needs a socket this
+    # tool owns: SO_TIMESTAMPING on it, and the PHC to read its stamps against.
+    # It serves a process because a socket belongs to one; an interface does not
+    # have a socket, which is why the fallback below exists at all.
+    - {id: "so_timestamping", requires: ["so_timestamping", "phc"], cost: free,
+       targets: {pid: native, launch: native}, filter_fields: [dport]}
+    # Per interface, over the ethtool netlink family and the PTP character
+    # device. What the card can stamp, and how far its clock is from ours.
+    - {id: "netlink:ethtool", requires: ["netlink", "ethtool"], cost: free,
+       targets: {iface: native, system: native}, filter_fields: [iface],
+       degraded: "what an interface can timestamp and how far its clock has
+                  drifted from CLOCK_MONOTONIC, not the timestamps of individual
+                  packets: it says whether a latency measured elsewhere is the
+                  card's word or the kernel's guess, and cannot itself split one"}
+  modes: [trace, poll, snapshot]
+  emits: [raw, timeline, summary]
+  targets: {pid: native, launch: native, iface: native, system: native}
+  keys: [sock, iface]
   filter_fields: [iface, dport]
   determinism: high
   caveats:
@@ -218,6 +231,20 @@
        into NIC / kernel / application segments."
     - "A different clock domain from CLOCK_MONOTONIC: calibration is mandatory and
        ts_err_ns is non-zero on these events."
+    - "The measured value is the offset between an interface's own clock and
+       CLOCK_MONOTONIC, so an interface with no hardware clock is refused by
+       name rather than reported as an offset of zero: its packets are stamped
+       from CLOCK_REALTIME like every other software timestamp, and there is no
+       second clock to be offset from."
+    - "Reading a PTP hardware clock needs read permission on /dev/ptp<n>, which
+       is root and the `clock` group on most distributions. An interface whose
+       clock is out of reach is named in the run's notes, because out of reach
+       and absent are different answers and only the first is a privilege to
+       grant."
+    - "A PTP hardware clock is free-running unless something disciplines it.
+       Nothing bounds how fast it drifts from CLOCK_MONOTONIC the way the
+       kernel's slew ceiling bounds the realtime clock, which is why polling
+       this source is the way to find out rather than assuming a rate."
 
 - id: net.xdp
   family: net
@@ -241,12 +268,26 @@
   modes: [trace]
   emits: [raw, timeline]
   targets: {iface: native, system: native}
-  keys: [sock]
+  # A frame off the wire has no socket: the lookup that would give it one has
+  # not happened yet, and on receive it never happens in a process context at
+  # all. What a captured frame does have is the interface it crossed.
+  keys: [iface]
   filter_fields: [iface, protocol, dport, daddr]
   determinism: high
   caveats:
     - "Watch buffer drops. A capture that loses packets under load silently
        produces wrong conclusions."
+    - "The kernel is told to copy only the headers of each frame, through a
+       classic BPF filter on the socket, so no payload enters this process.
+       `bytes` is still the frame's length on the wire; `captured_bytes` is what
+       was copied."
+    - "A packet the snaplen cut short before its ports reports no ports, which
+       is not port zero."
+    - "Frames are stamped from CLOCK_REALTIME by the kernel and converted here,
+       so every event carries a non-zero ts_err_ns: the width of the calibration
+       plus what the realtime clock could have been slewed by since."
+    - "Needs CAP_NET_RAW. The build does not grant it, so this source reports
+       the privilege it is missing rather than collecting."
 
 - id: net.iface
   family: net

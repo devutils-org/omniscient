@@ -1613,6 +1613,73 @@ instead of writing one.
 
 ---
 
+## 27. What the network breadth stream measured
+
+Landed by the stream that owns `src/collect/net/**`, building `net.capture`
+over `AF_PACKET` and `net.hwts` over the `ethtool` netlink family and the PTP
+character device. Four things here are worth knowing outside that directory.
+
+**A capture's privacy boundary belongs in the kernel, not in the code.** The
+obvious way to keep a payload out of the output is to parse the headers and
+print only those. The output is then clean and the payload is still in this
+process's address space, in a buffer shared with the kernel, for as long as the
+ring holds the block. So the boundary is placed one layer down instead: a
+classic BPF filter of a single instruction, `BPF_RET | BPF_K` returning 96,
+tells the kernel how many bytes of each frame to copy. Ninety-six is an
+Ethernet header, the largest IPv6 header the reader walks and a TCP header. The
+payload never crosses. `tp_len` still reports the frame's real length, so
+nothing about the measurement is lost:
+
+```console
+$ omn net.capture --iface lo --mode trace --duration 2s --emit raw --format json
+  bytes 142   captured_bytes 96   protocol udp   dport 39999   direction outgoing
+```
+
+142 is 14 + 20 + 8 + 100 for a hundred-byte datagram, measured; 96 is the cap.
+The same one-instruction program is where a pushed-down predicate would go, and
+that is the subject of a request below.
+
+**Loopback carries every frame twice, and `af_packet` shows it as two frames
+rather than as one counted twice.** `net.bytes` has carried the caveat "loopback
+traffic is counted twice, once received and once transmitted, because it is
+both" since the first wave; at frame level the two are distinguishable, by the
+`sll_pkttype` the kernel attaches. A hundred datagrams produce exactly a hundred
+frames with `direction outgoing` and exactly a hundred with `direction host`.
+That is what makes the capture's ground truth an equality rather than a range.
+
+**`CLOCK_REALTIME` is slew-bounded and the bound is usable.** A packet socket
+stamps frames from the realtime clock, so every timestamp has to be converted,
+and the conversion has to say how wrong it may be. Two terms: the width of the
+calibration sandwich (monotonic, realtime, monotonic — about 11 µs on this
+machine, and dominated by the two monotonic reads), and drift since. The second
+is bounded because `MAXFREQ` in `kernel/time/ntp.c` caps what `adjtimex` will
+slew to 500 parts per million, so an offset measured one 20 ms drain ago is
+wrong by at most 10 µs. What no bound covers is a *step*: `settimeofday` moves
+the clock by any amount at any moment. That cannot be predicted and it can be
+caught, because two calibrations that disagree by more than the slew allows can
+only have had a step between them. `foreign_clock.rs` checks for it and widens
+the error of everything converted afterwards rather than shifting a window of
+timestamps silently.
+
+**A machine's PTP hardware clocks are readable without privileges, and they are
+a real second clock domain.** On this machine `/dev/ptp0` and `/dev/ptp1` are
+mode 0664 root:clock, so `clock_gettime` on the descriptor works as an ordinary
+user. `enp38s0` names clock 0 and reports an offset of about
+1.79 × 10¹⁸ ns from `CLOCK_MONOTONIC` — which is the gap between the 1970 epoch
+and this machine's boot, so that clock is disciplined to realtime. Polled, the
+offset moves by far less than one part in a hundred of the window, which is the
+ground truth both the unit test and the integration test use: two independent
+oscillators agreeing about the passage of a known interval is a check that owes
+nothing to the code that reads them.
+
+**And what is not there.** No interface on this machine is *configured* for
+hardware timestamping; `ETHTOOL_MSG_TSINFO_GET` reports what a card can do, and
+turning it on is a system-wide change with side effects for anything else using
+the NIC, which this tool does not make. So `net.hwts` says where the card's
+clock is, not that any packet was stamped with it.
+
+---
+
 ## Needs from another stream
 
 ### For whoever updates `docs/families/cpu.md`
@@ -1677,3 +1744,174 @@ rule is absolute; passing `$(abspath $(BINARY))` by hand succeeds immediately.
 Every stream in this wave that needs `CAP_PERFMON` is granting it by hand or
 running without it, and a suite that is green without it is not evidence about
 the privileged paths. One word in the Makefile.
+
+---
+
+Written by the network breadth stream, which owns `src/collect/net/**`. Each of
+these is the other half of something landed there.
+
+### To whoever owns `src/capabilities.rs`: a probe hook for the `net` family
+
+`capabilities.rs` says, in a comment that is still correct:
+
+> `ethtool` is deliberately absent: it is a generic-netlink family, resolved by
+> name through `CTRL_CMD_GETFAMILY`, not a protocol number. Answering it as
+> `NETLINK_ROUTE` would report a different question's answer, and reporting it
+> unverified is the honest state until the family lookup exists.
+
+The family lookup now exists, in `src/collect/net/ethtool.rs`, because
+`net.hwts` had to do it to ask anything at all. What is missing is the line that
+lets `capabilities.rs` use it — the same hook `gpu` already has, two lines up
+from where this would go:
+
+```rust
+// src/collect/mod.rs
+pub mod net;                       // today: `mod net;`
+
+// src/capabilities.rs, beside the gpu hook
+if let Some(probe) = crate::collect::net::probe(requirement) {
+    return probe;
+}
+```
+
+and, in `src/collect/net/mod.rs`, which this stream owns and will add as soon as
+the caller exists (it is dead code until then, and the build refuses dead code):
+
+```rust
+/// Requirement classes this family answers for itself.
+pub fn probe(requirement: &str) -> Option<crate::capabilities::Probe> {
+    if requirement != "ethtool" {
+        return None;
+    }
+    Some(match ethtool::Ethtool::open() {
+        Ok(_) => crate::capabilities::Probe::Available,
+        Err(error) => crate::capabilities::Probe::Missing(format!(
+            "the `ethtool` generic-netlink family could not be resolved: {error}"
+        )),
+    })
+}
+```
+
+It costs one socket and one round trip, changes nothing on the machine, and
+turns the last unverified requirement in the `net` family into a checked one.
+`omn list net` reports `net.hwts` as `?` today for exactly this reason, and
+`net.iface`'s `netlink` backend is held back by it as well.
+
+### To the coordinator, who owns the `Makefile`: `CAP_NET_RAW`
+
+`net.capture` needs `CAP_NET_RAW` and the build grants `cap_bpf,cap_perfmon+ep`.
+On this machine the source therefore reports the privilege it is missing rather
+than collecting, which is correct behaviour and a source nobody can run.
+
+This stream did not widen the capability set, for a reason worth stating rather
+than just obeying: `CAP_BPF` and `CAP_PERFMON` let a binary observe the machine,
+and `CAP_NET_RAW` lets it *send* arbitrary frames as well as read them. They are
+not the same kind of grant, and the difference belongs to whoever decides what
+this tool is allowed to be, not to the stream that wanted a test to pass.
+
+Three options, in the order this stream would rank them:
+
+1. **Leave it.** `net.capture` stays a source that names its missing privilege.
+   The ground-truth test still runs, because it creates a user namespace where
+   it holds the capability (below), so the code is exercised on every run of the
+   suite on any machine with unprivileged user namespaces enabled.
+2. **Grant it, and say so.** One more capability in `CAPS`, and a line in
+   `CLAUDE.md` about what it allows. The sudoers line in the `Makefile` would
+   have to change with it, and that line is already noted as hard to get right
+   (finding 10).
+3. **A separate target.** `make caps-capture`, run deliberately, so a developer
+   who wants the capture opts into it and nobody gets it by building.
+
+Whichever is chosen, the ground-truth test needs no change: it uses the
+namespace only when the process cannot open a packet socket directly.
+
+### To whoever owns `src/resolve.rs`: `placement()` will be wrong about `af_packet`
+
+```rust
+fn placement(backend: &Backend, entry: &Entry) -> FilterPlacement {
+    if backend.id.starts_with("bpf") { FilterPlacement::Kernel(..) } else { .. }
+}
+```
+
+Nothing is wrong today: `net.capture` attaches a classic BPF program that caps
+the copy at the headers, which is not a predicate from the request, so reporting
+the request's filter as evaluated in userspace is accurate. It stops being
+accurate the moment a `--filter dport == 443` is compiled into that same
+program, which is the natural next step and the one the brief named. The string
+prefix is what has to go: a backend that filters in the kernel should say so
+itself rather than be recognised by the first three letters of its id. The
+smallest change that would do is a `kernel_filter: true` on `catalog::Backend`,
+defaulting false, read here.
+
+Until that exists this stream will not push a predicate down, because a filter
+the tool describes in the wrong place is worse than a filter that costs more
+than it should.
+
+### To whoever owns `src/emit.rs`: a missing value is not a non-numeric one
+
+```rust
+fn value_of(event: &Event, attr: &str) -> Result<f64, EmitError> {
+    event.attr(attr).and_then(|value| value.as_f64())
+        .ok_or_else(|| EmitError::NotNumeric { attr: attr.to_owned() })
+}
+```
+
+One event without the value attribute fails the aggregation of the entire run,
+with a message that says the attribute is not numeric — which is a different
+complaint from the true one, that it is not there. This shaped `net.hwts`: the
+first design reported every interface, with an offset on those that keep a
+hardware clock, and `--emit summary` then answered
+
+```
+error: `offset_ns` is not a numeric attribute, so it cannot be aggregated
+```
+
+for a run in which most interfaces were reported correctly. The source was
+reshaped to refuse a scope with no clock in it, which is the better design for
+independent reasons, so nothing is blocked. The gap is still real, and it will
+find the next source whose events are not all alike:
+
+```rust
+#[error("no event carried `{attr}`, so there is nothing to aggregate")]
+MissingValue { attr: String },
+```
+
+with the emit skipping events that do not carry it and the count of skipped ones
+reaching the output, the way `Filtered` already does for a predicate. An
+aggregate over three of forty events looks exactly like an aggregate over three.
+
+### To whoever owns `CATALOG.md`: the `net.hwts` row
+
+The prose table says
+
+| `net.hwts` | NIC hardware timestamps | `SO_TIMESTAMPING` + PHC | trace | pid (socket opt) | free | high |
+
+and the entry now declares two backends: `so_timestamping` for exactly that, per
+process, with no collector; and `netlink:ethtool` for what an interface can
+stamp and where its clock is, per interface, with one. The row is not wrong
+about the source, it is silent about the half that is built. This stream owns
+the entry and not the document, so the divergence is recorded rather than
+resolved.
+
+### To whoever owns `src/render.rs`: a series whose interesting part is its variation
+
+`net.hwts --emit timeline` is the first source in the tool whose value is a
+large absolute number of which only the changes matter. The text renderer scales
+a `ns` unit to whatever reads best, and at this magnitude that is minutes:
+
+```console
+$ omn net.hwts --system --mode poll@100ms --duration 400ms --emit timeline
+  timeline
+    iface:enp38s0
+      +0ns        29829246.93min
+      +100ms      29829246.93min
+      ...
+```
+
+Five readings, all identical to the digit shown, of a quantity that moved by
+tens of nanoseconds between them — which is the measurement. The JSON carries
+the exact value and the test reads that, so nothing is wrong with the numbers;
+the text rendering of this particular shape is useless. Not this stream's file
+and not urgent, but the shape will recur: any absolute offset, any counter read
+as a level, anything whose zero is arbitrary. A renderer that showed the first
+value in full and the rest as deltas from it would fix the whole class.
