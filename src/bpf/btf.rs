@@ -22,10 +22,15 @@ const VMLINUX_BTF: &str = "/sys/kernel/btf/vmlinux";
 const BTF_MAGIC: u16 = 0xeb9f;
 
 const KIND_INT: u8 = 1;
+const KIND_PTR: u8 = 2;
 const KIND_ARRAY: u8 = 3;
 const KIND_STRUCT: u8 = 4;
 const KIND_UNION: u8 = 5;
 const KIND_ENUM: u8 = 6;
+const KIND_TYPEDEF: u8 = 8;
+const KIND_VOLATILE: u8 = 9;
+const KIND_CONST: u8 = 10;
+const KIND_RESTRICT: u8 = 11;
 const KIND_FUNC_PROTO: u8 = 13;
 const KIND_VAR: u8 = 14;
 const KIND_DATASEC: u8 = 15;
@@ -38,6 +43,13 @@ struct TypeEntry {
     kind: u8,
     kind_flag: bool,
     vlen: u16,
+    /// Offset of this type's name in the string section, or zero when it is
+    /// anonymous.
+    name_at: usize,
+    /// A size for the kinds that have one, and the referenced type id for the
+    /// kinds that point at another -- a pointer, a typedef, a qualifier. BTF
+    /// packs both into the same word.
+    size_or_type: u32,
     /// Offset of the first member, immediately after the 12-byte header.
     members_at: usize,
 }
@@ -92,6 +104,8 @@ impl Btf {
             kind: 0,
             kind_flag: false,
             vlen: 0,
+            name_at: 0,
+            size_or_type: 0,
             members_at: 0,
         }];
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -114,12 +128,13 @@ impl Btf {
                 KIND_ENUM64 => vlen as usize * 12,
                 _ => 0,
             };
-            let _ = size_or_type;
             let index = types.len();
             types.push(TypeEntry {
                 kind,
                 kind_flag,
                 vlen,
+                name_at: name_off,
+                size_or_type,
                 members_at,
             });
             if name_off != 0 {
@@ -190,6 +205,91 @@ impl Btf {
         ))
     }
 
+    /// The arguments a raw tracepoint hands its program, as the running kernel
+    /// declares them.
+    ///
+    /// A raw tracepoint's context is an array of `u64`, one per argument, and
+    /// nothing in it says what any of them is. A program reads argument two as
+    /// a `task_struct *` because the tracepoint's prototype says so -- and that
+    /// prototype changes: `sched_switch` gained a fourth argument in 5.18, and
+    /// a program written against the older shape reads the wrong slot on a
+    /// newer kernel and produces plausible numbers from an address that is not
+    /// a task.
+    ///
+    /// The kernel publishes the prototype in its own BTF, as
+    /// `typedef void (*btf_trace_<name>)(void *, args...)`, so a program can
+    /// check the shape it assumes against the kernel it is about to run on
+    /// instead of assuming. The leading `void *` is the tracepoint's own data
+    /// pointer and is not one of the arguments, so it is dropped here.
+    pub fn tracepoint_signature(&self, tracepoint: &str) -> Result<Vec<String>, String> {
+        let name = format!("btf_trace_{tracepoint}");
+        let typedef = self
+            .by_name
+            .get(&name)
+            .and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|index| self.types[**index].kind == KIND_TYPEDEF)
+            })
+            .ok_or_else(|| {
+                format!("this kernel's BTF declares no `{name}`, so `{tracepoint}` is not a raw tracepoint on it")
+            })?;
+        let pointer = self.entry(self.types[*typedef].size_or_type)?;
+        if pointer.kind != KIND_PTR {
+            return Err(format!(
+                "this kernel's `{name}` is not a function pointer, which is the only shape a \
+                 tracepoint prototype takes"
+            ));
+        }
+        let index = pointer.size_or_type;
+        let proto = self.entry(index)?;
+        if proto.kind != KIND_FUNC_PROTO {
+            return Err(format!(
+                "this kernel's `{name}` does not point at a prototype"
+            ));
+        }
+        // Parameter zero is the tracepoint's own `void *__data`, which the
+        // program never sees: its context starts at the first real argument.
+        Ok((1..proto.vlen as usize)
+            .map(|slot| {
+                let at = proto.members_at + slot * 8;
+                self.describe(self.word(at + 4), 0)
+            })
+            .collect())
+    }
+
+    /// A type as a person would write it, for a message that has to be read.
+    ///
+    /// The depth bound is not defensive programming against the kernel: BTF
+    /// can legitimately be cyclic through a struct that points at itself, and
+    /// a description is not worth recursing forever for.
+    fn describe(&self, type_id: u32, depth: usize) -> String {
+        if depth > 4 {
+            return "...".to_owned();
+        }
+        let Ok(entry) = self.entry(type_id) else {
+            return "?".to_owned();
+        };
+        match entry.kind {
+            0 => "void".to_owned(),
+            KIND_PTR => format!("{} *", self.describe(entry.size_or_type, depth + 1)),
+            // A qualifier does not change which slot a program reads, so it is
+            // stepped through rather than printed.
+            KIND_CONST | KIND_VOLATILE | KIND_RESTRICT => {
+                self.describe(entry.size_or_type, depth + 1)
+            }
+            _ => read_string(&self.buffer, self.string_offset + entry.name_at)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "?".to_owned()),
+        }
+    }
+
+    fn entry(&self, type_id: u32) -> Result<&TypeEntry, String> {
+        self.types
+            .get(type_id as usize)
+            .ok_or_else(|| format!("this kernel's BTF has no type {type_id}"))
+    }
+
     fn word(&self, at: usize) -> u32 {
         u32::from_ne_bytes([
             self.buffer[at],
@@ -227,6 +327,8 @@ mod tests {
     struct BtfBuilder {
         types: Vec<u8>,
         strings: Vec<u8>,
+        /// Type ids start at one; zero is void and has no entry.
+        next_id: u32,
     }
 
     impl BtfBuilder {
@@ -235,7 +337,56 @@ mod tests {
             Self {
                 types: Vec::new(),
                 strings: vec![0],
+                next_id: 1,
             }
+        }
+
+        /// Writes one 12-byte type header and returns the type's id.
+        fn header(&mut self, name_off: u32, info: u32, size_or_type: u32) -> u32 {
+            self.types.extend_from_slice(&name_off.to_ne_bytes());
+            self.types.extend_from_slice(&info.to_ne_bytes());
+            self.types.extend_from_slice(&size_or_type.to_ne_bytes());
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        }
+
+        fn named(&mut self, kind: u8, name: &str, size_or_type: u32) -> u32 {
+            let name_off = self.string(name);
+            self.header(name_off, (kind as u32) << 24, size_or_type)
+        }
+
+        fn pointer(&mut self, target: u32) -> u32 {
+            self.header(0, (KIND_PTR as u32) << 24, target)
+        }
+
+        /// A named integer, and its id, for use as a parameter type.
+        fn scalar(&mut self, name: &str) -> u32 {
+            let id = self.named(KIND_INT, name, 4);
+            self.types.extend_from_slice(&0u32.to_ne_bytes());
+            id
+        }
+
+        /// A named struct with no members, which is all a parameter type has
+        /// to be to be pointed at.
+        fn opaque(&mut self, name: &str) -> u32 {
+            self.named(KIND_STRUCT, name, 8)
+        }
+
+        /// A tracepoint as the kernel declares one: a typedef to a pointer to
+        /// a prototype whose first parameter is the tracepoint's own data.
+        fn tracepoint(&mut self, name: &str, arguments: &[u32]) -> &mut Self {
+            let void_star = self.pointer(0);
+            let name_off = self.string(&format!("btf_trace_{name}"));
+            let info = ((KIND_FUNC_PROTO as u32) << 24) | (arguments.len() as u32 + 1);
+            let proto = self.header(0, info, 0);
+            for parameter in std::iter::once(&void_star).chain(arguments) {
+                self.types.extend_from_slice(&0u32.to_ne_bytes());
+                self.types.extend_from_slice(&parameter.to_ne_bytes());
+            }
+            let pointer = self.pointer(proto);
+            self.header(name_off, (KIND_TYPEDEF as u32) << 24, pointer);
+            self
         }
 
         fn string(&mut self, text: &str) -> u32 {
@@ -254,9 +405,7 @@ mod tests {
             if bitfields {
                 info |= 1 << 31;
             }
-            self.types.extend_from_slice(&name_off.to_ne_bytes());
-            self.types.extend_from_slice(&info.to_ne_bytes());
-            self.types.extend_from_slice(&8u32.to_ne_bytes());
+            self.header(name_off, info, 8);
             for (member, offset) in members {
                 let member_off = self.string(member);
                 self.types.extend_from_slice(&member_off.to_ne_bytes());
@@ -269,12 +418,8 @@ mod tests {
         /// A type of a kind this parser skips over rather than indexes, to
         /// check that it walks past the right number of bytes.
         fn integer(&mut self, name: &str) -> &mut Self {
-            let name_off = self.string(name);
-            self.types.extend_from_slice(&name_off.to_ne_bytes());
-            self.types
-                // Kind 1, an integer, with no members of its own.
-                .extend_from_slice(&(1u32 << 24).to_ne_bytes());
-            self.types.extend_from_slice(&4u32.to_ne_bytes());
+            // Kind 1, an integer, with a four-byte encoding word of its own.
+            self.named(KIND_INT, name, 4);
             self.types.extend_from_slice(&0u32.to_ne_bytes());
             self
         }
@@ -343,6 +488,71 @@ mod tests {
         let btf = Btf::parse(blob).expect("a well-formed blob");
         let error = btf.member_offset("flags_like", "third_bit").unwrap_err();
         assert!(error.contains("bitfield at bit 3"), "{error}");
+    }
+
+    /// The first parameter of every tracepoint prototype is the tracepoint's
+    /// own `void *__data`, which a program never sees: its context starts at
+    /// the argument after it. Counting it would put every argument one slot
+    /// out, and a `task_struct *` read one slot early is an address that is
+    /// not a task -- from which `bpf_probe_read_kernel` returns whatever is
+    /// there, as a number that looks like a pid.
+    #[test]
+    fn a_tracepoints_own_data_pointer_is_not_one_of_its_arguments() {
+        let mut builder = BtfBuilder::new();
+        let boolean = builder.scalar("_Bool");
+        let unsigned = builder.scalar("unsigned int");
+        let task = builder.opaque("task_struct");
+        let task_pointer = builder.pointer(task);
+        let blob = builder
+            .tracepoint(
+                "sched_switch",
+                &[boolean, task_pointer, task_pointer, unsigned],
+            )
+            .build();
+        let btf = Btf::parse(blob).expect("a well-formed blob");
+        assert_eq!(
+            btf.tracepoint_signature("sched_switch"),
+            Ok(vec![
+                "_Bool".to_owned(),
+                "task_struct *".to_owned(),
+                "task_struct *".to_owned(),
+                "unsigned int".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_tracepoint_is_refused_rather_than_answered_empty() {
+        let blob = BtfBuilder::new().integer("int").build();
+        let error = Btf::parse(blob)
+            .expect("a well-formed blob")
+            .tracepoint_signature("not_a_tracepoint")
+            .unwrap_err();
+        assert!(error.contains("btf_trace_not_a_tracepoint"), "{error}");
+    }
+
+    /// Ground truth from the kernel that is running, not from this reader.
+    /// `sched_switch` takes four arguments since 5.18 and `sched_waking` one,
+    /// and the whole point of reading the prototype is that a program can
+    /// refuse a kernel whose shape it was not written for.
+    #[test]
+    fn the_running_kernel_declares_the_tracepoints_this_layer_attaches_to() {
+        let Some(btf) = kernel_btf() else { return };
+        assert_eq!(
+            btf.tracepoint_signature("sched_switch"),
+            Ok(vec![
+                "bool".to_owned(),
+                "task_struct *".to_owned(),
+                "task_struct *".to_owned(),
+                "unsigned int".to_owned(),
+            ]),
+            "the offcpu program reads prev, next and prev_state out of these slots"
+        );
+        assert_eq!(
+            btf.tracepoint_signature("sched_waking"),
+            Ok(vec!["task_struct *".to_owned()]),
+            "the wakeup program reads the woken task out of slot zero"
+        );
     }
 
     #[test]

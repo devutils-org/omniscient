@@ -28,12 +28,15 @@
 
 pub mod btf;
 mod insn;
+mod map;
+mod offcpu;
 mod ring;
 mod syscall;
 mod wakeup;
 
 use std::sync::OnceLock;
 
+pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use wakeup::{Wakeup, WakeupProgram};
 
 use btf::Btf;

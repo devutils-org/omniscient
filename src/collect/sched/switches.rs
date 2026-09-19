@@ -229,9 +229,24 @@ mod tests {
             std::thread::sleep(StdDuration::from_millis(2));
         }
 
+        // The perf window is closed before the reference is read, so the two
+        // cover the same interval. `stop()` disables the event and *then*
+        // drains it, and the drain allocates an `Event` per switch, so under
+        // load it is itself preempted repeatedly -- switches `/proc` counts
+        // and the event, already disabled, does not. That made this test fail
+        // as a threefold shortfall "with nothing reported as lost", which is
+        // the one diagnosis it exists to give and here it was the test's own
+        // bracketing rather than the collector.
+        collector
+            .event
+            .as_ref()
+            .expect("the event is open until stop")
+            .disable()
+            .expect("disabling an open event");
+        let after = kernel_switches().expect("the file was readable a moment ago");
+
         let mut events = collector.sample(0).unwrap();
         events.extend(collector.stop());
-        let after = kernel_switches().expect("the file was readable a moment ago");
 
         let kernel = after - before;
         let measured = events.len() as u64;
@@ -244,11 +259,12 @@ mod tests {
         // lost. Both cases are asserted rather than the comparison being
         // loosened until it always passes: a shortfall with nothing reported as
         // lost is the failure this test exists to catch.
-        // The two counters are not read at the same instant, and cannot be: the
-        // reference is read by opening a file, which is itself liable to switch
-        // off the cpu. Each edge of the window is worth a switch or two that one
-        // side counted and the other had not yet. That is the only slack given;
-        // the ratio bound below is what a collector returning a constant fails.
+        // The two counters are still not read at the same instant, and cannot
+        // be: the reference is read by opening a file, which is itself liable
+        // to switch off the cpu. Each edge of the window is worth a switch or
+        // two that one side counted and the other had not yet. That is the
+        // only slack given; the ratio bound below is what a collector
+        // returning a constant fails.
         const EDGES: u64 = 4;
 
         let losses = collector.losses();

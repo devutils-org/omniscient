@@ -180,3 +180,255 @@ fn a_wakeup_session_is_valid_where_it_cannot_be_served() {
     );
     assert!(text.contains("sched.wakeup"), "{text}");
 }
+
+/// Where `sleep` is. The launcher execs the path it is given and does not
+/// search `PATH`, because a measurement of "whichever program that name found"
+/// is not a measurement of anything.
+fn sleep_binary() -> &'static str {
+    for candidate in ["/usr/bin/sleep", "/bin/sleep"] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate;
+        }
+    }
+    panic!("no `sleep` on this machine, and the off-cpu tests are about a known delay");
+}
+
+/// Whether the run was refused for want of the capabilities, which is the
+/// project's answer on an unprivileged machine and not a failure. The refusal
+/// still has to say what would make it work, and that is asserted rather than
+/// assumed.
+fn refused_for_capabilities(text: &str) -> bool {
+    if !text.contains("CAP_BPF") {
+        return false;
+    }
+    assert!(
+        text.contains("setcap") && text.contains("CAP_PERFMON"),
+        "a refusal must name what would make it work:\n{text}"
+    );
+    eprintln!("skipped: this machine does not grant CAP_BPF and CAP_PERFMON");
+    true
+}
+
+/// Sums one attribute over every event in a `raw` rendering.
+fn sum_of(text: &str, attribute: &str) -> u64 {
+    let needle = format!("{attribute}=");
+    text.lines()
+        .filter(|line| line.contains("sched.offcpu"))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix(&needle))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .sum()
+}
+
+/// Ground truth for the aggregating path: the delay is the kernel's own timer,
+/// the tolerance is the one the brief sets, and the number comes back through
+/// a hash map the program filled rather than through a stream of events.
+#[test]
+fn a_program_that_sleeps_a_known_time_is_off_cpu_for_that_time() {
+    const SLEPT_NS: u64 = 400_000_000;
+    let output = run(&[
+        "sched.offcpu",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--",
+        sleep_binary(),
+        "0.4",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+
+    let blocked_ns = sum_of(&text, "total_ns");
+    let margin = SLEPT_NS / 20;
+    assert!(
+        blocked_ns.abs_diff(SLEPT_NS) <= margin,
+        "a 400 ms sleep must be reported as 400 ms off cpu within 5 %, saw {} ms:\n{text}",
+        blocked_ns / 1_000_000
+    );
+    assert!(
+        text.contains("no loss"),
+        "blocked time lost to a full map cannot be checked against a known delay:\n{text}"
+    );
+    // A timer is an interruptible wait. Reporting it as uninterruptible would
+    // turn a program doing nothing into a program stuck on a device.
+    assert!(
+        text.contains("state=sleeping"),
+        "the state a task blocked in must reach the user:\n{text}"
+    );
+}
+
+/// Preemption is not blocked time, and this is the assertion that says so with
+/// a number. A program that never waits for anything is pushed off the cpu
+/// hundreds of times in three hundred milliseconds; if those switches were
+/// counted, this would report something close to the whole run.
+#[test]
+fn a_program_that_only_spins_reports_almost_no_blocked_time() {
+    let output = run(&[
+        "sched.offcpu",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--duration",
+        "300ms",
+        "--",
+        "/bin/sh",
+        "-c",
+        "while :; do :; done",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+
+    let blocked_ns = sum_of(&text, "total_ns");
+    assert!(
+        blocked_ns < 50_000_000,
+        "a program that spun for 300 ms without waiting for anything reported {} ms blocked, \
+         which means run queue wait is being counted as a block:\n{text}",
+        blocked_ns / 1_000_000
+    );
+}
+
+/// The in-kernel aggregation is the point of the backend, and what it buys is
+/// that the number of things userspace reads does not grow with the number of
+/// switches. A shell waiting on twenty children blocks twenty times and must
+/// produce one entry per drain interval, not one per block.
+#[test]
+fn the_kernel_aggregates_so_that_many_blocks_are_a_few_events() {
+    let output = run(&[
+        "sched.offcpu",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--",
+        "/bin/sh",
+        "-c",
+        "i=0; while [ $i -lt 20 ]; do sleep 0.005; i=$((i+1)); done",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+
+    let events = text
+        .lines()
+        .filter(|line| line.contains("sched.offcpu") && line.contains("total_ns="))
+        .count();
+    let blocks = sum_of(&text, "blocks");
+    assert!(
+        blocks >= 20,
+        "twenty waits are at least twenty blocks, saw {blocks}:\n{text}"
+    );
+    assert!(
+        (events as u64) < blocks,
+        "{blocks} blocks came back as {events} events, so nothing was aggregated:\n{text}"
+    );
+}
+
+/// Fills a file with bytes no filesystem can compress away, and puts it on the
+/// device before returning.
+///
+/// A file of zeros is not a file to read: btrfs stores 32 MiB of them in
+/// almost nothing, so reading it back with `O_DIRECT` reaches the device a
+/// quarter of the time and the block count comes out a quarter of what the
+/// arithmetic says. Measured here before it was understood -- 133 waits for
+/// 512 reads -- which is the same lesson as every other surprising number in
+/// this project: the collector was right and the premise was wrong.
+fn write_incompressible(path: &std::path::Path, bytes: usize) {
+    use std::io::Write;
+    // xorshift64, so the bytes are the same on every run and on every machine:
+    // a test that reads different data each time is a test with a different
+    // amount of device work each time.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut blob = Vec::with_capacity(bytes);
+    while blob.len() < bytes {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        blob.extend_from_slice(&state.to_ne_bytes());
+    }
+    let mut file = std::fs::File::create(path).expect("a file to read back");
+    file.write_all(&blob).expect("the whole file written");
+    // Without this the reads can be served from pages the filesystem has not
+    // written out yet, and there is no device wait to measure.
+    file.sync_all().expect("the file on the device");
+}
+
+/// Ground truth for the state, and a second, independent count of the blocks.
+///
+/// `dd` reading with `O_DIRECT` bypasses the page cache, so every read is a
+/// trip to the device and the task waits for it uninterruptibly. The number of
+/// reads is arithmetic -- the file size over the block size -- and it is known
+/// before the run, which makes it something to check the block count against
+/// rather than something derived from what the collector reported.
+#[test]
+fn reads_that_must_reach_the_device_are_uninterruptible_waits() {
+    const BLOCK_BYTES: usize = 64 * 1024;
+    const READS: usize = 512;
+
+    let blob = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("offcpu-direct.blob");
+    write_incompressible(&blob, BLOCK_BYTES * READS);
+
+    let output = run(&[
+        "sched.offcpu",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--",
+        "/usr/bin/dd",
+        &format!("if={}", blob.display()),
+        "of=/dev/null",
+        "bs=64k",
+        "iflag=direct",
+        "status=none",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    let _ = std::fs::remove_file(&blob);
+
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    // A filesystem that will not serve O_DIRECT is a machine that cannot
+    // answer the question, which is the one reason to stop quietly. A run that
+    // was refused for any other reason is not.
+    if text.contains("the launched program exited with exit status 1") {
+        assert!(
+            text.contains("sched.offcpu"),
+            "the run itself failed, which is not the filesystem's doing:\n{text}"
+        );
+        eprintln!("skipped: this filesystem does not serve O_DIRECT, so there is no device wait");
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+
+    let blocks = sum_of(&text, "blocks");
+    assert!(
+        blocks >= READS as u64 * 9 / 10,
+        "{READS} reads that must reach the device are {READS} waits, saw {blocks}:\n{text}"
+    );
+    assert!(
+        blocks <= READS as u64 + 64,
+        "{READS} reads produced {blocks} blocks, so something other than the reads is being \
+         counted:\n{text}"
+    );
+    assert!(
+        text.contains("state=uninterruptible"),
+        "a task waiting on a device is in uninterruptible sleep, and calling it anything else \
+         turns a disk problem into a program doing nothing:\n{text}"
+    );
+}
