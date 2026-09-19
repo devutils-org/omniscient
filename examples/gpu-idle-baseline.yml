@@ -1,0 +1,47 @@
+# The same four device figures, with the GPU left alone.
+#
+#   omn -f examples/gpu-idle-baseline.yml
+#
+# The other half of `examples/gpu-device-state.yml`. The workload here never
+# opens a context and never touches the device; everything else about the run
+# -- the window, the poll interval, the four sources, the machine -- is the
+# same. What differs between the two runs is a resident kernel, so what differs
+# between the two sets of numbers is what a resident kernel costs.
+#
+# A GPU is never idle in the sense of drawing nothing. On the machine this was
+# written against the board draws about fifteen watts with nothing running and
+# a compositor holds a context, so `gpu.engine_busy` reads a fifth rather than
+# zero. That floor is exactly why this file exists: a busy reading is only
+# meaningful against the floor of the same machine, and the floor is not zero.
+#
+# The clock is the figure that will not settle. A GPU that boosted a second ago
+# is still boosted here, and it falls back over seconds, not milliseconds -- so
+# a baseline taken straight after a busy run reports a busy clock. Run this one
+# first, or leave the device alone in between.
+name: the device left alone
+format: text
+
+requests:
+  - label: energy
+    source: gpu.power
+    target: {launch: [python3, tests/gpu_workload.py, idle, "1600"]}
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: clock
+    source: gpu.freq
+    target: {launch: [python3, tests/gpu_workload.py, idle, "1600"]}
+    mode: poll@100ms
+    emit: [timeline, summary]
+
+  - label: temperature
+    source: gpu.temp
+    target: {launch: [python3, tests/gpu_workload.py, idle, "1600"]}
+    mode: poll@100ms
+    emit: [summary]
+
+  - label: busy
+    source: gpu.engine_busy
+    target: {launch: [python3, tests/gpu_workload.py, idle, "1600"]}
+    mode: poll@100ms
+    emit: [timeline, summary]

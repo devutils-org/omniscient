@@ -1,0 +1,37 @@
+# How long a command buffer spent between submission and its fence.
+#
+#   omn -f examples/gpu-job-latency.yml
+#
+# This session does not run on an NVIDIA machine, and that is the scenario.
+# `gpu.job` reads the DRM scheduler's tracepoints, which AMD and Intel expose
+# and the NVIDIA proprietary driver does not: below that driver there is no
+# scheduler to trace. On a machine with `amdgpu`, `i915` or `xe` this measures;
+# on the machine this repository is developed on it is refused, and the refusal
+# names the two tracepoints that are absent rather than sending the reader to a
+# capability or a sysctl that would not have helped.
+#
+#   error: `gpu.job` has no viable backend on this machine:
+#     bpf:tp: tracepoint:gpu_scheduler:drm_run_job: missing: ...
+#     hint: the request is valid; it is this machine that cannot serve it.
+#
+# It is kept here, and kept running in `tests/scenario_gpu.rs`, so that a
+# machine that can serve it does. `--no-resolve` writes the request down
+# without consulting this machine at all, which is how you check the session
+# itself on hardware that cannot answer it:
+#
+#   omn -f examples/gpu-job-latency.yml --no-resolve
+#
+# What it measures, where it measures: a command buffer, IRQ included -- not a
+# kernel. It cannot tell you whether the GPU saturated its SMs or waited on
+# VRAM, only how long the whole submission took to come back.
+name: drm job latency
+format: text
+duration: 3s
+
+requests:
+  - label: jobs
+    source: gpu.job
+    target: system
+    mode: trace
+    emit: [hist, summary]
+    keys: [gpu, task]
