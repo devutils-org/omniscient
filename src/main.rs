@@ -31,7 +31,37 @@ const EXIT_REJECTED: u8 = 2;
 /// exist yet.
 const EXIT_NOT_IMPLEMENTED: u8 = 3;
 
+/// Undoes the `dumpable = 0` that comes with carrying file capabilities.
+///
+/// A binary that gains privileges through `setcap` is marked non-dumpable at
+/// exec, and the kernel then reassigns its own `/proc/<pid>` entries to root.
+/// The collectors that read this process's procfs -- the heap shim's, which
+/// walk `pagemap` and `smaps_rollup` -- get EACCES on files belonging to the
+/// user who started the run.
+///
+/// The symptom is the one worth naming, because it is backwards: granting
+/// `CAP_BPF` and `CAP_PERFMON` to unlock the eBPF backends *removes*
+/// `mem.heap.alloc`, `.live` and `.retained`, which needed no privileges at
+/// all. Two identical binaries, one with capabilities, disagree about what the
+/// machine can serve.
+///
+/// This does not give anything away. `ptrace` of a task holding capabilities
+/// the tracer lacks is refused by the capability subset check, which is a
+/// separate barrier and still stands; dumpability governs core dumps and the
+/// ownership of procfs entries, and this process has no business hiding either
+/// from the user running it. The same call is made in every launched child,
+/// for the same reason and with the same comment.
+fn restore_own_dumpability() {
+    // Safety: `prctl` with this option takes no pointers and cannot fail in a
+    // way that matters -- a kernel that refuses it leaves the old behaviour,
+    // which is what this build had before.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+    }
+}
+
 fn main() -> ExitCode {
+    restore_own_dumpability();
     let cli = match Cli::try_parse_from(normalize(std::env::args_os())) {
         Ok(cli) => cli,
         Err(error) => {

@@ -898,6 +898,72 @@ fn available_cpus() -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// Why `omn` makes itself dumpable again at startup, proved without needing
+    /// the capabilities that cause the problem.
+    ///
+    /// A binary carrying file capabilities is marked non-dumpable at exec, and
+    /// the kernel then reassigns its `/proc/<pid>` entries to root -- so the
+    /// tool loses the ability to read its own procfs, and the heap sources that
+    /// need no privileges at all stop resolving the moment the eBPF ones are
+    /// granted theirs.
+    ///
+    /// `PR_SET_DUMPABLE` is the same switch by a different route, so the whole
+    /// effect is reproducible by an ordinary process. It runs in a forked child
+    /// because dumpability is process-wide and the rest of the suite is running
+    /// in the other threads of this one.
+    #[test]
+    fn a_non_dumpable_process_cannot_read_its_own_procfs() {
+        const UNREADABLE_WHILE_HIDDEN: i32 = 0;
+        const READABLE_THROUGHOUT: i32 = 1;
+        const NEVER_READABLE: i32 = 2;
+
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            let path = format!("/proc/{}/pagemap\0", std::process::id());
+            let readable = || unsafe {
+                libc::faccessat(
+                    libc::AT_FDCWD,
+                    path.as_ptr().cast(),
+                    libc::R_OK,
+                    libc::AT_EACCESS,
+                ) == 0
+            };
+            let code = if !readable() {
+                NEVER_READABLE
+            } else {
+                unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+                let hidden = !readable();
+                unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) };
+                if hidden && readable() {
+                    UNREADABLE_WHILE_HIDDEN
+                } else {
+                    READABLE_THROUGHOUT
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        assert!(
+            unsafe { libc::waitpid(child, &mut status, 0) } == child,
+            "waiting for the child"
+        );
+        assert!(libc::WIFEXITED(status), "the child did not exit normally");
+        match libc::WEXITSTATUS(status) {
+            NEVER_READABLE => {
+                eprintln!("skipped: this kernel does not expose a readable pagemap at all")
+            }
+            UNREADABLE_WHILE_HIDDEN => {}
+            READABLE_THROUGHOUT => panic!(
+                "a non-dumpable process could still read its own pagemap, so \
+                 `restore_own_dumpability` in main.rs is guarding against nothing on this \
+                 kernel and the comment there is wrong"
+            ),
+            other => panic!("unexpected exit status {other}"),
+        }
+    }
+
     use super::*;
 
     #[test]

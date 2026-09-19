@@ -1033,3 +1033,53 @@ A predicate over one of these is accepted, runs, and matches nothing. The run
 does say so -- "no event carried `cpu`, so that part of the predicate was never
 true" -- which is why this is a gap rather than a lie, but it is a promise the
 build does not keep.
+---
+
+## 14. Granting capabilities removes three sources that needed none
+
+Found while verifying the build after `setcap`, by running the same binary
+twice.
+
+```console
+$ getcap target/debug/omn
+target/debug/omn cap_perfmon,cap_bpf=ep
+$ omn mem.heap.retained --mode poll@100ms --emit timeline -- python3 …
+error: `mem.heap.retained` has no viable backend on this machine:
+  preload: /proc/[pid]/pagemap: missing: /proc/1659117/pagemap exists but is not
+  readable by uid 1000
+
+$ cp target/debug/omn target/debug/omn-nocaps     # byte-identical, no capabilities
+$ omn-nocaps mem.heap.retained --mode poll@100ms --emit timeline -- python3 …
+mem.heap.retained  via preload  (mem.heap.retained)
+  1 events over 33.04ms, stopped because the launched program exited …
+```
+
+The pid in the refusal is `omn`'s own. A binary that gains privileges at exec
+is marked non-dumpable, and the kernel reassigns its `/proc/<pid>` entries to
+root; `mem.heap.alloc`, `.live` and `.retained` read `pagemap` and
+`smaps_rollup` of the process holding the shim's ring, so they get EACCES on
+files belonging to the user who started the run.
+
+So the fix for one silent failure produced another of the opposite sign.
+`make` reapplies the capabilities because a build without them under-reports
+what the machine can serve; the capabilities then under-report it again, in the
+other three sources, and the two errors do not cancel — they read as a machine
+that changed.
+
+**Fixed** in `main.rs`: `prctl(PR_SET_DUMPABLE, 1)` at startup, which is the
+same call `collect/launch.rs` already makes in every launched child and for the
+same reason. It gives nothing away: `ptrace` of a task holding capabilities the
+tracer lacks is refused by the capability subset check, a separate barrier that
+still stands.
+
+The regression test does not need the capabilities to run, because
+`PR_SET_DUMPABLE` reaches the same state by another route — an ordinary process
+that sets `dumpable = 0` also loses the ability to read its own `pagemap`. It
+runs in a forked child, since dumpability is process-wide and the rest of the
+suite is in the other threads.
+
+**Generalisation worth carrying**: any collector that reads `/proc/self/...`
+rather than a target's is measuring a process whose procfs ownership depends on
+how the binary was installed. There are no others today; `capabilities.rs`
+substitutes `[pid]` with `self` when a requirement names no target, and that is
+exactly where this surfaced.
