@@ -1,27 +1,46 @@
-# Who unblocks whom, and how often a program leaves the cpu.
-#
-# The two sources answer different halves of the same question. `sched.switches`
-# says how often the program stopped running -- it needs no privileges, and it
-# cannot say why. `sched.wakeup` says which task made it runnable again, which
-# is the half no cpu profiler can see; it needs CAP_BPF and CAP_PERFMON.
+# Who unblocks whom.
 #
 #   omn -f examples/sched-wakeup.yml
 #
-# Run it against a program of your own by replacing the target below.
+# This is the measurement no cpu profiler can stand in for. A blocked thread
+# burns no cycles and appears nowhere in a profile of the ones that do, so a
+# profile of a program that spends its life waiting is a profile of the waiting
+# it did not do. `sched.wakeup` records both ends of every wakeup: who was made
+# runnable, and who made them.
+#
+# The property the workload chose: the shell below blocks in `wait4` five times
+# and is released five times, each by a different child exiting. So the run must
+# contain at least five wakeups whose wakee is the shell, with at least five
+# distinct wakers -- and the count of `sleep` children is in the loop, not read
+# off the output.
+#
+# `sched.switches` beside it is the same five blocks counted from the other
+# side, through `perf_event_open` rather than eBPF. It needs no privileges and
+# cannot say who released the block; `sched.wakeup` needs CAP_BPF and
+# CAP_PERFMON and is the only thing that can.
+#
+# Read the waker as evidence, not as proof. A wakeup issued from interrupt or
+# softirq context is credited to whatever was interrupted, so a process doing
+# nothing but sleeping appears to wake kernel workers and network daemons; a
+# waker of pid 0 is the idle task, which is what a timer expiry looks like.
+# That caveat travels with the measurement, and examples/sched-round-trips.yml
+# is where the wakers are unambiguous.
 name: what blocks this program, and who releases it
 requests:
-  - label: switches
-    source: sched.switches
-    target:
-      launch: ["/bin/sh", "-c", "for i in 1 2 3 4 5; do sleep 0.05; done"]
-    mode: trace
-    emit: [summary]
-    keys: [task]
-
   - label: wakeups
     source: sched.wakeup
-    target:
-      launch: ["/bin/sh", "-c", "for i in 1 2 3 4 5; do sleep 0.05; done"]
+    target: &five-children
+      launch:
+        - /bin/sh
+        - -c
+        - "for i in 1 2 3 4 5; do sleep 0.02; done"
     mode: trace
-    emit: [raw, topk:5]
+    emit: [raw, topk:5, summary]
+    keys: [task]
+
+  - label: switches
+    source: sched.switches
+    target: *five-children
+    mode: trace
+    emit: [summary]
     keys: [task]

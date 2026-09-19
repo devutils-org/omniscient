@@ -1,0 +1,61 @@
+# Drive the wakeup ring past what it can hold, and check the tool says so.
+#
+#   omn -f examples/sched-wakeup-loss.yml
+#
+# A collector that loses three percent and says nothing produces wrong numbers
+# that look right, and by the time anyone notices the run is gone. So this
+# scenario loses data on purpose.
+#
+# `sched.wakeup` streams one 48-byte record per wakeup through a 256 KiB BPF
+# ring, drained every 10 ms: about 4700 records per drain, or 470 000 wakeups a
+# second before the ring is the limit. The workload below beats that with two
+# pipe ping-pongs running in one process -- two threads each, each round trip
+# waking its peer and being woken back.
+#
+# The number the workload chose is 20 000 round trips per pair, in the argument
+# at the bottom. Two pairs, two wakeups a round trip, so the run must account
+# for at least 80 000 wakeups. Measured on this machine it saw 57 424 of them
+# and reported 26 634 dropped: the events alone are 28 % short of what the
+# workload did, and only the loss line says so.
+#
+# Threads rather than processes because a process target keeps the wakeups its
+# thread group takes part in, and `os.fork` would put the peer in another one.
+name: more wakeups than the ring holds
+requests:
+  - label: wakeups-under-overflow
+    source: sched.wakeup
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import os, sys, threading
+
+          pairs, rounds = int(sys.argv[1]), int(sys.argv[2])
+
+          def ping_pong():
+              there_r, there_w = os.pipe()
+              back_r, back_w = os.pipe()
+
+              def peer():
+                  while os.read(there_r, 1):
+                      os.write(back_w, b"y")
+
+              answering = threading.Thread(target=peer)
+              answering.start()
+              for _ in range(rounds):
+                  os.write(there_w, b"x")
+                  os.read(back_r, 1)
+              os.close(there_w)
+              answering.join()
+
+          running = [threading.Thread(target=ping_pong) for _ in range(pairs)]
+          for thread in running:
+              thread.start()
+          for thread in running:
+              thread.join()
+        - "2"
+        - "20000"
+    mode: trace
+    emit: [summary]
+    keys: [task]

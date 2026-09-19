@@ -1,0 +1,53 @@
+# Every backend this family declares and does not implement, pinned on purpose.
+#
+#   omn -f examples/sched-forced-backends.yml ; echo $?   # 3
+#
+# `--backend force:` bypasses the resolver, which is how a comparison bench
+# measures one road at a time. This family has no comparison to make: each of
+# its five collected sources has exactly one implemented backend, so there is no
+# second road to measure. What there is instead is a refusal, and the refusal
+# has to be the right one -- exit 3, "this build does not implement it", not
+# exit 1, "this machine cannot serve it". The machine can: every requirement of
+# every backend below probes available here, which `omn list sched.offcpu`
+# shows.
+#
+# Eighteen of the family's twenty-three backends are in this position. The five
+# below are the ones that sit in a chain whose other end is implemented, which
+# is where a reader is most likely to reach for `force:` and most likely to be
+# misled by a wrong exit code.
+name: the backends this build does not have
+requests:
+  - label: offcpu-through-tracefs-with-stacks
+    source: sched.offcpu
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [summary]
+    backend: "force:bpf:tp:stacks"
+
+  - label: offcpu-through-tracefs
+    source: sched.offcpu
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [summary]
+    backend: "force:bpf:tp"
+
+  - label: switches-through-a-raw-tracepoint
+    source: sched.switches
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [summary]
+    backend: "force:bpf:raw_tp"
+
+  - label: wakeup-through-tracefs
+    source: sched.wakeup
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [summary]
+    backend: "force:bpf:tp"
+
+  - label: migrations-through-tracefs
+    source: sched.migrations
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [summary]
+    backend: "force:bpf:tp"

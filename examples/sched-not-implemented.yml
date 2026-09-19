@@ -1,0 +1,43 @@
+# `sched` sources this build describes and cannot measure.
+#
+#   omn -f examples/sched-not-implemented.yml ; echo $?   # 3
+#
+# They are vocabulary: they resolve, they validate, and they say plainly that
+# nothing collects them yet. That is a different answer from "this machine
+# cannot", and it has its own exit code so a script can tell them apart -- a
+# reader who takes exit 3 for a machine limit goes looking for a kernel option
+# that would not have helped.
+#
+# The three here take a launched program, which is what a session file can hold:
+# one run observes one target. The family's other two uncollected sources watch
+# the machine and are the same answer from the command line --
+#
+#   omn sched.irq --mode trace --emit hist --system -d 100ms          ; echo $?  # 3
+#   omn sched.numa_balance --mode count --emit summary --system -d 1s ; echo $?  # 3
+#
+# `sched.lock` and `sched.futex` want an eBPF attach kind the layer does not
+# have; `sched.mutex` wants the `LD_PRELOAD` shim to interpose
+# `pthread_mutex_lock`. STATE.md tracks both under "eBPF beyond raw tracepoints".
+#
+# A session stops at the first of these rather than listing all three, which
+# the rejections in examples/sched-refusals.yml.rejected do not: run them one
+# at a time to see each message.
+name: described, not built
+requests:
+  - label: kernel-lock-contention
+    source: sched.lock
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [hist]
+
+  - label: userspace-futex-wait
+    source: sched.futex
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [hist]
+
+  - label: pthread-mutex-contention
+    source: sched.mutex
+    target: {launch: ["/bin/true"]}
+    mode: trace
+    emit: [hist]
