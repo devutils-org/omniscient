@@ -226,7 +226,11 @@ impl JitMapCollector {
                     // code, published through the same file. They are not
                     // compilations this run caused, and a user counting
                     // compilations has to be able to tell them apart.
-                    Attr::text("kind", entry.kind),
+                    //
+                    // Not named `kind`: the filter grammar reads that name as
+                    // the event's source id, so an attribute called `kind`
+                    // could be declared, validated, and never match anything.
+                    Attr::text("code_kind", entry.kind),
                     Attr::uint("first_read", u64::from(first_read)),
                 ],
                 collector_id: self.id.clone(),
