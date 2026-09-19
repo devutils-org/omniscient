@@ -538,18 +538,31 @@ fn every_emit_a_mem_source_declares_can_be_produced_by_a_mode_it_declares() {
         stderr(&served)
     );
 
-    assert_eq!(
-        unreachable,
-        vec![
-            "mem.sharing declares `summary`".to_owned(),
-            "mem.swap declares `rate`".to_owned(),
-        ],
+    assert!(
+        unreachable.is_empty(),
         "\nthe set of `mem` emits that no declared mode can produce has changed.\n\
          Each of these is a promise in catalog/mem.yaml that no build can keep: the source \
          declares the emit, and every mode it declares refuses it with exit {EXIT_REJECTED}.\n\
-         Removing one from the catalog -- or giving the source a mode that can produce it -- \
-         is the fix; delete it here and from docs/scenarios/mem.md under D3 when that happens.\n"
+         D3 was the two this file used to record -- `mem.sharing` declaring `summary` over its \
+         only mode `sample`, and `mem.swap` declaring `rate` over `poll` and `snapshot`.\n\
+         Both are out of the catalog; what is left here is: {unreachable:?}\n"
     );
+
+    // And the two that were removed are now refused by the source rather than
+    // by the matrix, which is the message that names the line of YAML to look
+    // at. Against the old catalog both of these said `mode ... cannot produce`.
+    for (source, mode, emit, target) in [
+        ("mem.swap", "poll@50ms", "rate", "--system"),
+        ("mem.sharing", "sample@997hz", "summary", "--system"),
+    ] {
+        let refused = run(&[source, target, "-m", mode, "-e", emit, "-d", "100ms"]);
+        assert_eq!(code(&refused), EXIT_REJECTED, "{}", stderr(&refused));
+        assert!(
+            stderr(&refused).contains(&format!("`{source}` cannot emit `{emit}`")),
+            "`{source}` should refuse `{emit}` as its own, not as the matrix's: {}",
+            stderr(&refused)
+        );
+    }
 }
 
 /// The shapes the family can produce, all at once, over one program.

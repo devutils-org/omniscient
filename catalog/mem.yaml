@@ -286,7 +286,7 @@
     - {id: "pmu:pebs", requires: ["pmu:pebs:mem-loads", "pmu:pebs:mem-stores"], cost: med}
     - {id: "pmu:ibs", requires: ["pmu:ibs_op"], cost: med, equivalent: true}
   modes: [sample]
-  emits: [topk, stack, raw, summary]
+  emits: [topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
   keys: [task, mem, cpu]
   filter_fields: [comm, cpu, addr]
@@ -423,7 +423,7 @@
     - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current"], cost: free, equivalent: true,
        targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
   modes: [poll, snapshot]
-  emits: [timeline, rate, raw, summary]
+  emits: [timeline, raw, summary]
   targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
   keys: [cgroup]
   filter_fields: []
