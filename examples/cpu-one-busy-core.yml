@@ -1,0 +1,39 @@
+# Is this core busy, and is it busy with my work?
+#
+#   taskset -c 3 sh -c 'while :; do :; done' &
+#   omn -f examples/cpu-one-busy-core.yml
+#
+# Twenty-four cores with one of them saturated average four per cent, which is
+# indistinguishable from twenty-four cores doing almost nothing -- and the
+# difference between the two is whether one thread is the whole bottleneck. So
+# this asks about a core, not about a machine: `/proc/stat` has a line per cpu,
+# and `cpu.util --cpu` keeps them apart rather than averaging them into a number
+# that describes no core.
+#
+# Pin something to cpu 3 first, as above, and the answer is known before the run:
+# a core with a spinning task on it is busy for the whole window, and the share
+# reported here has to be one. Nothing about that prediction comes from the tool.
+#
+# The pair with it is the invariant `tests/scenario_cpu.rs` checks: a core is at
+# least as busy as the tasks pinned to it, so `cpu.oncpu_time` for that task can
+# never exceed this. Where the core has one tenant the two are the same number by
+# two different files -- `/proc/stat` and `/proc/<pid>/stat` -- which is as close
+# to a backend comparison as this family gets.
+#
+# Two things this cannot do. It cannot say *who* made the core busy: the line in
+# `/proc/stat` is every task that ran there, kernel and interrupts included, and
+# recovering a process from it is a different measurement. And it cannot be
+# asked faster than the kernel accounts: `/proc/stat` moves in ticks of ten
+# milliseconds, so `poll@1ms` reads the same numbers ten times and reports the
+# nine of them that found nothing as nothing at all.
+name: one core, and what it is doing
+format: text
+duration: 1s
+
+requests:
+  - label: how busy the core was
+    source: cpu.util
+    target:
+      cpu: "3"
+    mode: poll@100ms
+    emit: [timeline, summary]

@@ -1,0 +1,46 @@
+# What did the profiler not see?
+#
+#   omn -f examples/cpu-profile-loss.yml --pid $(pgrep -n something-busy)
+#
+# This session asks for a hundred thousand samples a second, which no kernel
+# will give. That is the point of it: `kernel.perf_event_max_sample_rate` caps
+# what a profiler may take, and past the cap the kernel stops delivering for a
+# while and says so, while the ring fills faster than it is drained. Both are
+# losses, and a run that lost a third of its samples and rendered as a clean
+# flame graph would be the exact failure this tool exists to prevent.
+#
+# So run it and read the loss block rather than the profile:
+#
+#   LOSS: 10061 dropped, 0 failed reads, 2 late ticks
+#     238x the kernel throttled profile sampling: an unknown number of samples
+#          in each throttled period were not taken
+#       2x the profile ring overflowed: samples were taken and never read, so
+#          the stacks here are a biased subset -- the busy phases are the ones
+#          that overflow
+#
+# Both sentences are careful about a distinction worth keeping: a drop is a
+# number of samples the ring says it lost, and a throttle is the kernel
+# declining to deliver anything for a while. How many samples were in that
+# window is not knowable from userspace, and counting a throttled period as one
+# lost sample would claim a precision that does not exist.
+#
+# The bias is the part that matters for reading the result. A ring overflows
+# when samples arrive faster than they are drained, which is when the target is
+# busiest -- so what is missing is not a random third of the profile, it is the
+# hottest third.
+#
+# A sane frequency for real work is 97 or 997 Hz; `examples/cpu-where-the-time-
+# went.yml` uses the latter. This one is here to be pushed over.
+name: a profile past what the kernel will give
+format: text
+duration: 300ms
+
+requests:
+  - label: more samples than the kernel will take
+    source: cpu.profile
+    target:
+      launch: [/bin/sh, -c, "while :; do :; done"]
+    mode: sample@100000hz
+    emit: [topk]
+    stack: fp
+    keys: [task]

@@ -12,9 +12,15 @@
 # answers the second from PSI, which counts the time at least one runnable task
 # was waiting for a cpu. Read together, over one window, they separate a machine
 # that is full from a machine that is late.
+#
+# The window is two seconds, which is the shortest one that says anything here:
+# PSI publishes averages over ten seconds and the totals this reads are the
+# only part of the file that describes the window asked for. Lengthen it for a
+# real look at a machine; `tests/scenario_cpu.rs` runs this file as it stands,
+# and a command-line `--duration` beside `-f` is accepted and ignored.
 name: busy or oversubscribed
 format: text
-duration: 5s
+duration: 2s
 
 requests:
   - label: doing work

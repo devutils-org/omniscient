@@ -1,0 +1,42 @@
+# A session that is valid everywhere and runs almost nowhere.
+#
+#   omn -f examples/cpu-out-of-reach.yml                # refused here, by name
+#   omn -f examples/cpu-out-of-reach.yml --no-resolve   # written down for elsewhere
+#
+# Two of this family's fourteen sources need hardware most machines do not have,
+# and the point of this file is the difference between the three answers the
+# tool gives when it says no.
+#
+# `cpu.topdown` needs a pipeline that counts issue slots -- Intel from Icelake,
+# AMD from Zen 4 -- and the five events it reads are taken from what the kernel
+# publishes, never hard-coded. `cpu.flow` needs Intel PT or CoreSight. On a
+# machine without either, this session is refused with the requirement that is
+# missing, and the refusal says the request is valid and belongs on another
+# machine:
+#
+#   error: `cpu.topdown` has no viable backend on this machine:
+#     pmu: pmu:slots: missing: this machine publishes no `slots` event
+#     hint: the request is valid; it is this machine that cannot serve it.
+#           Use --no-resolve to write it down for one that can.
+#
+# That is not the same as a rejection -- a request that cannot mean anything on
+# any machine, like a histogram of a ratio -- and not the same as "no collector
+# is written for this backend yet", which is about this build rather than this
+# machine. `docs/scenarios/cpu.md` has all three side by side, and records that
+# the first two share an exit code today.
+#
+# On a machine that has the counters this runs, and then the four categories
+# below are a partition of the issue slots: they sum to one, and `accounted`
+# carries that sum so a window where the five counters did not describe the same
+# thing is visible rather than rescaled away.
+name: what this machine cannot serve
+format: text
+
+requests:
+  - label: where the pipeline went
+    source: cpu.topdown
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done"]
+    mode: count
+    emit: [raw]
+    keys: [task]

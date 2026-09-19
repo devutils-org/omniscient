@@ -22,6 +22,7 @@ requests:
       launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"]
     mode: count
     emit: [summary]
+    keys: [task]
 
   - label: memory stalls
     source: cpu.cache_misses
@@ -29,6 +30,7 @@ requests:
       launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"]
     mode: count
     emit: [summary, rate]
+    keys: [task]
 
   - label: taken off the cpu
     source: cpu.context_switches
@@ -36,3 +38,4 @@ requests:
       launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"]
     mode: count
     emit: [summary]
+    keys: [task]

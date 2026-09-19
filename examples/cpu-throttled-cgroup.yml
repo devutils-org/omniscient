@@ -1,0 +1,44 @@
+# Was this run throttled, and is it therefore worth keeping?
+#
+# The cgroup has to exist and have a quota before this means anything. As root,
+# or wherever the cpu controller is delegated:
+#
+#   mkdir /sys/fs/cgroup/omn-scenario
+#   echo '10000 100000' > /sys/fs/cgroup/omn-scenario/cpu.max   # a tenth of a cpu
+#   sh -c 'echo $$ > /sys/fs/cgroup/omn-scenario/cgroup.procs; exec sh -c "while :; do :; done"' &
+#   omn -f examples/cpu-throttled-cgroup.yml
+#
+# Then the answer is known before the run, which is what makes this a scenario
+# rather than a demonstration. CFS hands out the quota once per period: a task
+# that wants a whole cpu and may have a tenth of one is stopped for about ninety
+# milliseconds of every hundred, so `throttled_ns` has to come back at about
+# nine tenths of the window. A reading far below that is a quota that is not
+# being enforced; far above it is arithmetic on the wrong counter.
+#
+# This matters more than the number suggests. A throttled run is not a slower
+# run, it is a different run: the work happened in bursts separated by stalls
+# that belong to nothing the program did, and averaging it in beside an
+# unthrottled run produces a mean that describes neither. A harness that
+# measures inside a container and does not read this is reporting noise it
+# cannot see.
+#
+# Where the cgroup has no `cpu.max` at all, the kernel writes no `nr_throttled`
+# and no `throttled_usec`, and the run says that the cgroup *cannot* be
+# throttled rather than reporting a zero. Those are different statements and
+# the zero is the one that reads like a measurement.
+#
+# `tests/scenario_cpu.rs` runs this where the cpu controller is delegated to the
+# session's own cgroup, and where it is not -- which is the common case for a
+# user session, and the case on the machine this was written on -- it says so
+# and stops, rather than passing without having measured anything.
+name: was this run throttled
+format: text
+duration: 1s
+
+requests:
+  - label: time stopped by the quota
+    source: cpu.throttle
+    target:
+      cgroup: /omn-scenario
+    mode: poll@100ms
+    emit: [timeline, summary]

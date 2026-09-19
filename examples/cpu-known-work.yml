@@ -1,0 +1,50 @@
+# Does the counter count what the program actually did?
+#
+#   omn -f examples/cpu-known-work.yml
+#
+# Every other example in this family asks the tool a question. This one checks
+# the answer, because a counter is the one thing in observability that can be
+# wrong by a factor of two and look completely plausible.
+#
+# The workload is chosen so that its answer is known before the run: a loop of
+# `dec` and `jnz` retires exactly two instructions per turn and touches nothing
+# else, so five hundred million turns is a thousand million retired
+# instructions. Point `OMN_SCENARIO_WORKLOAD` at such a program and the number
+# below has to be that one, within the one per cent `cpu.instructions` claims
+# in the catalog:
+#
+#   OMN_SCENARIO_WORKLOAD="./my-known-loop" omn -f examples/cpu-known-work.yml
+#
+# `tests/scenario_cpu.rs` runs exactly this session with the test binary as the
+# workload -- it carries the loop, in `retire()` -- and subtracts a second run
+# with no loop at all, which is how the cost of starting the program is
+# measured rather than assumed. On this machine that cost is about seven
+# million instructions, under a hundredth of what is being counted.
+#
+# Without the variable the workload is a shell loop, which retires whatever
+# this machine's shell retires. That still shows the shape of the answer; it is
+# not ground truth, and the session says so rather than pretending.
+#
+# `cpu.ipc` is here beside it because a count on its own says how much work was
+# done and nothing about how well it went. The two counters of the ratio are
+# opened as one group, so it is a ratio of one window; `--emit raw` is what
+# shows the terms it came from.
+name: a known number of instructions
+format: text
+
+requests:
+  - label: what it retired
+    source: cpu.instructions
+    target:
+      launch: [/bin/sh, -c, 'if [ -n "$OMN_SCENARIO_WORKLOAD" ]; then exec $OMN_SCENARIO_WORKLOAD >/dev/null 2>&1; fi; i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done']
+    mode: count
+    emit: [summary]
+    keys: [task]
+
+  - label: what it got per cycle
+    source: cpu.ipc
+    target:
+      launch: [/bin/sh, -c, 'if [ -n "$OMN_SCENARIO_WORKLOAD" ]; then exec $OMN_SCENARIO_WORKLOAD >/dev/null 2>&1; fi; i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done']
+    mode: count
+    emit: [raw]
+    keys: [task]

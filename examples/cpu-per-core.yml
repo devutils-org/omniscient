@@ -26,9 +26,13 @@
 #
 # The mean over the cores is still available -- it is what the emit layer does
 # to a series on request. Recovering a core from a mean is not.
+#
+# One second, so that the suite can run this file as it stands: a command-line
+# `--duration` beside `-f` is accepted and ignored, so the window a session
+# names is the window it gets.
 name: which core, and on what
 format: text
-duration: 3s
+duration: 1s
 
 requests:
   - label: what each core retired
@@ -37,6 +41,7 @@ requests:
       cpu: 0-3
     mode: count
     emit: [summary]
+    keys: [cpu]
 
   - label: how much it got per cycle
     source: cpu.ipc
@@ -44,6 +49,7 @@ requests:
       cpu: 0-3
     mode: count
     emit: [summary]
+    keys: [cpu]
 
   - label: what it missed in the last-level cache
     source: cpu.cache_misses
@@ -51,3 +57,4 @@ requests:
       cpu: 0-3
     mode: count
     emit: [summary]
+    keys: [cpu]

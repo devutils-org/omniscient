@@ -1,0 +1,48 @@
+# Where did this program's time go -- on a cpu, or waiting?
+#
+#   omn -f examples/cpu-where-the-time-went.yml
+#
+# A program that takes a second can be a program that used a second of cpu or a
+# program that used fifty milliseconds and waited for the rest, and a wall clock
+# cannot tell them apart. These two sources can, over one window and one launch:
+# `cpu.oncpu_time` says how much cpu the program actually got, and `cpu.profile`
+# says where it went while it had it.
+#
+# The workload here spends about half its life computing and the other half
+# asleep, which makes the pair checkable against each other rather than
+# believable one at a time. A profile is sampled on *cpu* time -- 997 Hz is one
+# sample per 1.003 ms of cpu, not per 1.003 ms of wall clock -- so the sample
+# count has to be about 997 times the cpu time the other source measured, and
+# about half what the wall clock would suggest. `tests/scenario_cpu.rs` checks
+# exactly that; a profile that sampled the sleep would fail it, and so would one
+# that reported the whole window as work.
+#
+# What this pair cannot tell you is where the *waiting* went. `cpu.profile` sees
+# a task only while it is running, so the half of this program that is blocked
+# is invisible here and belongs to `sched.offcpu`. That is the crossing phase
+# two's P2 is built on, and it is why both requests carry `keys: [task]`.
+#
+# One warning the run will print, and it is not noise: without `stack: fp` the
+# resolver picks an unwind mode for you. A target built without frame pointers
+# gives a profile of leaf functions, and the run says so as a degradation rather
+# than letting a flame graph look deeper than it is.
+name: on a cpu, or waiting
+format: text
+
+requests:
+  - label: where the time went
+    source: cpu.profile
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 90000 ]; do i=$((i+1)); done; sleep 0.25"]
+    mode: sample@997hz
+    emit: [topk, stack]
+    stack: fp
+    keys: [task]
+
+  - label: how much of it was cpu
+    source: cpu.oncpu_time
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 90000 ]; do i=$((i+1)); done; sleep 0.25"]
+    mode: poll@50ms
+    emit: [timeline, summary]
+    keys: [task]
