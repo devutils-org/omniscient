@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use crate::catalog::Unit;
-use crate::emit::{Output, Results};
+use crate::emit::{Bucket, Output, Results, SeriesHist, StackCount};
 use crate::error::ParseError;
 use crate::event::KeyValue;
 use crate::format::OutputFormat;
@@ -55,6 +55,8 @@ pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, Pa
             }
             Ok(text)
         }
+        OutputFormat::Folded => folded(output),
+        OutputFormat::Speedscope => speedscope(output),
         format if format.renders_documents() => format.serialize_document(output),
         format => Err(ParseError::new(format!(
             "`{format}` has no encoder yet: {}",
@@ -165,6 +167,15 @@ pub fn results(format: OutputFormat, results: &Results) -> Result<String, ParseE
     match format {
         OutputFormat::Text => Ok(text(results)),
         OutputFormat::Ndjson => ndjson(results),
+        // A profile format is a file, not a fragment: it has a header, a shared
+        // frame table and a list of profiles. One result is a run of one.
+        OutputFormat::Folded | OutputFormat::Speedscope => run_output(
+            format,
+            &RunOutput {
+                results: vec![results.clone()],
+                joins: Vec::new(),
+            },
+        ),
         format if format.renders_documents() => format.serialize_document(results),
         format => Err(ParseError::new(format!(
             "`{format}` has no encoder yet: {}",
@@ -229,6 +240,57 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
                     line["record"] = serde_json::Value::from("summary");
                     let _ = writeln!(out, "{line}");
                 }
+            }
+            Output::Hist { layout, series } => {
+                for histogram in series {
+                    let mut line = serde_json::to_value(histogram).map_err(|error| {
+                        ParseError::new(format!("cannot encode histogram: {error}"))
+                    })?;
+                    line["record"] = serde_json::Value::from("hist");
+                    line["layout"] = serde_json::Value::from(layout.to_string());
+                    let _ = writeln!(out, "{line}");
+                }
+            }
+            Output::TopK { k, series, rest } => {
+                for (rank, total) in series.iter().enumerate() {
+                    let mut line = serde_json::to_value(total).map_err(|error| {
+                        ParseError::new(format!("cannot encode a ranking: {error}"))
+                    })?;
+                    line["record"] = serde_json::Value::from("topk");
+                    line["rank"] = serde_json::Value::from(rank + 1);
+                    line["k"] = serde_json::Value::from(*k);
+                    let _ = writeln!(out, "{line}");
+                }
+                // Always written, even when nothing was left out: a consumer
+                // reading the stream cannot tell a complete ranking from a
+                // truncated one unless the answer is in it.
+                let mut line = serde_json::to_value(rest)
+                    .map_err(|error| ParseError::new(format!("cannot encode the rest: {error}")))?;
+                line["record"] = serde_json::Value::from("topk_rest");
+                let _ = writeln!(out, "{line}");
+            }
+            Output::Stack {
+                stacks,
+                unattributed,
+            } => {
+                for stack in stacks {
+                    let line = serde_json::json!({
+                        "record": "stack",
+                        "stack": stack.stack,
+                        "events": stack.events,
+                        "total": stack.total,
+                        "frames": results.stacks.get(&stack.stack),
+                    });
+                    let _ = writeln!(out, "{line}");
+                }
+                // Always written: a profile missing nine tenths of its samples
+                // and a complete one are the same stream of records otherwise.
+                let line = serde_json::json!({
+                    "record": "stack_coverage",
+                    "stacks": stacks.len(),
+                    "unattributed": unattributed,
+                });
+                let _ = writeln!(out, "{line}");
             }
         }
     }
@@ -352,6 +414,74 @@ fn text(results: &Results) -> String {
                     }
                 }
             }
+            Output::Hist { layout, series } => {
+                let _ = writeln!(out, "  hist ({layout})");
+                for histogram in series {
+                    hist_text(&mut out, histogram, results.unit);
+                }
+            }
+            Output::TopK { k, series, rest } => {
+                let _ = writeln!(
+                    out,
+                    "  topk: the {} heaviest of {} series",
+                    series.len(),
+                    series.len() + rest.series
+                );
+                if series.len() < *k as usize && rest.series == 0 {
+                    let _ = writeln!(
+                        out,
+                        "    ({k} were asked for and the run produced {})",
+                        series.len()
+                    );
+                }
+                for (rank, total) in series.iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "    {:>2}. {:<20} {:>12}  over {} events",
+                        rank + 1,
+                        total.key,
+                        quantity(total.total, results.unit),
+                        total.events
+                    );
+                }
+                // A ranking that does not say what it left out reads as a
+                // statement about everything.
+                if rest.is_empty() {
+                    let _ = writeln!(out, "    nothing was left out: that is every series");
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "    the other {} series: {} over {} events",
+                        rest.series,
+                        quantity(rest.total, results.unit),
+                        rest.events
+                    );
+                }
+            }
+            Output::Stack {
+                stacks,
+                unattributed,
+            } => {
+                let _ = writeln!(out, "  stack");
+                for stack in stacks {
+                    let _ = writeln!(
+                        out,
+                        "    {:>12}  {:>7} events  {}",
+                        quantity(stack.total, results.unit),
+                        stack.events,
+                        frames(results, stack).join(";")
+                    );
+                }
+                if *unattributed > 0 {
+                    let _ = writeln!(
+                        out,
+                        "    {unattributed} events carried no stack, so they are in no line above"
+                    );
+                }
+                if stacks.is_empty() && *unattributed == 0 {
+                    let _ = writeln!(out, "    no events");
+                }
+            }
             Output::Raw { events } => {
                 let _ = writeln!(out, "  raw");
                 for event in events {
@@ -374,6 +504,317 @@ fn text(results: &Results) -> String {
         }
     }
     out
+}
+
+/// Collapsed stacks: one line of `root;...;leaf weight` per distinct stack.
+///
+/// The weight is the summed value attribute, not the number of events, because
+/// that is what the emit measured: nanoseconds blocked for `sched.offcpu`,
+/// bytes for `mem.heap.alloc`, the sampling period for a profile. Counting
+/// lines instead would make every sample worth the same, which is the one thing
+/// a weighted profile exists not to do.
+fn folded(output: &RunOutput) -> Result<String, ParseError> {
+    let profiles: Vec<&Results> = output
+        .results
+        .iter()
+        .filter(|results| {
+            results
+                .outputs
+                .iter()
+                .any(|output| matches!(output, Output::Stack { .. }))
+        })
+        .collect();
+
+    // With one profile the file is the profile. With several, the label becomes
+    // a root frame: merging two sources into one flame graph without saying
+    // which frames came from where would produce a picture of neither.
+    let label_as_root = profiles.len() > 1;
+    let mut text = String::new();
+    for results in &profiles {
+        for output in &results.outputs {
+            let Output::Stack { stacks, .. } = output else {
+                continue;
+            };
+            for stack in stacks {
+                let mut chain = frames(results, stack);
+                if label_as_root {
+                    chain.insert(0, results.label.clone());
+                }
+                let chain: Vec<String> = chain
+                    .iter()
+                    .map(|frame| frame.replace(['\n', '\r', ';'], " "))
+                    .collect();
+                let _ = writeln!(text, "{} {}", chain.join(";"), stack.total.round() as i64);
+            }
+        }
+    }
+
+    // An empty collapsed-stack file is a valid file: it opens as an empty flame
+    // graph, which reads as a program that spent no time anywhere. Whatever the
+    // reason there is nothing to write, saying it beats writing nothing.
+    if text.is_empty() {
+        return Err(ParseError::new(format!(
+            "`folded` describes a profile and this run has none to write: {}",
+            why_no_profile(output)
+        )));
+    }
+    Ok(text)
+}
+
+/// Why a run carries no stacks, for a profile format that cannot write one.
+///
+/// The two reasons are different answers and only one of them is about the
+/// program: a request that never asked for stacks, and a request that asked and
+/// whose collector captured none.
+fn why_no_profile(output: &RunOutput) -> String {
+    let mut unattributed = 0;
+    let mut asked = false;
+    for results in &output.results {
+        for out in &results.outputs {
+            if let Output::Stack {
+                stacks,
+                unattributed: missing,
+            } = out
+            {
+                asked = true;
+                unattributed += missing;
+                if !stacks.is_empty() {
+                    return String::new();
+                }
+            }
+        }
+    }
+    if !asked {
+        return "it emitted no stacks; use --emit stack, or json for what was measured".to_owned();
+    }
+    format!(
+        "`stack` was asked for and no event carried one, {unattributed} of them;          the backend that served this request captures no stacks"
+    )
+}
+
+/// Speedscope's own JSON.
+///
+/// Two shapes, because speedscope has two and this tool produces both: a
+/// *sampled* profile for aggregated stacks, whose axis is the weight, and an
+/// *evented* profile per timeline series, whose axis is time. The second is
+/// what makes speedscope worth offering for something that is not a profile --
+/// a timeline opened in it is a strip of what the value was and when, which no
+/// other format here can show.
+fn speedscope(output: &RunOutput) -> Result<String, ParseError> {
+    let mut frames_seen: Vec<String> = Vec::new();
+    let mut index_of: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut intern = |name: String| -> usize {
+        *index_of.entry(name.clone()).or_insert_with(|| {
+            frames_seen.push(name);
+            frames_seen.len() - 1
+        })
+    };
+
+    let mut profiles = Vec::new();
+    for results in &output.results {
+        for out in &results.outputs {
+            match out {
+                Output::Stack { stacks, .. } => {
+                    let mut samples = Vec::new();
+                    let mut weights = Vec::new();
+                    for stack in stacks {
+                        samples.push(
+                            frames(results, stack)
+                                .into_iter()
+                                .map(&mut intern)
+                                .collect::<Vec<_>>(),
+                        );
+                        weights.push(stack.total);
+                    }
+                    if samples.is_empty() {
+                        continue;
+                    }
+                    let end: f64 = weights.iter().sum();
+                    profiles.push(serde_json::json!({
+                        "type": "sampled",
+                        "name": results.label,
+                        "unit": speedscope_unit(results.unit),
+                        "startValue": 0.0,
+                        "endValue": end,
+                        "samples": samples,
+                        "weights": weights,
+                    }));
+                }
+                Output::Timeline { series } => {
+                    for series in series {
+                        let Some(first) = series.points.first() else {
+                            continue;
+                        };
+                        let last = series.points.last().expect("a first implies a last");
+                        let mut events = Vec::new();
+                        for (index, point) in series.points.iter().enumerate() {
+                            // The value is in the frame's name and the time is
+                            // the axis: a point holds until the next one, and
+                            // the last holds for nothing, because nothing was
+                            // observed after it.
+                            let frame = intern(format!(
+                                "{} = {}",
+                                series.key,
+                                quantity(point.value, results.unit)
+                            ));
+                            let until = series
+                                .points
+                                .get(index + 1)
+                                .map(|next| next.offset_ns)
+                                .unwrap_or(point.offset_ns);
+                            events.push(serde_json::json!({"type": "O", "frame": frame, "at": point.offset_ns}));
+                            events.push(
+                                serde_json::json!({"type": "C", "frame": frame, "at": until}),
+                            );
+                        }
+                        profiles.push(serde_json::json!({
+                            "type": "evented",
+                            "name": format!("{} {}", results.label, series.key),
+                            "unit": "nanoseconds",
+                            "startValue": first.offset_ns,
+                            "endValue": last.offset_ns,
+                            "events": events,
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if profiles.is_empty() {
+        return Err(ParseError::new(format!(
+            "`speedscope` carries stacks and timelines and this run has neither to write: {}",
+            why_no_profile(output)
+        )));
+    }
+
+    let document = serde_json::json!({
+        "$schema": "https://www.speedscope.app/file-format-schema.json",
+        "exporter": concat!("omn ", env!("CARGO_PKG_VERSION")),
+        "name": output
+            .results
+            .iter()
+            .map(|results| results.label.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        "activeProfileIndex": 0,
+        "shared": {
+            "frames": frames_seen
+                .iter()
+                .map(|name| serde_json::json!({"name": name}))
+                .collect::<Vec<_>>(),
+        },
+        "profiles": profiles,
+    });
+    serde_json::to_string_pretty(&document)
+        .map_err(|error| ParseError::new(format!("cannot encode speedscope JSON: {error}")))
+}
+
+/// Speedscope names the units it knows how to label an axis with; anything else
+/// is `none`, which renders the number bare rather than as a wrong unit.
+fn speedscope_unit(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Ns => "nanoseconds",
+        Unit::Bytes => "bytes",
+        _ => "none",
+    }
+}
+
+/// One histogram, with a bar per bucket.
+///
+/// The bar is the whole point of rendering a distribution in text: a column of
+/// counts is a table, and the shape -- one mode, two modes, a long tail -- is
+/// what a reader came for and what the mean could not tell them.
+fn hist_text(out: &mut String, histogram: &SeriesHist, unit: Unit) {
+    let mean = if histogram.count == 0 {
+        0.0
+    } else {
+        histogram.sum / histogram.count as f64
+    };
+    let _ = writeln!(
+        out,
+        "    {}  n={}  min {}  mean {}  max {}",
+        histogram.key,
+        histogram.count,
+        quantity(histogram.min, unit),
+        quantity(mean, unit),
+        quantity(histogram.max, unit),
+    );
+
+    const BAR: usize = 32;
+    let peak = histogram
+        .buckets
+        .iter()
+        .map(|bucket| bucket.count)
+        .max()
+        .unwrap_or(0);
+    for bucket in &histogram.buckets {
+        let filled = (bucket.count * BAR).checked_div(peak).unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "      {:<30} {:>8}  |{:<BAR$}|",
+            bucket_range(bucket, unit),
+            bucket.count,
+            "#".repeat(filled),
+        );
+    }
+    if histogram.unbucketable > 0 {
+        let _ = writeln!(
+            out,
+            "      {} values are in no bucket: a histogram has no range below zero, and \
+             putting them in the lowest one would report them as values they are not",
+            histogram.unbucketable
+        );
+    }
+}
+
+/// `[low, high)` in the source's own unit, which is what makes a latency
+/// histogram readable as milliseconds rather than as powers of two.
+fn bucket_range(bucket: &Bucket, unit: Unit) -> String {
+    match bucket.high {
+        Some(high) => format!("[{}, {})", edge(bucket.low, unit), edge(high, unit)),
+        None => format!("[{}, ...)", edge(bucket.low, unit)),
+    }
+}
+
+/// A bucket boundary. Exact, unlike `quantity`: a boundary is a definition of
+/// which values fall inside, and rounding one turns two adjacent buckets into
+/// the same printed range.
+fn edge(value: u64, unit: Unit) -> String {
+    match unit {
+        Unit::Bytes if value >= 1024 => exact_binary(value),
+        Unit::Ns => Duration::from_nanos(value).to_string(),
+        _ => value.to_string(),
+    }
+}
+
+/// A power of two as `1 MiB` rather than `1048576`, and anything else as it is.
+fn exact_binary(value: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [
+        (1024 * 1024 * 1024, "GiB"),
+        (1024 * 1024, "MiB"),
+        (1024, "KiB"),
+    ];
+    for (factor, suffix) in UNITS {
+        if value >= factor && value % factor == 0 {
+            return format!("{} {suffix}", value / factor);
+        }
+    }
+    value.to_string()
+}
+
+/// The frames of a stack, or a placeholder naming the identity that has none.
+///
+/// An unresolved stack is not an empty stack: a profile that silently dropped
+/// the samples it could not symbolize would understate exactly the part of the
+/// program the symbols were missing for.
+fn frames(results: &Results, stack: &StackCount) -> Vec<String> {
+    results
+        .stacks
+        .get(&stack.stack)
+        .cloned()
+        .unwrap_or_else(|| vec![format!("[unresolved stack {:#x}]", stack.stack)])
 }
 
 /// Renders a wall-clock span for a human: three significant digits, not the
@@ -475,9 +916,13 @@ fn bytes(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::collect::Losses;
-    use crate::emit::{Point, Series, SeriesSummary};
+    use crate::emit::{
+        Bucket, Point, Rest, Series, SeriesHist, SeriesSummary, SeriesTotal, StackCount,
+    };
 
     fn sample() -> Results {
         Results {
@@ -519,6 +964,7 @@ mod tests {
             filtered: None,
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
+            stacks: BTreeMap::new(),
         }
     }
 
@@ -710,14 +1156,297 @@ mod tests {
         );
     }
 
+    /// A profile: stacks aggregated by identity, with the frames beside them.
+    fn profile() -> Results {
+        let mut results = sample();
+        results.label = "profile".into();
+        results.source = "cpu.profile".into();
+        results.unit = Unit::Ns;
+        results.outputs = vec![Output::Stack {
+            stacks: vec![
+                StackCount {
+                    stack: 1,
+                    events: 300,
+                    total: 3_000_000.0,
+                },
+                StackCount {
+                    stack: 2,
+                    events: 7,
+                    total: 70_000.0,
+                },
+                // Seen, counted, and with no frames to show for it.
+                StackCount {
+                    stack: 3,
+                    events: 1,
+                    total: 10_000.0,
+                },
+            ],
+            unattributed: 4,
+        }];
+        results.stacks = BTreeMap::from([
+            (1, vec!["main".into(), "work".into(), "read".into()]),
+            (2, vec!["main".into(), "idle".into()]),
+        ]);
+        results
+    }
+
+    fn histogram() -> Results {
+        let mut results = sample();
+        results.unit = Unit::Bytes;
+        results.outputs = vec![Output::Hist {
+            layout: crate::emit::BucketLayout::Log2,
+            series: vec![SeriesHist {
+                key: "task:7".into(),
+                count: 102,
+                min: 1024.0,
+                max: 1_048_576.0,
+                sum: 2_199_552.0,
+                buckets: vec![
+                    Bucket {
+                        low: 1024,
+                        high: Some(2048),
+                        count: 100,
+                    },
+                    Bucket {
+                        low: 2048,
+                        high: Some(4096),
+                        count: 0,
+                    },
+                    Bucket {
+                        low: 1_048_576,
+                        high: Some(2_097_152),
+                        count: 2,
+                    },
+                ],
+                unbucketable: 0,
+            }],
+        }];
+        results
+    }
+
+    fn ranked() -> Results {
+        let mut results = sample();
+        results.outputs = vec![Output::TopK {
+            k: 2,
+            series: vec![
+                SeriesTotal {
+                    key: "task:2".into(),
+                    events: 1,
+                    total: 300.0,
+                },
+                SeriesTotal {
+                    key: "task:3".into(),
+                    events: 2,
+                    total: 100.0,
+                },
+            ],
+            rest: Rest {
+                series: 2,
+                events: 2,
+                total: 11.0,
+            },
+        }];
+        results
+    }
+
+    /// A histogram in text is the buckets *and* the shape: the empty bucket
+    /// between two modes is the thing being read for, so it is printed.
+    #[test]
+    fn a_histogram_prints_the_empty_bucket_between_two_modes() {
+        let text = results(OutputFormat::Text, &histogram()).unwrap();
+        assert!(text.contains("hist (log2)"), "{text}");
+        assert!(text.contains("[1 KiB, 2 KiB)"), "{text}");
+        assert!(
+            text.contains("[2 KiB, 4 KiB)"),
+            "the empty bucket between the modes is the shape: {text}"
+        );
+        assert!(text.contains("[1 MiB, 2 MiB)"), "{text}");
+    }
+
+    /// A ranking that does not say what it left out reads as a statement about
+    /// everything that happened.
+    #[test]
+    fn a_topk_says_what_it_left_out() {
+        let text = results(OutputFormat::Text, &ranked()).unwrap();
+        assert!(text.contains("the 2 heaviest of 4 series"), "{text}");
+        assert!(text.contains("the other 2 series"), "{text}");
+    }
+
+    /// Collapsed stacks, one line each: `root;...;leaf weight`. Parsed back
+    /// rather than string-matched, because what matters is that a consumer of
+    /// the format gets the numbers that went in.
+    #[test]
+    fn folded_round_trips_through_the_format_flamegraph_reads() {
+        let run = RunOutput {
+            results: vec![profile()],
+            joins: Vec::new(),
+        };
+        let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
+
+        let parsed: Vec<(String, i64)> = encoded
+            .lines()
+            .map(|line| {
+                let (chain, weight) = line.rsplit_once(' ').expect("a weight after the frames");
+                (chain.to_owned(), weight.parse().expect("an integer weight"))
+            })
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                ("main;work;read".to_owned(), 3_000_000),
+                ("main;idle".to_owned(), 70_000),
+                ("[unresolved stack 0x3]".to_owned(), 10_000),
+            ],
+            "{encoded}"
+        );
+    }
+
+    /// Two sources in one file would merge into a flame graph of neither, so
+    /// each keeps its label as a root frame.
+    #[test]
+    fn two_profiles_in_one_folded_file_stay_distinguishable() {
+        let mut second = profile();
+        second.label = "offcpu".into();
+        let run = RunOutput {
+            results: vec![profile(), second],
+            joins: Vec::new(),
+        };
+        let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
+        assert!(encoded.contains("profile;main;work;read "), "{encoded}");
+        assert!(encoded.contains("offcpu;main;work;read "), "{encoded}");
+    }
+
+    /// Speedscope indexes frames into a shared table, so an index that points
+    /// past the table is a file that opens empty. The weights are the other
+    /// half: `endValue` is what the tool claims the profile adds up to.
+    #[test]
+    fn every_speedscope_frame_index_resolves_and_the_weights_add_up() {
+        let run = RunOutput {
+            results: vec![profile()],
+            joins: Vec::new(),
+        };
+        let encoded = run_output(OutputFormat::Speedscope, &run).expect("encoding");
+        let document: serde_json::Value =
+            serde_json::from_str(&encoded).expect("one json document");
+
+        let frames = document["shared"]["frames"].as_array().expect("frames");
+        let profiles = document["profiles"].as_array().expect("profiles");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["type"], "sampled");
+        assert_eq!(profiles[0]["unit"], "nanoseconds");
+
+        let mut total = 0.0;
+        for (sample, weight) in profiles[0]["samples"]
+            .as_array()
+            .expect("samples")
+            .iter()
+            .zip(profiles[0]["weights"].as_array().expect("weights"))
+        {
+            for index in sample.as_array().expect("a stack of frame indices") {
+                let index = index.as_u64().expect("an index") as usize;
+                assert!(index < frames.len(), "frame {index} is past the table");
+            }
+            total += weight.as_f64().expect("a weight");
+        }
+        assert_eq!(profiles[0]["endValue"].as_f64(), Some(total));
+        assert_eq!(total, 3_080_000.0);
+    }
+
+    /// The reason speedscope is offered for something that is not a profile: a
+    /// timeline becomes an evented strip, whose axis is time. Speedscope
+    /// requires the events in non-decreasing order and properly closed, and a
+    /// file that breaks either opens as an error rather than as a chart.
+    #[test]
+    fn a_timeline_becomes_a_well_formed_evented_profile() {
+        let run = RunOutput {
+            results: vec![sample()],
+            joins: Vec::new(),
+        };
+        let encoded = run_output(OutputFormat::Speedscope, &run).expect("encoding");
+        let document: serde_json::Value =
+            serde_json::from_str(&encoded).expect("one json document");
+        let profile = &document["profiles"][0];
+        assert_eq!(profile["type"], "evented");
+        assert_eq!(profile["unit"], "nanoseconds");
+
+        let mut open: Vec<u64> = Vec::new();
+        let mut last_at = 0;
+        for event in profile["events"].as_array().expect("events") {
+            let at = event["at"].as_u64().expect("a time");
+            assert!(at >= last_at, "events are out of order at {at}");
+            last_at = at;
+            let frame = event["frame"].as_u64().expect("a frame index");
+            match event["type"].as_str() {
+                Some("O") => open.push(frame),
+                Some("C") => assert_eq!(
+                    open.pop(),
+                    Some(frame),
+                    "a close that does not match the frame it closes"
+                ),
+                other => panic!("unknown event type {other:?}"),
+            }
+        }
+        assert!(open.is_empty(), "a frame was left open");
+        assert_eq!(profile["endValue"].as_u64(), Some(1_000_000_000));
+    }
+
+    /// A profile format has nothing to say about a run that produced no stacks,
+    /// and saying nothing is worse than saying so: an empty folded file opens
+    /// as an empty flame graph, which reads as a program that did nothing.
+    #[test]
+    fn a_profile_format_refuses_a_run_that_produced_no_profile() {
+        let run = RunOutput {
+            results: vec![ranked()],
+            joins: Vec::new(),
+        };
+        let error = run_output(OutputFormat::Folded, &run).unwrap_err();
+        assert!(error.message().contains("emitted no stacks"), "{error}");
+    }
+
+    /// The other reason there is no profile, and a different answer: stacks
+    /// were asked for and the collector captured none. A reader who cannot tell
+    /// the two apart does not know whether to change the request or the build.
+    #[test]
+    fn a_profile_of_events_that_carried_no_stack_says_which_of_the_two_happened() {
+        let mut empty = profile();
+        empty.outputs = vec![Output::Stack {
+            stacks: Vec::new(),
+            unattributed: 5057,
+        }];
+        empty.stacks = BTreeMap::new();
+        let run = RunOutput {
+            results: vec![empty],
+            joins: Vec::new(),
+        };
+        let error = run_output(OutputFormat::Folded, &run).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("no event carried one, 5057 of them"),
+            "{error}"
+        );
+    }
+
     /// What a format claims about itself has to match what it does. A merge
     /// once put `ndjson` back to "planned" while it was encoding perfectly
     /// well, and nothing noticed: the claim and the encoder are in different
     /// files and only a test crosses them.
+    ///
+    /// Each format is handed a run carrying an output it declares it can
+    /// express, so that a refusal is about the encoder and not about the emit.
     #[test]
     fn every_format_does_what_its_declared_status_says() {
-        let run = correlated_run();
+        let mut run = correlated_run();
+        run.results.push(profile());
+        run.results.push(histogram());
         for format in OutputFormat::ALL {
+            assert!(
+                run.results.iter().any(|results| results
+                    .outputs
+                    .iter()
+                    .any(|output| format.supports_emit(output.kind()))),
+                "`{format}` was given nothing it declares it can carry"
+            );
             let encoded = run_output(format, &run);
             match format.status() {
                 crate::format::FormatStatus::Ready => assert!(
@@ -735,7 +1464,32 @@ mod tests {
 
     #[test]
     fn a_format_without_an_encoder_says_so() {
-        let error = results(OutputFormat::Folded, &sample()).unwrap_err();
+        let error = results(OutputFormat::Pprof, &sample()).unwrap_err();
         assert!(error.message().contains("no encoder yet"), "{error}");
+    }
+
+    /// Every new emit reaches the stream too, and a consumer reading it must be
+    /// able to tell a complete ranking from a truncated one and a whole profile
+    /// from a tenth of one.
+    #[test]
+    fn the_stream_carries_what_each_new_emit_left_out() {
+        let ranked = results(OutputFormat::Ndjson, &ranked()).unwrap();
+        for line in ranked.lines() {
+            serde_json::from_str::<serde_json::Value>(line).expect("a document per line");
+        }
+        assert!(ranked.contains("\"record\":\"topk_rest\""), "{ranked}");
+
+        let profiled = results(OutputFormat::Ndjson, &profile()).unwrap();
+        for line in profiled.lines() {
+            serde_json::from_str::<serde_json::Value>(line).expect("a document per line");
+        }
+        assert!(
+            profiled.contains("\"unattributed\":4"),
+            "a profile missing four events says so: {profiled}"
+        );
+        assert!(
+            profiled.contains("\"frames\":[\"main\",\"work\",\"read\"]"),
+            "{profiled}"
+        );
     }
 }

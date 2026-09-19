@@ -251,18 +251,39 @@ fn the_catalog_listing_is_machine_readable() {
     assert!(entries.iter().all(|entry| entry["family"] == "io"));
 }
 
+/// A format is declared before its encoder is written, and the listing has to
+/// say which of the two a given format is at.
+///
+/// The assertion is about the distinction rather than about any one format:
+/// naming the format that happens to be unwritten today turns this into a test
+/// that fails the day it is written, which is the day it should say nothing.
 #[test]
 fn every_declared_format_is_listed_with_whether_its_encoder_exists() {
     let output = run(&["formats", "--format", "json"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let info: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
     let outputs = info["output"].as_array().expect("output formats");
+
+    assert!(
+        outputs.iter().any(|format| format["implemented"] == false),
+        "a format declared and not yet written is listed as such: {outputs:?}"
+    );
+    for format in outputs {
+        assert!(
+            format["implemented"].is_boolean(),
+            "`{}` says nothing about whether it can be written: {format}",
+            format["name"]
+        );
+    }
+
+    // `folded` describes a profile and nothing else, which is the whole reason
+    // the emit matrix exists.
     let folded = outputs
         .iter()
         .find(|format| format["name"] == "folded")
         .expect("folded is declared");
-    assert_eq!(folded["implemented"], false);
     assert_eq!(folded["emits"].as_array().unwrap().len(), 1);
+    assert_eq!(folded["emits"][0], "stack");
 }
 
 #[test]

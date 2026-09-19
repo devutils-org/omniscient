@@ -204,9 +204,12 @@ impl OutputFormat {
             // ndjson landed with the first collector: it encodes any record
             // stream, so it needed no emit-specific work.
             OutputFormat::Ndjson => FormatStatus::Ready,
-            OutputFormat::Folded | OutputFormat::Speedscope => FormatStatus::Planned {
-                phase: "the first stack-producing collector",
-            },
+            // Written with the aggregation layer, not with the first
+            // stack-producing collector: `folded` renders an aggregate of stack
+            // identities and `speedscope` renders that or a timeline, and
+            // neither needed a collector to exist. Where the stacks come from
+            // is a separate question from whether this can write them down.
+            OutputFormat::Folded | OutputFormat::Speedscope => FormatStatus::Ready,
             OutputFormat::Pprof | OutputFormat::ChromeTrace => FormatStatus::Planned {
                 phase: "phase 4, with the correlated vertical case",
             },

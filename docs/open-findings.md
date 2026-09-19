@@ -199,3 +199,110 @@ From the threads that made them, on the development machine.
   sleep ended is paid time belonging to earlier ticks. Over two seconds it reads
   0.968 against `/proc/stat`'s independent 0.974. Reported as it is, because
   clamping it would hide the effect and break the sum.
+
+---
+
+## 7. What the aggregation layer found once `hist`, `topk` and `stack` existed
+
+From the stream that wrote them. The emits are in, the `folded` and
+`speedscope` encoders are in, and three of the things they touch belong to
+somebody else.
+
+**A series has a name now, and two families cannot produce the ones they
+declare.** `emit::SeriesKey` is what `topk` ranks and what `timeline`,
+`summary`, `rate` and `hist` produce one of each per: every event sharing the
+first key its collector put on it, or `system` when it has none. That makes
+finding 2 concrete rather than theoretical. `io.bytes` and `io.iops` declare
+`topk` and the `fs:proc` backend emits one event per tick holding the sum over
+every device, so `topk` over them answers with one series called `system` —
+true, and not the question. `power` is the same per cpu. Both are answered by
+`KeyValue::Dev` and `KeyValue::Cpu`; nothing in the emit layer needs to change
+when they arrive, because a series is keyed on whatever the collector put
+first.
+
+**A log2 histogram is the layout, and that was a choice about the kernel.**
+Bucket 0 holds the values below one and bucket *k* holds `[2^(k-1), 2^k)` —
+what `bpf_log2l` plus an array map computes, one index and one atomic increment
+per event, no record. A prettier layout would have to be abandoned when
+`--budget` moves the aggregation in-kernel (section 5, and `STATE.md`'s item on
+the budget), and two runs of the same source across that change would not be
+comparable. The validator already warns that `trace` with `hist` aggregates in
+userspace without a budget; that warning is now about something real.
+
+**`request::HistScale` cannot be serialized, so the emit layer carries its own
+copy.** `Emit` and `HistScale` are `Copy, PartialEq, Eq` and nothing more, and
+a result file has to say how to read its buckets, so `emit::BucketLayout`
+exists with the same two variants and a string form. If the catalog-model
+stream gives `HistScale` `Serialize`/`Deserialize`, `BucketLayout` collapses
+into a re-export. It is duplication, not a disagreement: the conversion is a
+`From` impl and the two cannot drift without the compiler saying so.
+
+**`hist:linear:0` parses and should not.** `Emit::from_str` refuses a negative
+width and a missing one — "a linear histogram needs a bucket width, as in
+`hist:linear:1ms`" — and accepts zero, because the width goes through
+`i64 -> u64` and zero converts. Every value then divides into one bucket of
+zero width. The emit layer refuses it with a reason rather than rendering it,
+but it refuses *after* the run, which throws a real measurement away for a typo
+that was visible before anything was attached. It belongs with the other two
+width errors in `src/request.rs`, which is the catalog-model stream's file.
+
+**`sched.switches`'s ground-truth unit test fails when the suite is loaded.**
+`collect::sched::switches::tests::the_switch_count_agrees_with_the_kernels_own`
+counted 21 switches against the kernel's own 56, with nothing reported as lost,
+while the rest of the library suite ran beside it; run alone it passes every
+time. The test asserts `measured * 10 >= kernel * 8` on a machine where the
+reference counter is moving for reasons the test did not cause, which is the
+sampler being right and the reference being wrong rather than the other way
+round. It belongs to whoever owns `sched`; it is not the aggregation layer, and
+it is a test that is green on an idle machine and red on a busy one, which is
+the worst kind to leave.
+
+---
+
+## Needs from another stream
+
+### The stack seam, for stream B
+
+Agreed shape, and the half of it that is written: aggregation, the side table,
+the `folded` encoder and the `speedscope` sampled profile all exist and are
+tested. What they read is two attributes on an ordinary `Event` — no new field
+on `Event`, and nothing added to `Collection`, so this needs no change in any
+file stream B does not own.
+
+```rust
+// src/emit.rs, already there:
+pub const STACK_ID_ATTR: &str = "stack_id";  // Attr::uint
+pub const STACK_ATTR: &str = "stack";        // Attr::text, root first, `;` separated
+```
+
+- Every event taken on a stack carries `Attr::uint("stack_id", id)`. The id is
+  the identity `stack` aggregates by, and it is compared instead of the frames,
+  so the same stack seen ten thousand times costs ten thousand `u64`
+  comparisons and one string.
+- The frames go on `Attr::text("stack", "main;work;read")`, root first, the
+  same spelling `folded` uses. Putting it on *every* event is correct and
+  putting it only on the first event bearing a given id is correct and cheaper:
+  the table keeps the first it sees for each id and ignores the rest.
+- An id whose frames never arrive is not dropped. It renders as
+  `[unresolved stack 0x…]`, because a profile that silently omitted the samples
+  it could not symbolize would understate exactly the part of the program the
+  symbols were missing for.
+- Events with no `stack_id` are counted in `Output::Stack::unattributed` and
+  reported. `--emit stack` on a backend that captures none says so today, and
+  `tests/aggregation.rs` asserts it — that test changes shape when stacks
+  arrive and must not be left quietly passing.
+- A kernel frame and a user frame are different things. Nothing in the emit
+  layer inspects a frame's name, so B is free to mark them however it likes; if
+  they should be visibly separated in the rendering rather than by their names,
+  that is a request back to this layer and it is a small one.
+
+`Results::stacks` is `BTreeMap<u64, Vec<String>>`, written by `emit::aggregate`
+and only when the request asked for stacks.
+
+### What would let `topk` answer the question `io` and `net` declare
+
+`KeyValue::Dev { major, minor }` and `KeyValue::Cpu { cpu }` from stream D, and
+the `io` and `power` collectors emitting one event per device or per cpu rather
+than one summed event per tick. Nothing in `emit` changes. It is written up as
+finding 2 and repeated here only because `topk` now makes the gap visible in
+the output rather than in the model.
