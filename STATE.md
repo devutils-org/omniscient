@@ -32,7 +32,7 @@ expensive parts are done.
 ## What the numbers say
 
 ```
-100 sources: 53 usable here, 9 unverified, 38 out of reach on this machine.
+100 sources: 79 usable here, 15 unverified, 6 out of reach on this machine.
 44 of them have a collector, covering 48 of their 165 backends.
 ```
 
@@ -40,29 +40,33 @@ Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 53 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this machine serve? | 79 | probed now: the file is readable, the event opens, the tracepoint is there |
 | What can this build collect? | 44 sources, 48 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-**That `53` was read off a binary with no capabilities**, which is the state
-every `cargo build` leaves behind. The same machine reports around `78` once
-`CAP_BPF` and `CAP_PERFMON` are granted and tracefs is readable — the difference
-is the whole eBPF and per-cpu perf surface. `make` reapplies them and says so
-when `sudo -n` will not let it, which is the case here; the numbers in this file
-are therefore the pessimistic ones.
+That `79` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. The same
+binary without them reports `53`: the difference is the whole eBPF and per-cpu
+perf surface, and it is why `make` reapplies the capabilities that every relink
+drops. Nothing announces the loss — the tool reports fewer sources, which reads
+like the machine changed rather than the binary.
+
+It cuts the other way too, which cost a session to find: a binary that carries
+capabilities is non-dumpable, so its own `/proc` entries belong to root and the
+three `mem.heap.*` sources lost the `pagemap` they read. Finding 14 of
+`docs/open-findings.md` has it; `main.rs` now restores dumpability at startup.
 
 Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
 | `cpu` | 11 | 14 | 12 |
-| `mem` | 7 | 23 | 17 |
+| `mem` | 7 | 23 | 20 |
 | `gpu` | 5 | 9 | 6 |
-| `io` | 5 | 14 | 6 |
-| `net` | 5 | 15 | 5 |
-| `power` | 5 | 5 | 3 |
-| `sched` | 3 | 10 | 1 |
-| `proc` | 2 | 6 | 2 |
+| `io` | 5 | 14 | 11 |
+| `net` | 5 | 15 | 10 |
+| `power` | 5 | 5 | 4 |
+| `sched` | 3 | 10 | 9 |
+| `proc` | 2 | 6 | 6 |
 | `runtime` | 1 | 4 | 1 |
 
 ---
