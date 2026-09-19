@@ -85,7 +85,7 @@
   modes: [count, sample, trace]
   emits: [summary, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, mem, cgroup]
+  keys: [task, mem, cgroup, cpu]
   filter_fields: [comm, addr]
   determinism: medium
   caveats:
@@ -202,7 +202,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
 
@@ -215,7 +215,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
 
@@ -228,7 +228,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
 
@@ -242,7 +242,7 @@
   modes: [sample]
   emits: [hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, mem]
+  keys: [task, mem, cpu]
   filter_fields: [comm, cpu, addr]
   determinism: low
 
@@ -256,7 +256,7 @@
   modes: [sample]
   emits: [topk, stack, raw, summary]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
-  keys: [task, mem]
+  keys: [task, mem, cpu]
   filter_fields: [comm, cpu, addr]
   determinism: low
 
@@ -285,11 +285,12 @@
   backends:
     - {id: "pmu", requires: ["pmu:pebs:mem-loads"], cost: med}
     - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: free,
+       targets: {pid: native, launch: native}, filter_fields: [comm, node],
        degraded: "page placement, not accesses"}
   modes: [sample, poll]
   emits: [topk, hist, raw, summary, timeline]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
-  keys: [task, mem]
+  keys: [task, mem, cpu]
   filter_fields: [comm, cpu, node]
   determinism: low
 
@@ -356,8 +357,9 @@
   summary: "Swap in / swap out"
   unit: bytes
   backends:
-    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free}
-    - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current"], cost: free, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, targets: {system: native}}
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current"], cost: free, equivalent: true,
+       targets: {cgroup: native, container: native}}
   modes: [poll, snapshot]
   emits: [timeline, rate, raw, summary]
   targets: {system: native, cgroup: native, container: native}
@@ -370,8 +372,9 @@
   summary: "PSI: memory stall time"
   unit: ratio
   backends:
-    - {id: "fs:proc", requires: ["/proc/pressure/memory"], cost: free}
-    - {id: "fs:cgroup", requires: ["cgroup2:memory.pressure"], cost: free, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/pressure/memory"], cost: free, targets: {system: native}}
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.pressure"], cost: free, equivalent: true,
+       targets: {cgroup: native, container: native}}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native, cgroup: native, container: native}

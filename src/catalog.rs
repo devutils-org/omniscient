@@ -70,13 +70,49 @@ impl Entry {
     /// fallbacks: launching a program is following a pid tree, a container is a
     /// cgroup, a thread is a narrower pid.
     pub fn target_support(&self, kind: TargetKind) -> TargetSupport {
-        if let Some(support) = self.targets.get(&kind) {
-            return *support;
+        support_in(&self.targets, kind)
+    }
+
+    /// How one backend of this chain supports a target kind.
+    ///
+    /// A backend that declares its own `targets` speaks only for itself and is
+    /// never widened by the entry's: the entry describes the union of what the
+    /// chain can do, and the whole point of the per-backend map is that a
+    /// backend which only attributes per cgroup must not be handed a
+    /// system-wide request because a sibling could serve one.
+    pub fn backend_target_support(&self, backend: &Backend, kind: TargetKind) -> TargetSupport {
+        match &backend.targets {
+            Some(targets) => support_in(targets, kind),
+            None => self.target_support(kind),
         }
-        match kind.fallback() {
-            Some(fallback) => self.target_support(fallback),
-            None => TargetSupport::No,
-        }
+    }
+
+    /// The filterable fields one backend of this chain actually carries.
+    ///
+    /// A backend that declares none carries the entry's, which is the common
+    /// case: the per-backend list exists for the fields that are real through
+    /// one mechanism and impossible through another. `comm` on `net.bytes` is
+    /// the example -- the eBPF backend knows which process sent a byte and
+    /// `/proc/net/dev` has no idea.
+    pub fn backend_filter_fields<'a>(&'a self, backend: &'a Backend) -> &'a [String] {
+        backend
+            .filter_fields
+            .as_deref()
+            .unwrap_or(&self.filter_fields)
+    }
+
+    /// The backends of this chain that carry a filterable field, in chain
+    /// order. What a rejection names when the selected one does not.
+    pub fn backends_carrying(&self, field: &str) -> Vec<&str> {
+        self.backends
+            .iter()
+            .filter(|backend| {
+                self.backend_filter_fields(backend)
+                    .iter()
+                    .any(|known| known == field)
+            })
+            .map(|backend| backend.id.as_str())
+            .collect()
     }
 
     /// The target kinds this source actually accepts.
@@ -128,6 +164,22 @@ pub struct Backend {
     /// one from two separate events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join: Option<JoinRule>,
+    /// Which targets *this* backend serves, when the chain does not agree.
+    ///
+    /// Absent means the backend serves whatever the entry declares, which is
+    /// the common case. Present, it replaces the entry's map rather than
+    /// patching it: a kind it does not mention is one this backend cannot
+    /// serve, and writing `no` for every other kind would be noise nobody
+    /// maintains. The loader checks it claims nothing the entry refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<BTreeMap<TargetKind, TargetSupport>>,
+    /// Which of the entry's filterable fields *this* backend carries.
+    ///
+    /// Absent means all of them. Present, it is a subset: a predicate over a
+    /// field the selected backend never emits is false everywhere, which
+    /// empties a series rather than narrowing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_fields: Option<Vec<String>>,
 }
 
 /// How two events are tied together into one measurement.
@@ -300,6 +352,92 @@ impl fmt::Display for Unit {
     }
 }
 
+/// The per-backend `targets` maps have to stay consistent with the entry's.
+///
+/// Two ways they can drift, and both are the kind of mistake that reads as
+/// correct. A backend claiming a target the entry refuses is unreachable: the
+/// validator turns the request away before the resolver ever walks the chain.
+/// A target the entry promises and no backend serves is worse, because it is
+/// accepted and then resolves to nothing at all.
+fn check_backend_targets(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        let Some(targets) = &backend.targets else {
+            continue;
+        };
+        for kind in TargetKind::ALL {
+            if support_in(targets, kind) != TargetSupport::No
+                && entry.target_support(kind) == TargetSupport::No
+            {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: backend `{}` claims a `{kind}` target the entry itself \
+                     refuses, so no request could ever reach it",
+                    entry.id, backend.id
+                )));
+            }
+        }
+    }
+
+    for kind in entry.supported_targets() {
+        if entry
+            .backends
+            .iter()
+            .any(|backend| entry.backend_target_support(backend, kind) != TargetSupport::No)
+        {
+            continue;
+        }
+        return Err(ParseError::new(format!(
+            "catalog entry `{}` declares `{kind}` support, but no backend in its chain serves \
+             that target: the request would be accepted and then resolve onto nothing",
+            entry.id
+        )));
+    }
+    Ok(())
+}
+
+/// The same two directions for `filter_fields`: a backend cannot carry a field
+/// the entry never offers, and a field the entry offers has to be carried by
+/// some backend or it is a predicate that can only ever empty a series.
+fn check_backend_filter_fields(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        let Some(fields) = &backend.filter_fields else {
+            continue;
+        };
+        for field in fields {
+            if !entry.filter_fields.contains(field) {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: backend `{}` carries the filter field `{field}`, which \
+                     the entry does not offer, so nobody could ever ask for it",
+                    entry.id, backend.id
+                )));
+            }
+        }
+    }
+
+    for field in &entry.filter_fields {
+        if entry.backends_carrying(field).is_empty() {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}` offers the filter field `{field}`, which no backend in its \
+                 chain carries: a predicate over it would be false on every event and empty the \
+                 series instead of narrowing it",
+                entry.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Walks the documented target fallbacks over one map: launching a program is
+/// following a pid tree, a container is a cgroup, a thread is a narrower pid.
+fn support_in(map: &BTreeMap<TargetKind, TargetSupport>, kind: TargetKind) -> TargetSupport {
+    if let Some(support) = map.get(&kind) {
+        return *support;
+    }
+    match kind.fallback() {
+        Some(fallback) => support_in(map, fallback),
+        None => TargetSupport::No,
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -424,6 +562,8 @@ impl Catalog {
                     entry.id
                 )));
             }
+            check_backend_targets(entry)?;
+            check_backend_filter_fields(entry)?;
         }
         let catalog = Self { entries };
         for entry in &catalog.entries {

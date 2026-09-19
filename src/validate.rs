@@ -467,19 +467,19 @@ fn check_backend(
     rejections: &mut Vec<Rejection>,
     report: &mut Report,
 ) {
-    let Some(backend) = &request.backend else {
+    let Some(pinned) = &request.backend else {
         return;
     };
-    if entry.backend(backend.as_str()).is_none() {
+    let Some(backend) = entry.backend(pinned.as_str()) else {
         let suggestion = nearest(
-            backend.as_str(),
+            pinned.as_str(),
             entry.backends.iter().map(|b| b.id.as_str()),
         );
         rejections.push(Rejection::with_hint(
             format!(
                 "`{}` has no backend `{}`{}",
                 entry.id,
-                backend.as_str(),
+                pinned.as_str(),
                 DidYouMean(suggestion)
             ),
             format!(
@@ -488,10 +488,40 @@ fn check_backend(
             ),
         ));
         return;
+    };
+
+    // Pinning bypasses the resolver, which is the one place that would
+    // otherwise have refused a backend that cannot attribute at the requested
+    // granularity. Without this check the bench could pin `/proc/diskstats`
+    // against a cgroup and be handed the whole machine's I/O under the
+    // cgroup's name -- and a pin exists to compare backends, which is only
+    // meaningful between backends that answer the same question.
+    let kind = request.target.kind();
+    if entry.backend_target_support(backend, kind) == TargetSupport::No {
+        let serves: Vec<&str> = TargetKind::ALL
+            .into_iter()
+            .filter(|candidate| {
+                entry.backend_target_support(backend, *candidate) != TargetSupport::No
+            })
+            .map(|candidate| candidate.as_str())
+            .collect();
+        rejections.push(Rejection::with_hint(
+            format!(
+                "backend `{}` of `{}` cannot attribute per {kind}",
+                backend.id, entry.id
+            ),
+            if serves.is_empty() {
+                format!("`{}` serves no target this source declares", backend.id)
+            } else {
+                format!("`{}` serves {}", backend.id, one_of(serves.into_iter()))
+            },
+        ));
+        return;
     }
+
     report.push(format!(
         "backend `{}` is pinned, so the resolver's choice is bypassed; this is for the comparison bench, not for measuring",
-        backend.as_str()
+        backend.id
     ));
 }
 
