@@ -129,6 +129,12 @@ impl Rule {
     }
 }
 
+/// What a correlation read back from a file without one was: the only match
+/// kind that existed when those files were written.
+fn default_match_kind() -> MatchKind {
+    MatchKind::Interval
+}
+
 fn default_capacity() -> usize {
     1_000_000
 }
@@ -175,6 +181,13 @@ pub struct Correlation {
     pub rule: String,
     pub from: String,
     pub to: String,
+    /// How the two sides were matched, carried here because it decides what the
+    /// numbers below *mean*. A state is a range for `interval`, a key for `eq`,
+    /// and an edge between two tasks for `wakeup`; a reader told "3 of 3 events
+    /// fell outside every open range" about a wakeup join is being handed the
+    /// wrong question's answer.
+    #[serde(default = "default_match_kind")]
+    pub match_kind: MatchKind,
     /// How strongly this join ties its two sides together.
     pub evidence: Evidence,
     /// Downstream events that landed inside an open state.
@@ -752,6 +765,7 @@ fn assemble<K: Ord + Clone>(
         rule: rule.id.clone(),
         from: rule.from.clone(),
         to: rule.to.clone(),
+        match_kind: rule.match_kind,
         evidence: evidence(rule),
         matched,
         unmatched,

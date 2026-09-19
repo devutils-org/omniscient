@@ -7,7 +7,7 @@
 
 use std::fmt::Write as _;
 
-use crate::catalog::Unit;
+use crate::catalog::{MatchKind, Unit};
 use crate::emit::{Bucket, Output, Results, SeriesHist, StackCount};
 use crate::error::ParseError;
 use crate::event::KeyValue;
@@ -98,8 +98,12 @@ fn correlation_text(correlation: &Correlation) -> String {
     };
     let _ = writeln!(
         out,
-        "  {} of {} `{}` events attributed ({share:.1} %); {} fell outside every open range",
-        correlation.matched, total, correlation.to, correlation.unmatched
+        "  {} of {} `{}` events attributed ({share:.1} %); {} {}",
+        correlation.matched,
+        total,
+        correlation.to,
+        correlation.unmatched,
+        unmatched_reason(correlation.match_kind)
     );
 
     let states = &correlation.states;
@@ -127,38 +131,101 @@ fn correlation_text(correlation: &Correlation) -> String {
         return out;
     }
 
-    let _ = writeln!(out, "\n  heaviest ranges");
-    let _ = writeln!(
-        out,
-        "    {:<34} {:>10}  {:>8}  OUTCOME",
-        "RANGE", "SIZE", "EVENTS"
-    );
-    for attribution in &correlation.top {
+    // An `interval` state has an extent and the others do not, so the size
+    // column exists for one match kind and would be a column of zeroes for the
+    // other three -- which reads as "these allocations were empty" rather than
+    // as "this join is not about ranges".
+    let ranged = correlation.match_kind == MatchKind::Interval;
+    let (heading, column) = table_words(correlation.match_kind);
+    let _ = writeln!(out, "\n  {heading}");
+    if ranged {
         let _ = writeln!(
             out,
-            "    {:<34} {:>10}  {:>8}  {}",
-            attribution.key,
-            bytes(attribution.len as f64),
-            attribution.matched,
-            outcome(attribution.outcome)
+            "    {column:<34} {:>10}  {:>8}  OUTCOME",
+            "SIZE", "EVENTS"
         );
+    } else {
+        let _ = writeln!(out, "    {column:<44} {:>8}  OUTCOME", "EVENTS");
     }
-    let _ = writeln!(
-        out,
-        "\n  EVENTS counts faults, not bytes, and on a kernel with multi-size transparent huge \
-         pages it does not even rank by bytes: the kernel picks larger folios for larger regions, \
-         so a 1 MiB and a 32 MiB allocation both fault a few hundred times. Read it as where the \
-         faults happened, not as how much memory they cost; the THP mode is in the environment."
-    );
+    for attribution in &correlation.top {
+        if ranged {
+            let _ = writeln!(
+                out,
+                "    {:<34} {:>10}  {:>8}  {}",
+                attribution.key,
+                bytes(attribution.len as f64),
+                attribution.matched,
+                outcome(attribution.outcome, correlation.match_kind)
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "    {:<44} {:>8}  {}",
+                attribution.key,
+                attribution.matched,
+                outcome(attribution.outcome, correlation.match_kind)
+            );
+        }
+    }
+    if let Some(note) = counting_note(correlation.match_kind) {
+        let _ = writeln!(out, "\n  {note}");
+    }
     out
 }
 
-fn outcome(outcome: Outcome) -> &'static str {
-    match outcome {
-        Outcome::Closed => "freed",
-        Outcome::Expired => "expired",
-        Outcome::Overflowed => "evicted",
-        Outcome::StillOpen => "live",
+/// What an unattributed downstream event means, which is a different sentence
+/// for each match kind.
+fn unmatched_reason(kind: MatchKind) -> &'static str {
+    match kind {
+        MatchKind::Interval => "fell outside every open range",
+        MatchKind::Eq => "carried a key no open state had",
+        MatchKind::ScopedEq => "carried a key no open state had in that scope",
+        MatchKind::Wakeup => "followed no wakeup this run saw",
+    }
+}
+
+/// The heading over the attributions, and what the first column holds.
+fn table_words(kind: MatchKind) -> (&'static str, &'static str) {
+    match kind {
+        MatchKind::Interval => ("heaviest ranges", "RANGE"),
+        MatchKind::Eq | MatchKind::ScopedEq => ("heaviest keys", "KEY"),
+        MatchKind::Wakeup => ("heaviest wakeup chains", "CHAIN"),
+    }
+}
+
+/// The caveat under the table, where the counting has one.
+///
+/// Only the interval match does. Its `EVENTS` column counts page faults, and a
+/// fault is not a page; the other three count events whose meaning the reader
+/// already has from the source.
+fn counting_note(kind: MatchKind) -> Option<&'static str> {
+    match kind {
+        MatchKind::Interval => Some(
+            "EVENTS counts faults, not bytes, and on a kernel with multi-size transparent huge \
+             pages it does not even rank by bytes: the kernel picks larger folios for larger \
+             regions, so a 1 MiB and a 32 MiB allocation both fault a few hundred times. Read it \
+             as where the faults happened, not as how much memory they cost; the THP mode is in \
+             the environment.",
+        ),
+        _ => None,
+    }
+}
+
+/// How a state left the engine, in the words of the thing it was.
+///
+/// `Closed` is the one that differs: a range closes because the program freed
+/// it, a wakeup closes because the task it released actually ran. Calling the
+/// second one "freed" is not a wording problem, it is a claim about memory in a
+/// join that never looked at any.
+fn outcome(outcome: Outcome, kind: MatchKind) -> &'static str {
+    match (outcome, kind) {
+        (Outcome::Closed, MatchKind::Interval) => "freed",
+        (Outcome::Closed, MatchKind::Wakeup) => "ran",
+        (Outcome::Closed, _) => "closed",
+        (Outcome::Expired, _) => "expired",
+        (Outcome::Overflowed, _) => "evicted",
+        (Outcome::StillOpen, MatchKind::Wakeup) => "never ran",
+        (Outcome::StillOpen, _) => "live",
     }
 }
 
@@ -919,6 +986,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::join::{Attribution, StateStats};
+
     use crate::collect::Losses;
     use crate::emit::{
         Bucket, Point, Rest, Series, SeriesHist, SeriesSummary, SeriesTotal, StackCount,
@@ -1070,6 +1139,7 @@ mod tests {
                 rule: "pages-of-allocation".into(),
                 from: "mem.heap.alloc".into(),
                 to: "mem.faults".into(),
+                match_kind: MatchKind::Interval,
                 evidence: crate::join::Evidence::Key,
                 matched: 12,
                 unmatched: 3,
@@ -1491,5 +1561,84 @@ mod tests {
             profiled.contains("\"frames\":[\"main\",\"work\",\"read\"]"),
             "{profiled}"
         );
+    }
+
+    fn correlated(match_kind: MatchKind, key: &str, len: u64) -> Correlation {
+        Correlation {
+            rule: "r".into(),
+            from: "a".into(),
+            to: "b".into(),
+            match_kind,
+            evidence: crate::join::Evidence::Key,
+            matched: 3,
+            unmatched: 1,
+            states: StateStats {
+                opened: 2,
+                closed: 1,
+                still_open: 1,
+                peak_open: 2,
+                ..StateStats::default()
+            },
+            top: vec![Attribution {
+                key: key.into(),
+                base: 0,
+                len,
+                opened_ns: 0,
+                closed_ns: None,
+                matched: 3,
+                outcome: Outcome::Closed,
+            }],
+            total_attributed: 3,
+        }
+    }
+
+    /// The interval join's own words, which every other kind used to borrow.
+    #[test]
+    fn an_interval_join_reads_as_ranges_and_bytes() {
+        let text = correlation_text(&correlated(
+            MatchKind::Interval,
+            "mem:[0x1000,0x2000)",
+            4096,
+        ));
+        assert!(text.contains("fell outside every open range"), "{text}");
+        assert!(text.contains("heaviest ranges"), "{text}");
+        assert!(text.contains("RANGE"), "{text}");
+        assert!(text.contains("4.0 KiB"), "{text}");
+        assert!(text.contains("freed"), "{text}");
+        // The fault-counting caveat belongs to this kind and only this one.
+        assert!(text.contains("multi-size transparent huge"), "{text}");
+    }
+
+    /// A wakeup join borrowed all of it: it reported chains between tasks as
+    /// ranges of zero bytes that had been "freed", and printed the page-fault
+    /// caveat about a join that never looked at memory.
+    #[test]
+    fn a_wakeup_join_speaks_of_chains_not_of_ranges() {
+        let text = correlation_text(&correlated(MatchKind::Wakeup, "task:7 -> task:9", 0));
+        assert!(text.contains("followed no wakeup this run saw"), "{text}");
+        assert!(text.contains("heaviest wakeup chains"), "{text}");
+        assert!(text.contains("CHAIN"), "{text}");
+        assert!(text.contains("ran"), "{text}");
+        assert!(!text.contains("RANGE"), "{text}");
+        assert!(!text.contains("SIZE"), "{text}");
+        assert!(!text.contains("freed"), "{text}");
+        assert!(
+            !text.contains("0 B"),
+            "a chain has no extent to report: {text}"
+        );
+        assert!(!text.contains("transparent huge"), "{text}");
+    }
+
+    /// The two keyed kinds differ from each other only in what an unattributed
+    /// event means, which is the one place the scope matters to a reader.
+    #[test]
+    fn the_keyed_joins_name_the_key_and_the_scope() {
+        let plain = correlation_text(&correlated(MatchKind::Eq, "req:42", 0));
+        assert!(plain.contains("carried a key no open state had"), "{plain}");
+        assert!(plain.contains("heaviest keys"), "{plain}");
+        assert!(plain.contains("closed"), "{plain}");
+
+        let scoped = correlation_text(&correlated(MatchKind::ScopedEq, "blk:0x10@99", 0));
+        assert!(scoped.contains("in that scope"), "{scoped}");
     }
 }
