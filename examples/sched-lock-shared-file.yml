@@ -1,0 +1,70 @@
+# What does sharing one file cost, in kernel lock contention?
+#
+# Start twelve writers first, all appending to one file:
+#
+#   D=$(mktemp -d)
+#   for i in $(seq 1 12); do
+#     ( exec 3>>"$D/shared"
+#       i=0; while [ $i -lt 400000 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&3; i=$((i+1)); done ) &
+#   done
+#   omn -f examples/sched-lock-shared-file.yml
+#
+# The property this measures is chosen, not observed. A write to a regular file
+# holds that file's inode lock -- an rwsem, taken for writing -- for the length
+# of the write, so twelve processes appending to one file serialize on one lock
+# and the same twelve appending to twelve files never touch it. Same program,
+# same number of processes, same number of writes of the same size: the only
+# difference between the two runs is whether the object is shared.
+#
+# Measured on the development machine, over two seconds, filtered to the
+# writers, on btrfs:
+#
+#                        write (rwsem)              spin
+#   one shared file    2233 waits, 5.82 s     1602 waits, 16.3 ms
+#   twelve own files      0 waits                838505 waits, 18.4 s
+#
+# **Read that table before reading a lock count anywhere.** The shared run is
+# the contended one and it has *two hundred times fewer* waits in total. Nothing
+# is wrong with either number: serializing twelve writers on one inode makes
+# them slow, and slow processes make fewer syscalls, and it is the syscalls that
+# reach the filesystem's own spinlocks. The private run is two hundred times
+# faster and pays for it in two hundred times more brief contention somewhere
+# else.
+#
+# So a count of lock waits is a throughput measurement wearing a contention
+# measurement's name, and the two go opposite ways. What separates the runs is
+# *which lock* was contended and for how long: 5.8 seconds of aggregate waiting
+# on one inode's rwsem, at a mean of 2.6 ms a wait, against none at all.
+# `kind` on every event is what makes that visible, and it is why the lock
+# flags are part of the key rather than a field carrying their last value.
+#
+# Three smaller things about the numbers.
+#
+# The value on each event is the *low bound* of its log2 bucket, not the wait
+# itself: the histogram is built in the kernel, because a contended lock fires
+# these tracepoints as fast as the machine can take them and one event per wait
+# would be a measurement whose cost grows with the contention. `total_ns` beside
+# it is the exact sum, which the bucket bounds cannot give back.
+#
+# The filter is applied to the drained rows rather than in the program, and the
+# run says so with the count it removed. The resolver credits an eBPF backend
+# with pushing a filter down; for this source that is true of the numbers and
+# not yet of the cost.
+#
+# And the per-cpu idle task is not measured at all. Every cpu's idle task is
+# numbered thread zero, so pairing a begin on one cpu with an end on another
+# would report the gap between two unrelated instants -- which it did, as a wait
+# of a hundred and fifty million minutes, before the exclusion. The run says how
+# many it set aside.
+name: twelve writers, one file
+format: text
+duration: 2s
+
+requests:
+  - label: contention
+    source: sched.lock
+    target: system
+    mode: trace
+    emit: [hist, topk:8, raw, summary]
+    keys: [task]
+    filter: "comm == 'omnlockprobe'"

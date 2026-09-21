@@ -1,0 +1,59 @@
+# Every axis the catalog offers this family's machine-wide sources.
+#
+#   omn -f examples/sched-sweep-machine.yml
+#   omn -f examples/sched-sweep-machine.yml --format json | jq '.results[].outputs[].emit'
+#
+# The companion of examples/sched-sweep.yml, and separate from it for a reason
+# the runner enforces: one run observes one target, and these three sources
+# watch the machine where the ones in that file follow a launched program.
+#
+# The catalog is data and the CLI is a projection of it, so a combination the
+# catalog offers and the build cannot serve is a promise broken in the one place
+# nobody looks. Each source here is asked for every emit it declares.
+#
+# `sched.numa_balance` will be empty on a machine with one NUMA node, and says
+# so in its own output. An emit still has to render an empty series without
+# falling over, which is the half of it this file checks.
+name: every emit the machine-wide sources declare
+format: text
+duration: 2s
+
+requests:
+  - label: lock-every-emit
+    source: sched.lock
+    target: system
+    mode: trace
+    emit: [hist, topk:5, stack, raw, summary]
+    keys: [task]
+
+  - label: irq-traced
+    source: sched.irq
+    target: system
+    mode: trace
+    emit: [hist, topk:5, rate, raw, summary]
+    keys: [cpu]
+
+  # `count` narrows what any source may emit: a single measurement over one
+  # window is not a distribution and not a ranking. `hist` and `topk` are
+  # declared by these entries and refused here, which is the same shape as the
+  # `sched.migrations` case docs/scenarios/sched.md records as defect 3.
+  - label: irq-counted
+    source: sched.irq
+    target: system
+    mode: count
+    emit: [rate, raw, summary]
+    keys: [cpu]
+
+  - label: numa-traced
+    source: sched.numa_balance
+    target: system
+    mode: trace
+    emit: [rate, topk:5, raw, summary]
+    keys: [task]
+
+  - label: numa-counted
+    source: sched.numa_balance
+    target: system
+    mode: count
+    emit: [rate, raw, summary]
+    keys: [task]

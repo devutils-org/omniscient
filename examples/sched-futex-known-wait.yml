@@ -1,0 +1,79 @@
+# A lock held for a known time, and the thread that waited for it.
+#
+#   omn -f examples/sched-futex-known-wait.yml
+#
+# The workload chooses the number, and chooses it in the one shape that does not
+# depend on how busy the machine is. The main thread takes a lock *before* the
+# second thread exists; the second thread is started and asks for the same lock,
+# so it blocks; the main thread sleeps 500 ms and then releases. The second
+# thread's wait is 500 ms minus however long it took to be created, and nothing
+# else in the program waits for anything.
+#
+# An earlier version of this session had the two threads take and release the
+# lock in turns, three times. It measured beautifully on an idle machine and
+# lost one of the three waits under load: if the waiter is late enough, the
+# holder has already released and there is nothing to wait for. The property was
+# real and the workload did not guarantee it, which is the difference this whole
+# scenario is about.
+#
+# What the run reports, on the development machine:
+#
+#   one wait, on one thread, of 499.7 ms, in the [268.4 ms, 536.9 ms) bucket
+#
+# A `pthread_mutex_lock` that is not contended never reaches the kernel: it is
+# an atomic in the program's own memory. What this source sees is the slow path,
+# the `futex` syscall a thread makes when somebody else holds the lock, and the
+# time until it returns. So an uncontended program measures as nothing here,
+# which is correct and worth knowing before reading an empty series as a
+# failure.
+#
+# Only the waiting operations are timed, and the filter is in the program.
+# `futex()` is one syscall with a dozen operations behind an argument, and most
+# of them -- `FUTEX_WAKE` above all, the other half of every wait -- return in a
+# microsecond. Timing all of them would put the wake path in the same
+# distribution as the waits.
+#
+# This source has no `--system` form and the catalog says so: `sys_enter` fires
+# on every syscall of every process on the machine, and a machine-wide futex
+# histogram is mostly idle thread pools waiting on purpose. The program still
+# runs on every syscall; what the target buys is that only one process's waits
+# are recorded.
+#
+# The workload is Python because it is what is on the machine, and it is written
+# out in full below rather than kept in a file beside this one: any two threads
+# and any lock do the same thing, and a session nobody can read is a session
+# nobody can check. A machine without `python3` cannot run this one, and
+# `tests/scenario_sched.rs` says so and skips rather than passing quietly.
+name: a lock held for a known time
+format: text
+
+requests:
+  - label: waits
+    source: sched.futex
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import threading, time
+
+          HOLD = 0.5    # how long the lock is held while the other thread waits
+
+          lock = threading.Lock()
+
+          # Taken before the waiter exists, so there is no race to lose: the
+          # waiter cannot arrive early and find the lock free.
+          lock.acquire()
+
+          def waiter():
+              lock.acquire()
+              lock.release()
+
+          thread = threading.Thread(target=waiter)
+          thread.start()
+          time.sleep(HOLD)
+          lock.release()
+          thread.join()
+    mode: trace
+    emit: [hist, topk:5, raw, summary]
+    keys: [task]

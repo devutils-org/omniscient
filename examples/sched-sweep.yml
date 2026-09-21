@@ -23,6 +23,11 @@
 # `sched.migrations` does not declare `launch` and does not need to: the catalog
 # reads a target map through its documented fallbacks, and launching a program
 # is following the pid it created.
+#
+# The family's three machine-wide sources -- `sched.lock`, `sched.irq` and
+# `sched.numa_balance` -- are in examples/sched-sweep-machine.yml instead, and
+# not out of tidiness: one run observes one target, and a session mixing a
+# launched program with the machine is refused before anything starts.
 name: every emit this family declares
 requests:
   - label: wakeup-every-emit
@@ -67,6 +72,16 @@ requests:
     target: *blocker
     mode: trace
     emit: [rate, topk:5, raw, summary]
+    keys: [task]
+
+  # Every emit `sched.futex` declares, including `stack`: the frames are the
+  # call that took the lock, walked where the wait ends, which for a launched
+  # program is inside the same `pthread_mutex_lock` that began it.
+  - label: futex-every-emit
+    source: sched.futex
+    target: *blocker
+    mode: trace
+    emit: [hist, topk:5, stack, raw, summary]
     keys: [task]
 
   # `topk` is declared on this source and refused in `count` mode, although the

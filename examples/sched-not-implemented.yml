@@ -1,41 +1,33 @@
-# `sched` sources this build describes and cannot measure.
+# The one `sched` source this build describes and cannot measure.
 #
 #   omn -f examples/sched-not-implemented.yml ; echo $?   # 3
 #
-# They are vocabulary: they resolve, they validate, and they say plainly that
-# nothing collects them yet. That is a different answer from "this machine
-# cannot", and it has its own exit code so a script can tell them apart -- a
-# reader who takes exit 3 for a machine limit goes looking for a kernel option
-# that would not have helped.
+# It is vocabulary: it resolves, it validates, and it says plainly that nothing
+# collects it yet. That is a different answer from "this machine cannot", and it
+# has its own exit code so a script can tell them apart -- a reader who takes
+# exit 3 for a machine limit goes looking for a kernel option that would not
+# have helped.
 #
-# The three here take a launched program, which is what a session file can hold:
-# one run observes one target. The family's other two uncollected sources watch
-# the machine and are the same answer from the command line --
+# This file used to list three. The sixth wave left one: `sched.lock`,
+# `sched.futex`, `sched.irq` and `sched.numa_balance` now collect through raw
+# tracepoints, and what is left is the source whose two backends are the two
+# mechanisms this layer still does not have.
 #
-#   omn sched.irq --mode trace --emit hist --system -d 100ms          ; echo $?  # 3
-#   omn sched.numa_balance --mode count --emit summary --system -d 1s ; echo $?  # 3
+#   preload      the `LD_PRELOAD` shim would have to interpose
+#                `pthread_mutex_lock`, which it does not: the shim knows the
+#                allocator and nothing else.
+#   bpf:uprobe   a uprobe on `pthread_mutex_lock` inside the target's own
+#                libc, which needs the symbol resolved in that mapping. The
+#                attach kind exists in `src/bpf/attach.rs`; nothing calls it.
 #
-# `sched.lock` and `sched.futex` want an eBPF attach kind the layer does not
-# have; `sched.mutex` wants the `LD_PRELOAD` shim to interpose
-# `pthread_mutex_lock`. STATE.md tracks both under "eBPF beyond raw tracepoints".
-#
-# A session stops at the first of these rather than listing all three, which
-# the rejections in examples/sched-refusals.yml.rejected do not: run them one
-# at a time to see each message.
+# `sched.futex` measures the same waits one layer down and does collect --
+# every contended `pthread_mutex_lock` ends in a `futex` syscall, and
+# examples/sched-futex-known-wait.yml is that measurement. What it cannot say is
+# which *mutex object* in the program was contended, only which futex word:
+# those are the same address for an ordinary glibc mutex, and are not for a
+# lock implementation that keeps its word elsewhere.
 name: described, not built
 requests:
-  - label: kernel-lock-contention
-    source: sched.lock
-    target: {launch: ["/bin/true"]}
-    mode: trace
-    emit: [hist]
-
-  - label: userspace-futex-wait
-    source: sched.futex
-    target: {launch: ["/bin/true"]}
-    mode: trace
-    emit: [hist]
-
   - label: pthread-mutex-contention
     source: sched.mutex
     target: {launch: ["/bin/true"]}

@@ -216,6 +216,12 @@ fn the_examples_still_say_what_these_tests_assert() {
         ),
         ("sched-wakeup-loss.yml", format!("\"{LOSS_ROUNDS}\"")),
         ("sched-wakeup-loss.yml", format!("\"{LOSS_PAIRS}\"")),
+        ("sched-lock-shared-file.yml", LOCK_WRITERS.to_string()),
+        ("sched-lock-shared-file.yml", LOCK_LINES.to_string()),
+        (
+            "sched-futex-known-wait.yml",
+            format!("HOLD = {}", FUTEX_HOLD_MS as f64 / 1000.0),
+        ),
     ];
     for (file, number) in expected {
         let path = format!("examples/{file}");
@@ -254,6 +260,11 @@ fn every_session_this_family_ships_is_understood() {
 
     let expectations = [
         ("sched-blocking-stack.yml", 0),
+        ("sched-futex-known-wait.yml", 0),
+        ("sched-irq-against-procfs.yml", 0),
+        ("sched-lock-shared-file.yml", 0),
+        ("sched-numa-balance.yml", 0),
+        ("sched-sweep-machine.yml", 0),
         ("sched-forced-backends.yml", 0),
         ("sched-half-blocked.yml", 0),
         ("sched-migrations.yml", 0),
@@ -1184,7 +1195,7 @@ fn a_source_with_no_collector_is_refused_with_its_own_exit_code() {
         "`no collector` has an exit code of its own:\n{text}"
     );
     assert!(
-        text.contains("no collector is written for `sched.lock`"),
+        text.contains("no collector is written for `sched.mutex`"),
         "the refusal must name the source:\n{text}"
     );
     assert!(
@@ -1193,18 +1204,21 @@ fn a_source_with_no_collector_is_refused_with_its_own_exit_code() {
          for a machine problem that is not there:\n{text}"
     );
 
-    // The family's two machine-wide uncollected sources answer the same way
-    // from the command line, which a session file cannot hold beside the three
-    // above: one run observes one target.
-    for source in ["sched.irq", "sched.numa_balance"] {
+    // And the four that used to answer this way no longer do. A source that
+    // gains a collector and leaves a "not built" message behind is the same
+    // lie as one that never had it, pointing the other way.
+    for source in ["sched.lock", "sched.irq", "sched.numa_balance"] {
         let output = omn(&[
             source, "--mode", "trace", "--emit", "summary", "--system", "-d", "50ms",
         ]);
-        assert_eq!(
-            exit_code(&output),
-            3,
-            "`{source}` has no collector and should say so with exit 3:\n{}",
-            spoken(&output)
+        let text = spoken(&output);
+        if unprivileged(&text) {
+            eprintln!("skipped: `{source}` needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+            continue;
+        }
+        assert!(
+            !text.contains("no collector is written"),
+            "`{source}` has a collector and still says it does not:\n{text}"
         );
     }
 }
@@ -1263,4 +1277,940 @@ fn pinning_a_backend_this_build_lacks_blames_the_build_and_not_the_machine() {
         listed.contains("no collector yet"),
         "`omn list` should mark the backends this build does not have:\n{listed}"
     );
+}
+
+// ===========================================================================
+// The sixth wave: lock contention, futex waits, interrupts and NUMA balancing
+//
+// Four sources whose catalog entries were written to the raw tracepoint path
+// in wave three and whose collectors landed in wave six. Each has a ground
+// truth of its own kind, and they are deliberately three different kinds: a
+// difference the workload constructed, a delay the workload injected, and a
+// counter the kernel keeps for its own reasons.
+// ===========================================================================
+
+use std::path::PathBuf;
+
+/// Writers in `examples/sched-lock-shared-file.yml`, and lines each one writes.
+///
+/// The count is in the session's own comment, and
+/// `the_examples_still_say_what_these_tests_assert` keeps the two together.
+const LOCK_WRITERS: usize = 12;
+const LOCK_LINES: u64 = 400_000;
+
+/// How many waits on the shared inode's rwsem this scenario expects before it
+/// believes twelve writers were serialised on one lock at all.
+///
+/// Measured over two seconds on the development machine: 2233 of them, 5.8
+/// seconds of aggregate waiting at a mean of 2.6 ms each. The bar is two
+/// hundred, which is wide enough that a busy machine or a different filesystem
+/// does not turn a measurement into a failure, and far above the zero the
+/// private-file run produces.
+const LOCK_EXCLUSIVE_WAITS: u64 = 200;
+
+/// How many times more of them the shared run must have than the private one.
+///
+/// The private run produced none at all, which is the point: an inode's rwsem
+/// is per inode, so twelve writers on twelve inodes never contend it however
+/// fast they run. The ratio rather than an exact zero because a machine doing
+/// something else may contend some other file's rwsem in the same window, and
+/// a scenario that failed on that would be asserting what the machine was
+/// doing.
+const LOCK_SEPARATION: u64 = 20;
+
+/// How long `examples/sched-futex-known-wait.yml` holds its lock while the
+/// other thread waits for it, in milliseconds. The session says the same
+/// number.
+const FUTEX_HOLD_MS: u64 = 500;
+
+/// What counts as the workload's own wait rather than the interpreter's.
+///
+/// The two threads also wait on the interpreter's internal locks, for
+/// microseconds at a time. Half of the injected wait is four orders of
+/// magnitude above those, so it separates them without being a threshold
+/// anyone has to calibrate.
+const LONG_WAIT_NS: u64 = FUTEX_HOLD_MS * 1_000_000 / 2;
+
+/// The name the lock workload's processes carry, which the session filters on.
+const LOCK_PROBE: &str = "omnlockprobe";
+
+/// One machine, two scenarios that start processes under the same name.
+///
+/// `sched.lock` has no per-process target -- the catalog gives it `--system`,
+/// `--pid` and `--tid`, and the workload is twelve separate processes, so a
+/// machine-wide run narrowed by `comm` is the only shape that sees all of
+/// them. Two of these running at once each measure the other's writers, and
+/// the attribution assertion catches it, which is how this lock came to be
+/// here rather than a guess that it might be needed.
+static LOCK_WORKLOAD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds that lock for the length of a scenario, poisoning and all: a test
+/// that panicked while holding it has already failed, and the next one should
+/// still run rather than failing for a reason of somebody else's.
+fn one_lock_workload_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    LOCK_WORKLOAD
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+}
+
+fn scratch(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+}
+
+/// A copy of the shell under a name nothing else on the machine has.
+///
+/// The session filters on `comm`, and `comm` is the basename of what was
+/// exec'd. A workload that ran as `sh` could not be told apart from every other
+/// shell on the machine, and a `--system` measurement of the machine's own
+/// contention is exactly what this scenario must not accidentally assert.
+fn lock_probe() -> Option<PathBuf> {
+    let path = scratch(LOCK_PROBE);
+    if path.exists() {
+        return Some(path);
+    }
+    let shell = Path::new("/bin/sh");
+    if !shell.exists() {
+        return None;
+    }
+    std::fs::copy(shell, &path).ok()?;
+    let mut permissions = std::fs::metadata(&path).ok()?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+    }
+    std::fs::set_permissions(&path, permissions).ok()?;
+    Some(path)
+}
+
+/// Starts the writers and returns them, with the pids they were given.
+///
+/// `shared` decides the only thing that differs between the two runs this
+/// scenario compares: whether all of them append to one file or each to its
+/// own. Same program, same number of processes, same number of writes, same
+/// bytes.
+fn lock_writers(probe: &Path, shared: bool, directory: &Path) -> Vec<std::process::Child> {
+    let _ = std::fs::create_dir_all(directory);
+    (0..LOCK_WRITERS)
+        .filter_map(|index| {
+            let file = if shared {
+                directory.join("shared")
+            } else {
+                directory.join(format!("own.{index}"))
+            };
+            let script = format!(
+                "exec 3>>{}; i=0; while [ $i -lt {LOCK_LINES} ]; do \
+                 echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&3; i=$((i+1)); done",
+                file.display()
+            );
+            Command::new(probe)
+                .arg("-c")
+                .arg(script)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()
+        })
+        .collect()
+}
+
+fn stop(writers: Vec<std::process::Child>) {
+    for mut writer in writers {
+        let _ = writer.kill();
+        let _ = writer.wait();
+    }
+}
+
+/// How many lock waits the run attributed, in waits rather than in events.
+///
+/// One event stands for as many waits as its `count` says: the histogram is
+/// built in the kernel, so the event count is a count of `(task, kind, stack,
+/// bucket)` rows and not of waits.
+fn waits_attributed(result: &Value) -> u64 {
+    total_attribute(result, "count")
+}
+
+/// Every `raw` event of a request, as attribute maps.
+fn raw_events(result: &Value) -> Vec<std::collections::BTreeMap<String, Value>> {
+    outputs(result, "raw")
+        .flat_map(|output| {
+            output["events"]
+                .as_array()
+                .expect("a raw output carries events")
+                .clone()
+        })
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .expect("an event carries attributes")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().expect("a name").to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+// -------------------------------------------------- sched.lock: ground truth
+
+/// Twelve processes appending to one file wait for a kernel lock; the same
+/// twelve appending to twelve files do not.
+///
+/// The property is constructed rather than observed, which is what makes it
+/// ground truth. A write to a regular file holds that file's inode lock for the
+/// duration of the write, so the first run serialises twelve writers on one
+/// lock and the second serialises nothing. Everything else about the two runs
+/// is identical: the same program, the same number of processes, the same
+/// number of writes of the same size, started the same way.
+///
+/// What is asserted is the separation and not a threshold. The measured ratio
+/// on an idle machine was fifty-four; the bar is five, because a machine with
+/// something else on it is still a machine where sharing a lock costs more than
+/// not sharing one, and a collector that reported the machine's own contention
+/// rather than the workload's would fail either way.
+#[test]
+fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
+    let _serialised = one_lock_workload_at_a_time();
+    let Some(probe) = lock_probe() else {
+        eprintln!("skipped: /bin/sh could not be copied, and this workload needs a program with a name of its own to filter on");
+        return;
+    };
+    let directory = scratch("sched-lock-shared-file");
+
+    let mut measured = Vec::new();
+    for shared in [true, false] {
+        let _ = std::fs::remove_dir_all(&directory);
+        let writers = lock_writers(&probe, shared, &directory);
+        assert_eq!(
+            writers.len(),
+            LOCK_WRITERS,
+            "the workload could not be started, so there is nothing to measure"
+        );
+        let pids: Vec<u32> = writers.iter().map(|writer| writer.id()).collect();
+        // Long enough for every writer to be past `exec` and into its loop.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+        let text = spoken(&output);
+        stop(writers);
+        if unprivileged(&text) {
+            eprintln!("skipped: `sched.lock` needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+            let _ = std::fs::remove_dir_all(&directory);
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        let results = results(&output);
+        let result = labelled(&results, "contention");
+
+        // Attribution, and it is exact rather than approximate: every wait this
+        // run reported has to belong to a process this test started. A
+        // `--system` measurement that leaked the machine's own contention into
+        // the answer would show up here and nowhere else.
+        let mut exclusive = (0u64, 0u64);
+        let mut every = (0u64, 0u64);
+        for event in raw_events(result) {
+            assert_eq!(
+                event["comm"].as_str(),
+                Some(LOCK_PROBE),
+                "the session filters on comm and an event carries another: {event:?}"
+            );
+            let pid = event["pid"].as_u64().expect("a pid on every event") as u32;
+            assert!(
+                pids.contains(&pid),
+                "the run attributed a wait to pid {pid}, which is not one of the {} it started",
+                pids.len()
+            );
+            let count = event["count"].as_u64().expect("a weight");
+            let total = event["total_ns"].as_u64().expect("an exact total");
+            every = (every.0 + count, every.1 + total);
+            // The rwsem taken for writing is the file's own inode lock, which
+            // is the lock the workload constructed a fight over.
+            if event["kind"]
+                .as_str()
+                .is_some_and(|kind| kind.contains("write"))
+            {
+                exclusive = (exclusive.0 + count, exclusive.1 + total);
+            }
+        }
+        measured.push((exclusive, every));
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let (shared, private) = (measured[0], measured[1]);
+    eprintln!(
+        "{LOCK_WRITERS} writers appending {LOCK_LINES} lines each.\n  \
+         one shared file:   {} waits on the inode rwsem ({:.2} s), {} waits on any lock\n  \
+         twelve own files:  {} waits on an inode rwsem ({:.2} s), {} waits on any lock",
+        shared.0 .0,
+        shared.0 .1 as f64 / 1e9,
+        shared.1 .0,
+        private.0 .0,
+        private.0 .1 as f64 / 1e9,
+        private.1 .0,
+    );
+
+    assert!(
+        shared.0 .0 >= LOCK_EXCLUSIVE_WAITS,
+        "twelve processes appending to one file serialise on that file's rwsem, and this run \
+         found {} waits on one where it expected at least {LOCK_EXCLUSIVE_WAITS}",
+        shared.0 .0
+    );
+    assert!(
+        shared.0 .0 >= private.0 .0.max(1) * LOCK_SEPARATION,
+        "one shared file produced {} waits on an inode rwsem and twelve private files produced \
+         {}; the rwsem is per inode, so the only difference between these two runs is the one \
+         that should show here",
+        shared.0 .0,
+        private.0 .0
+    );
+    assert!(
+        shared.0 .1 > private.0 .1,
+        "the shared run waited {} ns on inode rwsems and the private run {} ns",
+        shared.0 .1,
+        private.0 .1
+    );
+}
+
+/// A count of lock waits is a throughput measurement wearing a contention
+/// measurement's name, and this scenario is where that was found.
+///
+/// The private-file run -- the one with *no* contention over the thing the
+/// workload shares -- produces two hundred times more lock waits in total than
+/// the shared one. Nothing is wrong with either number. Serialising twelve
+/// writers on one inode makes them slow; slow processes make fewer syscalls;
+/// and it is the syscalls that reach the filesystem's own spinlocks. The
+/// private run is two hundred times faster and pays for it in two hundred
+/// times more brief contention somewhere else.
+///
+/// This test asserts the trap rather than working around it, because it is the
+/// reason `kind` is part of the key: a reader who ranks two runs by how many
+/// lock waits each had will order them backwards, and there is nothing in a
+/// count that says so. It is written up in `docs/scenarios/sched.md`.
+#[test]
+fn more_lock_waits_is_not_more_contention() {
+    let _serialised = one_lock_workload_at_a_time();
+    let Some(probe) = lock_probe() else {
+        eprintln!("skipped: /bin/sh could not be copied");
+        return;
+    };
+    let directory = scratch("sched-lock-throughput");
+    let mut totals = Vec::new();
+    for shared in [true, false] {
+        let _ = std::fs::remove_dir_all(&directory);
+        let writers = lock_writers(&probe, shared, &directory);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+        let text = spoken(&output);
+        stop(writers);
+        if unprivileged(&text) {
+            eprintln!("skipped: `sched.lock` needs CAP_BPF and CAP_PERFMON");
+            let _ = std::fs::remove_dir_all(&directory);
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        let results = results(&output);
+        totals.push(waits_attributed(labelled(&results, "contention")));
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+
+    eprintln!(
+        "lock waits of any kind: {} with the contention, {} without it -- the run that is \
+         serialised is the one with fewer",
+        totals[0], totals[1]
+    );
+    assert!(
+        totals[0] > 0 && totals[1] > 0,
+        "both runs contend something; this one found {totals:?}"
+    );
+    assert!(
+        totals[1] > totals[0],
+        "the finding this test records is that the uncontended run has *more* lock waits \
+         ({} against {}), because it runs faster and reaches more locks. If that has stopped \
+         being true on this machine, the note in docs/scenarios/sched.md needs the new numbers \
+         rather than this test needing a smaller assertion",
+        totals[1],
+        totals[0]
+    );
+}
+
+/// The loss path: a run that could not time a wait says which wait and why.
+///
+/// Every reason this source can lose a wait for is a different fact about the
+/// run and is answered differently -- a map too small for the machine, an
+/// interval inside another interval, a bucket the kernel would not let this cpu
+/// touch -- and a loss reported under the wrong one sends a reader to change
+/// something that was never the problem. The first version of this collector
+/// reported all of them as "the map is full", on a machine where the map held
+/// sixteen thousand entries and nine were in use.
+///
+/// The losses themselves are the kernel's to produce and this test does not
+/// pretend to force them: a lock tracepoint fires inside the code a map update
+/// takes a lock in, so re-entrant refusals happen on a busy machine and not to
+/// order. What is asserted is what holds either way -- the count and the words
+/// agree, and there is never a number without a sentence.
+#[test]
+fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
+    let _serialised = one_lock_workload_at_a_time();
+    let Some(probe) = lock_probe() else {
+        eprintln!("skipped: /bin/sh could not be copied");
+        return;
+    };
+    let directory = scratch("sched-lock-loss");
+    let _ = std::fs::remove_dir_all(&directory);
+    let writers = lock_writers(&probe, true, &directory);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    stop(writers);
+    let _ = std::fs::remove_dir_all(&directory);
+    if unprivileged(&text) {
+        eprintln!("skipped: `sched.lock` needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let result = &results(&output)[0];
+
+    let lost = dropped(result);
+    let reasons = result["losses"]["reasons"]
+        .as_object()
+        .expect("a loss carries its reasons");
+    if lost == 0 {
+        // Stated rather than hidden: this run lost nothing, so what it
+        // establishes is the negative -- a clean run claims no loss.
+        eprintln!(
+            "the contended run lost nothing this time, so what is checked is the negative: \
+             {} events, no drops, no reasons",
+            events_seen(result)
+        );
+        assert!(
+            reasons.is_empty(),
+            "a run that dropped nothing must not name a reason it dropped something: {reasons:?}"
+        );
+        return;
+    }
+
+    assert!(
+        !reasons.is_empty(),
+        "{lost} waits were dropped and the run gave no reason for any of them"
+    );
+    // Each of the four things this source can fail to record has its own
+    // sentence. A reason that is none of them is a number with prose around it.
+    let known = [
+        "than the in-flight map holds",
+        "without ending its first",
+        "already being updated on this cpu",
+        "before it began",
+        "than the histogram holds",
+    ];
+    for reason in reasons.keys() {
+        assert!(
+            known.iter().any(|shape| reason.contains(shape)),
+            "a loss was reported under a reason this scenario does not recognise: {reason}"
+        );
+    }
+    // And it reaches the terminal, which is where a reader is.
+    let rendered = spoken(&session("sched-lock-shared-file.yml", &[]));
+    assert!(
+        rendered.contains("LOSS") || rendered.contains("no loss"),
+        "a run has to say what it did not see:\n{rendered}"
+    );
+}
+
+// ------------------------------------------------- sched.futex: ground truth
+
+/// A lock held for a known time is the wait the other thread reports.
+///
+/// The workload injects the delay: one thread takes a lock and sleeps 250 ms
+/// holding it, and a second asks for the same lock 50 ms later. Its first wait
+/// is 200 ms and its next two are 250 ms each, and all three numbers are in the
+/// session's own source rather than in anything the tool computed.
+///
+/// The check is against the injected delay in two ways, because they fail
+/// differently. The bucket is a fact about the histogram's layout -- a
+/// kernel-side bucket and a userspace one have to agree, and off by one is a
+/// factor of two. The exact total is a fact about the clock: `total_ns` is kept
+/// beside the count precisely because a log2 bucket is a factor of two wide and
+/// a sum built from its bounds would inherit that.
+#[test]
+fn a_lock_held_for_a_known_time_is_the_wait_the_other_thread_reports() {
+    if !have("python3") {
+        eprintln!(
+            "skipped: this workload needs two threads and a lock, and the program that provides \
+             them here is python3, which this machine does not have"
+        );
+        return;
+    }
+    let output = session("sched-futex-known-wait.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: `sched.futex` needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let result = labelled(&results, "waits");
+
+    // Every wait this run reported. The one that matters is the long one:
+    // the workload's threads also wait on the interpreter's own locks, for
+    // microseconds at a time.
+    let mut long_waits: Vec<(u64, u64, u64)> = Vec::new();
+    let mut processes: std::collections::BTreeSet<u64> = Default::default();
+    let mut bucketed = 0;
+    for event in raw_events(result) {
+        processes.insert(event["pid"].as_u64().expect("a pid"));
+        let low = event["wait_ns"].as_u64().expect("a bucketed wait");
+        let tid = event["tid"].as_u64().expect("a tid");
+        let count = event["count"].as_u64().expect("a weight");
+        let total = event["total_ns"].as_u64().expect("an exact total");
+
+        // The bucket has to contain the exact total, on every event and
+        // whatever this machine was doing. The histogram is built in the
+        // kernel and re-bucketed by the emit layer, and off by one there is a
+        // factor of two in every number this source reports -- so it is
+        // checked against the value rather than against a bucket the workload
+        // was expected to land in.
+        if count == 1 {
+            assert!(
+                low <= total && total < low.saturating_mul(2).max(1),
+                "a wait of {total} ns is reported in the bucket that starts at {low} ns"
+            );
+            bucketed += 1;
+        }
+        if total >= LONG_WAIT_NS {
+            long_waits.push((tid, low, total));
+        }
+    }
+    assert!(
+        bucketed > 0,
+        "no event carried a single wait, so the kernel's bucketing was never crossed against \
+         the emit layer's:\n{text}"
+    );
+
+    // The target narrowed to one process, so nothing else on the machine may
+    // appear -- and `sys_enter` fires on every syscall of every process, so
+    // this is the assertion that the filter ran at all.
+    assert_eq!(
+        processes.len(),
+        1,
+        "the run watched one launched program and reported waits from {} processes",
+        processes.len()
+    );
+
+    // Exactly one, by construction rather than by luck: the main thread takes
+    // the lock before the waiter exists, so the waiter cannot arrive early and
+    // find it free, and nothing else in the program waits for anything.
+    assert_eq!(
+        long_waits.len(),
+        1,
+        "the workload makes one thread wait about {FUTEX_HOLD_MS} ms and nothing else in it \
+         waits at all; this run reports {} waits longer than {} ms: {long_waits:?}\n{text}",
+        long_waits.len(),
+        LONG_WAIT_NS / 1_000_000,
+    );
+
+    let (waiter, bucket, measured) = long_waits[0];
+    let expected_ns = FUTEX_HOLD_MS * 1_000_000;
+    eprintln!(
+        "a lock held {FUTEX_HOLD_MS} ms: thread {waiter} waited {measured} ns against \
+         {expected_ns} ns injected, reported in the bucket starting at {bucket} ns"
+    );
+    assert!(
+        close_to(measured, expected_ns),
+        "the workload held the lock for {expected_ns} ns and the run reports a wait of \
+         {measured} ns"
+    );
+    // And the wait can only be shorter than the hold, never longer: it begins
+    // when the waiter asks, which is after the lock was taken.
+    assert!(
+        measured <= expected_ns + expected_ns / 10,
+        "a thread waited {measured} ns for a lock held {expected_ns} ns"
+    );
+}
+
+// --------------------------------------------------- sched.irq: ground truth
+
+/// Every interrupt this run timed is one the kernel also counted.
+///
+/// `/proc/interrupts` is the ground truth, and it is a good one for the reason
+/// `docs/contributing.md` asks for: the kernel maintains those counters itself,
+/// in a different place and for a different reason, so they are not this tool
+/// checking its own arithmetic. What this source adds is the only thing that
+/// file does not have -- how long each handler ran.
+///
+/// The check is an inequality, deliberately. The tool attaches after the first
+/// read of the file and detaches before the second, so what it counted is
+/// strictly inside what the file counted, always and on any machine. An
+/// equality would be an assertion about how quiet the machine was at the edges
+/// of the window, which is exactly the shape of test findings 11 and 35 are
+/// about.
+///
+/// Shared interrupt lines are left out and the reason is not incidental: the
+/// tracepoint fires once per handler on a line, and `/proc/interrupts` counts
+/// once per interrupt, so on a line with two handlers the tool legitimately
+/// counts twice what the file does.
+#[test]
+fn every_interrupt_this_run_timed_is_one_the_kernel_also_counted() {
+    let Some(before) = interrupt_counts() else {
+        eprintln!(
+            "skipped: /proc/interrupts is not readable, and it is this scenario's ground truth"
+        );
+        return;
+    };
+    let output = session("sched-irq-against-procfs.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!(
+            "skipped: `sched.irq` needs CAP_BPF and CAP_PERFMON, which this machine does not grant"
+        );
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let after = interrupt_counts().expect("/proc/interrupts was readable a moment ago");
+    let results = results(&output);
+    let result = labelled(&results, "handlers");
+
+    let mut measured: std::collections::BTreeMap<u64, (u64, u64, String)> = Default::default();
+    for event in raw_events(result) {
+        let irq = event["irq"].as_u64().expect("an interrupt number");
+        let entry = measured.entry(irq).or_insert((0, 0, String::new()));
+        entry.0 += event["count"].as_u64().expect("a weight");
+        entry.1 += event["total_ns"].as_u64().expect("an exact total");
+        entry.2 = event["name"].as_str().expect("a handler name").to_owned();
+    }
+    assert!(
+        !measured.is_empty(),
+        "a machine with a disk and a network card takes interrupts, and this run timed none:\n{text}"
+    );
+
+    let mut compared = 0;
+    for (irq, (count, total_ns, name)) in &measured {
+        let Some(after) = after.get(irq) else {
+            continue;
+        };
+        // A line several devices share counts once per interrupt in the file
+        // and once per handler here, so the two are not comparable.
+        if after.shared {
+            continue;
+        }
+        let delta = after
+            .count
+            .saturating_sub(before.get(irq).map_or(0, |row| row.count));
+        assert!(
+            *count <= delta,
+            "irq {irq} ({name}): this run timed {count} handler runs and the kernel's own \
+             counter moved by {delta} over a window that contains this run entirely"
+        );
+        assert!(
+            *total_ns > 0 || *count == 0,
+            "irq {irq} ({name}): {count} handler runs took no time at all"
+        );
+        // The names have to be the same string, or `--filter name` selects
+        // something other than what `/proc/interrupts` calls it.
+        assert!(
+            after.actions.contains(name),
+            "irq {irq}: this run calls the handler `{name}` and /proc/interrupts calls it `{}`",
+            after.actions
+        );
+        compared += 1;
+    }
+    assert!(
+        compared > 0,
+        "every interrupt this run timed was on a shared line, so nothing could be compared \
+         against the kernel's own counter"
+    );
+
+    // And the busiest line has to be most of what the kernel saw, not a
+    // fraction of it: an inequality alone would be satisfied by a collector
+    // that reported one interrupt in a hundred.
+    let (irq, (count, _, name)) = measured
+        .iter()
+        .filter(|(irq, _)| after.get(irq).is_some_and(|row| !row.shared))
+        .max_by_key(|(_, (count, _, _))| *count)
+        .expect("a busiest line among the comparable ones");
+    let delta = after[irq]
+        .count
+        .saturating_sub(before.get(irq).map_or(0, |row| row.count));
+    eprintln!(
+        "irq {irq} ({name}): {count} handler runs timed against {delta} the kernel counted over \
+         a window that contains this run"
+    );
+    assert!(
+        count * 2 >= delta,
+        "irq {irq} ({name}) fired {delta} times by the kernel's own count and this run timed \
+         {count} of them, which is less than half"
+    );
+}
+
+/// One interrupt line of `/proc/interrupts`.
+struct InterruptLine {
+    count: u64,
+    /// The handler names at the end of the line, as one string.
+    actions: String,
+    /// Whether more than one device shares this line.
+    shared: bool,
+}
+
+/// `/proc/interrupts`, summed across cpus, by interrupt number.
+fn interrupt_counts() -> Option<std::collections::BTreeMap<u64, InterruptLine>> {
+    let text = std::fs::read_to_string("/proc/interrupts").ok()?;
+    let mut lines = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let Some((number, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(irq) = number.trim().parse::<u64>() else {
+            // The named lines -- `NMI`, `LOC`, `RES` -- are not interrupt
+            // numbers and no handler fires for them.
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let counts: Vec<u64> = fields
+            .iter()
+            .map_while(|field| field.parse::<u64>().ok())
+            .collect();
+        // What follows the per-cpu counts is the chip, the hardware interrupt,
+        // the trigger and then the handler names, comma-separated.
+        let tail = fields[counts.len()..].join(" ");
+        let actions = tail
+            .split_once("Edge")
+            .or_else(|| tail.split_once("Level"))
+            .or_else(|| tail.split_once("Fasteoi"))
+            .map(|(_, actions)| actions.trim().to_owned())
+            .unwrap_or(tail);
+        lines.insert(
+            irq,
+            InterruptLine {
+                count: counts.iter().sum(),
+                shared: actions.contains(','),
+                actions,
+            },
+        );
+    }
+    Some(lines)
+}
+
+// ------------------------------------ sched.numa_balance: the machine's limit
+
+/// A machine with one NUMA node reports no balancing decisions, and says that
+/// the empty series is the machine.
+///
+/// This is the one source in the wave whose property cannot be created here,
+/// and the difference between a source that found nothing and a machine that
+/// could never produce anything is exactly what a reader needs. So the test is
+/// not a skip: it asserts that the tool says which of the two it is, with the
+/// number that settles it.
+#[test]
+fn a_machine_with_one_numa_node_says_the_empty_series_is_the_machine() {
+    let nodes = std::fs::read_dir("/sys/devices/system/node")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix("node")
+                        .is_some_and(|rest| rest.parse::<u32>().is_ok())
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    let output = session("sched-numa-balance.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: `sched.numa_balance` needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let result = labelled(&results, "decisions");
+    let degradations: Vec<String> = result["degradations"]
+        .as_array()
+        .map(|notes| {
+            notes
+                .iter()
+                .filter_map(|note| note.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if nodes <= 1 {
+        eprintln!(
+            "this machine has {nodes} NUMA node, so the balancer has nothing to decide and this \
+             source can produce no measurement here; what is checked is that the run says so"
+        );
+        assert_eq!(
+            events_seen(result),
+            0,
+            "a machine with one NUMA node cannot produce a balancing decision, and this run \
+             reported some:\n{text}"
+        );
+        assert!(
+            degradations
+                .iter()
+                .any(|note| note.contains("NUMA node") && note.contains("never")),
+            "an empty series from a machine that cannot produce one and an empty series from a \
+             balancer with nothing to do look identical; the run has to say which: \
+             {degradations:?}"
+        );
+    } else {
+        // The claim only holds one way. On a machine with somewhere to move a
+        // task to, the run must not tell a reader that the series is empty
+        // because of the machine.
+        assert!(
+            !degradations
+                .iter()
+                .any(|note| note.contains("NUMA node") && note.contains("never")),
+            "this machine has {nodes} NUMA nodes and the run claims it has nowhere to balance \
+             to: {degradations:?}"
+        );
+        eprintln!(
+            "{nodes} NUMA nodes: the balancer made {} decisions over this window",
+            events_seen(result)
+        );
+    }
+}
+
+// ------------------------------------------------- the sweep and the refusals
+
+/// The machine-wide half of the capability sweep.
+///
+/// Its companion is `every_emit_each_collected_source_declares_renders`, and
+/// the two are separate files because one run observes one target: a session
+/// mixing a launched program with the machine is refused before anything
+/// starts.
+#[test]
+fn every_emit_the_machine_wide_sources_declare_renders() {
+    let output = session("sched-sweep-machine.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: every source in this sweep needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+
+    for (label, source) in [
+        ("lock-every-emit", "sched.lock"),
+        ("irq-traced", "sched.irq"),
+        ("numa-traced", "sched.numa_balance"),
+    ] {
+        let declared = declared_emits(source);
+        let rendered = emits(labelled(&results, label));
+        for emit in &declared {
+            assert!(
+                rendered.contains(emit),
+                "`{source}` declares `{emit}` and the sweep did not render it; \
+                 rendered {rendered:?}, declared {declared:?}"
+            );
+        }
+    }
+
+    // `count` narrows what any source may emit -- one measurement over one
+    // window is not a distribution and not a ranking -- and the three it does
+    // allow still have to render.
+    for label in ["irq-counted", "numa-counted"] {
+        let rendered = emits(labelled(&results, label));
+        for emit in ["rate", "raw", "summary"] {
+            assert!(
+                rendered.contains(&emit.to_owned()),
+                "`{label}` did not render `{emit}`: {rendered:?}"
+            );
+        }
+    }
+}
+
+/// A source whose targets the catalog narrows has to refuse the others before
+/// anything attaches, and say which the entry declares.
+///
+/// These are exit 2 -- a request that cannot mean anything -- rather than exit
+/// 1 or 3, and the difference is the whole of class D: a reader who takes a
+/// rejection for a machine limit goes looking for a kernel option, and one who
+/// takes it for a missing collector goes looking for a newer build.
+#[test]
+fn the_targets_and_modes_these_entries_do_not_declare_are_rejected_by_name() {
+    let cases = [
+        // `sys_enter` fires on every syscall on the machine, so a machine-wide
+        // futex histogram is mostly idle thread pools waiting on purpose. The
+        // entry declares no system target and the validator says so.
+        (
+            vec![
+                "sched.futex",
+                "--system",
+                "-m",
+                "trace",
+                "-e",
+                "hist",
+                "-d",
+                "50ms",
+            ],
+            "no `system` support",
+        ),
+        // An interrupt handler belongs to no process.
+        (
+            vec![
+                "sched.irq",
+                "--pid",
+                "1",
+                "-m",
+                "trace",
+                "-e",
+                "hist",
+                "-d",
+                "50ms",
+            ],
+            "no `pid` support",
+        ),
+        // A lock wait is a duration between two events; counting them would
+        // report a number of waits under a unit of nanoseconds.
+        (
+            vec![
+                "sched.lock",
+                "--system",
+                "-m",
+                "count",
+                "-e",
+                "summary",
+                "-d",
+                "50ms",
+            ],
+            "cannot be observed in `count` mode",
+        ),
+        // The balancer's decisions are the machine's.
+        (
+            vec![
+                "sched.numa_balance",
+                "--pid",
+                "1",
+                "-m",
+                "count",
+                "-e",
+                "summary",
+                "-d",
+                "50ms",
+            ],
+            "no `pid` support",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = omn(&args);
+        let text = spoken(&output);
+        assert_eq!(
+            exit_code(&output),
+            2,
+            "`{}` asks for something the catalog does not offer, which is a rejection and not a \
+             machine limit:\n{text}",
+            args.join(" ")
+        );
+        assert!(
+            text.contains(expected),
+            "`{}` was rejected without saying `{expected}`:\n{text}",
+            args.join(" ")
+        );
+    }
 }

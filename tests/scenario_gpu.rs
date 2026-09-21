@@ -1724,3 +1724,124 @@ fn a_target_that_exits_without_being_reaped_ends_the_run() {
     );
     let _ = child.wait();
 }
+
+// ===========================================================================
+// The sixth wave: `gpu.job`
+//
+// The only collector in this wave that cannot be exercised on the machine it
+// was written on, and the only one in this build on the classic tracepoint
+// path. What can be checked here is checked here; what cannot is said in those
+// words in `docs/families/gpu.md` rather than asserted away.
+// ===========================================================================
+
+/// The answer this machine gives has to stay "the machine", now that the build
+/// has the collector.
+///
+/// Before the sixth wave `gpu.job` had no collector, and a machine without a
+/// DRM scheduler and a build without a collector would have been two reasons
+/// for the same silence. Now only one of them is true here, and the exit code
+/// has to say which: exit 1 sends a reader to their hardware and exit 3 to
+/// their build, and there is nothing to find in the second.
+///
+/// This is the class D refusal for this source, and it is the only class that
+/// can be run here at all.
+#[test]
+fn the_collector_exists_and_this_machine_is_still_the_thing_that_cannot_serve_it() {
+    let listed = stdout(&omn(&["list", "gpu.job"]));
+    assert!(
+        listed.contains("collector written"),
+        "`gpu.job` has a collector in this build and the listing does not say so:\n{listed}"
+    );
+
+    let output = omn(&["-f", "examples/gpu-job-latency.yml"]);
+    if output.status.success() {
+        // A machine with amdgpu, i915 or xe, and a readable tracefs: the
+        // session measures, which is the whole reason the collector exists.
+        eprintln!("this machine has a DRM scheduler: the session measured rather than refusing");
+        return;
+    }
+    let complaint = stderr(&output);
+    assert_eq!(
+        code(&output),
+        EXIT_UNAVAILABLE,
+        "the collector is written, so a refusal here is the machine's and not the build's; \
+         exit {EXIT_NOT_IMPLEMENTED} would send a reader looking for a newer build that would \
+         not help:\n{complaint}"
+    );
+    assert!(
+        !complaint.contains("no collector is written"),
+        "`gpu.job` has a collector and the refusal still says it does not:\n{complaint}"
+    );
+    assert!(
+        complaint.contains("gpu_scheduler:drm_run_job"),
+        "the refusal must name what is absent:\n{complaint}"
+    );
+}
+
+/// What this machine cannot check, said with the numbers that show why.
+///
+/// A scenario that states its limit is worth more than one that hides it, and
+/// this source's limit is total: there is no DRM scheduler under the NVIDIA
+/// proprietary driver, so neither tracepoint exists, and tracefs is unreadable
+/// by the uid the tool runs as, so even the field layout the collector reads at
+/// startup cannot be looked at. Both are printed rather than described, because
+/// the next person to read this will be on a different machine.
+#[test]
+fn what_this_machine_cannot_check_about_gpu_job_is_named_with_its_numbers() {
+    let tracefs = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|root| root.join("events").is_dir());
+    let readable = tracefs
+        .as_ref()
+        .is_some_and(|root| std::fs::read_dir(root.join("events/gpu_scheduler")).is_ok());
+    let drivers: Vec<String> = std::fs::read_dir("/sys/class/drm")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    eprintln!(
+        "gpu.job on this machine: tracefs at {:?}, its `gpu_scheduler` events {}readable, \
+         /sys/class/drm holds {:?}",
+        tracefs.as_ref().map(|root| root.display().to_string()),
+        if readable { "" } else { "not " },
+        drivers
+    );
+
+    if readable {
+        // A machine that can see the events can answer the one question this
+        // test exists for: whether its kernel publishes the fence's identity
+        // or only the pointer this build refuses to key on.
+        let format = tracefs
+            .expect("a root, since its events were readable")
+            .join("events/gpu_scheduler/drm_sched_process_job/format");
+        match std::fs::read_to_string(&format) {
+            Ok(text) => eprintln!(
+                "this kernel's `drm_sched_process_job` publishes the fence's identity: {}",
+                text.contains("fence_context")
+            ),
+            Err(error) => eprintln!("{} cannot be read: {error}", format.display()),
+        }
+        return;
+    }
+
+    // The refusal is the only behaviour this machine can exercise, and it has
+    // to send the reader to the right thing.
+    let complaint = stderr(&omn(&[
+        "gpu.job", "--system", "-m", "trace", "-e", "hist", "-d", "50ms",
+    ]));
+    assert!(
+        complaint.contains("tracefs") || complaint.contains("gpu_scheduler"),
+        "this machine cannot serve `gpu.job` and the refusal names neither the tracepoints nor \
+         the filesystem they would be read through:\n{complaint}"
+    );
+    assert!(
+        !complaint.contains("CAP_BPF"),
+        "the eBPF capabilities are not what is missing here, and a refusal that names them \
+         sends the reader to a setcap that will not help:\n{complaint}"
+    );
+}

@@ -1,0 +1,46 @@
+# The balancer giving up on a task, on a machine that has two places to put it.
+#
+#   omn -f examples/sched-numa-balance.yml
+#
+# Automatic NUMA balancing samples what memory a task touches and tries to put
+# the task and its pages on the same node. `sched_stick_numa` is the event for
+# the decision *not* to: the balancer found a better node and left the task
+# where it was, because moving it would have cost more than the remote accesses
+# do. A machine producing these in quantity has tasks whose placement the
+# balancer has given up on, which is a kind of slowness that appears in no cpu
+# measurement at all -- the task runs at full speed and every load takes longer.
+#
+# **This session cannot produce a number on the machine this repository is
+# developed on, and that is the scenario.** That machine has one NUMA node:
+#
+#   $ ls -d /sys/devices/system/node/node*
+#   /sys/devices/system/node/node0
+#
+# There is no balancing to do when there is nowhere else to be, so the tracepoint
+# never fires and the series is empty. An empty series from a machine that cannot
+# produce one and an empty series from a balancer with nothing to do look
+# identical, so the run says which it is:
+#
+#   degraded: this machine has 1 NUMA node, so the balancer has nowhere to move
+#   anything to and this source can never report a decision here: an empty
+#   series is the machine, not the workload
+#
+# On a two-socket machine, run something that allocates on one node and runs on
+# the other -- `numactl --membind=0 --cpunodebind=1 ./workload` -- and the
+# decisions appear, keyed by the task with the node it did not move to.
+#
+# The node is not in the tracepoint. The kernel event carries cpus; a cpu belongs
+# to a node, and that mapping is in `/sys/devices/system/node`, which a program
+# in the kernel cannot read and the collector can. `node` on an event is the node
+# of the cpu the balancer wanted, and `src_node` is the one the task stayed on.
+name: what the NUMA balancer gave up on
+format: text
+duration: 2s
+
+requests:
+  - label: decisions
+    source: sched.numa_balance
+    target: system
+    mode: count
+    emit: [rate, raw, summary]
+    keys: [task]
