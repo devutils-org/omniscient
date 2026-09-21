@@ -1,5 +1,11 @@
 # `proc` — implementation notes
 
+> Two waves, in order. Everything down to the rule below is the first wave's
+> record, kept as it was written; **the four sources it calls blocked have since
+> landed**, and the second half of this file starts at
+> *"The four event sources, over eBPF"*. Read the status table there for what is
+> true today.
+
 ## Status
 
 | Source | Backend | Ground truth |
@@ -8,7 +14,8 @@
 | `proc.threads` | `fs:proc` | same, for threads |
 
 Blocked on the eBPF layer: `proc.syscall`, `proc.exec`, `proc.exit`,
-`proc.signals`.
+`proc.signals`. *(No longer: all four landed in the sixth wave. Their row of the
+status table is in the second half of this file.)*
 
 ## Findings
 
@@ -45,6 +52,9 @@ against a limit of 1024. The soft limit and the headroom travel with the count,
 and a test asserts all three are present.
 
 ## Needs from the shared layer
+
+*(Both were answered by the sixth wave; what is still wanted is at the end of
+this file.)*
 
 - The eBPF layer, for the other four sources. `proc.syscall` in particular needs
   in-kernel aggregation before it is usable: `raw_syscalls` fires on everything,
