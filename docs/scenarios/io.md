@@ -703,6 +703,26 @@ either way. Neither is in files this stream owns, and they are recorded here
 rather than fixed for the same reason a defect is: the scenario found them, and
 working around them would have measured nothing.
 
+**The sixth wave saw three more of the same species, and the load explains
+them.** Over five `make check` runs, three different tests failed once each and
+every one passed in isolation immediately afterwards:
+
+- `tests/budget.rs::the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes`
+  — the one above, again.
+- `tests/family_cpu.rs::per_cpu_utilisation_reports_one_series_for_each_core_asked_for`.
+- `tests/encoders.rs::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`.
+
+None of them is in a file this stream touched, and none exercises code it
+changed. The machine's load average was between 7 and 9 on 24 cores with none of
+this stream's own processes running, because five sibling streams were running
+their suites at the same time — which is what `docs/open-findings.md` describes
+under "eight streams running their suites at once, which is every wave this
+project has had". The block scenarios are the heaviest thing in the suite and
+they are a suspect on their own merits, so it is worth saying that
+`cargo test --test scenario_io --test family_io` was run repeatedly and never
+flapped: the three failures are the shared machine, not the load this wave adds
+to it.
+
 ---
 
 ## Running these
@@ -752,3 +772,283 @@ Nothing in the tool is wrong here: it reported what the kernel said, which is
 what it is for. The scenario now asserts the invariant with the resolution of
 the thing that reports it, and a violation larger than a microsecond is the
 tool's rather than the kernel's.
+
+---
+
+# The block layer's scenarios — the sixth wave
+
+Six scenarios for the four sources that see one request at a time:
+`io.latency`, `io.queue`, `io.size` and `io.writeback`. They are in the same
+four classes, and what is different about them is the kind of thing they can be
+checked against. The procfs scenarios above check a **quantity of bytes**; these
+check a **number of requests**, chosen by the workload before the run.
+
+## The workload these rest on, and why it is exact
+
+One page read with `O_DIRECT`, issued `n` times on one thread.
+
+```rust
+let file = OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(path)?;
+for index in 0..count {
+    libc::pread(fd, aligned_page, 4096, (index * 4096) as off_t);
+}
+```
+
+Three properties, and each of them is what makes a claim possible:
+
+- **The page cache is bypassed**, so every read reaches the block layer. Without
+  it the count depends on what the machine happened to be caching.
+- **The reads are issued one at a time**, so the block layer has nothing to
+  merge them with. A merged pair would be one request for two reads.
+- **Each is one page at a page-aligned offset**, so none of them spans two
+  extents. A read that did would be two requests for one read.
+
+One read, one request, one page. And the filter is `--tid`, not `--pid`:
+`cargo test` runs its tests in parallel threads of one process, so a process
+filter catches every other scenario's I/O as well. A thread filter catches
+exactly these reads, which is what turns "at least this much" into "exactly this
+many".
+
+The file has to be on a real block device. `/tmp` is a tmpfs on this machine and
+a scenario about block requests written there measures nothing at all -- which
+reads exactly like a collector that does not work, and cost the better part of a
+session before `CARGO_TARGET_TMPDIR` was used instead.
+
+## The scenarios
+
+### 8. A known number of requests, found one for one
+
+`a_known_number_of_direct_reads_is_found_one_for_one`, and
+`examples/io-known-requests.yml`.
+
+4096 one-page reads. The assertion is in two halves that catch different
+mistakes. The **upper** bound is exact -- a read cannot produce two requests, so
+anything above 4096 is double counting. The **lower** bound is 99 %, and the one
+percent is the window's own edge: a request issued in the last moments of the
+run is published after the final drain. That is not a calibrated threshold.
+Every mistake this scenario exists to catch is out by a *factor*: a collector
+reporting sectors is out by 512, one reading `__data_len` after
+`blk_update_request` decremented it reports zero, one counting completions
+rather than issues differs on every partially completed request. None of them
+lands within one percent of the truth.
+
+And the sharper half: **the set of request sizes in the series must be exactly
+`{4096}`**. Not a mean, not a maximum -- the set. A collector that let anything
+else into a thread's series would fail that before it failed the count.
+
+### 9. Two mechanisms counting the same requests
+
+`the_tracer_and_the_kernels_own_counter_see_the_same_requests`.
+
+This is the backend comparison this family could not make until now, and it is
+across *sources* rather than across a chain. `/proc/diskstats` counts the
+operations a device completed; the block tracer counts the requests it was
+issued; for the same window those are the same requests counted twice by two
+mechanisms that share no code at all.
+
+The check is one-sided on purpose and the reason is written into it: `io.size`
+is filtered to one thread and the kernel's counter is not, so the counter is the
+ceiling and the machine's own background I/O is in it. What the comparison
+catches is the failure that matters -- a tracer reporting *more* requests than
+the device completed, which is double counting, or a fraction of them, which is
+silent loss.
+
+`BRIEF.md` asked for the comparison "where a source now has both an eBPF and a
+procfs backend". No source does: `io.bytes`, `io.iops` and `io.merges` declare
+one and this wave did not write it, deliberately. Adding a `bpf:raw_tp`
+collector for `io.bytes` would move every existing `io.bytes --system` run onto
+a backend landing in the same wave, and the family's whole procfs half is
+already checked against the device. The comparison above is the same question
+asked without moving anything.
+
+### 10. A recycled pointer, and how far the scope separates its lives
+
+`a_recycled_request_pointer_is_told_apart_by_its_scope`.
+
+Eight concurrent readers, a few hundred pointers, a hundred thousand requests.
+The assertion is a **separation of two orders of magnitude** rather than a
+threshold: a bare pointer would give as many distinct keys as there are
+pointers, and the scope gives hundreds of times more. That is the whole claim
+`scoped_eq` rests on.
+
+What the run then *reports* is the residual, because it is real:
+
+```
+166448 events, 527 pointers, 165921 reuses, 5722 keys used twice
+```
+
+`blk_time_get_ns()` caches its reading for the lifetime of the submitting task's
+plug, so requests created inside one plug section share a timestamp and two
+lives of one pointer inside one section are one key. 96.6 % separated, and the
+rest named. The scenario prints its own numbers rather than asserting the
+percentage, because how many are left over depends on how the plugs fall.
+
+It also refuses to pass quietly on a quiet machine: if no pointer was reused at
+all, it says so and says that the run therefore proved nothing about recycling.
+
+### 11. The join the engine was written for
+
+`the_two_halves_of_a_request_join_across_two_collectors`, and
+`examples/io-request-halves.yml`.
+
+`scoped_eq` is one of the four match kinds the join engine implements, and until
+this wave it was the only one **nothing produced** -- a quarter of the engine
+that resolved, validated, and had never once run against real events.
+
+```
+join queue-then-device  io.queue -> io.latency  evidence KEY
+  1273 of 1273 `io.latency` events attributed (100.0 %); 0 unmatched
+  states: 1273 opened, 1182 replaced, 91 still open at the end
+```
+
+What this checks is not that the engine works -- `tests/join_engine.rs` holds
+that -- but that **two independently loaded program sets agree about what a
+request is**. They do only because the scope is the kernel's own
+`request.start_time_ns` and not a timestamp either of them took; a scope either
+one invented would differ between them, the join would match nothing, and it
+would report that as a finding about the machine rather than as its own bug.
+
+The 1182 replacements are the recycling of scenario 10 seen from the engine's
+side: a state filed under a pointer, replaced when that pointer opens again.
+
+### 12. The ring, driven until it overflows
+
+`driving_the_block_tracer_past_the_ring_says_how_much_it_lost`, and
+`examples/io-ring-overflow.yml`.
+
+The BPF ring buffer does not report its own overflows: `bpf_ringbuf_output`
+returns an error, the record is gone, and nothing anywhere would record that it
+existed. So every program in this layer carries its own drop counter, and this
+is the check that the counter reaches the output.
+
+```
+609880 events over 3.02s
+LOSS: 93274 dropped, 0 failed reads, 8 late ticks, 0 undecoded, 0 throttled
+  194x the block ring was full: requests completed faster than they were drained
+```
+
+The arithmetic: 256 KiB of ring, 96 bytes plus an 8-byte header per record,
+drained every ten milliseconds -- so it overflows above roughly 250 000 requests
+a second. Thirty-two concurrent one-page readers reach 280 000 on this machine's
+NVMe. **A slower device cannot**, and rather than passing quietly the scenario
+then prints the rate it managed against the rate it needed -- "32 readers issued
+N requests in Ts, which is R a second, and the ring overflows above about
+250000" -- and says that the run correctly reported no loss over the events it
+did see.
+
+That is the shape `BRIEF.md` asks for and the shape findings 11 and 35 were
+about: a scenario that states its limit is worth more than one that hides it.
+
+### 13. A `sync` that waited for the device
+
+`a_sync_produces_writeback_rounds_that_waited_for_the_device`, and
+`examples/io-writeback-rounds.yml`.
+
+`sync(2)` does not return until the data is out, and it asks for `WB_SYNC_ALL`
+-- the mode in which the flusher waits for the device rather than handing it
+work and moving on. So a window containing a `sync` of a freshly written file
+must contain at least one `WB_SYNC_ALL` round. That is a property the scenario
+created, not one it observed.
+
+Deliberately `sync(2)` and not `fsync`: an `fsync` of one file goes down the
+filesystem's own path and on btrfs never reaches the generic flusher at all.
+A first version used `sync_all` on the file handle and saw three rounds and zero
+pages for a 256 MiB write, which looked like a broken collector and was a
+misunderstanding of which syscall drives which path.
+
+Every round's duration is also required to fit inside the window it was measured
+in. That is the cheap check that catches a duration computed from an
+uninitialised timestamp, which is not a large number but the machine's whole
+uptime.
+
+## What cannot be verified here — the block half
+
+Four things, each with the numbers that show why.
+
+**The pages a writeback round wrote, against a known quantity.** 256 MiB written
+buffered and `sync`ed came back as six rounds and 976 pages -- 3.8 MiB, one and
+a half percent. btrfs writes its delayed-allocation extents through its own
+workers on the transaction commit, not through `wb_writeback`, so the generic
+flusher's budget never accounts for them. Every writable filesystem on this
+machine is btrfs; `/boot` is vfat and root-only. On ext4 or xfs the number would
+be the write, and the scenario that checks it belongs on a machine that has one.
+
+**A software queue that actually queues, in depth.** The only block device here
+runs the `none` scheduler, so 1563 of 1657 requests in a measured run were
+issued directly. The 94 that did queue are a real measurement and are checked
+for shape, but a distribution of queueing times under `mq-deadline` or `bfq`
+needs `echo mq-deadline > /sys/block/nvme0n1/queue/scheduler`, which needs root.
+It belongs with the phase 8 harness, beside the `dm-delay` injection the procfs
+half of this document already asks for.
+
+**A ring overflow on a device that cannot be driven to 250 000 requests a
+second.** Named above; the scenario reports the rate it reached.
+
+**The residual of the scoped key.** 5722 of 165921 reuses were not separated,
+because the kernel's stamp does not change inside a plug. Nothing here can close
+that -- it is a property of the key, and item 5 of the sixth wave's section in
+`docs/open-findings.md` says what would.
+
+## Defects found — the block half
+
+### 10. A queueing time of zero reported as a measurement that did not happen
+
+The first `io.queue` reported **0 events** over a device moving 200 MB/s, with a
+note saying 17 issues had no insert and were "already in flight when the
+programs attached". Every part of that was wrong except the count.
+
+`block_rq_insert` does not fire on a blk-mq queue with no I/O scheduler: the
+request is issued directly and never goes on a software queue. So the right
+answer is *this device does not queue*, and what the tool said was *this tool
+cannot see your queue*. Those are opposite answers and a reader acting on the
+second would go looking for a kernel or a capability.
+
+Fixed by distinguishing the two cases with the kernel's own creation stamp -- a
+request created after the programs attached would have been seen at its insert
+had there been one -- and publishing the direct issues at zero with
+`queued = direct`. The run now says which, and how many.
+
+### 11. The catalog's caveat about writes, measured and half wrong
+
+`io.latency` carries "writes are not [attributable], they leave through
+writeback in a kworker". Measured against a program that wrote 64 MiB and
+`fsync`ed them, 511 write requests came back attributed to it by name. An
+`fsync`ed write is submitted in the calling task's own context.
+
+Not fixed in the catalog, because the caveat is not owned by this stream and
+because it is true of the case it names. What this wave did instead is make the
+correction a measurement: `examples/io-my-own-reads.yml` shows both halves and
+says which is which, and `docs/families/io.md` records the split.
+
+### 12. A scenario that checked nothing, in green, for an hour
+
+Every one of the six scenarios above skipped with
+
+```
+skipped: the build directory is not on a block device
+(.../target/tmp/probe: No such file or directory), so no write of it reaches one
+```
+
+because `no_device_here` was handed a path that does not exist and
+`Path::canonicalize` failed on it rather than on the device question. Six tests
+passed without measuring anything, which is the exact shape `STATE.md` warns
+about under "a test that skips is not a test that passes" and the exact shape
+findings 11 and 35 record.
+
+It was caught by running the new scenarios with `--nocapture` and reading what
+they said, which is the only thing that catches it. Fixed by probing
+`CARGO_TARGET_TMPDIR` itself, which exists, the way the five older scenarios in
+this file already did.
+
+### 13. `tests/cli.rs` named a source as its example of one with no collector
+
+`a_valid_request_with_no_collector_names_the_ones_that_exist` ran
+`io.latency --system -m trace -e hist` and required exit 3. The assertion is
+about the *shape of a refusal*, and it broke because the refusal stopped
+happening -- which is a false failure that every wave of collectors will produce
+again.
+
+Fixed by choosing the source from the build: the first catalog entry none of
+whose backends `omn::collect::implements`, which also has a `system` target and
+a `raw` emit so the validator does not refuse it first. Streams B through E land
+collectors in this wave too and will not hit it.
