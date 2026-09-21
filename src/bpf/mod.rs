@@ -29,6 +29,8 @@
 pub mod attach;
 pub mod btf;
 mod insn;
+mod io;
+mod io_writeback;
 mod map;
 mod migrate;
 mod offcpu;
@@ -40,6 +42,8 @@ mod wakeup;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
+pub use io::{BlockEvent, BlockProgram, Stage, Submitter, NO_OPEN, SCOPE_IS_OURS};
+pub use io_writeback::{Writeback, WritebackProgram};
 pub use migrate::{Migration, MigrationProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use runqlat::{RunqLat, RunqLatProgram};

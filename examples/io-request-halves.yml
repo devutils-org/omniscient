@@ -1,0 +1,84 @@
+# Where did a block request spend its time -- queueing, or on the device?
+#
+#   omn -f examples/io-request-halves.yml
+#
+# This is the session the join engine was written for and the one it waited two
+# years to have a producer for. `scoped_eq` is one of the four match kinds the
+# engine implements and until these two collectors existed it was the only one
+# **nothing produced**: a quarter of the engine that resolved, validated and
+# was never once exercised against real events.
+#
+# The question is the oldest one in storage. A request that took four
+# milliseconds took them somewhere, and the two somewheres call for opposite
+# fixes: time on a software queue means the machine is asking for more than the
+# device can take at once, and time on the device means the device is slow. An
+# average latency cannot tell them apart, and neither can two averages.
+#
+# So both halves are collected and joined per request:
+#
+#   io.queue    block_rq_insert -> block_rq_issue      the software queue
+#   io.latency  block_rq_issue  -> block_rq_complete   the device
+#
+# **Why the key is scoped.** A `struct request` is freed the instant it
+# completes and handed straight back out, often within the same millisecond, so
+# a bare pointer is an identity that means two different requests a moment
+# apart. `blk:rq@open_ts` carries the pointer *and* which life of it this is,
+# and the scope is the kernel's own `request.start_time_ns` -- not a timestamp
+# either collector took. That matters here and nowhere else in the project:
+# these are two separate program sets, loaded at two different instants, and a
+# scope either of them invented would differ between them. The join would then
+# match nothing and report it as a finding rather than as its own bug.
+#
+# What comes back, over a machine doing real I/O:
+#
+#   join queue-then-device  io.queue -> io.latency  evidence KEY
+#     1 of 1 `io.latency` events attributed (100.0 %)
+#     heaviest keys
+#       blk:0xffff8da627188c00@10128480080239   1  live
+#
+# Run something that writes while it watches:
+#
+#   dd if=/dev/urandom of=scratch.bin bs=1M count=256 conv=fsync
+#
+# **What `[none]` does to the left-hand half.** On a blk-mq device with no I/O
+# scheduler -- the default for NVMe -- most requests are handed to the driver
+# directly and never go on a software queue at all. `block_rq_insert` does not
+# fire for them. That is not a measurement this tool failed to take: it is a
+# queueing time of zero, and the run says how many were like that and marks
+# each such event `queued = direct`. A device whose whole distribution is at
+# zero is a device with no software queueing, which is the answer.
+name: where a block request spent its time
+format: text
+duration: 5s
+
+requests:
+  # The left-hand half. System-wide, because the catalog gives `io.queue` no
+  # process target: the insert happens in the submitter's context for a read
+  # and in a kworker for a write, so a per-process queueing time would be the
+  # reads only and would not say so.
+  - label: queueing
+    source: io.queue
+    target: system
+    mode: trace
+    emit: [hist, summary]
+
+  # The right-hand half.
+  - label: device
+    source: io.latency
+    target: system
+    mode: trace
+    emit: [hist, summary]
+
+joins:
+  # `scoped_eq` rather than `eq`, and the difference is the whole point: under
+  # `eq` a completion that arrived after its pointer had been reissued would
+  # land on the stranger now sitting at that address, and nothing would say so.
+  - id: queue-then-device
+    from: io.queue
+    to: io.latency
+    via: blk
+    match: scoped_eq
+    # A request that is still in flight after thirty seconds is one the device
+    # has not answered, and holding its state forever is how a join engine
+    # grows until it is killed. The eviction is counted.
+    window: 30s

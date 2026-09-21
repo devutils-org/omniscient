@@ -7,16 +7,53 @@
 //! 40 ms at the syscall and 2 ms at the device was not slow because of the
 //! disk -- so each layer keeps its own sources.
 //!
-//! What is here reads the block layer's counters out of procfs. It is free,
-//! it is system-wide, and it says nothing about who caused the I/O; the
-//! per-request, per-task view is the eBPF backends' job and arrives with that
-//! layer.
+//! Two mechanisms live here and they answer different questions. The procfs
+//! collectors read the block layer's counters: free, system-wide, exact, and
+//! silent about who caused the I/O. The eBPF collectors watch the block layer's
+//! own tracepoints and see one request at a time -- which device, which task,
+//! how long it queued and how long the device took.
+//!
+//! The two are not a fallback for each other and the catalog does not treat
+//! them as one. `/proc/diskstats` cannot say which request was slow and the
+//! tracepoints cannot see a device nobody is using, so where a source has both
+//! they are ordered by which answers its question better and the entry says
+//! what the cheaper one gives up.
 
+mod block;
 mod diskstats;
 mod pressure;
+mod writeback;
+
+use std::collections::BTreeMap;
 
 use super::Factory;
+use block::Measure;
 use diskstats::Metric;
+
+/// The name the kernel gives each `major:minor`, read from `/proc/diskstats`.
+///
+/// The eBPF collectors get a packed `dev_t` out of the kernel and a reader
+/// wants a name, and `dev` is a text attribute everywhere else in this family
+/// -- so the two mechanisms have to agree about what a device is called.
+/// `/sys/dev/block/<major>:<minor>` would answer the same question one device
+/// at a time; this answers it for every device in one read, which is what a
+/// drain of a few thousand records wants.
+///
+/// The pair is what an event's key carries and the name is what a reader sees,
+/// deliberately: a device name is a symlink away from meaning something else.
+fn device_names() -> BTreeMap<(u32, u32), String> {
+    let Ok(text) = std::fs::read_to_string("/proc/diskstats") else {
+        return BTreeMap::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let major = fields.next()?.parse().ok()?;
+            let minor = fields.next()?.parse().ok()?;
+            Some(((major, minor), fields.next()?.to_owned()))
+        })
+        .collect()
+}
 
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
@@ -47,6 +84,38 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("io.pressure", "fs:proc", |resolved| {
             Ok(Box::new(pressure::Prepare::new(resolved.request.mode)?))
+        }),
+        // The block layer's own tracepoints. These three share one program
+        // shape and are the only sources in the project that produce
+        // `blk:rq@open_ts`, which is the key `scoped_eq` joins on.
+        Factory::new("io.latency", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(block::Prepare {
+                measure: Measure::Latency,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("io.queue", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(block::Prepare {
+                measure: Measure::Queue,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("io.size", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(block::Prepare {
+                measure: Measure::Size,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // The flusher, which is the other half of a write and belongs to no
+        // process at all.
+        Factory::new("io.writeback", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(writeback::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
         }),
     ]
 }

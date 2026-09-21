@@ -1,0 +1,55 @@
+# Which device was slow, and how slow -- as a distribution, never as a mean.
+#
+#   omn -f examples/io-device-latency.yml
+#
+# A mean latency is the least useful number storage produces. Half a
+# millisecond mean over an NVMe means a handful of requests took forty and
+# nobody noticed; the same mean over a spinning disk means everything is fine.
+# The distribution is the measurement and the mean is a summary of it, in that
+# order.
+#
+# Two things this session is careful about, and both are the family's own
+# lessons written into a file:
+#
+# **The series is the device.** A machine with an NVMe and a spinning disk has
+# two latency distributions that share no shape, and a histogram over both
+# describes neither. Averaging a series is something the emit layer can do;
+# splitting one back apart is not, so the collector keys every event on the
+# device and never on the machine. `topk` is then the question "which device
+# was the slow one", which a single number cannot answer at all.
+#
+# **What `--pid` would and would not reach.** The catalog offers a process
+# target here and the collector serves it, but the answer is reads and almost
+# nothing else: a read is submitted in the reading task's own context, so the
+# task is readable at `block_rq_issue`, while a write leaves through writeback
+# in a kworker minutes later and carries no submitter at all. A run with a
+# process target says so in its own output rather than leaving a reader to
+# explain why a program that wrote a gigabyte produced four events.
+#
+# Run a burst while it watches:
+#
+#   dd if=/dev/urandom of=scratch.bin bs=1M count=256 conv=fsync
+#
+# and the histogram separates the 4 KiB metadata writes -- tens of microseconds
+# -- from the 128 KiB data writes that the device queues behind each other.
+name: which device was slow, and how slow
+format: text
+duration: 5s
+
+requests:
+  - label: device latency
+    source: io.latency
+    target: system
+    mode: trace
+    emit: [hist, topk, summary]
+    keys: [dev, blk]
+
+  # The same requests, from the other side. `io.size` is what says whether a
+  # long latency was a large request or a slow device, and the two are read
+  # together or not at all.
+  - label: request size
+    source: io.size
+    target: system
+    mode: trace
+    emit: [hist, summary]
+    keys: [dev]

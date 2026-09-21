@@ -3550,5 +3550,193 @@ beside them would be a second such statement in different words.
 `Shortfall::of` is public and takes `(&Losses, records, per_record)`, so
 whoever takes this needs no new derivation — only a decision about how it
 should read next to `Rest` and `unattributed`.
+## Needs from another stream — the sixth wave, stream A (`io` through the block layer)
+
+Five things the block-layer collectors could not do from their own paths.
+Each is written out with the exact change wanted rather than applied in
+passing, because three of the five are wanted by more than one family and the
+second wave's lesson is that the coordinator lands those once.
+`docs/families/io.md` has the reasoning behind all five.
+
+### 1. In `src/bpf/insn.rs`: `bpf_get_current_comm` in the helper table
+
+`insn::helper` lists the six helpers the scheduler programs call. A block
+tracepoint hands over a `struct request` rather than a `task_struct`, so a
+program that wants the submitting task's name cannot read it out of a field --
+it has to ask the kernel for the current task's:
+
+```rust
+pub const GET_CURRENT_COMM: i32 = 16;
+```
+
+`src/bpf/io.rs` declares the number locally, with a comment saying where it
+belongs, because `Insn::call` takes an `i32` and nothing forced the edit.
+`proc` and `net` will both want it: every program attached to something that is
+not a scheduler tracepoint has the same problem.
+
+### 2. In `src/bpf/btf.rs`: a member offset that descends anonymous members
+
+`Btf::member_offset` walks a struct's direct members and stops there. That is
+enough for `task_struct`, `request`, `bdi_writeback` and `super_block`, and it
+is not enough for `struct folio` or `struct page`, whose useful fields --
+`mapping` and `index` -- live inside an anonymous struct inside an anonymous
+union:
+
+```c
+struct folio {
+    union {
+        struct {
+            memdesc_flags_t flags;
+            union { struct list_head lru; ... };
+            struct address_space *mapping;   /* wanted */
+            union { unsigned long index; ... };
+            ...
+        };
+        struct page page;
+    };
+    ...
+};
+```
+
+Wanted: when a member's name is empty and its type is a struct or a union,
+recurse into it and add its base offset. That is what the C compiler does with
+the same declaration, so it is not an extension of the model, it is the model.
+
+```rust
+/// The byte offset of `member` within `struct_name`, descending into the
+/// anonymous structs and unions the kernel uses to overlay one object on
+/// another. An anonymous member has no name of its own, so its fields are
+/// addressed as if they were the outer type's -- which is what C does.
+pub fn member_offset(&self, struct_name: &str, member: &str) -> Result<i32, String>
+```
+
+**This is what blocks `io.pagecache`.** Its `bpf:raw_tp` requires
+`mm_filemap_add_to_page_cache`, whose only argument is a `struct folio *`, and
+the source's keys are `task` and `file` -- the file being `mapping->host->i_ino`
+and `mapping->host->i_sb->s_dev`. Every step of that chain is reachable except
+the first. `mem` will want the same thing for `mm_page_alloc`'s `struct page *`.
+
+Hard-coding the offset was considered and refused: `folio.mapping` is at 24
+bytes on this kernel because `memdesc_flags_t` is 8 and a `list_head` is 16, and
+both of those have changed inside the last year. A baked-in offset is the
+`bpf:kprobe` degradation -- "no BTF: struct layouts are not portable" -- applied
+to a path that declares BTF as a requirement.
+
+### 3. In `src/bpf/btf.rs`: the values of an enum, by name
+
+`io.writeback` carries `enum wb_reason` as a bare number, because the enum has
+gained and lost members between releases -- this kernel has no
+`WB_REASON_LAPTOP_TIMER` and numbers everything after it one lower than a 5.x
+kernel does. A name taken from a table compiled into `omn` is therefore a wrong
+answer that reads exactly like a right one, which is the class of defect this
+project exists to refuse.
+
+The kernel publishes the answer in the same BTF everything else here comes from:
+
+```rust
+/// The name of `value` in `enum_name`, as the running kernel declares it.
+///
+/// For a field an event carries as the kernel's own number: the numbering is
+/// a property of the kernel that is running, and a table compiled in here
+/// would be a property of the kernel this was built against.
+pub fn enum_name(&self, enum_name: &str, value: u32) -> Option<&str>
+```
+
+`sched` wants it for `enum wb_reason`'s neighbours and `net` for
+`enum skb_drop_reason`, which is the field that makes `net.drops` worth having
+at all and which grows every release.
+
+### 4. In `catalog/io.yaml`: the glob that `io.readahead` requires
+
+`BRIEF.md` gives stream A the decision and the catalog to stream nobody, so the
+decision is here and the edit is the coordinator's. `io.readahead`'s first
+backend is
+
+```yaml
+- {id: "bpf:tp", requires: ["tracepoint:filemap:*", "bpf"], cost: low}
+```
+
+and a glob is not a name: no probe covers it, so the source reports `?` under
+`HERE` rather than yes or no, and the chain falls through to `bpf:fentry`, which
+this layer does not have. The source is unreachable from both ends.
+
+**The tracepoint to name is `mm_filemap_get_pages`**, and the entry wanted is a
+`bpf:raw_tp` ahead of the existing pair:
+
+```yaml
+- id: io.readahead
+  backends:
+    - {id: "bpf:raw_tp",
+       requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages",
+                  "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"],
+       cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages",
+                                "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"],
+       cost: low, equivalent: true}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"],
+       cost: low, equivalent: true}
+```
+
+Why that one, of the five the `filemap` subsystem publishes on this kernel.
+Readahead effectiveness is *pages read ahead* against *pages used*, which is a
+ratio of two counts and needs both:
+
+| tracepoint | argument | what it would count |
+|---|---|---|
+| `mm_filemap_get_pages(mapping, start, end)` | `address_space *` | pages a read asked for |
+| `mm_filemap_add_to_page_cache(folio)` | `folio *` | pages the cache had to fill |
+| `mm_filemap_delete_from_page_cache(folio)` | `folio *` | pages evicted |
+| `mm_filemap_fault(mapping, index)` | `address_space *` | a mapped page taken |
+| `mm_filemap_map_pages(mapping, start, end)` | `address_space *` | a fault filled from cache |
+
+`get_pages` is the denominator and `add_to_page_cache` the numerator, and no
+single one of the five answers the question. Naming two in `requires` is not a
+glob under another name: both are names, both are probed, and a kernel missing
+either says which.
+
+Note that it takes item 2 with it: both of the first two hand over a `folio` or
+an `address_space` whose inode has to be reached, and `address_space.host` is a
+direct member while `folio.mapping` is not.
+
+`io.fs`'s glob -- `tracepoint:ext4:*` -- is deliberately **not** decided here.
+Its first backend is `bpf:fentry` on `vfs_read`, which is the right answer and
+is a mechanism this layer does not have; converting the filesystem-specific
+fallback would be choosing which filesystem `io.fs` is about, and a machine with
+btrfs and xfs mounted would get the ext4 answer or nothing. It waits for fentry.
+
+### 5. In `src/event.rs`: a block key the plug's cached clock cannot collapse
+
+Not blocking anything, and worth recording with its measurement before someone
+rediscovers it.
+
+`KeyValue::Blk { ptr, open_ts }` is the identity of one life of a request
+pointer, and `open_ts` is `request.start_time_ns` -- deliberately the kernel's
+own stamp rather than either collector's, because `io.queue` and `io.latency`
+are two independently loaded program sets and a scope either of them
+timestamped would differ between them.
+
+The kernel takes that stamp with `blk_time_get_ns()`, which **caches its reading
+for the lifetime of the submitting task's plug**. Every request created inside
+one plug section therefore carries the same `start_time_ns`, and two lives of
+one pointer inside one section are one key. Measured under eight concurrent
+one-page `O_DIRECT` readers:
+
+```
+166448 events, 527 pointers, 165921 reuses, 5722 keys used twice
+```
+
+96.6 % of the reuses separated, where a bare pointer would have separated none.
+The residual is a real hole: a completion that arrives after its pointer has
+been reissued *within the same plug section* attaches to the wrong life, and
+nothing says so.
+
+Closing it needs a third component that both collectors can read and that
+changes per request. `request.tag` is assigned at issue and cleared at
+completion, so `io.queue` at the insert and `io.latency` at the issue read
+different values; `internal_tag` is `BLK_MQ_NO_TAG` under the `none` scheduler,
+which is the default. The sector would work for reads of distinct blocks and not
+for a queue of rewrites. So this is a question about the key rather than about
+the collector, and it belongs with whoever owns `src/event.rs` and `src/join.rs`
+-- `gpu:fence_ctx+seqno` is the same shape and may want the same answer.
 
 ---

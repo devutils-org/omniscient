@@ -1,0 +1,50 @@
+# Driving the block tracer until it loses events, on purpose.
+#
+#   omn -f examples/io-ring-overflow.yml
+#
+# Every streaming collector in this project has one way to lose data, and it is
+# always the same one: the kernel produces records faster than userspace drains
+# them, the ring buffer fills, and `bpf_ringbuf_output` starts returning an
+# error. The event is gone and **nothing anywhere would record that it ever
+# existed** -- the BPF ring buffer does not report its own overflows.
+#
+# So every program in this layer carries its own drop counter, and this session
+# is the check that the counter is wired to the output. Drive the device hard
+# enough and the run says:
+#
+#   609880 events over 3.02s
+#   LOSS: 93274 dropped, 0 failed reads, 8 late ticks, 0 undecoded, 0 throttled
+#     8x a round of reads outran the 10.0ms tick: worst 10.6ms
+#     194x the block ring was full: requests completed faster than they were drained
+#
+# Six hundred thousand requests measured and ninety-three thousand admitted
+# missing. That second number is the one this session exists for. A distribution
+# built from the first number alone would be short by fifteen percent, and the
+# events it is missing are not a random fifteen percent: they are the ones that
+# arrived during the bursts, which is when the interesting latencies happen.
+#
+# The workload that produces it is thirty-two concurrent readers of a large
+# incompressible file, each issuing 4 KiB requests with `O_DIRECT`:
+#
+#   for i in $(seq 0 31); do
+#     dd if=big.bin of=/dev/null bs=4k count=40000 skip=$((i*4000)) \
+#        iflag=direct &
+#   done
+#
+# That is about two hundred thousand requests a second. The ring holds 256 KiB,
+# a record is 96 bytes plus an 8-byte header, and it is drained every ten
+# milliseconds -- so it overflows above roughly 250 000 requests a second, and
+# a machine whose device cannot be driven that hard will report no loss here.
+# `tests/scenario_io.rs` says so with the rate it managed rather than passing
+# quietly.
+name: driving the block tracer until it loses events
+format: text
+duration: 3s
+
+requests:
+  - label: every request
+    source: io.size
+    target: system
+    mode: trace
+    emit: [summary, hist]
+    keys: [dev]

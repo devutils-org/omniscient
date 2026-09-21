@@ -562,25 +562,59 @@ fn every_mode_and_emit_the_catalog_offers_is_served_or_refused_by_name() {
 
 /// A mode and an emit each source genuinely offers.
 ///
-/// Every source of this family is a counter or a gauge, and the two do not
-/// overlap: a volume has no depth to take a snapshot of, and a queue depth
-/// counts over no window.
+/// Every source of this family is a counter, a gauge or a traced event, and
+/// the three do not overlap: a volume has no depth to take a snapshot of, a
+/// queue depth counts over no window, and a latency is the gap between two
+/// events that a sample cannot both catch.
 fn something_this_source_does(source: &str) -> (&'static str, &'static str) {
     match source {
         "io.inflight" | "io.pressure" => ("snapshot", "raw"),
+        "io.latency" | "io.queue" | "io.size" | "io.writeback" => ("trace", "summary"),
         _ => ("count", "summary"),
     }
 }
 
-/// The five sources of this family that have a collector in this build.
-fn collected_sources() -> [&'static str; 5] {
+/// The sources of this family that have a collector in this build.
+///
+/// Five through `/proc/diskstats` and PSI, and four through the block layer's
+/// own raw tracepoints. The two mechanisms answer different questions and the
+/// sweep covers both: a combination the catalog offers and the build cannot
+/// serve is a promise broken in the one place nobody looks, and that is as
+/// true of an eBPF backend as of a file.
+fn collected_sources() -> [&'static str; 9] {
     [
         "io.bytes",
         "io.iops",
         "io.merges",
         "io.inflight",
         "io.pressure",
+        "io.latency",
+        "io.queue",
+        "io.size",
+        "io.writeback",
     ]
+}
+
+/// Whether this build can load an eBPF program at all, and why not when it
+/// cannot.
+///
+/// The capabilities are file capabilities on `target/debug/omn` and every
+/// relink drops them, so a suite run after a plain `cargo build` finds every
+/// eBPF scenario unable to attach. That is a fact about the binary rather than
+/// about the machine, and a scenario that quietly passed through it would be
+/// reporting a green eBPF layer that was never exercised.
+fn no_bpf_here() -> Option<String> {
+    let output = run(&[
+        "io.size", "--system", "-m", "trace", "-e", "summary", "-d", "100ms",
+    ]);
+    if output.status.success() {
+        return None;
+    }
+    Some(format!(
+        "this build cannot load a block tracer: {}. `make` grants CAP_BPF and CAP_PERFMON to \
+         target/debug/omn, and every `cargo build` drops them again",
+        stderr(&output).lines().next().unwrap_or("").trim()
+    ))
 }
 
 /// A mode and an emit are compatible in the abstract or not at all, and the
@@ -773,11 +807,18 @@ fn a_filter_the_backend_cannot_carry_names_the_backend_that_can() {
 /// Every backend this family declares and has not written is refused by name,
 /// with the exit code that means "this build", not "this run".
 ///
-/// This family has one implemented backend per source, so there is no second
-/// road to compare a number against -- the comparison is with the refusal
-/// instead, which is what `BRIEF.md` asks for where a chain has one
-/// implementation and others declared. `docs/scenarios/io.md` says what a
-/// comparison would look like once the eBPF backends land.
+/// This family still has one *implemented* backend per source -- procfs for the
+/// counters, the raw tracepoint for the block layer -- so there is no second
+/// road within a chain to compare a number against, and the comparison is with
+/// the refusal instead, which is what `BRIEF.md` asks for where a chain has one
+/// implementation and others declared. The comparison across two mechanisms
+/// that *is* now possible is
+/// `the_tracer_and_the_kernels_own_counter_see_the_same_requests`, further
+/// down: `/proc/diskstats` and the block tracer counting the same requests.
+///
+/// The backend that is skipped is whichever one this build implements, asked of
+/// the build rather than written down here: the eBPF collectors landed after
+/// this scenario did, and a list in a test is a thing that goes stale quietly.
 #[test]
 fn forcing_a_backend_this_build_has_not_written_names_it_and_exits_three() {
     let catalog = Catalog::embedded().expect("the embedded catalog loads");
@@ -798,7 +839,7 @@ fn forcing_a_backend_this_build_has_not_written_names_it_and_exits_three() {
              something else than it thinks"
         );
         for backend in &entry.backends {
-            if backend.id == "fs:proc" {
+            if omn::collect::implements(source, &backend.id) {
                 continue;
             }
             asked.push((source, backend.id.clone()));
@@ -1935,6 +1976,925 @@ fn the_sessions_a_reader_can_run_unaided_produce_series() {
                 series > 0,
                 "{name}: `{}` produced no series, so the session documents a measurement that \
                  does not happen",
+                result["label"]
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The block layer, through its own tracepoints
+//
+// Everything below this line is about `io.latency`, `io.queue`, `io.size` and
+// `io.writeback`, which see one request at a time rather than a device's
+// counters. What they can be checked against is different in kind: not a
+// quantity of bytes but a *number of requests*, chosen by the workload and
+// found one for one.
+
+/// A buffer the kernel will accept for an `O_DIRECT` read.
+///
+/// The requirement is alignment, not size: a direct read's buffer, offset and
+/// length all have to be multiples of the device's logical block size, and a
+/// `Vec` is aligned to one byte. So one page is over-allocated and the aligned
+/// window inside it is what is read into.
+struct AlignedPage {
+    storage: Vec<u8>,
+    offset: usize,
+}
+
+impl AlignedPage {
+    fn new() -> Self {
+        let storage = vec![0u8; 2 * PAGE];
+        let offset = (PAGE - (storage.as_ptr() as usize % PAGE)) % PAGE;
+        Self { storage, offset }
+    }
+
+    fn pointer(&mut self) -> *mut libc::c_void {
+        // Safety: `offset` is under `PAGE` and the allocation is `2 * PAGE`, so
+        // the window of `PAGE` bytes starting here is inside it.
+        unsafe { self.storage.as_mut_ptr().add(self.offset) as *mut libc::c_void }
+    }
+}
+
+const PAGE: usize = 4096;
+
+/// This thread's id, which is what makes a machine-wide tracer into a
+/// measurement of one workload.
+///
+/// `--pid` would not do: `cargo test` runs its tests in parallel threads of one
+/// process, so a process filter catches every other scenario's I/O as well. A
+/// thread filter catches exactly the reads the next few lines issue, which is
+/// what turns "at least this much" into "exactly this many".
+fn this_thread() -> i32 {
+    // Safety: `gettid` takes nothing and returns this thread's id.
+    unsafe { libc::syscall(libc::SYS_gettid) as i32 }
+}
+
+/// Issues `count` reads of one page each, straight to the device.
+///
+/// `O_DIRECT` is the whole guarantee. The page cache is bypassed, so every read
+/// reaches the block layer; the reads are issued one at a time, so the block
+/// layer has nothing to merge them with; and each is one page at a page-aligned
+/// offset, so none of them spans two extents. One read, one request, one page.
+fn direct_reads(path: &Path, count: usize) -> std::io::Result<usize> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    let mut page = AlignedPage::new();
+    let pointer = page.pointer();
+    let mut issued = 0;
+    for index in 0..count {
+        // Safety: the descriptor is open for reading and the buffer is a page
+        // of this scope's own memory, aligned as `O_DIRECT` requires.
+        let read = unsafe { libc::pread(fd, pointer, PAGE, (index * PAGE) as libc::off_t) };
+        if read != PAGE as isize {
+            return Err(std::io::Error::last_os_error());
+        }
+        issued += 1;
+    }
+    Ok(issued)
+}
+
+/// A file of incompressible bytes, on the device, large enough for `pages`
+/// pages of direct reads.
+fn direct_read_file(name: &str, pages: usize) -> PathBuf {
+    use std::io::Write;
+    let path = scratch(name);
+    let bytes = pages * PAGE;
+    if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) < bytes as u64 {
+        std::fs::create_dir_all(path.parent().expect("a parent")).ok();
+        let mut file = std::fs::File::create(&path).expect("a file to read from");
+        file.write_all(&incompressible(bytes))
+            .expect("the whole file written");
+        file.sync_all().expect("the file on the device");
+    }
+    path
+}
+
+/// Every `raw` event of a result, as `(attribute, value)` maps.
+fn raw_events(
+    result: &serde_json::Value,
+) -> Vec<std::collections::BTreeMap<String, serde_json::Value>> {
+    output_of(result, "raw")["events"]
+        .as_array()
+        .expect("a raw emit carries its events")
+        .iter()
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .expect("an event carries its attributes")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().expect("a name").to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The losses a result reports.
+fn losses(result: &serde_json::Value) -> &serde_json::Value {
+    &result["losses"]
+}
+
+// ---------------------------------------------------------------------------
+// Ground truth: a number of requests chosen in advance
+
+/// A known number of direct reads is found one for one, at the size they were
+/// issued at.
+///
+/// This is the family's sharpest ground truth and the one that could not be
+/// taken before the block layer's tracepoints were collected. `/proc/diskstats`
+/// can say that 16 MiB moved; only this can say that it moved as 4096 requests
+/// of one page each, and the difference between those two statements is the
+/// whole reason the eBPF backends exist.
+///
+/// Nothing here is a plausible constant. A collector reading `__data_len`
+/// after the block layer decremented it would report zero; one reporting
+/// sectors would be out by 512; one counting completions rather than issues
+/// would differ on every partially completed request; one that attributed to
+/// the process rather than the thread would catch every other test in this
+/// binary.
+#[test]
+fn a_known_number_of_direct_reads_is_found_one_for_one() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+
+    const READS: usize = 4096;
+    let path = direct_read_file("io-direct-reads.bin", READS);
+    let tid = this_thread().to_string();
+
+    let child = Command::new(BINARY)
+        .args([
+            "io.size", "--tid", &tid, "-m", "trace", "-e", "raw", "-d", "5s", "--format", "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(Duration::from_millis(500));
+
+    let issued = match direct_reads(&path, READS) {
+        Ok(issued) => issued,
+        Err(error) => {
+            // A filesystem that refuses `O_DIRECT` cannot produce the property
+            // this scenario measures, and saying so beats asserting something
+            // else about it.
+            let _ = child.wait_with_output();
+            eprintln!(
+                "skipped: {} refuses O_DIRECT ({error}), so a read of it is not one block request",
+                path.display()
+            );
+            return;
+        }
+    };
+    assert_eq!(issued, READS);
+    // The last request has to be issued, completed and drained before the
+    // window closes, and the drain is on a ten-millisecond tick.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let output = child.wait_with_output().expect("omn should finish");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.size");
+    let events = raw_events(result);
+
+    // Every request this thread issued was one page. Not "mostly": the read was
+    // one page at a page-aligned offset with the cache out of the way, and
+    // anything else in this series would be a request the workload did not
+    // make.
+    let sizes: std::collections::BTreeSet<u64> = events
+        .iter()
+        .filter_map(|attrs| attrs.get("bytes")?.as_u64())
+        .collect();
+    assert_eq!(
+        sizes,
+        [PAGE as u64].into_iter().collect(),
+        "this thread issued {READS} one-page reads and the tracer saw other sizes: {sizes:?}"
+    );
+
+    // One request per read. The upper bound is exact: a read cannot produce two
+    // requests, so anything above `READS` is double counting.
+    assert!(
+        events.len() <= READS,
+        "{} requests for {READS} reads: something is counted twice",
+        events.len()
+    );
+    // The lower bound carries the window's own edge -- a request issued in the
+    // last moments of the run is published after the final drain -- and it is a
+    // fraction of a percent rather than a calibrated threshold. Every mistake
+    // this scenario exists to catch is out by a *factor*: a collector reporting
+    // sectors is out by 512, one counting completions differs on every
+    // partially completed request, one reading `__data_len` too late reports
+    // zero. None of them lands within one percent of the truth.
+    assert!(
+        100 * events.len() >= 99 * READS,
+        "{READS} one-page reads produced {} requests, and the run reported losing none of them: \
+         {}",
+        events.len(),
+        losses(result)
+    );
+    assert_eq!(
+        losses(result)["dropped"].as_u64(),
+        Some(0),
+        "a shortfall the tool knew about is a different scenario: {}",
+        losses(result)
+    );
+
+    // Reads, and attributed to the thread that made them. `rwbs` is the
+    // kernel's own letters, so `R` is the first of them for any read.
+    for attrs in &events {
+        let rwbs = attrs["rwbs"].as_str().unwrap_or_default();
+        assert!(rwbs.starts_with('R'), "a read reported as `{rwbs}`");
+        assert_eq!(
+            attrs["tid"].as_u64(),
+            Some(this_thread() as u64),
+            "a request attributed to a thread that issued none"
+        );
+    }
+}
+
+/// The eBPF request count and the kernel's own operation count agree.
+///
+/// This is the backend comparison this family could not make until now, and it
+/// is across sources rather than across a chain: `/proc/diskstats` counts the
+/// operations a device completed and the block tracer counts the requests it
+/// was issued, and for the same window those are the same requests counted
+/// twice by two mechanisms that share no code.
+///
+/// The check is one-sided on purpose. `io.size` is filtered to one thread and
+/// the kernel's counter is not, so the counter is the ceiling: the machine's
+/// own background I/O is in it and cannot be in the other. What the comparison
+/// catches is the failure that matters -- a tracer reporting more requests than
+/// the device completed, which is double counting, or a fraction of them,
+/// which is silent loss.
+#[test]
+fn the_tracer_and_the_kernels_own_counter_see_the_same_requests() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let device = match backing_device(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        Ok(device) => device,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+
+    const READS: usize = 4096;
+    let path = direct_read_file("io-agreement.bin", READS);
+    let tid = this_thread().to_string();
+
+    let before = counters_of(&device);
+    let child = Command::new(BINARY)
+        .args([
+            "io.size", "--tid", &tid, "-m", "trace", "-e", "raw", "-d", "5s", "--format", "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(Duration::from_millis(500));
+    if direct_reads(&path, READS).is_err() {
+        let _ = child.wait_with_output();
+        eprintln!("skipped: this filesystem refuses O_DIRECT");
+        return;
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let output = child.wait_with_output().expect("omn should finish");
+    let kernel = counters_of(&device).since(&before);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.size");
+    let events = raw_events(result);
+    let traced_bytes: u64 = events
+        .iter()
+        .filter_map(|attrs| attrs.get("bytes")?.as_u64())
+        .sum();
+
+    assert!(
+        events.len() as u64 <= kernel.reads + kernel.writes,
+        "the tracer counted {} requests and the device completed {} over a strictly longer \
+         window, so one of them is counting something twice",
+        events.len(),
+        kernel.reads + kernel.writes
+    );
+    assert!(
+        traced_bytes <= kernel.bytes(),
+        "the tracer saw {traced_bytes} bytes and the kernel counted {} over a window that \
+         contains it",
+        kernel.bytes()
+    );
+    // And the other side: the reads were issued, so they are in both accounts.
+    // The one percent is the window's edge rather than a calibrated threshold
+    // -- see `a_known_number_of_direct_reads_is_found_one_for_one`.
+    assert!(
+        100 * traced_bytes >= 99 * (READS * PAGE) as u64,
+        "{} bytes traced for the {} the workload read",
+        traced_bytes,
+        READS * PAGE
+    );
+}
+
+/// A recycled request pointer is told apart by its scope, as far as the
+/// kernel's own stamp can tell them apart -- and this says how far that is.
+///
+/// The catalog says the key is `(pointer, open timestamp)` and not the pointer,
+/// because a `struct request` is freed the instant it completes and handed
+/// straight back out. Under the workload below a few hundred pointers carry a
+/// hundred and sixty thousand requests, so the claim is testable.
+///
+/// **And it is not quite true, which is what this scenario is really for.** The
+/// scope is `request.start_time_ns`, which the kernel takes with
+/// `blk_time_get_ns()` -- and that function caches its reading for the lifetime
+/// of the submitting task's *plug*, so every request created inside one plug
+/// section carries the same timestamp. Two lives of one pointer inside one plug
+/// section are therefore indistinguishable. Measured under eight concurrent
+/// readers driven from outside the suite:
+///
+/// ```text
+/// 166448 events, 527 pointers, 165921 reuses, 5722 keys used twice
+/// ```
+///
+/// The scope separated 96.6 % of the reuses there and a bare pointer would have
+/// separated none of them, which is the separation this asserts. How many are
+/// left over depends on how the plugs fall, so the run reports its own number
+/// rather than asserting one; the residual is a limit of the key rather than of
+/// this collector, and `docs/families/io.md` records what would close it.
+#[test]
+fn a_recycled_request_pointer_is_told_apart_by_its_scope() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+
+    const READERS: usize = 8;
+    const READS_EACH: usize = 12_000;
+    const PAGES: usize = 16_384;
+
+    let path = direct_read_file("io-recycling.bin", PAGES);
+    if direct_reads(&path, 1).is_err() {
+        eprintln!("skipped: this filesystem refuses O_DIRECT");
+        return;
+    }
+
+    let child = Command::new(BINARY)
+        .args([
+            "io.latency",
+            "--system",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "-d",
+            "3s",
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(Duration::from_millis(500));
+    std::thread::scope(|scope| {
+        for reader in 0..READERS {
+            let path = path.clone();
+            scope.spawn(move || {
+                use std::os::unix::fs::OpenOptionsExt;
+                use std::os::unix::io::AsRawFd;
+                let Ok(file) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECT)
+                    .open(&path)
+                else {
+                    return;
+                };
+                let fd = file.as_raw_fd();
+                let mut page = AlignedPage::new();
+                let pointer = page.pointer();
+                for index in 0..READS_EACH {
+                    let at = ((reader * 997 + index) % PAGES) * PAGE;
+                    // Safety: as in `direct_reads`.
+                    unsafe { libc::pread(fd, pointer, PAGE, at as libc::off_t) };
+                }
+            });
+        }
+    });
+    let output = child.wait_with_output().expect("omn should finish");
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let document = json(&output);
+    let result = result(&document, "io.latency");
+    let events = output_of(result, "raw")["events"]
+        .as_array()
+        .expect("a raw emit carries its events");
+
+    let mut pointers: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    let mut keys: std::collections::BTreeSet<(u64, u64)> = std::collections::BTreeSet::new();
+    let mut collisions = 0usize;
+    for event in events {
+        let key = event["keys"]
+            .as_array()
+            .expect("an event carries its keys")
+            .iter()
+            .find_map(|key| key.get("blk"))
+            .unwrap_or_else(|| panic!("every `io.latency` event carries a blk key: {event}"));
+        let pointer = key["ptr"].as_u64().expect("a pointer");
+        let scope = key["open_ts"].as_u64().expect("a scope");
+        assert_ne!(
+            scope, 0,
+            "a key with no scope is a bare pointer under a name that promises more"
+        );
+        pointers.insert(pointer);
+        if !keys.insert((pointer, scope)) {
+            collisions += 1;
+        }
+    }
+
+    let reuses = events.len().saturating_sub(pointers.len());
+    if reuses == 0 {
+        eprintln!(
+            "skipped the half that matters: none of the {} request pointers in this run was \
+             reused, so the run says nothing about recycling. Every key still carried a scope",
+            pointers.len()
+        );
+        return;
+    }
+
+    // The separation, and it is an order of magnitude rather than a threshold:
+    // a bare pointer would have given as many keys as there are pointers, and
+    // the scope gives hundreds of times more. That is the whole claim
+    // `scoped_eq` rests on.
+    assert!(
+        keys.len() > pointers.len() * 10,
+        "{} pointers carried {} requests and produced only {} distinct keys: the scope is not \
+         separating the lives of a pointer, and a join over them would attribute one request's \
+         latency to another",
+        pointers.len(),
+        events.len(),
+        keys.len()
+    );
+
+    // And what the scope does *not* separate, said with its number rather than
+    // left out. `blk_time_get_ns` caches its reading for the lifetime of a
+    // plug, so requests created inside one plug section share a timestamp, and
+    // two lives of one pointer inside one section are one key.
+    eprintln!(
+        "{} events, {} pointers, {reuses} reuses, {collisions} keys used twice: the scope \
+         separated {:.1} % of the reuses, and the rest were created inside one plug section, \
+         where the kernel's own timestamp does not change",
+        events.len(),
+        pointers.len(),
+        100.0 * (reuses - collisions.min(reuses)) as f64 / reuses as f64,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The join the engine was written for
+
+/// The two halves of a request join on the scoped key, across two collectors
+/// that never met.
+///
+/// `scoped_eq` is one of the four match kinds the join engine implements and
+/// until these collectors existed it was the only one **nothing produced**.
+/// What this checks is not that the engine works -- `tests/join_engine.rs`
+/// holds that -- but that two independently loaded program sets agree about
+/// what a request *is*, which they only do because the scope is the kernel's
+/// own `request.start_time_ns` and not a timestamp either of them took.
+#[test]
+fn the_two_halves_of_a_request_join_across_two_collectors() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+
+    let path = scratch("io-join.bin");
+    let (output, _) = match backing_device(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        Ok(device) => measure_while(
+            &["-f", &session("io-request-halves.yml"), "--format", "json"],
+            &device,
+            || write_and_sync(&path),
+        ),
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+
+    let joins = document["joins"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the session declares a join: {document}"));
+    let join = joins
+        .iter()
+        .find(|entry| entry["rule"] == "queue-then-device")
+        .unwrap_or_else(|| panic!("the join ran: {document}"));
+
+    assert_eq!(
+        join["evidence"], "KEY",
+        "a shared typed key is KEY evidence and nothing stronger"
+    );
+    let matched = number(&join["matched"]);
+    let unmatched = number(&join["unmatched"]);
+    if matched + unmatched == 0.0 {
+        eprintln!(
+            "skipped: no request was seen by both halves in this window, so the join had nothing \
+             to do. `io.queue` sees an issue and `io.latency` a completion, and a machine quiet \
+             enough for neither to fire produces no correlation to check"
+        );
+        return;
+    }
+
+    // The claim: a completion whose request this run also saw issued is
+    // attributed, and nothing else is. An unmatched completion is a request
+    // that was already in flight when the collectors attached, which is a
+    // property of the window rather than a failure -- so what is asserted is
+    // that the matched ones exist and that the engine called them KEY.
+    assert!(
+        matched > 0.0,
+        "no completion was joined to its issue, and {unmatched} were not: the two collectors \
+         disagree about what a request is"
+    );
+    let key = join["top"][0]["key"]
+        .as_str()
+        .expect("the join names the keys it matched on");
+    assert!(
+        key.starts_with("blk:0x") && key.contains('@'),
+        "the key has to carry the pointer and which life of it this is: {key}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C. The loss path
+
+/// Driven hard enough, the ring overflows and the run says how much it lost.
+///
+/// The BPF ring buffer does not report its own overflows: `bpf_ringbuf_output`
+/// returns an error, the record is gone, and nothing anywhere would record that
+/// it existed. So every program in this layer carries its own drop counter, and
+/// this is the check that the counter reaches the output.
+///
+/// The arithmetic of the overflow: the ring holds 256 KiB, a record is 96 bytes
+/// plus an 8-byte header, and it is drained every ten milliseconds -- so it
+/// starts losing above roughly 250 000 requests a second. Thirty-two concurrent
+/// readers of one page each get there on this machine's NVMe. A slower device
+/// cannot, and this says so with the rate it managed rather than passing
+/// quietly.
+#[test]
+fn driving_the_block_tracer_past_the_ring_says_how_much_it_lost() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+
+    const READERS: usize = 32;
+    const READS_EACH: usize = 40_000;
+    /// Above this many requests a second the ring cannot be drained in time.
+    const OVERFLOWS_ABOVE: f64 = 250_000.0;
+
+    let path = direct_read_file("io-overflow.bin", 131_072);
+    if direct_reads(&path, 1).is_err() {
+        eprintln!("skipped: this filesystem refuses O_DIRECT");
+        return;
+    }
+
+    let child = Command::new(BINARY)
+        .args([
+            "io.size", "--system", "-m", "trace", "-e", "summary", "-d", "3s", "--format", "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(Duration::from_millis(500));
+
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        for reader in 0..READERS {
+            let path = path.clone();
+            scope.spawn(move || {
+                use std::os::unix::fs::OpenOptionsExt;
+                use std::os::unix::io::AsRawFd;
+                let Ok(file) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECT)
+                    .open(&path)
+                else {
+                    return;
+                };
+                let fd = file.as_raw_fd();
+                let mut page = AlignedPage::new();
+                let pointer = page.pointer();
+                for index in 0..READS_EACH {
+                    let at = ((reader * 4_000 + index) % 131_072) * PAGE;
+                    // Safety: as in `direct_reads`.
+                    unsafe { libc::pread(fd, pointer, PAGE, at as libc::off_t) };
+                }
+            });
+        }
+    });
+    let elapsed = started.elapsed().as_secs_f64();
+
+    let output = child.wait_with_output().expect("omn should finish");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.size");
+    let losses = losses(result);
+    let dropped = losses["dropped"].as_u64().unwrap_or(0);
+    let seen = number(&result["events_seen"]);
+    let rate = (READERS * READS_EACH) as f64 / elapsed;
+
+    if dropped == 0 {
+        eprintln!(
+            "skipped the loss itself: {READERS} readers issued {} requests in {elapsed:.2}s, \
+             which is {rate:.0} a second, and the ring overflows above about \
+             {OVERFLOWS_ABOVE:.0}. This device cannot be driven hard enough here, and the run \
+             correctly reported no loss over {seen} events",
+            READERS * READS_EACH
+        );
+        return;
+    }
+
+    // The loss reached the output, and it says which loss it was. A count with
+    // no reason is a number a reader cannot act on.
+    let reasons = losses["reasons"]
+        .as_object()
+        .map(|reasons| reasons.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("ring was full")),
+        "{dropped} records were dropped and the run does not say the ring overflowed: {reasons:?}"
+    );
+    // And the count is a real fraction of the run rather than a token. A tool
+    // that admitted one dropped record out of six hundred thousand would be
+    // telling a reader the distribution is complete.
+    assert!(
+        dropped > 0 && (dropped as f64) < seen + dropped as f64,
+        "{dropped} dropped against {seen} seen is not a fraction of anything"
+    );
+    eprintln!(
+        "the ring lost {dropped} of {} requests at {rate:.0} a second, and said so",
+        seen as u64 + dropped
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `io.writeback`: the half of a write nobody waits for
+
+/// A `sync` produces rounds that say they waited for the device.
+///
+/// `sync(2)` does not return until the data is out, and it asks for
+/// `WB_SYNC_ALL` -- the mode in which the flusher waits for the device rather
+/// than handing it work and moving on. So a window containing a `sync` of a
+/// freshly written file must contain at least one `WB_SYNC_ALL` round, and that
+/// is a property this test created rather than one it observed.
+///
+/// What is **not** checked here is the page count, and the reason is measured
+/// rather than assumed: see `docs/families/io.md`.
+#[test]
+fn a_sync_produces_writeback_rounds_that_waited_for_the_device() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+
+    let path = scratch("io-writeback.bin");
+    let child = Command::new(BINARY)
+        .args([
+            "io.writeback",
+            "--system",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "-d",
+            "4s",
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(Duration::from_millis(500));
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&path).expect("a file to write");
+        file.write_all(&incompressible(KNOWN_BYTES as usize))
+            .expect("the whole file written");
+        // Deliberately not `sync_all`: an `fsync` of one file goes down the
+        // filesystem's own path and may never reach the flusher at all. It is
+        // `sync(2)` that puts the flusher into WB_SYNC_ALL, which is the
+        // property this scenario chose.
+        drop(file);
+    }
+    // Safety: `sync` takes nothing and returns nothing.
+    unsafe { libc::sync() };
+
+    let output = child.wait_with_output().expect("omn should finish");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.writeback");
+    let events = raw_events(result);
+
+    let waited: Vec<_> = events
+        .iter()
+        .filter(|attrs| attrs.get("sync_mode").and_then(|v| v.as_str()) == Some("all"))
+        .collect();
+    assert!(
+        !waited.is_empty(),
+        "a `sync` ran inside the window and no round reported WB_SYNC_ALL; the {} rounds seen \
+         were {:?}",
+        events.len(),
+        events
+            .iter()
+            .filter_map(|attrs| attrs.get("sync_mode")?.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Every round's duration fits inside the window it was measured in. A
+    // duration computed from an uninitialised timestamp would be the whole
+    // uptime, which is the shape this catches.
+    for attrs in &events {
+        let duration = attrs["writeback_ns"].as_u64().expect("a duration");
+        assert!(
+            duration < 4_000_000_000,
+            "a round lasted {duration} ns inside a four-second window"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D. The refusal
+
+/// Each of the block tracer's refusals names the thing that is actually
+/// missing, and returns the code that says whose gap it is.
+///
+/// Three different answers, and a caller scripting around them reads the exit
+/// code: 2 is a request that cannot mean anything, 1 is a machine that cannot
+/// serve it, 3 is a build that has not written it. A refusal that sends a
+/// reader to the wrong one costs more than no message at all.
+#[test]
+fn each_block_refusal_names_the_thing_that_is_actually_missing() {
+    // A sampled latency is a latency whose beginning or end was not seen, and
+    // the request cannot mean anything however it is run.
+    let sampled = run(&[
+        "io.latency",
+        "--system",
+        "-m",
+        "sample@997hz",
+        "-e",
+        "hist",
+        "-d",
+        "200ms",
+    ]);
+    assert_eq!(
+        sampled.status.code(),
+        Some(EXIT_REJECTED),
+        "a sampled latency is a request to rewrite: {}",
+        stderr(&sampled)
+    );
+
+    // `io.queue` declares no process target, so the validator refuses before
+    // anything is attached: the insert happens in a kworker for a write, and a
+    // per-process queueing time would be the reads only without saying so.
+    let per_process = run(&[
+        "io.queue", "--pid", "1", "-m", "trace", "-e", "hist", "-d", "200ms",
+    ]);
+    assert_eq!(
+        per_process.status.code(),
+        Some(EXIT_REJECTED),
+        "the catalog gives `io.queue` no pid target: {}",
+        stderr(&per_process)
+    );
+    assert!(
+        stderr(&per_process).contains("pid"),
+        "the refusal has to name the target it is refusing: {}",
+        stderr(&per_process)
+    );
+
+    // A cgroup target the catalog offers and this build does not serve: a gap
+    // in the build, so exit 3, and the message says where the request for it
+    // is written down.
+    let cgrouped = run(&[
+        "io.latency",
+        "--cgroup",
+        "/sys/fs/cgroup",
+        "-m",
+        "trace",
+        "-e",
+        "hist",
+        "-d",
+        "200ms",
+    ]);
+    if cgrouped.status.code() == Some(EXIT_NOT_IMPLEMENTED) {
+        let message = stderr(&cgrouped);
+        assert!(
+            message.contains("cgroup") && message.contains("open-findings"),
+            "a target this build has not written has to say so and say where: {message}"
+        );
+    }
+
+    // A task target for writeback, which has no task at all.
+    let attributed = run(&[
+        "io.writeback",
+        "--pid",
+        "1",
+        "-m",
+        "trace",
+        "-e",
+        "hist",
+        "-d",
+        "200ms",
+    ]);
+    assert_ne!(attributed.status.code(), Some(0));
+    let message = stderr(&attributed);
+    assert!(
+        message.contains("pid") || message.contains("kworker"),
+        "the refusal has to say why writeback has no process: {message}"
+    );
+}
+
+/// The sessions this stream ships, run unaided.
+///
+/// A session that validates and then measures nothing is a worse document than
+/// no session at all. These four need no setup: they watch the whole machine,
+/// and a machine that is doing no I/O at all for three seconds is itself worth
+/// saying rather than asserting past.
+#[test]
+fn the_block_sessions_run_and_say_what_they_found() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = scratch("io-sessions.bin");
+    for name in [
+        "io-device-latency.yml",
+        "io-known-requests.yml",
+        "io-writeback-rounds.yml",
+        "io-ring-overflow.yml",
+    ] {
+        let child = Command::new(BINARY)
+            .args(["-f", &session(name), "--format", "json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("omn should run");
+        std::thread::sleep(Duration::from_millis(300));
+        write_and_sync(&path);
+        let output = child.wait_with_output().expect("omn should finish");
+        assert!(output.status.success(), "{name}: {}", stderr(&output));
+        let document = json(&output);
+        let results = document["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} reports results"));
+        assert!(!results.is_empty(), "{name} reported nothing at all");
+        for result in results {
+            // Not "produced series": a machine can genuinely be idle. What must
+            // hold is that the run accounted for itself either way.
+            assert!(
+                result["events_seen"].is_number(),
+                "{name}: `{}` did not report how many events it saw",
                 result["label"]
             );
         }

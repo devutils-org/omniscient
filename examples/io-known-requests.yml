@@ -1,0 +1,50 @@
+# How many requests, and how big? -- checked against a number chosen in advance.
+#
+#   omn -f examples/io-known-requests.yml
+#
+# `io.size` is the simplest source in this family and the easiest to check,
+# which is why it is the one the family's ground truth rests on. A read of
+# `n` blocks with `O_DIRECT` and a block size the device accepts whole is
+# exactly `n` requests of exactly that size: the page cache is bypassed, so
+# nothing is served from memory, and the block layer merges nothing, because
+# consecutive `pread`s are issued one at a time.
+#
+# Measured here, against 131072 reads of 4 KiB:
+#
+#   io.size  via bpf:raw_tp
+#     131072 events over 3.00s
+#     no loss: every read succeeded and no tick ran late
+#     summary
+#       dev:259+6 n=131072  min 4.0 KiB  mean 4.0 KiB  max 12.0 KiB
+#
+# Not "about 131000". Exactly the number the workload issued, at exactly the
+# size it asked for. A collector that reported sectors as bytes would be out by
+# 512, one that read `__data_len` after the block layer decremented it would
+# report zero, and one that counted completions instead of issues would differ
+# on every partially completed request. Each of those is a real mistake and
+# none of them survives this number.
+#
+# The workload has to be launched by hand, because O_DIRECT reads of a file
+# this session would have to create are more than a session file can express.
+# `tests/scenario_io.rs` drives it exactly:
+#
+#   dd if=<a 512 MiB incompressible file> of=/dev/null bs=4k count=131072 \
+#      iflag=direct
+#
+# **The file must be on a real block device.** On this machine `/tmp` is a
+# tmpfs and a scenario about block requests written there measures nothing at
+# all -- which reads exactly like a collector that does not work.
+name: how many requests, and how big
+format: text
+duration: 5s
+
+requests:
+  - label: requests
+    source: io.size
+    target: system
+    mode: trace
+    # `hist` because the interesting thing about request sizes is that they are
+    # bimodal on a real machine: 4 KiB metadata and 128 KiB data, and a mean
+    # between them describes neither.
+    emit: [hist, summary, topk]
+    keys: [dev]

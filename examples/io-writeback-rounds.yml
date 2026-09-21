@@ -1,0 +1,51 @@
+# The half of a write nobody is waiting for.
+#
+#   omn -f examples/io-writeback-rounds.yml
+#
+# An application's `write` returns as soon as the page is dirty. Minutes later
+# a kworker walks the dirty list and pushes it to the device, and the cost of
+# that appears in no process's accounting: not in its cpu time, not in its
+# `io.latency`, not in anything `/proc/<pid>` has. `io.writeback` is that cost,
+# measured one turn of the flusher's loop at a time.
+#
+# Run it and then ask the machine to flush:
+#
+#   dd if=/dev/urandom of=scratch.bin bs=1M count=256 ; sync
+#
+# and the rounds appear, each with `sync_mode = all` -- a `sync(2)` is
+# `WB_SYNC_ALL`, and the flusher waits for the device rather than handing it
+# work and moving on. Background writeback, which happens on its own thirty
+# seconds after a page is dirtied, is `WB_SYNC_NONE`. The two are different
+# measurements and the distinction is the first thing to read off this source.
+#
+# **Three things it cannot tell you, all said plainly by the run itself.**
+#
+# The catalog lists `file` among this source's keys and these two tracepoints
+# cannot produce it: a round walks a superblock's dirty inodes and
+# `writeback_start` and `writeback_written` see the work item, not the inodes.
+# The finest attribution here is the filesystem.
+#
+# `reason` is `enum wb_reason` as a bare number. It is not translated to a name
+# on purpose: the enum has gained and lost members between kernel releases, so
+# a name taken from a table built against one kernel is a wrong answer that
+# reads like a right one on another.
+#
+# And `pages` is what the round actually wrote, computed as the budget it had
+# at the start minus the budget left at the end -- reading either one alone
+# gives the *remainder*, which for a `sync` is `LONG_MAX`. On a filesystem that
+# writes its data through its own workers rather than through the generic
+# flusher -- btrfs does, for delayed allocation -- most of a large write is
+# accounted nowhere in this number, and the run's page total will be a small
+# fraction of what was written. That is a fact about the filesystem, and
+# `docs/families/io.md` has the measurement.
+name: the half of a write nobody is waiting for
+format: text
+duration: 5s
+
+requests:
+  - label: flusher rounds
+    source: io.writeback
+    target: system
+    mode: trace
+    emit: [hist, timeline, summary]
+    keys: [dev]
