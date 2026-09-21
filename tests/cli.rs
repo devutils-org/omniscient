@@ -100,10 +100,54 @@ fn an_impossible_request_is_refused_before_anything_is_attached() {
     );
 }
 
+/// A source the catalog declares and this build does not collect is refused
+/// with exit 3, and the refusal names what *is* collected.
+///
+/// The source is chosen from the build rather than written down here. This test
+/// used to name `io.latency`, which is exactly the kind of thing a wave of
+/// collectors turns into a false failure: the assertion was about the shape of
+/// the refusal and it broke because the refusal stopped happening.
 #[test]
 fn a_valid_request_with_no_collector_names_the_ones_that_exist() {
-    let output = run(&["io.latency", "--system", "-m", "trace", "-e", "hist"]);
-    assert_eq!(output.status.code(), Some(EXIT_NOT_IMPLEMENTED));
+    let catalog = omn::Catalog::embedded().expect("the embedded catalog loads");
+    let uncollected = catalog
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry
+                .backends
+                .iter()
+                .all(|backend| !omn::collect::implements(&entry.id.to_string(), &backend.id))
+                && entry.modes.iter().any(|mode| mode.as_str() == "trace")
+                && entry.emits.iter().any(|emit| emit.as_str() == "raw")
+                && entry.target_support(omn::request::TargetKind::System)
+                    != omn::catalog::TargetSupport::No
+        })
+        .map(|entry| entry.id.to_string())
+        .expect("this build does not collect every source in the catalog");
+
+    let output = run(&[
+        &uncollected,
+        "--system",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "-d",
+        "1s",
+    ]);
+    let code = output.status.code();
+    if code == Some(EXIT_UNAVAILABLE) {
+        // This machine cannot serve it either, which is a different answer and
+        // one this test is not about.
+        return;
+    }
+    assert_eq!(
+        code,
+        Some(EXIT_NOT_IMPLEMENTED),
+        "`{uncollected}` has no collector, so the refusal is the build's: {}",
+        stderr(&output)
+    );
     assert!(stderr(&output).contains("mem.rss"), "{}", stderr(&output));
 }
 

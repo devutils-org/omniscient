@@ -1,0 +1,60 @@
+# What did *this program* make the device do?
+#
+#   omn -f examples/io-my-own-reads.yml
+#
+# The launched program does two symmetric things. It writes 64 MiB and
+# `fsync`s them; then it tells the page cache to forget the file and reads the
+# same 64 MiB back. Both halves are known before the run, and both come back
+# exactly:
+#
+#   by rwbs   RA: 512 requests, 64.0 MiB      the read back
+#             WS: 511 requests, 63.9 MiB      the data written
+#            WSM: 22 requests,  0.3 MiB       filesystem metadata
+#           WFSM: 1 request                   the flush that ended the fsync
+#
+# 512 requests of 128 KiB in each direction, which is 64 MiB at the largest
+# request this device accepts. Not "about 512": the number the workload chose,
+# found by a tool that was told nothing about it.
+#
+# **This session corrects a caveat rather than illustrating it.** The catalog
+# says, of `io.latency`:
+#
+#   Reads are attributable to the submitter (IDENTITY); writes are not, they
+#   leave through writeback in a kworker and fall back to file:dev+ino (KEY).
+#
+# Measured, that is half right, and the half it gets wrong is the half a reader
+# will hit first. A write that is `fsync`ed is submitted **in the calling
+# task's own context** -- `fsync` does not return until the data is on the
+# device, and on this machine the extents go down from inside the syscall. So
+# they are attributed, and the 511 `WS` requests above have `comm=python3` on
+# them. What is genuinely unattributable is *deferred* writeback: a page
+# dirtied and left alone reaches the device thirty seconds later from a
+# kworker, and by then there is no submitting task anywhere in the block layer.
+# `io.writeback` is the source for that half, and it sees it as the flusher's
+# time rather than as anybody's.
+#
+# The difference matters because it is the difference between the I/O a program
+# *waited for* and the I/O it *caused*, and those two are the same number only
+# when it fsyncs.
+#
+# The file is written into the current directory and removed again. It has to
+# be on a real block device: on a tmpfs there is no block request at all, and
+# the session reports nothing -- which reads exactly like a collector that does
+# not work.
+name: what this program made the device do
+format: text
+
+requests:
+  - label: its own requests
+    source: io.latency
+    target:
+      launch:
+        - python3
+        - -c
+        - "import os; p='omn-io-demo.bin'; b=os.urandom(1<<20); f=open(p,'wb'); [f.write(b) for _ in range(64)]; f.flush(); os.fsync(f.fileno()); f.close(); d=os.open(p,os.O_RDONLY); os.posix_fadvise(d,0,0,os.POSIX_FADV_DONTNEED); [None for _ in iter(lambda: os.read(d,1<<20), b'')]; os.close(d); os.remove(p)"
+    mode: trace
+    # `topk` over the request kinds is what separates the reads from the
+    # writes; the histogram alone puts them in the same buckets and a mean over
+    # both describes neither.
+    emit: [hist, topk, summary, raw]
+    keys: [dev, task]
