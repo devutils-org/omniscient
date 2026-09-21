@@ -1776,6 +1776,30 @@ whoever owns `catalog.rs` and `CATALOG.md`.** Nothing about the enforcement
 landed here depends on the answer: it compares against a measurement, not
 against the band.
 
+### The per-event numbers this project already has, for whoever takes that decision
+
+The first option needs a price per unit of work, and two of them are measured
+and sitting in finding 6 rather than in the catalog:
+
+| Mechanism | Per event | Source |
+|---|---|---|
+| preload shim | **132 ns** | finding 6, same event as the line below |
+| eBPF uprobe | **740 ns** | finding 6 |
+
+That ratio is the whole argument for the decision. `bpf:usdt` is implemented as
+a uprobe on a `nop`, so it pays the same trap, and the entries that declare it
+`low` are not wrong -- `low` means "under 1 %", and 740 ns at a thousand events
+a second is 0.07 % -- they are *unfalsifiable*, because the same backend at a
+hundred thousand events a second is 7.4 % and still declares `low`. A band
+without a rate cannot be checked against anything, which is this finding's
+point, and `usdt` is where it bites hardest: `runtime.alloc` and `proc.syscall`
+name mechanisms whose event rate varies by three orders of magnitude between two
+reasonable workloads.
+
+It is also why `mem.heap.*` is served by a shim and not by a uprobe, which was
+decided on this measurement before it was written down as a cost.
+
+
 ## 29. `Cost::Free` had no number, so its claim could not be checked
 
 `free` is documented as "a counter read, about zero". As a number that has to be
@@ -3331,5 +3355,80 @@ except through `fentry` and `usdt`**. `io.syscall`, `io.fs`, `io.fsync`,
 `net.tcp.connect` and `net.socket` name `bpf:fentry` first; `runtime.gc`,
 `runtime.alloc` and `runtime.custom` name `bpf:usdt`. Everything else on the
 list of forty-one is a collector to write against a path that attaches today.
+
+---
+## 37. A distribution does not say that it is missing its own tail
+
+Raised from outside the project, checked against it, and narrower than it
+arrived -- the narrowing is the interesting half.
+
+**Coordinated omission** is the bias that makes most published latency numbers
+wrong: a measurement that misses readings misses *the slow ones*, because
+whatever stalled the system is what stopped the measuring. A histogram built on
+top reports a tail that is short by exactly the amount that mattered. It is
+worth naming here because this project produces latency distributions and is
+built on the rule that a number must never mean something other than what it
+says.
+
+### What is already closed, by construction
+
+`poll` mode cannot produce `hist`. The mode × emit matrix refuses it, and every
+polled source says so by name:
+
+```console
+$ omn net.tcp.rtt --system -m poll@1ms -e hist -d 1s
+error: [net.tcp.rtt #1] mode `poll` cannot produce `hist`
+  hint: in `poll` mode `net.tcp.rtt` emits raw, timeline, summary
+```
+
+That closes the largest opening there was, and it was closed for a different
+reason: `CATALOG.md` §12 refuses it because *a histogram of a polled gauge is a
+histogram of when the poller happened to look*, which is a property of the tick
+and not of the program. The same sentence is the coordinated-omission argument,
+written before anyone here used the term. A late tick in a `timeline` is
+visible as a gap; a late tick folded into a bucket is not, and the tool does not
+let anyone fold it.
+
+### What is left open, and it is `sample` and `trace`
+
+Both produce `hist`, and both lose events in the way that biases:
+
+- **A sampler that is throttled** loses samples while the kernel declines to
+  deliver, and `kernel.perf_event_max_sample_rate` is reached exactly when the
+  event rate is highest. `Losses::throttled` counts the throttles, and
+  `DECISIONS.md` already states the honest half of this -- *"how many events
+  happened inside that while is not recorded anywhere"*, so a throttled run says
+  it cannot tell how much it lost.
+- **A traced source that drops** loses ring-buffer events under pressure, which
+  is the busy period by definition. `Losses::dropped` counts them.
+
+So the *losses* are counted and surfaced, which is this project's standing
+invariant and it holds. What is missing is one step further: **the histogram
+built from a lossy run is rendered exactly like one built from a complete run.**
+A reader takes a p99 off it with nothing beside that number saying the
+distribution is short, and the loss line -- which is printed, and is correct --
+is several lines away and phrased as a count of events rather than as a
+statement about the shape.
+
+### What would close it
+
+Not a new counter; the counters exist. The emit and render layers need to carry
+the fact:
+
+- A `hist`, `summary` or any percentile derived from a run with `dropped` or
+  `throttled` above zero is marked, beside the value rather than above it, with
+  what fraction of events is unaccounted for.
+- The mark says which direction the bias runs, because it only runs one way: the
+  missing events are the ones from the busiest moments, so **every percentile is
+  a lower bound**, never an estimate.
+- Where the count of missing events is unknown -- the throttled case -- it says
+  that instead of a fraction, which is the answer `DECISIONS.md` already chose
+  for the loss line.
+
+**Belongs to whoever owns `src/emit.rs` and `src/render.rs`.** It is a defect of
+the same class as the sixty-three: the tool telling a reader something that is
+not true, in this case by omission. It does not block any collector, and it
+should land before the phase 10 triage layer, because a layer that reads
+percentiles to decide what to escalate is exactly who a short tail misleads.
 
 ---

@@ -205,6 +205,22 @@ What is still genuinely missing as mechanism is **fentry** (BTF-typed attach,
 `io.fsync`, `net.tcp.connect` and `net.socket`, and **USDT** (the target's ELF
 notes, then a uprobe) for the three `runtime` sources.
 
+### 2c. The distribution that does not say it is short — finding 37
+
+New, and it is a defect rather than breadth. A `hist` or a percentile built from
+a run that dropped or was throttled is rendered exactly like one built from a
+complete run, and the events it is missing are the slow ones — whatever stalled
+the machine is what stopped the measuring. So every percentile from a lossy run
+is a lower bound and nothing says so.
+
+The largest opening was already closed by construction and for a better reason:
+`poll` cannot produce `hist` at all, because a histogram of a polled gauge is a
+histogram of when the poller looked. What is left is `sample` and `trace`, whose
+losses *are* counted — the invariant holds — and whose distributions do not
+carry the fact. `src/emit.rs` and `src/render.rs`. It should land before phase
+10, because a triage layer reading a p99 to decide what to escalate is exactly
+who a short tail misleads.
+
 ### 2b. The eleven defects the fifth wave left
 
 `docs/fixes/` names each with why it was left: two need a line in a file the

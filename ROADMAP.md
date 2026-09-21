@@ -39,6 +39,11 @@ To be recalled at every phase — these are the project's natural drifts:
   core (it is dynamic binary translation). An accepted boundary, to be documented.
 - ❌ **Do not promise the inside of NVIDIA GPUs.** CUPTI is closed, there is no
   kernel path. An accepted boundary.
+- ❌ **Do not tune anything.** No `madvise`, no `sched_setaffinity`, no queueing
+  discipline, no cgroup limit, and nothing that modifies the target in order to
+  read it. A tool that measures and changes in the same run produces numbers
+  nobody can interpret. An accepted boundary, and the one most likely to be
+  proposed as a feature.
 
 ---
 
@@ -53,7 +58,7 @@ To be recalled at every phase — these are the project's natural drifts:
 | Clock | `CLOCK_MONOTONIC` **everywhere** | non-negotiable, see Phase 1 |
 | Privileges | root · `CAP_BPF`+`CAP_PERFMON` · unprivileged degraded | changes half the backends |
 | Scope | single machine (phases 1-8) · fleet (later) | multi-host adds inter-machine clock drift |
-| Usage target | one-off session · continuous daemon | sampling vs capture, online aggregation vs raw storage |
+| Usage target | one-off session · continuous daemon · daemon with a flight recorder | sampling vs capture, online aggregation vs raw storage. The third is the second plus a trigger, and it is what catches a p99.9 that cannot be reproduced. Still open; `DECISIONS.md` says what it costs to leave it so |
 
 **Output**: a filled-in `DECISIONS.md`. Every line settled, with the reason.
 
@@ -324,12 +329,43 @@ truth test + automatic appearance in `omn list`.
 
 Above the engine, not inside it. It calls Omniscient like any other user.
 
+The methods are the deliverable, not a menu. Each one names the sources it needs
+and each is only worth building once they collect, so the order below is the
+order in which their inputs land.
+
 1. **USE triage** (Utilization / Saturation / Errors): a broad, cheap pass that
    answers "what is this workload limited by?".
-2. **Automatic escalation**: once the suspect is identified, enable that layer's
+2. **TSA** (thread state analysis): where a thread's wall clock went, split
+   across on-cpu, runnable-and-waiting, and blocked-on-what. **This one is
+   ready first**, because its three inputs already collect and are checked --
+   `cpu.profile`, `sched.runqlat` and `sched.offcpu` with its blocking stack --
+   and the `wakeup` join already says what released a block. It is also the
+   method that answers the question people actually arrive with, which USE does
+   not: *why is this slow*, rather than *what is saturated*.
+3. **Automatic escalation**: once the suspect is identified, enable that layer's
    detailed collectors and turn off the rest. The budget holds because we only pay
    dearly for one layer at a time. Depends on hot attach (phase 6).
-3. **Question-oriented modes**: `omn latency --pid X`, `omn saturate`.
+4. **Question-oriented modes**: `omn latency --pid X`, `omn saturate`.
+5. **Differential flame graphs**, which need nothing new: two profiles and a
+   subtraction, and the encoders for both already exist.
+
+### What this layer must not get wrong
+
+Two arithmetics that look like presentation and are not:
+
+- **Coordinated omission.** A `hist` built from a source that missed readings is
+  biased, and biased *towards the answer the reader wants*: the readings a
+  polled or sampled source loses are the ones taken while the machine was
+  stalled, which are the slow ones. The collectors already count what they
+  missed -- `late_ticks`, `throttled`, `dropped` -- and nothing anywhere says
+  the distribution built on top of them therefore under-reports its own tail.
+  This belongs to the emit layer, not to this phase, and it is recorded as
+  finding 37 in `docs/open-findings.md`; it is named here because a triage layer
+  reading a percentile is exactly who would be misled by one.
+- **Little's law and the queueing identities** are how saturation is read from
+  what is already collected -- `io.inflight` against `io.iops`, run queue length
+  against `sched.runqlat`. They are worth stating as the arithmetic of the USE
+  pass rather than leaving each source to imply them.
 
 ---
 
@@ -359,6 +395,13 @@ it has no "obviously wrong" output.
    originating context is lost: `KEY` evidence, not `IDENTITY`.
 4. **Single machine first.** Inter-machine clock drift is a different class of
    problem from local correlation.
+5. **It observes; it does not tune.** Every knob a performance engineer reaches
+   for is out of scope, and so is anything that modifies the target to measure
+   it -- `ptrace` and `userfaultfd` are interception, not observation.
+   `DECISIONS.md` carries the reasoning.
+6. **LTTng and its kind are peers, not backends.** Same events, another path;
+   nothing to recover by wrapping one. If LTTng-UST ever earns a place it is as
+   a CTF **import**, a consumer of one more format.
 
 These limits must be visible on first contact with the tool. A project named
 "Omniscient" that fails to state them turns its boundaries into perceived bugs.

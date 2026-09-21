@@ -193,6 +193,13 @@ Not in this brief. Written down so it is not rediscovered.
 | `gpu.kernel`, `gpu.counters` | **CUPTI, Nsight** | Vendor libraries with their own licensing and their own idea of what a profile is. |
 | `net.xdp` | **an XDP program** | A different program type and a different attach point, and the only one here that can drop packets rather than observe them. |
 
+### Not a source at all, and worth knowing it is not
+
+| | Why it is here | Priority |
+|---|---|---|
+| **CTF import** — ingest an LTTng-UST stream and merge it into the timeline | Some people have already instrumented their applications in LTTng-UST, mostly in embedded and telecom. Reading their stream gives their application semantics for free. It is a **consumer of one more format, not a source**: `DECISIONS.md` boundary 6 says why LTTng is a peer rather than a backend, and why LTTng-UST in particular can never be an eBPF-readable one — what makes it fast, writing in-line into its own buffer with no trap, is exactly what puts its events out of reach of a BPF program. | Low. Nothing depends on it and no measurement here is worse without it. |
+| **A flight recorder** — a permanent circular buffer, snapshotted when a predicate fires | The one class of problem this tool cannot serve at all today: a p99.9 that cannot be reproduced, where a run is one window opened by hand and the interesting moment has to happen inside it. | **Not low, and not here.** It is the run model, not a feature, so it is an open line in `DECISIONS.md` folded into the session-versus-daemon decision it is really part of. Deciding it changes what every collector written in the meantime assumes. |
+
 Two more that are decisions rather than mechanism:
 
 - **`net.capture` needs `CAP_NET_RAW`**, which the build does not grant. The

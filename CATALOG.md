@@ -409,6 +409,15 @@ Invalid combinations must be rejected at validation time with an explicit
 message: sampling a procfs file, counting a tracepoint without tracing it, asking
 for stacks on a `poll`.
 
+**`poll` has no `hist`, and that is load-bearing.** A histogram of a polled gauge
+is a histogram of when the poller happened to look, which is a property of the
+tick rather than of the program. It is also, under another name, the guard
+against coordinated omission: a tick that ran late is visible as a gap in a
+`timeline` and invisible once folded into a bucket, and the readings a late tick
+loses are the ones from the moments that stalled -- the slow ones. `sample` and
+`trace` do produce `hist` and do lose events, which is finding 37 of
+`docs/open-findings.md` and is not closed.
+
 ---
 
 ## 13. Global options

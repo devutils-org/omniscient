@@ -189,6 +189,16 @@ them into perceived bugs.
 - **Writes are less attributable than reads.** Writeback leaves in a kworker and
   the originating context is gone: `KEY` evidence, not `IDENTITY`.
 - **Single machine.** Inter-machine clock drift is a different class of problem.
+- **It observes; it does not tune.** No `madvise`, no `sched_setaffinity`, no
+  queueing discipline, no cgroup limit — and nothing that modifies the target in
+  order to read it, which is why `ptrace` and `userfaultfd` are not backends
+  here. A tool that measures and changes in one run produces numbers nobody can
+  interpret afterwards. It will tell you readahead is doing nothing for this
+  workload; what to do about that is yours.
+- **LTTng and its kind are peers, not backends.** They reach the same kernel
+  tracepoints by another path, so wrapping one would mean shelling out — see the
+  first boundary. If LTTng-UST ever earns a place it is as a CTF import: one
+  more format read, not one more source.
 
 ## State
 

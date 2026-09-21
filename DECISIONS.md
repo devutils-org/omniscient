@@ -124,7 +124,30 @@ construction. They block the resolver, which is the next milestone.
 
 | Decision | Options | What it costs to decide either way |
 |---|---|---|
-| Usage target | One-off session · continuous daemon | A session can buffer and aggregate at the end. A daemon must aggregate online, bound every map, and support hot attach and detach, which phase 6 already assumes. Deciding "daemon" now is cheaper than retrofitting it. |
+| Usage target | One-off session · continuous daemon · **daemon with a flight recorder** | A session can buffer and aggregate at the end. A daemon must aggregate online, bound every map, and support hot attach and detach, which phase 6 already assumes. Deciding "daemon" now is cheaper than retrofitting it. |
+
+The third option is new, and it is the same decision seen from the side that
+makes it concrete. A **flight recorder** is a bounded circular buffer kept
+permanently, with a snapshot written out when something the run is watching for
+happens -- a latency over a threshold, a loss, an exit code. It is what catches
+a p99.9 that cannot be reproduced, which is the class of problem this tool is
+least able to serve today: a run is one window, opened by hand, and the
+interesting moment has to happen inside it.
+
+It is listed here rather than in the roadmap because it is not a feature to
+schedule, it is the run model. "A run is one window and one document" is written
+into `run_all`, into the resolved file, into every emit and into how losses are
+reported. A flight recorder means a run with no end, a buffer that evicts, and
+an output triggered by a predicate over the events rather than by a duration --
+which is *exactly* the "aggregate online, bound every map" column above, plus a
+trigger. So deciding "daemon" and deciding "flight recorder" are one decision
+with two names, and the cost of leaving it open is the same cost, already
+stated: every collector written in the meantime assumes the window.
+
+What the project already has that would serve it: `Losses` counts and surfaces
+eviction, the join engine's open-state has a bounded capacity with expiry and
+overflow counted, and `--budget` measures a run against the target. What it does
+not have is a run that does not end.
 
 ---
 
@@ -141,3 +164,26 @@ Restated from `ROADMAP.md` because they are decisions, not omissions.
    the originating context is lost: `KEY` evidence, not `IDENTITY`.
 4. **No wrapping of `perf`, `bpftrace` or `bcc`.** Omniscient talks to
    `perf_event_open`, `bpf()`, procfs, sysfs and netlink directly.
+5. **It observes; it does not tune.** Every knob the kernel offers a performance
+   engineer -- `madvise`, `sched_setaffinity`, `posix_fadvise`, `io_uring`
+   parameters, a queueing discipline, `nr_requests`, a cgroup limit -- is out of
+   scope, and so is anything that modifies the target to measure it: `ptrace`
+   and `userfaultfd` are interception rather than observation. The reason is not
+   modesty, it is that a tool which measures and changes in one run produces
+   measurements nobody can interpret: the second reading is of a machine the
+   first reading altered. Omniscient will report that readahead is not being
+   used; the person decides what to do about it. This is stated because "why
+   does it not set X" is otherwise a perceived bug rather than a boundary, and
+   because it is half of what "performance engineering" usually means.
+6. **LTTng, and tools like it, are peers rather than backends.** LTTng-kernel
+   attaches the same kernel tracepoints through its own out-of-tree modules, its
+   own ring buffers and CTF. Consuming it would mean shelling out, which
+   boundary 4 refuses, or reimplementing its chain to reach events this tool
+   already reaches by a shorter path -- there is nothing to recover. LTTng-UST
+   is the interesting half and is still not a backend: it is fast precisely
+   because it writes in-line into its own buffer without a trap, which is also
+   why its events do not exist for an eBPF program. If it is ever worth having,
+   it is worth having as an **import** -- a CTF stream merged into the timeline
+   after the fact, a consumer of one more format rather than a source. That is
+   written down in `BRIEF_NEXT.md` under what is left, at the priority it
+   deserves.
