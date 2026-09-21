@@ -32,6 +32,9 @@ mod insn;
 mod io;
 mod io_writeback;
 mod map;
+mod mem_alloc;
+mod mem_program;
+mod mem_stall;
 mod migrate;
 mod net_drops;
 mod net_lifetime;
@@ -50,6 +53,8 @@ use std::sync::OnceLock;
 
 pub use io::{BlockEvent, BlockProgram, Stage, Submitter, NO_OPEN, SCOPE_IS_OURS};
 pub use io_writeback::{Writeback, WritebackProgram};
+pub use mem_alloc::{AllocProgram, AllocRow, Allocator};
+pub use mem_stall::{Stall, StallDrops, StallProgram, StallRow, SCOPE_CGROUP, SCOPE_GLOBAL};
 pub use migrate::{Migration, MigrationProgram};
 pub use net_drops::{DropProgram, PacketDrop};
 pub use net_lifetime::{TcpLifetime, TcpLifetimeProgram};

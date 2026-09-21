@@ -1,0 +1,42 @@
+# Compaction: what a machine pays for contiguity when its memory is scattered.
+#
+#   omn -f examples/mem-compaction-watch.yml
+#
+# The allocator wants a two-megabyte block -- a transparent huge page, a large
+# network buffer, a kernel stack on some configurations -- the free pages are
+# scattered, and somebody has to move them. Either the allocating thread does it
+# inside its own allocation, which is latency it cannot explain, or `kcompactd`
+# does it in the background, which is cpu nobody attributes. Both fire the same
+# tracepoints and this session sees both.
+#
+# **On a machine with free memory this prints nothing, and that is the answer.**
+# Compaction happens when contiguity is short; `/proc/buddyinfo` says whether it
+# is. An empty histogram here is not a failed measurement and is not dressed up
+# as one -- `docs/scenarios/mem.md` (D13) records what it takes to make this
+# machine compact, which is more than a scenario may do to a machine it does not
+# own.
+#
+# The window is long because the thing being watched is rare: four seconds of a
+# machine under memory pressure will usually catch kcompactd at least once,
+# where half a second catches nothing on any machine at all.
+#
+# What to look at, where there is anything:
+#
+#   * the distribution. A compaction of a zone is microseconds when the scan
+#     finds what it needs immediately and tens of milliseconds when it does not,
+#     and a mean over that range is a number with no referent.
+#   * `comm`. `kcompactd0` is the background case, costing nobody in particular;
+#     any other name is a thread that paid for it inside its own allocation.
+#     The entry declares no key, deliberately: the work is done for a whole
+#     zone, and keying it by the thread that triggered it would invite a reader
+#     to add up one program's share of a machine-wide job.
+name: what the machine pays for contiguity
+format: json
+duration: 4s
+
+requests:
+  - label: compaction
+    source: mem.compaction
+    target: system
+    mode: trace
+    emit: [raw, hist:log2, summary]

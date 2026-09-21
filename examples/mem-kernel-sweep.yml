@@ -1,0 +1,67 @@
+# Every shape the four kernel-side `mem` sources can produce, over one window.
+#
+#   omn -f examples/mem-kernel-sweep.yml
+#   omn -f examples/mem-kernel-sweep.yml --format ndjson | head
+#
+# The catalog is data and the command line is a projection of it, so every
+# combination of source, mode and emit it offers is a promise. `mem.page_alloc`,
+# `mem.kmalloc`, `mem.reclaim` and `mem.compaction` all count in the kernel and
+# hand up rows of a histogram rather than one event per measurement, which is a
+# shape no emit in this tool was originally written for -- so each of them is
+# asked here for every emit its entry declares.
+#
+# They are in their own session rather than in `mem-capability-sweep.yml`
+# because they observe the machine and that one launches a program: one run
+# observes one target, and a session asking for both is refused.
+#
+# **Two of these will usually render nothing, and that is the right answer.**
+# Direct reclaim happens when a machine has no free memory and compaction when
+# it has no contiguous memory; an idle developer machine has both, so the
+# sessions below produce empty summaries and empty histograms. An empty
+# distribution is not a failure and must not be dressed up as one --
+# `examples/mem-reclaim-squeeze.yml` is the session that makes reclaim happen
+# on purpose, and `docs/families/mem.md` records what it takes to make
+# compaction happen, which on this machine is more than a scenario may do.
+#
+# The full sweep -- every mode against every emit, for every `mem` source that
+# has a collector -- is not a session anybody would run. It lives in
+# `tests/scenario_mem.rs`, where a combination the catalog offers and the build
+# refuses is a failure rather than a surprise.
+name: every shape the allocator sources make
+format: json
+duration: 500ms
+
+requests:
+  - label: pages, every shape
+    source: mem.page_alloc
+    target: system
+    mode: trace
+    emit: [hist:log2, topk:5, rate, raw, summary]
+    keys: [task, cgroup]
+
+  - label: pages, counted
+    source: mem.page_alloc
+    target: system
+    mode: count
+    emit: [rate, raw, summary]
+    keys: [task]
+
+  - label: slab, every shape
+    source: mem.kmalloc
+    target: system
+    mode: trace
+    emit: [hist:log2, topk:5, rate, raw, summary]
+    keys: [task]
+
+  - label: reclaim, every shape
+    source: mem.reclaim
+    target: system
+    mode: trace
+    emit: [hist:log2, topk:5, rate, raw, summary]
+    keys: [task, cgroup]
+
+  - label: compaction, every shape
+    source: mem.compaction
+    target: system
+    mode: trace
+    emit: [hist:log2, rate, raw, summary]

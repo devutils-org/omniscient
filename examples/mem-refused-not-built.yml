@@ -16,17 +16,17 @@
 # those two answers sends a reader to look at their kernel config for an
 # afternoon over a mechanism nobody has written.
 #
-# This session used to ask for `mem.reclaim`, which was the better illustration
-# while it lasted: direct reclaim is the kernel doing the allocator's work in
-# the allocating thread, and one of the clearest memory problems there is. It
-# stopped being the right example when the `tracepoint:` probe became honest.
-# `mem.reclaim` declares only `bpf:tp`, the classic tracepoint attach, which
-# reads a numeric event id out of tracefs -- and tracefs is mounted and
-# unreadable at uid 1000 here and on a stock machine. So this machine genuinely
-# cannot serve it, the answer is exit 1, and it says so. Finding 9 of
-# `docs/open-findings.md` is the other half of that: the tracepoint it names is
-# published in this kernel's own BTF, so a `bpf:raw_tp` backend ahead of the
-# classic one would put `mem.reclaim` back within reach with no code at all.
+# This session used to ask for `mem.reclaim`, and it is worth knowing why it
+# stopped, twice. First the `tracepoint:` probe became honest: `mem.reclaim`
+# declared only `bpf:tp`, the classic tracepoint attach, which reads a numeric
+# event id out of tracefs -- and tracefs is mounted and unreadable at uid 1000
+# here and on a stock machine. So this machine genuinely could not serve it and
+# the answer became exit 1. Finding 9's catalog pass then put a `bpf:raw_tp`
+# ahead of the classic one, which needs nothing but BTF and a name, and it went
+# back to exit 3. The sixth wave then wrote the collector, so today it exits 0
+# and measures direct reclaim -- `examples/mem-reclaim-squeeze.yml` is that
+# session. `mem.latency` is an illustration that will last: no backend for
+# either PEBS or IBS is written, and neither is close to being.
 name: memory access latency, which nothing here collects
 format: text
 duration: 1s

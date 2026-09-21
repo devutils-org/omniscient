@@ -1,0 +1,63 @@
+# The kernel's own ledger: what the page and slab allocators handed out, to
+# whom, in what sizes.
+#
+#   omn -f examples/mem-allocator-ledger.yml
+#
+# Every other `mem` source reports a *level* -- resident size, cgroup charge,
+# swap in use -- and a level says what is held, never who asked for it. These
+# two are flows. `mem.page_alloc` is every page the allocator handed anyone:
+# faults, page tables, network buffers, the pages behind a slab. `mem.kmalloc`
+# is the kernel objects too small to be pages, and it is the only source in this
+# tool that can see kernel memory at all, since slab memory is in no process's
+# footprint.
+#
+# **Neither has a process target, and that is not an omission.** The allocators
+# are properties of the machine; the entries offer `system` and, for pages,
+# `cgroup`, and nothing narrower. So the attribution is on the events -- every
+# row carries the task, the process and the name that asked -- and the session
+# below watches everything. Run it on an idle machine and what you get is the
+# machine's own housekeeping, which is worth looking at once.
+#
+# **The ground truth is driven beside it**, because a session that observes the
+# machine cannot also launch a program: one run observes one target, and the
+# tool refuses a session that asks for both. `tests/scenario_mem.rs` runs this
+# file unchanged while starting a program that touches sixty-four mebibytes and
+# sends two thousand datagrams of two kilobytes, and checks the rows carrying
+# that program's process id. By hand it is two terminals:
+#
+#   omn -f examples/mem-allocator-ledger.yml
+#   python3 -c 'block = bytearray(64 << 20)
+#   for offset in range(0, len(block), 4096): block[offset] = 1'
+#
+# What to look at:
+#
+#   * the order-9 rows. Sixty-four mebibytes of anonymous memory arrive as
+#     thirty-two two-megabyte folios where transparent huge pages are enabled,
+#     not as sixteen thousand single pages -- so the histogram spikes at 512
+#     pages and the count of *allocations* is small. It is the same fact
+#     `mem.faults` states as a caveat, from the other side: a fault is not a
+#     page.
+#   * `requested_bytes` beside `total_bytes` on the slab rows. The difference is
+#     what the allocator rounded up, and it is a number no other source here can
+#     produce.
+#   * the frees, which are in the run's notes rather than in its events, with
+#     the reason. `docs/families/mem.md` says what it would take to publish them
+#     beside the allocations instead.
+name: what the allocators handed out
+format: json
+duration: 4s
+
+requests:
+  - label: pages handed out
+    source: mem.page_alloc
+    target: system
+    mode: trace
+    emit: [raw, hist:log2, topk:5]
+    keys: [task]
+
+  - label: slab bytes
+    source: mem.kmalloc
+    target: system
+    mode: trace
+    emit: [raw, hist:log2]
+    keys: [task]

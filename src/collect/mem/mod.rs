@@ -1,5 +1,6 @@
 //! Collectors for the `mem` family.
 
+mod allocations;
 mod cadence;
 mod cgroup;
 mod footprint;
@@ -7,6 +8,7 @@ pub mod heap;
 mod numa;
 mod page_faults;
 mod pressure;
+mod stall;
 mod swap;
 #[cfg(test)]
 mod testing;
@@ -14,6 +16,7 @@ mod thp;
 mod wss;
 
 use super::Factory;
+use crate::bpf::{Allocator, Stall};
 use footprint::{Metric, Source};
 use heap::Which;
 
@@ -131,6 +134,40 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("mem.wss", "fs:proc:clear_refs", |resolved| {
             Ok(Box::new(wss::Prepare::new(resolved.request.mode)?))
+        }),
+        // The four that go through the kernel rather than through a file. Each
+        // carries the request's own keys and predicate, because the resolver
+        // credits a `bpf` backend with filtering in the kernel and then leaves
+        // its events alone; `allocations.rs` says what that credit costs.
+        Factory::new("mem.page_alloc", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(allocations::Prepare {
+                allocator: Allocator::Pages,
+                mode: resolved.request.mode,
+                keys: resolved.request.keys.clone(),
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("mem.kmalloc", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(allocations::Prepare {
+                allocator: Allocator::Slab,
+                mode: resolved.request.mode,
+                keys: resolved.request.keys.clone(),
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("mem.reclaim", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(stall::Prepare {
+                stall: Stall::Reclaim,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("mem.compaction", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(stall::Prepare {
+                stall: Stall::Compaction,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
         }),
     ]
 }

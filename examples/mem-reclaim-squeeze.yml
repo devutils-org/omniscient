@@ -1,0 +1,52 @@
+# Direct reclaim: the kernel doing the allocator's work inside the allocating
+# thread, which no other source here can see.
+#
+#   omn -f examples/mem-reclaim-squeeze.yml &
+#   sh examples/mem-reclaim-squeeze.sh
+#
+# A thread asks for a page, there is none free, and instead of being handed one
+# it is made to go and find one: write back dirty pages, drop cache, swap. That
+# happens on the thread's own stack, in the middle of the allocation. A cpu
+# profile shows the thread running -- it is running, in `shrink_node` -- a
+# resident size shows a flat line, and the program is simply slow. This is the
+# source that names it.
+#
+# **The workload is beside the session and not in it**, because `mem.reclaim`
+# offers no `launch` target: one run observes one target, and the entry offers
+# the machine, a cgroup and a process. `examples/mem-reclaim-squeeze.sh` is the
+# other half -- it builds a thirty-two mebibyte cgroup, writes two hundred
+# mebibytes of page cache through it, and prints the cgroup's own `pgsteal`
+# counter, which is the kernel counting the same thing this session measures.
+#
+# **Two shapes of reclaim, one measurement.** The kernel publishes the global
+# case -- the machine is out of memory -- and the cgroup case -- this container
+# is out of its allowance -- under two tracepoint names with one prototype, and
+# a tool that watched only the first would report zero while a squeezed cgroup
+# reclaimed continuously. Both are attached; every event says which under
+# `scope`, because they are one measurement and two problems, and only the
+# second is a limit somebody chose.
+#
+# What to look at:
+#
+#   * `pages_reclaimed`, which is what the episodes actually freed. A thread
+#     that stalled ten milliseconds and reclaimed nothing is in a different
+#     situation from one that stalled ten milliseconds and freed a hundred
+#     megabytes, and a duration alone cannot tell them apart.
+#   * the histogram. Reclaim latency spans four orders of magnitude on one
+#     machine in one minute, so a mean of it is a number with no referent; the
+#     buckets are built in the kernel, which is what makes the source
+#     affordable at the rate a squeezed cgroup produces.
+#   * the run's own note about how many episodes the rows stand for. One event
+#     here is not one episode, and every other source in this tool makes those
+#     the same thing.
+name: a cgroup made to reclaim
+format: json
+duration: 3s
+
+requests:
+  - label: reclaim
+    source: mem.reclaim
+    target: system
+    mode: trace
+    emit: [raw, hist:log2, summary]
+    keys: [task, cgroup]

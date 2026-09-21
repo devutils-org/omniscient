@@ -1,0 +1,44 @@
+# The loss path: a kernel-side histogram driven past what it can hold.
+#
+#   omn -f examples/mem-kernel-storm.yml &
+#   sh examples/mem-kernel-storm.sh
+#
+# Every source that aggregates in the kernel trades a bound for a cost. The
+# events never reach userspace, which is what makes `mem.kmalloc` affordable at
+# a million allocations a second; what reaches userspace is rows of a map, and
+# the map holds four thousand and ninety-six of them between two drains.
+#
+# The question this session exists to answer is what the tool says when that is
+# not enough. A collector that quietly counted fewer allocations would produce a
+# number that looks exactly like a machine allocating less, and by the time
+# anyone noticed the run would be gone. So the program counts every row it could
+# not create, per cpu, and the run reports them as `dropped` with the capacity
+# in the reason -- it is the one loss these sources can suffer, and the
+# allocations behind it are recorded nowhere else at all.
+#
+# **The workload is beside the session and not in it**, because `mem.kmalloc`
+# observes the machine and a session that both observes and launches is refused.
+# `examples/mem-kernel-storm.sh` forks about three thousand short-lived
+# processes from four shells at once: a row is keyed by a task and a size, one
+# task makes at most a couple of dozen rows, so filling the map takes tasks
+# rather than allocations.
+#
+# What to look at:
+#
+#   * `dropped`, and the reason beside it, which names the capacity. A run that
+#     reports a loss is a run whose totals are a lower bound, and the totals
+#     here are hundreds of thousands of allocations.
+#   * the summary, which is still exactly right about what it *did* see. A loss
+#     is not a corruption: every row that was created was counted atomically and
+#     drained whole.
+name: more rows than the map holds
+format: json
+duration: 4s
+
+requests:
+  - label: slab under a fork storm
+    source: mem.kmalloc
+    target: system
+    mode: trace
+    emit: [summary, hist:log2]
+    keys: [task]
