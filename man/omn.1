@@ -97,6 +97,15 @@ is what this build can measure, which is not the same question.
 is the cheapest backend in a chain, and
 .B DET
 is reproducibility between runs \(em never bit-exactness.
+.IP
+.B \-\-verify\-attach
+answers every raw\-tracepoint requirement by attaching to it rather than by
+reading the kernel's BTF. Those are not the same question: BTF says the kernel
+defines a tracepoint, and the attach is what a run will actually do. They have
+never yet disagreed, which the suite checks rather than assumes, and asking the
+expensive one of every entry costs about a second \(em so it is a switch and not
+the default. Reach for it on a machine where a backend probes available and then
+refuses once a target is running.
 .TP
 .B validate \fB\-f\fI session
 Check a session against the catalog without touching the machine. Machine

@@ -227,6 +227,12 @@ pub struct ListArgs {
     /// When to colour the listing: auto, always or never.
     #[arg(long, value_name = "WHEN", default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
+
+    /// Answer every raw-tracepoint requirement by attaching to it, not by
+    /// reading the kernel's BTF. Slower by about a second, and the only way to
+    /// know a backend will still be there once a target has been launched.
+    #[arg(long)]
+    pub verify_attach: bool,
 }
 
 #[derive(Debug, Args)]

@@ -3432,3 +3432,80 @@ should land before the phase 10 triage layer, because a layer that reads
 percentiles to decide what to escalate is exactly who a short tail misleads.
 
 ---
+## 38. BTF presence is not attachability, measured rather than assumed
+
+Asked by the coordinator while six streams were writing collectors against the
+twenty-seven `bpf:raw_tp` backends finding 36 added. Those were checked name by
+name against `/sys/kernel/btf/vmlinux` and **not** against an attach, and the
+difference between those two is the whole of finding 15: a requirement probed by
+the easy question, a backend reported available, a resolver that selects it, and
+a refusal that arrives with the target already launched.
+
+If BTF presence and attachability diverge, every collector in the wave finds out
+one at a time, at attach time. So it was worth asking once, of the whole
+catalog, before they did.
+
+### The answer
+
+**Thirty-eight of thirty-eight attach.** Every name the catalog gives a
+`bpf:raw_tp` backend, loaded with the two-instruction no-op `load_support` uses
+and bound with `BPF_RAW_TRACEPOINT_OPEN`, on kernel 7.2.6 with `CAP_BPF` and
+`CAP_PERFMON`. The cheap probe and the expensive one report the same
+`86 usable here, 10 unverified, 4 out of reach`, and not merely the same totals —
+the two listings are identical line for line.
+
+### Why the probe stays cheap anyway
+
+Because the expensive question costs what it costs:
+
+```
+omn list                    154 ms
+omn list --verify-attach   1687 ms
+```
+
+Attaching and detaching a raw tracepoint is about thirty milliseconds of RCU
+synchronisation, and a full listing probes thirty-eight distinct names. An
+eleven-fold slowdown on the most-run command in the tool, to close a gap
+measured at zero on this kernel, is a bad trade — and it would be paid by
+everyone, on every listing, forever.
+
+So `raw_tracepoint_support` still reads BTF, and the attach lives behind
+`omn list --verify-attach`, which exists for the machine where the two *do*
+disagree. That machine is by definition not this one, which is exactly why the
+switch has to exist before anyone needs it.
+
+### What makes "they agree" a claim rather than a belief
+
+`tests/raw_tracepoints.rs` runs both listings and requires them to be identical.
+It is an integration test and not a unit one, and the reason is worth stating
+because it was tried the other way first: an in-process test binary is rebuilt
+under a fresh hash every run and cannot carry file capabilities, so a unit
+version of this sweep **skipped, and printed `ok`** — a test that could never
+have run on the machine it was written for. `target/debug/omn` carries the
+capabilities once `make` has applied them, so the integration version does the
+attach for real; when it cannot, it says which case it is instead of passing
+quietly.
+
+The failure message names the fix rather than the symptom: if the two ever
+disagree, `raw_tracepoint_support` should start calling
+`raw_tracepoint_attaches`, which is kept beside it for that day.
+
+### One thing that was tried and withdrawn
+
+The probe was first changed to attach *always*, which is what `load_support`
+two functions above already does and argues for in its own words — *"the probe
+is a load, not a guess"*. It was withdrawn on the measurement above, and the
+inconsistency is worth naming rather than hiding: **this layer now probes one
+requirement by asking the kernel and another by reading a file, and the reason
+is cost, not principle.** Should raw-tracepoint attach ever become cheap, or
+should a machine be found where the two disagree, the cheap probe is the thing
+to delete.
+
+A second thing was withdrawn with it. Attaching turned the permission refusal
+from *"`sched_waking` is available"* into *"attaching needs CAP_BPF"*, which
+reads worse: it loses the fact that the tracepoint is there. The fix, kept in
+`raw_tracepoint_attaches`, is to say both — *`sched_waking` is defined by this
+kernel, and attaching to it needs CAP_BPF* — because "the tracepoint is not
+there" and "you may not attach to it" send a reader to two different places.
+
+---

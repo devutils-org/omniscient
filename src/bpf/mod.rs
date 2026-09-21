@@ -37,6 +37,7 @@ mod runqlat;
 mod syscall;
 mod wakeup;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 pub use migrate::{Migration, MigrationProgram};
@@ -53,6 +54,7 @@ use btf::Btf;
 /// be reported as satisfied, and must be told apart from one that was checked
 /// and found absent -- one calls for privileges, the other for a different
 /// kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Support {
     Yes,
     No(String),
@@ -107,12 +109,83 @@ pub fn load_support() -> &'static Support {
 /// tracefs and without loading anything.
 pub fn raw_tracepoint_support(name: &str) -> Support {
     match kernel_btf() {
-        Ok(btf) if btf.has_type(&format!("btf_trace_{name}")) => Support::Yes,
+        Ok(btf) if btf.has_type(&format!("btf_trace_{name}")) => {
+            if VERIFY_ATTACH.load(Ordering::Relaxed) {
+                raw_tracepoint_attaches(name)
+            } else {
+                Support::Yes
+            }
+        }
         Ok(_) => Support::No(format!(
             "this kernel defines no `{name}` tracepoint; it is absent from its own BTF"
         )),
         Err(reason) => Support::Unchecked(format!(
             "whether `{name}` exists cannot be checked: {reason}"
+        )),
+    }
+}
+
+/// Set by `--verify-attach`, and read by the probe above.
+///
+/// A process-global rather than a parameter threaded through `Capabilities`
+/// and the resolver, deliberately: it is set once at startup, before anything
+/// probes, and it changes no answer -- only how thoroughly the same question is
+/// asked. Threading it would have meant a signature change in two layers while
+/// six streams were mid-flight against them, which is a cost with no matching
+/// benefit.
+static VERIFY_ATTACH: AtomicBool = AtomicBool::new(false);
+
+/// Asks every later raw-tracepoint probe to attach rather than read BTF.
+pub fn verify_attach() {
+    VERIFY_ATTACH.store(true, Ordering::Relaxed);
+}
+
+/// Whether `BPF_RAW_TRACEPOINT_OPEN` will actually bind to this name.
+///
+/// The question `raw_tracepoint_support` above does *not* ask, and the reason
+/// it does not is a measurement rather than an assumption. Finding 38 has it:
+/// asking this of every entry turns `omn list` from 150 ms into 1.3 s, because
+/// attaching and detaching a tracepoint costs about thirty milliseconds of RCU
+/// synchronisation apiece -- and on this kernel all thirty-eight names the
+/// catalog gives attach, so the expensive question has never had a different
+/// answer from the cheap one.
+///
+/// It is kept, and reachable as `omn list --verify-attach`, which is what
+/// `tests/raw_tracepoints.rs` runs: the two probes are required to reach the
+/// same answer, so "they have never disagreed" is checked on every machine the
+/// suite runs on rather than believed. The test is an integration test and not
+/// a unit one for the reason `CLAUDE.md` gives -- an in-process test binary is
+/// rebuilt under a fresh hash every run and cannot carry file capabilities, so
+/// a unit version of this would skip here and always have.
+///
+/// If it ever fails, this is the function the probe should start calling.
+pub fn raw_tracepoint_attaches(name: &str) -> Support {
+    let probe = [insn::Insn::mov64_imm(0, 0), insn::Insn::exit()];
+    let program = match syscall::prog_load(
+        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+        &probe,
+        "omn_rtp_probe",
+        "GPL",
+    ) {
+        Ok(program) => program,
+        Err(error) if error.is_permission() => {
+            return Support::Unchecked(permission_advice("attaching to a raw tracepoint"))
+        }
+        Err(error) => {
+            return Support::Unchecked(format!(
+                "this kernel refused the smallest possible tracing program ({error})"
+            ))
+        }
+    };
+
+    use std::os::fd::AsRawFd;
+    match syscall::raw_tracepoint_open(name, program.as_raw_fd()) {
+        Ok(_link) => Support::Yes,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Support::Unchecked(permission_advice("attaching to a raw tracepoint"))
+        }
+        Err(error) => Support::No(format!(
+            "`{name}` is in this kernel's BTF and `BPF_RAW_TRACEPOINT_OPEN` refuses it ({error})"
         )),
     }
 }

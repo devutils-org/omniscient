@@ -1063,6 +1063,11 @@ fn print_session(
 
 fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
     let catalog = catalog(args.catalog.as_deref())?;
+    // Before `detect`, which is what probes: the switch changes how the
+    // question is asked and must be set before anything asks it.
+    if args.verify_attach {
+        omn::bpf::verify_attach();
+    }
     let capabilities = Capabilities::detect();
     match args.format {
         OutputFormat::Text => print!(

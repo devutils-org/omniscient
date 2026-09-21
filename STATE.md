@@ -25,7 +25,7 @@ two ways — a `perf_event_open` callchain for `cpu.profile` and
 blocked — and a run measures and reports what it cost, against a ceiling it can
 be held to.
 
-**1037 tests pass**, of which 175 are scenarios: a workload whose property the
+**1040 tests pass**, of which 175 are scenarios: a workload whose property the
 scenario chose, a session that measures it, and a check against that property.
 They found 63 defects, none worked around, recorded in `docs/scenarios/`; the
 fifth wave closed 52 of them, and `docs/fixes/` records what became of each.

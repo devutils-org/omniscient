@@ -207,7 +207,7 @@ remains in the order it is worth doing. In short: the skeleton is finished and
 59 of 100 sources collect for real, over eight mechanisms: procfs and sysfs,
 `perf_event_open` counting and sampling, netlink, an `LD_PRELOAD` shim, NVML
 through `dlopen`, `af_packet` with a `PACKET_MMAP` ring, and eBPF through raw
-tracepoints, classic tracepoints, kprobes and uprobes. 1037 tests pass, of which
+tracepoints, classic tracepoints, kprobes and uprobes. 1040 tests pass, of which
 175 are scenarios: a workload whose property the scenario chose, a session that
 measures it, and a check against that property. They found 63 defects, none
 worked around, and `docs/scenarios/` records every one.
