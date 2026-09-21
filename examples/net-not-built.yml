@@ -3,30 +3,31 @@
 #   omn -f examples/net-not-built.yml            # exit 3
 #   omn -f examples/net-not-built.yml --dump-request
 #
-# Eight of the fifteen `net` sources have no collector. The catalog describes
-# them anyway, and that is the point -- the request resolves, validates and
-# dumps, and the refusal says which backend is missing rather than pretending
-# the source does not exist.
+# Three of the fifteen `net` sources have no collector, and the catalog
+# describes them anyway -- that is the point. The request resolves, validates
+# and dumps, and the refusal says which backend is missing rather than
+# pretending the source does not exist.
 #
 # The first request is the one that carries this file's answer, because a
 # session stops at the first request it cannot serve. It asks for a source whose
 # backend this machine genuinely has: `net.tcp.connect` needs `bpf:fentry`,
 # which needs BTF, which is here. So the gap is the build's and the code is 3.
 #
-# All three requests are chosen for that reason, and the choice is the lesson.
-# This file used to ask for `net.drops`, `net.qdisc` and `net.softirq`, which
-# are the more interesting sources and the wrong ones here: they need `bpf:tp`,
-# the classic tracepoint attach, whose numeric event id lives in a root-only
-# file under tracefs. On this machine they are not a collector nobody wrote,
-# they are a machine that cannot serve them, and the tool correctly answers 1.
-# A session mixing the two answers demonstrates neither, because resolution
-# happens before any collector is looked for, so the machine's gap is reported
-# first whatever the order of the requests.
+# Both requests are chosen for that reason, and the choice is the lesson. This
+# file used to ask for `net.drops`, `net.qdisc` and `net.softirq`, which were
+# then the more interesting sources and the wrong ones here: they resolved onto
+# `bpf:tp`, the classic tracepoint attach, whose numeric event id lives in a
+# root-only file under tracefs. On this machine they were not a collector
+# nobody had written, they were a machine that could not serve them, and the
+# tool correctly answered 1. A session mixing the two answers demonstrates
+# neither, because resolution happens before any collector is looked for.
 #
-# Finding 9 of `docs/open-findings.md` is why that is a catalog gap rather than
-# a fact of the kernel: every tracepoint those three name is published in this
-# kernel's own BTF, and a `bpf:raw_tp` backend ahead of the classic one would
-# bring them back here.
+# All three of them now collect, through a `bpf:raw_tp` backend put ahead of
+# the classic one by finding 9 and served by the collectors of the sixth wave.
+# What is left in this file needs **fentry** -- BTF-typed attach,
+# `BPF_PROG_TYPE_TRACING` with an `attach_btf_id` -- which the eBPF layer does
+# not have. That is the same shape of gap the raw tracepoint pass closed for
+# the other three, one mechanism further on.
 #
 # Exit 3 is a different answer from exit 1. Exit 1 is a problem with this run,
 # and retrying or raising privileges may help. Exit 3 is a problem with this
@@ -36,7 +37,7 @@
 # The run answers for the first request and stops, because a session is one
 # window and one of its requests cannot be served in it. That is worth knowing
 # when reading the output: the validator reports every rejection at once, and
-# this stage reports one missing collector at a time. The other two requests are
+# this stage reports one missing collector at a time. The second request is
 # here so that `--dump-request` shows both, and so that this file stops being
 # an example the day they land.
 name: two sources this build does not collect

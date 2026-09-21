@@ -415,8 +415,14 @@ impl QdiscProgram {
 mod tests {
     use super::*;
 
-    fn kernel_btf() -> Option<Btf> {
-        match Btf::from_kernel() {
+    /// The running kernel's BTF, read once for the whole process.
+    ///
+    /// `Btf::from_kernel` parses six megabytes, and there are a dozen tests in
+    /// this family that want it. Reading it once is what `crate::bpf::
+    /// kernel_btf` is for, and a test suite that parsed it per test loaded the
+    /// machine enough to unsettle the cpu-accounting tests running beside it.
+    fn kernel_btf() -> Option<&'static Btf> {
+        match super::super::kernel_btf() {
             Ok(btf) => Some(btf),
             Err(reason) => {
                 eprintln!("skipped: {reason}");
@@ -459,8 +465,8 @@ mod tests {
     #[test]
     fn both_programs_are_built_against_the_running_kernel() {
         let Some(btf) = kernel_btf() else { return };
-        let enqueue = enqueue_instructions(&btf, 3, 4).expect("an enqueue program");
-        let dequeue = dequeue_instructions(&btf, 3, 4, 5, None).expect("a dequeue program");
+        let enqueue = enqueue_instructions(btf, 3, 4).expect("an enqueue program");
+        let dequeue = dequeue_instructions(btf, 3, 4, 5, None).expect("a dequeue program");
         assert_eq!(enqueue.last().copied(), Some(Insn::exit()));
         assert_eq!(dequeue.last().copied(), Some(Insn::exit()));
         assert!(dequeue.len() > enqueue.len());
@@ -473,8 +479,8 @@ mod tests {
     #[test]
     fn an_interface_target_is_compared_in_the_kernel() {
         let Some(btf) = kernel_btf() else { return };
-        let all = dequeue_instructions(&btf, 3, 4, 5, None).expect("a program");
-        let one = dequeue_instructions(&btf, 3, 4, 5, Some(4242)).expect("a program");
+        let all = dequeue_instructions(btf, 3, 4, 5, None).expect("a program");
+        let one = dequeue_instructions(btf, 3, 4, 5, Some(4242)).expect("a program");
         assert!(one.iter().any(|insn| insn.imm == 4242));
         assert!(!all.iter().any(|insn| insn.imm == 4242));
         assert_eq!(one.len(), all.len() + 2, "one load and one comparison");
@@ -486,8 +492,8 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for program in [
-            enqueue_instructions(&btf, 3, 4).expect("an enqueue program"),
-            dequeue_instructions(&btf, 3, 4, 5, None).expect("a dequeue program"),
+            enqueue_instructions(btf, 3, 4).expect("an enqueue program"),
+            dequeue_instructions(btf, 3, 4, 5, None).expect("a dequeue program"),
         ] {
             let called: Vec<i32> = program
                 .iter()

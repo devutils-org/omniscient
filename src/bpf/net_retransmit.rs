@@ -252,8 +252,14 @@ impl RetransmitProgram {
 mod tests {
     use super::*;
 
-    fn kernel_btf() -> Option<Btf> {
-        match Btf::from_kernel() {
+    /// The running kernel's BTF, read once for the whole process.
+    ///
+    /// `Btf::from_kernel` parses six megabytes, and there are a dozen tests in
+    /// this family that want it. Reading it once is what `crate::bpf::
+    /// kernel_btf` is for, and a test suite that parsed it per test loaded the
+    /// machine enough to unsettle the cpu-accounting tests running beside it.
+    fn kernel_btf() -> Option<&'static Btf> {
+        match super::super::kernel_btf() {
             Ok(btf) => Some(btf),
             Err(reason) => {
                 eprintln!("skipped: {reason}");
@@ -306,7 +312,7 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, 3, 4).expect("a program");
+        let program = instructions(btf, 3, 4).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -323,9 +329,8 @@ mod tests {
     #[test]
     fn this_kernels_tracepoint_is_a_shape_the_program_knows() {
         let Some(btf) = kernel_btf() else { return };
-        let signature =
-            expect_signature(&btf, "tcp_retransmit_skb", &[&WITH_ERROR, &WITHOUT_ERROR])
-                .expect("a kernel this program can read");
+        let signature = expect_signature(btf, "tcp_retransmit_skb", &[&WITH_ERROR, &WITHOUT_ERROR])
+            .expect("a kernel this program can read");
         assert_eq!(signature[0], "sock *");
         assert_eq!(signature[1], "sk_buff *");
     }
@@ -335,7 +340,7 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(&btf, 3, 4)
+        let called: Vec<i32> = instructions(btf, 3, 4)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)

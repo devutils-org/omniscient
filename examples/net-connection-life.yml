@@ -1,0 +1,57 @@
+# How long did that connection live, and what crossed it?
+#
+#   omn -f examples/net-connection-life.yml
+#
+# and, while it runs, a connection whose properties you chose:
+#
+#   python3 -c 'import socket, time
+#   l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
+#   c = socket.create_connection(l.getsockname()); s, _ = l.accept()
+#   print("client port", c.getsockname()[1])
+#   c.sendall(b"x" * 4096); s.recv(1 << 20)
+#   time.sleep(0.3)
+#   c.close()'
+#
+# Three numbers are chosen there and nowhere else: the connection lives 300 ms,
+# the client sends exactly 4096 bytes, and the client's local port is printed.
+# `net.tcp.lifetime` has to find all three, on the event whose `sport` is that
+# port -- and a second event, the server's end of the same connection, whose
+# `bytes_received` is 4097. The extra byte is the FIN: a connection's sequence
+# space counts it, and `bytes_received` is the kernel's own reading of that
+# space rather than a count of payload the application saw.
+#
+# **`net.tcp.rtt` is in this session for a reason, and it is not the round
+# trip.** A socket cookie is generated lazily -- the first time anything asks
+# the kernel for one -- so a connection that opens and closes with nothing ever
+# looking at it has none, and an event with no cookie carries no `sock` key and
+# cannot be joined to anything. `net.tcp.rtt` polls `sock_diag`, and a
+# `sock_diag` dump is exactly the thing that asks. So the two sources together
+# produce what neither produces alone: connections named by the same number on
+# both sides of the boundary, ready for a `sock:cookie` join.
+#
+# What is missing from the events, and is missing rather than wrong: the peer's
+# address and port. `skc_daddr` and `skc_dport` live in an anonymous union of
+# `sock_common`, and this build resolves a field by name inside a named
+# structure. So what these events carry is the *local* endpoint of each socket,
+# both sides of a loopback connection appear as two events, and a filter on
+# `daddr` or `dport` matches nothing -- which the run says in its own output.
+name: what a connection cost
+duration: 2s
+format: text
+
+requests:
+  - label: connections
+    source: net.tcp.lifetime
+    target: system
+    mode: trace
+    emit: [raw, summary]
+    keys: [sock]
+
+  # Not for the round trip. This is what makes the kernel generate the socket
+  # cookies the events above are keyed by.
+  - label: round-trip
+    source: net.tcp.rtt
+    target: system
+    mode: poll@200ms
+    emit: [summary]
+    keys: [sock]

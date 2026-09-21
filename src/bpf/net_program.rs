@@ -297,16 +297,16 @@ mod tests {
     /// of the two it is.
     #[test]
     fn a_prototype_that_is_not_one_of_the_accepted_shapes_is_refused_by_name() {
-        let Ok(btf) = Btf::from_kernel() else {
+        let Ok(btf) = super::super::kernel_btf() else {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
         let accepted: &[&[&str]] = &[&["unsigned int"]];
         assert!(
-            expect_signature(&btf, "softirq_entry", accepted).is_ok(),
+            expect_signature(btf, "softirq_entry", accepted).is_ok(),
             "softirq_entry takes a vector number and nothing else"
         );
-        let error = expect_signature(&btf, "softirq_entry", &[&["task_struct *"]]).unwrap_err();
+        let error = expect_signature(btf, "softirq_entry", &[&["task_struct *"]]).unwrap_err();
         assert!(error.contains("unsigned int"), "{error}");
         assert!(error.contains("task_struct *"), "{error}");
     }

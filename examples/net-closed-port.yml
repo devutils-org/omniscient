@@ -1,0 +1,60 @@
+# Why did the machine throw that packet away?
+#
+#   omn -f examples/net-closed-port.yml
+#
+# and, while it runs, a known number of datagrams sent somewhere nothing is
+# listening:
+#
+#   python3 -c 'import socket
+#   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#   for _ in range(512): s.sendto(b"x" * 32, ("127.0.0.1", 59321))'
+#
+# Five hundred and twelve datagrams, and the kernel has nowhere to put any of
+# them. `net.drops` has to report at least that many drops, all carrying one
+# reason -- `SKB_DROP_REASON_NO_SOCKET`, which is 3 on the kernel this was
+# written against -- and the kernel's own `Udp: NoPorts` counter in
+# `/proc/net/snmp` has to have moved by at least as much.
+#
+# **The reason is a number and not a name.** `enum skb_drop_reason` has a
+# hundred and twenty-eight members and their names are in the kernel's own BTF,
+# which this build reads field offsets out of and cannot yet read an enum out
+# of. A table of names written into the tool would be a constant no run could
+# check against the kernel it is running on, and a mislabelled drop reason
+# sends a reader to fix the wrong thing -- so the number travels alone until
+# the names can come from the same place the offsets do.
+#
+# **`protocol` says `no-socket` here, and that is the honest answer.** A
+# packet's own protocol is in `skb->protocol`, inside an anonymous union of
+# `sk_buff` that this build cannot resolve by name; what it can reach is the
+# protocol of the *socket* the drop belonged to, and a packet dropped because
+# nothing was listening has no socket by construction. So the commonest drop on
+# any machine is exactly the one whose protocol cannot be recovered, and the
+# field says which case it is instead of guessing.
+#
+# `net.iface` is here as the contrast, and it is the point of landing both.
+# These drops happen inside the stack, after the device handed the frame up
+# perfectly: loopback's error and drop counters do not move at all. A reader
+# with only `net.iface` concludes the machine lost nothing.
+name: packets nobody was listening for
+duration: 1s
+format: text
+
+requests:
+  - label: drops
+    source: net.drops
+    target: system
+    mode: count
+    # `raw` as well as the aggregates: a drop's reason is an attribute, and
+    # `rate` and `summary` are built over the value. The per-reason totals a
+    # reader -- or a check -- wants are in the events themselves.
+    emit: [rate, raw, summary]
+    keys: [sock]
+
+  # The same window, seen by the device counters, which do not move: the frames
+  # arrived, the stack discarded them.
+  - label: links
+    source: net.iface
+    target: system
+    mode: count
+    emit: [summary]
+    keys: [iface]

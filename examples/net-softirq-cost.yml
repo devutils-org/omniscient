@@ -1,0 +1,57 @@
+# Where did the cpu go while nothing was running?
+#
+#   omn -f examples/net-softirq-cost.yml
+#
+# and, while it runs, some traffic:
+#
+#   python3 -c 'import socket, threading
+#   l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
+#   t = threading.Thread(target=lambda: l.accept()[0].recv(1 << 30) or None)
+#   t.start(); c = socket.create_connection(l.getsockname())
+#   c.sendall(b"x" * (16 << 20)); c.close()'
+#
+# A received packet is processed in softirq context: the driver raises `NET_RX`,
+# the kernel runs the stack out of `__do_softirq`, and none of that time belongs
+# to any process. Every per-process number this tool produces is blind to it,
+# which is why a machine can be busy with nothing on the run queue.
+#
+# **Which vector is `NET_RX` is read off the running kernel.** The number a
+# `softirq_entry` tracepoint reports is an index into the kernel's own
+# `softirq_to_name` table, and `/proc/softirqs` prints that table, in that
+# order, as its row labels. So the eBPF program compares against a number this
+# run looked up rather than one written into the tool, and the same file gives
+# the run an independent count to report itself against -- which it does, in
+# its own output: the kernel counted so many handler runs over a window
+# containing this one, and this run bucketed so many. The first can only be the
+# larger, and a run where it is not is a defect.
+#
+# The histogram is built in the kernel, for the reason `sched.runqlat` gives:
+# `NET_RX` fires tens of thousands of times a second on a loaded link, and one
+# event per handler would make the cost of measuring grow with the traffic
+# being measured. Each event is one log2 bucket of one `(cpu, vector)`, carries
+# the runs it stands for, and carries their exact total beside the bucket --
+# because a bucket is a factor of two wide and a mean built from its bounds
+# inherits that.
+name: the cpu a packet costs before anyone asks for it
+duration: 1s
+format: text
+
+requests:
+  - label: softirq
+    source: net.softirq
+    target: system
+    mode: trace
+    # `raw` beside the histogram because a kernel-built bucket carries more
+    # than its value: the runs it stands for, and their exact total, which is
+    # the number a factor-of-two bucket cannot give back.
+    emit: [hist, raw, summary]
+    keys: [cpu]
+
+  # What crossed the wire over the same window, so the softirq time has a
+  # denominator a reader can hold it against.
+  - label: volume
+    source: net.bytes
+    target: system
+    mode: count
+    emit: [summary]
+    keys: [iface]

@@ -406,8 +406,14 @@ impl SoftIrqProgram {
 mod tests {
     use super::*;
 
-    fn kernel_btf() -> Option<Btf> {
-        match Btf::from_kernel() {
+    /// The running kernel's BTF, read once for the whole process.
+    ///
+    /// `Btf::from_kernel` parses six megabytes, and there are a dozen tests in
+    /// this family that want it. Reading it once is what `crate::bpf::
+    /// kernel_btf` is for, and a test suite that parsed it per test loaded the
+    /// machine enough to unsettle the cpu-accounting tests running beside it.
+    fn kernel_btf() -> Option<&'static Btf> {
+        match super::super::kernel_btf() {
             Ok(btf) => Some(btf),
             Err(reason) => {
                 eprintln!("skipped: {reason}");
@@ -453,8 +459,8 @@ mod tests {
     #[test]
     fn both_programs_are_built_against_the_running_kernel() {
         let Some(btf) = kernel_btf() else { return };
-        let entry = entry_instructions(&btf, &[2, 3], 3).expect("an entry program");
-        let exit = exit_instructions(&btf, &[2, 3], 3, 4, 5).expect("an exit program");
+        let entry = entry_instructions(btf, &[2, 3], 3).expect("an entry program");
+        let exit = exit_instructions(btf, &[2, 3], 3, 4, 5).expect("an exit program");
         assert_eq!(entry.last().copied(), Some(Insn::exit()));
         assert_eq!(exit.last().copied(), Some(Insn::exit()));
         assert!(
@@ -474,8 +480,8 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for program in [
-            entry_instructions(&btf, &[3], 3).expect("an entry program"),
-            exit_instructions(&btf, &[3], 3, 4, 5).expect("an exit program"),
+            entry_instructions(btf, &[3], 3).expect("an entry program"),
+            exit_instructions(btf, &[3], 3, 4, 5).expect("an exit program"),
         ] {
             let called: Vec<i32> = program
                 .iter()
@@ -499,8 +505,8 @@ mod tests {
         // A file descriptor number that cannot be mistaken for a vector: the
         // map descriptor is written into the instruction stream as an
         // immediate too, and 3 is both a plausible fd and NET_RX.
-        let one = entry_instructions(&btf, &[3], 77).expect("a program");
-        let two = entry_instructions(&btf, &[2, 3], 77).expect("a program");
+        let one = entry_instructions(btf, &[3], 77).expect("a program");
+        let two = entry_instructions(btf, &[2, 3], 77).expect("a program");
         assert_eq!(
             one.iter().filter(|insn| insn.imm == 3).count(),
             1,

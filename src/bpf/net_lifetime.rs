@@ -437,8 +437,14 @@ impl TcpLifetimeProgram {
 mod tests {
     use super::*;
 
-    fn kernel_btf() -> Option<Btf> {
-        match Btf::from_kernel() {
+    /// The running kernel's BTF, read once for the whole process.
+    ///
+    /// `Btf::from_kernel` parses six megabytes, and there are a dozen tests in
+    /// this family that want it. Reading it once is what `crate::bpf::
+    /// kernel_btf` is for, and a test suite that parsed it per test loaded the
+    /// machine enough to unsettle the cpu-accounting tests running beside it.
+    fn kernel_btf() -> Option<&'static Btf> {
+        match super::super::kernel_btf() {
             Ok(btf) => Some(btf),
             Err(reason) => {
                 eprintln!("skipped: {reason}");
@@ -523,7 +529,7 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, 3, 4, 5).expect("a program");
+        let program = instructions(btf, 3, 4, 5).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -541,7 +547,7 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(&btf, 3, 4, 5)
+        let called: Vec<i32> = instructions(btf, 3, 4, 5)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -564,7 +570,7 @@ mod tests {
     #[test]
     fn only_the_two_states_that_bound_a_connection_are_acted_on() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, 3, 4, 5).expect("a program");
+        let program = instructions(btf, 3, 4, 5).expect("a program");
         let compared: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x15 && insn.regs & 0xf == 1)

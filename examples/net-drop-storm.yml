@@ -1,0 +1,50 @@
+# What happens when the machine loses packets faster than this can read them?
+#
+#   omn -f examples/net-drop-storm.yml
+#
+# and, while it runs, more drops than the ring can hold:
+#
+#   python3 -c 'import socket, os
+#   for _ in range(8):
+#       if os.fork() == 0:
+#           s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#           s.connect(("127.0.0.1", 59321))
+#           for _ in range(120000):
+#               try: s.send(b"x" * 16)
+#               except OSError: pass
+#           os._exit(0)
+#   [os.wait() for _ in range(8)]'
+#
+# Nearly a million datagrams to a port nothing is listening on, from eight
+# processes at once. Each one is a `kfree_skb` with a reason, each is 48 bytes
+# in a ring that holds about nine thousand, and the ring is drained every ten
+# milliseconds. It cannot keep up, and the point of this session is that it
+# says so:
+#
+#   LOSS: 54038 dropped, 0 failed reads, 10 late ticks, 0 undecoded, 0 throttled
+#     10x a round of reads outran the 10.0ms tick: worst 12.0ms
+#     40x the drop ring was full: the machine lost packets faster than they
+#        were drained, so this run's own count of them is short
+#
+# The BPF ring buffer does not report its own overflows: when a program cannot
+# reserve space the helper returns an error, the event is gone, and nothing
+# anywhere records that it existed. So the program counts it, in a per-cpu array
+# beside the ring, and the collector reads that counter into the run's losses.
+#
+# Two things are worth noticing in that output, and both are the reason this
+# session exists. The count of drops is a **lower bound** and the run says which
+# way it is wrong. And the late ticks are counted apart from the dropped events,
+# because they are different facts: one is a number of events that were lost,
+# the other is a number of reads that started late -- and a run that folded them
+# together would claim a precision it does not have.
+name: more drops than the ring can hold
+duration: 2s
+format: text
+
+requests:
+  - label: drops
+    source: net.drops
+    target: system
+    mode: count
+    emit: [summary]
+    keys: [sock]
