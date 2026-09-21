@@ -4,14 +4,20 @@ mod afpacket;
 mod backlog;
 mod capture;
 mod dev;
+mod drops;
 mod ethtool;
 mod foreign_clock;
 mod hwts;
 mod iface;
 mod interfaces;
+mod lifetime;
 mod netlink;
 mod packet;
 mod procfs;
+mod qdisc;
+mod retransmit;
+mod softirq;
+mod softirqs;
 mod tcp_rtt;
 
 use super::Factory;
@@ -36,6 +42,39 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("net.backlog", "fs:proc", |resolved| {
             Ok(Box::new(backlog::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("net.tcp.lifetime", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(lifetime::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("net.tcp.retransmit", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(retransmit::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("net.qdisc", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(qdisc::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("net.drops", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(drops::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("net.softirq", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(softirq::Prepare {
+                mode: resolved.request.mode,
+                // Carried into the collector because the resolver credits every
+                // `bpf` backend with filtering in the kernel and then leaves
+                // its events alone; see `softirq::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("net.capture", "af_packet", |_| {
             Ok(Box::new(capture::Prepare))

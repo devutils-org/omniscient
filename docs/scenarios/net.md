@@ -1,12 +1,11 @@
 # `net` — what is worth measuring, and how you know the answer is right
 
-Seven of the fifteen `net` sources have a collector. This document is what to
+Twelve of the fifteen `net` sources have a collector. This document is what to
 measure with them, what the numbers are checked against, what this family
 cannot check and why, and what the checking found.
 
 The sessions are in `examples/net-*.yml` and the checks in
-`tests/scenario_net.rs`. Nineteen scenarios, about four seconds in parallel and
-two seconds of cpu in total. Four of them are over a second each and none of
+`tests/scenario_net.rs`. Thirty scenarios, about nine seconds in parallel. Four of them are over a second each and none of
 them is over four: the injected round trip waits out a connection's first two
 round trips before the kernel has an estimate to report, the capture and the
 two-mechanism comparison each hold a ring open for most of a second before
@@ -26,17 +25,29 @@ of the mode. The rest are tenths.
 | `net.tcp.rtt` | `netlink` | poll, trace | raw, hist, timeline, summary | a delay injected by `netem` |
 | `net.hwts` | `netlink:ethtool` | poll, snapshot | raw, timeline, summary | two clocks, and the passage of time |
 | `net.capture` | `af_packet` | trace | raw, timeline | frames the scenario sent |
+| `net.tcp.lifetime` | `bpf:raw_tp` | trace | hist, topk, raw, timeline, summary | a connection held open for a chosen time, carrying a chosen number of bytes |
+| `net.tcp.retransmit` | `bpf:raw_tp` | trace, count | rate, topk, raw, summary | the kernel's own `Tcp: RetransSegs`, over a link removed on purpose |
+| `net.drops` | `bpf:raw_tp` | trace, count | rate, topk, raw, summary | a chosen number of datagrams sent where nothing is listening, and `Udp: NoPorts` |
+| `net.qdisc` | `bpf:raw_tp` | trace | hist, raw, summary, timeline | a delay injected by `netem` |
+| `net.softirq` | `bpf:raw_tp` | trace, count | hist, rate, raw, summary | the kernel's own `/proc/softirqs` |
 
 `net.bytes` also declared `topk`, and no mode it declares can produce one. That
 is the first entry under **Defects found**, and it is fixed: the emit is out of
 the entry until `count` mode can rank what it counted.
 
-The other eight sources are vocabulary: `net.tcp.connect`, `net.tcp.lifetime`,
-`net.tcp.retransmit`, `net.drops`, `net.socket`, `net.qdisc`, `net.softirq` and
-`net.xdp`. Seven of them wait on the same thing — an eBPF layer that can attach
-beyond a raw tracepoint — and all seven carry `sock:cookie`, which `net.tcp.rtt`
-already keys on, so they will join to it without a translation.
-`examples/net-not-built.yml` is what asking for one looks like.
+The other three sources are vocabulary: `net.tcp.connect`, `net.socket` and
+`net.xdp`. The first two wait on **fentry** -- BTF-typed attach, which the eBPF
+layer does not have -- and the third on an XDP program to load. Five sources
+came off that list in the sixth wave, through the `bpf:raw_tp` backend the
+catalog pass put ahead of their classic one; the three that are left need a
+mechanism rather than a collector. `examples/net-not-built.yml` is what asking
+for one looks like.
+
+**Every one of the five needs `CAP_BPF` and `CAP_PERFMON`**, which `make` puts
+on the binary and every `cargo build` takes off again. A machine that does not
+grant them answers 1 and names both, and every scenario below says so on stderr
+and stands down. A green suite on such a machine is not evidence about any of
+this.
 
 ---
 
@@ -82,7 +93,14 @@ nobody has written.
 backend comparison.
 
 **No `net` source has two implemented backends**, so there is no comparison to
-make inside a chain — the brief says to say so rather than invent one. What
+make inside a chain — the brief says to say so rather than invent one. That is
+still true after the sixth wave: each of the five eBPF sources has exactly one
+implemented backend and one declared behind it, so what a forced `bpf:tp`
+establishes is that the chain is real — the resolver knows about the second
+road, names it, and says which kind of obstacle is in the way. On this machine
+it is always the same obstacle, and it is the machine's rather than the build's:
+a classic tracepoint's numeric event id lives in a file under tracefs that uid
+1000 cannot read. What
 there is instead is two *mechanisms* measuring one wire over one window:
 `/proc/net/dev`, which is the kernel's own per-interface accounting, and
 `AF_PACKET`, which is every frame copied out of a ring. They were written by
@@ -224,6 +242,195 @@ has to carry that port. It does.
 The address does not work the same way, and that is a finding rather than a
 lesson — see **Defects found**.
 
+### How long did that connection live, and what crossed it?
+
+`examples/net-connection-life.yml`. **The first source in this family that
+measures a connection rather than a link.**
+
+Three numbers are chosen in the workload and nowhere else: the connection is
+held open for 300 ms, the client writes exactly 4096 bytes, and the client's
+local port is read off the socket. Both ends of a loopback connection are
+separate sockets and both close, so one workload produces two events:
+
+```
+sport=54278  duration_ns=300232759  bytes_sent=4096  bytes_received=1     inode=2019125
+sport=38863  duration_ns=300234569  bytes_sent=0     bytes_received=4097  (no inode)
+```
+
+Everything in those two lines is checked. `bytes_sent` is exact, because the
+kernel's `bytes_sent` counts payload: not segments, not wire bytes, not
+retransmissions. The extra byte on the receiving side is the FIN -- a close
+occupies a sequence number, and `bytes_received` is the kernel's reading of the
+sequence space rather than a count of payload the application saw. The client's
+inode is the one `/proc/<pid>/fd` shows as `socket:[2019125]`, which is the
+strongest identity check available without a cookie.
+
+**Two facts about identity came out of writing this, and both are on the
+events.**
+
+A socket loses its inode before it reaches `TCP_CLOSE`: `tcp_close` calls
+`sock_orphan` first, which unhooks the socket from the file that gave it one. So
+the identity read at the close is zero and the identity read at the
+establishment is not, and the program keeps both. A socket taken off a listen
+queue has the opposite problem -- it has no file until `accept()` gives it one,
+which is after it is established -- which is why the second line above has no
+inode at all, and why the run says how many of its connections are in that
+state.
+
+A socket cookie is generated **lazily**, the first time anything asks the kernel
+for one. A connection that opens and closes with nothing looking at it has none,
+so it carries no `sock` key and can be joined to nothing. `net.tcp.rtt` is in
+this session for that reason and not for the round trip: it polls `sock_diag`,
+and a `sock_diag` dump is exactly the thing that asks. The two sources together
+produce what neither produces alone -- connections named by the same number on
+both sides of the kernel boundary, which is what the family's key discipline was
+always for.
+
+### Why did the machine throw that packet away?
+
+`examples/net-closed-port.yml`. **The source that makes this family's headline
+honest.**
+
+Five hundred and twelve datagrams to a port nothing is listening on. Two
+independent parties count them: this scenario, which chose the number, and the
+kernel's own `Udp: NoPorts` in `/proc/net/snmp`. Both have to move by at least
+512, and the drops have to carry the reason a closed port gives --
+`SKB_DROP_REASON_NO_SOCKET`, which is 3.
+
+The contrast is the point of landing the source at all. `net.iface` watches the
+same window and reports nothing: the frames arrived perfectly and the stack
+discarded them afterwards, so a reader with only the device counters concludes
+the machine lost nothing.
+
+**The reason is a number and not a name**, and that is deliberate. `enum
+skb_drop_reason` has a hundred and twenty-eight members whose names are in the
+kernel's own BTF, which this build reads field offsets out of and cannot yet
+read an enum out of. A table of names written into the tool would be a constant
+that no run could check against the kernel it is running on, and a mislabelled
+drop reason sends a reader to fix the wrong thing. Finding 2 below.
+
+**`protocol` says `no-socket` on almost every drop**, and that is the honest
+answer rather than a gap. A packet's own protocol is `skb->protocol`, inside an
+anonymous union of `sk_buff`; what this build can reach is the protocol of the
+*socket* the drop belonged to, and a packet dropped because nothing was
+listening has no socket by construction. So the commonest drop on any machine is
+exactly the one whose protocol cannot be recovered. Finding 1.
+
+### Where did the cpu go while nothing was running?
+
+`examples/net-softirq-cost.yml`. **The only source here that measures work
+belonging to no process.**
+
+A received packet is processed in softirq context, so its cost is absent from
+every per-process number this tool produces. There is no way to inject a number
+of `NET_RX` handlers -- how many a transfer costs depends on the driver's
+coalescing -- so the check is against the only other party that counts them:
+
+```
+degraded: the kernel's own /proc/softirqs counted 260 handler runs on these
+          vectors over a window containing this run, and this run bucketed 260
+```
+
+That comparison is in the run's own output, not only in the test, because a
+reader holding a softirq number wants to know whether it is all of them. The
+relationship is exact in one direction and that is the direction that matters:
+the window the run observed is inside the one the two file reads bound, so it
+cannot have seen more handlers than happened. A run that reports more is
+double-counting, and this is the only thing that would catch it.
+
+**Which number is `NET_RX` is read off the running kernel.** The vector a
+`softirq_entry` tracepoint reports is an index into the kernel's own
+`softirq_to_name` table, and `/proc/softirqs` prints that table, in that order,
+as its row labels. Nothing in this build assumes `NET_RX` is 3 -- a number baked
+in at the wrong value would measure the timer softirq and report it as network
+time.
+
+### How long did that packet wait to leave?
+
+`examples/net-queue-delay.yml`. **The strongest statement this family makes
+about a number it did not choose, after the injected round trip.**
+
+A queueing discipline that holds every packet for fifty milliseconds, on a
+device that exists only inside a network namespace, and two hundred packets
+pushed through it:
+
+```
+  hist (log2)
+    iface:dummy0  n=200  min 33.55ms  mean 33.55ms  max 33.55ms
+      [33554432ns, 67108864ns)            200  |################################|
+
+  raw
+    net.qdisc  iface:dummy0  wait_ns=33554432 count=200 weight=200
+               total_ns=10000359457 bucket=26 iface=dummy0 handle=2156527616 qdisc=808a:
+```
+
+`10000359457 / 200` is 50.0018 ms. The bucket cannot say that -- a log2 bucket
+is a factor of two wide, and `[33.55ms, 67.11ms)` contains the answer without
+being it -- which is exactly why `total_ns` travels beside the bucket in every
+kernel-built histogram in this repository.
+
+**`omn` runs outside the namespace and the workload inside it**, which is the
+opposite of the four older scenarios in this file and is not a convenience. A
+raw tracepoint is not namespaced, so a program loaded on the machine sees
+packets queued on a device this process cannot even name; and `bpf()` checks
+`CAP_BPF` against the *initial* user namespace, so a program cannot be loaded
+from inside an unprivileged one at all. Measured, not assumed:
+`sched.runqlat --system` inside `unshare --user --map-root-user --net` answers
+"no viable backend", naming both capabilities.
+
+That is also why each row carries the interface's name as the *kernel* read it.
+An interface index is only meaningful inside the namespace that assigned it, so
+resolving `dummy0` here, afterwards, would find someone else's device or
+nothing.
+
+**Loopback has no queueing discipline**, on any machine: `lo` is `noqueue`, the
+transmit path calls the driver directly, and neither tracepoint fires. A machine
+whose only live link is loopback measures nothing here, correctly, and the run
+says so in its own output rather than leaving an empty histogram to be read as a
+broken collector.
+
+### Did this path lose anything, and did the stack notice?
+
+`examples/net-retransmissions.yml`.
+
+A queueing discipline is added *after* the handshake, so an established
+connection finds its path gone. What is checked is not the number of resends,
+which is an accident of `TCP_RTO_MIN` and exponential backoff, but the agreement
+between two counts of the same events: this run's, and `Tcp: RetransSegs` in
+that namespace's own `/proc/net/snmp`. The namespace is what makes the kernel's
+number exact -- the only connection on that network is the scenario's -- and the
+workload prints its local port so the comparison is over that one socket.
+
+Three resends, three counted, and every one of them from `ESTABLISHED`. The
+state is on every event with its name beside it, because three retransmissions
+from `SYN_SENT` are a handshake nobody answered and one from `FIN_WAIT1` is a
+close that did not land: three different faults with the same number.
+
+### What happens when the machine loses packets faster than this can read them?
+
+`examples/net-drop-storm.yml`. **The class that justifies the project, for the
+second source in this family that can lose.**
+
+Six senders and a quarter of a million datagrams to a closed port. The BPF ring
+buffer does not report its own overflows -- when a program cannot reserve space
+the helper returns an error, the event is gone, and nothing anywhere records
+that it existed -- so every program in this layer carries a per-cpu counter
+beside its ring, and this is the check that the counter reaches the user:
+
+```
+  LOSS: 54038 dropped, 0 failed reads, 10 late ticks, 0 undecoded, 0 throttled
+    10x a round of reads outran the 10.0ms tick: worst 12.0ms, 11.2ms on average
+    40x the drop ring was full: the machine lost packets faster than they were
+       drained, so this run's own count of them is short
+```
+
+Two things in that output are the reason the scenario exists. The count of drops
+is a **lower bound** and the run says which way it is wrong. And the late ticks
+are counted apart from the dropped events, because they are different facts --
+one is a number of events that were lost, the other a number of reads that
+started late -- and a run that folded them together would claim a precision it
+does not have.
+
 ### Is the network the problem, or is it us?
 
 `examples/net-health.yml`, inherited from before this wave and left as it was.
@@ -245,7 +452,32 @@ cannot share one:
 | poll | `net-capability-sweep.yml` | six | `raw`, `timeline`, `summary` |
 | count | `net-counters.yml` | four | `rate`, `raw`, `summary` |
 | snapshot | `net-snapshot.yml` | three | `raw`, `summary` |
-| trace | `net-injected-rtt.yml`, and a check of its own | `net.tcp.rtt`, `net.hwts` | `raw`, `hist`, `timeline`, `summary` |
+| trace, netlink | `net-injected-rtt.yml`, and a check of its own | `net.tcp.rtt`, `net.hwts` | `raw`, `hist`, `timeline`, `summary` |
+| trace, eBPF | `net-bpf-sweep.yml` | the five raw-tracepoint sources | `hist`, `topk`, `rate`, `raw`, `timeline`, `summary` |
+
+The eBPF leg is five sources over one window with four mebibytes crossing
+loopback under it, and it checks the same thing the others do: every request
+produced exactly the emits it asked for, and each was served by `bpf:raw_tp`
+rather than falling back. Two of the five have to have seen something -- a
+connection opened and closed, and the receive softirq that carried it -- and the
+other three are a machine's own business: a quiet link retransmits nothing and
+drops nothing, and loopback has no queueing discipline at all.
+
+**Three pairs the entries imply are refused, and correctly.** A catalog entry
+lists its modes and its emits as two flat lists, so it promises their cross
+product, and the mode x emit matrix is narrower:
+
+```
+net.tcp.retransmit --mode count --emit topk      exit 2
+net.drops          --mode count --emit topk      exit 2
+net.softirq        --mode count --emit hist      exit 2
+```
+
+A `count` window produces one measurement per series, and neither a ranking over
+it nor a histogram of it means anything. The set is pinned by
+`the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_three_recorded`,
+so a fourth cannot arrive quietly -- and the day `count` can rank what it
+counted, which is a request in `docs/open-findings.md`, two of them go away.
 
 The count leg carries the ground truth: four mebibytes are pushed through
 loopback while it runs, and the `lo` series has to have seen them. The poll and
@@ -274,6 +506,11 @@ property chosen in its source.
 | the veth pair with a down peer | every frame handed to it is dropped at the device, and counted |
 | `netem delay 25ms` on `lo` | a round trip of exactly 50 ms for every connection over loopback |
 | the namespace helper | a network where the only traffic is the scenario's, which is what makes the counts exact rather than lower bounds |
+| `workload_in_a_namespace(script)` | the same network, with the *workload* inside it and `omn` outside: a raw tracepoint is not namespaced, and `bpf()` refuses to load from inside an unprivileged user namespace |
+| `netem delay 50ms` on a dummy device | a queueing delay of exactly 50 ms for every packet, on a link nothing else uses |
+| `netem loss 100%` added after the handshake | an established connection whose path is gone, so every segment is retransmitted |
+| 512 datagrams to a closed port | exactly that many drops with one reason, and the same movement in `Udp: NoPorts` |
+| six senders, 240 000 datagrams | more drops than a 512 KiB ring drained every 10 ms can hold |
 
 **The last one is the reusable part.** `rerun_inside_a_namespace` re-runs a test
 inside `unshare --user --map-root-user --net`, where it holds `CAP_NET_RAW` and
@@ -308,8 +545,13 @@ as a measurement.
 reports what the stack believes. Splitting a measured latency into NIC, kernel
 and application segments is `net.hwts`'s per-packet backend, which is not built.
 
-**A qdisc drop.** Written up above: netem's loss does not reach `/proc/net/dev`,
-so nothing in this family can see a frame dropped inside a queueing discipline.
+**A qdisc drop.** Netem's loss does not reach `/proc/net/dev`, so `net.iface`
+cannot see a frame dropped inside a queueing discipline; `net.qdisc` measures
+how long a packet *waited* there and not whether it came out. What does see it
+is `net.drops`, through `qdisc_drop` reaching `kfree_skb` with its own reason --
+and that is a claim this family has not checked, because the check wants the
+namespaced workload of `net-queue-delay.yml` and the drop accounting of
+`net-closed-port.yml` in one session, which is a scenario nobody has written.
 
 **A driver-specific counter.** `net.iface` reports the counters every driver
 keeps. The long list `ethtool -S` prints needs the ethtool generic-netlink
@@ -324,6 +566,23 @@ is allowed to, but cannot move by anything like the window itself. A machine
 whose interfaces keep no clock, or keep one this user may not read, says so and
 stops — out of reach and absent are different answers and only the first is a
 privilege to grant.
+
+**A connection's peer, a dropped packet's protocol, and a drop reason's name.**
+Findings 9 and 10. None of the three is a measurement this family declined to
+make; all three are fields the shared BTF reader cannot reach, and each run says
+which ones it could not carry rather than carrying a zero.
+
+**`net.qdisc` on a machine whose only live link is loopback.** `lo` is
+`noqueue`, so no packet on it ever enters a queueing discipline. The scenario
+builds a device with one inside a namespace; a machine that allows no
+unprivileged user namespace has nothing here to measure a queue on, and the test
+says so and stands down.
+
+**Anything needing `CAP_BPF` and `CAP_PERFMON`.** Six scenarios need them, and a
+machine that does not grant them cannot exercise any of the five eBPF sources.
+They are file capabilities and every `cargo build` drops them, which is why
+`make` exists; a green suite on a binary without them is not evidence about any
+of this.
 
 **Anything needing `CAP_NET_RAW` on a machine that forbids user namespaces.**
 Four scenarios build a network of their own: the two-mechanism comparison, the
@@ -363,6 +622,15 @@ requests:
 | no viable backend | this machine cannot serve it | 1 | **2** |
 | no collector | this build does not implement it | 3 | **3**, except one |
 
+The eBPF sources give all three, and
+`the_three_answers_an_ebpf_net_request_can_be_refused_with` asks for one of
+each: a sampled connection lifetime is a request that cannot mean anything (2),
+a `net.tcp.lifetime --pid` is a target the catalog offers and this build cannot
+serve (3), and a forced `bpf:tp` is a road this machine has closed (1). The
+fourth answer in that test is the one worth keeping apart from the second:
+`net.drops --pid` is also 2, because the catalog never offered a process target
+for it at all, and only a target it *did* offer is a gap anybody can close.
+
 The messages are good. Every rejection names the axis that is wrong and lists
 what the source does accept; `net.capture` names `CAP_NET_RAW` and says in the
 same breath that the request is valid; `net.hwts --iface lo` says where
@@ -376,9 +644,11 @@ Two of the codes do not match the messages. Both are below.
 
 ## Defects found
 
-Eight, in the order a reader is likely to meet them. Each is pinned by an
+Thirteen, in the order a reader is likely to meet them. Each is pinned by an
 assertion in `tests/scenario_net.rs`, so that fixing one is noticed here rather
-than silently changing what a caller sees.
+than silently changing what a caller sees. The last five arrived with the eBPF
+sources of the sixth wave and four of them are the same defect wearing four
+hats.
 
 Two carry a **fixed** marker, with the reproduction left in place: the session
 and the output that found them are what says a regression has happened.
@@ -680,6 +950,106 @@ rather than eight, and a connect every other millisecond rather than as fast as
 the loop can go. The capture's twenty thousand datagrams stayed, because five
 thousand sometimes fails to overflow the ring and a loss scenario that loses
 nothing measures nothing. Two seconds of cpu for nineteen scenarios.
+
+### 9. Half of a connection's identity is unreachable, and it is the half a reader asks for
+
+The largest of this wave, and the one the other three below are consequences of.
+
+`Btf::member_offset` resolves a member by name inside a *named* structure. A
+great deal of what the network stack keeps is not in one:
+
+| What | Where | Wanted by |
+|---|---|---|
+| `skc_daddr`, `skc_dport` | an anonymous struct inside an anonymous union of `sock_common` | `net.tcp.lifetime`, `net.tcp.retransmit` -- the catalog declares both as filter fields |
+| `skb->protocol`, `skb->skb_iif`, `skb->dev` | an anonymous union of `sk_buff` | `net.drops` -- the catalog declares `protocol` as a filter field |
+
+A real CO-RE relocation walks into anonymous members, which is how
+`skb->protocol` resolves in a compiled program. This one cannot, so what the two
+TCP sources report is the **local** endpoint of each socket and `net.drops`
+reports the protocol of the socket a drop belonged to, which for a
+receive-side drop is usually none.
+
+Writing the offsets into the collectors instead was considered and refused: it
+is exactly the staleness the whole layer exists to prevent, and the one failure
+mode -- a plausible number read out of the wrong field on a kernel nobody
+tested -- is the one this project is built not to have. A predicate over a field
+no event carries is false everywhere, which empties a series and looks like a
+quiet link, so each run says in its own output which fields those are. The
+signature that would close it is under **Needs from another stream** in
+`docs/open-findings.md`.
+
+### 10. The drop reason has no name
+
+`enum skb_drop_reason` has a hundred and twenty-eight members and the kernel
+publishes all of their names in its own BTF, which this build already reads and
+already parses. What it has no reader for is an enum.
+
+So `net.drops` reports `reason=3` where it could report
+`SKB_DROP_REASON_NO_SOCKET`, which is a real cost for the source whose whole
+point is that it says *why*. A table of names in the collector would close it
+today and was refused for the same reason as finding 9: the values would be a
+constant no run could check against the kernel it is running on, and a
+mislabelled drop reason does not read as wrong, it reads as a different fault.
+
+The scenario turns that into a check rather than a caveat: it asserts the
+number a closed port gives. A kernel that renumbers the enum fails the test
+instead of quietly reporting something else.
+
+### 11. A socket cookie does not exist until something asks for one
+
+The key this family is built on is generated **lazily**: `__sock_gen_cookie`
+assigns one the first time anything calls for it, and nothing in the kernel
+calls for it on a socket's own account. So a connection that opens and closes
+with nothing dumping it has a cookie of zero, which is not a cookie -- keying an
+event on it would join every anonymous connection to every other -- and
+`net.tcp.lifetime` emits no `sock` key at all for those.
+
+It is not a defect in the collector and it is not fixable there. What it means
+is that **a `sock:cookie` join between an eBPF source and `net.tcp.rtt` works
+because `net.tcp.rtt` is running**: its `sock_diag` poll is what generates the
+cookies. `examples/net-connection-life.yml` is built that way and says so, and
+the scenario asserts the cookie is there. A session that asked for
+`net.tcp.lifetime` alone and expected to join it to something later would find
+nothing, and nothing in the catalog warns of it.
+
+Two more identities were found on the way, both now on the events: a socket
+loses its inode before it reaches `TCP_CLOSE`, because `tcp_close` calls
+`sock_orphan` first, so the program keeps the one it read at the
+establishment; and a socket taken off a listen queue has no inode at all until
+`accept()` gives it a file, which is after it is established.
+
+### 12. Five entries offer targets and keys no backend can serve
+
+Consequences of the two above, and each is a promise a reader can ask for:
+
+- `net.tcp.lifetime` and `net.tcp.retransmit` declare `pid`, `cgroup` and
+  `container` targets. Both ends of a connection become established in softirq
+  context, and a retransmission is issued from a timer, so the task current at
+  those moments is whichever one the interrupt landed on. Both refuse by name
+  with exit 3, which is the right code -- attributing a connection to a process
+  needs a socket-to-process map, which is a thing to build rather than a thing
+  the machine lacks.
+- `net.qdisc` declares `keys: [sock]`. A row aggregated over packets has no
+  socket; what it has is the interface, which is what the events carry.
+- `net.qdisc` requires only `raw_tracepoint:qdisc_dequeue`, and a wait needs
+  both ends. The collector attaches `qdisc_enqueue` as well and refuses by name
+  on a kernel that has only one of them, but the probe would report the source
+  available on such a kernel.
+
+All four are catalog edits, which belong to whoever owns `catalog/net.yaml`; the
+exact lines are in `docs/open-findings.md`.
+
+### 13. `topk` cannot rank the thing worth ranking
+
+`net.drops` declares `topk`, and what a reader wants ranked is the drop
+*reason*: which fault cost this machine the most packets. `topk` ranks series,
+and a drop's series is its socket -- which most drops do not have, so the
+ranking is over one series called `system`.
+
+This is `docs/open-findings.md`'s existing request for a ranking over an
+attribute, met for the second time by a second family. It is recorded here
+because it is the difference between `net.drops --emit topk` being the first
+thing a reader reaches for and being a line that says `1 series`.
 
 ---
 

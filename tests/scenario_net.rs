@@ -17,6 +17,7 @@
 //! that allows no unprivileged user namespace cannot serve them, and they say
 //! so on stderr and stop rather than reporting a pass.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Command, Output, Stdio};
@@ -134,6 +135,33 @@ fn push_through_loopback(bytes: usize) {
 
 fn pause(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
+}
+
+/// Every byte loopback has carried since boot, received and transmitted.
+///
+/// The kernel's own counter, read straight out of the file the `fs:proc`
+/// backend reads. It is what gives a scenario a ceiling that does not depend on
+/// what the rest of the machine happens to be doing: a run's window is inside
+/// the one two reads of this bound, so a run cannot report more than the
+/// difference.
+fn loopback_bytes() -> u64 {
+    let text = std::fs::read_to_string("/proc/net/dev").expect("/proc/net/dev");
+    for line in text.lines() {
+        let Some((name, counters)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() != "lo" {
+            continue;
+        }
+        let fields: Vec<u64> = counters
+            .split_whitespace()
+            .filter_map(|field| field.parse().ok())
+            .collect();
+        // Received bytes first, transmitted bytes ninth, as the file's own
+        // header names them.
+        return fields[0] + fields[8];
+    }
+    panic!("/proc/net/dev has no loopback");
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +348,7 @@ fn the_poll_leg_of_the_sweep_answers_with_every_emit_it_promised() {
 fn the_count_leg_of_the_sweep_finds_the_traffic_the_scenario_pushed() {
     const MOVED: usize = 4 * 1024 * 1024;
 
+    let moved_at_start = loopback_bytes();
     let measuring = Command::new(BINARY)
         .args(["-f", &session("net-counters.yml"), "--format", "json"])
         .stdout(Stdio::piped())
@@ -351,17 +380,26 @@ fn the_count_leg_of_the_sweep_finds_the_traffic_the_scenario_pushed() {
     }
 
     // Loopback counts every byte twice, once received and once transmitted,
-    // because it is both: the floor is the transfer and the ceiling allows the
-    // doubling plus whatever else is talking to localhost.
+    // because it is both: the floor is the transfer this scenario made.
+    //
+    // The ceiling is the interface's own counter over a window that contains
+    // this run, read here, and not a multiple of the transfer -- which is what
+    // it was, and which made this test a statement about what the rest of the
+    // machine was doing. Eight times the transfer is thirty-three megabytes,
+    // and a desktop with a browser and a tunnel on it moves that through
+    // loopback on its own often enough to fail this a few times an hour. The
+    // bound below cannot be exceeded whatever else is running, because the
+    // tool's window is inside the one the two reads bound.
     let bytes = rate_total(labelled(&run, "volume"), "iface:lo");
     assert!(
         bytes >= MOVED as f64,
         "{MOVED} bytes went through loopback and the counters saw {bytes}"
     );
+    let crossed = (loopback_bytes() - moved_at_start) as f64;
     assert!(
-        bytes <= 8.0 * MOVED as f64,
-        "the counters saw {bytes} for a {MOVED} byte transfer, which is more than loopback \
-         doubling explains"
+        bytes <= crossed,
+        "the run reports {bytes} bytes over loopback and the interface's own counters moved by \
+         {crossed} over a window containing it, so the run counted something twice"
     );
 
     // Whatever the segment size was, that many bytes cannot have crossed in
@@ -1180,7 +1218,8 @@ fn a_net_request_that_cannot_mean_anything_is_refused_with_the_axis_that_is_wron
     let complaint = stderr(&outcome);
     assert!(
         complaint.matches("error:").count() >= 5,
-        "only {} refusals were reported for four bad requests; a validator that stops at the          first turns one session into five runs:\n{complaint}",
+        "only {} refusals were reported for four bad requests; a validator that stops \
+         at the first turns one session into five runs:\n{complaint}",
         complaint.matches("error:").count()
     );
     std::fs::remove_file(&path).ok();
@@ -1281,12 +1320,10 @@ fn a_machine_that_cannot_serve_a_net_request_names_what_it_is_missing() {
 /// scenario says so rather than assuming. A source is exit 3 only where its
 /// best backend is one the machine serves; where the machine cannot serve any
 /// of them, exit 1 is the honest answer and this scenario is not what proves
-/// it. The five `bpf:tp` sources fall on that side here, because a classic
-/// tracepoint's numeric id lives in a root-only file. So the session asks for
-/// the two `fentry` sources, whose requirement is BTF, and the sweep below
-/// requires each source to give one of the two answers with the message that
-/// belongs to it -- never the third answer, which would say the request cannot
-/// mean anything.
+/// it. So the session asks for the two `fentry` sources, whose requirement is
+/// BTF, and the sweep below requires each source to give one of the two answers
+/// with the message that belongs to it -- never the third answer, which would
+/// say the request cannot mean anything.
 #[test]
 fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() {
     let outcome = omn(&["-f", &session("net-not-built.yml")]);
@@ -1301,15 +1338,17 @@ fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() 
         "exit 3 is not a failure of the request and should not read like one: {complaint}"
     );
 
-    // Each of the eight, on its own, for the message rather than the code.
+    // Each of the three left, on its own, for the message rather than the code.
+    //
+    // Five sources have come off this list: `net.tcp.lifetime`,
+    // `net.tcp.retransmit`, `net.drops`, `net.qdisc` and `net.softirq` all
+    // collect now, through the `bpf:raw_tp` backend the catalog pass put ahead
+    // of their classic one. What is left needs a mechanism rather than a
+    // collector -- BTF-typed attach for two of them, an XDP program for the
+    // third -- which is the same shape of gap one step further on.
     let unbuilt: &[(&str, &str, &str)] = &[
         ("net.tcp.connect", "trace", "bpf:fentry"),
-        ("net.tcp.lifetime", "trace", "bpf:tp"),
-        ("net.tcp.retransmit", "count", "bpf:tp"),
-        ("net.drops", "count", "bpf:tp"),
         ("net.socket", "trace", "bpf:fentry"),
-        ("net.qdisc", "trace", "bpf:tp"),
-        ("net.softirq", "count", "bpf:tp"),
         ("net.xdp", "count", "bpf"),
     ];
     for (source, mode, backend) in unbuilt {
@@ -1900,4 +1939,1258 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         3,
         "a mode that resolves and is then refused as not built is exit 3: {complaint}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The five sources that go through the kernel
+// ---------------------------------------------------------------------------
+//
+// `net.tcp.lifetime`, `net.tcp.retransmit`, `net.drops`, `net.qdisc` and
+// `net.softirq`, all over raw tracepoints. Every one of them needs `CAP_BPF`
+// and `CAP_PERFMON`, which `make` puts on the binary and every `cargo build`
+// takes off again; a machine that does not grant them cannot serve any of
+// these and the tests say so and stop, which is the only thing allowed to stop
+// one quietly.
+//
+// Three of them are measured against a property injected from outside the
+// tool: a queueing discipline that delays every packet by a chosen amount, a
+// link that drops everything, a count of datagrams sent somewhere nothing is
+// listening. Two are measured against a counter the kernel keeps for its own
+// reasons -- `/proc/softirqs` and `/proc/net/snmp` -- which is the strongest
+// check available for a number nobody can inject.
+//
+// The namespaced scenarios run **`omn` outside** the namespace and the workload
+// inside it, which is the opposite of the older ones in this file. A raw
+// tracepoint is not namespaced, so a program loaded on the machine sees packets
+// queued on a device this process cannot name -- and `bpf()` checks `CAP_BPF`
+// against the initial user namespace, so a program cannot be loaded from inside
+// an unprivileged one at all. Measuring from outside is the only arrangement
+// that works, not a convenience.
+
+/// Whether a run was refused for want of the privileges the eBPF backends need.
+/// A machine's limit, and the only thing in this section allowed to stop a test
+/// quietly.
+fn unprivileged(text: &str) -> bool {
+    text.contains("CAP_BPF") || text.contains("CAP_PERFMON")
+}
+
+/// Whether this machine will let an unprivileged user build a network of its
+/// own, which three of these scenarios inject their ground truth with.
+fn can_build_a_network() -> bool {
+    iproute2_is_installed()
+        && Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net", "--", "true"])
+            .output()
+            .is_ok_and(|outcome| outcome.status.success())
+}
+
+/// Runs a script inside a user and network namespace of its own, in the
+/// background, and returns the child.
+///
+/// Unlike `rerun_inside_a_namespace`, nothing here is measured *inside* the
+/// namespace: the script is the workload and `omn` watches it from outside.
+fn workload_in_a_namespace(script: &str) -> std::process::Child {
+    Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "--net",
+            "--",
+            "sh",
+            "-c",
+            script,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("unshare should run")
+}
+
+/// Every attribute of an event, by name.
+fn attrs(event: &serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    event["attrs"]
+        .as_array()
+        .expect("attrs")
+        .iter()
+        .map(|attr| {
+            (
+                attr["name"].as_str().expect("a name").to_owned(),
+                attr["value"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// The raw events of a labelled result.
+fn raw_events<'a>(run: &'a serde_json::Value, label: &str) -> &'a Vec<serde_json::Value> {
+    labelled(run, label)["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .find(|output| output["emit"] == "raw")
+        .unwrap_or_else(|| panic!("no raw output in `{label}`"))["events"]
+        .as_array()
+        .expect("events")
+}
+
+/// One counter out of a `/proc/net/snmp` block, by its protocol and name.
+///
+/// The file is pairs of lines: a header naming the columns and a row of values
+/// under it, which is why this cannot just split on whitespace and count.
+fn snmp(protocol: &str, counter: &str) -> u64 {
+    let text = std::fs::read_to_string("/proc/net/snmp").expect("/proc/net/snmp");
+    let lines: Vec<&str> = text.lines().collect();
+    for pair in lines.windows(2) {
+        let (header, values) = (pair[0], pair[1]);
+        if !header.starts_with(protocol) || !values.starts_with(protocol) {
+            continue;
+        }
+        let names: Vec<&str> = header.split_whitespace().collect();
+        let Some(at) = names.iter().position(|name| *name == counter) else {
+            continue;
+        };
+        return values
+            .split_whitespace()
+            .nth(at)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("`{protocol} {counter}` is not a number"));
+    }
+    panic!("/proc/net/snmp has no `{protocol} {counter}`")
+}
+
+/// How many times a softirq vector's handler has run since boot, over all cpus.
+///
+/// The row's position in the file is the vector number the tracepoint reports,
+/// which is the same fact the collector reads; this reads it by name because a
+/// test that hard-coded the number would be checking the tool against itself.
+fn softirq_runs(vector: &str) -> u64 {
+    let text = std::fs::read_to_string("/proc/softirqs").expect("/proc/softirqs");
+    for line in text.lines().skip(1) {
+        let mut fields = line.split_whitespace();
+        let Some(label) = fields.next() else { continue };
+        if label.trim_end_matches(':') != vector {
+            continue;
+        }
+        return fields.filter_map(|count| count.parse::<u64>().ok()).sum();
+    }
+    panic!("/proc/softirqs has no `{vector}` row")
+}
+
+// ------------------------------------------------------ Class A: the sweep
+
+/// The `trace` leg of the sweep for the five sources that go through the
+/// kernel: every emit each one declares, over one window, with traffic running.
+///
+/// What this catches is the promise nobody looks at -- a combination the
+/// catalog offers and the build cannot serve. It is not about the numbers; each
+/// source's own scenario below is.
+#[test]
+fn the_ebpf_leg_of_the_sweep_answers_with_every_emit_it_promised() {
+    let measuring = Command::new(BINARY)
+        .args(["-f", &session("net-bpf-sweep.yml"), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // The window is half a second and the programs attach first; the traffic
+    // has to happen inside it or three of the five answer for an idle machine.
+    //
+    // Sixty-four kibibytes and no more, deliberately. What this leg needs is a
+    // connection that opens and closes and a receive softirq that carries it,
+    // not volume -- and `the_count_leg_of_the_sweep_finds_the_traffic_the_
+    // scenario_pushed` is reading this machine's loopback counters at the same
+    // time, in another thread of the same suite. A megabyte here is a megabyte
+    // in its total.
+    pause(150);
+    push_through_loopback(64 * 1024);
+
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: every source in this sweep needs CAP_BPF and CAP_PERFMON, which this \
+             machine does not grant"
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+
+    let expected: &[(&str, &[&str])] = &[
+        (
+            "connections",
+            &["hist", "topk", "raw", "timeline", "summary"],
+        ),
+        ("retransmits", &["rate", "topk", "raw", "summary"]),
+        ("drops", &["rate", "topk", "raw", "summary"]),
+        ("queueing", &["hist", "raw", "summary", "timeline"]),
+        ("softirq", &["hist", "rate", "raw", "summary"]),
+    ];
+    for (label, wanted) in expected {
+        let result = labelled(&run, label);
+        assert_eq!(&emits(result), wanted, "`{label}` emitted the wrong set");
+        assert_eq!(
+            result["backend"], "bpf:raw_tp",
+            "`{label}` was served by something other than the raw tracepoint path"
+        );
+        assert!(
+            result["losses"].is_object(),
+            "`{label}` reported no loss accounting at all"
+        );
+    }
+
+    // Two of the five answer for any machine that moved a byte: four mebibytes
+    // through loopback is a connection that opened and closed, and the receive
+    // softirq that carried it. The other three are a machine's own business --
+    // a quiet link retransmits nothing, drops nothing, and loopback has no
+    // queueing discipline at all.
+    for label in ["connections", "softirq"] {
+        let seen = labelled(&run, label)["events_seen"]
+            .as_u64()
+            .expect("an event count");
+        assert!(
+            seen > 0,
+            "`{label}` watched four mebibytes cross loopback and produced nothing"
+        );
+    }
+}
+
+/// The three pairs the catalog implies and the mode x emit matrix refuses.
+///
+/// An entry lists its modes and its emits as two flat lists, so it promises
+/// their cross product; the matrix is narrower than that, and the difference is
+/// a promise nobody can collect. These three are correct refusals -- a ranking
+/// over a window that produced one measurement per series, and a histogram of
+/// the same -- and they are pinned so that a fourth cannot arrive quietly.
+#[test]
+fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_three_recorded() {
+    const RECORDED: &[(&str, &str, &str)] = &[
+        ("net.tcp.retransmit", "count", "topk"),
+        ("net.drops", "count", "topk"),
+        ("net.softirq", "count", "hist"),
+    ];
+
+    for (source, mode, emit) in RECORDED {
+        let outcome = omn(&[
+            source,
+            "--system",
+            "--mode",
+            mode,
+            "--duration",
+            "150ms",
+            "--emit",
+            emit,
+        ]);
+        assert_eq!(
+            code(&outcome),
+            2,
+            "`{source} --mode {mode} --emit {emit}` is refused as a request that cannot mean \
+             anything, which is exit 2: {}",
+            stderr(&outcome)
+        );
+        assert!(
+            stderr(&outcome).contains(&format!("mode `{mode}` cannot produce `{emit}`")),
+            "the refusal should name the pair: {}",
+            stderr(&outcome)
+        );
+    }
+
+    // And every other pair these five entries imply is one a request can
+    // actually ask for. A new refusal appearing here is a promise the catalog
+    // now makes and no request can collect.
+    use omn::catalog::Catalog;
+    let catalog = Catalog::embedded().expect("the embedded catalog");
+    let mut refused = Vec::new();
+    for id in [
+        "net.tcp.lifetime",
+        "net.tcp.retransmit",
+        "net.drops",
+        "net.qdisc",
+        "net.softirq",
+    ] {
+        let entry = catalog
+            .get(&id.parse().expect("a source id"))
+            .unwrap_or_else(|| panic!("{id} is in the catalog"));
+        for mode in &entry.modes {
+            for emit in &entry.emits {
+                if !mode.valid_emits().contains(emit) {
+                    refused.push((id, mode.as_str().to_owned(), emit.as_str().to_owned()));
+                }
+            }
+        }
+    }
+    let recorded: Vec<(&str, String, String)> = RECORDED
+        .iter()
+        .map(|(source, mode, emit)| (*source, (*mode).to_owned(), (*emit).to_owned()))
+        .collect();
+    assert_eq!(
+        refused, recorded,
+        "the set of pairs these entries imply and the matrix refuses changed; \
+         docs/scenarios/net.md lists them"
+    );
+}
+
+// ------------------------------------------- Class: ground truth, per source
+
+/// A connection whose length, volume and local port the scenario chose, found
+/// by both of its ends.
+///
+/// Three numbers come from the workload and nowhere else: it lives 300 ms, the
+/// client writes exactly 4096 bytes, and the client's local port is read off
+/// the socket. `net.tcp.lifetime` has to find all three.
+///
+/// The fourth check is the identity. A socket cookie is generated lazily -- the
+/// first time anything asks the kernel for one -- so the session polls
+/// `net.tcp.rtt` beside it, and a `sock_diag` dump is exactly the thing that
+/// asks. Without it both events carry no `sock` key and can be joined to
+/// nothing; with it the two sources name the same connection by the same
+/// number, which is what this family's whole key discipline is for.
+#[test]
+fn a_connection_of_a_known_length_and_volume_is_found_by_both_of_its_ends() {
+    const HELD_MS: u64 = 300;
+    const SENT: usize = 4096;
+
+    let measuring = Command::new(BINARY)
+        .args([
+            "-f",
+            &session("net-connection-life.yml"),
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // Three connections in a row rather than one, and the check asks for any
+    // of them. A connection that was already established when the programs
+    // attached has no beginning for them to measure and produces no event at
+    // all, so a single connection after a fixed pause is a test that passes
+    // when the machine is idle and fails when it is busy -- which is what this
+    // did. Every one of the three carries the same chosen properties, so
+    // finding one of them is the same statement.
+    pause(150);
+    let mut made = Vec::new();
+    for _ in 0..3 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let server_port = listener.local_addr().expect("local address").port();
+        let sink = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = vec![0u8; 64 * 1024];
+            let mut received = 0usize;
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => received += read,
+                    Err(_) => break,
+                }
+            }
+            received
+        });
+        let mut stream = TcpStream::connect(("127.0.0.1", server_port)).expect("connect");
+        let client_port = stream.local_addr().expect("local address").port();
+        stream.write_all(&vec![0x5au8; SENT]).expect("write");
+        stream.flush().expect("flush");
+        // The connection is established for this long and no less. The far end
+        // closes as soon as it sees the client's EOF, so both sockets reach
+        // TCP_CLOSE within a few milliseconds of each other.
+        pause(HELD_MS);
+        drop(stream);
+        assert_eq!(sink.join().expect("the receiver"), SENT);
+        made.push((client_port, server_port));
+    }
+
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: net.tcp.lifetime needs CAP_BPF and CAP_PERFMON, which this machine does \
+             not grant"
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+
+    // Any one of the three, with both of its ends.
+    let closed: BTreeMap<u64, (&serde_json::Value, BTreeMap<String, serde_json::Value>)> =
+        raw_events(&run, "connections")
+            .iter()
+            .filter_map(|event| {
+                let attributes = attrs(event);
+                attributes["sport"]
+                    .as_u64()
+                    .map(|port| (port, (event, attributes)))
+            })
+            .collect();
+    let found = made
+        .iter()
+        .find(|(client, server)| {
+            closed.contains_key(&u64::from(*client)) && closed.contains_key(&u64::from(*server))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "none of the three connections the scenario opened on ports {made:?} is among \
+                 the {} this run saw close: {:?}",
+                closed.len(),
+                closed.keys().collect::<Vec<_>>()
+            )
+        });
+    let (client_event, client_attrs) = &closed[&u64::from(found.0)];
+    let (_, server_attrs) = &closed[&u64::from(found.1)];
+
+    // The length. The connection was held open for 300 ms after the transfer
+    // and closed once; anything under that is a duration measured from the
+    // wrong moment, and the ceiling is generous because the close is a
+    // scheduling event on a machine running a test suite.
+    let held_ns = client_attrs["duration_ns"].as_u64().expect("a duration");
+    assert!(
+        held_ns >= HELD_MS * 1_000_000,
+        "the connection was held open for at least {HELD_MS} ms and this says {} ms",
+        held_ns / 1_000_000
+    );
+    assert!(
+        held_ns < 3 * HELD_MS * 1_000_000,
+        "and not three times that: {} ms",
+        held_ns / 1_000_000
+    );
+
+    // The volume, which is exact: `bytes_sent` counts payload, so it is the
+    // number the workload wrote and not one byte more.
+    assert_eq!(
+        client_attrs["bytes_sent"].as_u64(),
+        Some(SENT as u64),
+        "the client sent exactly {SENT} bytes"
+    );
+    // And the other end received them, plus one: a FIN occupies a sequence
+    // number, and `bytes_received` is the kernel's reading of the sequence
+    // space rather than a count of payload the application saw.
+    assert_eq!(
+        server_attrs["bytes_received"].as_u64(),
+        Some(SENT as u64 + 1),
+        "the server received the payload and the FIN behind it"
+    );
+    assert_eq!(client_attrs["saddr"].as_str(), Some("127.0.0.1"));
+
+    // The identity. `net.tcp.rtt` dumped the connection while it was alive,
+    // which is what made the kernel generate a cookie for it at all.
+    let keyed = client_event["keys"]
+        .as_array()
+        .and_then(|keys| keys.first())
+        .and_then(|key| key["sock"]["cookie"].as_u64());
+    assert_eq!(
+        keyed,
+        client_attrs["cookie"].as_u64(),
+        "the event's key and its cookie attribute are the same number"
+    );
+    assert!(
+        keyed.is_some_and(|cookie| cookie != 0),
+        "a connection dumped by `net.tcp.rtt` during its life must carry the cookie that dump \
+         generated, which is what a `sock:cookie` join is made of: {client_event}"
+    );
+
+    // The peer, which is absent rather than wrong, and said so in the run.
+    assert!(
+        !client_attrs.contains_key("dport") && !client_attrs.contains_key("daddr"),
+        "the peer's address and port are not reachable and must not be invented"
+    );
+    let notes = labelled(&run, "connections")["degradations"].to_string();
+    assert!(
+        notes.contains("daddr") && notes.contains("dport"),
+        "a filter on a field no event carries is false everywhere, so the run has to say which \
+         fields those are: {notes}"
+    );
+}
+
+/// Every datagram sent to a port nothing is listening on is a drop, with one
+/// reason, and the kernel's own counter agrees.
+///
+/// Two independent checks on one workload. The count is chosen here -- five
+/// hundred and twelve datagrams -- and `Udp: NoPorts` in `/proc/net/snmp` is
+/// the kernel counting the same thing by another route. Both are lower bounds
+/// rather than equalities, and deliberately: this machine is shared with a test
+/// suite and whatever else is running, and a scenario that asserted an exact
+/// total would be asserting what the machine was doing.
+///
+/// The contrast is the point of landing this source at all: `net.iface` watches
+/// the same window and reports nothing. The frames arrived perfectly and the
+/// stack discarded them, so a reader with only the device counters concludes
+/// the machine lost nothing.
+#[test]
+fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
+    const SENT: u64 = 512;
+    /// A port nothing on a developer machine binds, and nothing here binds
+    /// either: the scenario needs the kernel to have no socket for it.
+    const NOWHERE: u16 = 59321;
+
+    // Up to three windows, because a window that lost records cannot answer
+    // this question and a lossy one is not this scenario's fault: another test
+    // in this suite floods a socket until its receive buffer overflows, and
+    // twenty thousand of its drops in one tick fill the ring this reads. The
+    // run says when that happened, so the answer is to take another window
+    // rather than to assert a count that is known to be short.
+    let mut attempts = Vec::new();
+    for _ in 0..3 {
+        let before = snmp("Udp", "NoPorts");
+        let measuring = Command::new(BINARY)
+            .args(["-f", &session("net-closed-port.yml"), "--format", "json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("omn should run");
+
+        pause(200);
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("a socket to send from");
+        for _ in 0..SENT {
+            // A previous datagram's ICMP port-unreachable comes back as an
+            // error on the next send of a connected socket; this one is
+            // unconnected, so every send is delivered to the stack and dropped
+            // there.
+            let _ = sender.send_to(&[0x5au8; 32], ("127.0.0.1", NOWHERE));
+        }
+
+        let outcome = measuring.wait_with_output().expect("omn should finish");
+        if unprivileged(&stderr(&outcome)) {
+            eprintln!(
+                "skipped: net.drops needs CAP_BPF and CAP_PERFMON, which this machine does not \
+                 grant"
+            );
+            return;
+        }
+        assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+        let after = snmp("Udp", "NoPorts");
+        let run = results(&outcome);
+        let lost = labelled(&run, "drops")["losses"]["dropped"]
+            .as_u64()
+            .expect("a loss count");
+        if lost == 0 {
+            attempts.push((before, after, run));
+            break;
+        }
+        attempts.push((before, after, run));
+    }
+    let (before, after, run) = attempts.pop().expect("at least one window");
+    let lost = labelled(&run, "drops")["losses"]["dropped"]
+        .as_u64()
+        .expect("a loss count");
+    if lost > 0 {
+        eprintln!(
+            "skipped: three windows in a row lost drops to a full ring -- the last {lost} of \
+             them -- so none of their counts can be checked against the {SENT} datagrams the \
+             scenario sent; `a_drop_storm_reports_what_the_ring_could_not_hold` is the scenario \
+             for that case"
+        );
+        return;
+    }
+
+    assert!(
+        after - before >= SENT,
+        "the kernel's own Udp:NoPorts moved by {}, and the scenario sent {SENT} datagrams to a \
+         port nothing was listening on",
+        after - before
+    );
+
+    // Every drop, by reason. A drop to a closed port has exactly one, and it
+    // has to account for at least the datagrams the scenario sent -- the rest
+    // of the machine's drops are other reasons or more of this one.
+    let mut by_reason: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut counted = 0;
+    for event in raw_events(&run, "drops") {
+        let attributes = attrs(event);
+        let drops = attributes["drops"].as_u64().expect("a count");
+        *by_reason
+            .entry(attributes["reason"].as_u64().expect("a reason"))
+            .or_default() += drops;
+        counted += drops;
+    }
+    assert!(counted >= SENT, "only {counted} drops were reported");
+
+    // Reason 3 specifically, and not "the commonest reason", which is what
+    // this asserted first and is a fact about the machine rather than about
+    // the tool: nine hundred tests share it, and the rest of this file's own
+    // scenarios flood a socket whose receive buffer overflows, which is
+    // reason 6 and outnumbers the scenario's own drops twenty to one.
+    //
+    // A packet nobody was listening for is `SKB_DROP_REASON_NO_SOCKET`, which
+    // is 3 on every kernel this has run on. If one renumbers the enum this
+    // fails, rather than silently reporting a different fault under the same
+    // number -- which is exactly why the names are not written into the tool.
+    const NO_SOCKET: u64 = 3;
+    assert!(
+        by_reason.get(&NO_SOCKET).copied().unwrap_or(0) >= SENT,
+        "the scenario sent {SENT} datagrams to a port nothing was listening on, and reason \
+         {NO_SOCKET} accounts for {:?} of the {counted} drops this run saw: {by_reason:?}",
+        by_reason.get(&NO_SOCKET)
+    );
+
+    // And the contrast. The device counted no drops at all, because nothing
+    // went wrong at the device.
+    let links = labelled(&run, "links");
+    assert!(
+        links["events_seen"].as_u64().unwrap_or(0) > 0,
+        "net.iface read the interface counters and produced nothing"
+    );
+}
+
+/// The kernel's own softirq counter bounds what this run bucketed.
+///
+/// There is no way to inject a number of `NET_RX` handlers: they happen when
+/// the driver decides, and how many a transfer costs depends on coalescing. So
+/// the check is against the only other party that counts them, `/proc/softirqs`,
+/// which the kernel maintains for its own reasons and which this run reads
+/// around -- once strictly before, once strictly after.
+///
+/// That makes the relationship exact in one direction, which is the direction
+/// that matters: the window this run observed is *inside* the window the two
+/// reads bound, so it cannot have seen more handlers than happened. A run that
+/// reports more is double-counting, and this is the only thing that would catch
+/// it.
+#[test]
+fn the_kernels_own_softirq_counter_bounds_what_this_run_bucketed() {
+    let before = softirq_runs("NET_RX");
+    let measuring = Command::new(BINARY)
+        .args(["-f", &session("net-softirq-cost.yml"), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // A quarter of a mebibyte is thousands of `NET_RX` handlers and is small
+    // enough not to show up in the loopback counters another test in this file
+    // is reading over the same seconds. The bound below is what this scenario
+    // checks, and it does not need volume to be meaningful.
+    pause(200);
+    push_through_loopback(256 * 1024);
+
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    let after = softirq_runs("NET_RX");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: net.softirq needs CAP_BPF and CAP_PERFMON, which this machine does not \
+             grant"
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+
+    // Every event stands for the handler runs in its bucket, which is what the
+    // `count` attribute and `emit::WEIGHT_ATTR` both carry. Counting the events
+    // instead would count buckets.
+    // `NET_RX` alone, because that is the row this test reads out of
+    // `/proc/softirqs`. The source measures both network vectors, and summing
+    // them against one of the kernel's two counters is how this first failed:
+    // it reported more handlers than had happened, which is exactly the shape
+    // of the defect the bound exists to catch.
+    let mut handlers = 0u64;
+    let mut exact_total_ns = 0u64;
+    let mut bucketed_low_ns = 0u64;
+    let mut vectors: BTreeMap<String, u64> = BTreeMap::new();
+    for event in raw_events(&run, "softirq") {
+        let attributes = attrs(event);
+        let count = attributes["count"].as_u64().expect("a count");
+        assert_eq!(
+            attributes["weight"].as_u64(),
+            Some(count),
+            "a kernel-built bucket has to carry the runs it stands for, or a histogram comes \
+             out the height of its bucket count"
+        );
+        let vector = attributes["vec_name"]
+            .as_str()
+            .expect("a vector name")
+            .to_owned();
+        *vectors.entry(vector.clone()).or_default() += count;
+        exact_total_ns += attributes["total_ns"].as_u64().expect("a total");
+        bucketed_low_ns += count * attributes["duration_ns"].as_u64().expect("a value");
+        if vector == "NET_RX" {
+            handlers += count;
+        }
+    }
+    assert!(
+        vectors
+            .keys()
+            .all(|name| name == "NET_RX" || name == "NET_TX"),
+        "a network source must measure the network vectors and no others: {vectors:?}"
+    );
+
+    assert!(
+        handlers > 0,
+        "a quarter of a mebibyte crossed loopback and no NET_RX softirq ran: {vectors:?}"
+    );
+    let kernel_ran = after - before;
+    assert!(
+        handlers <= kernel_ran,
+        "this run bucketed {handlers} NET_RX handlers and the kernel counted {kernel_ran} over a \
+         window containing it, so something here counted twice"
+    );
+
+    // The exact total and the bucketed one are different numbers, and the
+    // second is a lower bound: a log2 bucket is a factor of two wide, so a sum
+    // built from its low bounds is between half the truth and the truth.
+    assert!(
+        exact_total_ns >= bucketed_low_ns,
+        "the exact total {exact_total_ns} is below the sum of the bucket floors \
+         {bucketed_low_ns}, which cannot happen"
+    );
+    assert!(
+        exact_total_ns < 2 * bucketed_low_ns.max(1),
+        "and cannot be more than twice it: {exact_total_ns} against {bucketed_low_ns}"
+    );
+
+    // The run says which vectors it measured and how it compares against the
+    // kernel's own count, because "network softirq time" is a choice this
+    // collector made rather than something the kernel reports.
+    let notes = labelled(&run, "softirq")["degradations"].to_string();
+    assert!(
+        notes.contains("NET_RX") && notes.contains("/proc/softirqs"),
+        "the run has to name the vectors it measured and where their numbers came from: {notes}"
+    );
+}
+
+/// A queueing discipline that delays every packet by fifty milliseconds,
+/// measured as fifty milliseconds.
+///
+/// The number is injected: `netem` holds each packet for a fixed time, chosen
+/// here and produced by the kernel, and the whole of `net.qdisc` is the gap
+/// between the enqueue and the dequeue that the delay sits in. Two hundred
+/// packets are sent and all two hundred have to be found.
+///
+/// The device is inside a network namespace and `omn` runs outside it, which is
+/// the only arrangement that works: a raw tracepoint is not namespaced and sees
+/// every packet queued on the machine, while `bpf()` checks `CAP_BPF` against
+/// the initial user namespace and would refuse to load anything from inside an
+/// unprivileged one.
+#[test]
+fn a_queue_that_delays_every_packet_is_measured_as_that_delay() {
+    const PACKETS: u64 = 200;
+    const DELAY_MS: u64 = 50;
+
+    if !can_build_a_network() {
+        eprintln!(
+            "skipped: this scenario needs iproute2 and an unprivileged user namespace to build a \
+             device with a queueing discipline; loopback is `noqueue` on every machine, so there \
+             is nothing else here to measure a queue on"
+        );
+        return;
+    }
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|outcome| outcome.status.success())
+    {
+        eprintln!("skipped: this machine has no `python3`, which the sending workload is in");
+        return;
+    }
+
+    let measuring = Command::new(BINARY)
+        .args(["-f", &session("net-queue-delay.yml"), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // A dummy device, a discipline that delays, an address to send to and a
+    // static neighbour so that address resolution never happens: what is left
+    // on the wire is exactly the scenario's own packets.
+    let workload = workload_in_a_namespace(&format!(
+        "set -e
+         ip link add dummy0 type dummy
+         tc qdisc add dev dummy0 root netem delay {DELAY_MS}ms limit 100000
+         ip addr add 10.99.0.1/24 dev dummy0
+         ip link set dummy0 up
+         ip neigh add 10.99.0.2 lladdr 02:00:00:00:00:02 dev dummy0
+         sleep 0.4
+         python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range({PACKETS}): s.sendto(b\"x\" * 64, (\"10.99.0.2\", 9999))'
+         sleep 0.6"
+    ));
+    let built = workload
+        .wait_with_output()
+        .expect("the workload should run");
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: net.qdisc needs CAP_BPF and CAP_PERFMON, which this machine does not grant"
+        );
+        return;
+    }
+    if !built.status.success() {
+        eprintln!(
+            "skipped: this machine would not build the device the scenario measures: {}",
+            stderr(&built)
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+
+    let mut packets = 0u64;
+    let mut total_ns = 0u64;
+    for event in raw_events(&run, "queueing") {
+        let attributes = attrs(event);
+        if attributes["iface"].as_str() != Some("dummy0") {
+            continue;
+        }
+        packets += attributes["count"].as_u64().expect("a count");
+        total_ns += attributes["total_ns"].as_u64().expect("a total");
+    }
+    assert_eq!(
+        packets, PACKETS,
+        "the scenario put {PACKETS} packets through a queueing discipline and this found \
+         {packets}"
+    );
+
+    // The exact mean, which is what `total_ns` is beside the bucket for: a log2
+    // bucket holding fifty milliseconds is `[33.55ms, 67.11ms)`, and a mean
+    // taken from those bounds could say anything in between.
+    let mean_ms = total_ns as f64 / packets as f64 / 1e6;
+    assert!(
+        (mean_ms - DELAY_MS as f64).abs() < 5.0,
+        "the discipline was told to hold every packet for {DELAY_MS} ms and the exact mean of \
+         what it held is {mean_ms:.2} ms"
+    );
+
+    // The interface's name came out of the kernel, in a namespace this process
+    // cannot name an index in. Resolving it here afterwards would have found
+    // someone else's device or nothing at all.
+    let keys = raw_events(&run, "queueing")
+        .iter()
+        .filter_map(|event| event["keys"][0]["iface"]["name"].as_str())
+        .any(|name| name == "dummy0");
+    assert!(keys, "the event's key carries the name the program read");
+}
+
+/// Every segment the kernel resent is one this run saw, and the kernel is the
+/// one that counted them.
+///
+/// There is no way to choose a number of retransmissions: the stack resends on
+/// its own timer, and how many fit in a window is an accident of `TCP_RTO_MIN`
+/// and exponential backoff. What the scenario chooses is the *fault* -- a
+/// queueing discipline added after the handshake, so an established connection
+/// finds its path gone -- and what it checks against is `Tcp: RetransSegs` in
+/// that namespace's own `/proc/net/snmp`, which the kernel maintains by a
+/// completely different route.
+///
+/// The namespace makes that counter exact: the only connection on that network
+/// is the scenario's, so its whole `RetransSegs` delta belongs to the one
+/// socket, whose local port the workload prints. `omn` watches from outside and
+/// sees the machine's retransmissions as well as the scenario's, which is why
+/// the check is over the events of that one port.
+#[test]
+fn every_segment_the_kernel_resent_is_one_this_run_saw() {
+    if !can_build_a_network() {
+        eprintln!(
+            "skipped: this scenario needs iproute2 and an unprivileged user namespace to build a \
+             link it can break; breaking this machine's own is not an option a test has"
+        );
+        return;
+    }
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|outcome| outcome.status.success())
+    {
+        eprintln!("skipped: this machine has no `python3`, which the workload is written in");
+        return;
+    }
+
+    let measuring = Command::new(BINARY)
+        .args([
+            "-f",
+            &session("net-retransmissions.yml"),
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // The discipline is added after the handshake, so the connection is
+    // established and then the path disappears under it. The workload prints
+    // the two numbers this scenario is checked against.
+    let workload = workload_in_a_namespace(
+        "set -e
+         ip link set lo up
+         sleep 0.4
+         python3 -c '
+import socket, subprocess, time
+def retrans():
+    lines = open(\"/proc/net/snmp\").read().splitlines()
+    for at, line in enumerate(lines):
+        if line.startswith(\"Tcp:\") and \"RetransSegs\" in line:
+            names = line.split()
+            return int(lines[at + 1].split()[names.index(\"RetransSegs\")])
+    raise SystemExit(\"no Tcp: RetransSegs\")
+l = socket.socket(); l.bind((\"127.0.0.1\", 0)); l.listen(1)
+c = socket.create_connection(l.getsockname()); s, _ = l.accept()
+subprocess.run([\"tc\", \"qdisc\", \"add\", \"dev\", \"lo\", \"root\", \"netem\", \"loss\", \"100%\"], check=True)
+before = retrans()
+c.sendall(b\"x\" * 100)
+time.sleep(1.1)
+print(c.getsockname()[1], retrans() - before)'",
+    );
+    let built = workload
+        .wait_with_output()
+        .expect("the workload should run");
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: net.tcp.retransmit needs CAP_BPF and CAP_PERFMON, which this machine does \
+             not grant"
+        );
+        return;
+    }
+    if !built.status.success() {
+        eprintln!(
+            "skipped: this machine would not build the broken link the scenario measures: {}",
+            stderr(&built)
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+
+    let spoken = stdout(&built);
+    let mut said = spoken.split_whitespace();
+    let port: u64 = said
+        .next()
+        .and_then(|field| field.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not print its port: {spoken}"));
+    let kernel_counted: u64 = said
+        .next()
+        .and_then(|field| field.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not print its RetransSegs: {spoken}"));
+
+    if kernel_counted == 0 {
+        eprintln!(
+            "skipped: the kernel resent nothing over the scenario's window, so there is nothing \
+             to check this against; the connection was established and its path removed, and a \
+             machine slow enough to miss its own retransmission timer can do that"
+        );
+        return;
+    }
+
+    let mine: Vec<BTreeMap<String, serde_json::Value>> =
+        raw_events(&results(&outcome), "retransmits")
+            .iter()
+            .map(attrs)
+            .filter(|attributes| attributes["sport"].as_u64() == Some(port))
+            .collect();
+    assert_eq!(
+        mine.len() as u64,
+        kernel_counted,
+        "the kernel counted {kernel_counted} retransmitted segments on port {port} and this run \
+         saw {}",
+        mine.len()
+    );
+
+    // Every one of them from an established connection, which is what makes
+    // the count readable: the same number from `SYN_SENT` would be a handshake
+    // nobody answered, and it is a different fault.
+    for attributes in &mine {
+        assert_eq!(
+            attributes["state_name"].as_str(),
+            Some("ESTABLISHED"),
+            "the path was removed after the handshake, so every resend is of data: {attributes:?}"
+        );
+    }
+}
+
+// --------------------------------------------------------- Class: the loss path
+
+/// More drops than the ring can hold, and a run that says its own count is
+/// short.
+///
+/// The BPF ring buffer does not report its own overflows: when a program cannot
+/// reserve space the helper returns an error, the event is gone, and nothing
+/// anywhere records that it existed. So the program counts it in a per-cpu
+/// array beside the ring, and this checks that the count reaches the user.
+///
+/// It is the class this project exists for. A collector that loses a third of
+/// its events and says nothing produces wrong numbers that look right, and by
+/// the time anyone notices the run is over.
+#[test]
+fn a_drop_storm_reports_what_the_ring_could_not_hold() {
+    /// Six senders, because one cannot outrun the drain: a single thread
+    /// manages about two hundred thousand datagrams a second, and the ring
+    /// holds nine thousand records between ten-millisecond drains. Six of them
+    /// clear a million a second between them, which is more than that.
+    ///
+    /// Forty thousand each and no more, because this storm is shared: it runs
+    /// in the same suite as `every_datagram_sent_to_a_closed_port_is_a_drop_
+    /// with_one_reason`, whose window it can fill, and it saturates a machine
+    /// that eight hundred other tests are measuring things on.
+    const SENDERS: usize = 6;
+    const EACH: usize = 40_000;
+    const NOWHERE: u16 = 59321;
+
+    let measuring = Command::new(BINARY)
+        .args(["-f", &session("net-drop-storm.yml"), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    pause(200);
+    let senders: Vec<std::thread::JoinHandle<()>> = (0..SENDERS)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let socket = UdpSocket::bind("127.0.0.1:0").expect("a socket to send from");
+                socket
+                    .connect(("127.0.0.1", NOWHERE))
+                    .expect("a destination nothing is listening on");
+                for _ in 0..EACH {
+                    // A previous datagram's ICMP port-unreachable comes back as
+                    // an error on the next send of a connected socket. It is
+                    // not a failure of the workload: the datagram before it
+                    // reached the stack and was dropped, which is the whole
+                    // point.
+                    let _ = socket.send(&[0x5au8; 16]);
+                }
+            })
+        })
+        .collect();
+    for sender in senders {
+        sender.join().expect("a sender");
+    }
+
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: net.drops needs CAP_BPF and CAP_PERFMON, which this machine does not grant"
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    let result = labelled(&run, "drops");
+
+    let dropped = result["losses"]["dropped"].as_u64().expect("a loss count");
+    let seen = result["events_seen"].as_u64().expect("an event count");
+    if dropped == 0 {
+        eprintln!(
+            "skipped: this machine drained {seen} drops without ever filling the ring, so the \
+             loss path was not exercised; a faster machine needs a bigger storm than \
+             {} datagrams",
+            SENDERS * EACH
+        );
+        return;
+    }
+
+    assert!(
+        seen > 0,
+        "the run lost {dropped} drops and reported none at all, which is a ring that never \
+         delivered rather than a ring that overflowed"
+    );
+
+    // The count is a lower bound and the run has to say which way it is wrong.
+    let reasons = result["losses"]["reasons"].to_string();
+    assert!(
+        reasons.contains("the drop ring was full"),
+        "the loss has to reach the output with what it was: {reasons}"
+    );
+    assert!(
+        reasons.contains("short"),
+        "and with which way the number is wrong, because a count of what the machine threw away \
+         that is itself short is the worst shape this source could take: {reasons}"
+    );
+}
+
+// --------------------------------------------------------- Class: the refusal
+
+/// The three different things these five sources say no to, and the three
+/// different codes that go with them.
+///
+/// They must not be confused, because each one sends a reader somewhere else. A
+/// request that cannot mean anything has to be rewritten; a machine that cannot
+/// serve one may be swapped or given a privilege; a build that has not written
+/// something is neither, and retrying it forever is what a reader who cannot
+/// tell them apart does.
+#[test]
+fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
+    // 2 -- the request cannot mean anything. A connection's lifetime is the gap
+    // between two state changes, and there is no such thing as a sampled gap:
+    // a sample that catches one end without the other has no duration at all.
+    let outcome = omn(&[
+        "net.tcp.lifetime",
+        "--system",
+        "--mode",
+        "sample@99hz",
+        "--duration",
+        "200ms",
+        "--emit",
+        "raw",
+    ]);
+    let complaint = stderr(&outcome);
+    assert_eq!(code(&outcome), 2, "{complaint}");
+    assert!(
+        complaint.contains("net.tcp.lifetime") && complaint.contains("sample"),
+        "the rejection should name the source and the mode: {complaint}"
+    );
+
+    // Also 2, and by a different route: `net.drops` declares only a system
+    // target, so a pid never reaches a collector at all. The two are worth
+    // keeping apart -- a source the catalog says nothing about for a process,
+    // and a source it does and this build cannot serve -- because only the
+    // second is a gap anybody can close.
+    let outcome = omn(&[
+        "net.drops",
+        "--pid",
+        &std::process::id().to_string(),
+        "--mode",
+        "trace",
+        "--duration",
+        "200ms",
+        "--emit",
+        "raw",
+    ]);
+    let complaint = stderr(&outcome);
+    assert_eq!(code(&outcome), 2, "{complaint}");
+    assert!(
+        complaint.contains("declares no `pid` support"),
+        "a target the catalog never offered is a request that cannot mean anything: {complaint}"
+    );
+
+    // 3 -- this build has not written it. The catalog *does* offer
+    // `net.tcp.lifetime` for a process, and this backend cannot serve one for a
+    // reason that is about the measurement rather than about the machine: both
+    // ends of a connection become established in softirq context, so the task
+    // current at that moment is whichever one the interrupt landed on.
+    let outcome = omn(&[
+        "net.tcp.lifetime",
+        "--pid",
+        &std::process::id().to_string(),
+        "--mode",
+        "trace",
+        "--duration",
+        "200ms",
+        "--emit",
+        "raw",
+    ]);
+    let complaint = stderr(&outcome);
+    assert_eq!(
+        code(&outcome),
+        3,
+        "a target the catalog offers and this build cannot serve is the build's gap: {complaint}"
+    );
+    assert!(
+        complaint.contains("softirq context") && complaint.contains("--system"),
+        "the refusal should say why and what to ask for instead: {complaint}"
+    );
+    assert!(
+        complaint.contains("The request itself is valid"),
+        "exit 3 is not a failure of the request and should not read like one: {complaint}"
+    );
+
+    // 1 -- this machine cannot serve it. Every one of these five has a
+    // `bpf:tp` backend behind its `bpf:raw_tp` one, and a classic tracepoint's
+    // numeric event id lives in a file under tracefs that a normal user cannot
+    // read. Forcing it is the backend comparison this family can make: the
+    // second road exists, and on this machine it is closed.
+    let outcome = omn(&[
+        "net.softirq",
+        "--system",
+        "--mode",
+        "trace",
+        "--duration",
+        "200ms",
+        "--emit",
+        "hist",
+        "--backend",
+        "force:bpf:tp",
+    ]);
+    let complaint = stderr(&outcome);
+    match code(&outcome) {
+        1 => assert!(
+            complaint.contains("tracefs") || complaint.contains("tracepoint:irq:softirq_entry"),
+            "a machine that cannot serve the classic path should say what it is missing: \
+             {complaint}"
+        ),
+        3 => assert!(
+            complaint.contains("no collector is written"),
+            "a machine that can serve the classic path has only this build's gap left, and the \
+             message has to say so rather than reading like a failure: {complaint}"
+        ),
+        other => panic!(
+            "forcing `bpf:tp` exited {other}: it is this machine's gap or this build's, never a \
+             request that cannot mean anything:\n{complaint}"
+        ),
+    }
+}
+
+/// Forcing the backend a chain's second road is, on each of the five.
+///
+/// `--backend force:` is what a backend comparison is made with, and this
+/// family has none to make: every one of these sources has exactly one
+/// implemented backend and one declared behind it. So the comparison is with
+/// the refusal, and what it establishes is that the chain is real -- the
+/// resolver knows about the other road, names it, and says which kind of
+/// obstacle is in the way.
+#[test]
+fn the_second_road_of_every_ebpf_net_chain_is_named_when_it_is_forced() {
+    let chains: &[(&str, &str, &str, &str)] = &[
+        ("net.tcp.lifetime", "trace", "raw", "bpf:tp"),
+        ("net.tcp.retransmit", "trace", "raw", "bpf:tp"),
+        ("net.drops", "trace", "raw", "bpf:tp"),
+        ("net.qdisc", "trace", "raw", "bpf:tp"),
+        ("net.softirq", "trace", "raw", "bpf:tp"),
+    ];
+    for (source, mode, emit, backend) in chains {
+        let forced = format!("force:{backend}");
+        let outcome = omn(&[
+            source,
+            "--system",
+            "--mode",
+            mode,
+            "--duration",
+            "150ms",
+            "--emit",
+            emit,
+            "--backend",
+            &forced,
+        ]);
+        let complaint = stderr(&outcome);
+        assert!(
+            matches!(code(&outcome), 1 | 3),
+            "`{source}` forced onto `{backend}` exited {}, and the second road of a chain is \
+             either unreachable here or unwritten, never a request that cannot mean anything:\n\
+             {complaint}",
+            code(&outcome)
+        );
+        assert!(
+            complaint.contains(backend),
+            "`{source}` should name `{backend}` when it is the backend that was asked for: \
+             {complaint}"
+        );
+
+        // And the road that is open answers, which is what makes the refusal
+        // above a comparison rather than a pair of failures.
+        let outcome = omn(&[
+            source,
+            "--system",
+            "--mode",
+            mode,
+            "--duration",
+            "150ms",
+            "--emit",
+            emit,
+            "--backend",
+            "force:bpf:raw_tp",
+            "--format",
+            "json",
+        ]);
+        if unprivileged(&stderr(&outcome)) {
+            eprintln!(
+                "skipped: `{source}` needs CAP_BPF and CAP_PERFMON, which this machine does not \
+                 grant"
+            );
+            return;
+        }
+        assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+        assert_eq!(
+            results(&outcome)["results"][0]["backend"],
+            "bpf:raw_tp",
+            "`{source}` was served by something other than the backend it was forced onto"
+        );
+    }
 }

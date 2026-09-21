@@ -3740,3 +3740,160 @@ the collector, and it belongs with whoever owns `src/event.rs` and `src/join.rs`
 -- `gpu:fence_ctx+seqno` is the same shape and may want the same answer.
 
 ---
+---
+
+## Needs from another stream — the sixth wave, stream B (`net`)
+
+Six requests, written with the signature wanted rather than as a description,
+because the coordinator lands a shared change once and two streams asking for
+the same thing in two shapes is how the third wave paid for the second.
+
+**Two of them are blocking**, in the sense that three `net` sources shipped
+without filter fields their catalog entries declare. They are the first two.
+
+### To whoever owns `src/bpf/btf.rs`: a member lookup that walks into anonymous members
+
+```rust
+/// The byte offset of `member` within `struct_name`, including members of
+/// anonymous structs and unions inside it.
+///
+/// A compile-time CO-RE relocation resolves `skb->protocol` by walking into the
+/// anonymous union that holds it, adding each enclosing member's offset. This
+/// does the same, so a program can read a field the kernel did not put in a
+/// named structure.
+pub fn member_offset(&self, struct_name: &str, member: &str) -> Result<i32, String>
+```
+
+The current implementation iterates the struct's direct members and compares
+names. An anonymous member has an empty name and is skipped, and anonymous types
+are not in `by_name` at all — `if name_off != 0` is the line that keeps them
+out. So the recursion has to happen from the *parent*: when a member's name is
+empty and its type is a struct or a union, search inside it and add the
+enclosing offset.
+
+What is unreachable without it, and what shipped instead:
+
+| Field | Where it lives | Source | What it does instead |
+|---|---|---|---|
+| `skc_daddr`, `skc_dport` | anonymous struct in an anonymous union of `sock_common` | `net.tcp.lifetime`, `net.tcp.retransmit` | reports the local endpoint only; the catalog declares `daddr` and `dport` as filter fields and no event carries one |
+| `skb->protocol` | anonymous union of `sk_buff` | `net.drops` | reports the protocol of the socket the drop belonged to, which a receive-side drop does not have |
+| `skb->skb_iif`, `skb->dev` | the same union | `net.drops` | carries no interface at all |
+
+`io` and `mem` will want this the moment either reads a field out of a `bio`, a
+`page` or a `request`: the same pattern is everywhere in those structures.
+
+The three collectors refuse to write the offsets down themselves, and the reason
+is `docs/bpf-layer.md`'s own: an offset baked into a collector is the staleness
+the whole layer exists to prevent, and the failure mode is a plausible number
+read out of the wrong field on a kernel nobody tested.
+
+### To whoever owns `src/bpf/btf.rs`: the names of an enum's members
+
+```rust
+/// The name this kernel gives `value` in `enum_name`, when it has one.
+///
+/// The parser already walks `KIND_ENUM` and `KIND_ENUM64` well enough to step
+/// over them; what it does not do is read the `(name, value)` pairs that follow
+/// the header, which are 8 bytes each for an enum and 12 for an enum64.
+pub fn enum_variant(&self, enum_name: &str, value: i64) -> Option<&str>
+```
+
+`net.drops` reports `enum skb_drop_reason` as a bare number because of this. A
+hundred and twenty-eight names the kernel publishes, a source whose whole point
+is that it says *why* a packet was dropped, and a reader who sees `reason=3` and
+has to go looking in `include/net/dropreason-core.h`.
+
+A table of the names in the collector would close it today and was refused, for
+the same reason as the request above: the values would be a constant no run
+could check against the kernel it is running on, and the enum has been
+reorganised at least once. A mislabelled drop reason does not read as wrong, it
+reads as a different fault.
+
+`proc.syscall` will want the same call for `__NR_*`, and `sched.irq` for
+`softirq_to_name` if it does not read `/proc/softirqs` the way `net.softirq`
+does.
+
+### To whoever owns `src/bpf/insn.rs`: three helpers that are now written twice
+
+`src/bpf/net_program.rs` holds near-duplicates of three private helpers in
+`src/bpf/runqlat.rs`, and the duplication is not a style question: a program
+built as instructions has no compiler to notice that two copies of a sequence
+have drifted apart.
+
+```rust
+/// Reads `size` bytes of a kernel structure into the program's stack.
+pub fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32)
+
+/// Adds one to a slot of a per-cpu drop counter, resuming at `resume` either
+/// way: failing to record a loss is not a reason to stop recording
+/// measurements.
+pub fn count_drop(program: &mut Program, drops_fd: i32, drop_key: i16, slot: u32, resume: &'static str)
+
+/// Computes the log2 bucket of `value_reg` into `r3`, in
+/// `emit::BucketLayout::Log2`'s numbering. Six compares, thirty instructions,
+/// no loop.
+pub fn push_log2_bucket(program: &mut Program, value_reg: u8)
+```
+
+`push_log2_bucket` is the one that matters: it decides which bucket every
+kernel-built histogram in this repository puts a measurement in, and two copies
+that disagree by one report every duration in the neighbouring bucket — a factor
+of two — with nothing anywhere saying so. Both copies carry an independent test
+of the definition for that reason, which is a workaround rather than a fix.
+
+Two more, smaller:
+
+- `insn::helper` does not name `BPF_FUNC_get_current_comm`, which is 16, so
+  `src/bpf/net_lifetime.rs` declares the number itself.
+- `read_narrow` — clear a four-byte slot, then ask the kernel for exactly the
+  field's own width — is how a `u16` or a `u8` is taken out of a structure with
+  the loads this layer exposes. `net` has four fields that need it and every
+  family reading a kernel structure will.
+
+### To whoever owns `catalog/net.yaml`: four entries that offer what no backend can serve
+
+Each is a line, and each is a promise a reader can ask for and not get.
+
+1. `net.tcp.lifetime` and `net.tcp.retransmit` declare `pid`, `cgroup` and
+   `container` targets. Both ends of a connection reach `TCP_ESTABLISHED` in
+   softirq context and a retransmission is issued from a timer, so no task
+   current at those moments is the connection's owner. The collectors refuse by
+   name with exit 3, which is the right answer — attributing a connection to a
+   process needs a socket-to-process map, which is a thing to build — but the
+   entry should not offer it until there is one.
+2. The same two declare `daddr` and `dport` as filter fields. Until the first
+   request above lands, no event carries either and a predicate over one is
+   false everywhere. `net.drops` declares `protocol`, which is carried but is
+   `no-socket` for most drops.
+3. `net.qdisc` declares `keys: [sock]`. A row aggregated over packets has no
+   socket; what it has is the interface, which is what its events carry and what
+   `--keys iface` should be able to ask for.
+4. `net.qdisc` requires `raw_tracepoint:qdisc_dequeue` and needs
+   `raw_tracepoint:qdisc_enqueue` as well — a wait is the gap between the two.
+   Every kernel with one has the other, so nothing is broken today, but the
+   probe would report the source available on a kernel that had only the
+   dequeue. The collector refuses by name there.
+
+### To whoever owns `src/emit.rs`: a ranking over an attribute, met a second time
+
+This is already filed, by stream C of the fifth wave. It is recorded again
+because `net.drops` is the strongest case for it in the repository: what a
+reader wants ranked is the drop *reason* — which fault cost this machine the
+most packets — and `topk` ranks series. A drop's series is its socket, which
+most drops do not have, so `net.drops --emit topk` ranks one series called
+`system`.
+
+### To whoever owns `src/emit.rs` and `src/render.rs`: a note is not always a degradation
+
+Every string a collector returns from `Collector::notes` is rendered as
+`degraded: …`, because `emit.rs` appends them to the resolver's degradations.
+The trait's own documentation says that is the contract — "what the collector
+had to give up" — and the five `net` collectors were written to fit it.
+
+What does not fit is a run stating a fact about itself that is not a
+concession. `net.softirq` prints the kernel's own count of the handler runs it
+bucketed, which is the strongest thing it can say about its own completeness,
+and it comes out under `degraded:`. A second channel — `notes:` beside
+`degraded:`, with the same plumbing — would let a collector say "here is what
+another party counted" without it reading as an apology.
+

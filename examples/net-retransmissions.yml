@@ -1,0 +1,50 @@
+# Did this path lose anything, and did the stack notice?
+#
+# The ground truth is a link that drops everything, and the kernel's own count
+# of what it resent:
+#
+#   unshare --user --map-root-user --net -- sh -c '
+#     ip link set lo up
+#     python3 - <<PY
+#   import socket, time, subprocess
+#   l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
+#   c = socket.create_connection(l.getsockname()); s, _ = l.accept()
+#   subprocess.run(["tc", "qdisc", "add", "dev", "lo", "root", "netem", "loss", "100%"])
+#   print("client port", c.getsockname()[1])
+#   c.sendall(b"x" * 100)
+#   time.sleep(1.2)
+#   print(open("/proc/net/snmp").read())
+#   PY' &
+#   omn -f examples/net-retransmissions.yml
+#
+# The discipline is added *after* the handshake, so the connection is
+# established and then the path disappears under it. One hundred bytes are
+# written, nothing is acknowledged, and the stack resends on its own timer --
+# roughly at 200 ms, 400 ms and 800 ms, because that is what an exponential
+# backoff from `TCP_RTO_MIN` does.
+#
+# The number to check against is not the count of resends, which is a timing
+# accident. It is `Tcp: RetransSegs` in that namespace's own `/proc/net/snmp`:
+# the kernel counted the same events by a completely different route, and the
+# two have to agree exactly for the connection the scenario made.
+#
+# **The connection's state is what makes the count readable.** Three
+# retransmissions from `ESTABLISHED` are data that did not arrive; three from
+# `SYN_SENT` are a handshake nobody answered; one from `FIN_WAIT1` is a close
+# that did not land. They are three different faults with the same number, so
+# the kernel's own state travels on every event with its name beside it.
+#
+# As in `net-queue-delay.yml`, `omn` runs outside the namespace: a raw
+# tracepoint sees the whole machine, and `bpf()` would refuse to load anything
+# from inside an unprivileged user namespace.
+name: segments the stack had to send again
+duration: 1800ms
+format: text
+
+requests:
+  - label: retransmits
+    source: net.tcp.retransmit
+    target: system
+    mode: trace
+    emit: [raw, rate, summary]
+    keys: [sock]

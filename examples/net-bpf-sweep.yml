@@ -1,0 +1,86 @@
+# Does every axis the five eBPF `net` sources declare actually work?
+#
+#   omn -f examples/net-bpf-sweep.yml
+#   omn -f examples/net-bpf-sweep.yml --format json | jq '.results[].outputs[].emit'
+#
+# The `trace` leg of the sweep for the sources that go through the kernel. Every
+# one of them needs CAP_BPF and CAP_PERFMON, which `make` puts on the binary and
+# every `cargo build` takes off again; without them this file exits 1 and names
+# them, which is the right answer and not this sweep's subject.
+#
+# What the sweep is for is the promise nobody looks at: a combination the
+# catalog offers and the build cannot serve. Three of them are in this family,
+# all the same shape -- the entry lists its modes and its emits as two flat
+# lists, and the mode x emit matrix refuses three of the pairs that implies:
+#
+#   net.tcp.retransmit --mode count --emit topk      exit 2
+#   net.drops          --mode count --emit topk      exit 2
+#   net.softirq        --mode count --emit hist      exit 2
+#
+# They are correct refusals of requests that cannot mean anything -- a ranking
+# over a window that produced one measurement per series, a histogram of the
+# same -- and they are in this file's comments rather than in its requests
+# because a session stops at the first request it cannot serve.
+#
+# **Most of these will report nothing on an idle machine, and that is right.**
+# A machine with no traffic closes no connections, retransmits nothing and runs
+# no network softirq. To see them answer, push something through loopback in
+# another terminal while this runs:
+#
+#   python3 -c 'import socket
+#   l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
+#   c = socket.create_connection(l.getsockname()); s, _ = l.accept()
+#   c.sendall(b"x" * 65536); s.recv(1 << 20); c.close()'
+#
+# `net.qdisc` will still report nothing, and that is also right: loopback is
+# `noqueue`, so a packet on it never enters a queueing discipline and neither
+# tracepoint fires. `net-queue-delay.yml` is the session that gives it one.
+name: the trace leg of the net capability sweep
+duration: 500ms
+format: text
+
+requests:
+  # Every emit this source declares. A connection is one event with a duration
+  # and a volume, which is what makes `hist` and `topk` mean something here.
+  - label: connections
+    source: net.tcp.lifetime
+    target: system
+    mode: trace
+    emit: [hist, topk, raw, timeline, summary]
+    keys: [sock]
+
+  # A retransmission is a count, so `rate` rather than `hist`: there is no
+  # duration to bucket.
+  - label: retransmits
+    source: net.tcp.retransmit
+    target: system
+    mode: trace
+    emit: [rate, topk, raw, summary]
+    keys: [sock]
+
+  # Every packet the kernel threw away, with its reason. On a quiet machine
+  # this is usually empty; `net-closed-port.yml` makes it not be.
+  - label: drops
+    source: net.drops
+    target: system
+    mode: trace
+    emit: [rate, topk, raw, summary]
+    keys: [sock]
+
+  # Transmit queueing latency. Silent on a machine whose only live link is
+  # loopback, and the run says so rather than leaving an empty series to be
+  # read as a broken collector.
+  - label: queueing
+    source: net.qdisc
+    target: system
+    mode: trace
+    emit: [hist, raw, summary, timeline]
+
+  # The cpu a packet costs before any process asks for it. The one source here
+  # that answers on any machine that is doing anything at all.
+  - label: softirq
+    source: net.softirq
+    target: system
+    mode: trace
+    emit: [hist, rate, raw, summary]
+    keys: [cpu]

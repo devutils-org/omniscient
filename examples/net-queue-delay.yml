@@ -1,0 +1,51 @@
+# How long did that packet wait to leave?
+#
+# The ground truth is injected, the same way `net-injected-rtt.yml` injects
+# one: a queueing discipline that delays every packet by a number chosen
+# outside the tool. Here it is 50 ms, on a device that exists only inside a
+# network namespace:
+#
+#   unshare --user --map-root-user --net -- sh -c '
+#     ip link add dummy0 type dummy
+#     tc qdisc add dev dummy0 root netem delay 50ms limit 100000
+#     ip addr add 10.99.0.1/24 dev dummy0
+#     ip link set dummy0 up
+#     ip neigh add 10.99.0.2 lladdr 02:00:00:00:00:02 dev dummy0
+#     python3 -c "import socket
+#   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#   for _ in range(200): s.sendto(b\"x\" * 64, (\"10.99.0.2\", 9999))"
+#     sleep 1' &
+#   omn -f examples/net-queue-delay.yml
+#
+# and `omn` is run **outside** that namespace, which is the whole trick. A raw
+# tracepoint is not namespaced: the program sees every packet queued on the
+# machine, including ones on a device this process cannot even name. An eBPF
+# program cannot be loaded from inside an unprivileged user namespace at all --
+# `bpf()` checks `CAP_BPF` against the initial user namespace -- so measuring
+# from outside is not a convenience, it is the only arrangement that works.
+#
+# That is also why each row carries the interface's name as the *kernel* read
+# it. An interface index is only meaningful inside the namespace that assigned
+# it, so resolving `dummy0` here, afterwards, would resolve someone else's
+# device or nothing at all.
+#
+# **Loopback has no queueing discipline**, on any machine: `lo` is `noqueue`,
+# the transmit path calls the driver directly, and neither tracepoint fires. So
+# a session like this against loopback measures nothing, correctly, and says so
+# in its own output rather than leaving an empty histogram to be read as a
+# broken collector.
+#
+# What comes back is one bucket, `[33.55ms, 67.11ms)`, holding all two hundred
+# packets -- and `total_ns` beside it, which is where the 50 ms actually is: a
+# log2 bucket is a factor of two wide, so the bucket bounds cannot give the
+# number back and the exact sum can.
+name: a queue with a delay someone chose
+duration: 1500ms
+format: text
+
+requests:
+  - label: queueing
+    source: net.qdisc
+    target: system
+    mode: trace
+    emit: [hist, raw, summary]
