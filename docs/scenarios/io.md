@@ -704,8 +704,9 @@ rather than fixed for the same reason a defect is: the scenario found them, and
 working around them would have measured nothing.
 
 **The sixth wave saw three more of the same species, and the load explains
-them.** Over five `make check` runs, three different tests failed once each and
-every one passed in isolation immediately afterwards:
+them.** Over eight `make check` runs, three failed, each on a different test and
+each passing in isolation immediately afterwards — the first one three times,
+against eight isolated runs that all passed:
 
 - `tests/budget.rs::the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes`
   — the one above, again.
