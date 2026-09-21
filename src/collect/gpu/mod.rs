@@ -10,6 +10,7 @@
 mod device;
 #[cfg(test)]
 mod fixture;
+mod job;
 mod nvml;
 
 use super::Factory;
@@ -24,6 +25,16 @@ use crate::capabilities::Probe;
 pub fn factories() -> Vec<Factory> {
     use device::{Metric, Prepare};
     vec![
+        // The one collector in this family that does not go through a vendor
+        // library: the DRM scheduler's own tracepoints, which AMD and Intel
+        // publish and NVIDIA does not. `docs/families/gpu.md` says what that
+        // means for where it has been exercised.
+        Factory::new("gpu.job", "bpf:tp", |resolved| {
+            Ok(Box::new(job::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
         Factory::new("gpu.freq", "vendor:nvml", |resolved| {
             Ok(Box::new(Prepare::new(Metric::Freq, resolved.request.mode)))
         }),

@@ -4223,3 +4223,118 @@ wording chosen to survive its own label is a wording that will drift.
 **Stream F should know about this one**, since it is adding the mark that says a
 distribution is short: that mark is neither a degradation nor a note, and the
 distinction it needs is the one this asks for.
+*Written by stream E of the sixth wave, which owns `src/bpf/sched*.rs`,
+`src/collect/sched/**` and `src/collect/gpu/**`. Six things four collectors
+could not reach, each with the signature that would settle it.
+`docs/families/sched.md` and `docs/families/gpu.md` record what was done on
+this side of each.*
+
+### To whoever owns `src/bpf/insn.rs` — two helpers the shared list does not name
+
+`insn::helper` lists nine of the kernel's `bpf_func_id` values. Three of the
+four collectors this wave landed need two more, and they are named locally in
+`src/bpf/sched_common.rs::extra_helper` rather than added to a file five
+streams write into:
+
+```rust
+pub const GET_CURRENT_COMM: i32 = 16;          // bpf_get_current_comm(buf, size)
+pub const PROBE_READ_KERNEL_STR: i32 = 115;    // bpf_probe_read_kernel_str(dst, size, unsafe_ptr)
+```
+
+The second is not interchangeable with `PROBE_READ_KERNEL`: it stops at the
+terminator, where a fixed span past the end of a kernel string can fault. Note
+for whoever moves them — it does not zero the rest of the span, so the
+destination has to be cleared first or the map carries this program's own stack
+contents to userspace. `src/bpf/sched_irq.rs` does that and has a test for it.
+
+### To whoever owns `src/bpf/insn.rs` — there is no bitwise `and`
+
+`Insn` has `rsh64_imm` and `jset_imm` and no `and64_imm`. `sched.futex` has to
+mask two flag bits off a syscall argument the way the kernel does, and without
+an `and` it strips them by conditional subtraction: correct, tested, and eight
+instructions where two would do.
+
+```rust
+/// `dst &= imm`
+pub fn and64_imm(dst: u8, imm: i32) -> Self
+```
+
+Anything masking a field out of a register will want it. The four-byte load
+trick — write the register to the stack and read back with `BPF_W` — covers
+truncation to 32 bits and nothing narrower.
+
+### To whoever owns `src/bpf/attach.rs` — the tracefs root and the `format` file
+
+`attach.rs` knows where tracefs may be mounted and how to read a tracepoint's
+numeric id, and publishes neither the root nor a way to read the `format` file
+beside it. `gpu.job` is the only collector in this build on the classic
+tracepoint path and it needs the field layout, so `src/bpf/sched_drm.rs`
+carries a second copy of the two mount paths and a `format` parser of its own.
+Whoever takes the next classic tracepoint will write a third.
+
+```rust
+pub fn tracefs_root() -> Option<PathBuf>;
+
+/// Every field of `<category>:<name>`'s record, by name, with its offset, its
+/// width and whether it is a `__data_loc`.
+pub fn tracepoint_layout(category: &str, name: &str) -> Result<BTreeMap<String, Field>, String>;
+```
+
+`sched_drm.rs::parse_layout` is the implementation, with the `format` text of
+two real kernels as its fixtures; moving it needs no rewriting.
+
+### To whoever owns `src/bpf/` — a bounded read at an offset the verifier has not seen
+
+A classic tracepoint's `__string` fields arrive as `__data_loc`: a `u32` at a
+fixed offset holding a packed `(offset, length)` pair, with the characters
+somewhere else in the record. Reading them means a read at an offset computed
+at run time, and `PTR_TO_CTX` does not take variable arithmetic.
+
+`gpu.job` wants one for the DRM ring's name and does without it, carrying the
+scheduler kernel thread's name instead and saying so on every run. Nothing else
+in this build has met a `__data_loc` yet; `io.fs` and `io.readahead` will, if
+they take the classic path for their glob.
+
+### To stream B, for `catalog/sched.yaml` — `sched.irq` promises the soft half
+
+The entry's `summary` is *"Time spent in hard and soft interrupt handlers"* and
+its `requires` are `raw_tracepoint:irq_handler_entry` and
+`raw_tracepoint:irq_handler_exit`, which are the hard ones. Soft interrupt time
+— the network receive path, block completions, the timer wheel — is
+`softirq_entry` and `softirq_exit`, and this build does not attach to them:
+attaching to a tracepoint the resolver never probed is how a backend comes to
+be reported available and then fail, which is finding 15.
+
+Both exist in this kernel's BTF, checked by name. The entry needs them in its
+requirements before a collector may read them:
+
+```yaml
+- id: "bpf:raw_tp"
+  requires: ["bpf", "btf",
+             "raw_tracepoint:irq_handler_entry", "raw_tracepoint:irq_handler_exit",
+             "raw_tracepoint:softirq_entry", "raw_tracepoint:softirq_exit",
+             "kernel>=5.8"]
+```
+
+Until then every run of `sched.irq` says which half it measured, in its own
+output rather than in documentation nobody reads at the moment it matters.
+
+### To whoever owns `src/bpf/` and `src/collect/mod.rs` — no `sched` source serves a cgroup
+
+`catalog/sched.yaml` declares `cgroup: bpf_only` on `sched.wakeup`,
+`.runqlat`, `.offcpu`, `.migrations`, `.lock` and `.futex`. All six collectors
+refuse a cgroup target by name. This predates the sixth wave; the four
+collectors added in it inherited the refusal rather than each inventing a
+different answer to the same gap.
+
+What it needs is one helper and one comparison:
+
+```rust
+pub const GET_CURRENT_CGROUP_ID: i32 = 80;   // bpf_get_current_cgroup_id()
+```
+
+plus a way to turn a `Target::Cgroup(path)` into the id that helper returns —
+`name_to_handle_at` on the cgroup directory, whose handle's first eight bytes
+are the cgroup id. That second half is not eBPF and belongs wherever
+`Target::Cgroup` is already resolved. Six entries stop being aspirational the
+day both land.

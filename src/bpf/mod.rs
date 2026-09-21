@@ -47,6 +47,14 @@ mod proc_events;
 mod proc_syscall;
 mod ring;
 mod runqlat;
+// The sixth wave's `sched` programs. `sched_common` holds what they share; the
+// rest is one file per source, named for the tracepoints it attaches to.
+mod sched_common;
+mod sched_drm;
+mod sched_futex;
+mod sched_irq;
+mod sched_lock;
+mod sched_numa;
 mod syscall;
 mod wakeup;
 
@@ -67,6 +75,11 @@ pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
 pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};
 pub use runqlat::{RunqLat, RunqLatProgram};
+pub use sched_drm::{GpuJob, GpuJobDrops, GpuJobProgram};
+pub use sched_futex::{FutexDrops, FutexProgram, FutexWait, Whose as FutexWhose};
+pub use sched_irq::{IrqDrops, IrqProgram, IrqRun};
+pub use sched_lock::{LockDrops, LockProgram, LockWait};
+pub use sched_numa::{NumaDrops, NumaProgram, NumaStick};
 pub use wakeup::{Wakeup, WakeupProgram};
 
 use btf::Btf;

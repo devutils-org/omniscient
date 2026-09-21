@@ -676,3 +676,46 @@ host. Nothing else in this family can be joined, because nothing else in it
 belongs to a process; `gpu.job` and `gpu.kernel` would both carry a `gpu` key
 and both are out of reach here — the first for want of hardware, the second for
 want of a collector.
+
+---
+
+## `gpu.job`, after the sixth wave
+
+It has a collector now, and it still cannot be measured here. Those are two
+separate facts and keeping them apart is the whole of what this section is
+for — `docs/families/gpu.md` has the long version, including what was checked
+and what remains a claim.
+
+**What changed for a reader.** Before the wave, `omn gpu.job` on a machine
+without a DRM scheduler was one silence covering two causes: no hardware, and
+no collector. Now only the first is true here, and the exit code says so —
+exit 1, the machine, not exit 3, the build. `omn list gpu.job` marks the
+backend `collector written` rather than `no collector yet`. Both are asserted
+in `tests/scenario_gpu.rs`, because a source that gains a collector and leaves
+a *"not built"* message behind is the same lie as one that never had it,
+pointing the other way.
+
+**What the scenario can be, here.** Class D, the refusal, and nothing else.
+`examples/gpu-job-latency.yml` is unchanged and still refuses; what was added
+is a test that prints the machine's own numbers rather than describing them —
+where tracefs is, whether its `gpu_scheduler` events are readable, and what is
+under `/sys/class/drm`. On a machine that *can* read them it prints one thing
+more: whether that kernel's `drm_sched_process_job` publishes the fence's
+context and sequence number, which is the layout this build requires, or only
+the `dma_fence` pointer, which it refuses.
+
+**Why it refuses the pointer rather than using it.** A fence pointer is
+recycled as soon as the fence is freed, so a completion keyed by one would be
+attributed to whichever later job landed on the same address. It is the
+argument the catalog already makes for scoping block requests by
+`(ptr, open_ts)`, and the DRM scheduler has published the fence's identity
+since Linux 6.11. A build that fell back to the pointer on an older kernel
+would produce a latency distribution that looks exactly like a correct one.
+
+**The one place this build bends the catalog.** The entry offers `ring` as a
+filter field and the events carry the DRM scheduler kernel thread's name
+instead of the tracepoint's own — the latter is a `__data_loc` string, and
+reading one needs a variable-offset read of the record that this eBPF layer
+does not have. On every driver with a DRM scheduler those threads are named
+after the ring they serve, so the string is right for the wrong reason, and
+every run says so in its own notes rather than leaving it here.

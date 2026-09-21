@@ -12,7 +12,11 @@
 //! the measurement is worth. `sched.switches` goes through `perf_event_open`,
 //! needs no privileges, and can only say that a switch happened.
 
+mod futex;
+mod irq;
+mod lock;
 mod migrations;
+mod numa_balance;
 mod offcpu;
 mod runqlat;
 mod switches;
@@ -46,6 +50,38 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("sched.migrations", "bpf:raw_tp", |resolved| {
             Ok(Box::new(migrations::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("sched.lock", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(lock::Prepare {
+                mode: resolved.request.mode,
+                // Symbolising costs a read of every waiting process's mappings,
+                // and a machine-wide run meets every process; the emit layer
+                // keeps the table only when `stack` was asked for.
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                // Carried into the collector because the resolver credits every
+                // `bpf` backend with filtering in the kernel and then leaves
+                // its events alone; see `lock::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("sched.futex", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(futex::Prepare {
+                mode: resolved.request.mode,
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("sched.irq", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(irq::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("sched.numa_balance", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(numa_balance::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
             Ok(Box::new(switches::Prepare(resolved.request.mode)))

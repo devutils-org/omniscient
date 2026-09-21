@@ -297,6 +297,22 @@ machine. Blocks are microseconds, so the program is almost entirely on the cpu
 in wall-clock terms — it is a *count* workload, not a *duration* one. Costs
 about 120 ms for *N* = 2000.
 
+**The held lock** — `sched-futex-known-wait.yml`.
+Two Python threads and one lock. The main thread holds it before the waiter
+exists and releases it after a chosen delay, so the waiter's wait is that delay
+minus its own thread creation, and it is the only wait longer than a
+millisecond anywhere in the process. Guarantees: exactly one long futex wait,
+of the chosen length, on a thread that is not the main one. Costs the delay
+plus about 100 ms. Needs `python3`.
+
+**The shared inode** — `sched-lock-shared-file.yml`.
+Twelve copies of `/bin/sh`, renamed `omnlockprobe` so a machine-wide run can be
+narrowed to them by `comm`, appending to one file or to twelve. Guarantees:
+thousands of waits on one inode's rwsem in the first case and none in the
+second. Does *not* guarantee anything about the total number of lock waits —
+see the finding above, where the uncontended run has two hundred times more.
+Two scenarios using it must not run at once.
+
 **The half-blocked ping-pong** — `sched-half-blocked.yml`.
 The same shape with both ends spinning a fixed number of iterations before
 answering. Guarantees that the driver's on-cpu time and its blocked time are
@@ -350,10 +366,26 @@ counts both as one and cannot be made to separate them; the scenario measures
 the gap between it and the tracepoint instead, which is the same information
 arrived at from outside.
 
-**Anything about `sched.lock`, `sched.futex`, `sched.mutex`, `sched.irq` and
-`sched.numa_balance`.** Five of the family's ten sources have no collector.
-Their scenarios are the refusal, and that is all they can be until the eBPF
-layer grows the attach kinds in `STATE.md`.
+**Anything about `sched.mutex`.** One of the family's ten sources has no
+collector, and its scenario is the refusal. ~~Five~~ — `sched.lock`,
+`sched.futex`, `sched.irq` and `sched.numa_balance` landed in the sixth wave
+and have scenarios of their own below.
+
+**`sched.numa_balance`, on this machine, at all.** It has a collector and it
+can never fire here: one NUMA node, so the balancer has nowhere to move
+anything to and `sched_stick_numa` is never raised. That is not a skip in
+`tests/scenario_sched.rs` — what the test asserts is that the *tool says which
+of the two empty series it is*, with the node count in it, because an empty
+series from a machine that cannot produce one and an empty series from a
+balancer with nothing to do look identical and only the second is about the
+workload.
+
+**Soft interrupts.** `sched.irq` is the hard half only; see
+`docs/families/sched.md` for why, and for the catalog line that would close it.
+
+**A `cgroup` target, for any source in this family.** Six entries declare
+`cgroup: bpf_only` and six collectors refuse it by name. No scenario here can
+check a narrowing that does not exist.
 
 **The machine-wide stack scenario.** It is in `examples/` in spirit and not in
 fact: `omn sched.offcpu --system --emit stack -d 200ms` does not finish, so
@@ -366,10 +398,159 @@ scheduler, and what the task was waiting for is the state, not the frames. So
 
 ---
 
+## The sixth wave's scenarios
+
+Four sources, and their ground truths are deliberately three different kinds:
+a difference the workload constructed, a delay the workload injected, and a
+counter the kernel keeps for its own reasons. One source has no ground truth
+available on this machine, and the scenario for it is about saying so.
+
+### What does sharing one file cost? — `examples/sched-lock-shared-file.yml`
+
+Twelve processes append to one file; then the same twelve append to twelve
+files. A write to a regular file holds that file's inode lock — an rwsem, taken
+for writing — for the length of the write, so the first run serialises twelve
+writers on one lock and the second never touches it. Same program, same number
+of processes, same number of writes of the same size. The only difference
+between the two runs is whether the object is shared, which is what makes this
+ground truth rather than observation.
+
+```
+                       write (rwsem)              spin
+  one shared file    2233 waits, 5.82 s     1602 waits, 16.3 ms
+  twelve own files      0 waits                838505 waits, 18.4 s
+```
+
+**The finding is in the second column, and it is the most useful thing this
+wave measured.** The *contended* run has two hundred times fewer lock waits in
+total. Both numbers are right and the reason is arithmetic rather than
+mysterious: serialising twelve writers on one inode makes them slow, slow
+processes make fewer syscalls, and it is the syscalls that reach the
+filesystem's own spinlocks. The private run is two hundred times faster and
+pays for it in two hundred times more brief contention somewhere else.
+
+So a count of lock waits is a throughput measurement wearing a contention
+measurement's name, and the two go opposite ways. A reader ranking two runs by
+how many lock waits each had will order them backwards, and nothing in a count
+says so. What separates the runs is *which* lock was contended and for how
+long — 5.8 seconds of aggregate waiting on one inode's rwsem at a mean of
+2.6 ms a wait, against none at all — and that is why the lock's flags are part
+of the row key rather than a field carrying their last value.
+
+`tests/scenario_sched.rs` asserts both halves: the rwsem separation, and the
+trap. The second is written as an assertion rather than a comment on purpose —
+if the counts ever stop going opposite ways on this machine, this document
+needs the new numbers rather than the test needing a smaller claim.
+
+Two smaller things this scenario established. The workload's processes run
+under a name of their own — a copy of `/bin/sh` called `omnlockprobe` — because
+the source has no per-process target that sees twelve separate processes, so
+the session is machine-wide and narrowed by `comm`. And the two scenarios that
+use that workload hold a lock against each other: run concurrently, each
+measures the other's writers, and it was the attribution assertion that caught
+it rather than a guess that it might happen.
+
+### A lock held for a known time — `examples/sched-futex-known-wait.yml`
+
+The main thread takes a lock **before the second thread exists**, starts it,
+sleeps 500 ms and releases. The second thread's wait is 500 ms minus however
+long it took to be created, and nothing else in the program waits for anything.
+
+```
+one wait, on one thread, of 499.7 ms, in the [268.4 ms, 536.9 ms) bucket
+```
+
+The check is against the injected delay in two ways, because they fail
+differently. The **exact total** is a fact about the clock: `total_ns` is kept
+beside the count precisely because a log2 bucket is a factor of two wide and a
+sum built from its bounds would inherit that. The **bucket containment** —
+`low <= total < 2*low`, asserted on every event carrying a single wait — is a
+fact about the histogram's layout: it is built in the kernel and re-bucketed by
+the emit layer, and off by one there is a factor of two in every number this
+source reports. The second holds whatever the machine was doing, which is why
+it is written against the value rather than against a bucket the workload was
+expected to land in.
+
+**This workload is on its second design, and the first one is the lesson.** It
+had the two threads take and release the lock in turns, three times, with the
+waiter starting 50 ms late: one wait of 200 ms and two of 250 ms. It measured
+beautifully on an idle machine and lost one of the three under the full suite —
+if the waiter is late enough, the holder has already released and there is
+nothing to wait for. The property was real and the *workload did not guarantee
+it*, which is the difference this whole document is about, and it is finding
+11's shape in a scenario of this wave's own making. The version above cannot
+lose a wait: taking the lock before the waiter exists removes the race rather
+than making it unlikely, and the assertion is now that there is exactly one
+long wait in the entire process.
+
+The workload is Python because that is what is on the machine, and the session
+carries the program in full rather than pointing at a file: a session nobody
+can read is a session nobody can check. A machine without `python3` skips with
+that sentence rather than passing quietly.
+
+What this scenario cannot establish is the *absence* of waits. An uncontended
+`pthread_mutex_lock` never reaches the kernel — it is an atomic in the
+program's own memory — so a program with no contention measures as nothing
+here, and nothing is also what a broken collector measures.
+
+### Every interrupt this run timed is one the kernel also counted — `examples/sched-irq-against-procfs.yml`
+
+`/proc/interrupts` is the ground truth, and it is a good one for the reason
+`docs/contributing.md` asks for: the kernel maintains those counters itself, in
+a different place and for a different reason, so they are not this tool
+checking its own arithmetic. What this source adds is the only thing that file
+does not have — how long each handler ran.
+
+```
+ irq  tool  procfs  name
+  70   321     321  nvme0q2
+  69   154     154  nvme0q1
+  71     5       5  nvme0q3
+  84   387     439  iwlwifi:default_queue
+  66   965    1098  nvidia
+```
+
+The check is an **inequality**, and deliberately. The tool attaches after the
+first read of the file and detaches before the second, so what it counted is
+strictly inside what the file counted, always and on any machine. An equality
+would be an assertion about how quiet the machine happened to be at the edges
+of the window, which is the shape findings 11 and 35 are about. The exact lines
+above are the ones that were quiet there; the others differ by what arrived
+while the tool was starting and stopping.
+
+One line is excluded and the reason is not incidental: on a shared interrupt
+line the tracepoint fires once per handler and `/proc/interrupts` counts once
+per interrupt, so a line with two handlers legitimately gives the tool twice
+the file's number. Lines whose action list has a comma are skipped.
+
+The inequality alone would be satisfied by a collector reporting one interrupt
+in a hundred, so the busiest comparable line is also checked to be at least
+half of what the kernel saw. And the handler names have to be the same string
+the file uses, or `--filter name` selects something other than what a reader
+looked up.
+
+### The source that cannot fire here — `examples/sched-numa-balance.yml`
+
+One NUMA node:
+
+```console
+$ ls -d /sys/devices/system/node/node*
+/sys/devices/system/node/node0
+```
+
+so `sched_stick_numa` is never raised, and there is no measurement to check.
+The scenario is therefore about the tool's honesty rather than its arithmetic,
+and it is a test rather than a skip: on a machine with one node the run must
+report no decisions **and** say that the emptiness is the machine's; on a
+machine with more, it must *not* say that. The claim only holds one way, so it
+is asserted one way.
+
+---
+
 ## Defects found
 
-Ten, in the order they cost a reader most, **three of them now fixed**: 2, 3
-and 4, in the fifth wave, by the stream that owns stacks and the two families
+Ten from the earlier waves, in the order they cost a reader most, **three of
+them now fixed**: 2, 3 and 4, in the fifth wave, by the stream that owns stacks and the two families
 that produce them. Each is marked below with what changed and the scenario that
 now asserts it, and the reproduction is left in place because that is what the
 assertion is written against. `docs/fixes/stacks.md` is that stream's log, and
@@ -843,6 +1024,74 @@ None of this is caused by the scenarios in this wave: `cargo test` runs test
 binaries one at a time — the sum of the per-target times is 31.5 s against a
 31.6 s wall clock — so nothing in `tests/scenario_sched.rs` is running while
 `tests/family_sched.rs` is.
+
+---
+
+### 11. Pairing kernel lock waits by thread id put every cpu's idle task in one slot — **found and fixed in this wave**
+
+`sched.lock` keys its in-flight map by thread id, which is right for every
+thread on the machine except the twenty-four that share the number zero. Every
+cpu has an idle task and all of them are pid 0, so a wait opened by one cpu's
+idle task was closed by another's, and the duration that came out was the gap
+between two unrelated instants. Read as the unsigned number a duration is, a
+negative gap is nine billion billion nanoseconds:
+
+```
+summary
+  task:0 n=94  min 32.00ns  mean 3270699.30min  max 153722867.28min
+```
+
+That is 2^63 nanoseconds, bucketed and rendered as calmly as any other value.
+It was the first machine-wide run of the collector and it is the reason the
+histogram is worth reading at all: nothing about the output says which of those
+numbers is real.
+
+Two things were done rather than one. The idle task is excluded from the
+pairing, counted, and reported as a degradation with its number — its
+contention is real, in interrupt context, and no pairing keyed by thread id can
+give a duration for it. And a **guard** was added for a duration that runs
+backwards, in every collector this wave landed: the subtraction is checked for
+sign before it is bucketed, and a negative one is counted under its own reason
+instead. The guard should now be unreachable; it costs one compare, and the
+alternative is a histogram nobody can tell is wrong.
+
+### 12. Every loss was reported as "the map is full", on a map that was empty — **found and fixed in this wave**
+
+The first run of `sched.lock` on an idle machine reported twelve dropped waits
+with the reason *"more threads were waiting for a lock at once than the
+in-flight map holds"*. The map holds sixteen thousand entries and nine were in
+use.
+
+The collector had inferred the reason from the only fact it kept — that
+`bpf_map_update_elem` returned a negative value — and `-E2BIG` is one of
+several things that value can be. What was actually happening was `-EBUSY`: a
+hash map takes a per-bucket lock, a lock tracepoint fires inside the code that
+takes locks, and the kernel refuses a re-entrant update on the same cpu rather
+than deadlocking. On this machine that is the ordinary case, not the
+pathological one.
+
+A loss reported under the wrong reason costs more than a bare number would,
+because it sends the reader to raise a size that was never the problem. The
+programs now branch on the errno the kernel returned and count each reason in
+its own slot — full, already-open, busy — and each has a sentence of its own.
+`sched.futex`, `sched.irq` and `gpu.job` were written with the same split from
+the start.
+
+The shape generalises and is worth stating: **a collector that reduces several
+kernel errors to one loss counter is a collector that will name the wrong one.**
+The information is there at the moment of the failure and nowhere afterwards.
+
+### 13. Two scenarios that start processes under the same name measure each other
+
+Not a defect in the tool, and recorded because it will happen again. `sched.lock`
+has no per-process target that sees twelve separate processes, so its scenarios
+run machine-wide and narrow by `comm` — and two of them running in parallel
+each measure the other's writers. It was caught by the attribution assertion
+(every pid on every event must be one this test started) rather than by a
+number looking wrong, which is the argument for writing that assertion at all.
+The fix is a lock in `tests/scenario_sched.rs`, held for the length of a
+scenario; `tests/scenario_gpu.rs` has the same pattern for the same reason, one
+device instead of one machine.
 
 ---
 

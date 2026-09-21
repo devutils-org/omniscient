@@ -221,3 +221,117 @@ is worth doing.
 The unit enum has no watts, which is part of why `gpu.power` reports energy. Any
 future source reporting an instantaneous draw -- an AMD hwmon reading, an older
 NVIDIA device with no energy counter -- needs one.
+
+
+---
+
+# `gpu.job`, written here and exercised elsewhere
+
+Added in the sixth wave, and it is the exception in it. Everything else this
+project has landed was checked against something on the machine it was written
+on. This was not, and cannot be, and saying so is the point of this section:
+**a fix you cannot exercise is a claim**, and what follows separates the parts
+of it that were checked from the parts that were not.
+
+## Why it cannot be exercised here
+
+Two independent reasons, and either alone would be enough.
+
+The machine runs the NVIDIA proprietary driver, which has no DRM scheduler.
+`drm_run_job` and `drm_sched_process_job` are defined by the `gpu_scheduler`
+module that AMD's `amdgpu` and Intel's `i915` and `xe` drivers use, and below
+the NVIDIA driver there is nothing of the kind to trace. The catalog entry has
+said so as a caveat since it was written.
+
+And they are module tracepoints, so they carry no `btf_trace_` type in
+`vmlinux` BTF: `BPF_RAW_TRACEPOINT_OPEN` cannot find them by name. This is the
+only collector in the build on the classic tracepoint path, which needs a
+numeric id and a field layout out of `/sys/kernel/tracing` — and on this
+machine tracefs is mounted and not readable by the uid the tool runs as. So
+even the field layout the collector reads at startup cannot be looked at here.
+
+The answer the tool gives is unchanged by the collector existing, and that is
+itself checked:
+
+```console
+$ omn gpu.job --system -m trace -e hist -d 1s ; echo $?
+error: `gpu.job` has no viable backend on this machine:
+  bpf:tp: tracepoint:gpu_scheduler:drm_run_job: missing: tracefs is mounted but
+  not readable by uid 1000, ...
+  hint: the request is valid; it is this machine that cannot serve it.
+1
+```
+
+Exit 1, the machine — not exit 3, the build. Before this wave both were true
+and a reader could not tell which; now only one is, and
+`tests/scenario_gpu.rs::the_collector_exists_and_this_machine_is_still_the_thing_that_cannot_serve_it`
+holds the distinction.
+
+## What was checked, and how
+
+Everything that does not need the hardware, which is more than it sounds.
+
+**The record layout, against the text real kernels write.** A classic
+tracepoint's record is a structure the kernel lays out itself, and its fields
+move: the `format` files of `drm_run_job` and `drm_sched_process_job` as Linux
+6.12 writes them are in `src/bpf/sched_drm.rs` verbatim, and the parser is
+checked against them field by field — offsets, widths, and which fields are
+`__data_loc` rather than values.
+
+**The refusal for a kernel this program would read wrong.** Older kernels
+identify a job by its `struct dma_fence *`, and the DRM scheduler only began
+publishing the fence's context and sequence number in Linux 6.11. This build
+refuses the pointer rather than falling back to it, and says why: a fence
+pointer is recycled as soon as the fence is freed, so a completion would be
+attributed to whichever later job landed on the same address. It is the same
+argument the catalog makes for scoping block requests by `(ptr, open_ts)`, and
+the same one `docs/scenarios/io.md` will make when `io.latency` lands.
+
+**That each program reads its own record's offsets.** The two records are laid
+out differently — `fence_context` is at 40 in one and at 8 in the other — so a
+program using the other's offsets would key completions by whatever happens to
+be at 40. There is a test that crosses them.
+
+**The event's shape.** The catalog gives this source a `gpu:fence_ctx+seqno`
+join key, which is why finished jobs are one row each rather than a bucket: an
+aggregate has no sequence number to join on. A GPU retires thousands of command
+buffers a second, not the hundreds of thousands a lock tracepoint sees, so one
+row each is affordable here where for `sched.lock` it would not be.
+
+## What was not checked, and is therefore a claim
+
+- **That the programs load.** The verifier has never seen them. They are
+  `BPF_PROG_TYPE_TRACEPOINT`, which reads its context directly rather than
+  through `bpf_probe_read_kernel`, and that is a different validity rule from
+  every other program in this build.
+- **That the attach works.** `attach::tracepoint` is exercised by nothing else
+  in the build either.
+- **That the numbers mean what they say.** Submission to fence, IRQ included,
+  is what the tracepoints describe; nobody here has compared one against a
+  workload that submitted a known number of command buffers.
+
+A machine with `amdgpu`, `i915` or `xe` and a readable tracefs can run
+`examples/gpu-job-latency.yml` and find out. `tests/scenario_gpu.rs` prints
+what it found about this machine — the tracefs root, whether the
+`gpu_scheduler` events are readable, and what is under `/sys/class/drm` — so
+that the next person to read the output knows which machine they are on.
+
+## Two things the catalog promises that this build bends
+
+**`ring` is not the tracepoint's ring name.** The entry offers `ring` as a
+filter field. The tracepoint's own name field is a `__string`, which arrives as
+a `__data_loc` — a packed offset and length — and reading the string it points
+at needs a variable-offset read of the record that this eBPF layer does not
+have. So the events carry the name of the *kernel thread that ran the job*
+instead, which on every driver with a DRM scheduler is named after the ring it
+serves. `ring` and `comm` are the same string, every run says where it came
+from, and the missing mechanism is written up under "Needs from another stream"
+in `docs/open-findings.md`.
+
+**A `pid` target is refused.** The entry declares `pid: bpf_only`.
+`drm_run_job` fires in the DRM scheduler's own kernel thread, so the process
+that submitted the work is not in the tracepoint's context and there is nothing
+to compare a pid against. Attributing a job to a process needs the submission
+path — `drm_sched_job_arm`, or the driver's own ioctl — which this build does
+not attach to. The refusal says that, and is marked as this build's gap rather
+than as a request that cannot mean anything.
