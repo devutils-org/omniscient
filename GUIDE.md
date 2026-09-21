@@ -19,7 +19,7 @@ omn -f examples/mem-footprints.yml     # one session on its own
 `make` rather than `cargo build`, for two reasons that both fail silently:
 `--workspace` builds the preload shim that `mem.heap.*` loads, and the eBPF and
 per-cpu perf backends need `CAP_BPF` and `CAP_PERFMON`, which **every relink
-drops**. Without them this machine serves 51 sources instead of 62, and nothing
+drops**. Without them this machine serves 51 sources instead of 86, and nothing
 announces it — the tool simply reports fewer things as available, which reads
 like the machine changed rather than the binary.
 
@@ -105,8 +105,8 @@ the wrong answer.
 
 ### The refusal — *is the reason the right reason?*
 
-**Four** different noes, which must never be confused. Measured on this
-machine, because the exit codes are not quite what they should be:
+**Four** different noes, which must never be confused, and which the fifth wave
+gave four codes:
 
 | It says | It means | Where it is decided | Exit |
 |---|---|---|---|
@@ -121,12 +121,14 @@ fixes **3**, so a harness running sessions across a fleet needs to know which it
 got. `docs/fixes/runner.md` has the rule that decides a refusal at attach time.
 
 Which of the two a given session shows **depends on the machine**, which is
-worth knowing before reading the list below. On a machine whose tracefs is
-unreadable — the ordinary case, and this one — every source whose only eBPF
-backend is a classic tracepoint answers **1**, where the same source on a
-machine with readable tracefs answers **3**. `proc-not-built.yml` is entirely in
-that position today. Finding 9 of `docs/open-findings.md` is the catalog change
-that would move all of them back to **3**.
+worth knowing before reading the list below: a source whose only backend this
+machine cannot reach answers **1** where the same source elsewhere answers
+**3**. That used to be true of thirty sources here, because their only eBPF
+backend was a classic tracepoint and tracefs is root-only on a stock machine.
+Finding 36 of `docs/open-findings.md` closed twenty-seven of them by putting a
+raw tracepoint ahead of the classic one, so the sessions below now show **3**.
+The three that are left — `gpu.job`, `io.fs`, `io.readahead` — are named there
+with why.
 
 `cpu-out-of-reach.yml`, `mem-refused-not-built.yml`,
 `mem-refused-unavailable.yml`, `net-not-built.yml`, `proc-not-built.yml`,

@@ -501,7 +501,7 @@ On a merged-`/usr` distribution `/usr/sbin` is a symlink to `/usr/bin` and both
 spellings exist; `sudo` resolves the bare `setcap` through `secure_path` and
 matches whichever it finds first, so both lines are needed.
 
-## 11. Three flaky ground-truth tests, and what each one is really measuring
+## 11. Flaky ground-truth tests, and what each one is really measuring
 
 Found by running `cargo test --workspace` a dozen times on a machine with other
 builds on it, which is the condition none of them were written under. A test
@@ -542,6 +542,52 @@ against an idle machine. Either the bound is a function of how many cpus can
 wake in one interval, or the first tick of a run is excluded -- both are
 decisions for whoever owns the source, and loosening the number without saying
 which is happening would turn a real effect into a magic constant.
+
+**Two more, in `gpu`, added later and from the same cause: the device is
+shared.** `the_process_figure_and_the_device_figure_move_by_the_same_step` and
+`a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power`
+both failed in one workspace run and passed in the next. Measured at the time
+of the failure, another process held 98 MiB of VRAM and the device read 8 %
+busy: the first test allocates 256 MiB and requires the device figure to move by
+the same step, which it cannot while a second allocator is moving it too, and
+the second requires an idle device to read idle. Both are measuring the machine
+rather than the tool -- the same class as finding 35, arriving through a device
+instead of through a probe.
+
+Neither is loosened, because the bound is not the problem: a GPU with another
+tenant on it is a condition the scenario has to *detect* rather than tolerate,
+the way the `power` scenarios skip loudly with the numbers that show why.
+`device_to_ourselves()` now asks `nvidia-smi --query-compute-apps` before either
+of them runs, and both skip naming the client and what it holds:
+
+```console
+skipped: another process is using this GPU, so a device figure is not this
+         workload's: 4797, /home/moha/.local/zed.app/libexec/zed-editor, 98
+```
+
+That is the honest answer on the development machine, where the tenant is the
+author's own editor and the condition is permanent rather than occasional. It
+also means **these two scenarios do not run here**, which is a real loss and the
+reason the skip names numbers: a reader who wants them exercised now knows
+exactly what to close.
+
+**One more, in `io`, and it is two clocks rather than a shared machine.**
+`substituted_counters_are_converted_exactly_and_their_gaps_are_named` binds a
+file it wrote over `/proc/diskstats` inside a namespace, then writes a known
+increase into it on a schedule the test keeps. Its clock starts at `spawn`; the
+run's starts once `unshare` has built a user and a mount namespace, bound the
+file and exec'd `omn`. The lead-in between them was 250 ms, which is ample alone
+and not ample under nine hundred concurrent tests -- and when it is not, the
+increase the scenario chose becomes the baseline it is measured against, every
+interval reads zero, and the failure blames the one piece of arithmetic the test
+exists to check.
+
+It went from occasional to reproducible when finding 36's catalog pass gave the
+rest of the suite more work: twenty-four sources that used to stop at "no viable
+backend" now resolve and run further. The lead-in is 700 ms now and the window
+1500 ms, and where the race still wins the scenario says so and skips, because a
+series with no movement at all cannot be a wrong conversion -- a wrong
+conversion produces a wrong number, never an absent one.
 
 ## Needs from another stream
 
@@ -3203,5 +3249,87 @@ tool that failed; every one is a test of the machine that succeeded for a while.
 rather than a calibrated threshold* — and the six extend it: **where a tool has
 several honest answers, a test must either assert all of them or state which
 machine it is asserting.**
+
+---
+
+## 36. Finding 9, landed: twenty-seven chains, and what it moved
+
+The catalog pass finding 9 asked for, done in one commit over `catalog/*.yaml`
+and two probes in `src/capabilities.rs`. Recorded here rather than left as a
+diff, because the numbers are the argument.
+
+**Twenty-seven entries gained a `bpf:raw_tp` ahead of their `bpf:tp`**, with the
+classic one behind declaring `equivalent: true` where it had no degradation of
+its own, and keeping the degradation where it had one — `io.syscall` and
+`mem.faults` both degrade for a reason that belongs to the tracepoint rather
+than to the attach path, so the raw entry carries the same note and neither is
+equivalent to anything.
+
+Every tracepoint name was checked against this kernel's BTF before it was
+written down, one by one, not by trusting the audit in finding 9:
+
+```console
+$ strings -n 6 /sys/kernel/btf/vmlinux | sed -n 's/^btf_trace_//p' | sort -u
+```
+
+All thirty explicit names are published. **Three entries were left alone**, and
+each for its own reason:
+
+| Entry | Why |
+|---|---|
+| `gpu.job` | `drm_run_job` and `drm_sched_process_job` are module tracepoints, absent from `vmlinux` BTF. The classic path is the only one, and this is the entry finding 9 already called out. |
+| `io.fs` | Its requirement is the glob `tracepoint:ext4:*`, and a glob is not a name. Converting it would mean choosing which ext4 tracepoint the collector attaches to, which belongs to whoever writes it. |
+| `io.readahead` | The same, for `tracepoint:filemap:*`. |
+
+The two probes are the other half, from finding 15. `tracepoint:` under a
+*readable* tracefs now calls `attach::classic_tracepoint_support`, which reads
+the `id` file the attach reads rather than listing the event's directory; and
+`kprobe` and `uprobe` are answered by `attach::probe_type_support`, which reads
+the PMU type the kernel hands out at boot. Both existed, tested, and were called
+by nothing.
+
+### What it moved
+
+```
+before   100 sources: 62 usable here, 16 unverified, 22 out of reach
+after    100 sources: 86 usable here, 10 unverified,  4 out of reach
+                      67 of 202 backends have a collector
+```
+
+The `22 out of reach` was almost entirely this one gap: every source whose only
+eBPF backend was a classic tracepoint, on a machine that cannot read tracefs —
+which is the ordinary machine, not this one in particular. The six that became
+`unverified` no longer are, because `uprobe` is now asked rather than assumed.
+
+**The answers changed shape as well as count**, which is the part worth having.
+`mem.reclaim`, `proc.exec` and the other twenty-five now answer *"no collector
+is written for this yet"* — exit 3, this build's gap — where they answered *"no
+viable backend on this machine"* — exit 1, and a reader sent to their kernel
+configuration for an afternoon. Finding 35 records five tests that had encoded
+the wrong one of those two as a property of the tool; all five were written to
+accept either answer with the sentence that belongs to it, so all five passed
+unchanged across this change, in both directions. That is what those rewrites
+were for.
+
+Three tests did fail, and each is the same lesson once more — a test naming the
+shape of a chain rather than the property it is about:
+
+- `catalog::a_fallback_that_neither_degrades_nor_declares_equivalence_is_refused`
+  cleared `degraded` on `io.latency`'s second backend and expected a refusal.
+  That backend used to be `fs:tracefs`; it is now a `bpf:tp` that declares
+  itself equivalent, so clearing one of the two fields left the entry valid. It
+  clears both now, which is what its name always claimed it did.
+- Two `io` scenarios spelled `bpf:tp` into the message they expect — one for the
+  backend that carries a `comm` filter, one for the backend nothing collects.
+  Both now accept either id, because which of the two the resolver reaches for
+  is a fact about the chain's order and not about the refusal.
+
+### What is still waiting on mechanism, and is now the whole list
+
+With this landed, **no source is blocked by an attach kind this build lacks
+except through `fentry` and `usdt`**. `io.syscall`, `io.fs`, `io.fsync`,
+`net.tcp.connect` and `net.socket` name `bpf:fentry` first; `runtime.gc`,
+`runtime.alloc` and `runtime.custom` name `bpf:usdt`. Everything else on the
+list of forty-one is a collector to write against a path that attaches today.
 
 ---

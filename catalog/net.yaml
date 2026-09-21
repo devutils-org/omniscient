@@ -22,10 +22,15 @@
   summary: "Connection duration and volume"
   unit: ns
   backends:
+    - id: "bpf:raw_tp"
+      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state", "kernel>=5.8"]
+      join: {key: "sock:cookie", match: eq, ttl: 300s}
+      cost: low
     - id: "bpf:tp"
       requires: ["tracepoint:sock:inet_sock_set_state", "bpf"]
       join: {key: "sock:cookie", match: eq, ttl: 300s}
       cost: low
+      equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
   targets: {pid: bpf_only, cgroup: bpf_only, container: bpf_only, system: native}
@@ -65,7 +70,8 @@
   summary: "TCP retransmissions"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
@@ -78,7 +84,8 @@
   summary: "Dropped packets with drop reason"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native}
@@ -180,7 +187,8 @@
   summary: "Transmit scheduling latency"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_dequeue", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [hist, raw, summary, timeline]
   targets: {system: native, iface: bpf_only}
@@ -193,7 +201,8 @@
   summary: "Time spent in network softirq processing"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry", "raw_tracepoint:softirq_exit", "kernel>=5.8"], cost: med}
+    - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
   targets: {system: native, cpu: native}

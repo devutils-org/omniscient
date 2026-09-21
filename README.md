@@ -99,8 +99,8 @@ mem.heap.retained  poll, snapshot        low    high    yes   all        Fragmen
 mem.bandwidth      count, poll           free   low     ?     none       DRAM throughput
 mem.reclaim        trace, count          low    medium  no    none       Direct reclaim
 
-23 sources: 18 usable here, 1 unverified, 4 out of reach on this machine.
-16 of them have a collector, covering 23 of their 40 backends.
+23 sources: 22 usable here, 1 unverified, 0 out of reach on this machine.
+16 of them have a collector, covering 23 of their 45 backends.
 ```
 
 Three different questions, kept apart. **HERE** is what this machine offers,

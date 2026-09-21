@@ -350,13 +350,27 @@ impl Capabilities {
                      looked for: this needs root or CAP_SYS_ADMIN, not a different kernel",
                     current_uid()
                 )),
+                // Not `probe_path` on the event's directory, which is the
+                // easier question and the wrong one. The attach reads the
+                // event's `id` file, and on a stock machine the directory is
+                // listable by anyone while that file is root-only -- so a
+                // directory probe reports the backend available, the resolver
+                // selects it, the run launches its target, and only then does
+                // the attach discover it cannot read the number.
                 Access::Readable => {
-                    let Some(root) = tracefs_root() else {
-                        return Probe::Missing("tracefs is not mounted".into());
-                    };
-                    probe_path(&root.join("events").join(event.replace(':', "/")))
+                    Probe::from(crate::bpf::attach::classic_tracepoint_support(event))
                 }
             };
+        }
+
+        // `kprobe` and `uprobe` are PMUs whose type numbers the kernel hands
+        // out at boot, in the order the PMUs register. There is no constant
+        // that could be right, and an event opened on the wrong type does not
+        // fail -- it counts something else. Until this was asked, both read
+        // `unverified`, which the resolver treats as a reason to prefer a
+        // backend it could check.
+        if let Some(support) = crate::bpf::attach::probe_type_support(requirement) {
+            return Probe::from(support);
         }
 
         if let Some(event) = requirement.strip_prefix("pmu:") {
@@ -460,12 +474,11 @@ fn probe_path(path: &Path) -> Probe {
 
 const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
 
-fn tracefs_root() -> Option<PathBuf> {
-    TRACEFS_ROOTS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| access(&path.join("events")).is_readable())
-}
+// This file used to have a `tracefs_root` of its own, to build the path a
+// `tracepoint:` probe would look at. `src/bpf/attach.rs` has the same function
+// because it is where the attach happens, and two readers of one thing is the
+// shape findings 23 and 26 are about. Now that the probe asks the attach layer
+// its own question, only the attach layer's copy is left.
 
 /// Readable wins over restricted, restricted over absent: the best of the
 /// candidate mount points is what the machine offers.

@@ -5,7 +5,8 @@
   summary: "Per-syscall latency and count"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: high}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
@@ -21,7 +22,8 @@
   summary: "Process execution events"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: free}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec", "kernel>=5.8"], cost: free}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: free, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only, container: bpf_only}
@@ -34,7 +36,8 @@
   summary: "Process exit events with exit code"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: free}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit", "kernel>=5.8"], cost: free}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: free, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only, container: bpf_only}
@@ -94,7 +97,8 @@
   summary: "Signals delivered"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:signal:signal_generate", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:signal_generate", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:signal:signal_generate", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [raw, topk, rate, summary]
   targets: {pid: bpf_only, system: native, cgroup: bpf_only}

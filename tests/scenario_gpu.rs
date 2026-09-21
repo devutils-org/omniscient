@@ -163,6 +163,56 @@ fn device_and_workload() -> Result<(), String> {
     workload()
 }
 
+/// Whether this test has the board to itself, asked of the driver.
+///
+/// Two scenarios here compare a device figure against a workload they put on it
+/// themselves, and neither means anything while a second process is using the
+/// board: an allocation step is not the device's step if someone else is
+/// allocating too, and an idle device does not read idle if someone else is
+/// resident. Both failed exactly that way on the development machine, where the
+/// author's editor holds 98 MiB of VRAM and keeps the device a few per cent
+/// busy -- a permanent condition, not a Tuesday.
+///
+/// So it is detected rather than tolerated, and the numbers that show why go
+/// into the skip. Loosening the bounds instead would turn a real second tenant
+/// into slack, and the next reader would have no way to tell the difference
+/// between a device that is idle and one that is merely quiet.
+///
+/// Probed once: a client that appears mid-suite is a different scenario, and
+/// the `exclusive()` lock is what keeps this suite's own workloads apart.
+fn device_to_ourselves() -> Result<(), String> {
+    static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            let output = Command::new("nvidia-smi")
+                .args([
+                    "--query-compute-apps=pid,process_name,used_memory",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+                .map_err(|error| format!("nvidia-smi does not run here: {error}"))?;
+            if !output.status.success() {
+                return Err("nvidia-smi cannot list the device's clients".to_owned());
+            }
+            let tenants: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| line.to_owned())
+                .collect();
+            if tenants.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "another process is using this GPU, so a device figure is not this \
+                     workload's: {}",
+                    tenants.join("; ")
+                ))
+            }
+        })
+        .clone()
+}
+
 /// Runs one of this family's sessions and returns its results as JSON.
 ///
 /// `--format json` on the command line overrides the `format: text` in the
@@ -747,6 +797,9 @@ fn the_process_figure_and_the_device_figure_move_by_the_same_step() {
     if let Err(reason) = device_and_workload() {
         return eprintln!("skipped: {reason}");
     }
+    if let Err(reason) = device_to_ourselves() {
+        return eprintln!("skipped: {reason}");
+    }
     let _alone = exclusive();
 
     let run = session("gpu-vram-step.yml");
@@ -884,6 +937,9 @@ fn a_program_that_never_touches_the_device_holds_zero_rather_than_nothing() {
 #[test]
 fn a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power() {
     if let Err(reason) = device_and_workload() {
+        return eprintln!("skipped: {reason}");
+    }
+    if let Err(reason) = device_to_ourselves() {
         return eprintln!("skipped: {reason}");
     }
     let _alone = exclusive();

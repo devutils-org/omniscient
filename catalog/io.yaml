@@ -8,10 +8,18 @@
   summary: "Block request latency, submit -> completion"
   unit: ns
   backends:
+    # The two events this family is built on, attached by name against the
+    # kernel's own BTF. The classic path below reads the same two out of
+    # tracefs, which is mounted and unreadable on a stock machine.
+    - id: "bpf:raw_tp"
+      requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "raw_tracepoint:block_rq_complete", "kernel>=5.8"]
+      join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
+      cost: low
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_issue", "tracepoint:block:block_rq_complete", "bpf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: low
+      equivalent: true
     - {id: "fs:tracefs", requires: ["tracefs"], cost: med, targets: {system: native},
        degraded: "no per-task attribution, no pushed-down filter"}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
@@ -35,10 +43,15 @@
   summary: "Software queueing time, insert -> issue"
   unit: ns
   backends:
+    - id: "bpf:raw_tp"
+      requires: ["bpf", "btf", "raw_tracepoint:block_rq_insert", "raw_tracepoint:block_rq_issue", "kernel>=5.8"]
+      join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
+      cost: low
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_insert", "tracepoint:block:block_rq_issue", "bpf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: low
+      equivalent: true
   modes: [trace]
   emits: [hist, raw, topk, summary]
   targets: {system: native, cgroup: bpf_only}
@@ -51,7 +64,8 @@
   summary: "I/O volume"
   unit: bytes
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
     # `io.stat` attributes to a cgroup and nothing else, `diskstats` to the
     # machine and nothing else. Neither may stand in for the other: answering a
     # --cgroup request from diskstats reports the whole machine's I/O under one
@@ -96,7 +110,8 @@
   summary: "I/O operation rate"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
        targets: {system: native}, filter_fields: [dev],
        degraded: "system-wide, per device"}
@@ -123,7 +138,8 @@
   summary: "Request size distribution"
   unit: bytes
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, cgroup: bpf_only, pid: bpf_only}
@@ -136,7 +152,8 @@
   summary: "Request merges performed by the block layer"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_merge", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_merge", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_merge", "bpf"], cost: low, equivalent: true}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
        targets: {system: native}, filter_fields: [dev],
        degraded: "counters only, no per-request detail"}
@@ -178,6 +195,8 @@
   unit: ns
   backends:
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med,
+       degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,
        degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
   modes: [trace, count]
@@ -207,7 +226,8 @@
   summary: "Page cache hits and misses"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: med}
+    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, summary, raw]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
@@ -237,7 +257,8 @@
   summary: "Deferred writeback"
   unit: ns
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:writeback:writeback_start", "tracepoint:writeback:writeback_written", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:writeback_start", "raw_tracepoint:writeback_written", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:writeback:writeback_start", "tracepoint:writeback:writeback_written", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary, timeline]
   targets: {system: native, cgroup: bpf_only}

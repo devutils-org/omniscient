@@ -685,7 +685,13 @@ mod tests {
             .get(&"io.latency".parse().unwrap())
             .unwrap()
             .clone();
+        // Both fields, not only `degraded`: the rule is that a fallback declares
+        // one or the other, so a test that clears one of them is testing the
+        // chain's current shape rather than the rule. This one did, and stopped
+        // failing the day `io.latency` gained a `bpf:raw_tp` ahead of a
+        // `bpf:tp` that declares itself equivalent.
         entry.backends[1].degraded = None;
+        entry.backends[1].equivalent = false;
         let error = Catalog::from_entries(vec![entry]).unwrap_err();
         assert!(
             error.message().contains("neither states what it degrades"),

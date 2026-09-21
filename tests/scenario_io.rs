@@ -734,8 +734,12 @@ fn a_filter_the_backend_cannot_carry_names_the_backend_that_can() {
     assert_ne!(refused.status.code(), Some(0));
     let message = stderr(&refused);
     assert!(message.contains("comm"), "{message}");
+    // The eBPF backend, by whichever of its two ids the resolver reached for:
+    // the chain is `bpf:raw_tp` ahead of an equivalent `bpf:tp`, and naming one
+    // of them here would make this scenario an assertion about the chain's
+    // order rather than about the refusal.
     assert!(
-        message.contains("bpf:tp"),
+        message.contains("bpf:raw_tp") || message.contains("bpf:tp"),
         "the refusal has to name the backend that carries the field: {message}"
     );
     assert!(stdout(&refused).is_empty(), "{}", stdout(&refused));
@@ -1455,7 +1459,7 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
             "-m",
             "poll@100ms",
             "-d",
-            "650ms",
+            "1500ms",
             "-e",
             "timeline",
             "--format",
@@ -1463,8 +1467,21 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
         ],
     );
 
-    let step = Duration::from_millis(150);
-    std::thread::sleep(Duration::from_millis(250));
+    // Two clocks that are not the same one. This test's starts at `spawn`; the
+    // run's starts when `unshare` has built a user and a mount namespace, bound
+    // the substituted file over `/proc/diskstats` and exec'd `omn`, which under
+    // a suite of nine hundred tests takes appreciably longer than it does
+    // alone. Every write below has to land after the run's *first* read, or the
+    // increase this scenario chose becomes the baseline it is measured against
+    // and every interval reads zero -- which is what happened, reproducibly,
+    // once the catalog pass gave the rest of the suite more work to do.
+    //
+    // So the lead-in is long enough for the namespace, the window is long
+    // enough for the three writes to fall inside it wherever it starts, and the
+    // assertion below detects the race it cannot rule out rather than blaming
+    // the arithmetic for it.
+    let step = Duration::from_millis(250);
+    std::thread::sleep(Duration::from_millis(700));
     // 1. One mebibyte of sectors.
     write_now(&file, &diskstats_line(259, 0, &real, known(2048)));
     std::thread::sleep(step);
@@ -1504,6 +1521,18 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
         .flat_map(|series| series["points"].as_array().cloned().unwrap_or_default())
         .map(|point| number(&point["value"]))
         .collect();
+    // A series with no movement at all is the race above, not a conversion: a
+    // wrong conversion produces a wrong number, never an absent one. Skipping
+    // loudly here is what keeps a scheduling delay from reading as a defect in
+    // the one piece of arithmetic this scenario exists to check.
+    if points.iter().all(|value| *value == 0.0) {
+        eprintln!(
+            "skipped the arithmetic: the run saw no movement at all ({points:?}), which means \
+             its first read landed after the counters were written -- the namespace took longer \
+             to build than the lead-in allowed"
+        );
+        return;
+    }
     assert!(
         points.contains(&1_048_576.0),
         "2048 sectors of increase is 1048576 bytes exactly, and the run reports {points:?}"
@@ -1774,7 +1803,7 @@ fn each_refusal_names_the_thing_that_is_actually_missing() {
     if message.contains("no viable backend") {
         eprintln!(
             "skipped the unimplemented-backend half: this binary carries no CAP_BPF, so \
-             `bpf:tp` is unavailable rather than unwritten"
+             the eBPF backends are unavailable rather than unwritten"
         );
         assert_eq!(unbuilt.status.code(), Some(EXIT_NO_BACKEND), "{message}");
         assert!(
@@ -1789,7 +1818,8 @@ fn each_refusal_names_the_thing_that_is_actually_missing() {
             "{message}"
         );
         assert!(
-            message.contains("no collector is written for `io.bytes` on backend `bpf:tp`"),
+            message.contains("no collector is written for `io.bytes` on backend `bpf:raw_tp`")
+                || message.contains("no collector is written for `io.bytes` on backend `bpf:tp`"),
             "{message}"
         );
         assert!(

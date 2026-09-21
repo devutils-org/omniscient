@@ -29,7 +29,16 @@ for the same reason: one directory each, merges that cannot conflict.
 
 ---
 
-## Phase zero — the catalog change, and it comes first
+## Phase zero — the catalog change — **landed**
+
+Done by the coordinator before dispatch, in one commit. Twenty-seven entries
+carry a `bpf:raw_tp` ahead of their `bpf:tp`, every tracepoint name checked
+against this kernel's BTF one by one, and the two probes finding 15 asked for
+are wired. `86 usable here` instead of `62`, and every source below now resolves
+onto a backend this machine serves and answers *"no collector is written for it
+yet"*. Finding 36 of `docs/open-findings.md` records what moved and what was
+left. **The rest of this section is kept as the reasoning, because a stream that
+hits a `bpf:tp` entry needs it.**
 
 **The twenty above do not need the classic tracepoint path, and on this machine
 they cannot use it.** An earlier draft of this brief said the opposite, on the
@@ -72,18 +81,23 @@ cpu (1)   oncpu_time
 gpu (1)   job — leave it: module tracepoints, absent from vmlinux BTF
 ```
 
-Three reasons it is phase zero rather than each stream's first commit. It is the
-one file every stream would otherwise edit, which is the conflict this project
-has learned to design away. Each entry's `requires:` has to be checked against
-what the raw path actually needs, which is one person doing thirty of the same
-check rather than five people doing six each. And until it lands, every source
-below reads `out of reach on this machine`, so no stream can tell a collector it
-has not written from a backend it cannot reach — `STATE.md` records that this
-already cost the `62`-versus-`81` confusion once.
+Three reasons it was phase zero rather than each stream's first commit. It is
+the one file every stream would otherwise edit, which is the conflict this
+project has learned to design away. Each entry's `requires:` had to be checked
+against what the raw path actually needs, which is one person doing thirty of
+the same check rather than five people doing six each. And until it landed,
+every source below read `out of reach on this machine`, so no stream could tell
+a collector it has not written from a backend it cannot reach.
 
-**The coordinator lands this alone, before the streams start.** It is data, it
-is checkable by `omn list` before and after, and it is what makes the rest
-possible.
+**Three entries were left**, and a stream that owns one should not "fix" it:
+
+- `gpu.job` — `drm_run_job` and `drm_sched_process_job` are module tracepoints
+  and absent from `vmlinux` BTF. The classic path is the only one it has, and
+  stream E writes against it knowing it cannot be exercised here.
+- `io.fs` and `io.readahead` — their requirement is a glob, `tracepoint:ext4:*`
+  and `tracepoint:filemap:*`, and a glob is not a name. Converting one means
+  choosing which tracepoint the collector attaches to, which is stream A's call
+  when it writes the collector, not a catalog pass's.
 
 ---
 

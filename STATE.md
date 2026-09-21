@@ -38,33 +38,36 @@ expensive parts are done.
 ## What the numbers say
 
 ```
-100 sources: 62 usable here, 16 unverified, 22 out of reach on this machine.
-59 of them have a collector, covering 67 of their 175 backends.
+100 sources: 86 usable here, 10 unverified, 4 out of reach on this machine.
+59 of them have a collector, covering 67 of their 202 backends.
 ```
 
 Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 62 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this machine serve? | 86 | probed now: the file is readable, the event opens, the tracepoint is there |
 | What can this build collect? | 59 sources, 67 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `62` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
+That `86` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
 `make` reapplies the capabilities that every relink drops. Without them the
 whole eBPF and per-cpu perf surface goes, and nothing announces the loss — the
 tool reports fewer sources, which reads like the machine changed rather than
 the binary.
 
-**That number used to read `81`, and the drop is the tool becoming honest
-rather than the machine changing.** Finding 15 of `docs/open-findings.md`
-recorded that a `tracepoint:` requirement was probed by listing the event's
-*directory* under tracefs, which uid 1000 may traverse, while the `id` file the
-attach actually reads is root-only. Thirty sources therefore reported
-`available` and would have failed at attach. The probe now answers from the
-access tracefs really grants, and those thirty moved to `out of reach`. They are
-also thirty entries that would not need tracefs at all: see "the cheapest lever"
-below.
+**That number has been three different things in a week, and the sequence is
+the point.** It read `81` while a `tracepoint:` requirement was probed by
+listing the event's *directory* under tracefs, which uid 1000 may traverse,
+where the `id` file the attach actually reads is root-only: thirty sources
+reported `available` and would have failed at attach. Finding 15 is that. When
+the probe started answering from the access tracefs really grants it fell to
+`62`, which was the first honest number and a worse tool. Finding 9's catalog
+pass then put a `bpf:raw_tp` ahead of twenty-seven of those thirty — a raw
+tracepoint attaches by name against the kernel's own BTF and needs no tracefs —
+and finding 36 records what that moved. `86` is what this machine can serve
+through a path that attaches, checked name by name against `/sys/kernel/btf/
+vmlinux`.
 
 It cuts the other way too, which cost a session to find: a binary that carries
 capabilities is non-dumpable, so its own `/proc` entries belong to root and the
@@ -75,15 +78,19 @@ Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
-| `mem` | 16 | 23 | 18 |
+| `mem` | 16 | 23 | 22 |
 | `cpu` | 13 | 14 | 12 |
-| `net` | 7 | 15 | 5 |
+| `net` | 7 | 15 | 12 |
 | `gpu` | 5 | 9 | 6 |
-| `io` | 5 | 14 | 6 |
-| `power` | 5 | 5 | 3 |
+| `io` | 5 | 14 | 13 |
+| `power` | 5 | 5 | 4 |
 | `sched` | 5 | 10 | 9 |
-| `proc` | 2 | 6 | 2 |
-| `runtime` | 1 | 4 | 1 |
+| `proc` | 2 | 6 | 6 |
+| `runtime` | 1 | 4 | 2 |
+
+The gap between the two rightmost columns is now the project's whole remaining
+breadth, and it is collectors rather than mechanism: `io` can serve thirteen
+sources and collects five, `proc` can serve six and collects two.
 
 ---
 
@@ -162,41 +169,30 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 
 ## What remains, in the order it is worth doing
 
-Forty-one sources have no collector, and **29 of them are blocked by nothing
-this build lacks**. The fifth wave closed 52 of the sixty-three defects the
-scenario wave found; the eleven that are left are named in `docs/fixes/`.
+Forty-one sources have no collector, and **all but eight of them are blocked by
+nothing at all**: the catalog pass below has landed, so what is left for them is
+a collector written against an attach path that works today. The fifth wave
+closed 52 of the sixty-three defects the scenario wave found; the eleven that
+are left are named in `docs/fixes/`.
 
-### 1. The cheapest lever: twenty-nine catalog entries — no code at all
+### 1. ~~The cheapest lever: the catalog entries~~ — **done**
 
-Thirty sources declare a `bpf:tp` backend with **no `bpf:raw_tp` ahead of it**,
-and a classic tracepoint is attached by reading a numeric id out of tracefs,
-which uid 1000 cannot read here or on a stock machine. Twenty-nine of the thirty
-name tracepoints this kernel publishes as `btf_trace_<name>` in its own BTF —
-which is to say, as raw tracepoints, which attach with a name and need no
-tracefs. The audit is finding 9 of `docs/open-findings.md` and takes one command
-to re-run per kernel.
+Twenty-seven entries gained a `bpf:raw_tp` ahead of their `bpf:tp`, and the two
+probes finding 15 asked for are wired. `86 usable here` instead of `62`, `4 out
+of reach` instead of `22`, and twenty-seven sources that answered *"this machine
+cannot serve it"* now answer *"no collector is written for it yet"*. Finding 36
+of `docs/open-findings.md` records what was checked and what was left.
 
-```
-io (11)   latency queue bytes iops size merges syscall fs pagecache readahead writeback
-mem (5)   faults page_alloc kmalloc reclaim compaction
-net (5)   tcp.lifetime tcp.retransmit drops qdisc softirq
-proc (4)  syscall exec exit signals
-power (3) freq cstate throttle
-cpu (1)   oncpu_time
-gpu (1)   job — the exception: module tracepoints, absent from vmlinux BTF
-```
+Three entries were deliberately not converted: `gpu.job`, whose tracepoints are
+in a module and absent from `vmlinux` BTF, and `io.fs` and `io.readahead`, whose
+requirement is a glob rather than a name — converting those means choosing which
+tracepoint the collector attaches to, which belongs to whoever writes it.
 
-`DECISIONS.md` settled the rule and the whole `sched` family is written to it:
-`{id: bpf:raw_tp, requires: [bpf, btf, raw_tracepoint:<name>, kernel>=6.1]}`
-ahead of the `bpf:tp` entry, with `equivalent: true` on the one behind. It is
-**data, not code**, it is what moves the `62` above back up, and it is what
-every collector in item 2 would otherwise have to discover one at a time.
-
-### 2. The collectors that mechanism no longer blocks — 24 sources
+### 2. The collectors that nothing blocks — 24 sources
 
 `src/bpf/attach.rs` has raw tracepoints, classic tracepoints, kprobes and
-uprobes, and the raw path is enough for every one of these. Twenty name a
-tracepoint, four name a raw one already. `BRIEF_NEXT.md` divides them by family.
+uprobes, the raw path reaches every one of these, and since item 1 the catalog
+says so. `BRIEF_NEXT.md` divides them by family.
 
 **`io.latency` and `io.queue` are the two that matter most**: they are the only
 sources that would produce `blk:rq@open_ts`, and `scoped_eq` is the one join
