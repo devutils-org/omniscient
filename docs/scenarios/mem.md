@@ -304,14 +304,21 @@ exposes the counter at all` — and does not mention a collector. On a machine
 with the descriptor this session runs and measures, and the test says so and
 skips rather than passing quietly.
 
-**Exit 3.** `examples/mem-refused-not-built.yml`. `mem.reclaim` resolves, it
-validates, every axis of it is checked, and nothing collects it: it wants
-`bpf:tp`, the classic tracepoint attach, and `src/bpf/` has only
-`BPF_RAW_TRACEPOINT_OPEN`. The refusal names the source and the backend, lists
-what *does* have a collector, and points at `--dump-request`. The test also runs
-`omn validate` on the same file and requires it to pass, because the difference
-between "your machine cannot do this" and "we have not written it" is the
-difference between an afternoon in a kernel config and a line in this file.
+**Exit 3.** `examples/mem-refused-not-built.yml`. `mem.latency` resolves, it
+validates, every axis of it is checked, and nothing collects it: it wants PEBS
+or IBS, one of which every x86 cpu has, and neither is written. The refusal
+names the source and the backend, lists what *does* have a collector, and points
+at `--dump-request`. The test also runs `omn validate` on the same file and
+requires it to pass, because the difference between "your machine cannot do
+this" and "we have not written it" is the difference between an afternoon in a
+kernel config and a line in this file.
+
+The session used to ask for `mem.reclaim`, which was the better illustration
+until the `tracepoint:` probe became honest. It declares only `bpf:tp`, whose
+numeric event id lives in a root-only file, so this machine genuinely cannot
+serve it and the honest answer became exit 1. Finding 35 of
+`docs/open-findings.md` has the class; finding 9 has the catalog change that
+would put `mem.reclaim` back on exit 3.
 
 `forcing_a_backend_with_no_collector_exits_three_and_names_it` walks that
 systematically: every backend declared in a `mem` chain that has no collector —

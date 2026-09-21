@@ -99,8 +99,8 @@ mem.heap.retained  poll, snapshot        low    high    yes   all        Fragmen
 mem.bandwidth      count, poll           free   low     ?     none       DRAM throughput
 mem.reclaim        trace, count          low    medium  no    none       Direct reclaim
 
-23 sources: 17 usable here, 1 unverified, 5 out of reach on this machine.
-7 of them have a collector, covering 10 of their 38 backends.
+23 sources: 18 usable here, 1 unverified, 4 out of reach on this machine.
+16 of them have a collector, covering 23 of their 40 backends.
 ```
 
 Three different questions, kept apart. **HERE** is what this machine offers,
@@ -194,10 +194,13 @@ them into perceived bugs.
 
 `STATE.md` has the measured numbers, where each roadmap phase stands, and what
 remains in the order it is worth doing. In short: the skeleton is finished and
-42 of 100 sources collect for real, across procfs, sysfs, `perf_event_open`
-counting and sampling, netlink, an `LD_PRELOAD` shim and eBPF raw tracepoints.
-499 tests pass, several of which found real defects in the code they were
-written against.
+59 of 100 sources collect for real, over eight mechanisms: procfs and sysfs,
+`perf_event_open` counting and sampling, netlink, an `LD_PRELOAD` shim, NVML
+through `dlopen`, `af_packet` with a `PACKET_MMAP` ring, and eBPF through raw
+tracepoints, classic tracepoints, kprobes and uprobes. 1037 tests pass, of which
+175 are scenarios: a workload whose property the scenario chose, a session that
+measures it, and a check against that property. They found 63 defects, none
+worked around, and `docs/scenarios/` records every one.
 
 ## Documentation
 

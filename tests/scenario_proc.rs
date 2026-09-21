@@ -600,8 +600,9 @@ fn a_request_that_cannot_mean_anything_is_refused_with_the_reason_it_cannot() {
 ///
 /// Each request is rejected for a different reason, and the three must not be
 /// confused with each other or with the other two ways this tool says no --
-/// `proc-not-built.yml` is "this build does not implement it" and exits 3, and
-/// "this machine cannot serve it" should exit 1 and does not (defect 4).
+/// `proc-not-built.yml` is "this build does not implement it" where the machine
+/// can reach the backend, and "this machine cannot serve it" where it cannot;
+/// the scenario below takes either, and neither may be confused with these.
 const REFUSALS: &str = "\
 name: three ways a request cannot mean anything
 format: text
@@ -634,42 +635,66 @@ requests:
     emit: [hist]
 ";
 
-/// `examples/proc-not-built.yml`: valid, resolvable, and not written yet.
+/// `examples/proc-not-built.yml`: valid, resolvable, and refused for one of the
+/// two reasons that are not the request's fault.
 ///
-/// This is the third answer, and it must not be confused with the other two. A
-/// caller that cannot tell "you asked for something impossible" from "this is
+/// A caller that cannot tell "you asked for something impossible" from "this is
 /// not written yet" cannot decide whether to fix the request or wait for a
-/// release. The session validates cleanly, resolves onto a backend, and exits
-/// 3 naming that backend.
+/// release, and one that cannot tell either from "this machine cannot serve it"
+/// raises privileges against a collector nobody has written. The session
+/// validates cleanly and resolves, and whichever of the two refusals it gets
+/// must be the one whose sentence it prints.
+///
+/// **Which one depends on the machine, and this family cannot choose.** All
+/// four unwritten `proc` sources declare `bpf:tp` and nothing else, and a
+/// classic tracepoint is attached by reading a numeric event id out of a
+/// root-only file under tracefs. Where that file is readable the answer is 3;
+/// where it is not, as here, the machine genuinely cannot serve the request and
+/// 1 is the honest answer. Asserting either one alone would be asserting the
+/// machine. Finding 9 of `docs/open-findings.md` is what would settle it in one
+/// direction: all four tracepoints are published in this kernel's own BTF, so a
+/// `bpf:raw_tp` backend ahead of the classic one puts this family back on 3
+/// everywhere.
 #[test]
 fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
     let validated = omn(&["validate", "-f", &example("proc-not-built.yml")]);
     assert!(
         validated.status.success(),
-        "the session is valid; it is the build that is missing: {}",
+        "the session is valid; it is the build or the machine that is missing: {}",
         stderr(&validated)
     );
 
     let output = omn(&["-f", &example("proc-not-built.yml")]);
-    assert_eq!(
-        output.status.code(),
-        Some(3),
-        "not implemented is not the same answer as invalid: {}",
-        stderr(&output)
-    );
     let message = stderr(&output);
+    match output.status.code() {
+        Some(3) => {
+            assert!(
+                message.contains("no collector is written"),
+                "exit 3 is this build's gap and must say so: {message}"
+            );
+            // The way out is named too: the request is fine and can be written
+            // down for a build that has it.
+            assert!(
+                message.contains("--dump-request"),
+                "a reader has to be told what they can still do with a valid request: {message}"
+            );
+        }
+        Some(1) => assert!(
+            message.contains("has no viable backend on this machine"),
+            "exit 1 is this machine's gap and must say so: {message}"
+        ),
+        other => panic!(
+            "a valid request for an unwritten source is the build's gap or the machine's, \
+             never a request that cannot mean anything; got {other:?}:\n{message}"
+        ),
+    }
     assert!(
-        message.contains("no collector is written") && message.contains("bpf:tp"),
-        "the refusal must name the backend that is missing: {message}"
+        message.contains("bpf:tp"),
+        "the refusal must name the backend either way: {message}"
     );
     assert!(
         message.contains("proc.exec"),
         "and the source it was asked for: {message}"
-    );
-    // The way out is named too: the request is fine and can be written down.
-    assert!(
-        message.contains("--dump-request"),
-        "a reader has to be told what they can still do with a valid request: {message}"
     );
 }
 

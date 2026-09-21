@@ -92,12 +92,25 @@ cannot decide whether to fix the request or wait for a release.
 | It says | It means | Exit | Reachable here |
 |---|---|---|---|
 | a rejection | the request cannot mean anything | 2 | the session below |
-| no collector | this build does not implement it | 3 | `proc-not-built.yml` |
-| no viable backend | this machine cannot serve it | 1 | **no** — see defect 4 |
+| no collector | this build does not implement it | 3 | **no longer** — see below |
+| no viable backend | this machine cannot serve it | 1 | `proc-not-built.yml` |
 
-`proc-not-built.yml` validates cleanly, resolves onto `bpf:tp`, then exits 3
-naming the backend, the source and `--dump-request` as the thing a reader can
-still do with a valid request.
+The last two rows swapped, and the swap is the tool becoming more truthful. All
+four unwritten `proc` sources declare `bpf:tp` and nothing else, and a classic
+tracepoint is attached by reading a numeric event id out of a root-only file
+under tracefs. While the probe answered that requirement by listing the event's
+*directory*, which uid 1000 may traverse, the resolver selected the backend and
+the collect stage said "nothing collects this" — exit 3, and it would have
+failed at attach. The probe now answers from the access tracefs really grants,
+so `proc-not-built.yml` validates cleanly, resolves onto nothing, and exits 1
+naming every backend it passed over.
+
+**This family can therefore no longer demonstrate exit 3 on this machine**, and
+the scenario says so rather than pretending: it takes either refusal and
+requires the sentence that belongs to it. Finding 9 of `docs/open-findings.md`
+is what would settle it — all four tracepoints are published in this kernel's
+own BTF, so a `bpf:raw_tp` backend ahead of the classic one puts this family
+back on exit 3 everywhere.
 
 The rejections could not be shipped as an example, and the reason is worth
 recording for the other seven streams: `tests/cli.rs` walks `examples/` and

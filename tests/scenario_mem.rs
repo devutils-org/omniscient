@@ -1766,16 +1766,22 @@ fn a_machine_that_cannot_serve_a_backend_says_so_in_its_own_terms() {
 /// A source this build does not collect exits 3, and says what is missing.
 ///
 /// Exit 1 would send a reader to their kernel configuration for an afternoon
-/// over a mechanism nobody has written. `mem.reclaim` is valid, this machine
-/// has the tracepoints and the capability for it, and `src/bpf/` attaches only
-/// one way.
+/// over a mechanism nobody has written. The source has to be one this machine
+/// can genuinely serve, or the honest answer is exit 1 and this scenario is
+/// asserting the machine rather than the build. `mem.latency` is that source on
+/// any x86: it declares PEBS and IBS, one of which every such cpu has, and
+/// neither has a collector.
+///
+/// It used to be `mem.reclaim`, which stopped qualifying when the `tracepoint:`
+/// probe became honest -- it declares only the classic attach, whose event id
+/// lives in a root-only file. The session file records why.
 #[test]
 fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
     let output = run_example("mem-refused-not-built.yml");
     assert_eq!(code(&output), EXIT_NO_COLLECTOR, "{}", stderr(&output));
     let message = stderr(&output);
     assert!(
-        message.contains("mem.reclaim") && message.contains("bpf:tp"),
+        message.contains("mem.latency") && message.contains("pmu:"),
         "the refusal has to name the source and the backend that is missing: {message}"
     );
     assert!(
@@ -1805,13 +1811,17 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
 #[test]
 fn the_three_refusals_are_told_apart() {
     let rejected = run(&["mem.bandwidth", "--pid", "1", "-m", "count", "-e", "rate"]);
+    // `mem.sharing` rather than one of the tracefs-bound sources: the three
+    // refusals can only be told apart where the machine is not itself a fourth
+    // answer, and its PEBS-or-IBS chain is served by every x86 cpu and written
+    // for none.
     let not_built = run(&[
-        "mem.compaction",
+        "mem.sharing",
         "--system",
         "-m",
-        "trace",
+        "sample",
         "-e",
-        "hist",
+        "topk",
         "-d",
         "1s",
     ]);

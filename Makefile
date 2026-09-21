@@ -2,7 +2,7 @@
 #
 # The eBPF and perf backends need CAP_BPF and CAP_PERFMON, and file
 # capabilities do not survive a relink: every `cargo build` drops them. On this
-# machine that is the difference between 80 usable sources and 53, and nothing
+# machine that is the difference between 62 usable sources and 51, and nothing
 # announces it -- the tool simply reports fewer things as available, which looks
 # like the machine changed rather than the binary. So the build grants them.
 #

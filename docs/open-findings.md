@@ -3076,3 +3076,132 @@ which needs `modes:` to be declarable per backend the way `keys:` and
 `filter_fields:` already are. Until then `gpu.engine_busy --mode count` on NVML
 answers with a window that is now correct and a number that gpu 3 says should
 not exist.
+
+---
+
+## 34. A polling cadence anchored on boot, so a test passed or failed on uptime
+
+Found by the coordinator while re-measuring the project's own numbers, after
+`make check` came back red on a tree whose last six merges were all green.
+
+`collect::mem::cadence::Cadence` separates two rates: the pipe behind the
+preload shim has to be drained every ten milliseconds or it overflows, and the
+series the request asked for is published on its own, coarser grid. `due()`
+decides which ticks publish, and the grid was anchored at zero:
+
+```rust
+Self { interval_ns: interval.as_nanos() as u64, due_ns: 0 }
+```
+
+Zero in a `CLOCK_MONOTONIC` domain is boot. So the first slot of a `poll@1s`
+grid was one second after the machine started, not one second after the run
+started, and the slot the run actually landed on depended on how long the
+machine had been up. `due()` also treats "within a tenth of an interval" as due,
+which is right for a run whose tick is coarser than its grid and is what turned
+a skew into a failure:
+
+```
+interval 3600 s, slack 360 s, uptime 3483 s
+  first call:  due_ns := 3600 s        (the next slot since boot)
+  second call: 3483 + 360 = 3843 s  >  3600 s  -> due again, immediately
+```
+
+Two unit tests of `mem.heap.live` assert that a second sample an hour apart
+publishes nothing, and they **pass on a machine that has been up for more than
+an hour and fail on one that has not**. That is the shape `STATE.md` warns about
+in the other direction: a test asserting what the machine was doing. Here the
+test was right and the code was wrong, and the machine decided which of them was
+visible.
+
+The grid now anchors on the first sample, which is the only moment that belongs
+to the run:
+
+```rust
+let Some(due_ns) = self.due_ns else {
+    self.due_ns = Some(now_ns.saturating_add(self.interval_ns));
+    return true;
+};
+```
+
+`the_grid_is_anchored_on_the_first_sample_rather_than_on_boot` asserts it with
+the uptime that produced the failure, so it is deterministic on any machine.
+The three existing cadence tests pass unchanged, because they all call `due(0)`
+first and zero is now an anchor rather than a coincidence.
+
+**The user-visible half is worth stating separately**, because the tests are not
+the reason to care: a `poll@1s` run started at an uptime of 999.95 s published
+its second point 50 ms after its first. Only `mem.heap.live` and
+`mem.heap.retained` use `Cadence`, so that is the blast radius today — and it is
+the layer every polling collector would use if the runner's per-request pacing
+grows.
+
+---
+
+## 35. Six tests asserted what this machine can serve, not what the build has
+
+The same red suite, two files further on. Both are `mem` scenarios about the
+three refusals, and both chose a source that stopped qualifying when finding 15
+was half fixed.
+
+`a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing` ran
+`examples/mem-refused-not-built.yml`, which asked for `mem.reclaim` and expected
+exit 3, *"this build has not written it"*. `the_three_refusals_are_told_apart`
+used `mem.compaction` the same way. Both entries declare `bpf:tp` and nothing
+else, and a classic tracepoint is attached by reading a numeric event id out of
+tracefs — which uid 1000 cannot read. So the honest answer became exit 1,
+*"this machine cannot serve it"*, and the scenarios failed against a tool that
+had just become more truthful.
+
+The premise was written into the session file in so many words: *"This machine
+has the tracepoints, has `CAP_BPF`, and has the kernel for it."* It has the
+tracepoints; it cannot read the file that names them.
+
+A scenario about the *build's* gap has to pick a source whose backend this
+machine genuinely serves, or the machine is a fourth answer standing in for the
+third. Both now use the PEBS-or-IBS chain — `mem.latency` and `mem.sharing` —
+which every x86 cpu serves through one of its two backends and which no build
+has written. The session file records why it stopped being `mem.reclaim`, and
+the day finding 9's catalog pass lands, `mem.reclaim` goes back to exit 3 on its
+own without either scenario needing to change.
+
+`tests/budget.rs::the_help_and_the_run_agree_that_a_budget_is_enforced` is the
+same shape and is fixed the same way. It asserted that `io.latency --budget
+0.1%` names what it would degrade onto — true where the chain's best backend
+costs more than the ceiling, and not true here, where `io.latency` falls through
+to `/proc/diskstats`, which is free and needs no plan. It now accepts either
+honest answer and still refuses the retracted one.
+
+### The same shape, three more times, and what it says about the class
+
+`net` and `proc` each have a scenario that runs a session of unwritten sources
+and requires exit 3. In `net` five of the eight are `bpf:tp`-only, so the
+session was rebuilt out of the two `fentry` sources, whose requirement is BTF
+and which therefore answer 3 anywhere BTF exists; the sweep over all eight now
+requires each to give the answer that matches whose gap it is, and never the
+third. In `proc` **all four** unwritten sources are `bpf:tp`-only, so this
+machine cannot produce exit 3 for that family at all, and the scenario says so
+in place of pretending: it takes either refusal, requires the matching sentence,
+and names the catalog change that would settle it.
+
+`scenario_power` failed differently and is the most interesting of the six. Its
+sweep classifies every answer by exit code, and its constant for exit 1 was
+still documented as *"usage, or a failure while running"*, with a note that
+`BRIEF.md` asks for "cannot mean anything" and "this machine cannot serve it" to
+be told apart and *"today they are not"*. They were told apart — stream A of the
+fifth wave did exactly that, and "no viable backend" moved from 2 to 1. The
+scenario never noticed, because every `power` source resolved on this machine
+until the tracefs probe became honest and `power.throttle` stopped. So the test
+was carrying a retracted claim in a doc comment and a matching assertion, and
+only a change elsewhere made it visible.
+
+**What the class has in common** is not "flaky tests". Each of the six encodes,
+as an assertion, something that was true of this machine on the day it was
+written: that tracefs could be probed loosely, that a chain would reach its
+expensive backend, that exit 1 had one sentence. None of them is a test of the
+tool that failed; every one is a test of the machine that succeeded for a while.
+`STATE.md` already records the rule that catches this — *assert the separation
+rather than a calibrated threshold* — and the six extend it: **where a tool has
+several honest answers, a test must either assert all of them or state which
+machine it is asserting.**
+
+---

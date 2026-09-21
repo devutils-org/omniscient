@@ -3,12 +3,30 @@
 #   omn -f examples/net-not-built.yml            # exit 3
 #   omn -f examples/net-not-built.yml --dump-request
 #
-# Eight of the fifteen `net` sources have no collector and seven of those eight
-# wait on the same thing: an eBPF layer that can attach to a tracepoint by its
-# numeric id, or `fentry` with BTF. The catalog describes them anyway, and that
-# is the point -- the request resolves, validates and dumps, and the refusal
-# says which backend is missing rather than pretending the source does not
-# exist.
+# Eight of the fifteen `net` sources have no collector. The catalog describes
+# them anyway, and that is the point -- the request resolves, validates and
+# dumps, and the refusal says which backend is missing rather than pretending
+# the source does not exist.
+#
+# The first request is the one that carries this file's answer, because a
+# session stops at the first request it cannot serve. It asks for a source whose
+# backend this machine genuinely has: `net.tcp.connect` needs `bpf:fentry`,
+# which needs BTF, which is here. So the gap is the build's and the code is 3.
+#
+# All three requests are chosen for that reason, and the choice is the lesson.
+# This file used to ask for `net.drops`, `net.qdisc` and `net.softirq`, which
+# are the more interesting sources and the wrong ones here: they need `bpf:tp`,
+# the classic tracepoint attach, whose numeric event id lives in a root-only
+# file under tracefs. On this machine they are not a collector nobody wrote,
+# they are a machine that cannot serve them, and the tool correctly answers 1.
+# A session mixing the two answers demonstrates neither, because resolution
+# happens before any collector is looked for, so the machine's gap is reported
+# first whatever the order of the requests.
+#
+# Finding 9 of `docs/open-findings.md` is why that is a catalog gap rather than
+# a fact of the kernel: every tracepoint those three name is published in this
+# kernel's own BTF, and a `bpf:raw_tp` backend ahead of the classic one would
+# bring them back here.
 #
 # Exit 3 is a different answer from exit 1. Exit 1 is a problem with this run,
 # and retrying or raising privileges may help. Exit 3 is a problem with this
@@ -19,36 +37,33 @@
 # window and one of its requests cannot be served in it. That is worth knowing
 # when reading the output: the validator reports every rejection at once, and
 # this stage reports one missing collector at a time. The other two requests are
-# here so that `--dump-request` shows all three, and so that this file stops
-# being an example the day they land.
-name: three sources this build does not collect
+# here so that `--dump-request` shows both, and so that this file stops being
+# an example the day they land.
+name: two sources this build does not collect
 duration: 500ms
 format: text
 
 requests:
-  # tracepoint:skb:kfree_skb, with the drop reason the recent kernels carry.
-  - label: drops
-    source: net.drops
+  # fentry on tcp_v4_connect: BTF-typed attach, which this kernel publishes and
+  # this build does not write. The build's gap, so exit 3.
+  - label: connect
+    source: net.tcp.connect
     target: system
-    mode: count
-    emit: [rate]
+    mode: trace
+    emit: [raw]
     keys: [sock]
 
-  # tracepoint:qdisc:qdisc_dequeue -- the loss `net.iface` cannot see, because
-  # a frame dropped inside a queueing discipline never reaches the device
-  # counters.
-  - label: transmit-queue
-    source: net.qdisc
+  # fentry on sock_sendmsg: the write-side latency a socket sees, before any of
+  # it reaches a queueing discipline.
+  - label: socket-write
+    source: net.socket
     target: system
     mode: trace
     emit: [hist]
     keys: [sock]
 
-  # Where a received packet is actually processed: softirq context, outside any
-  # process. This is why `sock:cookie` and not the pid is this family's key.
-  - label: softirq
-    source: net.softirq
-    target: system
-    mode: count
-    emit: [rate]
-    keys: [cpu]
+# `net.xdp` is the third source that answers 3 here, and it is not in this file:
+# it is targeted by interface, and one run observes one target. `omn net.xdp
+# --iface lo --mode count --emit rate` shows it, with a different reason again
+# -- an XDP program is loaded onto a device, and this build loads none.
+

@@ -651,8 +651,15 @@ elapsed` after three times the requested duration reads oddly, and a scenario
 author budgeting test time will be surprised once.
 
 **The validator answers for every rejection at once; the collect stage answers
-for one missing collector at a time.** `examples/net-not-built.yml` holds three
+for one missing collector at a time.** `examples/net-not-built.yml` holds two
 unbuilt sources and reports the first. Fixing one shows you the next.
+
+It held three, and two of them had to go: they needed `bpf:tp`, whose numeric
+event id lives in a root-only file, so on this machine they are not an unwritten
+collector but a machine that cannot serve them, and the tool answers 1 rather
+than 3. A session mixing the two answers demonstrates neither, because
+resolution happens before any collector is looked for. Finding 35 of
+`docs/open-findings.md` has the class.
 
 **A timeline's closing read shares the previous offset.** The final read that
 closes a counter's window lands at the same rendered offset as the tick before

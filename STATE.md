@@ -25,9 +25,10 @@ two ways — a `perf_event_open` callchain for `cpu.profile` and
 blocked — and a run measures and reports what it cost, against a ceiling it can
 be held to.
 
-**993 tests pass**, of which 159 are scenarios: a workload whose property the
+**1037 tests pass**, of which 175 are scenarios: a workload whose property the
 scenario chose, a session that measures it, and a check against that property.
-They found 63 defects, none worked around, recorded in `docs/scenarios/`.
+They found 63 defects, none worked around, recorded in `docs/scenarios/`; the
+fifth wave closed 52 of them, and `docs/fixes/` records what became of each.
 
 What is missing is breadth, not skeleton. Adding a source is additive; the
 expensive parts are done.
@@ -37,7 +38,7 @@ expensive parts are done.
 ## What the numbers say
 
 ```
-100 sources: 81 usable here, 15 unverified, 4 out of reach on this machine.
+100 sources: 62 usable here, 16 unverified, 22 out of reach on this machine.
 59 of them have a collector, covering 67 of their 175 backends.
 ```
 
@@ -45,15 +46,25 @@ Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 81 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this machine serve? | 62 | probed now: the file is readable, the event opens, the tracepoint is there |
 | What can this build collect? | 59 sources, 67 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `81` is with `CAP_BPF`, `CAP_PERFMON` and readable tracefs. The same
-binary without them reports `53`: the difference is the whole eBPF and per-cpu
-perf surface, and it is why `make` reapplies the capabilities that every relink
-drops. Nothing announces the loss — the tool reports fewer sources, which reads
-like the machine changed rather than the binary.
+That `62` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
+`make` reapplies the capabilities that every relink drops. Without them the
+whole eBPF and per-cpu perf surface goes, and nothing announces the loss — the
+tool reports fewer sources, which reads like the machine changed rather than
+the binary.
+
+**That number used to read `81`, and the drop is the tool becoming honest
+rather than the machine changing.** Finding 15 of `docs/open-findings.md`
+recorded that a `tracepoint:` requirement was probed by listing the event's
+*directory* under tracefs, which uid 1000 may traverse, while the `id` file the
+attach actually reads is root-only. Thirty sources therefore reported
+`available` and would have failed at attach. The probe now answers from the
+access tracefs really grants, and those thirty moved to `out of reach`. They are
+also thirty entries that would not need tracefs at all: see "the cheapest lever"
+below.
 
 It cuts the other way too, which cost a session to find: a binary that carries
 capabilities is non-dumpable, so its own `/proc` entries belong to root and the
@@ -64,14 +75,14 @@ Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
-| `mem` | 16 | 23 | 22 |
+| `mem` | 16 | 23 | 18 |
 | `cpu` | 13 | 14 | 12 |
-| `net` | 7 | 15 | 10 |
+| `net` | 7 | 15 | 5 |
 | `gpu` | 5 | 9 | 6 |
-| `io` | 5 | 14 | 11 |
-| `power` | 5 | 5 | 4 |
+| `io` | 5 | 14 | 6 |
+| `power` | 5 | 5 | 3 |
 | `sched` | 5 | 10 | 9 |
-| `proc` | 2 | 6 | 6 |
+| `proc` | 2 | 6 | 2 |
 | `runtime` | 1 | 4 | 1 |
 
 ---
@@ -141,49 +152,68 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
 | 4 — the vertical case | **partly**. Two real correlations exist and are checked, one per match kind that has a producer. The HTTP-request decomposition it describes needs the eBPF backends of `io` and `net`. |
 | 5 — generalizing the join engine | **done for the engine**. All four match kinds — `interval`, `eq`, `scoped_eq`, `wakeup` — are implemented and each reports in its own words. What is missing is producers: `scoped_eq` needs `blk:rq@open_ts`, which needs the `io` eBPF backends. |
-| 6 — emit, aggregation, budget | **done**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. |
+| 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. What is left is the fourth task: **hot attach and detach**, which is also what `DECISIONS.md` defers concurrent requests on, and what phase 10's escalation assumes. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
-| 9 — breadth | in progress; 59 of 100. The 41 without a collector are named below, and 20 of them wait on one thing. |
+| 9 — breadth | in progress; 59 of 100 sources, 67 of 175 backends. The 41 without a collector are named below, and 29 of them are reachable by a mechanism this build already has. |
 | 10 — intelligence layer | not started. |
 
 ---
 
 ## What remains, in the order it is worth doing
 
-Forty-one sources have no collector, and **20 of them wait on one piece of
-work**. But the larger item is now new: sixty-three defects the scenario wave
-found, which are not breadth at all.
+Forty-one sources have no collector, and **29 of them are blocked by nothing
+this build lacks**. The fifth wave closed 52 of the sixty-three defects the
+scenario wave found; the eleven that are left are named in `docs/fixes/`.
 
-### 1. The sixty-three defects — `docs/scenarios/`
+### 1. The cheapest lever: twenty-nine catalog entries — no code at all
 
-The output of the fourth wave, one document per family, none worked around.
-They are not a backlog of small things: several are the tool telling a reader
-something that is not true, which is the one failure this project is built
-against. Two that recur across families:
+Thirty sources declare a `bpf:tp` backend with **no `bpf:raw_tp` ahead of it**,
+and a classic tracepoint is attached by reading a numeric id out of tracefs,
+which uid 1000 cannot read here or on a stock machine. Twenty-nine of the thirty
+name tracepoints this kernel publishes as `btf_trace_<name>` in its own BTF —
+which is to say, as raw tracepoints, which attach with a name and need no
+tracefs. The audit is finding 9 of `docs/open-findings.md` and takes one command
+to re-run per kernel.
 
-- **A refusal's exit code does not match its message.** "No viable backend"
-  returns 2, the same as a request that cannot mean anything; "cannot start
-  collecting" returns 1, where a mode the collector does not implement is 3.
-  The messages are right in every case. A caller scripting around the three
-  answers cannot tell them apart.
-- **A poll that cannot keep its cadence.** Several families report late ticks
-  as a note rather than counting them, so a run that ran at half the requested
-  rate can still say `no loss`.
+```
+io (11)   latency queue bytes iops size merges syscall fs pagecache readahead writeback
+mem (5)   faults page_alloc kmalloc reclaim compaction
+net (5)   tcp.lifetime tcp.retransmit drops qdisc softirq
+proc (4)  syscall exec exit signals
+power (3) freq cstate throttle
+cpu (1)   oncpu_time
+gpu (1)   job — the exception: module tracepoints, absent from vmlinux BTF
+```
 
-`GUIDE.md` names which sessions show which, and the per-family documents carry
-the session and the output for each.
+`DECISIONS.md` settled the rule and the whole `sched` family is written to it:
+`{id: bpf:raw_tp, requires: [bpf, btf, raw_tracepoint:<name>, kernel>=6.1]}`
+ahead of the `bpf:tp` entry, with `equivalent: true` on the one behind. It is
+**data, not code**, it is what moves the `62` above back up, and it is what
+every collector in item 2 would otherwise have to discover one at a time.
 
-### 2. eBPF beyond what attaches today — 20 sources
+### 2. The collectors that mechanism no longer blocks — 24 sources
 
-`src/bpf/attach.rs` now has raw tracepoints, classic tracepoints, kprobes and
-uprobes. What is missing is **fentry** (BTF-typed attach, `BPF_PROG_TYPE_TRACING`
-with an `attach_btf_id`) and **USDT** (reading the target's ELF notes, then a
-uprobe). Between them they are the first backend of eight sources and the
-fallback for more; `io`, `net` and `runtime` are where they land.
+`src/bpf/attach.rs` has raw tracepoints, classic tracepoints, kprobes and
+uprobes, and the raw path is enough for every one of these. Twenty name a
+tracepoint, four name a raw one already. `BRIEF_NEXT.md` divides them by family.
 
-A cheaper half of the same lever: 4 of the 41 name `bpf:raw_tp` first, which
-this build already attaches. Those are collectors to write, not mechanism.
+**`io.latency` and `io.queue` are the two that matter most**: they are the only
+sources that would produce `blk:rq@open_ts`, and `scoped_eq` is the one join
+match kind the engine implements that **nothing produces**. Landing them turns a
+quarter of the join engine from theory into something checked, and it is what
+phase 4's I/O path waits on.
+
+What is still genuinely missing as mechanism is **fentry** (BTF-typed attach,
+`BPF_PROG_TYPE_TRACING` with an `attach_btf_id`) for `io.syscall`, `io.fs`,
+`io.fsync`, `net.tcp.connect` and `net.socket`, and **USDT** (the target's ELF
+notes, then a uprobe) for the three `runtime` sources.
+
+### 2b. The eleven defects the fifth wave left
+
+`docs/fixes/` names each with why it was left: two need a line in a file the
+stream did not own, three are decisions rather than tasks, and one — `topk`
+ranking a series rather than an attribute — needs surface syntax nobody owns.
 
 ### 3. The sources nothing mechanical blocks — 6 sources
 
@@ -193,7 +223,7 @@ PMUs; `cpu.flow` wants Intel PT. Each is independent of the others.
 
 ### 4. Phase two of the scenarios — the crossings
 
-Written up in `BRIEF.md` and not dispatched: four questions a single family
+Written up in `BRIEF_NEXT.md` and not dispatched: four questions a single family
 cannot answer. `heap.alloc → mem.faults → mem.rss` for memory end to end;
 `cpu.profile` beside `sched.offcpu` for where the time went; the I/O path once
 `blk:rq@open_ts` has a producer; and the machine's own state as a confounder.

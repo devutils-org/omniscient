@@ -404,9 +404,16 @@ fn the_help_and_the_run_agree_that_a_budget_is_enforced() {
         "0.1%",
         "--dump-request",
     ]));
+    // Which of the two answers comes back depends on what this machine can
+    // serve, and asserting only one of them is asserting the machine. Where the
+    // chain's best backend costs more than the ceiling, the note names what it
+    // would degrade onto. Where tracefs is unreadable and `io.latency` falls
+    // through to `/proc/diskstats`, the selected backend is already free and
+    // there is nothing to plan. Both are the flag being enforced.
     assert!(
-        note.contains("will degrade onto"),
-        "before the run, a budget says what exceeding it would do: {note}"
+        note.contains("will degrade onto") || note.contains("which is within it"),
+        "before the run, a budget says either what exceeding it would do or that \
+         the backend selected is already under it: {note}"
     );
     assert!(
         !note.contains("not yet enforced"),

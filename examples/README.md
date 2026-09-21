@@ -53,7 +53,7 @@ about what writes the file.
 | `mem-fragmentation.yml` | What did the allocator keep? |
 | `mem-machine-counters.yml` | The three machine-wide readers, and the one that reads the mode as well. |
 | `mem-poll-too-fast.yml` | A cadence the collector cannot keep. |
-| `mem-refused-not-built.yml` | A request that is valid, and that this build cannot collect. |
+| `mem-refused-not-built.yml` | A request that is valid, that this machine can serve, and that this build cannot collect. |
 | `mem-refused-unavailable.yml` | A request this machine cannot serve, on a machine that cannot serve it. |
 | `mem-retained-eviction.yml` | More freed ranges than the table can hold. |
 | `mem-rss-run.yml` | A runnable session: watch one program's resident memory while it runs. |

@@ -1,20 +1,13 @@
 # Brief, next — the twenty-four the mechanism already reaches
 
-**Not for dispatch yet.** The fix wave is running against `BRIEF.md` and touches
-`src/collect/**`; every family stream below would conflict with its streams E
-and F. This is the wave after that one, written now so the shape is settled
-before it is needed.
+**Ready for dispatch.** The fix wave against `BRIEF.md` has landed and been
+merged, so `src/collect/**` is free.
 
 ---
 
 ## The finding this brief exists for
 
-`src/bpf/attach.rs` has classic tracepoints, kprobes and uprobes, built by wave
-three and **used by nothing**. Every eBPF program in the tool still attaches
-through `BPF_RAW_TRACEPOINT_OPEN`, which was the only path when they were
-written.
-
-So the largest block of remaining breadth is not blocked on mechanism. It is
+The largest block of remaining breadth is not blocked on mechanism. It is
 twenty-four collectors waiting to be written against an attach layer that
 already exists and is already probed:
 
@@ -33,6 +26,64 @@ collector that will be written here and exercised elsewhere.
 
 This is family work, so it divides by family, the way the first wave did and
 for the same reason: one directory each, merges that cannot conflict.
+
+---
+
+## Phase zero — the catalog change, and it comes first
+
+**The twenty above do not need the classic tracepoint path, and on this machine
+they cannot use it.** An earlier draft of this brief said the opposite, on the
+grounds that `src/bpf/attach.rs` had grown classic tracepoints, kprobes and
+uprobes in wave three and nothing used them. That was the wrong lesson from the
+right observation.
+
+A classic tracepoint is attached by reading a numeric event id out of
+`/sys/kernel/tracing`, which is mounted and unreadable at uid 1000 here and on a
+stock machine. A raw tracepoint attaches with a name out of the kernel's own
+BTF and needs no tracefs at all. Finding 9 of `docs/open-findings.md` re-ran the
+audit against this kernel: **thirty-nine of the forty-one tracepoints the
+catalog names under `bpf:tp` publish a `btf_trace_` type**, and the two that do
+not are the `gpu` pair. `DECISIONS.md` settled the ordering rule long ago —
+"`bpf:raw_tp` has strictly fewer requirements than `bpf:tp` and is ordered ahead
+of it" — and the whole `sched` family is written to it. Thirty entries are not.
+
+So before any collector is written, one pass over `catalog/*.yaml` adds a
+`bpf:raw_tp` backend ahead of the `bpf:tp` one, with `equivalent: true` on the
+classic entry behind it:
+
+```yaml
+- id: bpf:raw_tp
+  requires: [bpf, btf, "raw_tracepoint:<name>", "kernel>=6.1"]
+  cost: <as the classic entry declares>
+- id: bpf:tp
+  equivalent: true
+  ...
+```
+
+The thirty, by family:
+
+```
+io (11)   latency queue bytes iops size merges syscall fs pagecache readahead writeback
+mem (5)   faults page_alloc kmalloc reclaim compaction
+net (5)   tcp.lifetime tcp.retransmit drops qdisc softirq
+proc (4)  syscall exec exit signals
+power (3) freq cstate throttle
+cpu (1)   oncpu_time
+gpu (1)   job — leave it: module tracepoints, absent from vmlinux BTF
+```
+
+Three reasons it is phase zero rather than each stream's first commit. It is the
+one file every stream would otherwise edit, which is the conflict this project
+has learned to design away. Each entry's `requires:` has to be checked against
+what the raw path actually needs, which is one person doing thirty of the same
+check rather than five people doing six each. And until it lands, every source
+below reads `out of reach on this machine`, so no stream can tell a collector it
+has not written from a backend it cannot reach — `STATE.md` records that this
+already cost the `62`-versus-`81` confusion once.
+
+**The coordinator lands this alone, before the streams start.** It is data, it
+is checkable by `omn list` before and after, and it is what makes the rest
+possible.
 
 ---
 
@@ -71,11 +122,13 @@ into the catalog already; the collector has to honour it.
   example: `(key, bucket) -> count` with an unrolled log2 search, and
   `emit::WEIGHT_ATTR` on each row so a bucket standing for four hundred
   measurements counts as four hundred.
-- **Attach through `attach::tracepoint`**, not `raw_tracepoint_open`. Raw
-  tracepoints need BTF and a name; classic ones need a numeric id out of tracefs
-  and `PERF_EVENT_IOC_SET_BPF`. Tracefs is root-only on a stock machine, which
-  is why the raw path is ordered first where both work — and these twenty name
-  events the raw path cannot reach.
+- **Attach through `attach::raw_tracepoint`, which phase zero puts within
+  reach.** Raw tracepoints need BTF and a name; classic ones need a numeric id
+  out of tracefs and `PERF_EVENT_IOC_SET_BPF`, and tracefs is root-only on a
+  stock machine. `attach::tracepoint` exists and is tested, and it is the
+  fallback the entry declares behind the raw one — not the path to write
+  against. `gpu.job` is the exception, and the only collector here that has no
+  raw path at all.
 - **Check the tracepoint's prototype before building instructions.**
   `offcpu.rs` refuses a kernel whose `sched_switch` has a different signature,
   because a program written for one shape reads a `task_struct *` out of a slot

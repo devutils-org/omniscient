@@ -1,5 +1,12 @@
 # Brief — the sixty-three, divided by what is wrong rather than by where
 
+**Landed.** All six streams merged; `docs/fixes/` is the record. Fifty-two of
+the sixty-three are closed with the scenario that found each now asserting the
+new behaviour, and the eleven that are left are named there with why. This file
+is kept as written, because the division it argues for is the thing worth
+reusing: the next wave is `BRIEF_NEXT.md`, and it divides by family again for a
+reason this one explains.
+
 Six work streams. This is the fifth fan-out, and it is the first divided by
 **defect class** instead of by family or by layer, because that is the shape the
 work now has.

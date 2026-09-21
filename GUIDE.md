@@ -19,7 +19,7 @@ omn -f examples/mem-footprints.yml     # one session on its own
 `make` rather than `cargo build`, for two reasons that both fail silently:
 `--workspace` builds the preload shim that `mem.heap.*` loads, and the eBPF and
 per-cpu perf backends need `CAP_BPF` and `CAP_PERFMON`, which **every relink
-drops**. Without them this machine serves 53 sources instead of 80, and nothing
+drops**. Without them this machine serves 51 sources instead of 62, and nothing
 announces it — the tool simply reports fewer things as available, which reads
 like the machine changed rather than the binary.
 
@@ -111,9 +111,22 @@ machine, because the exit codes are not quite what they should be:
 | It says | It means | Where it is decided | Exit |
 |---|---|---|---|
 | `cannot be measured per …`, `mode X cannot produce Y` | the request cannot mean anything | the validator, before resolution | **2** |
-| `has no viable backend on this machine` | the request is fine and this machine cannot serve it | the resolver | **2** |
+| `has no viable backend on this machine` | the request is fine and this machine cannot serve it | the resolver | **1** |
 | `no collector is written for … yet` | the request is fine, this machine can serve it, and this build has not written it | the resolver | **3** |
-| `cannot start collecting` | a collector was chosen and refused once attached | the collector | **1** |
+| `cannot start collecting` | a collector was chosen and refused once attached | the collector | **1**, or **3** where the reason is a shape the collector has not written |
+
+The middle two are the pair worth keeping apart, and the fifth wave is what
+separated them: raising a privilege or changing machine fixes **1** and nothing
+fixes **3**, so a harness running sessions across a fleet needs to know which it
+got. `docs/fixes/runner.md` has the rule that decides a refusal at attach time.
+
+Which of the two a given session shows **depends on the machine**, which is
+worth knowing before reading the list below. On a machine whose tracefs is
+unreadable — the ordinary case, and this one — every source whose only eBPF
+backend is a classic tracepoint answers **1**, where the same source on a
+machine with readable tracefs answers **3**. `proc-not-built.yml` is entirely in
+that position today. Finding 9 of `docs/open-findings.md` is the catalog change
+that would move all of them back to **3**.
 
 `cpu-out-of-reach.yml`, `mem-refused-not-built.yml`,
 `mem-refused-unavailable.yml`, `net-not-built.yml`, `proc-not-built.yml`,
@@ -200,7 +213,7 @@ Each is `omn -f examples/<file>`. The whole family is
 | `mem-fragmentation.yml` | What did the allocator keep? |
 | `mem-machine-counters.yml` | The three machine-wide readers, and the one that reads the mode as well. |
 | `mem-poll-too-fast.yml` | A cadence the collector cannot keep. |
-| `mem-refused-not-built.yml` | A request that is valid, and that this build cannot collect. |
+| `mem-refused-not-built.yml` | A request that is valid, that this machine can serve, and that this build cannot collect. |
 | `mem-refused-unavailable.yml` | A request this machine cannot serve, on a machine that cannot serve it. |
 | `mem-retained-eviction.yml` | More freed ranges than the table can hold. |
 | `mem-rss-run.yml` | A runnable session: watch one program's resident memory while it runs. |

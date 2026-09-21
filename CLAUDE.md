@@ -61,8 +61,8 @@ nothing depends on, so a plain `cargo build` does not build it, and
 
 And the eBPF and per-cpu perf backends need `CAP_BPF` and `CAP_PERFMON`, which
 are file capabilities that **do not survive a relink** -- every `cargo build`
-drops them. On the development machine that is the difference between 78 usable
-sources and 52, and nothing announces it: the tool reports fewer things as
+drops them. On the development machine that is the difference between 62 usable
+sources and 51, and nothing announces it: the tool reports fewer things as
 available, which reads like the machine changed rather than the binary. `make`
 reapplies them, and says so when it cannot.
 

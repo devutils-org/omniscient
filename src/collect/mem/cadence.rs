@@ -13,16 +13,16 @@ use std::time::Duration;
 
 pub struct Cadence {
     interval_ns: u64,
-    due_ns: u64,
+    /// When the next value is due, or `None` until the first call anchors the
+    /// grid at the start of the run.
+    due_ns: Option<u64>,
 }
 
 impl Cadence {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval_ns: interval.as_nanos() as u64,
-            // The first sample publishes: a series that started one interval
-            // late would have no baseline to read the rest against.
-            due_ns: 0,
+            due_ns: None,
         }
     }
 
@@ -33,18 +33,30 @@ impl Cadence {
     /// collector that has fallen behind by more than one interval restarts from
     /// now rather than publishing a burst to catch up.
     pub fn due(&mut self, now_ns: u64) -> bool {
+        // The first sample publishes, and it is what the grid is anchored on: a
+        // series that started one interval late would have no baseline to read
+        // the rest against, and a grid anchored anywhere else is a grid in a
+        // clock domain the run does not own. `CLOCK_MONOTONIC` counts from
+        // boot, so anchoring at zero puts the next slot an arbitrary fraction
+        // of an interval away -- with an interval of an hour and an uptime of
+        // fifty-eight minutes, every tick of the run falls inside the slack
+        // below and the cadence publishes on every one of them.
+        let Some(due_ns) = self.due_ns else {
+            self.due_ns = Some(now_ns.saturating_add(self.interval_ns));
+            return true;
+        };
         // Within a tenth of the interval of being due counts as due: the run's
         // tick is coarser than the grid, and a point that missed its slot by a
         // millisecond would otherwise wait a whole interval for the next one.
-        if now_ns.saturating_add(self.interval_ns / 10) < self.due_ns {
+        if now_ns.saturating_add(self.interval_ns / 10) < due_ns {
             return false;
         }
-        let next_ns = self.due_ns.saturating_add(self.interval_ns);
-        self.due_ns = if next_ns <= now_ns {
+        let next_ns = due_ns.saturating_add(self.interval_ns);
+        self.due_ns = Some(if next_ns <= now_ns {
             now_ns.saturating_add(self.interval_ns)
         } else {
             next_ns
-        };
+        });
         true
     }
 }
@@ -78,6 +90,32 @@ mod tests {
         );
         assert_eq!(published[1], 50 * MS);
         assert_eq!(published[2], 100 * MS);
+    }
+
+    /// The grid belongs to the run, not to the machine. `CLOCK_MONOTONIC`
+    /// counts from boot, and a grid anchored at zero is a grid whose next slot
+    /// depends on how long the machine has been up: at an uptime of 58 minutes
+    /// the next hourly slot is two minutes away, inside the six-minute slack,
+    /// so every sample of the run reads as due. That made two tests of
+    /// `mem.heap.live` pass or fail on uptime alone.
+    #[test]
+    fn the_grid_is_anchored_on_the_first_sample_rather_than_on_boot() {
+        const SECOND: u64 = 1_000_000_000;
+        let mut cadence = Cadence::new(Duration::from_secs(3600));
+
+        // An uptime of 58 minutes: shorter than the interval, so no slot has
+        // gone by since boot.
+        let start = 3483 * SECOND;
+        assert!(cadence.due(start), "the first sample publishes");
+        assert!(
+            !cadence.due(start + 1),
+            "an hour has not passed since the first sample"
+        );
+        assert!(!cadence.due(start + 3000 * SECOND));
+        assert!(
+            cadence.due(start + 3600 * SECOND),
+            "an hour later, it is due"
+        );
     }
 
     /// A tick that arrives late must not shift every later point: the series

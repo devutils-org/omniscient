@@ -35,12 +35,15 @@ use omn::Catalog;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 
-/// Usage, or a failure while running -- which is also where a collector that
-/// refuses at attach time lands.
+/// This run's problem: usage, a failure while running, a collector that refuses
+/// at attach time because of the machine, and -- since the fifth wave told the
+/// four answers apart -- a request no backend on this machine can serve.
+/// Raising a privilege or moving machine may fix any of them.
 const EXIT_FAILED: i32 = 1;
-/// The request was refused: it cannot mean what it asks for, or this machine
-/// cannot serve it. `BRIEF.md` asks for those two to be told apart; today they
-/// are not, and `docs/scenarios/power.md` records it.
+/// The request cannot mean what it asks for, whatever the machine. This is the
+/// only one of the four that is the caller's own mistake. Defect 2 of
+/// `docs/scenarios/power.md` was that "this machine cannot serve it" landed
+/// here too; it now exits 1.
 const EXIT_REFUSED: i32 = 2;
 /// The request is valid and nothing in this build collects it yet.
 const EXIT_NO_COLLECTOR: i32 = 3;
@@ -768,10 +771,17 @@ fn every_axis_this_family_declares_is_served_or_refused_by_name() {
                         Answer::NotBuilt
                     }
                     Some(EXIT_FAILED) => {
+                        // Two sentences share this code because they share an
+                        // answer: whatever went wrong belongs to this run and
+                        // not to the request. A collector that refused at
+                        // attach says what could not start; a chain with no
+                        // backend this machine can reach says that instead, and
+                        // names every backend it passed over.
                         assert!(
-                            message.contains("cannot start collecting"),
+                            message.contains("cannot start collecting")
+                                || message.contains("has no viable backend on this machine"),
                             "{source} {mode} {emit} failed without saying what could not \
-                             start: {message}"
+                             start, nor that this machine cannot serve it: {message}"
                         );
                         Answer::WouldNotStart
                     }
@@ -1131,8 +1141,10 @@ fn every_session_this_family_ships_validates_and_then_runs_or_refuses_by_name() 
                 "{name} was refused without a reason: {message}"
             ),
             Some(EXIT_FAILED) => assert!(
-                message.contains("cannot start collecting"),
-                "{name} failed without saying what could not start: {message}"
+                message.contains("cannot start collecting")
+                    || message.contains("has no viable backend on this machine"),
+                "{name} failed without saying what could not start, nor that this machine \
+                 cannot serve it: {message}"
             ),
             other => panic!("{name} answered with exit {other:?}: {message}{out}"),
         }

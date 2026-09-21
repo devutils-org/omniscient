@@ -1276,13 +1276,24 @@ fn a_machine_that_cannot_serve_a_net_request_names_what_it_is_missing() {
 /// validates, it dumps, and nothing in this build can serve it. A caller that
 /// cannot tell that from exit 1 raises privileges against a collector nobody
 /// has written.
+///
+/// Which of the eight can demonstrate that depends on the machine, and the
+/// scenario says so rather than assuming. A source is exit 3 only where its
+/// best backend is one the machine serves; where the machine cannot serve any
+/// of them, exit 1 is the honest answer and this scenario is not what proves
+/// it. The five `bpf:tp` sources fall on that side here, because a classic
+/// tracepoint's numeric id lives in a root-only file. So the session asks for
+/// the two `fentry` sources, whose requirement is BTF, and the sweep below
+/// requires each source to give one of the two answers with the message that
+/// belongs to it -- never the third answer, which would say the request cannot
+/// mean anything.
 #[test]
 fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() {
     let outcome = omn(&["-f", &session("net-not-built.yml")]);
     assert_eq!(code(&outcome), 3, "{}", stderr(&outcome));
     let complaint = stderr(&outcome);
     assert!(
-        complaint.contains("net.drops") && complaint.contains("bpf:tp"),
+        complaint.contains("net.tcp.connect") && complaint.contains("bpf:fentry"),
         "the refusal should name the source and the backend it needs: {complaint}"
     );
     assert!(
@@ -1311,17 +1322,24 @@ fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() 
         let emit = if *mode == "count" { "rate" } else { "raw" };
         args.extend_from_slice(&["--mode", mode, "--duration", "200ms", "--emit", emit]);
         let outcome = omn(&args);
-        assert_eq!(
-            code(&outcome),
-            3,
-            "`{source}` exited {} rather than 3:\n{}",
-            code(&outcome),
-            stderr(&outcome)
-        );
+        let complaint = stderr(&outcome);
+        match code(&outcome) {
+            3 => assert!(
+                complaint.contains("no collector is written"),
+                "`{source}` exited 3, which is this build's gap, and must say so: {complaint}"
+            ),
+            1 => assert!(
+                complaint.contains("has no viable backend on this machine"),
+                "`{source}` exited 1, which is this machine's gap, and must say so: {complaint}"
+            ),
+            other => panic!(
+                "`{source}` exited {other}: an unwritten collector is the build's gap or the \
+                 machine's, never a request that cannot mean anything:\n{complaint}"
+            ),
+        }
         assert!(
-            stderr(&outcome).contains(backend),
-            "`{source}` should name `{backend}` as what is missing: {}",
-            stderr(&outcome)
+            complaint.contains(backend),
+            "`{source}` should name `{backend}` either way: {complaint}"
         );
     }
 }
