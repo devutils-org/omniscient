@@ -465,7 +465,7 @@ impl Collector for SoftIrqCollector {
         }
         if self.handlers > 0 {
             notes.push(format!(
-                "{} softirq handler runs are reported as {} rows of a kernel-side log2 \
+                "{} softirq handler runs were drained as {} rows of a kernel-side log2 \
                  histogram, each carrying the runs it stands for; a bucket is a factor of two \
                  wide, so every number derived from `duration_ns` is bucketed and `total_ns` is \
                  the exact sum",
@@ -598,7 +598,7 @@ mod tests {
         let notes = collector.notes().join(" ");
         assert!(notes.contains("NET_RX"), "{notes}");
         assert!(
-            !notes.contains("handler runs are reported as"),
+            !notes.contains("handler runs were drained as"),
             "a run that bucketed nothing has nothing to qualify: {notes}"
         );
         collector.handlers = 9;
