@@ -2170,7 +2170,9 @@ fn raw_events(result: &serde_json::Value) -> Vec<BTreeMap<String, serde_json::Va
 fn total_for_pid(result: &serde_json::Value, pid: u32, attribute: &str) -> u64 {
     raw_events(result)
         .iter()
-        .filter(|attrs| attrs.get("pid").and_then(serde_json::Value::as_u64) == Some(u64::from(pid)))
+        .filter(|attrs| {
+            attrs.get("pid").and_then(serde_json::Value::as_u64) == Some(u64::from(pid))
+        })
         .filter_map(|attrs| attrs.get(attribute).and_then(serde_json::Value::as_u64))
         .sum()
 }
@@ -2236,7 +2238,10 @@ fn the_kernel_sweep_session_produces_every_shape_it_asks_for() {
             "reclaim, every shape",
             &["hist", "topk", "rate", "raw", "summary"],
         ),
-        ("compaction, every shape", &["hist", "rate", "raw", "summary"]),
+        (
+            "compaction, every shape",
+            &["hist", "rate", "raw", "summary"],
+        ),
     ];
     for (label, emits) in wanted {
         let result = result(&run, label);
@@ -2419,9 +2424,7 @@ fn a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel_counted() {
         ground_truth
             .lines()
             .find_map(|line| line.strip_prefix(&format!("omn-scenario {name} ")))
-            .unwrap_or_else(|| {
-                panic!("the workload prints `{name}`; it said:\n{ground_truth}")
-            })
+            .unwrap_or_else(|| panic!("the workload prints `{name}`; it said:\n{ground_truth}"))
             .trim()
             .parse()
             .expect("a number")
@@ -2568,7 +2571,12 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
     // 2: the catalog declares no `pid` target for compaction, because
     // compaction is work done for a whole memory zone.
     let per_process = run(&["mem.compaction", "--pid", "1", "-m", "trace", "-e", "raw"]);
-    assert_eq!(code(&per_process), EXIT_REJECTED, "{}", stderr(&per_process));
+    assert_eq!(
+        code(&per_process),
+        EXIT_REJECTED,
+        "{}",
+        stderr(&per_process)
+    );
     assert!(
         stderr(&per_process).contains("mem.compaction") && stderr(&per_process).contains("pid"),
         "{}",

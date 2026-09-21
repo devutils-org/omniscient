@@ -587,12 +587,8 @@ mod tests {
     /// another cpu's.
     #[test]
     fn every_accumulation_into_a_shared_row_is_atomic() {
-        let counted = |instructions: Vec<Insn>| {
-            instructions
-                .iter()
-                .filter(|insn| insn.code == 0xdb)
-                .count()
-        };
+        let counted =
+            |instructions: Vec<Insn>| instructions.iter().filter(|insn| insn.code == 0xdb).count();
         // Pages: the count, and nothing else -- the total is exact from the
         // bucket and the program does not pay for it.
         assert_eq!(counted(built(Allocator::Pages, 0).unwrap_or_default()), 1);
@@ -615,10 +611,7 @@ mod tests {
             "the log2 search starts with a 32-bit shift, and there is nothing here to bucket"
         );
         assert_eq!(
-            instructions
-                .iter()
-                .filter(|insn| insn.code == 0xdb)
-                .count(),
+            instructions.iter().filter(|insn| insn.code == 0xdb).count(),
             1,
             "a free is counted and nothing about it is summed"
         );
@@ -739,7 +732,8 @@ mod tests {
     #[test]
     fn a_rows_direction_and_name_survive_the_round_trip() {
         let mut key = [0u8; ROW_KEY_BYTES];
-        key[KEY_DIRECTION as usize..KEY_DIRECTION as usize + 4].copy_from_slice(&1u32.to_ne_bytes());
+        key[KEY_DIRECTION as usize..KEY_DIRECTION as usize + 4]
+            .copy_from_slice(&1u32.to_ne_bytes());
         key[KEY_CGROUP as usize..KEY_CGROUP as usize + 8].copy_from_slice(&4242u64.to_ne_bytes());
         let mut value = [0u8; ROW_VALUE_BYTES];
         value[VALUE_COMM as usize..VALUE_COMM as usize + 6].copy_from_slice(b"python");

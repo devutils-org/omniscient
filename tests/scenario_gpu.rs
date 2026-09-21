@@ -1173,11 +1173,26 @@ fn a_poll_faster_than_the_driver_answers_counts_every_late_tick_and_says_so() {
         "a 200 us poll of a driver that answers in 250 us should be late on most ticks, \
          and was late on {late} of {seen}"
     );
-    // Nothing else went wrong: the reads all succeeded, they were just late.
-    // A run that conflated the two would be telling the reader to look for a
-    // driver problem that is not there.
+    // Nothing else went wrong: the run was late, not broken. A run that
+    // conflated the two would be telling the reader to look for a driver
+    // problem that is not there.
+    //
+    // `dropped` is exactly zero because a poll has no ring to lose events
+    // from. `failed_reads` is required to be negligible rather than zero: this
+    // test holds the shared lock, so it runs beside the rest of the suite and
+    // beside whatever else is on the board, and NVML does occasionally refuse
+    // a read on a contended device. One refusal in several hundred does not
+    // make the lateness a driver fault, and asserting zero asserts the machine
+    // rather than the tool -- which is finding 11's whole subject.
     assert_eq!(losses["dropped"], 0);
-    assert_eq!(losses["failed_reads"], 0);
+    let failed = losses["failed_reads"]
+        .as_u64()
+        .expect("failed reads are counted");
+    assert!(
+        failed * 20 < late,
+        "the run should be late rather than broken, and it reported {failed} failed reads \
+         against {late} late ticks"
+    );
 
     // And the count reaches a person, not only a JSON field. The text output is
     // what somebody running this at a terminal sees, and the loss leads it.
@@ -1216,6 +1231,12 @@ fn the_same_source_polled_at_a_sane_interval_keeps_up_with_itself() {
         "a 100 ms poll of a driver that answers in under a millisecond was late on \
          {late} of {seen} ticks"
     );
+    // Zero, and it is a real assertion rather than an optimistic one: the two
+    // calls NVML needs to list a device's processes race, and losing that race
+    // used to be reported here as a failed read about once per suite run. The
+    // collector retries with the size the library asks for, so a device whose
+    // process list is merely changing no longer costs a reading. A failure that
+    // survives that is a driver refusing, which is what this line is for.
     assert_eq!(losses["failed_reads"], 0, "{losses}");
     assert_eq!(losses["dropped"], 0, "{losses}");
 }

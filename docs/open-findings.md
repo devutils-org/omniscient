@@ -4338,3 +4338,79 @@ plus a way to turn a `Target::Cgroup(path)` into the id that helper returns —
 are the cgroup id. That second half is not eBPF and belongs wherever
 `Target::Cgroup` is already resolved. Six entries stop being aspirational the
 day both land.
+## 39. What the sixth wave's merge exposed
+
+Three things, which is what a merge of six streams is for. Two were the streams'
+and one was the merge's own.
+
+### The shared eBPF module was an append seam nobody had named
+
+`src/bpf/mod.rs` was edited by five of the six streams, and the brief did not
+forbid it — it named `attach.rs`, `insn.rs`, `map.rs`, `btf.rs` and `syscall.rs`
+as the shared layer and omitted `mod.rs`, which is where a new program registers
+its `mod` and its `pub use`. Five streams therefore added lines to one file.
+
+**It cost nothing**, because every edit was an append and none touched another's
+lines: four of the five auto-merged and the fifth was one hunk resolved by
+keeping both. That is the "registries are append seams" rule holding, and it is
+the third wave in a row where it has. What it says for the next brief is that
+the seam should be named rather than discovered: either `mod.rs` joins the
+forbidden list and the coordinator lands the registrations, or it is declared an
+append-only file and streams are told to add at the end.
+
+`docs/open-findings.md` was the same shape at six streams out of six, and that
+one *was* expected: the brief sends every "needs from another stream" there. Six
+appends to one file is six conflicts, all resolved by keeping both.
+
+### `gpu.mem` lost a reading to a race it should have retried
+
+Found by `the_same_source_polled_at_a_sane_interval_keeps_up_with_itself`, which
+asserts a clean run and got `failed_reads: 1` with the reason attached:
+
+```
+gpu.mem on NVIDIA GeForce RTX 2080 Ti: Insufficient Size (NVML code 7)
+```
+
+Listing a device's processes takes two NVML calls — one for how many, one for
+the list — and **they race**. A process that starts using the GPU between them
+makes the second answer `NVML_ERROR_INSUFFICIENT_SIZE` with the count raised to
+what it now needs. Under a suite of thirteen hundred tests sharing one board
+that happened about once a run, and it was reported as a failed read, which is
+exactly what it was: a reading the collector did not take.
+
+It was not the scenario's fault and the scenario's zero was right. `process_list`
+now retries with the size the library just asked for — the number it computed,
+not a guess — up to four attempts, growing by one each time so the next arrival
+does not cost another round. A device whose list is genuinely churning faster
+than it can be read still reports a failed read rather than spinning.
+
+This is the second NVIDIA-side race this project has found by running its own
+suite against a shared board; finding 11 has the first.
+
+### A `gpu` scenario that was late, not broken, asserted it twice
+
+`a_poll_faster_than_the_driver_answers_counts_every_late_tick_and_says_so`
+required `failed_reads == 0` while holding the *shared* lock, so it ran beside
+the rest of the suite and beside whatever else was on the device. Its subject is
+that lateness is told apart from breakage; requiring exactly zero failures made
+it assert the machine as well, which is finding 35's class. It now requires
+failures to be negligible against lateness, with the reason written down.
+
+Its sibling keeps its `failed_reads == 0`, and that zero is now earned rather
+than hoped for: the race above is retried, so a failure that survives is a
+driver refusing, which is what the line is for.
+
+### And one that was not a defect at all
+
+`what_this_machine_cannot_check_about_gpu_job_is_named_with_its_numbers` failed
+once during the merge with a refusal naming `CAP_BPF`, which on this machine is
+never the reason `gpu.job` cannot run — the NVIDIA driver publishes no
+`gpu_scheduler` tracepoints. The test was right and the binary was wrong:
+`cargo test` had relinked `target/debug/omn` after a source change, and **a
+relink drops the file capabilities**. `make` reapplies them and it passed.
+
+That is the trap `CLAUDE.md` opens with, caught by a test rather than by a
+person, on a machine where it has been caught three times before. Worth
+recording as the one case where the suite noticed on its own.
+
+---

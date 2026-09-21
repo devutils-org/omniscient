@@ -483,13 +483,8 @@ impl StallProgram {
         let btf = super::kernel_btf()?;
         let [live_name, rows_name, drops_name, begin_name, end_name] = stall.names();
 
-        let in_flight = Hash::create(
-            START_KEY_BYTES,
-            START_VALUE_BYTES,
-            MAX_IN_FLIGHT,
-            live_name,
-        )
-        .map_err(|error| format!("cannot create the in-flight map: {error}"))?;
+        let in_flight = Hash::create(START_KEY_BYTES, START_VALUE_BYTES, MAX_IN_FLIGHT, live_name)
+            .map_err(|error| format!("cannot create the in-flight map: {error}"))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
             .map_err(|error| format!("cannot create the stall histogram map: {error}"))?;
         let drops = Counters::create(DROP_SLOTS, drops_name)
@@ -510,13 +505,15 @@ impl StallProgram {
         // thing standing between that and a duration measured from an
         // uninitialised timestamp.
         for site in stall.begins() {
-            match check_signature(btf, site.name, site.signature, "nothing but the moment it fired")
-            {
+            match check_signature(
+                btf,
+                site.name,
+                site.signature,
+                "nothing but the moment it fired",
+            ) {
                 Ok(()) => links.push(
                     syscall::raw_tracepoint_open(site.name, begin_program.as_raw_fd()).map_err(
-                        |error| {
-                            format!("cannot attach to the `{}` tracepoint: {error}", site.name)
-                        },
+                        |error| format!("cannot attach to the `{}` tracepoint: {error}", site.name),
                     )?,
                 ),
                 Err(reason) if site.required => return Err(reason),
@@ -726,8 +723,7 @@ mod tests {
     /// number.
     #[test]
     fn the_duration_is_a_difference_and_not_a_timestamp() {
-        let program =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
         assert!(
             program.iter().any(|insn| *insn == Insn::sub64_reg(1, 7)),
             "the program must subtract the moment the thread entered from the moment it left"
@@ -780,8 +776,7 @@ mod tests {
     /// duration measured from whatever was in the map slot.
     #[test]
     fn an_unpaired_end_is_counted_and_not_measured() {
-        let program =
-            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
         let slots: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x62 && insn.off == DROP_KEY)

@@ -150,7 +150,9 @@ pub(super) fn descendants(root: &Cgroup) -> Result<BTreeSet<u64>, String> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if !kind.is_dir() {
                 continue;
             }
@@ -684,8 +686,7 @@ mod tests {
     /// for a growth.
     #[test]
     fn a_run_that_saw_frees_reports_them_even_though_they_are_not_events() {
-        let mut collector =
-            AllocationCollector::new(Allocator::Pages, Mode::Trace, None, None);
+        let mut collector = AllocationCollector::new(Allocator::Pages, Mode::Trace, None, None);
         assert!(collector.notes().is_empty(), "a run that saw nothing");
         collector.allocations = 90;
         collector.rows = 4;

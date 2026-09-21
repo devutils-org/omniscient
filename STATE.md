@@ -14,24 +14,40 @@ for where the two meet.
 
 The request model, the catalog, the resolver, the validator, the collector
 layer, the emit and encode layers and a join engine all exist and are used by
-every source. Fifty-nine sources across nine families collect for real, over
+every source. Eighty-one sources across nine families collect for real, over
 eight mechanisms: procfs and sysfs, `perf_event_open` counting and sampling,
 netlink, an `LD_PRELOAD` shim, NVML through `dlopen`, `af_packet` with a
 `PACKET_MMAP` ring, and eBPF through raw tracepoints, classic tracepoints,
 kprobes and uprobes. Every emit the catalog declares exists, all nine output
-formats have an encoder, all four join match kinds work, stacks are captured
-two ways — a `perf_event_open` callchain for `cpu.profile` and
-`bpf_get_stackid` for `sched.offcpu`, which is the one that says *where* a task
-blocked — and a run measures and reports what it cost, against a ceiling it can
-be held to.
+formats have an encoder, stacks are captured two ways — a `perf_event_open`
+callchain for `cpu.profile` and `bpf_get_stackid` for `sched.offcpu`, which is
+the one that says *where* a task blocked — and a run measures and reports what
+it cost, against a ceiling it can be held to.
 
-**1040 tests pass**, of which 175 are scenarios: a workload whose property the
+**All four join match kinds now have a producer**, which took until the sixth
+wave. `scoped_eq` was the last, and it was the quarter of the engine that
+resolved, validated and had never once been exercised against real events:
+
+```
+join queue-then-device  io.queue -> io.latency  evidence KEY
+  10553 of 10562 `io.latency` events attributed (99.9 %)
+  blk:0xffff8da6271c1200@14446180862290   closed
+  blk:0xffff8da6271c1200@14448276351000   closed
+```
+
+The same pointer under two open timestamps, four milliseconds apart, is why the
+`blk` key is scoped rather than a pointer: the kernel recycles a request within
+milliseconds, and a pointer alone would have credited one request's latency to
+another.
+
+**1367 tests pass**, of which 217 are scenarios: a workload whose property the
 scenario chose, a session that measures it, and a check against that property.
-They found 63 defects, none worked around, recorded in `docs/scenarios/`; the
-fifth wave closed 52 of them, and `docs/fixes/` records what became of each.
+The fourth wave's 63 defects are recorded in `docs/scenarios/`, 52 closed by the
+fifth wave in `docs/fixes/`.
 
-What is missing is breadth, not skeleton. Adding a source is additive; the
-expensive parts are done.
+What is missing is breadth, not skeleton, and there is much less of it than
+there was: nineteen sources have no collector, and **eight of those wait on two
+named mechanisms** rather than on anything unknown.
 
 ---
 
@@ -39,7 +55,7 @@ expensive parts are done.
 
 ```
 100 sources: 86 usable here, 10 unverified, 4 out of reach on this machine.
-59 of them have a collector, covering 67 of their 202 backends.
+81 of them have a collector, covering 89 of their 202 backends.
 ```
 
 Three different questions, deliberately kept apart.
@@ -47,7 +63,7 @@ Three different questions, deliberately kept apart.
 | Question | Answer | Meaning |
 |---|---|---|
 | What can this machine serve? | 86 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 59 sources, 67 backends | a collector is written and registered |
+| What can this build collect? | 81 sources, 89 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
 That `86` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
@@ -78,19 +94,20 @@ Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
-| `mem` | 16 | 23 | 22 |
+| `mem` | 20 | 23 | 22 |
 | `cpu` | 13 | 14 | 12 |
-| `net` | 7 | 15 | 12 |
-| `gpu` | 5 | 9 | 6 |
-| `io` | 5 | 14 | 13 |
+| `net` | 12 | 15 | 12 |
+| `io` | 9 | 14 | 13 |
+| `sched` | 9 | 10 | 9 |
+| `gpu` | 6 | 9 | 6 |
+| `proc` | 6 | 6 | 6 |
 | `power` | 5 | 5 | 4 |
-| `sched` | 5 | 10 | 9 |
-| `proc` | 2 | 6 | 6 |
 | `runtime` | 1 | 4 | 2 |
 
-The gap between the two rightmost columns is now the project's whole remaining
-breadth, and it is collectors rather than mechanism: `io` can serve thirteen
-sources and collects five, `proc` can serve six and collects two.
+**`proc` and `power` are complete**, and `sched`, `net` and `mem` are one, three
+and three short. The gap that used to be the project's whole remaining breadth
+has closed to nineteen sources, and the section below names what each waits
+for.
 
 ---
 
@@ -157,12 +174,12 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
-| 4 — the vertical case | **partly**. Two real correlations exist and are checked, one per match kind that has a producer. The HTTP-request decomposition it describes needs the eBPF backends of `io` and `net`. |
-| 5 — generalizing the join engine | **done for the engine**. All four match kinds — `interval`, `eq`, `scoped_eq`, `wakeup` — are implemented and each reports in its own words. What is missing is producers: `scoped_eq` needs `blk:rq@open_ts`, which needs the `io` eBPF backends. |
+| 4 — the vertical case | **partly**. Three real correlations exist and are checked, and the `io` and `net` eBPF backends the decomposition needs now collect. What is left is the decomposition itself — one request's latency split across its boundaries — and the two boundaries that need `fentry`. |
+| 5 — generalizing the join engine | **done**. All four match kinds — `interval`, `eq`, `scoped_eq`, `wakeup` — are implemented, each reports in its own words, and since the sixth wave each has a producer. `scoped_eq` was the last: `io.queue -> io.latency` joins per request at 99.9 %, keyed on `(pointer, open_ts)` because the kernel recycles a request pointer within milliseconds. |
 | 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. What is left is the fourth task: **hot attach and detach**, which is also what `DECISIONS.md` defers concurrent requests on, and what phase 10's escalation assumes. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
-| 9 — breadth | in progress; 59 of 100 sources, 67 of 175 backends. The 41 without a collector are named below, and 29 of them are reachable by a mechanism this build already has. |
+| 9 — breadth | in progress; **81 of 100 sources, 89 of 202 backends**. The 19 without a collector are named below, and eight of them sit behind two named attach kinds. |
 | 10 — intelligence layer | not started. |
 
 ---
@@ -175,51 +192,48 @@ a collector written against an attach path that works today. The fifth wave
 closed 52 of the sixty-three defects the scenario wave found; the eleven that
 are left are named in `docs/fixes/`.
 
-### 1. ~~The cheapest lever: the catalog entries~~ — **done**
+### 1. ~~The catalog pass, the collectors, and the short distribution~~ — **done**
 
-Twenty-seven entries gained a `bpf:raw_tp` ahead of their `bpf:tp`, and the two
-probes finding 15 asked for are wired. `86 usable here` instead of `62`, `4 out
-of reach` instead of `22`, and twenty-seven sources that answered *"this machine
-cannot serve it"* now answer *"no collector is written for it yet"*. Finding 36
-of `docs/open-findings.md` records what was checked and what was left.
+The sixth wave landed twenty-two of its twenty-four sources and closed finding
+37. `docs/families/*.md` is the per-stream record and `docs/briefs/` keeps the
+brief. What it moved:
 
-Three entries were deliberately not converted: `gpu.job`, whose tracepoints are
-in a module and absent from `vmlinux` BTF, and `io.fs` and `io.readahead`, whose
-requirement is a glob rather than a name — converting those means choosing which
-tracepoint the collector attaches to, which belongs to whoever writes it.
+- **`scoped_eq` has a producer**, which was the point. `io.latency` and
+  `io.queue` join per request at 99.9 % attribution, and the key is visibly
+  `(pointer, open_ts)` — the same pointer recurs under two timestamps in one
+  five-second run, which is the recycling the scoped key exists to catch.
+- **`proc` and `power` are complete.** `sched` is one short, `net` three, `mem`
+  three.
+- **A distribution says when it is short.** `emit::Shortfall` rides on
+  `SeriesHist` and `SeriesSummary`, so every format carries it at once, and a
+  run that lost a tenth of its events marks every count, mean and maximum as a
+  lower bound rather than a measurement.
 
-### 2. The collectors that nothing blocks — 24 sources
+### 2. What is left, and it is eight sources behind two mechanisms
 
-`src/bpf/attach.rs` has raw tracepoints, classic tracepoints, kprobes and
-uprobes, the raw path reaches every one of these, and since item 1 the catalog
-says so. `BRIEF_NEXT.md` divides them by family.
+Nineteen sources have no collector. Eight of them are behind exactly two pieces
+of mechanism, and the rest are behind hardware or a vendor library:
 
-**`io.latency` and `io.queue` are the two that matter most**: they are the only
-sources that would produce `blk:rq@open_ts`, and `scoped_eq` is the one join
-match kind the engine implements that **nothing produces**. Landing them turns a
-quarter of the join engine from theory into something checked, and it is what
-phase 4's I/O path waits on.
+| Waits for | Sources |
+|---|---|
+| **fentry** — `BPF_PROG_TYPE_TRACING` with an `attach_btf_id` | `io.syscall`, `io.fs`, `io.fsync`, `net.tcp.connect`, `net.socket` |
+| **USDT** — `.note.stapsdt` and the semaphore protocol, then a uprobe | `runtime.gc`, `runtime.alloc`, `runtime.custom` |
+| a `Btf::member_offset` that descends anonymous members | `io.pagecache`, `io.readahead` |
+| PEBS or IBS | `mem.latency`, `mem.sharing` |
+| uncore PMUs | `mem.bandwidth` |
+| Intel PT | `cpu.flow` |
+| the preload shim, pointed elsewhere | `sched.mutex`, `gpu.api` |
+| an XDP program | `net.xdp` |
+| CUPTI, Nsight | `gpu.kernel`, `gpu.counters` |
 
-What is still genuinely missing as mechanism is **fentry** (BTF-typed attach,
-`BPF_PROG_TYPE_TRACING` with an `attach_btf_id`) for `io.syscall`, `io.fs`,
-`io.fsync`, `net.tcp.connect` and `net.socket`, and **USDT** (the target's ELF
-notes, then a uprobe) for the three `runtime` sources.
+**fentry is now the single largest thing between this project and the layer
+above the block one**, and `docs/families/io.md` says so from the inside: three
+of the five `io` sources it left are the same missing attach kind.
 
-### 2c. The distribution that does not say it is short — finding 37
-
-New, and it is a defect rather than breadth. A `hist` or a percentile built from
-a run that dropped or was throttled is rendered exactly like one built from a
-complete run, and the events it is missing are the slow ones — whatever stalled
-the machine is what stopped the measuring. So every percentile from a lossy run
-is a lower bound and nothing says so.
-
-The largest opening was already closed by construction and for a better reason:
-`poll` cannot produce `hist` at all, because a histogram of a polled gauge is a
-histogram of when the poller looked. What is left is `sample` and `trace`, whose
-losses *are* counted — the invariant holds — and whose distributions do not
-carry the fact. `src/emit.rs` and `src/render.rs`. It should land before phase
-10, because a triage layer reading a p99 to decide what to escalate is exactly
-who a short tail misleads.
+The third row is the cheapest and is a request the sixth wave made twice, from
+two streams independently: `Btf::member_offset` cannot reach a member inside an
+anonymous struct or union, which is where `folio.mapping` lives. Two sources
+wait on it and it is one function in a file nobody owns.
 
 ### 2b. The eleven defects the fifth wave left
 
@@ -227,19 +241,17 @@ who a short tail misleads.
 stream did not own, three are decisions rather than tasks, and one — `topk`
 ranking a series rather than an attribute — needs surface syntax nobody owns.
 
-### 3. The sources nothing mechanical blocks — 6 sources
+### 3. The crossings — `BRIEF_NEXT.md`, and now unblocked
 
-`mem.page_alloc` and `mem.kmalloc` want the preload shim they already have;
-`mem.sharing` and `mem.latency` want PEBS or IBS; `mem.bandwidth` wants uncore
-PMUs; `cpu.flow` wants Intel PT. Each is independent of the others.
+Four questions a single family cannot answer, written up and not dispatched.
+`heap.alloc → mem.faults → mem.rss` for memory end to end; `cpu.profile` beside
+`sched.offcpu` for where the time went; **the I/O path, which was waiting for
+`blk:rq@open_ts` and is no longer**; and the machine's own state as a
+confounder.
 
-### 4. Phase two of the scenarios — the crossings
-
-Written up in `BRIEF_NEXT.md` and not dispatched: four questions a single family
-cannot answer. `heap.alloc → mem.faults → mem.rss` for memory end to end;
-`cpu.profile` beside `sched.offcpu` for where the time went; the I/O path once
-`blk:rq@open_ts` has a producer; and the machine's own state as a confounder.
-Phase one left the workloads and the keys for them.
+`BRIEF_NEXT.md` also notes that the compute crossing is where phase 10 starts:
+TSA's three inputs all collect and are checked, and it must not start before a
+distribution says when it is short — which it now does.
 
 ### 5. The smaller ones, each with its reason
 

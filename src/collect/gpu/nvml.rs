@@ -27,6 +27,8 @@ use std::fmt;
 const NVML_SUCCESS: c_int = 0;
 const NVML_ERROR_UNINITIALIZED: c_int = 1;
 const NVML_ERROR_NOT_SUPPORTED: c_int = 3;
+/// The buffer was too small, and `count` now holds what it would have needed.
+const NVML_ERROR_INSUFFICIENT_SIZE: c_int = 7;
 const NVML_ERROR_DRIVER_NOT_LOADED: c_int = 9;
 const NVML_ERROR_GPU_IS_LOST: c_int = 15;
 
@@ -424,13 +426,30 @@ impl Nvml {
         Ok(all)
     }
 
+    /// The processes on a device, asked for in the two steps the API demands.
+    ///
+    /// **The two steps race, and losing the race is ordinary rather than
+    /// exceptional.** The first call reports how many entries the second will
+    /// need; between them a process can start using the device, and the second
+    /// then answers `NVML_ERROR_INSUFFICIENT_SIZE` with `count` raised to what
+    /// it now needs. Measured under a suite of thirteen hundred tests sharing
+    /// one board, that happened about once a run -- reported as a failed read,
+    /// which is what it was: a reading this collector did not take.
+    ///
+    /// So the answer is to take it. The loop retries with the size the library
+    /// just asked for, which is the number it computed rather than a guess, and
+    /// gives up after a bounded number of attempts so that a device whose
+    /// process list is genuinely churning faster than it can be read reports a
+    /// failed read rather than spinning. A device with a stable list settles on
+    /// the first retry, and one that never settles says so.
     fn process_list(
         &self,
         device: DeviceHandle,
         entry: FnProcesses,
     ) -> Result<Vec<ProcessInfo>, NvmlError> {
-        // The call reports how many it would have written when the buffer is
-        // too small, so it is asked twice rather than guessed at once.
+        /// Enough for a list that grew while being read, not enough to spin.
+        const ATTEMPTS: usize = 4;
+
         let mut count: c_uint = 0;
         // SAFETY: a null buffer with a zero count is how the API is asked for a
         // size.
@@ -438,12 +457,28 @@ impl Nvml {
         if code == NVML_SUCCESS || count == 0 {
             return Ok(Vec::new());
         }
-        let mut buffer = vec![ProcessInfo::default(); count as usize];
-        // SAFETY: the buffer holds `count` entries, which is what the library
-        // just asked for.
-        self.check(unsafe { entry(device.0, &mut count, buffer.as_mut_ptr()) })?;
-        buffer.truncate(count as usize);
-        Ok(buffer)
+
+        let mut last = NVML_ERROR_INSUFFICIENT_SIZE;
+        for _ in 0..ATTEMPTS {
+            let mut buffer = vec![ProcessInfo::default(); count as usize];
+            let mut written = count;
+            // SAFETY: the buffer holds `count` entries, which is what the
+            // library just asked for.
+            last = unsafe { entry(device.0, &mut written, buffer.as_mut_ptr()) };
+            if last == NVML_SUCCESS {
+                buffer.truncate(written as usize);
+                return Ok(buffer);
+            }
+            if last != NVML_ERROR_INSUFFICIENT_SIZE {
+                break;
+            }
+            // `written` now holds what the next attempt needs. Growing it by
+            // one more leaves room for the next arrival rather than racing the
+            // same process twice.
+            count = written.saturating_add(1);
+        }
+        self.check(last)?;
+        Ok(Vec::new())
     }
 }
 
