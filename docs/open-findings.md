@@ -4414,3 +4414,99 @@ person, on a machine where it has been caught three times before. Worth
 recording as the one case where the suite noticed on its own.
 
 ---
+## 40. A survey of other tools, triaged against what is already here
+
+Raised from outside, and worth recording for the two suggestions that turned out
+to be already solved — because both were solved *better* than the suggestion,
+and the reasons are the interesting part.
+
+### Rejected: per-microarchitecture event group tables
+
+The suggestion was that `cpu.topdown` names a method without saying how to
+compute it on Zen 4 against Sapphire Rapids, and that a table mapping forty
+microarchitectures to raw counters and derived formulas — LIKWID's `groups/`
+directory is the worked example — is the missing layer.
+
+It is not missing; it is delegated. The entry requires `pmu:slots`,
+`pmu:topdown-retiring`, `pmu:topdown-bad-spec`, `pmu:topdown-fe-bound` and
+`pmu:topdown-be-bound`, which are **the kernel's own event aliases**, published
+per machine under `/sys/bus/event_source/devices/cpu/events`. The mapping from
+microarchitecture to raw counter is the kernel's, maintained by the people who
+add each new part, and this catalog reads it rather than reproducing it. The
+entry's own caveat has said so since it was written: *"map per CPU family, never
+hard-code event names."*
+
+What that buys is visible on this machine, a Zen 2 that has no topdown at all:
+
+```console
+$ omn list cpu.topdown
+  here          no backend is usable on this machine
+    1. pmu                    cost low    collector written
+       needs    pmu:slots     missing: this machine publishes no `slots`
+                              performance unit under /sys/bus/event_source/devices
+```
+
+A table would have had to know that Zen 2 lacks it. The kernel already does.
+Maintaining forty microarchitectures is a cost this project does not pay, and
+the licence of the best available table (GPL-3) is a second reason not to look
+closely at it.
+
+### Rejected: a privileged access daemon
+
+The suggestion was LIKWID's model — a small setuid daemon holding the
+privileges, rather than the whole tool running as root.
+
+`DECISIONS.md` settled this and the reason still holds: `CAP_BPF` +
+`CAP_PERFMON` on the binary, *"an unprivileged run is refused rather than served
+by a backend that answers a different question. This keeps one chain shape to
+reason about and to test."* A daemon is a third privilege shape, not a second,
+and it makes what a measurement can reach depend on how the machine was set up
+rather than on what the machine is. The project already refused that trade once
+by name.
+
+It is worth noting that the tool is *not* all-or-nothing today, which is what
+the suggestion was really about: two file capabilities, granted to one binary,
+are already the narrow middle it was reaching for.
+
+### Taken: three things that were genuinely absent
+
+**An `msr:` probe.** `power.freq`'s `pmu` fallback requires `msr:aperf` and
+`msr:mperf` and both read `unverified: no probe is written`, which the resolver
+treats as a reason to prefer a backend it could check. Now probed, and the
+answer on this machine is the useful one — the device exists and is not
+readable:
+
+```
+needs msr:aperf   missing: /dev/cpu/0/msr is present and not readable by uid 1000:
+                  an MSR read needs root or CAP_SYS_RAWIO, which is more than this
+                  project asks for elsewhere
+```
+
+The register's name is deliberately not checked against anything: there is no
+enumeration of which MSRs a part implements, and reading an absent one answers
+zero rather than failing — which is exactly why a collector must never guess.
+
+**Cache state between benchmark runs.** Phase 8's environment control listed the
+governor, the clocks, THP, affinity and throttling, and said nothing about what
+the previous run left in the last level cache or in a NUMA node's memory. This
+project's own `mem` scenarios turn that effect into a measurement on purpose — a
+shuffled walk over 64 MiB against one over 4 KiB — so inheriting it by accident
+between repetitions is measuring the order the runs happened to go in. Added to
+the protocol beside dropping the page cache.
+
+**Prefetcher state in the environment capture.** Captured, never changed:
+turning the prefetchers off is a real lever and a modification of the target,
+which boundary 5 puts outside this tool. Two runs on one machine with different
+settings are not comparable and nothing would have said why.
+
+### Left open, because it contradicts something already written
+
+Dynamic binary instrumentation. `Cost::Extreme` is documented as *"replay or
+dynamic binary instrumentation"* while the accepted boundaries call DBI
+*"outside the kernel-level core"* — a band reserved for a mechanism the
+boundaries exclude. `DECISIONS.md` now carries it as an open line with the three
+things that make it unlike any other backend: it is exclusive with the machine,
+its clock is a different domain rather than an uncertain one, and it would need
+a `Determinism` the enum refuses to have.
+
+---

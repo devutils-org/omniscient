@@ -126,6 +126,8 @@ construction. They block the resolver, which is the next milestone.
 |---|---|---|
 | Usage target | One-off session · continuous daemon · **daemon with a flight recorder** | A session can buffer and aggregate at the end. A daemon must aggregate online, bound every map, and support hot attach and detach, which phase 6 already assumes. Deciding "daemon" now is cheaper than retrofitting it. |
 
+| Dynamic binary instrumentation | Never · a `dbi:` backend, mutually exclusive with every other | The catalog already has a slot for it and the boundaries already exclude it, and those two cannot both be right. See below. |
+
 The third option is new, and it is the same decision seen from the side that
 makes it concrete. A **flight recorder** is a bounded circular buffer kept
 permanently, with a snapshot written out when something the run is watching for
@@ -148,6 +150,46 @@ What the project already has that would serve it: `Losses` counts and surfaces
 eviction, the join engine's open-state has a bounded capacity with expiry and
 overflow counted, and `--budget` measures a run against the target. What it does
 not have is a run that does not end.
+
+### Dynamic binary instrumentation, and the contradiction already in the tree
+
+`Cost::Extreme` is documented as *"over 10x: replay or dynamic binary
+instrumentation"*, so the cost model has a band reserved for a mechanism the
+accepted boundaries say is *"outside the kernel-level core"*. One of those is
+wrong, and the question has never been asked in so many words.
+
+**Writing a DBI engine is not on the table.** Valgrind, DynamoRIO and Pin have
+ten to twenty years each, and the cost is not the JIT — it is the long tail of
+SIMD extensions arriving every year, syscalls, TLS, signals, self-modifying
+code and threads. That is a second product, and it is not this one's thesis.
+
+**Consuming one is a different question, and the answer is not obviously no.**
+A `dbi:valgrind` backend would produce events with a `task:tid` key, counters,
+and attribution by code site — the shape every other collector produces. Three
+things make it unlike anything else here, and each is a reason the decision
+cannot be made by adding a catalog entry:
+
+- **It is mutually exclusive with the machine.** Under a DBI engine the program
+  is not running on this cpu: the PMU counters, the timings and the cache are
+  the simulator's. It is a mode of a whole session rather than a backend chosen
+  per source, and the validator would have to refuse every combination — which
+  is a shape the request model does not currently have.
+- **Its clock is a different domain, and that is phase 1's one
+  non-negotiable.** Wall time dilates twenty- to a hundred-fold. `ts_err_ns`
+  exists for a device whose timestamps are *uncertain*; a dilated clock is not
+  uncertain, it is a different time base, and every temporal join and every
+  wakeup chain means nothing across it. Only identity keys survive.
+- **It would need a fourth `Determinism`.** The enum is `low`, `medium`, `high`,
+  and its doc says *"never `exact`: bit-exact determinism is outside this
+  tool's boundary"*. A cachegrind run is exact, and it is exact about **a cache
+  that is not this machine's** — no prefetcher, no TLB, no coherence. Perfectly
+  reproducible and only moderately predictive of real time, which is the
+  determinism-against-validity trade in its sharpest form.
+
+Left open rather than settled, because settling it means either deleting a cost
+band or amending a boundary, and both deserve to be done deliberately. If it is
+ever taken, **DynamoRIO is the entry point rather than Valgrind**: 2–10× instead
+of 20–100×, and a client tool is a project of weeks rather than years.
 
 ---
 

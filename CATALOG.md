@@ -448,7 +448,15 @@ resolved file — this is what makes two measurements comparable across machines
 kernel and BTF · architecture and microarchitecture · speculative mitigations ·
 clocksource · governor and frequency bounds · SMT state · THP mode · NUMA
 topology · virtualization and steal time · vendor SDK versions · privileges
-(`perf_event_paranoid`, BPF capabilities) · backends actually selected.
+(`perf_event_paranoid`, BPF capabilities) · backends actually selected ·
+**hardware prefetcher state**.
+
+The last is captured and never changed, which is boundary 5. Turning the
+prefetchers off is a real lever for isolating a memory effect and it is a
+modification of the target, so whoever wants it does it themselves — and gets a
+resolved file that says which state the numbers were taken in. Two runs on one
+machine with different prefetcher settings are not comparable, and without this
+line nothing would say why.
 
 ---
 

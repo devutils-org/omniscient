@@ -292,6 +292,22 @@ finally earns its place.
 3. **Environment control**: `performance` governor, locked clocks, frozen THP,
    affinity, invalidation of any throttled run (`power.*` collected
    unconditionally).
+   - **And the caches, which this list was missing.** A run leaves the last
+     level cache and the NUMA node's memory in whatever state it left them, and
+     the next run inherits it: `docs/scenarios/mem.md` already records that a
+     shuffled walk over 64 MiB and one over 4 KiB differ by two orders of
+     magnitude, which is the same effect seen on purpose. So the protocol
+     evicts the LLC and sweeps each NUMA domain between repetitions, the way it
+     already drops the page cache — a cold cache and a warm one are two
+     measurements, and a harness that does not choose between them is measuring
+     the order its runs happened to go in.
+   - **Prefetcher state is captured, not controlled.** Disabling the hardware
+     prefetchers is a real lever for isolating a memory effect, and it is also a
+     modification of the target — boundary 5. So the state is read and written
+     into the resolved file beside the governor and the THP mode, and whoever
+     wants it off turns it off themselves and gets a resolved file that says so.
+     Two runs on the same machine with different prefetcher settings are not
+     comparable, and nothing today would say why.
 4. **Backend comparison**: for each source, force every backend in the chain and
    measure cost, effective resolution, loss rate. **Validates that the resolver
    chooses correctly.**
@@ -333,8 +349,16 @@ The methods are the deliverable, not a menu. Each one names the sources it needs
 and each is only worth building once they collect, so the order below is the
 order in which their inputs land.
 
+0. **The criterion comes first, and it is a parameter rather than a footnote.**
+   "What is this workload limited by" has no answer until someone says *limited
+   for what* — median latency, the tail, throughput, energy and cost do not name
+   the same culprit, and improving one routinely degrades another. So a triage
+   request carries its objective the way a measurement request carries its emit,
+   and the answer names the objective it answered for. A layer that picks one
+   silently is a layer that reports a confident wrong suspect, which is the
+   failure this project is built against, one level up.
 1. **USE triage** (Utilization / Saturation / Errors): a broad, cheap pass that
-   answers "what is this workload limited by?".
+   answers "what is this workload limited by, for this objective?".
 2. **TSA** (thread state analysis): where a thread's wall clock went, split
    across on-cpu, runnable-and-waiting, and blocked-on-what. **This one is
    ready first**, because its three inputs already collect and are checked --
@@ -366,6 +390,37 @@ Two arithmetics that look like presentation and are not:
   what is already collected -- `io.inflight` against `io.iops`, run queue length
   against `sched.runqlat`. They are worth stating as the arithmetic of the USE
   pass rather than leaving each source to imply them.
+
+---
+
+## Phase 11 — A model reads it
+
+Last, and the ordering is the whole point. Omniscient already produces what a
+language model needs and a human does not: typed events, attributions carrying
+an evidence level, and a resolved file describing the machine, the backend and
+every degradation. Handed that, a model can say what a run means without
+inventing the parts it cannot see. Handed rendered text, it invents.
+
+So the work is an MCP server exposing what already exists as resources — the
+resolved file, the results document, the catalog — rather than a report
+generator. Nothing new is measured and nothing new is modelled; this phase is a
+second surface on the same objects, the way the session file is a second surface
+on the same `Request`.
+
+**It comes after phase 10 and not before.** A model summarising a correlator
+nobody can yet interpret produces conclusions that are confident and wrong, and
+the evidence ladder is exactly the thing it would flatten: `IDENTITY` and
+`TEMPORAL` read alike in prose. Until the tool itself can say what a run was
+limited by and for which objective, a model reading it has nothing to be right
+about.
+
+Two constraints that fall out of the rest of this file:
+
+- **It reads; it does not run.** Boundary 5 applies to this surface too: a model
+  may ask for a measurement and may not change the machine.
+- **Every number it is handed carries what it is missing.** Finding 37's
+  `Shortfall` exists for a reader taking a p99 off a lossy run, and a model is
+  that reader with less judgement, not more.
 
 ---
 

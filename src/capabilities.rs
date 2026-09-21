@@ -377,6 +377,17 @@ impl Capabilities {
             return probe_pmu(event);
         }
 
+        // A model-specific register, read through `/dev/cpu/<n>/msr`. The
+        // question is not whether the register exists -- `aperf` and `mperf`
+        // are architectural on every x86 this tool targets -- but whether this
+        // process may read it, which is a driver and a permission rather than a
+        // cpu feature. Both of this catalog's `msr:` requirements read as
+        // `unverified` until this was written, and the resolver treats
+        // unverified as a reason to prefer a backend it could check.
+        if requirement.starts_with("msr:") {
+            return probe_msr(requirement);
+        }
+
         // A raw tracepoint is looked for in the kernel's own BTF rather than in
         // tracefs, because that is how this tool attaches to one: through
         // `BPF_RAW_TRACEPOINT_OPEN`, which takes a name and needs no tracefs.
@@ -658,6 +669,32 @@ fn sysfs_device_state(name: &str) -> Option<Probe> {
 /// The answer distinguishes "this cpu has no such counter" from "this machine
 /// will not let you read it", because one calls for different hardware and the
 /// other for `perf_event_paranoid`.
+/// Whether this process can read a model-specific register.
+///
+/// Three answers, and they send a reader to three different places: the `msr`
+/// module is not loaded (`modprobe msr`), the device is there and this user may
+/// not read it (root, or `CAP_SYS_RAWIO`), or it can be read. The register's
+/// own name is not checked against anything -- there is no enumeration of
+/// which MSRs a cpu implements, and reading an absent one answers zero rather
+/// than failing, which is exactly why a collector must never guess at one.
+fn probe_msr(requirement: &str) -> Probe {
+    let path = PathBuf::from("/dev/cpu/0/msr");
+    match access(&path) {
+        Access::Readable => Probe::Available,
+        Access::Restricted => Probe::Missing(format!(
+            "{} is present and not readable by uid {}: an MSR read needs root or \
+             CAP_SYS_RAWIO, which is more than this project asks for elsewhere",
+            path.display(),
+            current_uid()
+        )),
+        Access::Absent => Probe::Missing(format!(
+            "{} does not exist, so `{requirement}` cannot be read: the `msr` module is not \
+             loaded, or this is not an x86 machine",
+            path.display()
+        )),
+    }
+}
+
 fn probe_pmu(event: &str) -> Probe {
     // A PMU that is not the cpu's -- RAPL, the uncore, the memory controller --
     // counts for a whole package and refuses to be opened against a process.

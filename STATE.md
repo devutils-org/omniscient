@@ -180,7 +180,8 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
 | 9 — breadth | in progress; **81 of 100 sources, 89 of 202 backends**. The 19 without a collector are named below, and eight of them sit behind two named attach kinds. |
-| 10 — intelligence layer | not started. |
+| 10 — intelligence layer | not started. Now carries **the objective as a request parameter**: "limited by what" has no answer until someone says *limited for what*, because median latency, the tail, throughput and energy do not name the same culprit. |
+| 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
 
 ---
 
