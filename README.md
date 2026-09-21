@@ -29,7 +29,7 @@ make demo     # the guided tour: eight questions, against this machine
 make man      # the manual page
 ```
 
-`GUIDE.md` is where to go next: seventy-nine sessions, what each one shows, and
+`GUIDE.md` is where to go next: a hundred and seven sessions, what each one shows, and
 how to run one, a family, or all of them.
 
 ## The number no single source can give
@@ -97,10 +97,10 @@ SOURCE             MODES                 COST   DET     HERE  COLLECTOR  SUMMARY
 mem.rss            poll, snapshot        free   medium  yes   all        Resident footprint
 mem.heap.retained  poll, snapshot        low    high    yes   all        Fragmentation: retained but no longer live
 mem.bandwidth      count, poll           free   low     ?     none       DRAM throughput
-mem.reclaim        trace, count          low    medium  no    none       Direct reclaim
+mem.reclaim        trace, count          low    medium  yes   1 of 2     Direct reclaim
 
 23 sources: 22 usable here, 1 unverified, 0 out of reach on this machine.
-16 of them have a collector, covering 23 of their 45 backends.
+20 of them have a collector, covering 27 of their 45 backends.
 ```
 
 Three different questions, kept apart. **HERE** is what this machine offers,
@@ -145,7 +145,7 @@ joins:
     window: 60s
 ```
 
-YAML, JSON and TOML are all accepted. `GUIDE.md` explains the seventy-nine
+YAML, JSON and TOML are all accepted. `GUIDE.md` explains the hundred and seven
 sessions in `examples/` and what each one shows; `examples/README.md` is the
 index; `scripts/demo.sh <family>` runs one family's and `make demo-all` runs the
 lot.
@@ -204,13 +204,14 @@ them into perceived bugs.
 
 `STATE.md` has the measured numbers, where each roadmap phase stands, and what
 remains in the order it is worth doing. In short: the skeleton is finished and
-59 of 100 sources collect for real, over eight mechanisms: procfs and sysfs,
+81 of 100 sources collect for real, over eight mechanisms: procfs and sysfs,
 `perf_event_open` counting and sampling, netlink, an `LD_PRELOAD` shim, NVML
 through `dlopen`, `af_packet` with a `PACKET_MMAP` ring, and eBPF through raw
-tracepoints, classic tracepoints, kprobes and uprobes. 1040 tests pass, of which
-175 are scenarios: a workload whose property the scenario chose, a session that
-measures it, and a check against that property. They found 63 defects, none
-worked around, and `docs/scenarios/` records every one.
+tracepoints, classic tracepoints, kprobes and uprobes. All four join match kinds
+have a producer. 1367 tests pass, of which 217 are scenarios: a workload whose
+property the scenario chose, a session that measures it, and a check against
+that property. They found 63 defects, none worked around, and `docs/scenarios/`
+records every one.
 
 ## Documentation
 

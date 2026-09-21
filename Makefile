@@ -10,7 +10,7 @@
 #   make test       the full suite, after a build that has them
 #   make check      test, clippy and fmt, the way CI would
 #   make demo       the guided tour, against this machine (about seven seconds)
-#   make demo-all   the tour and then all 79 sessions (about ninety seconds)
+#   make demo-all   the tour and then all 107 sessions
 #   make man        the manual page
 #   make release    the same for an optimised build
 #

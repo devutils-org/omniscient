@@ -18,7 +18,7 @@ table below says which.
 | 3 | `wave-3-breadth.md` | what unlocks what | breadth, and the attach kinds; six streams appending to one findings file produced six conflicts on it |
 | 4 | `wave-4-scenarios.md` | family, with a file-name prefix as the lock | **the four scenario classes**, 175 scenarios, 63 defects; zero conflicts |
 | 5 | `wave-5-defects.md` | defect class | 52 of the 63 closed; `docs/fixes/` is its record |
-| 6 | `../../BRIEF.md` | family, plus one layer stream | in flight |
+| 6 | `wave-6-collectors.md` | family, plus one layer stream | 22 of 24 sources; `scoped_eq` got its first producer; finding 37 closed |
 
 The four scenario classes are in `wave-4-scenarios.md` and explained for a
 reader in `GUIDE.md`. They are: the capability sweep, the backend comparison,
@@ -38,3 +38,9 @@ beside the briefs themselves:
    worked, because the document *was* the deliverable.
 3. **Registries are append seams and belong per family.** A central `match` is
    one conflict per agent.
+
+And one the sixth wave added: **name the seam, or it gets discovered.** That
+wave's brief listed the shared eBPF files and omitted `src/bpf/mod.rs`, which is
+where a program registers its `mod` and its `pub use` — so five streams edited
+it. It cost nothing, because every edit was an append and four auto-merged, but
+that was luck rather than design. Finding 39 has it.

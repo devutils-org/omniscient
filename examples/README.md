@@ -1,7 +1,7 @@
 # Examples
 
-Seventy-nine sessions. Each is the same object a command line builds, written
-down, so a reader can run it and a test can run it identically.
+A hundred and seven sessions. Each is the same object a command line builds,
+written down, so a reader can run it and a test can run it identically.
 
 ```console
 omn -f examples/mem-footprints.yml    # one
@@ -58,6 +58,11 @@ about what writes the file.
 | `mem-retained-eviction.yml` | More freed ranges than the table can hold. |
 | `mem-rss-run.yml` | A runnable session: watch one program's resident memory while it runs. |
 | `mem-working-set.yml` | How much of what it holds does a program actually use? |
+| `mem-allocator-ledger.yml` | The kernel's own ledger: what the page and slab allocators handed out. |
+| `mem-compaction-watch.yml` | Compaction: what a machine pays for contiguity when its memory is scattered. |
+| `mem-kernel-storm.yml` | The loss path: a kernel-side histogram driven past what it can hold. |
+| `mem-kernel-sweep.yml` | Every shape the four kernel-side `mem` sources can produce, over one window. |
+| `mem-reclaim-squeeze.yml` | Direct reclaim: the kernel doing the allocator's work inside the allocating thread. |
 
 ## io
 
@@ -69,6 +74,12 @@ about what writes the file.
 | `io-per-process.yml` | Which of these bytes were mine? -- and why this build says it cannot tell. |
 | `io-pressure.yml` | Is the disk the bottleneck, or is it merely busy? |
 | `io-substituted-counters.yml` | Counters that lie, and what the tool does about it. |
+| `io-device-latency.yml` | Which device was slow, and how slow -- as a distribution, never as a mean. |
+| `io-known-requests.yml` | How many requests, and how big? -- checked against a number chosen in advance. |
+| `io-my-own-reads.yml` | What did *this program* make the device do? |
+| `io-request-halves.yml` | Where did a block request spend its time -- queueing, or on the device? |
+| `io-ring-overflow.yml` | Driving the block tracer until it loses events, on purpose. |
+| `io-writeback-rounds.yml` | The half of a write nobody is waiting for. |
 
 ## net
 
@@ -84,6 +95,13 @@ about what writes the file.
 | `net-not-built.yml` | Valid, and not built. Exit 3, which is not exit 1. |
 | `net-snapshot.yml` | The `snapshot` leg of the sweep: one read, now. |
 | `net-two-mechanisms.yml` | Two roads to the same traffic, and they have to meet. |
+| `net-bpf-sweep.yml` | Does every axis the five eBPF `net` sources declare actually work? |
+| `net-closed-port.yml` | Why did the machine throw that packet away? |
+| `net-connection-life.yml` | How long did that connection live, and what crossed it? |
+| `net-drop-storm.yml` | What happens when the machine loses packets faster than this can read them? |
+| `net-queue-delay.yml` | How long did that packet wait to leave? |
+| `net-retransmissions.yml` | Did this path lose anything, and did the stack notice? |
+| `net-softirq-cost.yml` | Where did the cpu go while nothing was running? |
 
 ## sched
 
@@ -98,6 +116,11 @@ about what writes the file.
 | `sched-sweep.yml` | Every axis the catalog offers this family, exercised once. |
 | `sched-wakeup-loss.yml` | Drive the wakeup ring past what it can hold, and check the tool says so. |
 | `sched-wakeup.yml` | Who unblocks whom. |
+| `sched-futex-known-wait.yml` | A lock held for a known time, and the thread that waited for it. |
+| `sched-irq-against-procfs.yml` | How much of this machine goes to interrupt handlers, and to which devices? |
+| `sched-lock-shared-file.yml` | What does sharing one file cost, in kernel lock contention? |
+| `sched-numa-balance.yml` | The balancer giving up on a task, on a machine that has two places to put it. |
+| `sched-sweep-machine.yml` | Every axis the catalog offers this family's machine-wide sources. |
 
 ## power
 
@@ -133,6 +156,11 @@ about what writes the file.
 | `proc-not-built.yml` | The four `proc` sources this build does not implement yet. |
 | `proc-one-reading.yml` | What is this process holding, right now? |
 | `proc-sweep.yml` | Does every axis these two sources declare actually work? |
+| `proc-bpf-sweep.yml` | Does every axis the four event sources declare actually work? |
+| `proc-lifecycle.yml` | What ran on this machine, and what became of it? |
+| `proc-signal-storm.yml` | When the ring overflows, does the tool say so -- and by how much? |
+| `proc-syscall-sweep.yml` | Does every axis `proc.syscall` declares actually work? |
+| `proc-syscall.yml` | How long did this program spend inside the kernel, and in which calls? |
 
 ## runtime
 
