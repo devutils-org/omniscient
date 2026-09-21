@@ -17,8 +17,12 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+use omn::catalog::Unit;
+use omn::collect::Losses;
+use omn::emit::{self, Bucket, BucketLayout, Results, SeriesHist, SeriesSummary, Shortfall};
 use omn::encode::{self, RunOutput};
 use omn::format::OutputFormat;
+use omn::request::EmitKind;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 const MIB: f64 = 1024.0 * 1024.0;
@@ -896,6 +900,276 @@ fn the_two_new_formats_refuse_the_emits_they_cannot_express() {
         assert!(
             message.contains("cannot carry") && message.contains(emit),
             "the refusal does not name the emit: {message}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The distribution that says it is short, in every format that carries one.
+//
+// Finding 37: a `hist` or a `summary` built from a run that dropped events or
+// was throttled renders exactly like one built from a complete run, and the
+// events it is missing are the slow ones. The mark that says so is carried on
+// the series rather than on the run, so it arrives beside the value in every
+// format at once -- and these are the tests that hold every one of those
+// formats to it, and hold a clean run to gaining nothing.
+// ---------------------------------------------------------------------------
+
+/// Every format whose matrix entry says it can carry a distribution.
+///
+/// Read off `supports_emit` rather than written down here, so a format added
+/// tomorrow is checked tomorrow. The other four -- `folded`, `speedscope`,
+/// `pprof` and `chrome` -- refuse `hist` and `summary` outright, which is the
+/// "or say it cannot" half and is checked by
+/// `a_format_that_cannot_carry_a_distribution_refuses_it_rather_than_marking_it`.
+fn formats_carrying_a_distribution() -> Vec<OutputFormat> {
+    OutputFormat::ALL
+        .into_iter()
+        .filter(|format| {
+            format.supports_emit(EmitKind::Hist) && format.supports_emit(EmitKind::Summary)
+        })
+        .collect()
+}
+
+/// A run of `mem.heap.alloc` over a hundred 2 MiB blocks and two of 64 MiB,
+/// as a `hist` and a `summary`, with whatever losses the caller chose.
+///
+/// The distribution is the one `tests/aggregation.rs` measures for real. What
+/// is substituted here is the *loss*, which is the thing under test: a ring
+/// that drops is a property of a machine under pressure and not of a workload,
+/// so it is set rather than provoked -- the same substitution the `io`
+/// scenarios make with a `/proc/diskstats` of their own writing.
+fn distribution(losses: Losses) -> Results {
+    let records = 102;
+    let short = Shortfall::of(&losses, records, false);
+    let sum = 100.0 * 2.0 * MIB + 2.0 * 64.0 * MIB;
+    Results {
+        label: "alloc".into(),
+        source: "mem.heap.alloc".into(),
+        unit: Unit::Bytes,
+        backend: "preload:shim".into(),
+        outputs: vec![
+            emit::Output::Hist {
+                layout: BucketLayout::Log2,
+                series: vec![SeriesHist {
+                    key: "task:7".into(),
+                    count: records as usize,
+                    min: 2.0 * MIB,
+                    max: 64.0 * MIB,
+                    sum,
+                    short: short.clone(),
+                    buckets: vec![
+                        Bucket {
+                            low: 2 * 1024 * 1024,
+                            high: Some(4 * 1024 * 1024),
+                            count: 100,
+                        },
+                        Bucket {
+                            low: 64 * 1024 * 1024,
+                            high: Some(128 * 1024 * 1024),
+                            count: 2,
+                        },
+                    ],
+                    unbucketable: 0,
+                }],
+            },
+            emit::Output::Summary {
+                series: vec![SeriesSummary {
+                    key: "task:7".into(),
+                    count: records as usize,
+                    min: 2.0 * MIB,
+                    max: 64.0 * MIB,
+                    mean: sum / records as f64,
+                    last: 64.0 * MIB,
+                    short,
+                }],
+            },
+        ],
+        events_seen: records as usize,
+        observed_ns: 250_000_000,
+        stopped_because: "the program exited".into(),
+        losses,
+        filtered: None,
+        unverified: Vec::new(),
+        degradations: Vec::new(),
+        stacks: BTreeMap::new(),
+    }
+}
+
+fn dropping(dropped: u64) -> Losses {
+    Losses {
+        dropped,
+        ..Default::default()
+    }
+}
+
+/// The mark reaches a reader in every format that can carry a distribution,
+/// and says the same three things in each: how short, which way the bias runs,
+/// and that the numbers are bounds rather than estimates.
+///
+/// Thirty-four of a hundred and thirty-six records never arrived, which is a
+/// quarter of the run. The fraction is the one this test chose; what is under
+/// test is that it survives the encoder.
+#[test]
+fn every_format_that_carries_a_distribution_says_when_it_is_short() {
+    let results = distribution(dropping(34));
+    for format in formats_carrying_a_distribution() {
+        let encoded =
+            encode::results(format, &results).unwrap_or_else(|error| panic!("{format}: {error}"));
+        assert!(
+            encoded.contains("25.0 %"),
+            "`{format}` drops the fraction that is missing:\n{encoded}"
+        );
+        assert!(
+            encoded.contains("lower bound"),
+            "`{format}` drops the direction of the bias:\n{encoded}"
+        );
+    }
+}
+
+/// The structured formats carry it as data on the series itself, not as a
+/// sentence several fields away from the numbers it is about.
+///
+/// That is the whole of finding 37: the loss counters were always there and
+/// always correct, and a reader taking a p99 off a result file had them
+/// nowhere near the number. A consumer reading one histogram out of this
+/// document has the shortfall inside it.
+#[test]
+fn a_structured_distribution_carries_the_shortfall_inside_the_series() {
+    let results = distribution(dropping(34));
+
+    let document: serde_json::Value =
+        serde_json::from_str(&encode::results(OutputFormat::Json, &results).expect("JSON"))
+            .expect("valid JSON");
+    let short = &document["outputs"][0]["series"][0]["short"];
+    assert_eq!(short["dropped"], 34);
+    assert_eq!(short["records"], 102);
+    assert_eq!(short["fraction"], 0.25);
+    assert_eq!(&document["outputs"][1]["series"][0]["short"], short);
+
+    // And it round-trips: a result file read back is the run it was written
+    // from, shortfall included.
+    let decoded: Results =
+        serde_json::from_str(&encode::results(OutputFormat::Json, &results).expect("JSON"))
+            .expect("results read back");
+    assert_eq!(decoded, results);
+
+    // ndjson is a record per series, and each record carries its own.
+    let stream = encode::results(OutputFormat::Ndjson, &results).expect("ndjson");
+    for line in stream.lines() {
+        let record: serde_json::Value = serde_json::from_str(line).expect("a JSON document");
+        if record["record"] == "hist" || record["record"] == "summary" {
+            assert_eq!(
+                record["short"]["fraction"], 0.25,
+                "a consumer reading this line alone has to see it: {line}"
+            );
+        }
+    }
+
+    // YAML and TOML are the two that re-read as session files, and TOML is the
+    // one where a table declared after an array of tables lands inside the
+    // last element of it instead of beside them.
+    let toml_text = encode::results(OutputFormat::Toml, &results).expect("TOML");
+    let toml_value: toml::Value = toml::from_str(&toml_text).expect("valid TOML");
+    let series = &toml_value["outputs"][0]["series"][0];
+    assert!(
+        series.get("short").is_some(),
+        "the shortfall is on the series and not inside a bucket:\n{toml_text}"
+    );
+    assert_eq!(series["short"]["dropped"].as_integer(), Some(34));
+}
+
+/// The text output marks the numbers a loss pulls downwards and leaves the one
+/// it does not alone.
+///
+/// `n`, `mean` and `max` are lower bounds; `min` is not. The events a lossy
+/// run is missing are the slow ones, so the smallest value measured is the one
+/// statistic the loss does not move, and marking it would be claiming a bias
+/// that does not exist.
+#[test]
+fn the_text_output_marks_the_values_a_loss_makes_lower_bounds() {
+    let text = encode::results(OutputFormat::Text, &distribution(dropping(34))).expect("text");
+    for marked in ["n>=102", "mean >=", "max >="] {
+        assert!(
+            text.contains(marked),
+            "`{marked}` is not beside the value it qualifies:\n{text}"
+        );
+    }
+    assert!(
+        !text.contains("min >="),
+        "the minimum of a lossy run is not a lower bound: the missing values are the large \
+         ones\n{text}"
+    );
+    assert!(
+        text.contains(">= short by at least 34 of 136 events"),
+        "the mark needs its sentence within sight of it:\n{text}"
+    );
+}
+
+/// A clean run gains nothing, in any format. Not a field, not a mark, not a
+/// character.
+///
+/// The negative matters as much as the mark. A mark on every run is a mark
+/// readers learn to skip, and the run that needed it is then the one nobody
+/// reads it on. The comparison is against the byte-for-byte output of the same
+/// results with no losses, so a stray space would fail this.
+#[test]
+fn a_clean_run_gains_nothing_in_any_format() {
+    let clean = distribution(Losses::default());
+    for format in formats_carrying_a_distribution() {
+        let encoded =
+            encode::results(format, &clean).unwrap_or_else(|error| panic!("{format}: {error}"));
+        assert!(
+            !encoded.contains("short"),
+            "`{format}` marks a run that lost nothing:\n{encoded}"
+        );
+        assert!(
+            !encoded.contains(">="),
+            "`{format}` bounds a value it measured exactly:\n{encoded}"
+        );
+    }
+
+    // And the three losses that do not bias a distribution are losses all the
+    // same: the loss line prints them, and the distribution is not marked.
+    let polled = Losses {
+        late_ticks: 40,
+        failed_reads: 7,
+        undecoded: 3,
+        ..Default::default()
+    };
+    let text = encode::results(OutputFormat::Text, &distribution(polled)).expect("text");
+    assert!(
+        text.contains("LOSS: 0 dropped, 7 failed reads, 40 late ticks"),
+        "the loss line is unchanged and still prints all five:\n{text}"
+    );
+    assert!(
+        !text.contains(">="),
+        "a late tick does not shorten a tail:\n{text}"
+    );
+}
+
+/// A format that cannot carry a distribution refuses the emit rather than
+/// writing one it cannot mark.
+///
+/// `format.rs` declares what each format can hold and a test crosses the claim
+/// against reality, because a merge once reverted an encoder and left the
+/// claim behind. This is the same crossing for the mark: every format that
+/// accepts `hist` was checked above, and every format that does not has to
+/// refuse it here, naming what it does carry. There is no third answer where a
+/// distribution is written without its shortfall.
+#[test]
+fn a_format_that_cannot_carry_a_distribution_refuses_it_rather_than_marking_it() {
+    let results = distribution(dropping(34));
+    for format in OutputFormat::ALL {
+        if format.supports_emit(EmitKind::Hist) {
+            continue;
+        }
+        let refusal = encode::results(format, &results)
+            .expect_err(&format!("`{format}` cannot hold a histogram"));
+        let message = refusal.message();
+        assert!(
+            message.contains("stack") || message.contains("timeline"),
+            "`{format}` has to say what it does carry: {refusal}"
         );
     }
 }

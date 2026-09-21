@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -267,6 +268,160 @@ pub struct Point {
     pub value: f64,
 }
 
+/// What a distribution built from a lossy run is missing, and which way that
+/// biases it.
+///
+/// A histogram of a run that dropped events renders exactly like a histogram
+/// of a complete one, and the events it is missing are **the slow ones**:
+/// whatever stalled the machine is what stopped the measuring. So a percentile
+/// taken off it is a lower bound and not an estimate, and nothing in the
+/// numbers themselves says so -- the loss line is printed, and is correct, and
+/// is several lines away and phrased as a count of events rather than as a
+/// statement about the shape.
+///
+/// This is that statement, carried on every series the bias reaches so that it
+/// arrives beside the value rather than above it. It is derived and adds no
+/// counter: `dropped` and `throttled` are the two of the five counted losses
+/// that bias a distribution, and both were already counted.
+///
+/// Two of the five are deliberately not here. `late_ticks` and `failed_reads`
+/// belong to `poll`, and `poll` cannot produce `hist` at all -- `CATALOG.md`
+/// §12 refuses it, because a histogram of a polled gauge is a histogram of
+/// when the poller happened to look, which is the same argument under another
+/// name. `undecoded` is a record shape this build does not parse, and there is
+/// no reason to think the shapes it cannot parse are the slow ones.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shortfall {
+    /// Records the ring reported losing. A count, so it yields a fraction.
+    pub dropped: u64,
+    /// Windows in which the kernel declined to deliver, which is not a count
+    /// of events: how many happened inside one is not recorded anywhere, and
+    /// `DECISIONS.md` chose to say so rather than to estimate it.
+    pub throttled: u64,
+    /// Records the distribution was actually built from. Run-wide, like the
+    /// losses it is weighed against: a ring drops without regard to which
+    /// series the record would have joined, so splitting the fraction per
+    /// series would be attributing the drops to one.
+    pub records: u64,
+    /// `dropped / (dropped + records)`. Absent when nothing was dropped, which
+    /// is the throttled case: a fraction there would be an invention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fraction: Option<f64>,
+    /// Whether a record here stood for more than one measurement, which makes
+    /// the fraction a fraction of *records* and not of the distribution.
+    ///
+    /// This is the line between [`WEIGHT_ATTR`] and a loss, and the two must
+    /// never be conflated: a bucket weighted four hundred is complete, and a
+    /// run that dropped four hundred records is not. When rows are weighted
+    /// both are true at once and the second number is unknowable -- the
+    /// dropped rows carried weights nobody up here ever saw.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_record: bool,
+    /// The whole statement, in one sentence, so that a consumer of the
+    /// structured output has it without deriving it from the fields above.
+    pub note: String,
+}
+
+impl Shortfall {
+    /// What goes beside a value this shortfall makes a lower bound.
+    ///
+    /// One token, and it is an inequality rather than a symbol a reader has to
+    /// look up: the number printed after it is the smallest the measurement
+    /// could have been, and the true one is somewhere above.
+    pub const MARK: &'static str = ">=";
+
+    /// The shortfall of a run, or nothing when the run lost nothing that
+    /// biases a distribution.
+    ///
+    /// A clean run gains nothing at all: no field, no mark, no line. That is
+    /// not a convenience -- a mark that appears on every run is a mark readers
+    /// learn to skip, and then the one run that needed it is the one nobody
+    /// reads it on.
+    pub fn of(losses: &Losses, records: u64, per_record: bool) -> Option<Self> {
+        if losses.dropped == 0 && losses.throttled == 0 {
+            return None;
+        }
+        let fraction =
+            (losses.dropped > 0).then(|| losses.dropped as f64 / (losses.dropped + records) as f64);
+        let note = Self::describe(
+            losses.dropped,
+            losses.throttled,
+            records,
+            fraction,
+            per_record,
+        );
+        Some(Self {
+            dropped: losses.dropped,
+            throttled: losses.throttled,
+            records,
+            fraction,
+            per_record,
+            note,
+        })
+    }
+
+    fn describe(
+        dropped: u64,
+        throttled: u64,
+        records: u64,
+        fraction: Option<f64>,
+        per_record: bool,
+    ) -> String {
+        let thing = if per_record { "rows" } else { "events" };
+        let mut note = String::new();
+
+        if let Some(fraction) = fraction {
+            let _ = write!(
+                note,
+                "short by at least {dropped} of {} {thing} ({:.1} % unaccounted for)",
+                dropped + records,
+                fraction * 100.0,
+            );
+        } else {
+            let _ = write!(note, "short by an unknown number of {thing}");
+        }
+
+        if throttled > 0 {
+            let times = if throttled == 1 { "once" } else { "times" };
+            let count = if throttled == 1 {
+                String::new()
+            } else {
+                format!("{throttled} ")
+            };
+            let and_by = if fraction.is_some() {
+                ", and by an unknown number more"
+            } else {
+                ""
+            };
+            let _ = write!(
+                note,
+                "{and_by}: the kernel throttled this event {count}{times} and how many events \
+                 happened inside those windows is not recorded anywhere"
+            );
+        } else {
+            let _ = write!(note, ": the ring had nowhere to put them");
+        }
+
+        if per_record {
+            let _ = write!(
+                note,
+                ". Each row stands for more than one measurement, so the fraction is of the \
+                 rows this backend handed up and not of the distribution: what the dropped rows \
+                 weighed is not knowable up here"
+            );
+        }
+
+        let _ = write!(
+            note,
+            ". What stalls a machine is what stops the measuring, so the {thing} it is missing \
+             are the slow ones, and every count, mean and maximum marked `{}` is a lower bound \
+             rather than an estimate",
+            Self::MARK
+        );
+        note
+    }
+}
+
 /// One key's values reduced to the shape of the whole run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesSummary {
@@ -276,6 +431,16 @@ pub struct SeriesSummary {
     pub max: f64,
     pub mean: f64,
     pub last: f64,
+    /// What this run lost, when it lost something that biases the shape.
+    ///
+    /// Beside the numbers rather than above them: `count`, `mean` and `max`
+    /// are lower bounds when it is present, and a reader taking one of them
+    /// off a result file has it in the same object. `min` and `last` are not
+    /// marked -- the events a lossy run is missing are the slow ones, so the
+    /// smallest value measured is the one part of the shape the loss does not
+    /// pull.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<Shortfall>,
 }
 
 /// One key's total, which is what `topk` ranks on.
@@ -431,6 +596,16 @@ pub struct SeriesHist {
     pub min: f64,
     pub max: f64,
     pub sum: f64,
+    /// What this run lost, when it lost something that biases the shape. See
+    /// [`SeriesSummary::short`]; every bucket count here is a lower bound too,
+    /// and the tail is the part that is short.
+    ///
+    /// Declared before `buckets` on purpose. TOML writes a table after the
+    /// scalars and an array of tables after that, so a table declared behind
+    /// `buckets` would be serialized into the last bucket instead of the
+    /// series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<Shortfall>,
     pub buckets: Vec<Bucket>,
     /// Values no bucket can hold: negative, or not a number. There is no bucket
     /// below zero and inventing one would put a value in a range it is not in,
@@ -483,6 +658,20 @@ pub fn aggregate(
     let mut degradations = resolved.degradations.clone();
     degradations.extend(collection.notes.iter().cloned());
 
+    // One shortfall for the run, not one per series: a ring drops without
+    // regard to which series the record would have joined, so a fraction
+    // computed per series would be attributing every drop to each of them.
+    //
+    // `per_record` is the guard between a weight and a loss. A row that stands
+    // for many measurements makes the fraction a fraction of rows, because
+    // what the dropped rows would have weighed is a number nobody up here ever
+    // saw -- see [`Shortfall::per_record`], and findings 17 and 18.
+    let short = Shortfall::of(
+        &collection.losses,
+        collection.events.len() as u64,
+        per_record(&collection.events),
+    );
+
     let mut outputs = Vec::new();
     for emit in &request.emit {
         outputs.push(match emit {
@@ -493,7 +682,7 @@ pub fn aggregate(
                 series: timeline(&collection.events, first_ts_ns, value_attr)?,
             },
             Emit::Summary => Output::Summary {
-                series: summary(&collection.events, value_attr)?,
+                series: summary(&collection.events, value_attr, short.as_ref())?,
             },
             Emit::Rate => Output::Rate {
                 series: rate(&collection.events, collection.observed_ns, value_attr)?,
@@ -502,7 +691,7 @@ pub fn aggregate(
                 let layout = BucketLayout::from(*scale);
                 Output::Hist {
                     layout,
-                    series: hist(&collection.events, value_attr, layout)?,
+                    series: hist(&collection.events, value_attr, layout, short.as_ref())?,
                 }
             }
             Emit::TopK(k) => topk(&collection.events, value_attr, *k)?,
@@ -605,7 +794,11 @@ fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>,
     Ok(rates)
 }
 
-fn summary(events: &[Event], attr: &str) -> Result<Vec<SeriesSummary>, EmitError> {
+fn summary(
+    events: &[Event],
+    attr: &str,
+    short: Option<&Shortfall>,
+) -> Result<Vec<SeriesSummary>, EmitError> {
     let mut summaries = Vec::new();
     for (key, events) in grouped(events) {
         let values: Vec<(f64, f64)> = events
@@ -642,12 +835,18 @@ fn summary(events: &[Event], attr: &str) -> Result<Vec<SeriesSummary>, EmitError
             max,
             mean,
             last,
+            short: short.cloned(),
         });
     }
     Ok(summaries)
 }
 
-fn hist(events: &[Event], attr: &str, layout: BucketLayout) -> Result<Vec<SeriesHist>, EmitError> {
+fn hist(
+    events: &[Event],
+    attr: &str,
+    layout: BucketLayout,
+    short: Option<&Shortfall>,
+) -> Result<Vec<SeriesHist>, EmitError> {
     if layout == (BucketLayout::Linear { width: 0 }) {
         return Err(EmitError::ZeroBucketWidth);
     }
@@ -684,6 +883,7 @@ fn hist(events: &[Event], attr: &str, layout: BucketLayout) -> Result<Vec<Series
             min: if count == 0 { 0.0 } else { min },
             max: if count == 0 { 0.0 } else { max },
             sum,
+            short: short.cloned(),
             buckets: buckets(&counts, layout),
             unbucketable,
         });
@@ -802,6 +1002,19 @@ fn stack(events: &[Event], attr: &str) -> Result<Output, EmitError> {
         stacks,
         unattributed,
     })
+}
+
+/// Whether a row in this run stands for more than one measurement.
+///
+/// True for a backend that aggregated before the events reached here: a
+/// weighted bucket from a BPF map, or a row whose value is a total over a
+/// drain window. It is what turns a fraction of dropped records into a
+/// statement about records rather than about the distribution -- see
+/// [`Shortfall::per_record`].
+fn per_record(events: &[Event]) -> bool {
+    events
+        .iter()
+        .any(|event| weight_of(event) > 1.0 || total_of(event).is_some())
 }
 
 /// How many measurements an event stands for.
@@ -957,7 +1170,7 @@ mod tests {
         let events = vec![weighted(8, 400), weighted(16, 100), weighted(64, 1)];
         let weighted_sum = 8.0 * 400.0 + 16.0 * 100.0 + 64.0;
 
-        let hists = hist(&events, "bytes", BucketLayout::Log2).expect("a histogram");
+        let hists = hist(&events, "bytes", BucketLayout::Log2, None).expect("a histogram");
         assert_eq!(hists.len(), 1);
         assert_eq!(
             hists[0].count, 501,
@@ -974,7 +1187,7 @@ mod tests {
             "the heaviest bucket holds the four hundred, not one row"
         );
 
-        let summaries = summary(&events, "bytes").expect("a summary");
+        let summaries = summary(&events, "bytes", None).expect("a summary");
         assert_eq!(summaries[0].count, 501);
         assert!(
             (summaries[0].mean - weighted_sum / 501.0).abs() < 1e-9,
@@ -1000,7 +1213,10 @@ mod tests {
     #[test]
     fn an_event_without_a_weight_is_one_measurement() {
         let events = vec![event(0, 7, 10), event(1, 7, 20)];
-        assert_eq!(summary(&events, "bytes").expect("a summary")[0].count, 2);
+        assert_eq!(
+            summary(&events, "bytes", None).expect("a summary")[0].count,
+            2
+        );
 
         // And a weight that cannot be one is ignored rather than obeyed: zero
         // would delete the row from every total, which is a worse answer than
@@ -1010,7 +1226,10 @@ mod tests {
         let mut negative = event(1, 7, 20);
         negative.attrs.push(Attr::int(WEIGHT_ATTR, -5));
         let events = vec![zero, negative];
-        assert_eq!(summary(&events, "bytes").expect("a summary")[0].count, 2);
+        assert_eq!(
+            summary(&events, "bytes", None).expect("a summary")[0].count,
+            2
+        );
     }
 
     /// A row whose value is a *sum* over its measurements says so, and the two
@@ -1057,7 +1276,7 @@ mod tests {
         // hundred times too high.
         let mut weighted = event(0, 7, 8_000_000);
         weighted.attrs.push(Attr::uint(WEIGHT_ATTR, 400));
-        let hists = hist(&[weighted], "bytes", BucketLayout::Log2).expect("a histogram");
+        let hists = hist(&[weighted], "bytes", BucketLayout::Log2, None).expect("a histogram");
         assert_eq!(hists[0].count, 400, "the count would be right");
         assert_eq!(
             hists[0].buckets.len(),
@@ -1069,6 +1288,225 @@ mod tests {
             "which is the bucket of their sum, not of any block: {:?}",
             hists[0].buckets[0]
         );
+    }
+
+    fn lost(dropped: u64, throttled: u64) -> Losses {
+        Losses {
+            dropped,
+            throttled,
+            ..Default::default()
+        }
+    }
+
+    /// A clean run gains nothing: not a field, not a mark, not a character.
+    ///
+    /// This is the half of finding 37 that is as important as the mark itself.
+    /// A mark that appears on every run is one readers learn to skip, and then
+    /// the run that needed it is the one nobody reads it on.
+    ///
+    /// The three losses that are *not* a reason to mark are checked here too,
+    /// and each for its own reason. `late_ticks` and `failed_reads` belong to
+    /// `poll`, and `poll` cannot produce `hist` at all -- `CATALOG.md` §12
+    /// refuses it because a histogram of a polled gauge is a histogram of when
+    /// the poller looked, which is the coordinated-omission argument under
+    /// another name. `undecoded` is a record shape this build cannot parse,
+    /// and nothing suggests the shapes it cannot parse are the slow ones.
+    #[test]
+    fn a_run_that_lost_nothing_that_biases_a_distribution_is_not_marked() {
+        assert_eq!(Shortfall::of(&Losses::default(), 1_000, false), None);
+
+        let unbiasing = Losses {
+            late_ticks: 40,
+            failed_reads: 7,
+            undecoded: 3,
+            ..Default::default()
+        };
+        assert!(
+            !unbiasing.is_clean(),
+            "these are losses, and the loss line still prints them"
+        );
+        assert_eq!(
+            Shortfall::of(&unbiasing, 1_000, false),
+            None,
+            "a late tick does not shorten a tail: a polled gauge has no histogram to shorten"
+        );
+
+        let events = vec![event(0, 7, 10), event(1, 7, 20)];
+        let histograms = hist(&events, "bytes", BucketLayout::Log2, None).expect("a histogram");
+        assert_eq!(histograms[0].short, None);
+        let summaries = summary(&events, "bytes", None).expect("a summary");
+        assert_eq!(summaries[0].short, None);
+    }
+
+    /// A run that dropped events says by how much it is short, and says that
+    /// the numbers built on it are lower bounds rather than estimates.
+    ///
+    /// The fraction is the one this test chose -- three hundred of a thousand
+    /// records never arrived -- and not a number the emit layer derived from
+    /// itself. The direction is not a choice: whatever stalled the machine is
+    /// what stopped the measuring, so the records a ring drops are the ones
+    /// from the busiest moments.
+    #[test]
+    fn a_run_that_dropped_records_says_what_fraction_of_them_is_missing() {
+        let short = Shortfall::of(&lost(300, 0), 700, false).expect("a dropped run is short");
+        assert_eq!(
+            (short.dropped, short.throttled, short.records),
+            (300, 0, 700)
+        );
+        assert_eq!(
+            short.fraction,
+            Some(0.3),
+            "three hundred of the thousand records that existed"
+        );
+        assert!(!short.per_record);
+        assert!(
+            short.note.contains("at least 300 of 1000 events")
+                && short.note.contains("30.0 %")
+                && short.note.contains("lower bound"),
+            "{}",
+            short.note
+        );
+        assert!(
+            !short.note.contains("throttled"),
+            "nothing was throttled, and naming a loss that did not happen is the defect \
+             the loss headline was fixed for: {}",
+            short.note
+        );
+    }
+
+    /// The throttled case, where the honest answer is that the number is not
+    /// knowable -- which is the answer `DECISIONS.md` already chose for the
+    /// loss line.
+    ///
+    /// A throttle is the kernel declining to deliver for a while. How many
+    /// events happened inside that while is recorded nowhere, so there is no
+    /// numerator and any fraction printed here would be an invention. The
+    /// distribution is still short and still a lower bound, and that much is
+    /// said.
+    #[test]
+    fn a_throttled_run_says_it_cannot_tell_how_much_it_lost() {
+        let short = Shortfall::of(&lost(0, 4), 700, false).expect("a throttled run is short");
+        assert_eq!(short.fraction, None, "no fraction exists to report");
+        assert!(
+            short.note.contains("unknown number of events")
+                && short.note.contains("throttled this event 4 times")
+                && short.note.contains("not recorded anywhere")
+                && short.note.contains("lower bound"),
+            "{}",
+            short.note
+        );
+        assert!(
+            !short.note.contains('%'),
+            "a percentage here would be invented: {}",
+            short.note
+        );
+
+        // One throttle reads as one throttle, not as "1 times".
+        let once = Shortfall::of(&lost(0, 1), 700, false).expect("a throttled run is short");
+        assert!(
+            once.note.contains("throttled this event once"),
+            "{}",
+            once.note
+        );
+    }
+
+    /// Both at once: what is known is given as a fraction, and what is not is
+    /// named as unknown rather than folded into it.
+    #[test]
+    fn a_run_that_both_dropped_and_was_throttled_keeps_the_two_apart() {
+        let short = Shortfall::of(&lost(300, 4), 700, false).expect("short both ways");
+        assert_eq!(short.fraction, Some(0.3));
+        assert!(
+            short.note.contains("at least 300 of 1000 events")
+                && short.note.contains("and by an unknown number more"),
+            "the fraction is a floor and the note has to say the floor is not the total: {}",
+            short.note
+        );
+    }
+
+    /// A weighted bucket and a lossy run are different facts, and conflating
+    /// them is the one way this mark could make the output worse.
+    ///
+    /// `sched.runqlat` hands up `(task, bucket) -> count`: a row weighted four
+    /// hundred stands for four hundred waits and is **complete**. A run that
+    /// dropped four hundred rows is not. When both are true the fraction that
+    /// is knowable is a fraction of *rows*, because what the dropped rows
+    /// weighed is a number nobody up here ever saw -- so the note says rows,
+    /// and does not claim a fraction of the distribution. Findings 17 and 18.
+    #[test]
+    fn a_weighted_row_is_complete_and_a_dropped_one_is_not() {
+        let weighted = |value: u64, weight: u64| {
+            let mut event = event(0, 7, value);
+            event.attrs.push(Attr::uint(WEIGHT_ATTR, weight));
+            event
+        };
+        let rows = vec![weighted(8, 400), weighted(16, 100), weighted(64, 1)];
+        assert!(per_record(&rows), "these rows stand for more than one each");
+
+        // Complete on its own: weighing is not losing, and a run that lost
+        // nothing is not marked however heavily its rows are weighted.
+        assert_eq!(
+            Shortfall::of(&Losses::default(), rows.len() as u64, true),
+            None
+        );
+        let whole = hist(&rows, "bytes", BucketLayout::Log2, None).expect("a histogram");
+        assert_eq!(
+            whole[0].count, 501,
+            "five hundred and one measurements, all of them here"
+        );
+
+        // And with a loss on top, the fraction is of rows and says so.
+        let short = Shortfall::of(&lost(1, 0), rows.len() as u64, true).expect("a dropped row");
+        assert!(short.per_record);
+        assert!(
+            short.note.contains("at least 1 of 4 rows")
+                && short.note.contains("not of the distribution"),
+            "one row of four is 25 % of the rows and an unknown share of the waits: {}",
+            short.note
+        );
+        assert!(
+            !short.note.contains("of the 4 measurements"),
+            "the measurements behind the dropped row were never counted: {}",
+            short.note
+        );
+
+        // An unweighted run of the same shape counts events, because there a
+        // record is a measurement.
+        let plain = vec![event(0, 7, 8), event(0, 7, 16)];
+        assert!(!per_record(&plain));
+        let short = Shortfall::of(&lost(2, 0), plain.len() as u64, false).expect("a dropped event");
+        assert!(
+            short.note.contains("at least 2 of 4 events"),
+            "{}",
+            short.note
+        );
+    }
+
+    /// The shortfall reaches every series of the two emits it biases, and none
+    /// of the ones it does not.
+    ///
+    /// Every series, because a ring drops without regard to which series the
+    /// record would have joined: a run with four devices lost events from some
+    /// unknown mixture of them, so marking one and not the others would be a
+    /// claim about where the drops fell. `min` is left unmarked in the text
+    /// for the opposite reason -- the missing values are the large ones, so
+    /// the smallest measured is the one statistic the loss does not pull.
+    #[test]
+    fn the_mark_reaches_every_series_of_a_lossy_run() {
+        let short = Shortfall::of(&lost(10, 0), 90, false).expect("a dropped run is short");
+        let events = vec![event(0, 1, 10), event(0, 2, 30), event(1, 1, 20)];
+
+        let histograms = hist(&events, "bytes", BucketLayout::Log2, Some(&short)).unwrap();
+        assert_eq!(histograms.len(), 2);
+        for series in &histograms {
+            assert_eq!(series.short.as_ref(), Some(&short), "{}", series.key);
+        }
+
+        let summaries = summary(&events, "bytes", Some(&short)).unwrap();
+        assert_eq!(summaries.len(), 2);
+        for series in &summaries {
+            assert_eq!(series.short.as_ref(), Some(&short), "{}", series.key);
+        }
     }
 
     #[test]
@@ -1084,7 +1522,7 @@ mod tests {
     #[test]
     fn two_targets_stay_two_series_rather_than_one_average() {
         let events = vec![event(0, 1, 10), event(0, 2, 30), event(1, 1, 20)];
-        let summaries = summary(&events, "bytes").unwrap();
+        let summaries = summary(&events, "bytes", None).unwrap();
         assert_eq!(summaries.len(), 2);
         let first = summaries.iter().find(|s| s.key == "task:1").unwrap();
         assert_eq!(
@@ -1115,7 +1553,7 @@ mod tests {
     fn a_non_numeric_attribute_is_refused_rather_than_counted_as_zero() {
         let mut broken = event(0, 1, 10);
         broken.attrs = vec![Attr::text("bytes", "a lot")];
-        assert!(summary(&[broken], "bytes").is_err());
+        assert!(summary(&[broken], "bytes", None).is_err());
     }
 
     /// An event with no key is not an error and not a series per event: it
@@ -1173,7 +1611,7 @@ mod tests {
             events.push(event(0, 1, 1_000_000));
         }
 
-        let series = hist(&events, "bytes", BucketLayout::Log2).unwrap();
+        let series = hist(&events, "bytes", BucketLayout::Log2, None).unwrap();
         assert_eq!(series.len(), 1);
         let histogram = &series[0];
         assert_eq!(histogram.count, 102);
@@ -1215,7 +1653,7 @@ mod tests {
         negative.attrs = vec![Attr::int("bytes", -5)];
         let events = vec![event(0, 1, 8), negative];
 
-        let series = hist(&events, "bytes", BucketLayout::Log2).unwrap();
+        let series = hist(&events, "bytes", BucketLayout::Log2, None).unwrap();
         assert_eq!(series[0].count, 1);
         assert_eq!(series[0].unbucketable, 1);
         assert_eq!(
@@ -1230,7 +1668,7 @@ mod tests {
     #[test]
     fn a_histogram_too_wide_to_render_folds_its_tail_rather_than_dropping_it() {
         let events = vec![event(0, 1, 0), event(0, 1, 10_000_000)];
-        let series = hist(&events, "bytes", BucketLayout::Linear { width: 1 }).unwrap();
+        let series = hist(&events, "bytes", BucketLayout::Linear { width: 1 }, None).unwrap();
         let buckets = &series[0].buckets;
         assert_eq!(buckets.len() as u64, BucketLayout::MAX_BUCKETS);
         let last = buckets.last().unwrap();
@@ -1249,7 +1687,7 @@ mod tests {
     fn a_linear_histogram_of_zero_width_is_refused_rather_than_bucketed() {
         let events = vec![event(0, 1, 10)];
         assert_eq!(
-            hist(&events, "bytes", BucketLayout::Linear { width: 0 }),
+            hist(&events, "bytes", BucketLayout::Linear { width: 0 }, None),
             Err(EmitError::ZeroBucketWidth)
         );
     }

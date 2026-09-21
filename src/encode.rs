@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use crate::catalog::{MatchKind, Unit};
 use crate::collect::Losses;
-use crate::emit::{Bucket, Output, Results, SeriesHist, SeriesKey, StackCount};
+use crate::emit::{Bucket, Output, Results, SeriesHist, SeriesKey, Shortfall, StackCount};
 use crate::error::ParseError;
 use crate::event::{Event, KeyValue};
 use crate::format::OutputFormat;
@@ -503,17 +503,26 @@ fn text(results: &Results) -> String {
             Output::Summary { series } => {
                 let _ = writeln!(out, "  summary");
                 for summary in series {
+                    // The mark goes on the three numbers a loss pulls
+                    // downwards and on no others. `min` is the one part of the
+                    // shape a lossy run does not move -- the events it is
+                    // missing are the slow ones -- and `last` is a value, not a
+                    // statistic over the run.
+                    let short = comparison(summary.short.as_ref());
                     let _ = writeln!(
                         out,
-                        "    {:<14} n={:<5} min {}  mean {}  max {}  last {}",
+                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}",
                         summary.key,
                         summary.count,
                         quantity(summary.min, results.unit),
+                        bound(summary.short.as_ref()),
                         quantity(summary.mean, results.unit),
+                        bound(summary.short.as_ref()),
                         quantity(summary.max, results.unit),
                         quantity(summary.last, results.unit),
                     );
                 }
+                push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
             Output::Timeline { series } => {
                 let _ = writeln!(out, "  timeline");
@@ -534,6 +543,7 @@ fn text(results: &Results) -> String {
                 for histogram in series {
                     hist_text(&mut out, histogram, results.unit);
                 }
+                push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
             Output::TopK { k, series, rest } => {
                 let _ = writeln!(
@@ -837,6 +847,40 @@ fn speedscope_unit(unit: Unit) -> &'static str {
     }
 }
 
+/// The mark that goes beside a value a lossy run has made a lower bound, and
+/// nothing at all when the run lost nothing.
+///
+/// A clean run must gain nothing: not a character. A mark that appears on
+/// every run is a mark readers learn to skip, and then the run that needed it
+/// is the one nobody reads it on.
+fn bound(short: Option<&Shortfall>) -> &'static str {
+    match short {
+        Some(_) => Shortfall::MARK,
+        None => "",
+    }
+}
+
+/// The same mark where a `=` would otherwise be, as in `n=102` against
+/// `n>=102`. A count is written with its comparison rather than beside it.
+fn comparison(short: Option<&Shortfall>) -> &'static str {
+    match short {
+        Some(_) => Shortfall::MARK,
+        None => "=",
+    }
+}
+
+/// The sentence under a marked distribution: what is missing, why no fraction
+/// where none is known, and which way the bias runs.
+///
+/// Once per emit rather than once per series. The shortfall is the run's and
+/// every series carries the same one, so printing it beside each of forty
+/// would be saying one fact forty times.
+fn push_shortfall(out: &mut String, short: Option<&Shortfall>) {
+    if let Some(short) = short {
+        let _ = writeln!(out, "    {} {}", Shortfall::MARK, short.note);
+    }
+}
+
 /// One histogram, with a bar per bucket.
 ///
 /// The bar is the whole point of rendering a distribution in text: a column of
@@ -848,13 +892,21 @@ fn hist_text(out: &mut String, histogram: &SeriesHist, unit: Unit) {
     } else {
         histogram.sum / histogram.count as f64
     };
+    // Every bucket count below is a lower bound too, and the highest ones are
+    // the short ones. Marking each of sixty-five rows would say it sixty-five
+    // times; the head line carries the mark and [`push_shortfall`] says which
+    // end of the distribution the missing values were at.
+    let short = histogram.short.as_ref();
     let _ = writeln!(
         out,
-        "    {}  n={}  min {}  mean {}  max {}",
+        "    {}  n{}{}  min {}  mean {}{}  max {}{}",
         histogram.key,
+        comparison(short),
         histogram.count,
         quantity(histogram.min, unit),
+        bound(short),
         quantity(mean, unit),
+        bound(short),
         quantity(histogram.max, unit),
     );
 
@@ -1727,6 +1779,7 @@ mod tests {
                         max: 2_097_152.0,
                         mean: 1_572_864.0,
                         last: 2_097_152.0,
+                        short: None,
                     }],
                 },
                 Output::Timeline {
@@ -1990,6 +2043,7 @@ mod tests {
                 min: 1024.0,
                 max: 1_048_576.0,
                 sum: 2_199_552.0,
+                short: None,
                 buckets: vec![
                     Bucket {
                         low: 1024,
