@@ -275,11 +275,17 @@ differently because the work was shaped differently. What held every time:
   in `src/collect/<family>/mod.rs`, so a new source is a line in a file one
   stream owns. A central `match` would be one conflict per agent.
 
-For what remains, the honest division is by **defect class rather than by
-family**: the sixty-three are grouped by what is wrong, not by where, and two
-streams fixing "every refusal's exit code" and "every late-tick count" would
-each touch several families and few files. That is the opposite of every wave so
-far, and it is what the work now is.
+The sixth wave divides by family again, plus one layer stream: five streams
+writing eBPF collectors into one family directory each, and one rewriting
+`src/emit.rs` and `src/render.rs` for finding 37, which shares no file with any
+of them. `BRIEF.md` is that brief and `scripts/spawn.sh` is wired for it.
+
+**Every earlier brief is now in `docs/briefs/`**, recovered from the history.
+`BRIEF.md` is overwritten each wave and roughly thirty documents and tests cite
+it — fifteen of them for "the four classes of `BRIEF.md`", which are the
+scenario wave's and left that file two waves ago. `docs/briefs/README.md` states
+the rule that resolves them: a citation in a document means the brief of the
+wave that document belongs to.
 
 ---
 

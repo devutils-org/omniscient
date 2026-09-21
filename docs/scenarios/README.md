@@ -20,5 +20,7 @@ Each carries four things:
   produced. A scenario suite that quietly worked around three bugs has measured
   nothing.
 
-See `BRIEF.md` for the four scenario classes every family covers, and
-`docs/contributing.md` for what ground truth means in this repository.
+See `docs/briefs/wave-4-scenarios.md` for the four scenario classes every family
+covers -- it was `BRIEF.md` while that wave ran, and `GUIDE.md` explains the four
+for a reader -- and `docs/contributing.md` for what ground truth means in this
+repository.

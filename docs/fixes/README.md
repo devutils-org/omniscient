@@ -12,5 +12,6 @@ Each carries three things:
 - **Left**, with why. A machine that cannot exercise a fix, a change that needs
   another stream first, a defect that is really a decision.
 
-See `BRIEF.md` for how the sixty-three were divided, and
-`docs/scenarios/<family>.md` for the defects themselves.
+See `docs/briefs/wave-5-defects.md` for how the sixty-three were divided --
+it was `BRIEF.md` while that wave ran -- and `docs/scenarios/<family>.md` for the
+defects themselves.

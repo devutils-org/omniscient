@@ -1,170 +1,25 @@
-# Brief, next — the twenty-four the mechanism already reaches
+# Brief, next — the crossings, and the layer above them
 
-**Ready for dispatch.** The fix wave against `BRIEF.md` has landed and been
-merged, so `src/collect/**` is free.
+**Not for dispatch yet.** The sixth wave is running against `BRIEF.md`: five
+family streams writing eBPF collectors and one rewriting the emit layer. Every
+stream below reads what those produce, and P3 cannot start at all until stream A
+has landed `io.latency`.
 
----
-
-## The finding this brief exists for
-
-The largest block of remaining breadth is not blocked on mechanism. It is
-twenty-four collectors waiting to be written against an attach layer that
-already exists and is already probed:
-
-```
-bpf:tp      20   mem.page_alloc mem.kmalloc mem.reclaim mem.compaction
-                 io.latency io.queue io.size io.pagecache io.readahead io.writeback
-                 net.tcp.lifetime net.tcp.retransmit net.drops net.qdisc net.softirq
-                 proc.syscall proc.exec proc.exit proc.signals
-                 gpu.job
-bpf:raw_tp   4   sched.lock sched.futex sched.irq sched.numa_balance
-```
-
-Every tracepoint they name exists on this kernel except `gpu_scheduler:*`,
-which the proprietary NVIDIA driver does not publish — so `gpu.job` is a
-collector that will be written here and exercised elsewhere.
-
-This is family work, so it divides by family, the way the first wave did and
-for the same reason: one directory each, merges that cannot conflict.
-
----
-
-## Phase zero — the catalog change — **landed**
-
-Done by the coordinator before dispatch, in one commit. Twenty-seven entries
-carry a `bpf:raw_tp` ahead of their `bpf:tp`, every tracepoint name checked
-against this kernel's BTF one by one, and the two probes finding 15 asked for
-are wired. `86 usable here` instead of `62`, and every source below now resolves
-onto a backend this machine serves and answers *"no collector is written for it
-yet"*. Finding 36 of `docs/open-findings.md` records what moved and what was
-left. **The rest of this section is kept as the reasoning, because a stream that
-hits a `bpf:tp` entry needs it.**
-
-**The twenty above do not need the classic tracepoint path, and on this machine
-they cannot use it.** An earlier draft of this brief said the opposite, on the
-grounds that `src/bpf/attach.rs` had grown classic tracepoints, kprobes and
-uprobes in wave three and nothing used them. That was the wrong lesson from the
-right observation.
-
-A classic tracepoint is attached by reading a numeric event id out of
-`/sys/kernel/tracing`, which is mounted and unreadable at uid 1000 here and on a
-stock machine. A raw tracepoint attaches with a name out of the kernel's own
-BTF and needs no tracefs at all. Finding 9 of `docs/open-findings.md` re-ran the
-audit against this kernel: **thirty-nine of the forty-one tracepoints the
-catalog names under `bpf:tp` publish a `btf_trace_` type**, and the two that do
-not are the `gpu` pair. `DECISIONS.md` settled the ordering rule long ago —
-"`bpf:raw_tp` has strictly fewer requirements than `bpf:tp` and is ordered ahead
-of it" — and the whole `sched` family is written to it. Thirty entries are not.
-
-So before any collector is written, one pass over `catalog/*.yaml` adds a
-`bpf:raw_tp` backend ahead of the `bpf:tp` one, with `equivalent: true` on the
-classic entry behind it:
-
-```yaml
-- id: bpf:raw_tp
-  requires: [bpf, btf, "raw_tracepoint:<name>", "kernel>=6.1"]
-  cost: <as the classic entry declares>
-- id: bpf:tp
-  equivalent: true
-  ...
-```
-
-The thirty, by family:
-
-```
-io (11)   latency queue bytes iops size merges syscall fs pagecache readahead writeback
-mem (5)   faults page_alloc kmalloc reclaim compaction
-net (5)   tcp.lifetime tcp.retransmit drops qdisc softirq
-proc (4)  syscall exec exit signals
-power (3) freq cstate throttle
-cpu (1)   oncpu_time
-gpu (1)   job — leave it: module tracepoints, absent from vmlinux BTF
-```
-
-Three reasons it was phase zero rather than each stream's first commit. It is
-the one file every stream would otherwise edit, which is the conflict this
-project has learned to design away. Each entry's `requires:` had to be checked
-against what the raw path actually needs, which is one person doing thirty of
-the same check rather than five people doing six each. And until it landed,
-every source below read `out of reach on this machine`, so no stream could tell
-a collector it has not written from a backend it cannot reach.
-
-**Three entries were left**, and a stream that owns one should not "fix" it:
-
-- `gpu.job` — `drm_run_job` and `drm_sched_process_job` are module tracepoints
-  and absent from `vmlinux` BTF. The classic path is the only one it has, and
-  stream E writes against it knowing it cannot be exercised here.
-- `io.fs` and `io.readahead` — their requirement is a glob, `tracepoint:ext4:*`
-  and `tracepoint:filemap:*`, and a glob is not a name. Converting one means
-  choosing which tracepoint the collector attaches to, which is stream A's call
-  when it writes the collector, not a catalog pass's.
-
----
-
-## Phase one — the collectors
-
-| | Stream | Sources | Owns |
-|---|---|---|---|
-| **A** | `io` through the block layer | `io.latency`, `.queue`, `.size`, `.pagecache`, `.readahead`, `.writeback` | `src/bpf/io*.rs`, `src/collect/io/**` |
-| **B** | `net` through skb and sock | `net.tcp.lifetime`, `.tcp.retransmit`, `.drops`, `.qdisc`, `.softirq` | `src/bpf/net*.rs`, `src/collect/net/**` |
-| **C** | `mem` through the allocator | `mem.page_alloc`, `.kmalloc`, `.reclaim`, `.compaction` | `src/bpf/mem*.rs`, `src/collect/mem/**` |
-| **D** | `proc` through process events | `proc.syscall`, `.exec`, `.exit`, `.signals` | `src/bpf/proc*.rs`, `src/collect/proc/**` |
-| **E** | `sched` contention and interrupts | `sched.lock`, `.futex`, `.irq`, `.numa_balance` | `src/bpf/sched*.rs`, `src/collect/sched/**`, `src/collect/gpu/**` and `gpu.job` |
-
-Five streams, each owning one family's directory and its own files under
-`src/bpf/`. **Nobody owns `src/bpf/attach.rs`, `insn.rs`, `map.rs`, `btf.rs` or
-`syscall.rs`** — those are the shared layer, and a stream needing something from
-them writes the request in `docs/open-findings.md` rather than editing them. If
-two streams need the same thing, the coordinator lands it once.
-
-### Stream A is the one that matters most
-
-`io.latency` and `io.queue` both join on `blk:rq@open_ts` with `scoped_eq` — the
-one match kind the engine implements and **no source produces**. Landing them
-turns a third of the join engine from theory into something checked, and it is
-what phase two's I/O path is waiting for.
-
-They are also the reason the `blk` key is scoped. A request pointer is recycled
-within milliseconds, so `(ptr, open_ts)` is the identity and `ptr` alone is a
-key that silently attributes one request's latency to another. That is written
-into the catalog already; the collector has to honour it.
-
-### What every stream does
-
-- **Aggregate in the kernel where the source is a distribution.** `io.latency`
-  is a histogram or it is nothing, and `src/bpf/runqlat.rs` is the worked
-  example: `(key, bucket) -> count` with an unrolled log2 search, and
-  `emit::WEIGHT_ATTR` on each row so a bucket standing for four hundred
-  measurements counts as four hundred.
-- **Attach through `attach::raw_tracepoint`, which phase zero puts within
-  reach.** Raw tracepoints need BTF and a name; classic ones need a numeric id
-  out of tracefs and `PERF_EVENT_IOC_SET_BPF`, and tracefs is root-only on a
-  stock machine. `attach::tracepoint` exists and is tested, and it is the
-  fallback the entry declares behind the raw one — not the path to write
-  against. `gpu.job` is the exception, and the only collector here that has no
-  raw path at all.
-- **Check the tracepoint's prototype before building instructions.**
-  `offcpu.rs` refuses a kernel whose `sched_switch` has a different signature,
-  because a program written for one shape reads a `task_struct *` out of a slot
-  holding an integer and gets a plausible number. Every one of these needs the
-  same guard.
-- **Write the scenarios with the collector.** Four classes, as `BRIEF.md` of the
-  scenario wave defined them and `GUIDE.md` explains them: ground truth, the
-  capability sweep, the loss path, the refusal. A collector without them is half
-  the work, and the fourth wave is what established that.
+Written now so the shape is settled before it is needed, which is the habit that
+has held for three waves.
 
 ---
 
 ## Phase two — the crossings
 
-Four streams, each a question a single family cannot answer. **P3 needs phase
-one's stream A**; the others do not.
+Four streams, each a question a single family cannot answer. **P3 needs the
+sixth wave's stream A**; the others do not.
 
 | | Stream | The question | The join |
 |---|---|---|---|
 | **P1** | Memory, end to end | Which allocation cost memory, and did it stay? | `heap.alloc → mem.faults` (interval, works today), then `→ mem.rss` and `heap.retained` |
 | **P2** | Compute, end to end | Where did the time go — on cpu, or waiting? | `cpu.profile` beside `sched.offcpu` by task, and `sched.wakeup → sched.offcpu` (wakeup) for what released it |
-| **P3** | The I/O path | What did one read cost, from syscall to platter? | `blk:rq@open_ts` (scoped_eq), which phase one's stream A produces |
+| **P3** | The I/O path | What did one read cost, from syscall to platter? | `blk:rq@open_ts` (scoped_eq), which the sixth wave's stream A produces |
 | **P4** | Crossed families | Does the machine's own state explain the measurement? | `power.freq` and `power.throttle` against `cpu.instructions`; `mem.pressure` against `io.bytes` |
 
 The scenario wave left these possible on purpose: every session carries its
@@ -175,6 +30,21 @@ workloads guarantee. P2 needs a program half on-cpu and half blocked —
 Each stream owns `examples/cross-<name>-*.yml`, `tests/cross_<name>.rs` and
 `docs/scenarios/cross-<name>.md`. The prefix is the lock, which is what gave the
 scenario wave zero conflicts across eight streams.
+
+### P2 is closer than it looks, and is where phase 10 starts
+
+`ROADMAP.md` phase 10 now names **TSA** — thread state analysis, where a
+thread's wall clock went across on-cpu, runnable-and-waiting, and blocked-on-what
+— and puts it ahead of USE, because its three inputs already collect and are
+checked: `cpu.profile`, `sched.runqlat` and `sched.offcpu` with its blocking
+stack, plus the `wakeup` join for what released the block. P2 is that
+decomposition for one task. It is the last stream here that needs nothing new,
+and the first piece of the intelligence layer.
+
+It also depends on the sixth wave's stream F in a way worth stating: a
+decomposition is only as good as its percentiles, and a percentile from a lossy
+run is a lower bound. Do not start P2 before F has landed, or the first thing it
+reports will be a tail that is short by an unknown amount.
 
 ---
 
@@ -214,19 +84,22 @@ Two more that are decisions rather than mechanism:
 
 ## Rules
 
-The same three that have held for five waves:
+The same three that have held for six waves, and `docs/briefs/README.md` keeps
+them beside every brief that proved them:
 
-1. **The unit of ownership is a file set nobody else writes.** Here it is one
-   family directory plus that family's own files under `src/bpf/`. The shared
-   eBPF layer belongs to nobody.
-2. **The handoff is a file only that stream can write.** `docs/fixes/` and
-   `docs/scenarios/` worked; a "write a log at the end" instruction did not.
-   Yours is `docs/families/<family>.md`, extended rather than replaced.
-3. **A source is landed when its scenarios are.** Ground truth, the capability
-   sweep, the loss path, the refusal. `GUIDE.md` explains each and
-   `tests/scenario_<family>.rs` is where they go.
+1. **The unit of ownership is a file set nobody else writes.** Here it is a
+   file-name prefix rather than a directory, because a crossing belongs to no
+   family: `examples/cross-<name>-*.yml`, `tests/cross_<name>.rs`,
+   `docs/scenarios/cross-<name>.md`.
+2. **The handoff is a file only that stream can write.** Yours is
+   `docs/scenarios/cross-<name>.md`, and it is the deliverable rather than a
+   log about one.
+3. **A crossing is landed when it says what evidence it has.** `IDENTITY` >
+   `KEY` > `WAKEUP` > `TEMPORAL`, on every joined result. A correlation backed
+   by a propagated identity and one backed by two things happening at the same
+   time are both correlations, and only one of them is evidence.
 
-Read `STATE.md`, `docs/bpf-layer.md` for the calling conventions, and
-`src/bpf/runqlat.rs` for in-kernel aggregation with a histogram. Build with
-`make`: these all need `CAP_BPF` and `CAP_PERFMON`, and a green suite on an
-unprivileged binary says nothing about any of them.
+Read `STATE.md` for where the project is, `docs/scenarios/<family>.md` for what
+each family's workloads guarantee, and `examples/allocation-cost.yml` for a join
+that works today. Build with `make`: a green suite on an unprivileged binary
+says nothing about the half of this that crosses an eBPF source.
