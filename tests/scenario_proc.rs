@@ -635,67 +635,82 @@ requests:
     emit: [hist]
 ";
 
-/// `examples/proc-not-built.yml`: valid, resolvable, and refused for one of the
-/// two reasons that are not the request's fault.
+/// `examples/proc-not-built.yml`: valid, resolvable, and refused because this
+/// build has no collector for the backend it names.
 ///
 /// A caller that cannot tell "you asked for something impossible" from "this is
 /// not written yet" cannot decide whether to fix the request or wait for a
 /// release, and one that cannot tell either from "this machine cannot serve it"
-/// raises privileges against a collector nobody has written. The session
-/// validates cleanly and resolves, and whichever of the two refusals it gets
-/// must be the one whose sentence it prints.
+/// raises privileges against a collector nobody has written. So the session
+/// validates cleanly, resolves, and exits 3 with the sentence that belongs to
+/// that answer.
 ///
-/// **Which one depends on the machine, and this family cannot choose.** All
-/// four unwritten `proc` sources declare `bpf:tp` and nothing else, and a
-/// classic tracepoint is attached by reading a numeric event id out of a
-/// root-only file under tracefs. Where that file is readable the answer is 3;
-/// where it is not, as here, the machine genuinely cannot serve the request and
-/// 1 is the honest answer. Asserting either one alone would be asserting the
-/// machine. Finding 9 of `docs/open-findings.md` is what would settle it in one
-/// direction: all four tracepoints are published in this kernel's own BTF, so a
-/// `bpf:raw_tp` backend ahead of the classic one puts this family back on 3
-/// everywhere.
+/// **This used to be a two-way test, and the sixth wave settled it.** Until
+/// then the file held the four `proc` sources with no collector at all; all
+/// four declared `bpf:tp` and nothing else, a classic tracepoint is attached by
+/// reading a numeric event id out of a root-only file under tracefs, and on a
+/// machine where that file is unreadable -- this project's own -- the honest
+/// answer was 1, "this machine cannot serve it". The test had to accept either.
+/// All four now collect through `bpf:raw_tp`, which needs a name and the
+/// kernel's own BTF; what is left unimplemented is the second backend of each
+/// chain, and `--backend force:` reaches it while bypassing the resolver
+/// entirely. The answer no longer depends on what this machine can read, which
+/// is what an exit code meaning "this build does not have it" should be.
 #[test]
 fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
     let validated = omn(&["validate", "-f", &example("proc-not-built.yml")]);
     assert!(
         validated.status.success(),
-        "the session is valid; it is the build or the machine that is missing: {}",
+        "the session is valid; it is the build that is missing: {}",
         stderr(&validated)
     );
 
     let output = omn(&["-f", &example("proc-not-built.yml")]);
     let message = stderr(&output);
-    match output.status.code() {
-        Some(3) => {
-            assert!(
-                message.contains("no collector is written"),
-                "exit 3 is this build's gap and must say so: {message}"
-            );
-            // The way out is named too: the request is fine and can be written
-            // down for a build that has it.
-            assert!(
-                message.contains("--dump-request"),
-                "a reader has to be told what they can still do with a valid request: {message}"
-            );
-        }
-        Some(1) => assert!(
-            message.contains("has no viable backend on this machine"),
-            "exit 1 is this machine's gap and must say so: {message}"
-        ),
-        other => panic!(
-            "a valid request for an unwritten source is the build's gap or the machine's, \
-             never a request that cannot mean anything; got {other:?}:\n{message}"
-        ),
-    }
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a valid request for a backend nothing collects is this build's gap, and `force:` \
+         bypasses the resolver so no machine can turn it into any other answer:\n{message}"
+    );
+    assert!(
+        message.contains("no collector is written"),
+        "exit 3 is this build's gap and must say so: {message}"
+    );
+    // The way out is named too: the request is fine and can be written down for
+    // a build that has it.
+    assert!(
+        message.contains("--dump-request"),
+        "a reader has to be told what they can still do with a valid request: {message}"
+    );
     assert!(
         message.contains("bpf:tp"),
-        "the refusal must name the backend either way: {message}"
+        "the refusal must name the backend: {message}"
     );
     assert!(
         message.contains("proc.exec"),
         "and the source it was asked for: {message}"
     );
+
+    // And the sibling answer stays distinct: the *other* backend of the same
+    // chain is written, so the same source without the pin measures.
+    let served = omn(&[
+        "proc.exec",
+        "--system",
+        "--mode",
+        "trace",
+        "--emit",
+        "summary",
+        "-d",
+        "100ms",
+    ]);
+    if !stderr(&served).contains("CAP_BPF") {
+        assert!(
+            served.status.success(),
+            "without the pin the resolver picks the backend this build does have: {}",
+            stderr(&served)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,5 +1226,667 @@ fn a_late_tick_is_one_reason_with_a_count_rather_than_one_reason_each() {
     assert!(
         overrun["total_ns"].as_u64().unwrap() >= overrun["worst_ns"].as_u64().unwrap(),
         "the total has to hold the worst one: {losses}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The four event sources, over eBPF
+// ---------------------------------------------------------------------------
+//
+// `proc.exec`, `proc.exit`, `proc.signals` and `proc.syscall` collect since the
+// sixth wave, through `bpf:raw_tp`. Everything above this line measures a
+// process from outside on a clock; everything below reads events the kernel
+// publishes as they happen, which is a different shape of scenario.
+//
+// Three of the four watch the machine -- the catalog declares no `pid` target
+// for them, because "watch this process's execs" is a question about a pid that
+// is about to mean something else. So their ground truth cannot come from a
+// launched target the way `proc.fd`'s does. It comes from a workload this file
+// starts *while the run is open*, whose identity nothing else on the machine
+// can accidentally share: a copy of `/bin/sh` under a name this test invented.
+// The same trick `examples/cpu-one-busy-core.yml` documents for a pinned spin
+// loop, for the same reason.
+
+use std::io::Read;
+use std::process::{Child, Stdio};
+
+/// How long the workload waits before it starts, so that the run under test is
+/// attached by the time it does.
+///
+/// Attaching means reading a few megabytes of BTF, building two programs and
+/// having the verifier accept them, which is tens of milliseconds. This is a
+/// margin over that rather than a measurement of it -- and when it is not
+/// enough the test fails saying so, with both numbers, rather than reporting a
+/// smaller count as a result.
+const ATTACH_MARGIN: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Starts a session without waiting for it, so a workload can be driven while
+/// it runs.
+fn session_in_background(name: &str) -> Child {
+    Command::new(BINARY)
+        .current_dir(root())
+        .args(["-f", &example(name), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should start")
+}
+
+fn finish(child: Child) -> Output {
+    child.wait_with_output().expect("omn should finish")
+}
+
+/// A copy of `/bin/sh` under a name nothing else on this machine has.
+///
+/// The name is what makes a machine-wide scenario checkable: a count of execs
+/// on a busy machine is whatever the machine was doing, and a count of execs
+/// *of this path* is exactly what this test ran. It is kept to ten characters
+/// because the kernel truncates `comm` to fifteen, and a name that is cut in
+/// half is one the exit events cannot be matched on.
+struct UniqueShell {
+    path: PathBuf,
+}
+
+impl UniqueShell {
+    fn new() -> Option<Self> {
+        // The pid alone is not unique enough: `cargo test` runs these in
+        // parallel threads of one process, so every test here would ask for the
+        // same name and each would then count the others' programs as its own.
+        // That is the same trap `docs/contributing.md` records for descriptor
+        // counts, in a new place.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("omnx{}x{serial}", std::process::id() % 100_000));
+        std::fs::copy("/bin/sh", &path).ok()?;
+        let mut permissions = std::fs::metadata(&path).ok()?.permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&path, permissions).ok()?;
+        Some(Self { path })
+    }
+
+    fn name(&self) -> String {
+        self.path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn as_str(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+
+    /// Runs the shell on one script and returns what it exited with.
+    fn run(&self, script: &str) -> std::process::ExitStatus {
+        Command::new(&self.path)
+            .args(["-c", script])
+            .status()
+            .expect("the copied shell runs")
+    }
+}
+
+impl Drop for UniqueShell {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Every event of one result, whatever emit carries them.
+fn attr_f64(event: &serde_json::Value, name: &str) -> Option<f64> {
+    attr(event, name).and_then(|value| value.as_f64())
+}
+
+fn attr_text(event: &serde_json::Value, name: &str) -> Option<String> {
+    attr(event, name).and_then(|value| value.as_str().map(str::to_owned))
+}
+
+/// Whether a run refused because this machine will not load an eBPF program.
+///
+/// A skip that says so beats a test that passes because it did nothing -- and
+/// it must be told apart from a run that attached and found nothing, which is a
+/// failure.
+fn skipped_without_bpf(output: &Output) -> bool {
+    let message = stderr(output);
+    if message.contains("CAP_BPF") || message.contains("Operation not permitted") {
+        eprintln!("skipped: {message}");
+        return true;
+    }
+    false
+}
+
+/// Class ground truth, `proc.exec`: a program this test ran, exactly as many
+/// times as it ran it, under a path nothing else on the machine has.
+///
+/// The count is exact rather than a lower bound, and that is the point: the
+/// path is unique to this test, so a machine executing a thousand other things
+/// at the same time contributes none of them. An event more or less than the
+/// number of `execve` calls this test made is a defect either way.
+#[test]
+fn every_exec_of_a_path_this_test_invented_is_reported_once() {
+    const RUNS: usize = 5;
+    let Some(shell) = UniqueShell::new() else {
+        eprintln!("skipped: this machine has no /bin/sh to copy");
+        return;
+    };
+
+    let run = session_in_background("proc-lifecycle.yml");
+    std::thread::sleep(ATTACH_MARGIN);
+    for _ in 0..RUNS {
+        assert!(shell.run("exit 0").success());
+    }
+    let output = finish(run);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let doc = document(&output);
+    let path = shell.as_str();
+    let mine: Vec<_> = events(result(&doc, "what-ran"))
+        .into_iter()
+        .filter(|event| attr_text(event, "filename").as_deref() == Some(path.as_str()))
+        .collect();
+    assert_eq!(
+        mine.len(),
+        RUNS,
+        "`{path}` was executed {RUNS} times and {} exec events carry it; losses {}",
+        mine.len(),
+        result(&doc, "what-ran")["losses"]
+    );
+    for event in &mine {
+        assert_eq!(
+            attr_text(event, "comm").as_deref(),
+            Some(shell.name().as_str()),
+            "the name a task takes at exec is the last component of its path"
+        );
+        assert_eq!(
+            attr_f64(event, "truncated"),
+            Some(0.0),
+            "a path this short did not fill the record"
+        );
+    }
+}
+
+/// Class ground truth, `proc.exit`: a status this test chose, and a signal this
+/// test sent, reported as the two different things they are.
+///
+/// The kernel packs both into one word -- a task killed by `SIGKILL` carries 9
+/// in `exit_code` and a task that returned 9 carries 2304 -- so a build that
+/// reported the raw word would call a killed program one that exited 9. Both
+/// are driven here, in one run, against the same program.
+#[test]
+fn a_chosen_exit_status_and_a_sent_signal_are_reported_as_different_things() {
+    let Some(shell) = UniqueShell::new() else {
+        eprintln!("skipped: this machine has no /bin/sh to copy");
+        return;
+    };
+
+    let run = session_in_background("proc-lifecycle.yml");
+    std::thread::sleep(ATTACH_MARGIN);
+    assert_eq!(shell.run("exit 7").code(), Some(7));
+    // `kill` is a shell builtin, so this is the same process signalling itself
+    // and no second program is executed.
+    assert_eq!(shell.run("kill -9 $$").code(), None);
+    let output = finish(run);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let doc = document(&output);
+    let name = shell.name();
+    let mine: Vec<_> = events(result(&doc, "what-ended"))
+        .into_iter()
+        .filter(|event| attr_text(event, "comm").as_deref() == Some(name.as_str()))
+        .collect();
+    assert_eq!(
+        mine.len(),
+        2,
+        "two copies of `{name}` were run and left; {} exit events carry that name",
+        mine.len()
+    );
+
+    let returned = mine
+        .iter()
+        .find(|event| attr_f64(event, "signal") == Some(0.0))
+        .expect("one of the two returned a status");
+    assert_eq!(
+        attr_f64(returned, "code"),
+        Some(7.0),
+        "the shell was told to exit 7"
+    );
+    assert_eq!(attr_f64(returned, "status"), Some(7.0));
+    assert_eq!(
+        attr_f64(returned, "exit_code"),
+        Some(f64::from(7 << 8)),
+        "the kernel's own word is carried undecoded beside the decoded one"
+    );
+
+    let killed = mine
+        .iter()
+        .find(|event| attr_f64(event, "signal") == Some(9.0))
+        .expect("the other was killed by SIGKILL");
+    assert_eq!(
+        attr_f64(killed, "code"),
+        Some(137.0),
+        "128 + the signal, which is the shell's convention and what `code` says it is"
+    );
+    assert_eq!(
+        attr(killed, "status"),
+        None,
+        "a task a signal killed returned no status, and inventing one is the defect"
+    );
+    assert_eq!(
+        attr_f64(killed, "exit_code"),
+        Some(9.0),
+        "the raw word is the signal number, which is why it is not reported as `code`"
+    );
+    assert_eq!(
+        attr_f64(killed, "group_dead"),
+        Some(1.0),
+        "a single-threaded program's exit is the last thread of its process"
+    );
+}
+
+/// Class ground truth, `proc.syscall`: a known number of calls, and a delay
+/// this session injected.
+///
+/// Two independent properties, and neither comes from the tool. The workload
+/// calls `getppid` exactly a thousand times -- glibc does not cache it and a
+/// Python start-up makes none -- and it sleeps fifty milliseconds ten times.
+/// The count must be exactly a thousand; the sleeps must be exactly ten and
+/// their mean must be the delay that was injected.
+#[test]
+fn a_known_number_of_calls_and_an_injected_delay_are_both_reported_as_chosen() {
+    needs_python!();
+    let output = session("proc-syscall.yml");
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+
+    let calls = reported(&output, "CALLS ");
+    assert_eq!(calls, 1000, "the workload says how many calls it made");
+
+    // Each row of a kernel-side histogram stands for as many calls as its
+    // `count` says, so the number of calls is the sum of those and not the
+    // number of events.
+    let cheap = result(&doc, "a-thousand-cheap-calls");
+    let counted: f64 = events(cheap)
+        .iter()
+        .filter_map(|event| attr_f64(event, "count"))
+        .sum();
+    assert_eq!(
+        counted as u64, calls,
+        "the workload made {calls} calls and {counted} were counted; losses {}",
+        cheap["losses"]
+    );
+
+    let delayed = result(&doc, "ten-injected-delays");
+    let sleeps = events(delayed);
+    let count: f64 = sleeps
+        .iter()
+        .filter_map(|event| attr_f64(event, "count"))
+        .sum();
+    let total: f64 = sleeps
+        .iter()
+        .filter_map(|event| attr_f64(event, "total_ns"))
+        .sum();
+    assert_eq!(count as u64, 10, "the workload sleeps ten times");
+
+    // The mean comes from `total_ns`, which is the exact sum the kernel kept
+    // beside the bucket; the bucket itself is a factor of two wide and could
+    // not answer this. A sleep is a lower bound on its own duration -- the
+    // kernel returns once the timer has expired *and* the thread is scheduled
+    // -- so the separation is what is asserted rather than a threshold: at
+    // least the delay that was asked for, and less than twice it.
+    let mean = total / count;
+    assert!(
+        (50_000_000.0..100_000_000.0).contains(&mean),
+        "ten sleeps of 50ms reported a mean of {mean}ns"
+    );
+
+    // And every one of them is in the bucket that holds fifty milliseconds,
+    // which is [2^25, 2^26) -- the one a `hist` puts them in.
+    for event in &sleeps {
+        assert_eq!(
+            attr_f64(event, "lat_ns"),
+            Some(33_554_432.0),
+            "a 50ms call belongs in [33.5ms, 67ms) and the value on the event is that \
+             bucket's low bound"
+        );
+    }
+}
+
+/// The filter the resolved file says ran in the kernel is the one that did.
+///
+/// The resolver credits any backend whose id begins with `bpf` with pushing
+/// predicates down, and writes `"placement": "kernel"` into the record kept
+/// beside the numbers. For this source that claim is about cost as well as
+/// about the numbers, because `raw_syscalls` fires on everything: a predicate
+/// applied after the fact still pays for every other syscall on the machine. A
+/// filter reported as pushed down and applied in userspace is what
+/// `DECISIONS.md` calls the worst shape a bug takes here, so the claim and the
+/// run's own account of itself are checked against each other.
+#[test]
+fn the_syscall_filter_the_resolved_file_claims_is_the_one_that_ran() {
+    let resolved = omn(&[
+        "proc.syscall",
+        "--system",
+        "--mode",
+        "trace",
+        "--emit",
+        "hist",
+        "--filter",
+        "syscall == 'getppid'",
+        "--dump-resolved",
+    ]);
+    assert!(resolved.status.success(), "{}", stderr(&resolved));
+    let record: serde_json::Value =
+        serde_json::from_str(&stdout(&resolved)).expect("one json document");
+    assert_eq!(
+        record["filter"]["placement"], "kernel",
+        "the record kept beside the numbers claims the predicate ran in the program"
+    );
+
+    needs_python!();
+    let output = session("proc-syscall-sweep.yml");
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    let result = result(&doc, "syscall-every-emit");
+
+    let account = result["degradations"]
+        .as_array()
+        .expect("a run says what qualifies its numbers")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        account.contains("pushed into the program") && account.contains("getppid"),
+        "the run has to say which predicate the program carried, or the resolved file's \
+         claim is unverifiable: {account}"
+    );
+
+    // And nothing else was timed. The workload makes thousands of other
+    // syscalls -- every `write`, every `mmap` of a Python start-up -- and none
+    // of them may be in these numbers.
+    for event in events(result) {
+        assert_eq!(
+            attr_text(&event, "syscall").as_deref(),
+            Some("getppid"),
+            "a syscall the program was narrowed away from is in the output, so the filter \
+             did not run where the resolved file says it did"
+        );
+    }
+}
+
+/// Class the loss path: what the ring could not hold is counted, and the count
+/// closes against a number the workload chose.
+///
+/// This is the only place in the family where a loss can be checked rather than
+/// merely observed. The workload sends itself three hundred thousand real-time
+/// signals -- real-time signals queue, so every one of them is generated -- and
+/// the identity that must hold is `counted + dropped >= sent`: a signal that
+/// was generated was either counted or dropped, and the drop counter is
+/// machine-wide so it also holds whatever else was lost in the same window.
+///
+/// On a machine fast enough to drain the ring, `dropped` is zero and `counted`
+/// is exactly `sent`. Both readings are correct and both are asserted, because
+/// asserting that this machine must lose something would be asserting the
+/// machine. What would be wrong -- and what this catches -- is a run that
+/// reported fewer signals than were sent and called itself clean.
+#[test]
+fn what_the_signal_ring_could_not_hold_is_counted_and_closes_against_what_was_sent() {
+    needs_python!();
+    const SENT: u64 = 300_000;
+    let storm = format!(
+        "import os, signal, sys, time\n\
+         signal.signal(signal.SIGRTMIN, lambda *a: None)\n\
+         time.sleep(0.1)\n\
+         pid = os.getpid()\n\
+         for _ in range({SENT}):\n    os.kill(pid, signal.SIGRTMIN)\n\
+         sys.stderr.write('SENT {SENT}\\n')\n"
+    );
+
+    let run = session_in_background("proc-signal-storm.yml");
+    std::thread::sleep(ATTACH_MARGIN);
+    let mut workload = Command::new("python3")
+        .args(["-c", &storm])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python3 runs");
+    let mut said = String::new();
+    workload
+        .stderr
+        .take()
+        .expect("a pipe")
+        .read_to_string(&mut said)
+        .expect("readable");
+    let target = workload.id();
+    assert!(workload.wait().expect("the workload finishes").success());
+    assert!(
+        said.contains(&format!("SENT {SENT}")),
+        "the workload has to say how many it sent: {said}"
+    );
+
+    let output = finish(run);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    let result = result(&doc, "storm");
+
+    let dropped = result["losses"]["dropped"].as_u64().expect("a drop count");
+    let counted: u64 = events(result)
+        .iter()
+        .filter(|event| attr_f64(event, "pid") == Some(f64::from(target)))
+        .filter(|event| attr_f64(event, "sig").is_some_and(|sig| sig >= 32.0))
+        .filter_map(|event| attr_f64(event, "count"))
+        .sum::<f64>() as u64;
+
+    assert!(
+        counted <= SENT,
+        "{counted} signals were counted and only {SENT} were sent"
+    );
+    if dropped == 0 {
+        assert_eq!(
+            counted, SENT,
+            "nothing was dropped, so every signal sent has to have been counted"
+        );
+    } else {
+        assert!(
+            counted + dropped >= SENT,
+            "{counted} counted plus {dropped} dropped is fewer than the {SENT} that were sent, \
+             so events went missing without being counted as lost"
+        );
+        // The loss is a drop and not a late tick. A dropped event is a
+        // measurement that happened and was not recorded; a late tick is a
+        // series whose spacing is not what it claims, and a ring-backed source
+        // has no clock to run late.
+        assert_eq!(
+            result["losses"]["late_ticks"].as_u64(),
+            Some(0),
+            "a full ring is a drop, not a tick that ran late: {}",
+            result["losses"]
+        );
+        let reasons = result["losses"]["reasons"]
+            .as_object()
+            .expect("a loss says why");
+        assert!(
+            reasons
+                .keys()
+                .any(|reason| reason.contains("ring was full")),
+            "the reason has to name the ring: {reasons:?}"
+        );
+    }
+}
+
+/// Class the capability sweep: every emit these three declare is produced, and
+/// every filter field they declare is on the events.
+///
+/// The catalog is data and the CLI is a projection of it, so a combination the
+/// catalog offers and the build cannot serve is a promise broken where nobody
+/// looks: `omn list proc` would still say `yes`.
+#[test]
+fn every_emit_and_filter_field_the_three_machine_wide_sources_declare_works() {
+    let Some(shell) = UniqueShell::new() else {
+        eprintln!("skipped: this machine has no /bin/sh to copy");
+        return;
+    };
+
+    let run = session_in_background("proc-bpf-sweep.yml");
+    std::thread::sleep(ATTACH_MARGIN);
+    // Something for each of the three to find: two programs start, two end,
+    // and one of them signals itself.
+    assert!(shell.run("exit 0").success());
+    assert!(shell.run("kill -USR1 $$").code().is_none());
+    let output = finish(run);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+
+    for (label, emits, fields) in [
+        (
+            "exec-every-emit",
+            &["raw", "timeline", "topk", "summary"][..],
+            &["comm", "filename"][..],
+        ),
+        (
+            "exit-every-emit",
+            &["raw", "timeline", "topk", "summary"][..],
+            &["comm", "code"][..],
+        ),
+        (
+            "signals-every-emit",
+            &["raw", "topk", "rate", "summary"][..],
+            &["comm", "sig", "pid"][..],
+        ),
+    ] {
+        let result = result(&doc, label);
+        for emit in emits {
+            let output = emitted(result, emit);
+            let filled = match *emit {
+                "raw" => !output["events"].as_array().expect("events").is_empty(),
+                _ => !output["series"].as_array().expect("series").is_empty(),
+            };
+            assert!(
+                filled,
+                "`{label}` produced an empty `{emit}`, and the workload this test ran is one \
+                 the source had to see"
+            );
+        }
+        let events = events(result);
+        assert!(!events.is_empty(), "`{label}` saw nothing");
+        for event in &events {
+            for field in fields {
+                assert!(
+                    attr(event, field).is_some(),
+                    "`{label}`: the catalog offers a `{field}` filter and this event carries \
+                     none, so a predicate over it would be false everywhere"
+                );
+            }
+        }
+    }
+}
+
+/// Class the refusal: the combinations these four sources do not have are
+/// refused by name, and not approximated.
+///
+/// Each of these is the axis interaction working. A caller that gets a number
+/// back from one of them has been told something that is not true.
+#[test]
+fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
+    const EXIT_REJECTED: i32 = 2;
+
+    // A mode that never sees an individual event cannot rank who produced them.
+    let output = omn(&[
+        "proc.signals",
+        "--system",
+        "--mode",
+        "count",
+        "--emit",
+        "topk",
+        "-d",
+        "50ms",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("cannot produce `topk`"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A duration is the gap between two events, and a sample that catches one
+    // of them without the other has no duration to report.
+    let output = omn(&[
+        "proc.syscall",
+        "--system",
+        "--mode",
+        "sample@99hz",
+        "--emit",
+        "hist",
+        "-d",
+        "50ms",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&output)
+    );
+
+    // A pid is not a target these two have: an exec is the moment a pid stops
+    // being one program and starts being another.
+    let output = omn(&["proc.exec", "--pid", "1", "--emit", "raw", "-d", "50ms"]);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("pid"),
+        "the refusal has to name the target: {}",
+        stderr(&output)
+    );
+
+    // A syscall this build's table does not know matches nothing, which reads
+    // exactly like a process that made no calls. It is refused instead.
+    let output = omn(&[
+        "proc.syscall",
+        "--system",
+        "--mode",
+        "trace",
+        "--emit",
+        "hist",
+        "--filter",
+        "syscall == 'wriet'",
+        "-d",
+        "50ms",
+    ]);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a misspelled syscall must not be served: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("wriet"),
+        "and the refusal has to name it: {}",
+        stderr(&output)
     );
 }

@@ -1,0 +1,51 @@
+# Does every axis `proc.syscall` declares actually work?
+#
+#   omn -f examples/proc-syscall-sweep.yml
+#   omn -f examples/proc-syscall-sweep.yml --format json | jq '.results[].outputs[].emit'
+#
+# The other half of the capability sweep, split off because one run observes
+# one target and this is the only event source in the family that declares a
+# `launch`. `proc-bpf-sweep.yml` is the machine-wide half.
+#
+# Five emits and three filter fields, all in one request:
+#
+#   emits           hist, topk, rate, raw, summary
+#   filter fields   comm, syscall, pid
+#
+# `hist` is the one that matters and the one that could not exist without the
+# kernel-side aggregation: the rows come back already bucketed, each carrying
+# how many calls it stands for, and the emit layer weighs them by that. A
+# source that handed up one event per syscall could produce the same histogram
+# and would have published two million ring records to do it.
+#
+# Two combinations are deliberately absent because the validator refuses them,
+# and the refusal is the axis interaction working rather than a gap:
+#
+#   count + topk    a mode that never sees an individual event cannot rank who
+#                   produced them
+#   sample          a call is the gap between two events, and a sample that
+#                   catches one of them without the other has no duration
+#
+# `tests/scenario_proc.rs` asserts both refusals by name.
+name: every axis proc.syscall declares
+format: text
+duration: 2s
+
+requests:
+  - label: syscall-every-emit
+    source: proc.syscall
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import os, sys, time
+          for _ in range(1000):
+              os.getppid()
+          sys.stderr.write('CALLS 1000\n')
+          sys.stderr.flush()
+          time.sleep(0.2)
+    mode: trace
+    keys: [task]
+    emit: [hist, topk, rate, raw, summary]
+    filter: "syscall == 'getppid' && pid > 0 && comm =~ 'python'"

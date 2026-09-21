@@ -1,9 +1,12 @@
 # `proc` — what is worth measuring, and how you know the answer is right
 
-Two sources of this family collect: `proc.fd` and `proc.threads`, both over
-procfs. Four do not, and all four wait on the same piece of work.
+All six sources of this family collect. `proc.fd` and `proc.threads` read two
+counts a process keeps about itself, over procfs, on a clock; `proc.exec`,
+`proc.exit`, `proc.signals` and `proc.syscall` read events the kernel publishes
+as they happen, over raw tracepoints, because there is no file to poll for any
+of them and a poll would answer with whatever was under the clock.
 
-They are the cheapest honest ground truth in the catalog. Everything else in
+The first two are the cheapest honest ground truth in the catalog. Everything else in
 this tool is measured with skid, with sampling, or with a folio size in the way;
 a process holding twenty descriptors holds twenty. So every scenario here
 asserts an exact equality rather than a tolerance, and the workload is a program
@@ -22,6 +25,10 @@ test runs one of those files, so anything below can be reproduced by hand.
 | Question | Session | What makes the answer checkable |
 |---|---|---|
 | Is it leaking handles or threads? | `proc-handles.yml` | the program opens 17 files on top of its 3 and runs 5 workers beside its main thread, and reports `HELD 20` / `RUNNING 6` |
+| What ran on this machine, and what became of it? | `proc-lifecycle.yml` | a copy of `/bin/sh` under a name the test invented, executed a chosen number of times, told to `exit 7` once and killed with `SIGKILL` once |
+| Where did the kernel time go? | `proc-syscall.yml` | exactly 1000 `getppid` calls, and ten sleeps of a delay this session injected |
+| Does every axis the event sources declare work? | `proc-bpf-sweep.yml`, `proc-syscall-sweep.yml` | every emit and every filter field each of the four declares, in two files because one run observes one target |
+| When the ring overflows, does it say so -- and by how much? | `proc-signal-storm.yml` | 300000 real-time signals sent by the workload; `counted + dropped` has to close against that |
 | Does every axis the catalog declares work? | `proc-sweep.yml` | the same workload, through every emit, every structured format and the one declared filter field |
 | What is it holding right now? | `proc-one-reading.yml` | `snapshot`: one read, and the only emits `snapshot` can carry |
 | Did the poller keep up, and does it say so? | `proc-loss.yml` | the program opens exactly 30000 descriptors and reports `OPEN 30003`; a 30000-entry directory cannot be walked in the 1 ms tick the session asks for |
@@ -30,10 +37,31 @@ test runs one of those files, so anything below can be reproduced by hand.
 
 ### A — the capability sweep
 
-Both sources declare two modes, three emits, and `comm` as a filter field.
-`proc-sweep.yml` covers the `poll` half and `proc-one-reading.yml` the
+The two procfs sources declare two modes, three emits, and `comm` as a filter
+field. `proc-sweep.yml` covers the `poll` half and `proc-one-reading.yml` the
 `snapshot` half, in two files rather than one, because a session that mixes them
 does not measure what it says — defect 3.
+
+The four event sources are swept in two more files, and for a different reason:
+**one run observes one target.** `proc.exec`, `proc.exit` and `proc.signals`
+declare no `launch` target and `proc.syscall` does, so `proc-bpf-sweep.yml`
+takes the machine-wide three and `proc-syscall-sweep.yml` takes the fourth with
+its own workload. Between them every emit and every filter field each of the
+four declares is asked for:
+
+| Source | Emits | Filter fields |
+|---|---|---|
+| `proc.exec` | `raw`, `timeline`, `topk`, `summary` | `comm`, `filename` |
+| `proc.exit` | `raw`, `timeline`, `topk`, `summary` | `comm`, `code` |
+| `proc.signals` | `raw`, `topk`, `rate`, `summary` | `comm`, `sig`, `pid` |
+| `proc.syscall` | `hist`, `topk`, `rate`, `raw`, `summary` | `comm`, `syscall`, `pid` |
+
+A machine-wide sweep has a problem the launched ones do not: what it finds is
+whatever the machine was doing, and on a quiet machine that is nothing at all —
+an empty `topk` that passes. So the test starts a workload of its own while the
+run is open, a copy of `/bin/sh` under a name it invented, and requires each
+emit to be non-empty. That is the same device `examples/cpu-one-busy-core.yml`
+documents for a pinned spin loop.
 
 Every structured format (`json`, `yaml`, `toml`, `ndjson`) carries all three
 emits. The stack formats do not and must not: `folded`, `pprof` and `speedscope`
@@ -50,17 +78,26 @@ axis interaction working:
 
 ### B — the backend comparison
 
-**This family contributes nothing to class B, and the honest thing is to say so
-rather than invent a comparison.** `proc.fd` and `proc.threads` have one backend
-each, `fs:proc`, and the other four sources have one each, `bpf:tp`. There is no
-chain anywhere in `proc` with two implemented backends, and none with two
-backends at all.
+**This family still contributes nothing to class B, and the honest thing is to
+say so rather than invent a comparison.** `proc.fd` and `proc.threads` have one
+backend each, `fs:proc`. The four event sources have two each — `bpf:raw_tp`
+ahead of `bpf:tp` — and only the first of each pair is implemented, so there is
+still no chain anywhere in `proc` with two roads to compare.
 
-What is checked instead is that the single road is named and that pinning it
-behaves: `--backend force:fs:proc` measures and says twice that the chain was
-not walked, and `--backend force:bpf:tp` is refused with the chain printed
-rather than accepted and ignored. The effort that class B would have taken went
-to class D, as `BRIEF.md` directs.
+That is deliberate rather than unfinished, and the reason is worth stating so
+that nobody writes the second one to fill the column. The two backends of each
+chain see **exactly the same events**; the catalog says so with
+`equivalent: true`. What differs is only what they need to attach: a raw
+tracepoint needs a name and the kernel's own BTF, and a classic one needs a
+numeric event id out of `<tracefs>/events/<category>/<name>/id`, which is
+`-r--r----- root root` on a stock machine. A backend that is strictly more
+demanding and answers identically is a fallback for machines without BTF, not a
+road worth benchmarking.
+
+What is checked instead is that the roads are named and that pinning behaves:
+`--backend force:fs:proc` measures and says twice that the chain was not walked,
+and `--backend force:bpf:tp` is refused by name — which is now class D's
+demonstration as well, below.
 
 ### C — the loss path
 
@@ -83,6 +120,35 @@ run cleanly with every loss counter at zero. Counting either as a lost read
 would make every clean run look lossy. There is a third answer procfs gives that
 the collector does not handle, and it is defect 2.
 
+**The event sources lose data the other way, and `proc-signal-storm.yml` is the
+only place in this family where a loss closes against a number.** A ring-backed
+source has no clock to run late; what it has is a 256 KiB ring drained every ten
+milliseconds and a program that counts what it could not publish, because the
+BPF ring buffer does not report its own overflows. The workload sends itself
+three hundred thousand real-time signals — real-time signals *queue*, so every
+one of them is generated and every one reaches the program — at roughly half a
+million a second, which is more than a drain interval holds.
+
+What must then be true is an identity rather than a threshold:
+
+```
+counted + dropped  >=  sent
+```
+
+because a signal that was generated was either counted or dropped, and the drop
+counter is machine-wide so it also holds whatever else the machine lost in the
+same window. Measured here: 291 169 counted and 8 832 dropped against 300 000
+sent, with the reason collapsed into one line — `44x the signal ring was full`.
+
+And on a machine fast enough to keep up, `dropped` is zero and `counted` is
+exactly `sent`. **Both readings are asserted**, because asserting that this
+machine must lose something would be asserting the machine — finding 35's
+mistake in a new place. What the scenario catches is the third reading, which is
+a run that reported fewer signals than were sent and called itself clean.
+
+The loss must also be a drop and not a late tick, and the test asserts that too:
+the two are different facts and this source can only have one of them.
+
 ### D — the refusal
 
 Three answers, three exit codes, and the distinction is the point: a caller that
@@ -92,25 +158,36 @@ cannot decide whether to fix the request or wait for a release.
 | It says | It means | Exit | Reachable here |
 |---|---|---|---|
 | a rejection | the request cannot mean anything | 2 | the session below |
-| no collector | this build does not implement it | 3 | **no longer** — see below |
-| no viable backend | this machine cannot serve it | 1 | `proc-not-built.yml` |
+| no collector | this build does not implement it | 3 | `proc-not-built.yml` |
+| no viable backend | this machine cannot serve it | 1 | through `--catalog`, in the test |
 
-The last two rows swapped, and the swap is the tool becoming more truthful. All
-four unwritten `proc` sources declare `bpf:tp` and nothing else, and a classic
-tracepoint is attached by reading a numeric event id out of a root-only file
-under tracefs. While the probe answered that requirement by listing the event's
-*directory*, which uid 1000 may traverse, the resolver selected the backend and
-the collect stage said "nothing collects this" — exit 3, and it would have
-failed at attach. The probe now answers from the access tracefs really grants,
-so `proc-not-built.yml` validates cleanly, resolves onto nothing, and exits 1
-naming every backend it passed over.
+**This row has now been all three things, and the sequence is the point.**
 
-**This family can therefore no longer demonstrate exit 3 on this machine**, and
-the scenario says so rather than pretending: it takes either refusal and
-requires the sentence that belongs to it. Finding 9 of `docs/open-findings.md`
-is what would settle it — all four tracepoints are published in this kernel's
-own BTF, so a `bpf:raw_tp` backend ahead of the classic one puts this family
-back on exit 3 everywhere.
+It began as exit 3: the four event sources had no collector, they declared
+`bpf:tp` and nothing else, and the resolver selected that backend because the
+probe for a `tracepoint:` requirement answered by listing the event's
+*directory* under tracefs, which uid 1000 may traverse. The run then said
+"nothing collects this" — and would have failed at attach, because the `id` file
+the attach really reads is root-only. Finding 15.
+
+It became exit 1 when the probe started answering from the access tracefs
+actually grants. That was the tool becoming more truthful and the demonstration
+getting worse: the family could no longer show exit 3 at all on this machine,
+and the scenario had to accept either refusal, which is a test that asserts the
+machine rather than the build.
+
+It is exit 3 again, and deterministically, since the sixth wave. All four
+sources collect through `bpf:raw_tp` — a name and the kernel's own BTF, no
+tracefs — and what is left unimplemented is the *second* backend of each chain.
+`proc-not-built.yml` pins it with `backend: "force:bpf:tp"`, and `force:`
+bypasses the resolver entirely, so the answer no longer depends on what this
+machine can read. It is 3 everywhere, which is what an exit code meaning "this
+build does not have it" should be.
+
+There is a lesson in that for the other families, and it is not about `proc`:
+**a refusal scenario that depends on a probe is a scenario that will change
+answer when the probe gets better.** Pinning the backend takes the resolver out
+of the question, and the refusal being demonstrated is about the build.
 
 The rejections could not be shipped as an example, and the reason is worth
 recording for the other seven streams: `tests/cli.rs` walks `examples/` and
@@ -179,6 +256,42 @@ family lose anything. Costs about 0.75 s, nearly all of it python opening files
 — the slowest scenario in the family, and the reason is worth knowing before
 copying it.
 
+**The uniquely named shell** (`proc-lifecycle.yml`, `proc-bpf-sweep.yml`). Not a
+program but a *name*: a copy of `/bin/sh` at `/tmp/omnx<pid>x<n>`, made by the
+test and removed after it. Guarantees the one thing a machine-wide scenario
+otherwise cannot have — an identity nothing else on the machine can accidentally
+share. A count of execs on a busy machine is whatever the machine was doing; a
+count of execs *of this path* is exactly what the test ran, so the assertion is
+an equality rather than a lower bound.
+
+Two details are not incidental. The name is under fifteen characters because the
+kernel truncates `comm` to that, and a name cut in half is one the exit events
+cannot be matched on. And it carries a serial as well as the pid, because
+`cargo test` runs these in parallel threads of **one** process: without it every
+test in this file asks for the same name and each counts the others' programs as
+its own, which is `docs/contributing.md`'s parallel-suite trap in a new place.
+It was found by the tests reporting 9 where they expected 5.
+
+**The real-time signal storm** (`proc-signal-storm.yml`). Python. Installs a
+handler for `SIGRTMIN` so the signals do not kill it, then sends itself exactly
+300000 of them as fast as it can — about half a million a second, 0.65 s of
+wall time. Guarantees more events per second than a 256 KiB ring drained every
+ten milliseconds can hold, and a number to close the loss against. Real-time
+rather than `SIGUSR1` on purpose: a non-real-time signal that is already pending
+is not queued again, so a `SIGUSR1` storm generates 300000 events and delivers
+one, and the count under test would have been a property of signal semantics
+rather than of the ring.
+
+**The known-syscall program** (`proc-syscall.yml`, `proc-syscall-sweep.yml`).
+Python. Calls `getppid` exactly 1000 times and then sleeps 50 ms ten times,
+reporting `CALLS 1000` and `SLEEPS 10 EACH 50000000`. Guarantees two independent
+properties for one workload: an exact count, and an injected delay. `getppid` is
+the choice it is because glibc does not cache it, a Python start-up makes none
+of them, and it does almost nothing in the kernel — so its latency is the cost
+of the transition and nothing else. Verified with `strace -c` before it was
+written into the session: 1000 `getppid` and 10 `clock_nanosleep`, and no others
+of either.
+
 ---
 
 ## What this family contributes to a crossing
@@ -190,10 +303,25 @@ it is `task`, and every session in this family sets `keys: [task]`.
 
 The crossing it is for is a leak: a descriptor count that climbs while
 `mem.rss` climbs with it is a program holding sockets or files open, and the two
-series separate that from a program simply allocating. `proc.exec` and
-`proc.exit` would carry far more — the `proc:pidns+pid` key rather than
-`task:tid`, since a tid alone is ambiguous the moment containers exist — and
-they wait on `bpf:tp`.
+series separate that from a program simply allocating.
+
+Three more crossings became possible in the sixth wave, and none is dispatched:
+
+- **`proc.exec` and `proc.exit` bound every other series in time.** A program
+  that lived for four milliseconds is invisible to every poller in this tool and
+  is two events here, so a `mem.rss` series with nothing in it and an exec/exit
+  pair four milliseconds apart are the same fact told twice. The key is `task`.
+- **`proc.syscall` beside `io` and `net`.** A `read` that took forty
+  milliseconds and a block request that took forty milliseconds are the same
+  wait seen from the two ends of the kernel, and until `io.latency` has a
+  producer there is no way to check that they agree.
+- **`proc.signals` beside `sched.offcpu`.** A signal is one of the things that
+  ends a block, and `sched.wakeup` cannot say which.
+
+What all three still want is the `proc:pidns+pid` key rather than `task:tid`,
+since a tid alone is ambiguous the moment containers exist. The key exists in
+the model, nothing produces it, and producing it needs the same cgroup and
+namespace helpers the cgroup target does.
 
 ---
 
@@ -209,17 +337,40 @@ with a copy of the catalog in which `proc.fd` requires a file that cannot exist
 — which is how defect 4 was found. A machine with `/proc` unmounted would reach
 it for real, and nothing here can be that machine.
 
-**The four unimplemented sources' measurements.** `proc.syscall`, `proc.exec`,
-`proc.exit` and `proc.signals` have sessions in `proc-not-built.yml` and no
-numbers, because there is no collector. Their *refusal* is checked; their
-accuracy cannot be. The tracepoints they name are present on this machine —
-`omn list proc` says `yes` in HERE and `none` in COLLECTOR, two different
-questions kept deliberately apart — so this is a build limit, not a machine one,
-and the day `bpf:tp` lands the file becomes a session.
+**The `bpf:tp` half of each event source's chain.** Deliberate rather than
+pending: the classic tracepoint sees exactly the same events as the raw one and
+needs a root-only file to attach, so it is a fallback for a machine without BTF
+and not a second road worth driving. `proc-not-built.yml` is what it is for.
 
 **Anything about a container or cgroup target.** `proc.exec`, `proc.exit` and
-`proc.signals` declare `cgroup: bpf_only` and `container: bpf_only`. Both wait
-on the same eBPF work.
+`proc.signals` declare `cgroup: bpf_only` and `container: bpf_only`, and
+`proc.syscall` declares both too. That is a statement about which *backend*
+could serve them, not a claim that this build does: narrowing an eBPF program to
+a cgroup needs a helper the shared layer does not have —
+`bpf_get_current_cgroup_id`, or `bpf_current_task_under_cgroup` against a
+`BPF_MAP_TYPE_CGROUP_ARRAY`. The collectors **refuse both targets by name**,
+saying which helper is missing and what to use instead, which is what
+`sched.wakeup` has done since wave two. The request is in
+`docs/open-findings.md`.
+
+**The syscall table on any architecture but x86-64.** Syscall numbers are not
+portable — 1 is `write` here and `exit` on arm64 — and
+`src/collect/proc/syscall_names.rs` carries one architecture's table. Elsewhere
+the event reports `syscall_<n>` and a predicate written against a *name* is
+refused rather than silently matching nothing. Nothing here can be an arm64
+machine; adding one is one array and one `cfg`.
+
+**`proc.syscall`'s `req` and `file` keys, and the `cgroup` key on `proc.exec`
+and `proc.exit`.** The catalog declares them and no event carries one, which is
+exactly the shape of defect 5 below. It belongs to whoever owns
+`catalog/*.yaml`; the request is in `docs/open-findings.md`.
+
+**Which process generated a signal, as opposed to which was running.**
+`signal_generate` fires in the context of whoever raised the signal, so
+`bpf_get_current_pid_tgid` is the sender — but a signal raised by the kernel
+itself, for a timer, a fault or a dying child, is credited to whatever was
+interrupted. That is the same caveat `sched.wakeup` carries about its waker, and
+`sender_pid` is evidence rather than proof.
 
 **The exact thread count immediately after a program starts its workers.** The
 catalog caveat says a thread appears in procfs once it is running, not once the
@@ -249,6 +400,11 @@ stream A, and 5 by stream B. The convention that replaced "delete the test" is
 the scenario that found a defect is the one that would fail if it came back.
 Each entry below says which test carries it, and `docs/fixes/` says what became
 of it.
+
+**The sixth wave found three more, 7 to 9, and all three are in layers this
+family does not own.** They are written up at the end of this section and
+requested, with the exact change wanted, under `## Needs from another stream` in
+`docs/open-findings.md`.
 
 
 ### 1. The first reading of a launched target described this tool, not the program
@@ -485,3 +641,87 @@ learns less than one saying `77x a round of reads outran the 1ms tick`.
 
 The reason string should carry the shape and the counters the magnitudes: the
 worst overrun is worth keeping, each individual one is not.
+
+---
+
+### 7. A collector's notes are printed under the word "degraded"
+
+Found while landing the four event sources; belongs to `src/emit.rs` and
+`src/encode.rs`.
+
+`Collector::notes()` is how a collector qualifies its own numbers, and the emit
+layer folds those notes into `degradations`, which `src/encode.rs` prints as
+`degraded: <note>`. A backend that fell back to a lesser mechanism and a
+collector stating a fact about its measurement then read identically:
+
+```console
+$ omn proc.syscall --system -m trace -e hist -d 1s
+  degraded: machine-wide: every syscall on the machine, including the ones this
+            tool makes to drain the histogram
+  degraded: only `getppid` (110) was timed: the predicate on `syscall` was pushed
+            into the program, so no other syscall is in these numbers at all
+```
+
+Neither of those is a degradation. The second is the tool doing exactly what the
+catalog asked of it, reported as though something had gone wrong.
+
+It is small, and it is this project's own class of defect: the output telling a
+reader something that is not true. It was worked around here by wording every
+note so that it reads as a qualification of the measurement — which is why the
+filter note leads with *"only `getppid` was timed"* rather than with *"the
+filter ran in the kernel"* — and a wording that has to be chosen to survive its
+own label is a wording that will drift.
+
+**What would close it.** Two lists rather than one: a degradation is something
+the run had to give up, a note is something the reader has to know. They print
+under different words. `sched.runqlat` has carried the same confusion since wave
+three and nobody had named it.
+
+### 8. `map_create` refuses with a bare errno, before any advice can reach it
+
+Found on an unprivileged run; belongs to `src/bpf/syscall.rs` or `src/bpf/map.rs`.
+
+Every program in the eBPF layer attaches `permission_advice` to a *program load*
+that fails on permission grounds, and that message is good: it names `CAP_BPF`,
+`CAP_PERFMON`, the `setcap` line and the sysctl that most often gets in the way.
+But a program load is not the first privileged thing a collector does. **Map
+creation is**, and it fails first:
+
+```
+skipped: cannot create the `sched_process_exec` ring buffer:
+         Operation not permitted (os error 1)
+```
+
+That is what somebody without the capabilities actually sees, and it names
+neither the capability nor the way to get it. It is the same for `wakeup.rs`,
+`offcpu.rs`, `runqlat.rs` and `migrate.rs`, which have shipped it since wave
+two; nobody noticed because the message only appears on a machine without the
+capabilities, and the development machine has them.
+
+This family wraps it locally — `map_failure` in `src/bpf/proc_events.rs` and
+`src/bpf/proc_syscall.rs` turns `EPERM` into the same advice — but the wrapper
+belongs one layer down, where every program would get it.
+
+### 9. Three key declarations the catalog makes and no event carries
+
+Belongs to whoever owns `catalog/*.yaml`. It is defect 5 exactly, in three new
+places:
+
+| Entry | Declares | Events carry |
+|---|---|---|
+| `proc.syscall` | `keys: [task, req, file]` | `task` |
+| `proc.exec` | `keys: [task, cgroup]` | `task` |
+| `proc.exit` | `keys: [task, cgroup]` | `task` |
+
+A join written on `file` or `cgroup` matches nothing and reports that it
+attributed zero events, which reads as a workload that did nothing rather than
+as a key that was never there. The validator will accept `--keys cgroup` and
+tell a reader that the source carries it.
+
+`req` and `file` on `proc.syscall` look like the remains of a design where one
+event was one syscall with its arguments decoded; this collector aggregates in
+the kernel and cannot carry either, and the entry's own caveat is why. `cgroup`
+on the other two waits on the same helper the cgroup *target* does, so it is
+worth keeping in the entry only if the entry is meant to describe what a future
+build would emit — and `CATALOG.md` says the opposite, that a declaration is a
+promise the build keeps.

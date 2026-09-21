@@ -32,6 +32,8 @@ mod insn;
 mod map;
 mod migrate;
 mod offcpu;
+mod proc_events;
+mod proc_syscall;
 mod ring;
 mod runqlat;
 mod syscall;
@@ -41,6 +43,8 @@ use std::sync::OnceLock;
 
 pub use migrate::{Migration, MigrationProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
+pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
+pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};
 pub use runqlat::{RunqLat, RunqLatProgram};
 pub use wakeup::{Wakeup, WakeupProgram};
 

@@ -1,0 +1,53 @@
+# What ran on this machine, and what became of it?
+#
+#   /bin/true; /bin/true; sh -c 'exit 7' &        # in another terminal
+#   omn -f examples/proc-lifecycle.yml
+#
+# Two events the kernel publishes and nothing in `/proc` can be polled for.
+# `sched_process_exec` fires at the instant a pid stops being one program and
+# starts being another, and `sched_process_exit` fires as a task leaves, with
+# the status still on it. Between them they are a process table that does not
+# need to be sampled: a program that lives for four milliseconds is invisible
+# to every poller and is two events here.
+#
+# Both are machine-wide, and that is the catalog's word rather than a
+# limitation of this build: `omn list proc` shows neither declaring a `pid`
+# target, because "watch this process's execs" is a question about a pid that
+# is about to mean something else. Drive the workload from another terminal, or
+# read `tests/scenario_proc.rs`, which drives it from the test and then checks
+# the answer against what it ran.
+#
+# Three things the exit events say that a wait status does not:
+#
+#   * `code` is the shell's convention -- a status for a program that returned,
+#     and 128 + the signal for one a signal killed -- and the two unambiguous
+#     halves travel beside it. `status` is absent for a signalled death and
+#     `signal` is zero for a clean one, so nothing here has to be decoded twice.
+#   * `group_dead` separates a thread leaving from a process leaving. This
+#     tracepoint fires once per thread, so a count of these events is a count of
+#     threads until it is filtered.
+#   * the kernel's raw `exit_code` is carried undecoded, because packing a
+#     status and a signal number into one word is the kernel's decision and
+#     hiding it would make the two impossible to tell apart afterwards.
+name: what ran, and what became of it
+format: text
+duration: 2s
+
+requests:
+  # Every program that started while the run was open, with the path `execve`
+  # was given -- not the name it took, which is only its last component cut to
+  # fifteen characters.
+  - label: what-ran
+    source: proc.exec
+    target: system
+    mode: trace
+    keys: [task]
+    emit: [raw, timeline, topk, summary]
+
+  # And what became of each of them.
+  - label: what-ended
+    source: proc.exit
+    target: system
+    mode: trace
+    keys: [task]
+    emit: [raw, timeline, topk, summary]

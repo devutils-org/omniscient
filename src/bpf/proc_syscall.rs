@@ -1,0 +1,742 @@
+//! The syscall latency programs: how long each call into the kernel took.
+//!
+//! Two programs, because no single event is the measurement: `sys_enter` says a
+//! task called into the kernel and `sys_exit` says it came back, and the gap
+//! between them is the latency. They share a map -- the first writes the moment
+//! and the syscall number, the second reads them back and closes the interval.
+//!
+//! **The histogram is built in the kernel, and here that is not an
+//! optimisation.** `raw_syscalls:sys_enter` fires on every syscall of every
+//! process on the machine; the catalog entry says so in its own caveat. A
+//! streaming shape would publish a ring record per syscall, which on a busy
+//! machine is millions a minute -- a measurement whose cost grows with the
+//! thing being measured, producing numbers that describe a machine running
+//! `omn`. What the kernel keeps instead is a count and an exact total per
+//! `(task, syscall, log2 bucket)`, which turns those millions into a few dozen
+//! rows per drain.
+//!
+//! **The filter runs in the program, and that is a promise rather than a
+//! speed.** The resolver credits any `bpf` backend with pushing predicates into
+//! the kernel and then leaves its events alone. For every other source in this
+//! build that credit is about the numbers; here it is about the cost as well,
+//! because filtering `syscall == 'read'` after the fact still pays for every
+//! `write` on the machine. So a predicate that names one syscall is written
+//! into the instruction stream, ahead of the map write, and the collector says
+//! in its notes that it was -- a filter reported as pushed down and applied in
+//! userspace is the shape `DECISIONS.md` calls the worst a bug takes here.
+//!
+//! The bucketing is `emit::BucketLayout::Log2`, the same definition userspace
+//! uses, for the reason `src/bpf/runqlat.rs` records: it is what lets a
+//! kernel-built histogram pass through the emit layer without being re-bucketed
+//! into something else.
+
+use std::os::fd::{AsRawFd, OwnedFd};
+
+use super::btf::Btf;
+use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{Counters, Hash};
+use super::syscall;
+
+/// Helper numbers this family needs and the shared `insn::helper` module does
+/// not name yet; the request to move them there is in `docs/open-findings.md`.
+mod extra_helper {
+    /// `bpf_get_current_comm(buf, size)`.
+    ///
+    /// `sys_exit` hands its program a `pt_regs *` and a return value and no
+    /// task at all, so the name of whoever made the call cannot be read out of
+    /// a `task_struct` the way every other program in this layer reads it. The
+    /// alternative is a `/proc/<tid>/comm` read in userspace at drain time,
+    /// which answers for whoever holds that tid *then* -- and a short-lived
+    /// task is exactly the one a syscall histogram is interesting about.
+    pub const GET_CURRENT_COMM: i32 = 16;
+}
+
+/// The prototypes these programs are written against.
+///
+/// `sys_exit`'s second argument is the *return value*, not the syscall number:
+/// the number is only on the entry side, which is the whole reason the pending
+/// map carries it rather than being keyed by it.
+const ENTER_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
+const EXIT_SIGNATURE: [&str; 2] = ["pt_regs *", "long int"];
+
+/// How many threads may be inside a syscall at once before the entry program
+/// stops being able to record new ones.
+///
+/// Every runnable thread on the machine can be in a syscall at the same
+/// instant, and on a machine doing I/O most of them are.
+const MAX_PENDING: u32 = 16384;
+
+/// How many distinct `(task, syscall, bucket)` rows one interval may hold.
+///
+/// The cardinality this buys is the point of aggregating: a thread uses a
+/// handful of syscalls and each lands in a handful of buckets, whatever the
+/// workload does.
+const MAX_ROWS: u32 = 32768;
+
+/// Slots of the drop counter, one per thing that can be lost.
+const DROP_PENDING: u32 = 0;
+const DROP_ROWS: u32 = 1;
+
+/// Where each map's key and value live on the program's stack.
+///
+/// Stated once so the sizes below, the decode on the other side and the map
+/// descriptors all come from the same place. Every byte of a key is written
+/// before the key is used: the kernel hashes all of it, and a byte nobody wrote
+/// puts two identical calls in two rows.
+const ROW_VALUE: i16 = -64;
+const ROW_KEY: i16 = -80;
+const PEND_VALUE: i16 = -96;
+const PEND_KEY: i16 = -104;
+const DROP_KEY: i16 = -112;
+
+/// The layout of a row key, as byte offsets within it.
+const KEY_TID: i16 = 0;
+const KEY_TGID: i16 = 4;
+/// The syscall number, which is the series a reader actually wants: a process
+/// whose `futex` calls take milliseconds and whose `write` calls take
+/// microseconds is two rows here and one meaningless average anywhere else.
+const KEY_NR: i16 = 8;
+/// The log2 bucket the call fell into. Part of the key is what makes this a
+/// histogram rather than a mean.
+const KEY_BUCKET: i16 = 12;
+const ROW_KEY_BYTES: usize = 16;
+
+/// The layout of a row value.
+const VALUE_COUNT: i16 = 0;
+/// The exact sum of the durations in this bucket, kept beside the count because
+/// the bucket is a factor of two wide and a total built from its bounds would
+/// inherit that error.
+const VALUE_TOTAL_NS: i16 = 8;
+const VALUE_COMM: i16 = 16;
+const COMM_BYTES: usize = 16;
+const ROW_VALUE_BYTES: usize = 32;
+
+/// The pending map: thread id to the moment it entered a syscall, and which.
+const PEND_KEY_BYTES: usize = 4;
+const PEND_TS: i16 = 0;
+const PEND_NR: i16 = 8;
+const PEND_VALUE_BYTES: usize = 16;
+
+/// `bpf_get_current_comm` is not GPL-only, but `bpf_probe_read_kernel` is and
+/// the rest of this layer declares GPL for it; a program that declared
+/// otherwise would be the one exception nobody expects.
+const LICENSE: &str = "GPL";
+
+/// One `(task, syscall, bucket)` row's calls over one drain interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyscallRow {
+    pub tid: u32,
+    pub tgid: u32,
+    /// The architecture's syscall number. The name for it is a userspace table
+    /// and belongs to the collector, not here: the kernel does not publish one.
+    pub nr: u32,
+    /// The log2 bucket, in `emit::BucketLayout::Log2`'s numbering: bucket 0
+    /// holds a duration of zero, and bucket *k* holds `[2^(k-1), 2^k)`.
+    pub bucket: u32,
+    pub count: u64,
+    /// The exact total, which the bucket bounds cannot give back.
+    pub total_ns: u64,
+    pub comm: String,
+}
+
+impl SyscallRow {
+    /// The low bound of this row's bucket, in nanoseconds.
+    ///
+    /// This is the value that travels on the event, because it is the one the
+    /// emit layer's own log2 bucketing maps back to exactly this bucket.
+    pub fn bucket_low_ns(&self) -> u64 {
+        match self.bucket {
+            0 => 0,
+            // A duration is a nanosecond count and `bucket` is derived from
+            // one, so this cannot be reached -- but a shift that would overflow
+            // is a panic rather than a wrong answer, so the case is written.
+            k if k >= 64 => 1 << 63,
+            k => 1 << (k - 1),
+        }
+    }
+
+    fn decode(key: &[u8], value: &[u8]) -> Option<Self> {
+        if key.len() < ROW_KEY_BYTES || value.len() < ROW_VALUE_BYTES {
+            return None;
+        }
+        let word =
+            |bytes: &[u8], at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("4"));
+        let long =
+            |bytes: &[u8], at: usize| u64::from_ne_bytes(bytes[at..at + 8].try_into().expect("8"));
+        let comm = &value[VALUE_COMM as usize..VALUE_COMM as usize + COMM_BYTES];
+        let end = comm
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(comm.len());
+        Some(Self {
+            tid: word(key, KEY_TID as usize),
+            tgid: word(key, KEY_TGID as usize),
+            nr: word(key, KEY_NR as usize),
+            bucket: word(key, KEY_BUCKET as usize),
+            count: long(value, VALUE_COUNT as usize),
+            total_ns: long(value, VALUE_TOTAL_NS as usize),
+            comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
+        })
+    }
+}
+
+/// Adds one to a slot of the per-cpu drop counter.
+///
+/// `resume` is where control goes both when the count has been made and when
+/// the counter could not be found: failing to record a loss is not a reason to
+/// stop recording measurements.
+fn count_drop(program: &mut Program, drops_fd: i32, slot: u32, resume: &'static str) {
+    program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot as i32));
+    program.extend(Insn::load_map_fd(1, drops_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, DROP_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
+    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
+    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+    program.push(Insn::add64_imm(1, 1));
+    program.push(Insn::stx(BPF_DW, 0, 0, 1));
+}
+
+/// The steps of the unrolled `log2`, as (shift, the label that skips it).
+///
+/// There is no count-leading-zeros instruction in BPF and no loop worth writing
+/// on a path this hot, so the exponent is found by binary search: six compares,
+/// thirty instructions, and no branch that depends on anything but the value.
+const LOG2_STEPS: [(i32, &str); 6] = [
+    (32, "log2_32"),
+    (16, "log2_16"),
+    (8, "log2_8"),
+    (4, "log2_4"),
+    (2, "log2_2"),
+    (1, "log2_1"),
+];
+
+/// Computes the log2 bucket of the duration in `value_reg` into `r3`.
+///
+/// The numbering is `emit::BucketLayout::Log2`'s: zero is bucket zero and
+/// everything else is `floor(log2(v)) + 1`, so bucket *k* holds `[2^(k-1),
+/// 2^k)` on both sides of the kernel boundary.
+fn push_log2_bucket(program: &mut Program, value_reg: u8) {
+    program.push(Insn::mov64_reg(1, value_reg));
+    program.push(Insn::mov64_imm(3, 0));
+    // A call that took no measurable time -- both events inside one clock tick
+    // -- is bucket zero, not the log2 of zero.
+    program.jump_to("log2_done", Insn::jeq_imm(1, 0, 0));
+    for (shift, label) in LOG2_STEPS {
+        program.push(Insn::mov64_reg(2, 1));
+        program.push(Insn::rsh64_imm(2, shift));
+        program.jump_to(label, Insn::jeq_imm(2, 0, 0));
+        program.push(Insn::add64_imm(3, shift));
+        program.push(Insn::mov64_reg(1, 2));
+        program.label(label);
+    }
+    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
+    // bucket 0 can mean "below one" rather than "exactly one".
+    program.push(Insn::add64_imm(3, 1));
+    program.label("log2_done");
+}
+
+/// A map this layer could not create, said in a way a reader can act on.
+///
+/// `EPERM` from `BPF_MAP_CREATE` is the *first* thing an unprivileged run hits
+/// -- before any program is loaded, which is where the rest of this layer
+/// attaches its advice -- so a bare "Operation not permitted" here is what
+/// somebody without `CAP_BPF` actually sees, and it names neither the
+/// capability nor the way to get it.
+fn map_failure(what: &str, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        super::permission_advice(&format!("creating the {what}"))
+    } else {
+        format!("cannot create the {what}: {error}")
+    }
+}
+
+/// Refuses a kernel whose tracepoint is not the shape the program reads.
+fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
+    let signature = btf.tracepoint_signature(tracepoint)?;
+    if signature != expected {
+        return Err(format!(
+            "this kernel declares `{tracepoint}({})`, and this program is written for \
+             `{tracepoint}({})`: it reads the syscall number out of a fixed slot, and against \
+             another prototype that slot holds something else",
+            signature.join(", "),
+            expected.join(", "),
+        ));
+    }
+    Ok(())
+}
+
+/// What the two programs are narrowed to before they do any work.
+///
+/// Both are written into the instruction stream rather than looked up in a map:
+/// they are known before the program loads, they never change during a run, and
+/// this path runs on every syscall of every process on the machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Narrowing {
+    /// The thread group whose calls are kept, or none for the machine.
+    pub tgid: Option<u32>,
+    /// The one syscall number kept, or none for all of them. This is the
+    /// predicate the catalog's caveat says to push down.
+    pub syscall_nr: Option<u32>,
+}
+
+/// The program on `sys_enter`: a task has called into the kernel.
+fn enter_instructions(
+    btf: &Btf,
+    narrowing: Narrowing,
+    pending_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    check_signature(btf, "sys_enter", &ENTER_SIGNATURE)?;
+
+    let mut program = Program::new();
+    // r6 keeps the context, r8 the timestamp and r9 the syscall number; all
+    // three survive helper calls, which clobber r1 through r5.
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    // The key is four bytes in an eight-byte slot, and the four the program
+    // does not write are still on the stack.
+    program.push(Insn::st_imm(BPF_DW, R10, PEND_KEY, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, PEND_KEY, 0));
+    if let Some(tgid) = narrowing.tgid {
+        program.push(Insn::rsh64_imm(0, 32));
+        program.jump_to("done", Insn::jne_imm(0, tgid as i32, 0));
+    }
+
+    // The second argument is the syscall number.
+    program.push(Insn::ldx(BPF_DW, 9, 6, 8));
+    if let Some(nr) = narrowing.syscall_nr {
+        program.jump_to("done", Insn::jne_imm(9, nr as i32, 0));
+    }
+
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_TS, 8));
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_NR, 9));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, PEND_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    // The map is full: this call will never be timed, and nothing else anywhere
+    // would record that it happened.
+    count_drop(&mut program, drops_fd, DROP_PENDING, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The program on `sys_exit`: the call has returned, and its duration is known.
+///
+/// There is no filtering here at all, and that is deliberate rather than an
+/// omission: a call the entry program declined to record has no entry in the
+/// pending map, so the lookup that opens this program is the same filter,
+/// applied where it cannot disagree with itself.
+fn exit_instructions(
+    btf: &Btf,
+    pending_fd: i32,
+    rows_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    check_signature(btf, "sys_exit", &EXIT_SIGNATURE)?;
+
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    program.push(Insn::st_imm(BPF_DW, R10, PEND_KEY, 0));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, PEND_KEY, 0));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 0));
+
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    // A call this run never saw begin: the thread was already inside it when
+    // the programs attached, or it belongs to another process, or the entry
+    // program's filter declined it.
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    // Both values are taken out of the map *before* the entry is removed: the
+    // pointer a lookup returns is only good until then.
+    program.push(Insn::ldx(BPF_DW, 9, 0, PEND_TS));
+    program.push(Insn::ldx(BPF_DW, 7, 0, PEND_NR));
+
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+
+    // r9 = now - when the call began. Computed through r1, which nothing
+    // between here and the next call reads.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::mov64_reg(9, 1));
+
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_NR, 7));
+    push_log2_bucket(&mut program, 9);
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
+
+    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ROW_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("first_call", Insn::jeq_imm(0, 0, 0));
+    // One allocation shared by every cpu, so both increments have to be ones
+    // the other cpus cannot interleave with.
+    program.push(Insn::mov64_imm(1, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_COUNT, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    program.jump_to("done", Insn::ja());
+
+    program.label("first_call");
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    // The name is read once, when the row is created, rather than on every
+    // call: it does not change, and this is the hot path.
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_COMM) as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(extra_helper::GET_CURRENT_COMM));
+    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ROW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ROW_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_ROWS, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Two loaded, attached programs and the maps they share.
+///
+/// Dropping it detaches both: the links, the programs and the maps are file
+/// descriptors, and the kernel unloads a program when the last one closes.
+pub struct SyscallProgram {
+    pending: Hash,
+    rows: Hash,
+    drops: Counters,
+    _enter_program: OwnedFd,
+    _enter_link: OwnedFd,
+    _exit_program: OwnedFd,
+    _exit_link: OwnedFd,
+}
+
+/// What one drain found, beside the measurements.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SyscallDrainLosses {
+    /// Rows the walk returned and the read no longer found.
+    pub vanished: u64,
+    /// The walk stopped at the map's capacity rather than at its end.
+    pub truncated: bool,
+}
+
+impl SyscallProgram {
+    pub fn load(narrowing: Narrowing) -> Result<Self, String> {
+        let btf = super::kernel_btf()?;
+
+        let pending = Hash::create(
+            PEND_KEY_BYTES,
+            PEND_VALUE_BYTES,
+            MAX_PENDING,
+            "omn_sys_pend",
+        )
+        .map_err(|error| map_failure("pending syscall map", error))?;
+        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sys_hist")
+            .map_err(|error| map_failure("syscall histogram map", error))?;
+        let drops = Counters::create(2, "omn_sys_drop")
+            .map_err(|error| map_failure("syscall drop counter", error))?;
+
+        let enter = enter_instructions(btf, narrowing, pending.as_raw_fd(), drops.as_raw_fd())?;
+        let exit = exit_instructions(
+            btf,
+            pending.as_raw_fd(),
+            rows.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
+
+        let enter_program = load(&enter, "omn_sys_enter")?;
+        let exit_program = load(&exit, "omn_sys_exit")?;
+
+        // Attached in this order on purpose, for the reason `runqlat.rs`
+        // records: a call recorded by a program whose partner is not attached
+        // yet is a call that is never closed -- harmless, it is taken by the
+        // next thread to reuse the tid or ages out with the map -- whereas an
+        // exit seen before any entry was recorded would close a call nobody
+        // opened, and the lookup that fails is the only thing standing between
+        // that and a duration measured from an uninitialised timestamp.
+        let enter_link = syscall::raw_tracepoint_open("sys_enter", enter_program.as_raw_fd())
+            .map_err(|error| format!("cannot attach to the `sys_enter` tracepoint: {error}"))?;
+        let exit_link = syscall::raw_tracepoint_open("sys_exit", exit_program.as_raw_fd())
+            .map_err(|error| format!("cannot attach to the `sys_exit` tracepoint: {error}"))?;
+
+        Ok(Self {
+            pending,
+            rows,
+            drops,
+            _enter_program: enter_program,
+            _enter_link: enter_link,
+            _exit_program: exit_program,
+            _exit_link: exit_link,
+        })
+    }
+
+    /// Takes every row the kernel has accumulated since the last drain.
+    ///
+    /// Each row is a delta over the interval between two drains: rows are
+    /// removed as they are read, so what comes back next time is what happened
+    /// in between.
+    pub fn drain(&self) -> Result<(Vec<SyscallRow>, SyscallDrainLosses), String> {
+        let drained = self
+            .rows
+            .drain()
+            .map_err(|error| format!("cannot read the syscall histogram: {error}"))?;
+        let mut losses = SyscallDrainLosses {
+            vanished: drained.vanished,
+            truncated: drained.truncated,
+        };
+        let mut rows = Vec::with_capacity(drained.entries.len());
+        for (key, value) in &drained.entries {
+            match SyscallRow::decode(key, value) {
+                Some(row) => rows.push(row),
+                // A record of the wrong size means this reader and the program
+                // disagree about the layout, which is a bug rather than a
+                // machine condition -- but counting it beats reinterpreting it.
+                None => losses.vanished += 1,
+            }
+        }
+        Ok((rows, losses))
+    }
+
+    /// How many threads were inside a syscall and had not come back.
+    ///
+    /// Their call is real and is in no bucket, because it has no end yet. A
+    /// machine with threads blocked in `epoll_wait` always has some, and that
+    /// is a fact about the window rather than a loss.
+    pub fn still_pending(&self) -> usize {
+        self.pending.len().unwrap_or(0)
+    }
+
+    /// Calls the programs could not record because a map was full, as
+    /// `(pending, rows)`.
+    pub fn dropped(&self) -> (u64, u64) {
+        (self.drops.read(DROP_PENDING), self.drops.read(DROP_ROWS))
+    }
+}
+
+fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
+    syscall::prog_load(
+        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+        instructions,
+        name,
+        LICENSE,
+    )
+    .map_err(|error| {
+        if error.is_permission() {
+            super::permission_advice("loading a raw tracepoint program")
+        } else {
+            format!("the kernel refused the `{name}` program: {error}")
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kernel_btf() -> Option<Btf> {
+        match Btf::from_kernel() {
+            Ok(btf) => Some(btf),
+            Err(reason) => {
+                eprintln!("skipped: {reason}");
+                None
+            }
+        }
+    }
+
+    /// The bucket index the emit layer computes, written here as the machine's
+    /// own count-leading-zeros rather than as the six-step search the program
+    /// performs. An independent expression of the definition is the only thing
+    /// that can catch the search being off by one.
+    fn reference_index(value: u64) -> u64 {
+        u64::from(u64::BITS - value.leading_zeros())
+    }
+
+    /// The kernel's bucketing and the emit layer's must be the same function.
+    ///
+    /// If the two disagree by one, every call is reported in the neighbouring
+    /// bucket -- a factor of two -- and nothing anywhere says so.
+    #[test]
+    fn the_kernels_buckets_and_the_emit_layers_are_the_same_buckets() {
+        for bucket in 0..48u32 {
+            let row = SyscallRow {
+                tid: 1,
+                tgid: 1,
+                nr: 1,
+                bucket,
+                count: 1,
+                total_ns: 0,
+                comm: String::new(),
+            };
+            let low = row.bucket_low_ns();
+            assert_eq!(
+                reference_index(low),
+                u64::from(bucket),
+                "bucket {bucket} has low bound {low}, which the emit layer would put in \
+                 bucket {}",
+                reference_index(low)
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_of_the_wrong_size_is_refused_rather_than_reinterpreted() {
+        assert!(SyscallRow::decode(&[0u8; 8], &[0u8; ROW_VALUE_BYTES]).is_none());
+        assert!(SyscallRow::decode(&[0u8; ROW_KEY_BYTES], &[0u8; 8]).is_none());
+        assert!(SyscallRow::decode(&[0u8; ROW_KEY_BYTES], &[0u8; ROW_VALUE_BYTES]).is_some());
+    }
+
+    fn helpers_called(instructions: &[Insn]) -> Vec<i32> {
+        instructions
+            .iter()
+            .filter(|insn| insn.code == 0x85)
+            .map(|insn| insn.imm)
+            .collect()
+    }
+
+    /// Invariant 6: `bpf_ktime_get_boot_ns` includes suspend time, and a
+    /// duration measured with one of each would be wrong by however long the
+    /// machine had been asleep.
+    #[test]
+    fn both_programs_read_the_monotonic_clock_and_no_other() {
+        const KTIME_GET_BOOT_NS: i32 = 125;
+        let Some(btf) = kernel_btf() else { return };
+        for program in [
+            enter_instructions(&btf, Narrowing::default(), 3, 4).expect("a program"),
+            exit_instructions(&btf, 3, 4, 5).expect("a program"),
+        ] {
+            let called = helpers_called(&program);
+            assert!(called.contains(&helper::KTIME_GET_NS));
+            assert!(!called.contains(&KTIME_GET_BOOT_NS));
+        }
+    }
+
+    /// The whole promise of this source's caveat. A predicate naming one
+    /// syscall has to appear in the instruction stream ahead of the map write,
+    /// and a run that names none must carry no comparison at all -- otherwise
+    /// the resolved file says the filter was pushed down and it was not.
+    #[test]
+    fn a_syscall_predicate_is_written_into_the_instruction_stream() {
+        let Some(btf) = kernel_btf() else { return };
+        let everything = enter_instructions(&btf, Narrowing::default(), 3, 4).expect("a program");
+        assert!(
+            !everything.iter().any(|insn| insn.imm == 257),
+            "a run that named no syscall compares against none"
+        );
+        let narrowed = enter_instructions(
+            &btf,
+            Narrowing {
+                tgid: None,
+                syscall_nr: Some(257),
+            },
+            3,
+            4,
+        )
+        .expect("a program");
+        assert_eq!(
+            narrowed.iter().filter(|insn| insn.imm == 257).count(),
+            1,
+            "the syscall number is compared once, in the program"
+        );
+        assert!(
+            narrowed.len() > everything.len(),
+            "the narrowed program carries a comparison the other does not"
+        );
+    }
+
+    /// A process filter and a syscall filter are independent, and both belong
+    /// in the entry program: the exit program has neither, because a call the
+    /// entry program declined has no pending entry for it to find.
+    #[test]
+    fn the_process_filter_and_the_syscall_filter_are_both_in_the_entry_program() {
+        let Some(btf) = kernel_btf() else { return };
+        let both = enter_instructions(
+            &btf,
+            Narrowing {
+                tgid: Some(4242),
+                syscall_nr: Some(257),
+            },
+            3,
+            4,
+        )
+        .expect("a program");
+        assert_eq!(both.iter().filter(|insn| insn.imm == 4242).count(), 1);
+        assert_eq!(both.iter().filter(|insn| insn.imm == 257).count(), 1);
+
+        let exit = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        assert!(
+            !exit.iter().any(|insn| insn.imm == 4242 || insn.imm == 257),
+            "the exit program filters through the pending map and nothing else"
+        );
+    }
+
+    /// The exit program reads both halves of the pending value out of the map
+    /// before it deletes the entry. A lookup's pointer is good until then and
+    /// not after, and reading it afterwards is a duration computed from freed
+    /// memory -- which is a number rather than a fault.
+    #[test]
+    fn the_pending_entry_is_read_before_it_is_deleted() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let delete_at = program
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::MAP_DELETE_ELEM)
+            .expect("the exit program removes the pending entry");
+        // The two loads out of r0, the map value pointer.
+        let loads = program[..delete_at]
+            .iter()
+            .filter(|insn| insn.code == 0x79 && (insn.regs >> 4) == 0)
+            .count();
+        assert_eq!(
+            loads, 2,
+            "the timestamp and the syscall number are both read before the delete"
+        );
+    }
+
+    /// Both programs end in `exit`, and the whole stream passes the structural
+    /// audit -- which is what stands in for a compiler on a program nobody
+    /// compiled.
+    #[test]
+    fn both_programs_are_built_against_the_running_kernel() {
+        let Some(btf) = kernel_btf() else { return };
+        for program in [
+            enter_instructions(&btf, Narrowing::default(), 3, 4).expect("a program"),
+            exit_instructions(&btf, 3, 4, 5).expect("a program"),
+        ] {
+            assert_eq!(program.last().copied(), Some(Insn::exit()));
+            super::super::insn::audit(&program).expect("the audit passes");
+        }
+    }
+}

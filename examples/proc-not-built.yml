@@ -1,71 +1,84 @@
-# The four `proc` sources this build does not implement yet.
+# The `proc` backends this build does not implement, pinned on purpose.
 #
-#   omn -f examples/proc-not-built.yml          # exit 3, and why
-#   omn -f examples/proc-not-built.yml --dump-request
+#   omn -f examples/proc-not-built.yml ; echo $?   # 3
 #
 # This session is valid. It validates, it resolves, it names a backend -- and
-# then it stops, because no collector is written for `bpf:tp`. That is a third
+# then it stops, because no collector is written for it. That is a third
 # answer, distinct from the other two, and it has an exit code of its own:
 #
 #   2   the request cannot mean anything          docs/scenarios/proc.md
 #   3   this build does not implement it          this file
-#   1   this machine cannot serve it              not reachable for this family
+#   1   this machine cannot serve it              through --catalog, in the test
 #
 # The distinction is the whole point. A caller that cannot tell "you asked for
 # something impossible" from "this is not written yet" cannot decide whether to
 # fix the request or wait for a release, and `--dump-request` on this file
 # prints exactly how these would be obtained on a build that has them.
 #
-# All four wait on one piece of work: `src/bpf/` attaches exactly one way,
-# `BPF_RAW_TRACEPOINT_OPEN`, and these four entries ask for `bpf:tp` -- a
-# numeric id out of tracefs and `PERF_EVENT_IOC_SET_BPF`. The tracepoints
-# themselves are present on this machine; `omn list proc` says so with `yes` in
-# its HERE column and `none` in its COLLECTOR column, which are two different
-# questions and are deliberately kept apart.
+# **What this file used to be is worth knowing.** Until the sixth wave it held
+# the four `proc` sources with no collector at all, and it could not decide
+# which refusal it was getting: all four declared `bpf:tp` and nothing else, a
+# classic tracepoint is attached by reading a numeric event id out of a
+# root-only file under tracefs, and on a machine where that file is unreadable
+# -- this project's own -- the honest answer was 1, "this machine cannot serve
+# it", not 3. All four now collect through `bpf:raw_tp`, which needs a name and
+# the kernel's own BTF and no tracefs at all.
 #
-# Only the first request is reached: the run stops at the first source it
-# cannot serve. The other three are here so that the file is the list, and so
-# that the day `bpf:tp` lands this becomes a session rather than an epitaph.
-name: valid, and not written yet
+# So what is left unimplemented is the *second* backend of each chain, and
+# `--backend force:` is what reaches it. That is a better demonstration than
+# the old one for a reason worth stating: `force:` bypasses the resolver
+# entirely, so the answer no longer depends on whether this machine can read
+# tracefs. It is 3 everywhere, which is what an exit code demonstrating "this
+# build does not have it" should be.
+#
+# Every request is reported: the run stops at the first source it cannot serve,
+# so only the first is reached, and the other three are here so that the file
+# is the list.
+name: the backends this build does not have
 duration: 500ms
 format: text
 
 requests:
-  # Every process that started while the run was open, with its filename.
-  - label: what-ran
+  # Every process that started while the run was open, with its filename --
+  # through the classic tracepoint path rather than the raw one.
+  - label: exec-through-tracefs
     source: proc.exec
     target: system
     mode: trace
-    keys: [task, cgroup]
+    keys: [task]
     emit: [timeline, topk, summary]
+    backend: "force:bpf:tp"
 
-  # And what became of each of them: the exit code is the field that matters.
-  - label: what-ended
+  # And what became of each of them.
+  - label: exit-through-tracefs
     source: proc.exit
     target: system
     mode: trace
-    keys: [task, cgroup]
+    keys: [task]
     emit: [timeline, topk, summary]
+    backend: "force:bpf:tp"
 
-  # Which signals were delivered to whom, ranked. `count` would be the cheaper
-  # mode, but `count` cannot produce a `topk` -- a mode that never sees an
-  # individual event cannot rank who produced them -- and the validator says so
-  # by name. That refusal is correct; the ones worth recording are the refusals
-  # that name the wrong thing, and docs/scenarios/proc.md has them.
-  - label: signals
+  # Which signals were generated for whom, ranked. `count` would be the cheaper
+  # mode to read, but `count` cannot produce a `topk` -- a mode that never sees
+  # an individual event cannot rank who produced them -- and the validator says
+  # so by name. That refusal is correct; the ones worth recording are the
+  # refusals that name the wrong thing, and docs/scenarios/proc.md has them.
+  - label: signals-through-tracefs
     source: proc.signals
     target: system
     mode: trace
     keys: [task]
     emit: [topk, rate, summary]
+    backend: "force:bpf:tp"
 
   # The expensive one, and the reason its caveat exists: `raw_syscalls` fires
   # on everything, so this has to aggregate in the kernel or filter by syscall
-  # number inside the eBPF program. A raw trace of it on a syscall-heavy
-  # workload is a load test, not a measurement.
-  - label: syscall-latency
+  # number inside the eBPF program. The raw path does both; this classic one is
+  # not written.
+  - label: syscall-through-tracefs
     source: proc.syscall
     target: system
     mode: trace
-    keys: [task, req]
+    keys: [task]
     emit: [hist, topk, summary]
+    backend: "force:bpf:tp"

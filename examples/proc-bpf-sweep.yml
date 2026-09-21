@@ -1,0 +1,62 @@
+# Does every axis the four event sources declare actually work?
+#
+#   omn -f examples/proc-bpf-sweep.yml
+#   omn -f examples/proc-bpf-sweep.yml --format json | jq '.results[].outputs[].emit'
+#
+# The capability sweep for the half of this family that goes through eBPF. The
+# catalog is data and the CLI is a projection of it, so a combination the
+# catalog offers and the build cannot serve is a promise broken in the one
+# place nobody looks: `omn list proc` would still say `yes`.
+#
+# Every emit each source declares is asked for here, and every filter field it
+# declares is used, because a predicate over a field no event carries is false
+# everywhere -- which empties the series and reads exactly like a machine that
+# did nothing.
+#
+#   proc.exec     raw, timeline, topk, summary      comm, filename
+#   proc.exit     raw, timeline, topk, summary      comm, code
+#   proc.signals  raw, topk, rate, summary          comm, sig, pid
+#
+# `proc.syscall` is the fourth event source and is not here, because one run
+# observes one target: these three declare no `launch` and it does, so its
+# sweep is a separate file, `proc-syscall-sweep.yml`. That is the same reason
+# `proc-sweep.yml` and `proc-one-reading.yml` are two files.
+#
+# This file does not mix modes either. Every request is `trace`, because a
+# session takes its tick from its requests and one that mixes them does not
+# measure what it says -- defect 3 of docs/scenarios/proc.md.
+#
+# All three watch the machine, so what they find is whatever the machine was
+# doing while the run was open. Start something:
+#
+#   sh -c 'for i in 1 2 3; do /bin/true; done; kill -USR1 $$' &
+#
+# and `tests/scenario_proc.rs` does exactly that before checking the answer.
+name: every axis the three machine-wide event sources declare
+format: text
+duration: 1s
+
+requests:
+  - label: exec-every-emit
+    source: proc.exec
+    target: system
+    mode: trace
+    keys: [task]
+    emit: [raw, timeline, topk, summary]
+    filter: "comm =~ '' && filename =~ '/'"
+
+  - label: exit-every-emit
+    source: proc.exit
+    target: system
+    mode: trace
+    keys: [task]
+    emit: [raw, timeline, topk, summary]
+    filter: "code >= 0 && comm =~ ''"
+
+  - label: signals-every-emit
+    source: proc.signals
+    target: system
+    mode: trace
+    keys: [task]
+    emit: [raw, topk, rate, summary]
+    filter: "sig > 0 && pid > 0 && comm =~ ''"

@@ -1,0 +1,78 @@
+# How long did this program spend inside the kernel, and in which calls?
+#
+#   omn -f examples/proc-syscall.yml
+#
+# The workload chooses both answers before the tool is started, which is what
+# makes them checkable. It calls `getppid` exactly a thousand times -- the one
+# syscall glibc does not cache, that nothing else in a Python start-up makes,
+# and that does almost nothing, so its latency is the cost of the transition
+# itself. Then it sleeps fifty milliseconds ten times, which is a delay this
+# file injected: those ten calls have to land in the bucket that holds 50 ms,
+# and no `getppid` may be anywhere near it.
+#
+# Both requests filter on one syscall, and that filter runs **in the kernel**.
+# `raw_syscalls:sys_enter` fires on every syscall of every process on the
+# machine, so a predicate applied after the fact would still pay for all of
+# them; the number is written into the eBPF program's instruction stream ahead
+# of the map write, and the run says so in its own output rather than leaving
+# it to be believed. A name this build does not know is refused rather than
+# matched against nothing -- `syscall == 'wriet'` is a typo, not an empty
+# series.
+#
+# What comes back is already a histogram. The kernel counts `(task, syscall,
+# log2 bucket) -> (calls, exact total)`, so one event here stands for many
+# calls and carries how many; the emit layer weighs it by that. A bucket is a
+# factor of two wide, so every number derived from the bucket is bucketed, and
+# `total_ns` beside it is the exact sum that the bucket bounds cannot give
+# back -- which is why the mean of the sleeps is right to the microsecond while
+# their bucket only says "between 33.5 and 67 milliseconds".
+name: where the kernel time went
+format: text
+duration: 2s
+
+requests:
+  # A thousand calls into the kernel that do nothing, which is the cost of the
+  # transition and nothing else.
+  - label: a-thousand-cheap-calls
+    source: proc.syscall
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import os, sys, time
+          for _ in range(1000):
+              os.getppid()
+          sys.stderr.write('CALLS 1000\n')
+          sys.stderr.flush()
+          for _ in range(10):
+              time.sleep(0.05)
+          sys.stderr.write('SLEEPS 10 EACH 50000000\n')
+          sys.stderr.flush()
+    mode: trace
+    filter: "syscall == 'getppid'"
+    keys: [task]
+    emit: [hist, raw, summary]
+
+  # The same program, watched through the one call whose duration this file
+  # chose. Ten sleeps of fifty milliseconds: the answer is known before the run.
+  - label: ten-injected-delays
+    source: proc.syscall
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import os, sys, time
+          for _ in range(1000):
+              os.getppid()
+          sys.stderr.write('CALLS 1000\n')
+          sys.stderr.flush()
+          for _ in range(10):
+              time.sleep(0.05)
+          sys.stderr.write('SLEEPS 10 EACH 50000000\n')
+          sys.stderr.flush()
+    mode: trace
+    filter: "syscall == 'clock_nanosleep'"
+    keys: [task]
+    emit: [hist, raw, summary]
