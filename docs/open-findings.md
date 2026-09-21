@@ -3507,5 +3507,48 @@ reads worse: it loses the fact that the tracepoint is there. The fix, kept in
 `raw_tracepoint_attaches`, is to say both — *`sched_waking` is defined by this
 kernel, and attaching to it needs CAP_BPF* — because "the tracepoint is not
 there" and "you may not attach to it" send a reader to two different places.
+## Needs from another stream
+
+### From stream F, to the coordinator: finding 37 landed, and nine lines of it are in `src/encode.rs`
+
+Finding 37 is closed. `src/emit.rs` computes a `Shortfall` and carries it on
+`SeriesHist` and `SeriesSummary`, so the four structured formats carry it with
+no encoder change at all. `docs/families/emit.md` is the write-up.
+
+**The one thing outside the stream's file set.** The finding says the defect
+"belongs to whoever owns `src/emit.rs` and `src/render.rs`", and `BRIEF.md`
+gave stream F those two files. `src/render.rs` renders requests, listings and
+refusals; it does not render results. `src/encode.rs` does, and `hist_text` is
+in it. So the file list names the wrong second file, and the text rendering of
+the mark — the format a reader actually takes a p99 off — is nine lines there:
+
+- `bound()` and `comparison()`, two helpers returning `">="` or nothing;
+- `>=` written into the `summary` and `hist` head lines in place of `=`, and
+  beside `mean` and `max`;
+- `push_shortfall()`, one line under each marked emit.
+
+`src/render.rs` is untouched. No stream of the sixth wave owns `src/encode.rs`,
+so this should merge without a conflict, but it is a file set overstep and is
+declared rather than hidden.
+
+### From stream F, to whoever takes it: `rate`, `topk` and `stack` are short in the same way and are not marked
+
+A run that dropped events understates its `rate`, its `topk` totals and its
+`stack` weights by exactly the same one-sided amount, and for the same reason:
+the records a ring drops are the ones from the busiest moment. Finding 37,
+`BRIEF.md` and `STATE.md` all scope themselves to `hist`, `summary` and
+percentiles, so stream F marked those three and left the others alone rather
+than widening a scope three documents had agreed.
+
+The argument for widening it is that a reader of `topk` is choosing what to
+look at next, which is the same decision a p99 is read for. The argument
+against is that the shape is not the same: `Output::Stack` already carries
+`unattributed` and `Output::TopK` already carries `Rest`, and each of those is
+that emit's own statement about what it does not account for. A mark bolted
+beside them would be a second such statement in different words.
+
+`Shortfall::of` is public and takes `(&Losses, records, per_record)`, so
+whoever takes this needs no new derivation — only a decision about how it
+should read next to `Rest` and `unattributed`.
 
 ---
