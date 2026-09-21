@@ -43,6 +43,8 @@ mod net_qdisc;
 mod net_retransmit;
 mod net_softirq;
 mod offcpu;
+mod proc_events;
+mod proc_syscall;
 mod ring;
 mod runqlat;
 mod syscall;
@@ -62,6 +64,8 @@ pub use net_qdisc::{QdiscDrain, QdiscProgram, QdiscWait};
 pub use net_retransmit::{Retransmit, RetransmitProgram};
 pub use net_softirq::{SoftIrq, SoftIrqDrain, SoftIrqProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
+pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
+pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};
 pub use runqlat::{RunqLat, RunqLatProgram};
 pub use wakeup::{Wakeup, WakeupProgram};
 

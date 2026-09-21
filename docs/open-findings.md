@@ -3983,4 +3983,243 @@ Either way `mem.kmalloc`'s freed *bytes* stay unavailable: `kfree` carries the
 pointer and the call site and nothing that says how large the object was, and a
 collector that wanted the size would have to hold every live pointer in a map —
 the per-allocation cost the aggregation exists to avoid.
+## 38. What the `proc` event stream measured
 
+The sixth wave's stream D, landing `proc.exec`, `proc.exit`, `proc.signals` and
+`proc.syscall` over raw tracepoints. `docs/families/proc.md` has the family's
+own account; what is here is what other families will meet.
+
+### A machine-wide syscall tracer is affordable and a streaming one is not
+
+Measured on the development machine, one second, every process:
+
+```
+31451 calls, reported as 5015 rows, for 26.9ms of cpu
+   -- 1.81 % against the machine's own 1.49s of cpu in the same second
+```
+
+The same second through a streaming program is 31 451 ring records. The cost of
+the measurement would grow with the workload, which is the shape `STATE.md`
+warns about, and the numbers would begin describing a machine running `omn`.
+`src/bpf/runqlat.rs`'s `(key, bucket) -> count` with an unrolled log2 is what
+makes it 5 015 rows instead, and `emit::WEIGHT_ATTR` is what makes them count
+correctly. **Stream C should read this before landing `mem.page_alloc`**: the
+rate is the same order and the conclusion is the same one.
+
+### The `bpf:tp` fallback is not a second road, and a refusal scenario should not depend on a probe
+
+Every one of these four chains is `bpf:raw_tp` ahead of `bpf:tp` with
+`equivalent: true`, and that is exact: the two see the same events and differ
+only in what they need to attach. So there is no backend comparison to make, and
+writing the classic collector would be writing a road nobody would drive.
+
+What the unimplemented backend is *for* turned out to be class D. This family's
+exit-3 scenario has been all three exit codes in three waves — 3 while a
+`tracepoint:` requirement was probed by listing a directory, 1 once the probe
+told the truth, and 3 again now that the raw path collects. The first two both
+depended on what the machine could read. Pinning the unimplemented backend with
+`backend: "force:bpf:tp"` takes the resolver out of the question entirely and
+the answer is 3 on every machine, which is what a code meaning "this build does
+not have it" should be. **Any family with an implemented and an unimplemented
+backend in one chain can demonstrate exit 3 this way**, and several have been
+asserting the machine instead.
+
+### Five identical signals generate five and deliver one
+
+`signal_generate` fires when a signal is generated, not when it is delivered,
+and the tracepoint's own fifth argument says which. A non-real-time signal that
+is already pending is not queued again, so `kill -USR1` five times over gives
+five events of which one has `result=0`. The catalog summarises this source as
+*"signals delivered"*, and the event count is not that number; `delivered` is.
+Both are on the event.
+
+This matters past `proc`. Any source counting a kernel event that the kernel may
+then decline to act on has the same gap between "generated" and "happened", and
+the tracepoint usually says which — `net.drops` has exactly this shape with its
+drop reason, and stream B should check whether `kfree_skb`'s reason field is on
+its events for the same reason.
+
+### Parallel tests in one process cannot share an invented name
+
+`docs/contributing.md` records that `cargo test` runs its tests in parallel
+threads of one process, so a process-wide count cannot get an exact delta. The
+same fact has a second face that cost time here: a test that invents a unique
+name from `std::process::id()` invents the **same** name in every test of the
+file, and each then counts the others' work as its own. Three machine-wide
+scenarios reported 9 where they expected 5. The fix is a serial beside the pid;
+the lesson is that "unique" in a parallel suite means unique per test, not per
+process.
+
+### Two shared-layer cost tests fail when another suite shares the machine
+
+`collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned` and
+`collect::tests::a_run_over_its_ceiling_with_nowhere_cheaper_to_go_stops_and_says_which`
+both failed once during this stream and passed on every other run, with:
+
+```
+the collector was asked to spin for 200 ms and did not, so this measured nothing
+```
+
+The cause was another worktree's `make check` running at the same time on the
+same machine, which is the ordinary condition during a parallel wave. This is
+finding 11's class — a test asserting what the machine was doing — in
+`src/collect/mod.rs`, which no family stream owns. It is worth the coordinator's
+attention because a wave of six streams makes it reproducible rather than rare.
+
+---
+
+## Needs from another stream
+
+Five requests from stream D of the sixth wave. All five are in the shared eBPF
+layer or the catalog, none of them blocked this stream, and each is written with
+the signature wanted so it can be landed once rather than five times.
+
+### To whoever owns `src/bpf/insn.rs`: two helper numbers
+
+```rust
+pub mod helper {
+    // ...
+    /// `long bpf_get_current_comm(void *buf, u32 size_of_buf)`
+    pub const GET_CURRENT_COMM: i32 = 16;
+    /// `long bpf_probe_read_kernel_str(void *dst, u32 size, const void *src)`
+    pub const PROBE_READ_KERNEL_STR: i32 = 115;
+}
+```
+
+Both are needed by programs that cannot use what is already there.
+`GET_CURRENT_COMM` because `sys_exit` hands its program a `pt_regs *` and a
+return value and **no task at all**, so the caller's name cannot be read out of a
+`task_struct` the way every other program in this layer reads it — and resolving
+it from `/proc/<tid>/comm` at drain time answers for whoever holds that tid
+*then*, which for a short-lived task is somebody else.
+`PROBE_READ_KERNEL_STR` because `linux_binprm.filename` is a `const char *` and
+a fixed-size `bpf_probe_read_kernel` over one walks past the end of whatever
+allocation holds the name; the `_str` form stops at the terminator and zeroes
+the whole destination on failure, which also satisfies this layer's rule that
+every byte of a record is written before it is published.
+
+Both are declared locally in `src/bpf/proc_events.rs` and
+`src/bpf/proc_syscall.rs` meanwhile, in a module called `extra_helper` with the
+reason written down, so the duplication is visible rather than quiet.
+
+### To whoever owns `src/bpf/insn.rs`: three program fragments now written three times
+
+Each of these exists in `runqlat.rs` and again in `proc_syscall.rs`, and two of
+the three in `proc_events.rs` as well. They are not family-specific in any way:
+
+```rust
+/// Reads `size` bytes of a kernel structure onto the program's stack.
+fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32);
+
+/// Adds one to a slot of a per-cpu drop counter, resuming at `resume` either
+/// way -- failing to record a loss is not a reason to stop measuring.
+fn count_drop(program: &mut Program, drops_fd: i32, drop_key: i16, slot: u32, resume: &'static str);
+
+/// Computes `emit::BucketLayout::Log2`'s bucket index of `value_reg` into r3,
+/// as an unrolled six-step binary search.
+fn push_log2_bucket(program: &mut Program, value_reg: u8);
+```
+
+The third is the one that matters most: it has to agree with
+`emit::BucketLayout::Log2` exactly, or every measurement lands in the
+neighbouring bucket — a factor of two — and nothing anywhere says so. Two copies
+of that agreement is two chances to break it, and streams A and C are both about
+to write a third and a fourth. `runqlat.rs` and `proc_syscall.rs` each carry
+their own test crossing the kernel's bucketing against an independent
+expression of the definition; one shared fragment would need one.
+
+### To whoever owns `src/bpf/map.rs` and `src/bpf/syscall.rs`: the capability advice belongs on map creation
+
+Defect 8 of `docs/scenarios/proc.md`. `permission_advice` is attached to
+`prog_load` in every program in this layer, and a program load is not the first
+privileged thing a collector does — **map creation is**, and it fails first. So
+what somebody without `CAP_BPF` actually sees is:
+
+```
+cannot create the `sched_process_exec` ring buffer: Operation not permitted (os error 1)
+```
+
+which names neither the capability nor the way to get it, and is what
+`wakeup.rs`, `offcpu.rs`, `runqlat.rs` and `migrate.rs` have printed since wave
+two. Nobody noticed because the message only appears on a machine without the
+capabilities.
+
+```rust
+/// In `map.rs`, so that `Hash::create`, `Counters::create` and `map_create`
+/// all get it:
+fn map_failure(what: &str, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        permission_advice(&format!("creating the {what}"))
+    } else {
+        format!("cannot create the {what}: {error}")
+    }
+}
+```
+
+Implemented locally in `src/bpf/proc_events.rs` and `src/bpf/proc_syscall.rs`;
+the wrapper belongs one layer down, where every program would get it.
+
+### To whoever owns `src/bpf/attach.rs` or `src/bpf/map.rs`: a way to narrow a program to a cgroup
+
+The catalog marks `cgroup` and `container` as `bpf_only` on `proc.exec`,
+`proc.exit`, `proc.signals` and `proc.syscall`, and `sched.wakeup`,
+`sched.runqlat` and `sched.offcpu` before them. **No collector in this build
+serves either**, and every one of them refuses by name — which is right, and is
+the fifth wave of a declaration nothing implements.
+
+Two mechanisms, and the choice is a decision rather than a task:
+
+```rust
+/// `u64 bpf_get_current_cgroup_id(void)` -- helper 80. One instruction, no map,
+/// and the id is compared against one userspace resolved from the cgroup path
+/// before the program was built. Reaches only the cgroup a task is *in*, not
+/// its ancestors, so a request for a parent cgroup would miss its children's.
+pub const GET_CURRENT_CGROUP_ID: i32 = 80;
+
+/// `long bpf_current_task_under_cgroup(void *map, u32 index)` -- helper 37,
+/// against a `BPF_MAP_TYPE_CGROUP_ARRAY` (type 12) holding the cgroup's own
+/// directory fd. Answers the ancestor question correctly, and needs a map.
+pub const CURRENT_TASK_UNDER_CGROUP: i32 = 37;
+pub const BPF_MAP_TYPE_CGROUP_ARRAY: u32 = 12;
+```
+
+The second is the one that makes `--cgroup /sys/fs/cgroup/foo` mean what a
+reader expects, since a container's tasks are usually in descendants of the path
+they were given. It would also be what produces the `cgroup` **key**, which four
+entries declare and nothing emits.
+
+### To whoever owns `catalog/*.yaml`: three key declarations nothing emits
+
+Defect 9 of `docs/scenarios/proc.md`, and defect 5 exactly, in three new places:
+
+| Entry | Declares | Events carry | What to do |
+|---|---|---|---|
+| `proc.syscall` | `keys: [task, req, file]` | `task` | drop `req` and `file` |
+| `proc.exec` | `keys: [task, cgroup]` | `task` | drop `cgroup` until the helper above lands |
+| `proc.exit` | `keys: [task, cgroup]` | `task` | the same |
+
+The validator accepts `--keys cgroup` and tells a reader that the source carries
+it; a join written on it matches nothing and reports that it attributed zero
+events, which reads as a workload that did nothing rather than as a key that was
+never there. `req` and `file` on `proc.syscall` look like the remains of a
+design where one event was one syscall with its arguments decoded; this
+collector aggregates in the kernel because its own caveat says to, and cannot
+carry either.
+
+### To whoever owns `src/emit.rs` and `src/encode.rs`: a note is not a degradation
+
+Defect 7 of `docs/scenarios/proc.md`. `Collector::notes()` is folded into
+`Results::degradations` by `src/emit.rs` and printed as `degraded: <note>`, so a
+backend that fell back to a lesser mechanism and a collector stating a fact
+about its own measurement read identically. `sched.runqlat` has had the same
+confusion since wave three.
+
+What is wanted is two lists rather than one — a degradation is something the run
+had to give up, a note is something the reader has to know — printed under
+different words and serialised under different keys. Meanwhile every note in
+this family is worded so that it survives being called a degradation, and a
+wording chosen to survive its own label is a wording that will drift.
+
+**Stream F should know about this one**, since it is adding the mark that says a
+distribution is short: that mark is neither a degradation nor a note, and the
+distinction it needs is the one this asks for.

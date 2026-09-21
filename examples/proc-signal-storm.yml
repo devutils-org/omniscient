@@ -1,0 +1,51 @@
+# When the ring overflows, does the tool say so -- and by how much?
+#
+#   python3 -c "import os,signal;signal.signal(signal.SIGRTMIN,lambda *a:None);\
+#     [os.kill(os.getpid(),signal.SIGRTMIN) for _ in range(300000)]" &
+#   omn -f examples/proc-signal-storm.yml
+#
+# The workload is started from outside, because `proc.signals` declares no
+# `launch` target: a signal is sent *to* a process and the catalog offers
+# `--pid` and `--system` for that. `tests/scenario_proc.rs` starts it from the
+# test and checks the identity below against the number it sent.
+#
+# This is the family's loss path, and it is the one place in `proc` where the
+# loss can be checked against a number rather than merely observed. The
+# workload sends itself three hundred thousand real-time signals as fast as it
+# can. Real-time signals queue, so every one of them is generated and every one
+# of them reaches the eBPF program; the program writes a 48-byte record per
+# signal into a 256 KiB ring that is drained every ten milliseconds, and at
+# roughly half a million signals a second the ring cannot hold a drain
+# interval's worth.
+#
+# What must then be true is an identity rather than a threshold:
+#
+#     counted + dropped  >=  sent
+#
+# because a signal that was generated was either counted or dropped, and the
+# drop counter is machine-wide so it also holds whatever else the machine lost
+# in the same window. And on a machine fast enough to keep up, `dropped` is
+# zero and `counted` is exactly `sent`. Both readings are correct and the
+# scenario asserts whichever one the machine produced -- what would be wrong is
+# a run that reported fewer signals than were sent and called itself clean.
+#
+# The loss is reported as `dropped`, never as a late tick: a dropped event is a
+# measurement that happened and was not recorded, a late tick is a series whose
+# spacing is not what it claims, and only the first is available to a source
+# that reads a ring rather than a clock.
+#
+# `count` mode is used here on purpose, and its own note says what it costs:
+# the program still publishes one record per signal, so counting is cheaper to
+# read and not cheaper to take. That is the honest reading of this source's
+# `count`, and it is in the run's output rather than in this comment alone.
+name: three hundred thousand signals, and what the ring could not hold
+format: text
+duration: 4s
+
+requests:
+  - label: storm
+    source: proc.signals
+    target: system
+    mode: count
+    keys: [task]
+    emit: [raw, summary]
