@@ -1218,7 +1218,8 @@ fn a_net_request_that_cannot_mean_anything_is_refused_with_the_axis_that_is_wron
     let complaint = stderr(&outcome);
     assert!(
         complaint.matches("error:").count() >= 5,
-        "only {} refusals were reported for four bad requests; a validator that stops at the          first turns one session into five runs:\n{complaint}",
+        "only {} refusals were reported for four bad requests; a validator that stops \
+         at the first turns one session into five runs:\n{complaint}",
         complaint.matches("error:").count()
     );
     std::fs::remove_file(&path).ok();

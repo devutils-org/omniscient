@@ -410,7 +410,8 @@ impl Collector for SoftIrqCollector {
         // share of it, and the numbers the kernel gave those vectors are worth
         // printing because nothing in this build chose them.
         notes.push(format!(
-            "{} time only, not every softirq the machine ran; the {} vectors this kernel does              have are the rows of /proc/softirqs",
+            "{} time only, not every softirq the machine ran; the {} vectors this kernel \
+             does have are the rows of /proc/softirqs",
             self.vectors
                 .iter()
                 .map(|vector| format!("{} ({vector})", self.vector_name(*vector)))

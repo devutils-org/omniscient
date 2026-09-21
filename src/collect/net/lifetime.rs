@@ -284,7 +284,9 @@ impl Collector for LifetimeCollector {
         );
         if self.without_inode > 0 {
             notes.push(format!(
-                "{} of {} connections carry no inode: a socket taken off a listen queue has no                  file, and therefore no inode, until `accept()` gives it one -- which is after                  it is established and is where this reads",
+                "{} of {} connections carry no inode: a socket taken off a listen queue has \
+                 no file, and therefore no inode, until `accept()` gives it one -- which is \
+                 after it is established and is where this reads",
                 self.without_inode, self.closed,
             ));
         }
