@@ -1772,9 +1772,10 @@ fn a_machine_that_cannot_serve_a_backend_says_so_in_its_own_terms() {
 /// any x86: it declares PEBS and IBS, one of which every such cpu has, and
 /// neither has a collector.
 ///
-/// It used to be `mem.reclaim`, which stopped qualifying when the `tracepoint:`
-/// probe became honest -- it declares only the classic attach, whose event id
-/// lives in a root-only file. The session file records why.
+/// It used to be `mem.reclaim`, which stopped qualifying twice over: first when
+/// the `tracepoint:` probe became honest, because it declared only the classic
+/// attach whose event id lives in a root-only file, and then for good when the
+/// sixth wave wrote its collector. The session file records both.
 #[test]
 fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
     let output = run_example("mem-refused-not-built.yml");
@@ -1796,7 +1797,7 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
     assert_eq!(
         code(&validated),
         0,
-        "`omn validate` checks the request against the catalog, where `mem.reclaim` is a source \
+        "`omn validate` checks the request against the catalog, where `mem.latency` is a source \
          like any other: {}",
         stderr(&validated)
     );
@@ -2020,5 +2021,765 @@ fn every_mem_session_says_what_it_means() {
     assert!(
         seen >= 12,
         "this stream ships more than {seen} sessions; examples/mem-*.yml has lost some"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The four that go through the kernel
+// ---------------------------------------------------------------------------
+//
+// `mem.page_alloc`, `mem.kmalloc`, `mem.reclaim` and `mem.compaction` count in
+// a BPF hash map and hand up rows of a histogram rather than one event per
+// measurement, which is a shape nothing else in this family has. Their four
+// classes are below, and two of them need something the others do not: a
+// workload running *beside* the session rather than launched by it. None of
+// these sources offers a `launch` target -- an allocator is a property of the
+// machine, and one run observes one target -- so the sessions watch everything
+// and the attribution is checked on the events.
+
+/// How long the sessions below are given before their workload starts.
+///
+/// The programs are loaded and attached in `Collector::start`, and an
+/// allocation made before that happened is one the kernel never told anyone
+/// about. Every ground truth here is a lower bound -- the tool must find *at
+/// least* what the workload did -- so starting the workload early would fail
+/// the assertion rather than weaken it, which is the right direction for a
+/// margin to be wrong in.
+const ATTACH_MARGIN: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Mebibytes touched by the workload in `a_known_number_of_megabytes_...`.
+const TOUCHED_MIB: u64 = 64;
+/// Datagrams, and their size, in the same scenario.
+const DATAGRAMS: u64 = 2000;
+const DATAGRAM_BYTES: u64 = 2048;
+
+/// A session run beside a workload, and how long the workload took.
+///
+/// The second half is not bookkeeping. These sessions have a fixed duration and
+/// the workload has none, so on a loaded machine the workload can outlive the
+/// window that was supposed to contain it -- and a measurement of the first half
+/// of a workload, compared against the whole workload's number, fails in a way
+/// that looks exactly like a collector losing events. The run says which it was.
+struct Beside {
+    output: Output,
+    workload_ns: u64,
+}
+
+/// Held for the length of a session that drives the machine hard.
+///
+/// The three scenarios below fork thousands of processes, write a hundred
+/// mebibytes through a squeezed cgroup and fault in sixty-four mebibytes of
+/// transparent huge pages. `cargo test` runs the tests of one binary in
+/// parallel threads of one process, so without this they run *at the same time
+/// as each other* and as
+/// `a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line`, whose ground truth
+/// is a machine with cpu and contiguous memory to spare. That is the trap
+/// `STATE.md` names: a measurement of a shared machine is not repeatable inside
+/// a parallel suite.
+///
+/// One at a time is not a fix for that -- nothing makes a scenario immune to
+/// the rest of the suite -- but it removes the largest avoidable part of it,
+/// and it costs only wall time in a file that already spends ten seconds.
+static ONE_HEAVY_SESSION_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs one of this stream's sessions while a workload drives the machine.
+///
+/// The session is started first and given [`ATTACH_MARGIN`] to load and attach
+/// its programs; the workload then runs to completion, ideally inside the
+/// session's own window. [`Beside::contained_the_workload`] is what says
+/// whether it did.
+fn run_example_beside(name: &str, workload: impl FnOnce()) -> Beside {
+    // A poisoned lock means another of these panicked, which is a failure
+    // being reported rather than a reason to fail differently here.
+    let _one_at_a_time = ONE_HEAVY_SESSION_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let child = Command::new(BINARY)
+        .args(["-f", &example(name)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(ATTACH_MARGIN);
+    let started = Instant::now();
+    workload();
+    let workload_ns = started.elapsed().as_nanos() as u64;
+    Beside {
+        output: child.wait_with_output().expect("omn should finish"),
+        workload_ns,
+    }
+}
+
+impl Beside {
+    /// Whether the session was still observing when the workload finished.
+    ///
+    /// The margin is counted in because the workload starts after it: a window
+    /// of two seconds that spent seven hundred milliseconds waiting has one and
+    /// a third left, and a workload that took longer than that was cut off.
+    fn contained_the_workload(&self, result: &serde_json::Value) -> bool {
+        let observed = result["observed_ns"].as_u64().unwrap_or(0);
+        ATTACH_MARGIN.as_nanos() as u64 + self.workload_ns <= observed
+    }
+
+    /// What to print when it did not.
+    fn cut_off(&self, result: &serde_json::Value) -> String {
+        format!(
+            "the workload took {:.1} ms and the session observed {:.1} ms of which the first \
+             {:.0} ms were spent waiting for the programs to attach, so the window did not \
+             contain the workload and its number cannot be checked against one that is whole",
+            self.workload_ns as f64 / 1e6,
+            result["observed_ns"].as_u64().unwrap_or(0) as f64 / 1e6,
+            ATTACH_MARGIN.as_millis(),
+        )
+    }
+}
+
+/// Every `raw` event of a result, as (attributes by name).
+fn raw_events(result: &serde_json::Value) -> Vec<BTreeMap<String, serde_json::Value>> {
+    result["outputs"]
+        .as_array()
+        .expect("a result carries outputs")
+        .iter()
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| {
+            output["events"]
+                .as_array()
+                .expect("a raw output carries events")
+                .clone()
+        })
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .expect("an event carries attributes")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().expect("a name").to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Adds up one attribute over the rows whose `pid` is this one.
+fn total_for_pid(result: &serde_json::Value, pid: u32, attribute: &str) -> u64 {
+    raw_events(result)
+        .iter()
+        .filter(|attrs| attrs.get("pid").and_then(serde_json::Value::as_u64) == Some(u64::from(pid)))
+        .filter_map(|attrs| attrs.get(attribute).and_then(serde_json::Value::as_u64))
+        .sum()
+}
+
+/// Whether this machine refused for want of the capabilities every eBPF backend
+/// here needs. That is a machine's limit and the only thing in this section
+/// allowed to stop a test quietly.
+fn unprivileged(output: &Output) -> bool {
+    let message = stderr(output);
+    message.contains("CAP_BPF") || message.contains("CAP_PERFMON")
+}
+
+// --------------------------------------------------- A. the capability sweep
+
+#[test]
+fn every_mode_and_emit_of_the_kernel_sources_is_served_or_refused_by_the_right_code() {
+    let walked = sweep(&[
+        "mem.page_alloc",
+        "mem.kmalloc",
+        "mem.reclaim",
+        "mem.compaction",
+    ]);
+    assert_modes_and_emits_are_coherent(&walked);
+    // Nothing here blames the machine. Every refusal these four raise is
+    // marked: a mode or a target that cannot mean anything exits 2, a shape
+    // this build has not written exits 3, and the machine is only ever blamed
+    // for the capabilities, which are checked separately.
+    assert_machine_blame_is_exactly(&walked, &[]);
+}
+
+/// The readable half of the sweep: five requests, one window, every emit these
+/// four sources declare.
+///
+/// Two of them will render nothing, and that is the right answer rather than a
+/// failure -- reclaim happens when a machine has no free memory and compaction
+/// when it has no contiguous memory, and an idle machine has both. What is
+/// checked here is that every shape was *produced*: a combination that resolves
+/// and then renders nothing at all passes the sweep above and fails here.
+#[test]
+fn the_kernel_sweep_session_produces_every_shape_it_asks_for() {
+    let output = run_example("mem-kernel-sweep.yml");
+    if unprivileged(&output) {
+        eprintln!(
+            "skipped: this machine does not grant CAP_BPF and CAP_PERFMON, which every \
+             kernel-side mem backend needs"
+        );
+        return;
+    }
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let run = json(&output);
+
+    let wanted: [(&str, &[&str]); 5] = [
+        (
+            "pages, every shape",
+            &["hist", "topk", "rate", "raw", "summary"],
+        ),
+        ("pages, counted", &["rate", "raw", "summary"]),
+        (
+            "slab, every shape",
+            &["hist", "topk", "rate", "raw", "summary"],
+        ),
+        (
+            "reclaim, every shape",
+            &["hist", "topk", "rate", "raw", "summary"],
+        ),
+        ("compaction, every shape", &["hist", "rate", "raw", "summary"]),
+    ];
+    for (label, emits) in wanted {
+        let result = result(&run, label);
+        let produced: Vec<&str> = result["outputs"]
+            .as_array()
+            .expect("outputs")
+            .iter()
+            .map(|output| output["emit"].as_str().expect("an emit name"))
+            .collect();
+        assert_eq!(produced, emits, "`{label}` produced the wrong shapes");
+    }
+
+    // The two that always see something must have seen something, or the
+    // session proves nothing about the shapes it rendered: a machine allocates
+    // pages and slab objects continuously, and a run of half a second that saw
+    // neither is a collector that is not attached.
+    for label in ["pages, every shape", "slab, every shape"] {
+        assert!(
+            result(&run, label)["events_seen"]
+                .as_u64()
+                .expect("a count")
+                > 0,
+            "`{label}` saw no allocations at all in half a second, which no running machine does"
+        );
+    }
+}
+
+// ------------------------------------------------------- C. ground truth
+
+/// One program, two numbers it chose, and the kernel's ledger of both.
+///
+/// The workload touches [`TOUCHED_MIB`] mebibytes one byte per page, and sends
+/// [`DATAGRAMS`] datagrams of [`DATAGRAM_BYTES`] bytes through a unix socket
+/// pair. Neither number is read off the tool:
+///
+/// * anonymous memory comes from the page allocator and from nowhere else, so a
+///   process that made 64 MiB resident was handed at least 64 MiB of pages;
+/// * a datagram smaller than a page is copied into one slab allocation of the
+///   kernel's own choosing, so 2000 of 2048 bytes are at least 2000 allocations
+///   and at least 4 MiB of slab.
+///
+/// Both are lower bounds, and both have an upper bound too, because a lower
+/// bound alone is passed by a collector that reports a huge constant.
+#[test]
+fn a_known_number_of_megabytes_and_datagrams_is_found_in_the_allocators_ledger() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to drive the allocators");
+        return;
+    }
+    let toucher = format!(
+        "block = bytearray({TOUCHED_MIB} * 1024 * 1024)\n\
+         for offset in range(0, len(block), 4096):\n    block[offset] = 1\n"
+    );
+    let sender = format!(
+        "import socket\n\
+         a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)\n\
+         payload = b'x' * {DATAGRAM_BYTES}\n\
+         for _ in range({DATAGRAMS}):\n    a.send(payload)\n    b.recv({DATAGRAM_BYTES})\n"
+    );
+
+    let (mut touching, mut sending) = (None, None);
+    let beside = run_example_beside("mem-allocator-ledger.yml", || {
+        let mut one = Command::new("python3")
+            .args(["-c", &toucher])
+            .spawn()
+            .expect("python3 should run");
+        let mut two = Command::new("python3")
+            .args(["-c", &sender])
+            .spawn()
+            .expect("python3 should run");
+        touching = Some(one.id());
+        sending = Some(two.id());
+        one.wait().expect("the toucher should finish");
+        two.wait().expect("the sender should finish");
+    });
+    let output = &beside.output;
+    if unprivileged(output) {
+        eprintln!("skipped: the allocator sources need CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(code(output), 0, "{}", stderr(output));
+    let run = json(output);
+    if !beside.contained_the_workload(result(&run, "pages handed out")) {
+        eprintln!(
+            "skipped: {}",
+            beside.cut_off(result(&run, "pages handed out"))
+        );
+        return;
+    }
+
+    let pages = total_for_pid(
+        result(&run, "pages handed out"),
+        touching.expect("a pid"),
+        "total_pages",
+    );
+    let mib = pages * 4096 / (1024 * 1024);
+    assert!(
+        mib >= TOUCHED_MIB,
+        "a program that made {TOUCHED_MIB} MiB resident must have been handed at least that \
+         many pages, and the ledger has {mib} MiB ({pages} pages). If this is short, the \
+         session's programs attached after the workload had already run"
+    );
+    assert!(
+        mib <= TOUCHED_MIB + 32,
+        "and not much more: {mib} MiB for a program that touched {TOUCHED_MIB} MiB is an \
+         interpreter's worth of startup plus something unaccounted for"
+    );
+
+    let slab = result(&run, "slab bytes");
+    let bytes = total_for_pid(slab, sending.expect("a pid"), "total_bytes");
+    let asked = total_for_pid(slab, sending.expect("a pid"), "requested_bytes");
+    assert!(
+        bytes >= DATAGRAMS * DATAGRAM_BYTES,
+        "{DATAGRAMS} datagrams of {DATAGRAM_BYTES} bytes are copied into at least {} bytes of \
+         slab, and the ledger has {bytes}",
+        DATAGRAMS * DATAGRAM_BYTES
+    );
+    assert!(
+        bytes <= 8 * DATAGRAMS * DATAGRAM_BYTES,
+        "and not eight times it: {bytes} bytes of slab for {DATAGRAMS} datagrams"
+    );
+    // The allocator never gives less than it was asked for, and the difference
+    // is the rounding -- a number no other source in this tool can produce.
+    assert!(
+        asked <= bytes,
+        "the slab handed out {bytes} bytes for {asked} asked for, which is the wrong way round"
+    );
+
+    // And the rows are a histogram of allocations, not of map entries: the
+    // weight on each row is what makes a summary of them come out the right
+    // height.
+    let weighted: u64 = raw_events(result(&run, "pages handed out"))
+        .iter()
+        .filter_map(|attrs| attrs.get("weight").and_then(serde_json::Value::as_u64))
+        .sum();
+    assert!(
+        weighted > 0,
+        "every row has to carry the allocations it stands for, or a histogram of these events \
+         is a histogram of the shape of a BPF map"
+    );
+}
+
+/// Direct reclaim, against the kernel's own count of the pages it freed.
+///
+/// `examples/mem-reclaim-squeeze.sh` builds a cgroup with a 32 MiB limit,
+/// writes 96 MiB of page cache through it, and reads that cgroup's own
+/// `memory.stat` before and after. `pgsteal_direct` is the kernel counting the
+/// pages reclaimed; `pages_reclaimed` is what this tool read off the `end`
+/// tracepoint. Two counters, incremented by different code in different places,
+/// that have to agree.
+///
+/// This is also the scenario that justifies attaching both halves of the
+/// source. The kernel publishes global reclaim and cgroup-limit reclaim under
+/// two names, the catalog's chain requires only the first pair, and every
+/// episode below is the second -- a build that attached only what the entry
+/// names would report zero here while the cgroup reclaimed ninety thousand
+/// pages.
+#[test]
+fn a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel_counted() {
+    let mut ground_truth = String::new();
+    let beside = run_example_beside("mem-reclaim-squeeze.yml", || {
+        let squeeze = Command::new("sh")
+            .arg(example("mem-reclaim-squeeze.sh"))
+            .output()
+            .expect("sh should run");
+        ground_truth = String::from_utf8_lossy(&squeeze.stderr).into_owned();
+    });
+    let output = &beside.output;
+    if unprivileged(output) {
+        eprintln!("skipped: mem.reclaim needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    if let Some(reason) = ground_truth.lines().find(|line| line.contains("skip")) {
+        eprintln!("skipped: the workload could not create the shortage: {reason}");
+        return;
+    }
+    assert_eq!(code(output), 0, "{}", stderr(output));
+
+    let number = |name: &str| -> u64 {
+        ground_truth
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("omn-scenario {name} ")))
+            .unwrap_or_else(|| {
+                panic!("the workload prints `{name}`; it said:\n{ground_truth}")
+            })
+            .trim()
+            .parse()
+            .expect("a number")
+    };
+    let cgroup_id = number("cgroup_id");
+    let stolen = number("pgsteal_direct");
+    assert!(
+        stolen > 0,
+        "the workload wrote 96 MiB through a 32 MiB cgroup and the kernel reclaimed nothing; \
+         there is no shortage here to measure"
+    );
+
+    let run = json(output);
+    let result = result(&run, "reclaim");
+    if !beside.contained_the_workload(result) {
+        eprintln!("skipped: {}", beside.cut_off(result));
+        return;
+    }
+    let mine: Vec<_> = raw_events(result)
+        .into_iter()
+        .filter(|attrs| {
+            attrs.get("cgroup_id").and_then(serde_json::Value::as_u64) == Some(cgroup_id)
+        })
+        .collect();
+    let sum = |attribute: &str| -> u64 {
+        mine.iter()
+            .filter_map(|attrs| attrs.get(attribute).and_then(serde_json::Value::as_u64))
+            .sum()
+    };
+    let reclaimed = sum("pages_reclaimed");
+    let episodes = sum("count");
+
+    assert!(
+        episodes > 0,
+        "the cgroup reclaimed {stolen} pages and this run measured no episode of it at all. \
+         The kernel fires `mm_vmscan_memcg_reclaim_*` for a cgroup that hits its own limit and \
+         never `mm_vmscan_direct_reclaim_*`, so a build attached to one of the two pairs sees \
+         exactly this"
+    );
+    // The tool may see a little more than the workload's own reading: the
+    // script reads memory.stat before it exits, and the run drains again after
+    // it has. It cannot see less: every page counted here was counted there.
+    assert!(
+        reclaimed >= stolen,
+        "the kernel's own memory.stat counted {stolen} pages reclaimed and this run found \
+         {reclaimed}; a measurement short of the counter it is read against is a measurement \
+         that missed episodes"
+    );
+    assert!(
+        reclaimed <= stolen + stolen / 20 + 1024,
+        "and it cannot be far more: {reclaimed} pages against the kernel's {stolen}"
+    );
+    // Every one of them is the cgroup half of the source, which is the half the
+    // catalog entry does not name.
+    let scopes: BTreeSet<&str> = mine
+        .iter()
+        .filter_map(|attrs| attrs.get("scope").and_then(serde_json::Value::as_str))
+        .collect();
+    assert_eq!(
+        scopes,
+        BTreeSet::from(["cgroup"]),
+        "a cgroup reclaiming under its own limit is the `cgroup` scope, and nothing else"
+    );
+}
+
+// ----------------------------------------------------------- D. the loss path
+
+/// A kernel-side histogram driven past its capacity says what it could not
+/// count.
+///
+/// The map holds 4096 rows between two drains, and a row is keyed by a task and
+/// a size, so filling it takes tasks: `examples/mem-kernel-storm.sh` forks
+/// about three thousand short-lived processes from four shells at once. When the
+/// update fails there is nothing anywhere else that records the allocation --
+/// the helper returns an error in the kernel and the event is gone -- so the
+/// program counts it per cpu and the run reports it.
+///
+/// A machine that forks more slowly than this one may not reach the bound, and
+/// that is a fact about the machine. It is skipped loudly, with the numbers.
+#[test]
+fn a_histogram_map_driven_past_its_capacity_says_what_it_could_not_count() {
+    let beside = run_example_beside("mem-kernel-storm.yml", || {
+        Command::new("sh")
+            .arg(example("mem-kernel-storm.sh"))
+            .output()
+            .expect("sh should run");
+    });
+    let output = &beside.output;
+    if unprivileged(output) {
+        eprintln!("skipped: mem.kmalloc needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(code(output), 0, "{}", stderr(output));
+    let run = json(output);
+    let result = result(&run, "slab under a fork storm");
+
+    let seen = result["events_seen"].as_u64().expect("a count");
+    let dropped = losses(result, "dropped");
+    if dropped == 0 {
+        eprintln!(
+            "skipped: the storm produced {seen} rows over the run and never more than the \
+             4096 the map holds in one drain, so the bound was not reached on this machine"
+        );
+        return;
+    }
+
+    // The loss reaches the output as a count and as a sentence, and the
+    // sentence names the capacity -- a reader told only that something was
+    // dropped cannot tell whether to change the request or the machine.
+    let reasons = result["losses"]["reasons"]
+        .as_object()
+        .expect("a loss carries its reasons")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        reasons.contains("4096"),
+        "the reason has to name the capacity that was reached: {reasons}"
+    );
+    assert!(
+        reasons.contains("never counted"),
+        "and what became of the allocations behind it: {reasons}"
+    );
+    // A loss is not a corruption: what the run did see is still exactly what
+    // the kernel counted, and it is not nothing.
+    assert!(
+        seen > 0,
+        "a run that dropped {dropped} allocations still counted the rows it managed to create"
+    );
+}
+
+// ------------------------------------------------------------ E. the refusals
+
+/// The four kernel-side sources refuse for the right reason, with the right
+/// code, in four different ways.
+///
+/// The table is the point. A request that cannot mean anything, a machine that
+/// cannot serve a backend and a build that has not written one are three
+/// different answers, and the cost of confusing them is a reader spending an
+/// afternoon on their kernel configuration over a collector nobody wrote.
+#[test]
+fn the_kernel_sources_tell_their_three_refusals_apart() {
+    // 2: the catalog declares no `pid` target for compaction, because
+    // compaction is work done for a whole memory zone.
+    let per_process = run(&["mem.compaction", "--pid", "1", "-m", "trace", "-e", "raw"]);
+    assert_eq!(code(&per_process), EXIT_REJECTED, "{}", stderr(&per_process));
+    assert!(
+        stderr(&per_process).contains("mem.compaction") && stderr(&per_process).contains("pid"),
+        "{}",
+        stderr(&per_process)
+    );
+
+    // 2: a polled distribution of an instant. The mode is not one the entry
+    // declares, and the refusal says which modes are.
+    let polled = run(&[
+        "mem.reclaim",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "timeline",
+        "-d",
+        "200ms",
+    ]);
+    assert_eq!(code(&polled), EXIT_REJECTED, "{}", stderr(&polled));
+    assert!(
+        stderr(&polled).contains("trace") && stderr(&polled).contains("count"),
+        "a refused mode has to name the ones that would work: {}",
+        stderr(&polled)
+    );
+
+    // 3: the classic tracepoint backend, which this machine can reach only
+    // through tracefs and which no collector serves either way. Forcing it is
+    // the backend comparison these four have -- each has exactly one
+    // implemented backend, so the comparison is with the refusal.
+    for source in [
+        "mem.page_alloc",
+        "mem.kmalloc",
+        "mem.reclaim",
+        "mem.compaction",
+    ] {
+        assert_eq!(
+            implemented_backends(source),
+            vec!["bpf:raw_tp".to_owned()],
+            "{source} has one implemented backend, so its comparison is with the refusal"
+        );
+        assert!(
+            declared_backends(source).contains(&"bpf:tp".to_owned()),
+            "{source} declares the classic tracepoint backend"
+        );
+        let forced = run(&[
+            source,
+            "--system",
+            "-m",
+            "trace",
+            "-e",
+            "summary",
+            "-d",
+            "200ms",
+            "--backend",
+            "force:bpf:tp",
+        ]);
+        assert_eq!(
+            code(&forced),
+            EXIT_NO_COLLECTOR,
+            "forcing an unimplemented backend is this build's gap, not this machine's: {}",
+            stderr(&forced)
+        );
+        assert!(
+            stderr(&forced).contains(source) && stderr(&forced).contains("bpf:tp"),
+            "the refusal names the source and the backend: {}",
+            stderr(&forced)
+        );
+    }
+
+    // 3: a key the catalog offers and an aggregating collector cannot carry.
+    // The identity of one allocation is exactly what counting in the kernel
+    // discards, and answering with an unkeyed series would put every task's
+    // allocations in one anonymous heap.
+    let keyed = run(&[
+        "mem.kmalloc",
+        "--system",
+        "-m",
+        "trace",
+        "-e",
+        "hist",
+        "-k",
+        "mem",
+        "-d",
+        "200ms",
+    ]);
+    if !unprivileged(&keyed) {
+        assert_eq!(code(&keyed), EXIT_NO_COLLECTOR, "{}", stderr(&keyed));
+        assert!(
+            stderr(&keyed).contains("mem:[base,len)") && stderr(&keyed).contains("task"),
+            "the refusal names the key it cannot carry and the one to use: {}",
+            stderr(&keyed)
+        );
+    }
+}
+
+/// Compaction, which this machine will not perform on request.
+///
+/// `mem.compaction` is the one collector in this family that is written here
+/// and exercised elsewhere, and saying so is the point of this test rather than
+/// an excuse for it. Compaction happens when the allocator wants a contiguous
+/// block and the free pages are scattered; a developer machine with free memory
+/// never needs to, and the two ways to make it are both out of reach:
+/// `/proc/sys/vm/compact_memory` is mode 0200 and root-only, and fragmenting a
+/// shared machine's memory badly enough that a huge-page fault has to compact
+/// is not something a test may do to a machine it does not own. Measured here:
+/// three gibibytes of transparent huge pages faulted in, and `compact_stall`
+/// did not move.
+///
+/// So the check is conditional on the kernel's own counters, and it is a real
+/// check wherever they move: `/proc/vmstat` says whether compaction ran in the
+/// window, and if it did, this source has to have seen it. Where it did not,
+/// the test skips with the numbers that show why -- which is the honest form of
+/// "the property could not be created here", and is worth more than a threshold
+/// that always passes.
+#[test]
+fn compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where_it_did_not() {
+    fn vmstat(name: &str) -> u64 {
+        std::fs::read_to_string("/proc/vmstat")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} ")))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    }
+    // Three counters rather than one. `compact_stall` counts only the direct
+    // case -- a thread that had to compact inside its own allocation -- and
+    // `kcompactd` fires the same tracepoint from a kernel thread, which this
+    // source sees and that counter does not.
+    // Three counters rather than one. `compact_stall` counts only the direct
+    // case -- a thread that had to compact inside its own allocation -- and
+    // `kcompactd` fires the same tracepoint from a kernel thread, which this
+    // source sees and that counter does not.
+    let counters = [
+        "compact_stall",
+        "compact_daemon_wake",
+        "compact_migrate_scanned",
+    ];
+    // Read around the workload rather than around the test, because the
+    // session's window is what the source could have seen: a compaction that
+    // happened while the programs were still loading is in the counters and in
+    // nothing else, and comparing the two would fail for the wrong reason.
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    // Read around the session's own window and nothing else, because that
+    // window is what the source could have seen: a compaction that happened
+    // while the programs were still loading is in the counters and in nothing
+    // else, and comparing the two would fail for the wrong reason.
+    //
+    // **And no workload.** An earlier version faulted in a quarter of a
+    // gibibyte of transparent huge pages to try to provoke compaction. It never
+    // provoked any -- this machine has free contiguous memory and simply does
+    // not need to compact -- and it took the huge pages that
+    // `a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` needs for its own
+    // scan, which then measured a gibibyte walked in four-kibibyte pages and
+    // failed beside it. A workload that cannot create the property and can
+    // break the neighbours is worse than no workload: what is left is a real
+    // check on any machine that does compact, and an honest skip here.
+    let beside = run_example_beside("mem-compaction-watch.yml", || {
+        before = counters.iter().map(|name| vmstat(name)).collect();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        after = counters.iter().map(|name| vmstat(name)).collect();
+    });
+    let output = &beside.output;
+    if unprivileged(output) {
+        eprintln!("skipped: mem.compaction needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(code(output), 0, "{}", stderr(output));
+
+    let run = json(output);
+    let result = result(&run, "compaction");
+    if !beside.contained_the_workload(result) {
+        eprintln!("skipped: {}", beside.cut_off(result));
+        return;
+    }
+
+    let moved: Vec<String> = counters
+        .iter()
+        .zip(before.iter().zip(after.iter()))
+        .filter(|(_, (before, after))| after > before)
+        .map(|(name, (before, after))| format!("{name} {before} -> {after}"))
+        .collect();
+    let episodes: u64 = raw_events(result)
+        .iter()
+        .filter_map(|attrs| attrs.get("count").and_then(serde_json::Value::as_u64))
+        .sum();
+
+    if moved.is_empty() {
+        let writable = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/sys/vm/compact_memory")
+            .is_ok();
+        eprintln!(
+            "skipped: this machine did not compact. None of {counters:?} moved over the \
+             session's window, so there was nothing for the source to see, and \
+             `/proc/sys/vm/compact_memory` is {}, which is the other way to ask and needs \
+             root. `mem.compaction` attached and reported zero, which is the right answer \
+             and not a measurement",
+            if writable { "writable" } else { "not writable" }
+        );
+        assert_eq!(
+            episodes, 0,
+            "the kernel's counters say compaction did not run, and this source reported \
+             {episodes} episodes of it"
+        );
+        return;
+    }
+
+    assert!(
+        episodes > 0,
+        "the kernel says compaction ran inside this session's window ({}) and \
+         `mem.compaction` saw none of it",
+        moved.join(", ")
     );
 }

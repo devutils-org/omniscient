@@ -30,6 +30,9 @@ pub mod attach;
 pub mod btf;
 mod insn;
 mod map;
+mod mem_alloc;
+mod mem_program;
+mod mem_stall;
 mod migrate;
 mod offcpu;
 mod ring;
@@ -39,6 +42,8 @@ mod wakeup;
 
 use std::sync::OnceLock;
 
+pub use mem_alloc::{AllocProgram, AllocRow, Allocator};
+pub use mem_stall::{Stall, StallDrops, StallProgram, StallRow, SCOPE_CGROUP, SCOPE_GLOBAL};
 pub use migrate::{Migration, MigrationProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use runqlat::{RunqLat, RunqLatProgram};

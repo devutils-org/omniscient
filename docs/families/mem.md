@@ -228,7 +228,144 @@ other accountings of the same event: `memory.swap.current`, and the process's
 own `Swap:` line in `smaps_rollup`, which is the same fact counted by a
 different subsystem and keyed on the process rather than on the cgroup.
 
+### Four sources now go through the kernel, and one event is not one measurement
+
+`mem.page_alloc`, `mem.kmalloc`, `mem.reclaim` and `mem.compaction` land in the
+sixth wave, through raw tracepoints with the histogram built in the kernel.
+`src/bpf/mem_alloc.rs` counts what the two allocators hand out, per
+`(task, cgroup, size bucket, direction)`; `src/bpf/mem_stall.rs` times what the
+kernel does inside an allocating thread that cannot be given memory, per
+`(task, cgroup, duration bucket, scope)`; `src/bpf/mem_program.rs` holds the
+fragments both share.
+
+The shape is `sched.runqlat`'s and the reason is the same one, with more force.
+`mm_page_alloc` fires for every page the kernel hands anyone and `kmalloc` for
+every object too small to be one: on an idle machine that is tens of thousands a
+second, and under a fork storm it is a million. A ring record per event would
+make the cost of the measurement grow with the thing being measured. What the
+kernel keeps instead is a few hundred map rows per drain, each carrying the
+allocations it stands for as `emit::WEIGHT_ATTR`, and the run says so in its own
+output because every other source in this tool makes one event one measurement.
+
+### A page allocation's bucket is free, and a slab allocation's is not
+
+An allocation of order *k* is exactly `2^k` pages, and `emit::BucketLayout::Log2`
+puts `2^k` in bucket `k + 1`. So for `mem.page_alloc` the order **is** the
+bucket, plus one, with no search to run and no total to accumulate: every
+allocation behind a row is the same size by construction, so the exact total is
+`count << order` and userspace computes it without needing a shift instruction
+the encoding does not have. A slab allocation's byte count is not a power of two,
+so that one goes through the unrolled six-step `log2` and the kernel accumulates
+both the bytes given and the bytes asked for. The difference between those two is
+the allocator's rounding, which is a number no other source here can produce.
+
+### The strongest ground truth this family has is a kernel counter
+
+`mem.reclaim` reports `pages_reclaimed` off the `end` tracepoint's first
+argument. A cgroup's own `memory.stat` reports `pgsteal_direct`. They are
+incremented by different code in different places and they came out **equal to
+the page**, on every run of `examples/mem-reclaim-squeeze.sh`: 146 114 against
+146 114, then 92 833 against 92 833.
+
+That is worth more than any of this family's other checks, and it is the shape
+to copy: a measurement checked against a counter the kernel keeps for its own
+reasons, rather than against a threshold somebody chose.
+
+### The catalog's `mem.reclaim` names half of the source, and the half a cgroup run needs is the other one
+
+Written up as D9 in `docs/scenarios/mem.md`. The short form: global reclaim and
+cgroup-limit reclaim are two tracepoint pairs with one prototype, the entry
+requires the first pair, and the entry also declares `cgroup: bpf_only` — so the
+one target the chain names is the one the declared tracepoints cannot serve. A
+build attached only to what the entry requires reports zero while a squeezed
+cgroup reclaims ninety thousand pages.
+
+Both pairs are attached, one program serves both beginnings, and each ending
+writes its `scope` into the row: `global` or `cgroup`. An optional half that this
+kernel did not publish would be reported in the run's notes rather than silently
+missing, because zero episodes on a kernel with half the source is not the same
+answer as zero on one with all of it.
+
+### An allocation in interrupt context belongs to whoever was interrupted
+
+Rows arrive keyed by `task:0`. `bpf_get_current_pid_tgid` returns the task that
+is on the cpu, and a slab allocation made in softirq context is made on whatever
+task the interrupt landed on — on an idle cpu, the per-cpu idle task. It is not
+the idle task allocating; it is the kernel allocating with nobody to charge.
+Left as it is, and said plainly in `docs/scenarios/mem.md` (D11), because an
+allocation reported under the task that was interrupted is at least a true
+statement about where it happened, and inventing an owner would not be.
+
+### The frees are attached, counted, and not events
+
+Both halves of each entry's chain are attached, so the totals are known. What
+cannot be done is publish the frees as events beside the allocations: a series is
+grouped by key, `direction` is neither a key nor a declared filter field, and a
+histogram of allocations and frees together is a histogram of neither. They are
+reported in the run's notes with their totals instead. `kfree` is worse and the
+note says so — it carries the pointer and the call site and nothing that says how
+large the object was.
+
+### The map bound is small on purpose, so that something has reached it
+
+Four thousand and ninety-six rows, a quarter of a megabyte, and deliberately not
+the largest number that would fit. The heaviest ordinary machine-wide interval
+measured here held a few hundred rows; a bound with five hundred times that
+headroom is a loss path nobody would ever exercise. At 4 096 it is reachable by
+`examples/mem-kernel-storm.sh` on this machine, reliably, and what happens when
+it is reached is counted per cpu and surfaced as `dropped` with the capacity in
+the reason.
+
+### A cgroup target is matched over the drained rows, and the run says so
+
+The programs write `bpf_get_current_cgroup_id()` into the row key, which is the
+cgroup directory's inode number, so userspace turns a `--cgroup` path into a set
+of numbers by walking the directory and its descendants. That is better than
+comparing against one id in the program — a container's own cgroup usually has
+children, and a task in a child is in the container by every definition a reader
+means — but it is not the kernel-side filtering the resolver credits a `bpf`
+backend with. The run says which it was, in the same words `sched.runqlat` uses
+for its predicate.
+
 ## Needs from the shared layer
+
+### `src/bpf/insn.rs`: two helper numbers and the log2 bucket
+
+This family declares `bpf_get_current_comm` (16) and
+`bpf_get_current_cgroup_id` (80) in `src/bpf/mem_program.rs`, because
+`insn::helper` names the eight the layer used before it and `insn.rs` belongs to
+nobody. Both are wanted by anything that identifies a task without a
+`task_struct` in hand, which is every program attached to a tracepoint that does
+not carry one.
+
+```rust
+pub const GET_CURRENT_COMM: i32 = 16;
+pub const GET_CURRENT_CGROUP_ID: i32 = 80;
+```
+
+The unrolled `log2` is the larger request. `src/bpf/runqlat.rs` has one,
+`src/bpf/mem_program.rs` has a second, and every source in this wave that wants
+`--emit hist` off a kernel-built histogram will want a third: the same six-step
+binary search, the same `emit::BucketLayout::Log2` numbering, the same
+off-by-one that would put every measurement in the neighbouring bucket. It wants
+to be one function in `insn.rs` with one test crossing it against the emit
+layer's own definition, rather than one copy per family each checked separately.
+
+```rust
+/// Computes the log2 bucket of `value_reg` into r3, in BucketLayout::Log2's
+/// numbering: zero is bucket zero, and bucket k holds [2^(k-1), 2^k).
+pub fn push_log2_bucket(program: &mut Program, value_reg: u8);
+pub fn bucket_low(bucket: u32) -> u64;
+```
+
+### `src/bpf/mod.rs`: four lines this stream had to add
+
+`mod mem_alloc; mod mem_program; mod mem_stall;` and their `pub use`. There is
+no way to register a program file without them, and every family stream in this
+wave adds its own; they sort to different places in the two lists, so the merges
+should not collide. Named here so the coordinator is not surprised by an edit to
+a file the brief says nobody owns.
+
 
 ### `src/perf.rs`: the page-fault sampling test is flaky under a parallel suite
 
@@ -296,8 +433,8 @@ sources of this family, and every source of `power`, plus most of `net`.
 
 ## What is still blocked, and on what
 
-Thirteen of this family's twenty-three sources now collect. What is left, and
-why:
+Twenty of this family's twenty-three sources now collect, and the three that do
+not are blocked on mechanism rather than on effort. What is left, and why:
 
 | Sources | Blocked on |
 |---|---|
@@ -305,6 +442,5 @@ why:
 | `bandwidth` | uncore PMUs: a different sysfs layout and a different privilege story. Package-scoped, so `--pid` must be refused rather than degraded. |
 | `latency`, `sharing` | PEBS load-latency and IBS: `perf_event_open` sampling with a data-source payload nothing in this build decodes yet. |
 | `numa` through `pmu` | the same PEBS data-source information. The `fs:proc` fallback is written and says plainly that it measures placement rather than accesses. |
-| `page_alloc`, `kmalloc`, `reclaim`, `compaction` | `bpf:tp`, which is the classic tracepoint attach the eBPF layer does not have. |
 | `wss` through `page_idle` and DAMON | `CAP_SYS_ADMIN`, twice over for `page_idle` (see above), and a DAMON probe class nothing answers. The `fs:proc:clear_refs` backend serves an unprivileged user today. |
 | `heap.alloc` by call site | stack capture, which exists now; wiring the shim's frames through it has not been done. |

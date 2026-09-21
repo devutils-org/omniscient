@@ -3432,3 +3432,92 @@ should land before the phase 10 triage layer, because a layer that reads
 percentiles to decide what to escalate is exactly who a short tail misleads.
 
 ---
+
+## Needs from another stream
+
+Requests raised by a family stream against a file it does not own, with the
+exact change wanted. The coordinator lands each one once — which is what wave
+two learned and wave three paid for by not doing.
+
+### `catalog/mem.yaml`: `mem.reclaim` requires half of the source it names — from `mem`
+
+`mem.reclaim`'s chain requires `raw_tracepoint:mm_vmscan_direct_reclaim_begin`
+and its `end`. Those fire when the *machine* has no free memory. A cgroup that
+hits its own `memory.max` reclaims through `mm_vmscan_memcg_reclaim_begin` and
+`mm_vmscan_memcg_reclaim_end` — different names, identical prototypes, same
+`DECLARE_EVENT_CLASS` — and the entry declares `cgroup: bpf_only`, so the one
+target the chain names is the one the required tracepoints cannot see.
+
+Measured: a cgroup squeezed to a 32 MiB limit produced 1 439 reclaim episodes in
+two seconds, **every one of them through the memcg pair**. A build attached only
+to what the entry requires reports zero while the cgroup reclaims ninety
+thousand pages, with nothing anywhere saying so.
+
+The collector attaches both pairs and marks each row with its scope, so the
+numbers are right today. What is wrong is the requirement, which will report
+this backend available on a kernel that has only the global pair and then serve
+a `--cgroup` request with a silent zero:
+
+```yaml
+- id: mem.reclaim
+  backends:
+    - {id: "bpf:raw_tp",
+       requires: ["bpf", "btf",
+                  "raw_tracepoint:mm_vmscan_direct_reclaim_begin",
+                  "raw_tracepoint:mm_vmscan_direct_reclaim_end",
+                  "raw_tracepoint:mm_vmscan_memcg_reclaim_begin",   # added
+                  "raw_tracepoint:mm_vmscan_memcg_reclaim_end",     # added
+                  "kernel>=5.8"], cost: low}
+```
+
+Adding them makes the probe strict: a kernel with only the global pair would
+report the backend missing rather than serving half of it. That is the right
+trade for an entry that offers a cgroup target, and it is a decision rather than
+a task — which is why it is here rather than done.
+
+### `catalog/mem.yaml`: `mem.compaction` requires a beginning and no ending — from `mem`
+
+`unit: ns`, and the chain requires `raw_tracepoint:mm_compaction_begin` alone. A
+duration needs both ends. On a kernel with the beginning and not the ending the
+resolver calls the backend available and the collector refuses at attach, which
+is the right refusal three layers after the one that could have said it.
+
+```yaml
+       requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin",
+                  "raw_tracepoint:mm_compaction_end", "kernel>=5.8"]
+```
+
+### `catalog/mem.yaml`: two entries declare a `mem` key nothing can carry — from `mem`
+
+`mem.page_alloc` and `mem.kmalloc` declare `keys: [task, mem, ...]`, and
+`mem:[base,len)` names one allocation — the address returned and the size given.
+That identity is exactly what counting in the kernel discards, and counting in
+the kernel is the only way either source is affordable at all.
+
+`omn mem.kmalloc -k mem` therefore validates, resolves, and is refused at attach
+with exit 3. The refusal names what to group by instead; what it cannot do is
+stop the catalog offering the key. Either drop `mem` from those two entries, or
+keep it against a future streaming backend and say what the aggregating one
+degrades.
+
+### `catalog/mem.yaml`: `direction` is not a filter field, so half of two sources cannot be events — from `mem`
+
+`mem.page_alloc`'s summary is "kernel page allocations **and frees**" and
+`mem.kmalloc`'s chain requires `kfree`. Both free tracepoints are attached, and
+neither source can publish their events: a series is grouped by key, `direction`
+is neither a key nor a declared filter field, and a histogram of allocations and
+frees together is a histogram of neither. The totals are reported in each run's
+notes instead.
+
+Two ways to fix it, and the choice is the catalog's:
+
+- add `direction` to `filter_fields` for both entries, so a reader can ask for
+  one side and the default stops being a merge of two; or
+- split each into two sources, which is what the separate emits and the separate
+  units argue for.
+
+Either way `mem.kmalloc`'s freed *bytes* stay unavailable: `kfree` carries the
+pointer and the call site and nothing that says how large the object was, and a
+collector that wanted the size would have to hold every live pointer in a map —
+the per-allocation cost the aggregation exists to avoid.
+

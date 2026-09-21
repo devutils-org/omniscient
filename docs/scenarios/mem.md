@@ -246,7 +246,7 @@ sample, and counting it as one would make every clean run look lossy.
 |---|---|---|---|
 | a rejection | the request cannot mean anything | 2 | `mem.bandwidth --pid` |
 | no viable backend | this machine cannot serve it | 1 | `mem.cache_llc` pinned to `pmu` on AMD 17h |
-| no collector | this build does not implement it | 3 | `mem.reclaim`, and four more |
+| no collector | this build does not implement it | 3 | `mem.latency`, and two more |
 
 **Exit 2.** DRAM throughput attributed to one process is not a number that
 exists: the memory controller counts what crosses it for the whole package and
@@ -313,12 +313,14 @@ requires it to pass, because the difference between "your machine cannot do
 this" and "we have not written it" is the difference between an afternoon in a
 kernel config and a line in this file.
 
-The session used to ask for `mem.reclaim`, which was the better illustration
-until the `tracepoint:` probe became honest. It declares only `bpf:tp`, whose
-numeric event id lives in a root-only file, so this machine genuinely cannot
-serve it and the honest answer became exit 1. Finding 35 of
-`docs/open-findings.md` has the class; finding 9 has the catalog change that
-would put `mem.reclaim` back on exit 3.
+The session used to ask for `mem.reclaim`, and the two reasons it stopped are
+the whole history of this answer. First the `tracepoint:` probe became honest:
+`mem.reclaim` declared only `bpf:tp`, whose numeric event id lives in a
+root-only file, so this machine genuinely could not serve it and exit 1 became
+the true answer. Then finding 9's catalog pass gave it a `bpf:raw_tp` and it
+went back to exit 3 -- and then the sixth wave wrote the collector, so it now
+exits 0. `mem.latency` is the illustration that will last: PEBS and IBS, one of
+which every x86 cpu has, and neither written.
 
 `forcing_a_backend_with_no_collector_exits_three_and_names_it` walks that
 systematically: every backend declared in a `mem` chain that has no collector —
@@ -839,6 +841,265 @@ Pinned by
 `a_sampling_request_that_no_backend_can_sample_is_not_answered_with_a_poll`,
 which accepts either fix: a run that samples, or a run that says which part of
 the request it could not honour.
+
+---
+
+## The four that go through the kernel
+
+Added in the sixth wave: `mem.page_alloc`, `mem.kmalloc`, `mem.reclaim` and
+`mem.compaction`, all four through raw tracepoints with the histogram built in
+the kernel. They are a different shape from everything above — one event stands
+for many measurements — and three of their four classes needed a workload
+running *beside* the session rather than launched by it, because none of them
+offers a `launch` target and one run observes one target.
+
+The sessions are `examples/mem-allocator-ledger.yml`,
+`examples/mem-reclaim-squeeze.yml`, `examples/mem-compaction-watch.yml`,
+`examples/mem-kernel-sweep.yml` and `examples/mem-kernel-storm.yml`, with two
+workloads shipped beside them: `examples/mem-reclaim-squeeze.sh` and
+`examples/mem-kernel-storm.sh`.
+
+**A session with a fixed window and a workload with none is a race, and it is
+checked rather than hoped.** The tests start the session, wait seven hundred
+milliseconds for its programs to attach, run the workload and time it. If the
+workload took longer than what was left of the window, the ground truth is
+compared against half a workload, which fails in a way that looks exactly like a
+collector losing events -- so the run says which it was and skips with both
+numbers. That is `Beside::contained_the_workload` in `tests/scenario_mem.rs`,
+and it turned three failures under a loaded suite into the sentence that
+explains them.
+
+The three of them also hold a process-wide mutex, so they do not run at the same
+time *as each other*. `cargo test` runs the tests of one binary in parallel
+threads of one process, and three scenarios that between them fork three
+thousand processes, write a hundred mebibytes through a squeezed cgroup and
+fault in sixty-four mebibytes of huge pages are not neighbours that
+`a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` survives. One at a time
+is not immunity from the rest of the suite; it is the largest avoidable part of
+it, and it costs only wall time.
+
+### Does the kernel's ledger agree with the program's own number?
+
+Two numbers chosen by the workload, neither read off the tool.
+
+A program touches sixty-four mebibytes, one byte every four kilobytes.
+Anonymous memory comes from the page allocator and from nowhere else, so
+`mem.page_alloc` must attribute at least sixty-four mebibytes of pages to that
+process id. Measured: **67.4 MiB, of which exactly 64 MiB arrived as thirty-two
+order-9 folios** — 16 384 pages in 32 allocations — and the remaining 3.4 MiB is
+the interpreter's own startup in single pages.
+
+That split is `mem.faults`'s caveat seen from the other side. A fault is not a
+page; here the allocator says why, in numbers: sixteen thousand pages of
+anonymous memory cost thirty-two allocations, because the kernel hands out
+folios and not pages.
+
+The same program sends two thousand datagrams of two kilobytes through a unix
+socket pair. A datagram smaller than a page is copied into one slab allocation,
+so `mem.kmalloc` must show at least four mebibytes of slab and at least two
+thousand allocations in the four-kibibyte bucket. Measured: **8 192 000 bytes in
+exactly 2 000 allocations of 4 096 bytes** — every 2 048-byte datagram costs one
+4 KiB slab object, which is the socket buffer's header rounded up.
+
+Checked by `a_known_number_of_megabytes_and_datagrams_is_found_in_the_allocators_ledger`,
+with an upper bound as well as a lower one: a lower bound alone is passed by a
+collector that reports a large constant.
+
+### Does direct reclaim agree with the kernel's own count of it?
+
+**The strongest ground truth this family has.** A cgroup is given a thirty-two
+mebibyte limit and ninety-six mebibytes of page cache are written through it;
+the cgroup's own `memory.stat` is read before and after. `pgsteal_direct` is the
+kernel counting the pages it reclaimed. `pages_reclaimed` is what `mem.reclaim`
+read off the `end` tracepoint. Two counters, incremented by different code in
+different places.
+
+```
+omn-scenario cgroup_id 18390
+omn-scenario pgsteal_direct 92833
+
+rows 25   episodes 1439   pages_reclaimed 92833   scopes {cgroup}
+```
+
+Equal, to the page, on every run. Page cache rather than anonymous memory
+deliberately: clean page cache is always reclaimable, so the cgroup reclaims
+continuously and is never killed, which an anonymous workload of the same size
+is within a second.
+
+Checked by `a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel_counted`.
+
+### Does the tool say what it did not see?
+
+`mem.kmalloc` counts into a map of 4 096 rows drained every hundred
+milliseconds. A row is a task and a size, and one task makes at most a couple of
+dozen rows however hard it allocates, so filling the map takes *tasks*:
+`examples/mem-kernel-storm.sh` forks about three thousand short-lived processes
+from four shells at once.
+
+```
+events 12664   dropped 97483
+  more distinct (task, cgroup, size, direction) rows appeared in one interval
+  than the 4096 rows the histogram holds, so their allocations were never counted
+```
+
+Reached on this machine, reliably. The allocations behind a row the map had no
+room for are recorded nowhere else at all — the helper returns an error in the
+kernel and the event is gone — so the program counts them per cpu and the run
+reports them.
+
+The map is 4 096 rows and not the largest number that would fit, deliberately.
+The heaviest interval an ordinary machine-wide run produced here was a few
+hundred rows; a bound with five hundred times that headroom is a bound nobody
+would ever exercise, and an unexercised loss path is the thing this project
+exists to prevent.
+
+Checked by `a_histogram_map_driven_past_its_capacity_says_what_it_could_not_count`,
+which skips loudly with the peak row count where the machine forks too slowly to
+reach it.
+
+### Is the reason the right reason?
+
+Four refusals, four codes, checked side by side by
+`the_kernel_sources_tell_their_three_refusals_apart`:
+
+| Request | Code | Why |
+|---|---|---|
+| `mem.compaction --pid 1` | 2 | compaction is work done for a whole memory zone, and the entry declares no `pid` |
+| `mem.reclaim -m poll@100ms -e timeline` | 2 | a stall is the gap between two events; the refusal names `trace` and `count` |
+| `--backend force:bpf:tp`, all four | 3 | the classic tracepoint attach, which no collector serves — this is also the backend comparison these four have, since each has exactly one implemented backend |
+| `mem.kmalloc -k mem` | 3 | see D8 below |
+
+### Does every axis the catalog declares work?
+
+`examples/mem-kernel-sweep.yml` asks all four for every emit they declare, and
+`every_mode_and_emit_of_the_kernel_sources_is_served_or_refused_by_the_right_code`
+walks every mode against every emit. Nothing in that sweep blames the machine:
+every refusal these four raise is marked as what it is, a request that cannot
+mean anything or a shape this build has not written.
+
+Two of the five requests in that session render nothing, and that is the right
+answer rather than a failure — an idle machine neither reclaims nor compacts.
+An empty distribution is not dressed up as a measurement.
+
+---
+
+## What the four found
+
+### D8 — two entries declare a `mem` key that an aggregating collector cannot carry
+
+`mem.page_alloc` and `mem.kmalloc` both declare `keys: [task, mem, ...]`, and
+`mem:[base,len)` names one allocation: the address it returned and the size it
+was. That is exactly the identity counting in the kernel throws away — the whole
+point of a row per `(task, size bucket)` is that the individual allocations are
+gone before userspace sees anything.
+
+The collector refuses the key by name and says what to group by instead. What it
+cannot do is make the catalog stop offering it: `omn mem.kmalloc -k mem`
+validates, resolves, and is then refused at attach. The alternative was worse —
+answering with no key at all puts every task's allocations into one anonymous
+series and looks exactly like a machine that allocates in one place.
+
+The fix is a line of YAML, and it belongs to whoever owns the catalog: either
+drop `mem` from those two entries, or keep it against a future streaming backend
+and mark what the aggregating one degrades. Recorded under "Needs from another
+stream" in `docs/open-findings.md`.
+
+### D9 — `mem.reclaim`'s chain names half of the source
+
+The catalog requires `raw_tracepoint:mm_vmscan_direct_reclaim_begin` and its
+`end`. Those fire when the *machine* has no free memory. A cgroup that hits its
+own `memory.max` reclaims through `mm_vmscan_memcg_reclaim_begin` and `_end`,
+which are different names — and the entry declares `cgroup: bpf_only`, so a
+`--cgroup` run is exactly the case the declared tracepoints cannot see.
+
+Measured: the squeeze scenario produces one to three thousand reclaim episodes,
+and **every one of them is the memcg pair**. A build attached only to what the
+entry names reports zero while the cgroup reclaims ninety thousand pages, with
+nothing anywhere saying so — a wrong number that looks right, in the one place
+the entry promises to work.
+
+Both pairs are attached. They come from one `DECLARE_EVENT_CLASS` and share a
+prototype, so one program serves both and the ending writes a `scope` into its
+row: `global` or `cgroup`. The catalog line that would make the requirement
+honest is in `docs/open-findings.md`.
+
+### D10 — `mem.compaction`'s chain requires a beginning and no ending
+
+`mem.compaction` requires `raw_tracepoint:mm_compaction_begin` and nothing else,
+and its unit is nanoseconds. A duration needs both ends. On a kernel with the
+beginning and not the ending, the resolver would call the backend available and
+the collector would refuse at attach — which is the right refusal in the wrong
+place, three layers after the one that could have said it.
+
+Not a defect anyone can hit on this kernel, which has both. Recorded because the
+next kernel is not this one.
+
+### D11 — a kmalloc in interrupt context is attributed to whoever was interrupted
+
+Rows arrive keyed by `task:0`, and thread zero is the per-cpu idle task:
+
+```
+task:0  n=36  min 128.0 B  mean 128.0 B  max 128.0 B
+```
+
+`bpf_get_current_pid_tgid` returns the task that is *on the cpu*, and a slab
+allocation made in softirq context — a network buffer, a timer — is made on
+whatever task the interrupt landed on. On an idle cpu that is thread zero. It is
+not the idle task allocating; it is the kernel allocating with nobody to charge.
+
+This is the same shape as the trap `docs/scenarios/net.md` records for received
+packets, and the same answer applies: the identity that matters is not always
+the task. Left as it is, because an allocation with no owner reported under the
+task that was interrupted is at least a true statement about where it happened,
+and inventing an owner would not be. Stated here so a reader of a `topk` does
+not conclude that the idle task allocates.
+
+### D12 — the frees are half the ledger and cannot be events
+
+`mem.page_alloc`'s summary is "kernel page allocations **and frees**", and both
+tracepoints are attached. What the collector cannot do is publish the frees as
+events beside the allocations: a series is grouped by key, `direction` is
+neither a key nor a declared filter field, and a histogram of allocations and
+frees together is a histogram of neither.
+
+So the frees are counted, totalled and reported in the run's own notes:
+
+```
+degraded: 1106 page frees totalling 1116 pages happened in the same window and
+are not events here: a series is grouped by key, `direction` is neither a key
+nor a filter field, and a histogram of allocations and frees together is a
+histogram of neither
+```
+
+For the slab side it is worse and the note says so: **`kfree` carries the
+pointer and the call site and nothing that says how large the object was**, so a
+freed byte count is not a number this source can report at all. A collector that
+wanted one would have to keep every live pointer in a map, which is the
+one-record-per-allocation cost the aggregation exists to avoid.
+
+Both would be fixed by the same catalog change: `direction` as a filter field,
+or two sources instead of one.
+
+### D13 — compaction is written here and exercisable elsewhere
+
+The collector loads, attaches to both tracepoints and reports zero, which on
+this machine is the right answer. Making it report something needs memory
+fragmented badly enough that a huge-page allocation has to compact, and the two
+ways to arrange that are both out of reach: `/proc/sys/vm/compact_memory` is
+mode 0200 and root-only, and fragmenting a shared machine's memory is not
+something a test may do to a machine it does not own.
+
+Measured before saying so: three gibibytes of transparent huge pages were
+faulted in and `compact_stall`, `compact_daemon_wake` and
+`compact_migrate_scanned` did not move — `/proc/buddyinfo` shows this machine
+still has free contiguous blocks, so the allocator never needed to.
+
+`compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where_it_did_not`
+is conditional on those three counters rather than on a threshold: where the
+kernel says compaction ran in the window, the source has to have seen it, and
+where it did not, the test skips with the numbers and asserts the source
+reported nothing rather than something. On a fragmented machine it is a real
+check; here it is an honest skip.
 
 ---
 
