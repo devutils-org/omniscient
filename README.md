@@ -208,7 +208,7 @@ remains in the order it is worth doing. In short: the skeleton is finished and
 `perf_event_open` counting and sampling, netlink, an `LD_PRELOAD` shim, NVML
 through `dlopen`, `af_packet` with a `PACKET_MMAP` ring, and eBPF through raw
 tracepoints, classic tracepoints, kprobes and uprobes. All four join match kinds
-have a producer. 1367 tests pass, of which 217 are scenarios: a workload whose
+have a producer. 1407 tests pass, of which 244 are scenarios: a workload whose
 property the scenario chose, a session that measures it, and a check against
 that property. They found 63 defects, none worked around, and `docs/scenarios/`
 records every one.

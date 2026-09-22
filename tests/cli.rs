@@ -758,3 +758,63 @@ fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
         "the refusal should say what a system-wide sampler would need: {complaint}"
     );
 }
+
+/// Both session indexes hold exactly the sessions on disk — no more and no
+/// fewer.
+///
+/// `examples/README.md` and `GUIDE.md` belong to nobody, which is how they came
+/// to be twenty-eight sessions short after the sixth wave: every stream wrote
+/// sessions and no stream owned the list. The commit that fixed the count said
+/// both were "checked to hold exactly the sessions on disk", and no test
+/// performed that check — so the claim was true for one afternoon and then
+/// drifted again by ten.
+///
+/// Both directions matter and they fail differently. A session missing from an
+/// index is a demonstration nobody finds; a row naming a file that does not
+/// exist is a reader typing a command that cannot run.
+#[test]
+fn the_session_indexes_hold_exactly_the_sessions_on_disk() {
+    let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir("examples")
+        .expect("the examples directory ships")
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+            (name.ends_with(".yml") || name.ends_with(".yaml") || name.ends_with(".toml"))
+                .then_some(name)
+        })
+        .collect();
+    assert!(on_disk.len() > 100, "only {} sessions found", on_disk.len());
+
+    for index in ["examples/README.md", "GUIDE.md"] {
+        let text = std::fs::read_to_string(index).expect("the index ships");
+        // A row is `| `<file>` | what it answers |`, which is the convention
+        // both files already followed.
+        let listed: std::collections::BTreeSet<String> = text
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("| `")?;
+                let name = rest.split('`').next()?;
+                // A row naming `sched-*.yml` is a prerequisite table saying
+                // "every session of this family", not an index entry. A glob
+                // is not a session name, here as in the catalog.
+                (!name.contains('*')
+                    && (name.ends_with(".yml")
+                        || name.ends_with(".yaml")
+                        || name.ends_with(".toml")))
+                .then(|| name.to_owned())
+            })
+            .collect();
+
+        let missing: Vec<_> = on_disk.difference(&listed).collect();
+        assert!(
+            missing.is_empty(),
+            "{index} does not list {} of the sessions on disk: {missing:?}",
+            missing.len()
+        );
+        let invented: Vec<_> = listed.difference(&on_disk).collect();
+        assert!(
+            invented.is_empty(),
+            "{index} names {} sessions that do not exist: {invented:?}",
+            invented.len()
+        );
+    }
+}

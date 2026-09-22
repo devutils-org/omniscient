@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-Seventy-nine sessions, nine families, four kinds of question. This is how to
+A hundred and eighteen sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and seven
+make demo-all           # the tour and then all one hundred and eighteen
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -333,6 +333,27 @@ Each is `omn -f examples/<file>`. The whole family is
 | `runtime-jit-sweep.yml` | Does every axis `runtime.jit` declares actually work? |
 | `runtime-jit.yml` | What did the runtime compile, and when? |
 | `runtime-not-built.yml` | The three `runtime` sources this build does not implement, and the backend of |
+
+## cross-family
+
+A crossing asks what no single family can answer, so it belongs to none of them
+and carries the `cross-` prefix instead of a family's. Each one states the
+evidence behind every joined line — `IDENTITY` > `KEY` > `WAKEUP` > `TEMPORAL` —
+and `docs/scenarios/cross-<name>.md` says what it found.
+
+| Session | The question it answers |
+|---|---|
+| `cross-memory-which-allocation.yml` | Which allocation cost memory, and which of them stayed? |
+| `cross-memory-did-it-stay.yml` | Did it stay? What the allocator kept after the program gave it back. |
+| `cross-compute-where-the-time-went.yml` | Where did one task's wall clock go — on a cpu, waiting for one, or blocked? |
+| `cross-compute-three-states.yml` | The same task with all three states large at once, and the rows adding up. |
+| `cross-compute-queued-after-wakeup.yml` | A known amount of sleep, and the part of "blocked" that was not. |
+| `cross-compute-drained-wakeup.yml` | What a wakeup join onto a drained total attributes, and why. |
+| `cross-compute-lossy-profile.yml` | The same decomposition from a run that lost samples, to read beside a clean one. |
+| `cross-io-one-read.yml` | What did one read cost, from the block layer to the reader waking up? |
+| `cross-io-stale-pointer.yml` | Would a bare pointer have credited somebody else's request to this reader? |
+| `cross-machine-frequency.yml` | Did the machine's clock explain the instruction rate you just measured? |
+| `cross-machine-reclaim-io.yml` | Was the I/O you just measured the program's, or the memory limit's? |
 
 ## general
 

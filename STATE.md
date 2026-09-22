@@ -40,8 +40,11 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**1367 tests pass**, of which 217 are scenarios: a workload whose property the
+**1407 tests pass**, of which 244 are scenarios: a workload whose property the
 scenario chose, a session that measures it, and a check against that property.
+Twenty-seven of those are the seventh wave's **crossings** -- a question no
+single family can answer, checked against something the workload itself
+reports.
 The fourth wave's 63 defects are recorded in `docs/scenarios/`, 52 closed by the
 fifth wave in `docs/fixes/`.
 
@@ -54,7 +57,7 @@ named mechanisms** rather than on anything unknown.
 ## What the numbers say
 
 ```
-100 sources: 86 usable here, 10 unverified, 4 out of reach on this machine.
+100 sources: 87 usable here, 9 unverified, 4 out of reach on this machine.
 81 of them have a collector, covering 89 of their 202 backends.
 ```
 
@@ -62,11 +65,11 @@ Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 86 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this machine serve? | 87 | probed now: the file is readable, the event opens, the tracepoint is there |
 | What can this build collect? | 81 sources, 89 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `86` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
+That `87` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
 `make` reapplies the capabilities that every relink drops. Without them the
 whole eBPF and per-cpu perf surface goes, and nothing announces the loss — the
 tool reports fewer sources, which reads like the machine changed rather than
@@ -81,9 +84,11 @@ the probe started answering from the access tracefs really grants it fell to
 `62`, which was the first honest number and a worse tool. Finding 9's catalog
 pass then put a `bpf:raw_tp` ahead of twenty-seven of those thirty — a raw
 tracepoint attaches by name against the kernel's own BTF and needs no tracefs —
-and finding 36 records what that moved. `86` is what this machine can serve
-through a path that attaches, checked name by name against `/sys/kernel/btf/
-vmlinux`.
+and finding 36 records what that moved. The seventh wave moved the last one:
+`io.readahead` required `tracepoint:filemap:*`, and a glob is not a name, so no
+probe covered it and the source reported `?` from both ends. It names two
+tracepoints now. `87` is what this machine can serve through a path that
+attaches, checked name by name against `/sys/kernel/btf/vmlinux`.
 
 It cuts the other way too, which cost a session to find: a binary that carries
 capabilities is non-dumpable, so its own `/proc` entries belong to root and the
@@ -174,20 +179,20 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
-| 4 — the vertical case | **partly**. Three real correlations exist and are checked, and the `io` and `net` eBPF backends the decomposition needs now collect. What is left is the decomposition itself — one request's latency split across its boundaries — and the two boundaries that need `fentry`. |
+| 4 — the vertical case | **partly, and further than it was**. The seventh wave's crossings decompose two of the paths: one task's wall clock across on-cpu, runnable and blocked, and one read from the block layer to the reader waking up, each line carrying its evidence. What is left is the boundaries above the block layer — `read()` to cache miss, FS to submission — which need `fentry`, and a decomposition that names a *request* rather than a task. |
 | 5 — generalizing the join engine | **done**. All four match kinds — `interval`, `eq`, `scoped_eq`, `wakeup` — are implemented, each reports in its own words, and since the sixth wave each has a producer. `scoped_eq` was the last: `io.queue -> io.latency` joins per request at 99.9 %, keyed on `(pointer, open_ts)` because the kernel recycles a request pointer within milliseconds. |
 | 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. What is left is the fourth task: **hot attach and detach**, which is also what `DECISIONS.md` defers concurrent requests on, and what phase 10's escalation assumes. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
 | 9 — breadth | in progress; **81 of 100 sources, 89 of 202 backends**. The 19 without a collector are named below, and eight of them sit behind two named attach kinds. |
-| 10 — intelligence layer | not started. Now carries **the objective as a request parameter**: "limited by what" has no answer until someone says *limited for what*, because median latency, the tail, throughput and energy do not name the same culprit. |
+| 10 — intelligence layer | **begun, by the crossing rather than by the layer**. TSA — where a thread's wall clock went — is what `examples/cross-compute-where-the-time-went.yml` produces for one task, with the residue printed rather than rounded away. What is not built is the layer above it: the objective as a request parameter, the escalation, the question-oriented modes. |
 | 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
 
 ---
 
 ## What remains, in the order it is worth doing
 
-Forty-one sources have no collector, and **all but eight of them are blocked by
+Nineteen sources have no collector, and **all but eight of them are blocked by
 nothing at all**: the catalog pass below has landed, so what is left for them is
 a collector written against an attach path that works today. The fifth wave
 closed 52 of the sixty-three defects the scenario wave found; the eleven that
@@ -231,10 +236,10 @@ of mechanism, and the rest are behind hardware or a vendor library:
 above the block one**, and `docs/families/io.md` says so from the inside: three
 of the five `io` sources it left are the same missing attach kind.
 
-The third row is the cheapest and is a request the sixth wave made twice, from
-two streams independently: `Btf::member_offset` cannot reach a member inside an
-anonymous struct or union, which is where `folio.mapping` lives. Two sources
-wait on it and it is one function in a file nobody owns.
+The third row is closed. `Btf::member_offset` descends anonymous structs and
+unions since the seventh wave, so `folio.mapping`, `skb->protocol`,
+`skc_daddr` and `skc_dport` are reachable; `io.pagecache` and `io.readahead`
+now wait on a collector rather than on mechanism.
 
 ### 2b. The eleven defects the fifth wave left
 
@@ -242,17 +247,33 @@ wait on it and it is one function in a file nobody owns.
 stream did not own, three are decisions rather than tasks, and one — `topk`
 ranking a series rather than an attribute — needs surface syntax nobody owns.
 
-### 3. The crossings — `BRIEF_NEXT.md`, and now unblocked
+### 3. ~~The crossings~~ — **landed by the seventh wave**
 
-Four questions a single family cannot answer, written up and not dispatched.
-`heap.alloc → mem.faults → mem.rss` for memory end to end; `cpu.profile` beside
-`sched.offcpu` for where the time went; **the I/O path, which was waiting for
-`blk:rq@open_ts` and is no longer**; and the machine's own state as a
-confounder.
+Four questions a single family can't answer, each now a session, a test and a
+document: `docs/scenarios/cross-memory.md`, `cross-compute.md`, `cross-io.md`
+and `cross-machine.md`. Twenty-seven scenarios, eleven sessions, and **no file
+under `src/` changed** — which was the point: every source they join already
+collected and was already checked, and what was new was the arithmetic that puts
+two families in one table.
 
-`BRIEF_NEXT.md` also notes that the compute crossing is where phase 10 starts:
-TSA's three inputs all collect and are checked, and it must not start before a
-distribution says when it is short — which it now does.
+What they produced beyond the tables is a list of things the engine cannot yet
+say, each filed with the signature wanted:
+
+- **The evidence ladder has a gap.** Three of the four streams independently
+  asked for a match kind that is `TEMPORAL` by construction: today the only
+  rules that validate between two families' events report `KEY`, which
+  overstates what crediting-by-recency actually knows.
+- **A decomposition is not an emit.** The compute crossing computes its three
+  states and its residue in the test rather than in the tool, because nothing in
+  `src/` renders a decomposition beside the joins that produced it.
+- **The I/O path starts at the block layer and says so.** The boundaries above
+  it need `fentry`.
+- **`mem.reclaim` stamps its windows at the close**, so a join opening on it
+  misses the first window — found by the machine crossing, filed for `mem`.
+
+The seventh wave's shared-layer stream is `docs/families/shared-layer.md`: the
+sixth wave's twenty requests landed once, which is what unblocked two `io`
+sources and put the capability advice where the failure actually is.
 
 ### 5. The smaller ones, each with its reason
 
@@ -271,7 +292,7 @@ distribution says when it is short — which it now does.
 
 ## How this parallelizes
 
-Four waves of parallel agents have run on this project, and each was divided
+Seven waves of parallel agents have run on this project, and each was divided
 differently because the work was shaped differently. What held every time:
 
 - **The unit of ownership has to be a file set nobody else writes.** Wave one
@@ -288,10 +309,23 @@ differently because the work was shaped differently. What held every time:
   in `src/collect/<family>/mod.rs`, so a new source is a line in a file one
   stream owns. A central `match` would be one conflict per agent.
 
-The sixth wave divides by family again, plus one layer stream: five streams
-writing eBPF collectors into one family directory each, and one rewriting
-`src/emit.rs` and `src/render.rs` for finding 37, which shares no file with any
-of them. `BRIEF.md` is that brief and `scripts/spawn.sh` is wired for it.
+The seventh wave divides **by question rather than by family**, and it is the
+cleanest division so far: four crossings owning nothing but
+`examples/cross-<name>-*.yml`, `tests/cross_<name>.rs` and
+`docs/scenarios/cross-<name>.md`, and touching **no file under `src/` at all**.
+That is what let a shared-layer stream run beside them rewriting
+`src/bpf/{attach,btf,insn,map}.rs` and the catalog with no possibility of a
+conflict. Four merges, four conflicts, every one of them in
+`docs/open-findings.md` — the append seam the brief had named, resolved by
+keeping both sides.
+
+Two seams were named ahead of time rather than discovered, which was the sixth
+wave's lesson: that findings file, and the two session indexes. `examples/README.md`
+and `GUIDE.md` belong to the coordinator, because after the sixth wave both were
+twenty-eight sessions short for exactly the reason that every stream wrote
+sessions and none owned the list. They are now held to the sessions on disk by
+a test, in both directions — a commit had claimed that check existed and none
+did, and the claim had already drifted by ten.
 
 **Every earlier brief is now in `docs/briefs/`**, recovered from the history.
 `BRIEF.md` is overwritten each wave and roughly thirty documents and tests cite
