@@ -1,0 +1,79 @@
+# Would a bare pointer have credited somebody else's request to this reader?
+#
+#   omn -f examples/cross-io-stale-pointer.yml
+#
+# and, in a second terminal while it watches, from the repository's root:
+#
+#   python3 -c "import os;p='target/cross-io-pair.bin';os.path.exists(p) or (lambda f:(f.write(os.urandom(16<<20)),f.flush(),os.fsync(f.fileno())))(open(p,'wb'))" &&
+#   for who in omnissuer:3000 omnnoise:12000; do python3 -c "import mmap,os,sys;n,c=sys.argv[1].split(':');os.sched_setaffinity(0,{0});open('/proc/self/comm','w').write(n);p='target/cross-io-pair.bin';g=os.open(p,os.O_RDONLY);os.posix_fadvise(g,0,0,os.POSIX_FADV_DONTNEED);f=os.open(p,os.O_RDONLY|os.O_DIRECT);b=mmap.mmap(-1,4096);[os.preadv(f,[b],(i*7919%4096)*4096) for i in range(int(c))];print(n,c,'reads')" $who & done; wait
+#
+# Two processes reading one-page `O_DIRECT` pages from one file, **pinned to the
+# same cpu**. That is what makes them share request pointers: blk-mq hands out
+# requests per hardware queue, NVMe has one queue per cpu, and two readers on
+# two cpus would never meet at one address. On one cpu they recycle each
+# other's requests all the time.
+#
+# The session watches the issues of **one** of them, `omnissuer`, and the
+# completions of **everybody**, and joins the two the same way twice:
+#
+#   scoped   blk:rq@open_ts   a completion matches an issue of the same life
+#   bare     blk:rq           a completion matches whatever was last issued
+#                             at that address
+#
+# `omnissuer` issued 3000 reads. Whatever the scoped join credits to it cannot
+# be more than 3000, because a read is one request and nothing else was issued
+# by it. What the bare join credits beyond 3000 is completions of `omnnoise`'s
+# requests landing on requests `omnissuer` had already finished:
+#
+#   join scoped  io.queue -> io.latency  evidence KEY
+#     2997 of 15001 `io.latency` events attributed (20.0 %); 12004 carried a key
+#     no open state had in that scope
+#   join bare  io.queue -> io.latency  evidence KEY
+#     14493 of 15001 `io.latency` events attributed (96.6 %); 508 carried a key
+#     no open state had
+#
+# 11496 completions credited to a stranger, by a join that reports the same
+# evidence level as the one that got it right. That is the argument for the
+# key being scoped, and it is also a finding about the evidence ladder: the
+# engine calls both KEY, because it derives the level from the key kind and the
+# match rather than from whether the key can tell two lives apart.
+#
+# The asymmetry is deliberate and it is not exotic. A session that narrows the
+# issuing side -- to one process, one cgroup, one device -- and not the
+# completing side is exactly the session somebody writes when they want "the
+# latency of my requests", and it is the one where `eq` is wrong.
+name: would a bare pointer have lied
+format: text
+duration: 5s
+
+requests:
+  - label: issues
+    source: io.queue
+    target: system
+    mode: trace
+    emit: [summary]
+    filter: "comm == 'omnissuer'"
+
+  - label: completions
+    source: io.latency
+    target: system
+    mode: trace
+    emit: [summary]
+
+joins:
+  - id: scoped
+    from: io.queue
+    to: io.latency
+    via: blk
+    match: scoped_eq
+    window: 30s
+
+  # The same rule with the scope thrown away. Nothing in the engine refuses it:
+  # `eq` on a scoped key compares the pointer alone, which is the comparison
+  # this session exists to show is wrong.
+  - id: bare
+    from: io.queue
+    to: io.latency
+    via: blk
+    match: eq
+    window: 30s

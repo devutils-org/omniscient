@@ -4510,3 +4510,142 @@ its clock is a different domain rather than an uncertain one, and it would need
 a `Determinism` the enum refuses to have.
 
 ---
+
+## Needs from another stream
+
+### Stream P3 — the I/O path
+
+Six requests from the I/O crossing, `docs/scenarios/cross-io.md`, each with the
+measurement that raised it. P3 owns no file under `src/`, so none of these is
+landed; the crossing works around none of them in the engine either, and says in
+its own session and test where it would have used each.
+
+#### To whoever owns `src/collect/sched/wakeup.rs` and `offcpu.rs` — apply the filter, or refuse it
+
+Defect 1 of `docs/scenarios/cross-io.md`: `--filter "comm == 'x'"` on
+`sched.wakeup` and `sched.offcpu` is validated, placed, and never evaluated, and
+no note says so — 1528 of 1528 wakeups came back for a `comm` no task has. The
+block collectors already show the shape to copy, in
+`src/collect/io/block.rs`: a `predicate: Option<FilterExpr>` taken from
+`request.filter` at prepare, `crate::filter::matches(predicate, &event)` over the
+drained events, and a degradation note with the two counts:
+
+```rust
+// in each collector's drain, after the event is built
+if let Some(predicate) = &self.predicate {
+    if !crate::filter::matches(predicate, &event) { self.filtered_out += 1; continue; }
+    self.filtered_in += 1;
+}
+// and in `degradations()`:
+"the filter kept {filtered_in} wakeups and removed {filtered_out}; it ran here, over the \
+ drained records, not in the kernel"
+```
+
+If that is not wanted, the other honest answer is a refusal at prepare naming the
+backend. What is not honest is the current one. Wanted by
+`the_scheduler_half_ignores_a_filter_and_says_nothing`, which asserts the defect
+and says what to flip.
+
+#### To whoever owns `src/collect/sched/*.rs` — a thread target that compares the thread
+
+Defect 2: `WakeupCollector::new(filter)` and `OffCpuCollector::new(filter, ..)`
+receive `Target::first_pid()`, which for `Target::Tid` is the thread id, and the
+programs compare it against the task's `tgid`. For any thread that is not its
+process's first the run keeps nothing and reports no loss — 0 events through
+`--tid`, 66 through `--pid` for a thread that slept 60 times. Wanted, on the
+model of `src/collect/io/block.rs`'s `Submitter`:
+
+```rust
+enum Whose { Any, Process(u32), Thread(u32) }   // compare tgid, or compare pid (the kernel's tid)
+```
+
+`sched.runqlat`, `sched.migrations`, `sched.lock`, `proc.syscall` and `mem.stall`
+hand `first_pid()` to a thread-group filter in the same way; that is read from
+the code, not measured. Wanted by
+`a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing`.
+
+#### To whoever owns `src/join.rs` — refuse `eq` on a scoped key, or rate it lower
+
+Defect 3: `check()` refuses `scoped_eq` on a key without a scope and accepts the
+converse, and `evidence()` rates both KEY. On `blk:rq@open_ts`, `eq` compares the
+pointer alone and credited 11496 completions to requests that had already
+finished, at the same evidence level as the join that credited none. Either:
+
+```rust
+// in check():
+MatchKind::Eq if is_scoped(rule.via) => Err(unmatchable(
+    "`blk:rq@open_ts` names one life of a recycled pointer, and `eq` compares the pointer \
+     alone: a completion would land on whichever request last held that address. Use \
+     `scoped_eq`",
+)),
+```
+
+or keep it expressible and rate it `Evidence::Temporal`, since what a bare
+recycled pointer establishes is that two events were at one address around the
+same time. `examples/cross-io-stale-pointer.yml` uses it on purpose and would
+move to a comment showing the refusal.
+
+#### To whoever owns `src/join.rs` and `src/encode.rs` — wakeup attributions grouped by chain
+
+Defect 4: every wakeup opens its own state, so against a stream with one event
+per block each attribution has a count of 1 and `top` is key order, not weight.
+The table headed *heaviest wakeup chains* then led with `task:0 (idle) ->
+task:113142`; every later run that counted the wakeup following each
+completion found three kworkers leading and the idle task not among them. Wanted: `assemble()` for `MatchKind::Wakeup` folds
+finished attributions by `key` (the rendered chain) before ranking, summing
+`matched` — the chain is the thing a reader ranks, not the state.
+
+#### To whoever owns `src/join.rs` — a match that pairs a close with the next wakeup of its task
+
+Boundary 8 is *this completion released this reader*. The engine's `wakeup`
+match goes the other way — a wakeup opens, and the woken task's later events are
+attributed to it — so against `io.latency` it attributes each request to the
+wakeup that released its submitter *before* the request was issued, which for
+reads one at a time is the previous read's delivery. The crossing does the pairing
+in its test instead. Wanted, one more `MatchKind`:
+
+```yaml
+- id: completion-released
+  from: io.latency          # opens a state per task named on the event
+  to: sched.wakeup          # the first wakeup of that task after it closes it
+  via: task
+  match: woke               # evidence WAKEUP; unmatched = the task never slept
+  woken: wakee_tid          # the attribute of a `to` event naming the woken task
+```
+
+with `unmatched` meaning a completion no wakeup followed — a reader that never
+went to sleep, which is itself a finding and should be counted as one.
+
+#### To whoever owns `src/request.rs`, `src/join.rs` and `src/encode.rs` — a decomposition
+
+The table in `docs/scenarios/cross-io.md` is computed by the test from raw
+events, because the engine can join two streams and cannot say *these segments
+of this whole, with this residue*. P2 needs the same thing for on-cpu, runnable
+and blocked. What the I/O crossing would declare:
+
+```yaml
+decompose:
+  id: one-read
+  whole: io.syscall                   # the enclosing span; absent in this build,
+                                      # so the table says `NOT SEEN` on its line
+  by: task
+  segments:
+    - {from: io.queue,   join: halves,     label: software queue}
+    - {from: io.latency, join: halves,     label: device}
+    - {join: completion-released,          label: completion -> wakeup}
+  residue: required                   # printed, never rounded into a segment
+```
+
+and what it would print is the table in that document: one line per segment with
+the evidence of the boundary that produced it, the weakest link that attaches it
+to the whole, and a residue line. Until a whole exists in this build (`fentry`),
+the useful half is the per-segment evidence and the residue against a whole the
+session is told about, such as a launched program's own timing.
+
+Two smaller ones, noted rather than asked for: **one target per session** is why
+the crossing runs two sessions over one window (`io.queue` has only `system`,
+and defect 2 rules out the thread), and **`sched.wakeup` carries the wakee's
+`comm` and not the waker's**, so a chain names its kworker only by a `/proc`
+read after the fact, which reports the work the worker took up since.
+
+---
