@@ -1,0 +1,106 @@
+# What did one read cost, from the block layer to the reader waking up?
+#
+#   omn -f examples/cross-io-one-read.yml
+#
+# and, in a second terminal while it watches, from the repository's root:
+#
+#   python3 -c "import mmap,os,time;p='target/cross-io-read.bin';n=2000;os.path.exists(p) or (lambda f:(f.write(os.urandom(n*4096)),f.flush(),os.fsync(f.fileno())))(open(p,'wb'));open('/proc/self/comm','w').write('omnreader');g=os.open(p,os.O_RDONLY);os.posix_fadvise(g,0,0,os.POSIX_FADV_DONTNEED);f=os.open(p,os.O_RDONLY|os.O_DIRECT);b=mmap.mmap(-1,4096);t=time.monotonic_ns();[os.preadv(f,[b],i*4096) for i in range(n)];print((time.monotonic_ns()-t)//n,'ns a read')"
+#
+# The file has to be on a real block device, and `/tmp` usually is not.
+#
+# Two thousand one-page reads with `O_DIRECT`, one at a time, from a thread
+# that renames itself `omnreader` so a machine-wide run can be narrowed to it.
+# The page cache is out of the way, so every read is one block request -- but
+# only because the one-liner does two things `O_DIRECT` alone does not. On
+# btrfs a direct read of a page the cache still holds can be answered from the
+# cache: a file written and read straight back, before writeback, gave 78
+# requests for 2000 reads, and a file whose pages were merely resident gave
+# 1999, the first read of every run never reaching a device. So the file is
+# `fsync`ed when it is made and `POSIX_FADV_DONTNEED` is issued before reading,
+# and then 2000 reads are 2000 requests.
+#
+# **Where this starts, said first.** A read enters at the syscall, goes through
+# the filesystem, and only then becomes a block request. Nothing in this build
+# sees the first two: `io.syscall` and `io.fs` need `fentry`, which is the next
+# wave's. So this session starts at the block layer, and the time between
+# `pread` being called and the request being issued is not in any number below.
+# `docs/scenarios/cross-io.md` shows how large that missing segment is, on the
+# reader's own clock, and prints it as a residue rather than leaving it out.
+#
+# What the session reaches, and on what evidence:
+#
+#   the read -> its request          not measured here: needs fentry
+#   queue    insert -> issue         io.queue     }  one request, joined on
+#   device   issue  -> complete      io.latency   }  blk:rq@open_ts   KEY
+#   complete -> the reader woken     sched.wakeup    task:tid         WAKEUP
+#
+# **Why it is machine-wide.** One run observes one target, and `io.queue` has
+# only a `system` target: the insert happens in the submitter's context for a
+# read and in a kworker for a write, so a per-process queueing time would be the
+# reads only and would not say so. The block half is narrowed by `comm`, which
+# its collectors apply and report ("the filter kept N requests and removed M").
+#
+# **The wakeup half is not narrowed, on purpose.** `sched.wakeup` accepts
+# `filter: "comm == 'omnreader'"`, validates it, and ignores it without saying
+# so: every wakeup on the machine comes back. That is a defect, recorded in
+# `docs/scenarios/cross-io.md` and asked for in `docs/open-findings.md`. A
+# filter that is silently not applied would make the summary below read like
+# the reader's when it is the machine's, so the request carries none and says
+# so here. The join does not care: it matches on the task the request names.
+#
+# **What the wakeup chain shows on btrfs.** The roadmap draws boundary 8 as a
+# wakeup from the interrupt that completed the request. On this machine it is
+# not: btrfs verifies a direct read's checksums in a worker, so the chain is
+# the interrupt waking a kworker, and the kworker waking the reader. `depth: 3`
+# follows it far enough to see both hops. The first waker is usually
+# `task:0 (idle)`: an interrupt taken on a cpu that had nothing to run.
+name: what one read cost
+format: text
+duration: 5s
+
+requests:
+  - label: queue
+    source: io.queue
+    target: system
+    mode: trace
+    emit: [summary]
+    filter: "comm == 'omnreader'"
+
+  - label: device
+    source: io.latency
+    target: system
+    mode: trace
+    emit: [hist, summary]
+    filter: "comm == 'omnreader'"
+
+  # Every wakeup on the machine; see above for why there is no filter.
+  - label: wakeups
+    source: sched.wakeup
+    target: system
+    mode: trace
+    emit: [summary]
+
+joins:
+  # Boundary 7. The two halves of one request, from two program sets that never
+  # met, agreeing on which life of the pointer this is.
+  - id: queue-then-device
+    from: io.queue
+    to: io.latency
+    via: blk
+    match: scoped_eq
+    window: 30s
+
+  # Boundary 8, seen from the side the engine can express: each completion is
+  # attributed to the wakeup that released its submitter before it issued the
+  # request -- which, for reads issued one at a time, is the previous read's
+  # completion being delivered. The engine has no match that pairs a completion
+  # with the *next* wakeup of the task it names; `docs/scenarios/cross-io.md`
+  # does that arithmetic per read, and `docs/open-findings.md` asks for it.
+  - id: what-released-the-reader
+    from: sched.wakeup
+    to: io.latency
+    via: task
+    match: wakeup
+    waker: waker_tid
+    depth: 3
+    window: 30s
