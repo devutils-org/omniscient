@@ -19,6 +19,7 @@ table below says which.
 | 4 | `wave-4-scenarios.md` | family, with a file-name prefix as the lock | **the four scenario classes**, 175 scenarios, 63 defects; zero conflicts |
 | 5 | `wave-5-defects.md` | defect class | 52 of the 63 closed; `docs/fixes/` is its record |
 | 6 | `wave-6-collectors.md` | family, plus one layer stream | 22 of 24 sources; `scoped_eq` got its first producer; finding 37 closed |
+| 7 | `wave-7-crossings.md` | question, not family: four crossings plus two engine streams | dispatched |
 
 The four scenario classes are in `wave-4-scenarios.md` and explained for a
 reader in `GUIDE.md`. They are: the capability sweep, the backend comparison,

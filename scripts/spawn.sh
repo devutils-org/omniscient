@@ -1,97 +1,105 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh io-bpf
-#   cd ../omniscient-io-bpf && claude          # paste the prompt it printed
+#   scripts/spawn.sh cross-memory
+#   cd ../omniscient-cross-memory && claude     # paste the prompt it printed
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
-# conflicts anywhere other than a family's registry line means a stream edited
-# something it does not own.
+# conflicts anywhere other than an append seam means a stream edited something
+# it does not own.
 #
-# Nobody owns the shared eBPF layer -- src/bpf/attach.rs, insn.rs, map.rs,
-# btf.rs, syscall.rs -- nor catalog/*.yaml. A stream that needs something from
-# either writes the request in docs/open-findings.md and the coordinator lands
-# it once.
+# This wave's four crossings touch no file under src/ at all, which is what lets
+# the two engine streams run beside them. The two session indexes --
+# examples/README.md and GUIDE.md -- belong to the coordinator: every crossing
+# writes sessions and none of them lists its own, because after the sixth wave
+# both indexes were twenty-eight sessions short for exactly that reason.
 set -euo pipefail
 
 declare -A OWNS=(
-    [io-bpf]="src/bpf/io*.rs src/collect/io/**"
-    [net-bpf]="src/bpf/net*.rs src/collect/net/**"
-    [mem-bpf]="src/bpf/mem*.rs src/collect/mem/**"
-    [proc-bpf]="src/bpf/proc*.rs src/collect/proc/**"
-    [sched-bpf]="src/bpf/sched*.rs src/collect/sched/** src/collect/gpu/**"
-    [emit-loss]="src/emit.rs src/render.rs"
+    [cross-memory]="examples/cross-memory-*.yml tests/cross_memory.rs"
+    [cross-compute]="examples/cross-compute-*.yml tests/cross_compute.rs"
+    [cross-io]="examples/cross-io-*.yml tests/cross_io.rs"
+    [cross-machine]="examples/cross-machine-*.yml tests/cross_machine.rs"
+    [shared-layer]="src/bpf/attach.rs src/bpf/btf.rs src/bpf/insn.rs src/bpf/map.rs src/bpf/syscall.rs src/bpf/mod.rs catalog/*.yaml"
+    [emit-short]="src/emit.rs src/encode.rs tests/aggregation.rs tests/encoders.rs"
 )
 declare -A TITLE=(
-    [io-bpf]="Stream A -- io through the block layer"
-    [net-bpf]="Stream B -- net through skb and sock"
-    [mem-bpf]="Stream C -- mem through the allocator"
-    [proc-bpf]="Stream D -- proc through process events"
-    [sched-bpf]="Stream E -- sched contention and interrupts, and gpu.job"
-    [emit-loss]="Stream F -- the distribution that does not say it is short"
+    [cross-memory]="Stream P1 -- memory, end to end"
+    [cross-compute]="Stream P2 -- compute, end to end, and where phase 10 starts"
+    [cross-io]="Stream P3 -- the I/O path"
+    [cross-machine]="Stream P4 -- crossed families, and the machine as a confounder"
+    [shared-layer]="Stream S -- the shared layer nobody owns"
+    [emit-short]="Stream E -- rate, topk and stack are short in the same way"
 )
 declare -A LOG=(
-    [io-bpf]="docs/families/io.md"
-    [net-bpf]="docs/families/net.md"
-    [mem-bpf]="docs/families/mem.md"
-    [proc-bpf]="docs/families/proc.md"
-    [sched-bpf]="docs/families/sched.md"
-    [emit-loss]="docs/families/emit.md"
-)
-# The scenario files each stream also owns, by the file-name prefix that was the
-# lock in wave four and gave eight streams zero conflicts.
-declare -A SCENARIOS=(
-    [io-bpf]="examples/io-*.yml tests/scenario_io.rs docs/scenarios/io.md"
-    [net-bpf]="examples/net-*.yml tests/scenario_net.rs docs/scenarios/net.md"
-    [mem-bpf]="examples/mem-*.yml tests/scenario_mem.rs docs/scenarios/mem.md"
-    [proc-bpf]="examples/proc-*.yml tests/scenario_proc.rs docs/scenarios/proc.md"
-    [sched-bpf]="examples/sched-*.yml examples/gpu-*.yml tests/scenario_sched.rs tests/scenario_gpu.rs docs/scenarios/sched.md docs/scenarios/gpu.md"
-    [emit-loss]="tests/aggregation.rs tests/encoders.rs"
+    [cross-memory]="docs/scenarios/cross-memory.md"
+    [cross-compute]="docs/scenarios/cross-compute.md"
+    [cross-io]="docs/scenarios/cross-io.md"
+    [cross-machine]="docs/scenarios/cross-machine.md"
+    [shared-layer]="docs/families/shared-layer.md"
+    [emit-short]="docs/families/emit.md"
 )
 
-EBPF_WORK='The catalog already declares every backend you are writing, and since the pass
-recorded as finding 36 it resolves onto one this machine serves: your sources
-answer "no collector is written for X on backend bpf:raw_tp yet", exit 3. That
-is the shape to start from -- run it, see the refusal, then make it a
-measurement. You should not need to touch catalog/*.yaml for an attach path.
+CROSSING_WORK='Every source your crossing joins already collects and is already checked against
+ground truth -- so nothing here is new mechanism, and that is the point. What is
+new is the arithmetic that puts two families in one table, and the honesty about
+what that table is missing.
 
-Attach through attach::raw_tracepoint, not raw_tracepoint_open and not the
-classic path. Check the tracepoint prototype before you build instructions:
-offcpu.rs refuses a kernel whose sched_switch has a different signature, because
-a program written for one shape reads a task_struct* out of a slot holding an
-integer and gets a plausible number. Aggregate in the kernel wherever the source
-is a distribution -- src/bpf/runqlat.rs is the worked example.
+You own no file under src/. If expressing your crossing needs a change in the
+engine, that is a request under "## Needs from another stream" in
+docs/open-findings.md, with the exact signature you want, under a heading naming
+your stream -- not an edit. Nor do you edit examples/README.md or GUIDE.md: the
+two session indexes belong to the coordinator, who regenerates them at the merge.
 
-**A source is landed when its scenarios are**, in all four classes:
-docs/briefs/wave-4-scenarios.md defines them and GUIDE.md explains them for a
-reader -- ground truth, the capability sweep, the loss path, the refusal. A
-collector without them is half the work.'
+Start from examples/allocation-cost.yml, which is a join that works today, and
+from docs/scenarios/<family>.md for what each workload guarantees -- the scenario
+wave wrote a "## Workloads" section into every one of them for this wave.
 
-EMIT_WORK='You are the one stream here that adds no source, and finding 37 of
-docs/open-findings.md is your whole brief. A hist, a summary or any percentile
-built from a run that dropped events or was throttled renders exactly like one
-built from a complete run -- and the events it is missing are the slow ones,
-because whatever stalled the machine is what stopped the measuring. So every
-percentile from a lossy run is a lower bound and nothing says so.
+**A crossing is landed when it says what evidence it has**: IDENTITY > KEY >
+WAKEUP > TEMPORAL, on every joined result. A correlation backed by a propagated
+identity and one backed by two things happening at the same time are both
+correlations, and only one of them is evidence. And a decomposition whose parts
+do not sum to the whole is hiding a state: print the residue rather than
+rounding it away.'
 
-Do not change what is already right. poll cannot produce hist at all, and
-CATALOG.md section 12 now says why that is also the coordinated-omission guard.
-The five loss kinds are counted and surfaced already. You are adding the step
-after: the mark beside the value, the direction of the bias, and "unknown"
-rather than a fraction where the count is genuinely unknown -- which is the
-answer DECISIONS.md already chose for the throttled case.
+SHARED_WORK='Read every "## Needs from another stream" section in docs/open-findings.md before
+you write anything, and group them: three are asked for twice by two families
+each, and the whole value of this stream is that they are written once. That is
+what the second wave learned and what the third paid for by not doing.
 
-Two things must not be conflated: emit::WEIGHT_ATTR means a kernel-built bucket
-stands for N measurements and is complete; a run that dropped N events is not.
-Stream C is about to become WEIGHT_ATTR heaviest user. Read findings 17 and 18
-before touching the weighting path.
+**A request is landed with the collector that wanted it, or it is not landed.**
+A helper added with no caller is a signature invented from a description. Where
+the caller lives in a file you do not own, say so in your log and leave the
+request in place rather than reaching into another stream.
 
-Your scenarios substitute the losses rather than choosing a workload -- the io
-scenarios show how, by substituting a /proc/diskstats the test wrote. Render in
-every format that carries a distribution, and check the negative too: **a clean
-run must gain nothing**, or the mark becomes noise and readers learn to ignore
-it.'
+Where you change a catalog entry requirements, re-probe: a source reported
+available that would then fail at attach is finding 15 all over again, and it
+cost this project thirty sources reading available once already. Say what moved,
+in numbers, in your log.
+
+Do not start fentry. It is the next wave, it is real mechanism, and this stream
+is valuable because it is boring and finite.'
+
+EMIT_WORK='Finding 37 was scoped to hist, summary and percentiles because three documents
+had agreed that scope; stream F wrote the argument for widening it on its way
+out, at the end of docs/open-findings.md. Shortfall::of is public and takes
+(&Losses, records, per_record), so there is no new derivation to do.
+
+What there is, is a decision: Output::Stack already carries unattributed and
+Output::TopK already carries Rest, and each is that emit own statement about
+what it does not account for. A mark bolted beside either is a second such
+statement in different words. Make them one statement or keep them visibly
+separate, and write down which you chose and why.
+
+Your second file is src/encode.rs, not src/render.rs -- render.rs renders
+requests, listings and refusals, and hist_text is in encode.rs. format.rs
+declares what each format can carry and a test crosses that claim against
+reality, so every format that can carry a topk or a stack carries the mark too,
+or says it cannot.
+
+And the negative matters as much as the positive: **a clean run must gain
+nothing**, or the mark becomes noise and readers learn to ignore it.'
 
 stream="${1:-}"
 if [[ -z "$stream" || -z "${OWNS[$stream]:-}" ]]; then
@@ -110,11 +118,11 @@ else
     git -C "$repo" worktree add -b "$branch" "$worktree" HEAD >&2
 fi
 
-if [[ "$stream" == "emit-loss" ]]; then
-    WORK="$EMIT_WORK"
-else
-    WORK="$EBPF_WORK"
-fi
+case "$stream" in
+    shared-layer) WORK="$SHARED_WORK" ;;
+    emit-short) WORK="$EMIT_WORK" ;;
+    *) WORK="$CROSSING_WORK" ;;
+esac
 
 cat <<PROMPT
 
@@ -131,15 +139,13 @@ Read these first, in this order:
 
 You own, and may only edit:
   ${OWNS[$stream]}
-  ${SCENARIOS[$stream]}
-  ${LOG[$stream]}    -- your handoff, extended rather than replaced
+  ${LOG[$stream]}    -- your handoff, and the deliverable rather than a log about one
 
-Everything else is read-only, including the shared eBPF layer
-(src/bpf/attach.rs, insn.rs, map.rs, btf.rs, syscall.rs) and catalog/*.yaml.
-Needing something from either is not a reason to edit it: write it under
-"## Needs from another stream" in docs/open-findings.md with the exact signature
-you want, and carry on. If two streams need the same thing the coordinator lands
-it once, which is what the second wave learned and the third paid for.
+Everything else is read-only. Needing something from another stream files is not
+a reason to edit them: write it under "## Needs from another stream" in
+docs/open-findings.md, under a heading naming your stream, with the exact
+signature you want, and carry on. That file is append-only per stream -- wave
+three had six streams edit it freely and produced six conflicts on it.
 
 Build with \`make\`, not \`cargo build\`: the preload shim is a workspace member
 nothing depends on, and the CAP_BPF and CAP_PERFMON file capabilities do not
@@ -148,8 +154,8 @@ available, which reads like the machine changed rather than the binary.
 
 ${WORK}
 
-You are done when \`make check\` is clean and every source you were given either
-collects with its scenarios, or is explained in ${LOG[$stream]}.
+You are done when \`make check\` is clean and everything you were given either
+works with its scenarios, or is explained in ${LOG[$stream]}.
 
 Ground truth is the bar: a test that checks the code returns what the code
 computed proves nothing. Choose a workload whose property you know independently
@@ -157,11 +163,11 @@ computed proves nothing. Choose a workload whose property you know independently
 state -- and check the tool against that.
 
 A test that skips is not a test that passes, and a test that asserts what the
-machine was doing is worse than either. Three of the last four sessions lost
-time to exactly that; findings 11 and 35 have them. Assert the separation rather
-than a threshold, and where the property cannot be created here -- no GPU, no
-CAP_NET_RAW, a device someone else is using -- skip loudly with the numbers that
-show why, and say so in ${LOG[$stream]}.
+machine was doing is worse than either. This wave is more exposed to that than
+any before it: a crossing is two sources on a shared machine at the same time.
+Assert the separation rather than a calibrated threshold, carry the reference
+own resolution as slack, and where the property cannot be created here, skip
+loudly with the numbers that show why, and say so in ${LOG[$stream]}.
 
 Commit on ${branch}. Do not merge; the coordinator does that.
 

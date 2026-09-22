@@ -1,290 +1,312 @@
-# Brief — the twenty-four collectors nothing blocks, and the tail nobody is told about
+# Brief — the crossings, the debt underneath them, and the tail nobody marked
 
-Six work streams. The sixth fan-out, and it divides by **family** again, the way
-the first wave did and for the same reason: one directory each, merges that
-cannot conflict. Five family streams plus one layer stream that shares no file
-with any of them.
+Six work streams. The seventh fan-out, and it divides **by question rather than
+by family**: four crossings, each asking something no single family can answer,
+plus two streams that clear what the sixth wave left behind.
 
-The previous five briefs are in `docs/briefs/`, with what each one taught. Read
-`STATE.md` for where the project is, `GUIDE.md` for how to run what you are
-building, `CLAUDE.md` for the invariants, and `docs/bpf-layer.md` for the
-calling conventions.
+The shape of the four crossings was settled in `BRIEF_NEXT.md` before this wave
+was dispatched, which is the habit that has held for four waves. The two other
+streams are new, and both exist because the sixth wave's merge left work that
+belongs to nobody.
+
+Read `STATE.md` for where the project is, `GUIDE.md` for how to run what you are
+building, `CLAUDE.md` for the invariants, `docs/scenarios/<family>.md` for what
+each family's workloads guarantee, and `examples/allocation-cost.yml` for a join
+that works today. The six earlier briefs are in `docs/briefs/`, with what each
+one taught.
 
 ---
 
 ## What changed before this wave, and why it matters to every stream
 
-**The catalog pass has landed.** Twenty-seven entries carry a `bpf:raw_tp` ahead
-of their `bpf:tp`, and the two probes that were written and never called are
-wired. On the development machine that moved `62 usable here` to `86`, and
-`22 out of reach` to `4`.
+**The sixth wave closed the two things the crossings were waiting on.**
 
-The consequence for you is not the number, it is the answer you will get:
+`scoped_eq` has a producer: `io.queue -> io.latency` joins per request at
+99.9 %, keyed on `(pointer, open_ts)` because the kernel recycles a request
+pointer within milliseconds. P3 was written as *blocked on stream A*, and it is
+not blocked any more.
 
-```console
-$ omn mem.reclaim --system -m trace -e hist -d 200ms
-error: no collector is written for `mem.reclaim` on backend `bpf:raw_tp` yet
-```
+A distribution now says when it is short: `emit::Shortfall` rides on
+`SeriesHist` and `SeriesSummary`, so a percentile from a run that dropped or was
+throttled is marked as a lower bound rather than rendered like a measurement.
+P2 was written as *do not start before F lands*, and F has landed. Every
+crossing in this wave reads percentiles, and every percentile it reads now
+carries what it is missing.
 
-Every source below now resolves onto a backend this machine serves and says
-*this build has not written it* — exit 3. Before, it said *this machine cannot
-serve it* — exit 1 — and you would have had no way to tell a collector you have
-not written from a backend you cannot reach. Finding 36 of
-`docs/open-findings.md` records the pass; you should not need to touch
-`catalog/*.yaml` for an attach path, and if you think you do, say so under
-`## Needs from another stream` rather than editing it.
-
-**Three entries were deliberately left**, and a stream that owns one must not
-"fix" it in passing:
-
-- `gpu.job` — `drm_run_job` and `drm_sched_process_job` are module tracepoints,
-  absent from `vmlinux` BTF. The classic path is the only one it has.
-- `io.fs` and `io.readahead` — their requirement is a glob, `tracepoint:ext4:*`
-  and `tracepoint:filemap:*`, and a glob is not a name. Converting one means
-  choosing which tracepoint the collector attaches to, which is the collector
-  author's call. Stream A makes it and writes down why.
+**And it left a debt that nobody has paid.** Five streams wrote requests under
+`## Needs from another stream` in `docs/open-findings.md` — roughly twenty of
+them, three of which were asked for twice by two families independently — and
+not one has been landed. `Btf::member_offset` still cannot descend into an
+anonymous member, `insn::helper` still has no `bpf_get_current_comm`, no
+`bpf_get_current_cgroup_id` and no bitwise `and`, and six `sched` entries still
+declare `cgroup: bpf_only` against six collectors that refuse a cgroup by name.
+That is stream S, and it is the only work in this wave that blocks a later one:
+**fentry and USDT both need `src/bpf/attach.rs`**, and neither can start until S
+has finished rewriting it.
 
 ---
 
 ## The streams
 
-| | Stream | Sources | Owns |
+| | Stream | The question, or the defect | Owns |
 |---|---|---|---|
-| **A** | `io` through the block layer | `io.latency`, `.queue`, `.size`, `.pagecache`, `.readahead`, `.writeback` | `src/bpf/io*.rs`, `src/collect/io/**` |
-| **B** | `net` through skb and sock | `net.tcp.lifetime`, `.tcp.retransmit`, `.drops`, `.qdisc`, `.softirq` | `src/bpf/net*.rs`, `src/collect/net/**` |
-| **C** | `mem` through the allocator | `mem.page_alloc`, `.kmalloc`, `.reclaim`, `.compaction` | `src/bpf/mem*.rs`, `src/collect/mem/**` |
-| **D** | `proc` through process events | `proc.syscall`, `.exec`, `.exit`, `.signals` | `src/bpf/proc*.rs`, `src/collect/proc/**` |
-| **E** | `sched` contention and interrupts | `sched.lock`, `.futex`, `.irq`, `.numa_balance`, `gpu.job` | `src/bpf/sched*.rs`, `src/collect/sched/**`, `src/collect/gpu/**` |
-| **F** | The distribution that does not say it is short | *no source* | `src/emit.rs`, `src/render.rs` |
+| **P1** | Memory, end to end | Which allocation cost memory, and did it stay? | `examples/cross-memory-*.yml`, `tests/cross_memory.rs`, `docs/scenarios/cross-memory.md` |
+| **P2** | Compute, end to end | Where did the time go — on cpu, or waiting? | `examples/cross-compute-*.yml`, `tests/cross_compute.rs`, `docs/scenarios/cross-compute.md` |
+| **P3** | The I/O path | What did one read cost, from syscall to platter? | `examples/cross-io-*.yml`, `tests/cross_io.rs`, `docs/scenarios/cross-io.md` |
+| **P4** | Crossed families | Does the machine's own state explain the measurement? | `examples/cross-machine-*.yml`, `tests/cross_machine.rs`, `docs/scenarios/cross-machine.md` |
+| **S** | The shared layer nobody owns | Twenty requests, three of them asked twice | `src/bpf/attach.rs`, `btf.rs`, `insn.rs`, `map.rs`, `syscall.rs`, `mod.rs`, `catalog/*.yaml`, `docs/families/shared-layer.md` |
+| **E** | `rate`, `topk` and `stack` are short in the same way | Finding 37, widened | `src/emit.rs`, `src/encode.rs`, `tests/aggregation.rs`, `tests/encoders.rs`, `docs/families/emit.md` |
 
-**Nobody owns `src/bpf/attach.rs`, `insn.rs`, `map.rs`, `btf.rs` or
-`syscall.rs`.** Those are the shared layer. A stream needing something from them
-writes the request under `## Needs from another stream` in
-`docs/open-findings.md`, with the exact signature wanted, and carries on. If two
-streams need the same thing, the coordinator lands it once — that is what wave
-two learned and what wave three paid for by not doing.
+**P1 to P4 touch no file under `src/`.** That is what lets S and E run beside
+them: a crossing is a session, a test and a document, and if one of them needs a
+change in the engine to express what it wants, that change is a request in
+`docs/open-findings.md` and not an edit.
 
-**F shares no file with A–E**, which is why it is in this wave rather than
-waiting for the next. It also has no `src/bpf/` and no catalog entry: it is the
-one stream that adds no source.
+**S is taken by the coordinator**, because three of its requests came from two
+families each and landing those twice is exactly what the second wave learned
+not to do.
 
----
+### Two seams, named rather than discovered
 
-## Stream A — `io` through the block layer
+Finding 39's lesson from the sixth wave was *name the seam, or it gets
+discovered*. This wave has two:
 
-> **Mission.** Six sources, and the two that matter most in the project. You own
-> `src/bpf/io*.rs` and `src/collect/io/**`.
-
-**`io.latency` and `io.queue` are the point of this wave.** They both join on
-`blk:rq@open_ts` with `scoped_eq` — the one match kind the engine implements and
-**no source produces**. Landing them turns a quarter of the join engine from
-theory into something checked, and it is what phase 4 of the roadmap has been
-waiting on since the vertical case was written.
-
-They are also the reason the `blk` key is scoped. A request pointer is recycled
-within milliseconds, so `(ptr, open_ts)` is the identity and `ptr` alone is a key
-that silently attributes one request's latency to another. That is in the
-catalog already; the collector has to honour it, and a scenario has to show that
-it does — drive enough I/O to recycle a pointer and check that no completion is
-attributed to a request that had already finished.
-
-**`io.fs` and `io.readahead` carry the glob decision.** Pick the tracepoint the
-collector actually attaches to, put its name in the catalog entry in place of the
-glob, and say in `docs/families/io.md` why that one. `tracepoint:filemap:*` has
-several members and they answer different questions; the entry should name the
-one the collector reads, not the set it might have.
-
-**Trap.** `io.bytes`, `.iops`, `.merges`, `.inflight` and `.pressure` already
-collect through `/proc/diskstats` and are already checked. You are adding
-backends *above* them in chains that exist. The scenario that matters is the
-backend comparison: where a source now has both an eBPF and a procfs backend,
-the two have to agree or the entry has to say what the procfs one degrades —
-which it already does, so check the claim rather than writing a new one.
+- **`examples/README.md` and `GUIDE.md` are the session indexes, and they belong
+  to the coordinator.** Every crossing stream writes sessions; none of them
+  edits either index. After the sixth wave both were twenty-eight sessions
+  short, precisely because every stream wrote sessions and no stream owned the
+  list. The coordinator regenerates both at the merge — and lands the test that
+  holds them to the sessions on disk, which `8ec62ec` said existed and which
+  **no test in `tests/` actually performs**.
+- **`docs/open-findings.md` is append-only, per stream, at the end.** Wave three
+  had six streams append to one findings file and produced six conflicts on it.
+  Write your section under a heading that names your stream, and never edit
+  another stream's.
 
 ---
 
-## Stream B — `net` through skb and sock
+## Stream P1 — memory, end to end
 
-> **Mission.** Five sources, all of which the `net` family already has a key
-> discipline for. You own `src/bpf/net*.rs` and `src/collect/net/**`.
+> **Mission.** `heap.alloc -> mem.faults` already works and is the project's
+> first correlation. Take it the rest of the way: `-> mem.rss` and
+> `heap.retained`, so a reader can follow one allocation from the call that made
+> it to the resident pages it still holds at the end.
 
-`net.tcp.lifetime` joins on `sock:cookie` with `eq` and a 300 s TTL. That is the
-key this family is built on, for the reason `docs/scenarios/net.md` records: a
-received packet is processed in softirq context, outside any process, so the pid
-is not the identity and the socket cookie is.
+The chain is an interval join onto a poll and a snapshot, which is the first
+time this repository crosses those two shapes in one session. `mem.rss` is
+sampled on a tick and an allocation is an instant: what you can honestly say is
+that residency *after* a range opened is consistent with it, not that this range
+caused those bytes. Say which one your document claims.
 
-**`net.drops` carries the drop reason** that recent kernels attach to
-`skb:kfree_skb`, and it is the source that makes the family's headline honest:
-`net.iface` counts frames the device lost and cannot see a frame dropped inside
-a queueing discipline, which is what `net.qdisc` is for. Landing both is what
-lets a reader tell those two apart.
+**The trap is already recorded and it is this family's own.** The first
+correlation reported ~515 faults for an 8 MiB allocation where 4 KiB pages would
+need 2048, and the collector was right: with multi-size transparent huge pages
+the fault count is nearly flat across allocation sizes. A derived "resident
+bytes" column computed from `faults x page size` was wrong by a factor of four
+and was deleted. **Do not reintroduce it under another name.** If your crossing
+wants bytes, take them from `mem.rss`, which measures bytes, and say so.
 
-**Trap.** `net.capture` needs `CAP_NET_RAW`, which the build does not grant, and
-that is a decision deliberately left open rather than an omission — do not grant
-it to make a scenario run. `net.xdp` is not in this wave: an XDP program is a
-different program type and the only one here that can drop packets rather than
-observe them.
-
----
-
-## Stream C — `mem` through the allocator
-
-> **Mission.** Four sources, and the family with the most collectors already. You
-> own `src/bpf/mem*.rs` and `src/collect/mem/**`.
-
-`mem.reclaim` is the one worth landing first: direct reclaim is the kernel doing
-the allocator's work inside the allocating thread, one of the clearest memory
-problems there is, and until now it has been the repository's worked example of
-*a source that is vocabulary and not a measurement*. Two sessions and a scenario
-document point at it saying exactly that; when it collects, update them.
-
-**Trap, and it is this family's own.** `mem.page_alloc` and `mem.kmalloc` fire
-at rates no other source here approaches. Aggregate in the kernel or do not
-land them: `src/bpf/runqlat.rs` is the worked example — `(key, bucket) -> count`
-with an unrolled log2 search, and `emit::WEIGHT_ATTR` on each row so a bucket
-standing for four hundred measurements counts as four hundred. A `trace` mode
-that streams every `mm_page_alloc` to userspace will bury the ring buffer, and
-the loss counter will tell you so honestly, which is not the same as working.
-
-Coordinate with stream F on `WEIGHT_ATTR`: you are its heaviest new user and F
-owns the file it lives in.
+`DECISIONS.md` has the whole episode under "What the measurement taught".
 
 ---
 
-## Stream D — `proc` through process events
+## Stream P2 — compute, end to end, and where phase 10 starts
 
-> **Mission.** Four sources, and the family with the fewest collectors — two of
-> six. You own `src/bpf/proc*.rs` and `src/collect/proc/**`.
+> **Mission.** `cpu.profile` beside `sched.offcpu`, by task, with
+> `sched.wakeup -> sched.offcpu` for what released each block. One thread's wall
+> clock, split across on-cpu, runnable-and-waiting, and blocked-on-what.
 
-`proc.exec` and `proc.exit` are the cheap pair and they unlock more than they
-look: a launched target's lifecycle is currently inferred by polling `/proc`,
-and three defects in `docs/scenarios/proc.md` are about the races that creates.
-An exec event is the moment the child stops being this tool's own image — which
-`STATE.md` records as a trap hit three times in three different shapes.
+**This is thread state analysis for one task, and `ROADMAP.md` phase 10 puts it
+ahead of USE** for a reason worth carrying into your document: it answers *why
+is this slow*, which is the question people arrive with, where USE answers
+*what is saturated*. Your three inputs already collect and are already checked
+against ground truth — `cpu.profile` against its own symbols, `sched.runqlat`
+against a known number of blocking round trips, `sched.offcpu` against a thread
+that sleeps a known 300 ms — so nothing here is new mechanism. What is new is
+the arithmetic that adds them up, and the honesty about what the sum is missing.
 
-**`proc.syscall` is the expensive one.** `raw_syscalls:sys_enter` fires on every
-syscall of every process, and the catalog says so: the entry declares
-`degraded: "raw_syscalls fires on everything: filter by syscall number
-in-program"`. That degradation is a promise about where the filter runs — honour
-it in the program, and make the resolved file say the filter was pushed down,
-because a filter that is reported as pushed down and applied in userspace is the
-defect `DECISIONS.md` calls the worst shape a bug takes here.
+`examples/sched-half-blocked.yml` is the workload: a program half on-cpu and
+half blocked, written by the scenario wave for exactly this.
 
----
+**Three things must not be quietly wrong.**
 
-## Stream E — `sched` contention and interrupts, and `gpu.job`
-
-> **Mission.** Four `sched` sources whose catalog entries were written to the raw
-> path in wave three, plus the one collector in this wave that cannot be
-> exercised here. You own `src/bpf/sched*.rs`, `src/collect/sched/**` and
-> `src/collect/gpu/**`.
-
-`sched.lock` and `sched.futex` are why the kernel floor is 6.1:
-`lock:contention_begin` and `lock:contention_end` exist from there, and
-`DECISIONS.md` chose that floor specifically so these two would not need a futex
-and uprobe fallback nobody would exercise. They are the payoff of a decision
-already paid for.
-
-**`gpu.job` is the exception in this wave and must be labelled as one.** Its two
-tracepoints are in the DRM scheduler module and absent from `vmlinux` BTF, so it
-is the only collector here written against the classic path — and this machine's
-proprietary NVIDIA driver does not publish them at all. So it is a collector
-that will be written here and exercised elsewhere. Say that in
-`docs/families/gpu.md`, make the scenario skip loudly with the reason, and do
-not assert that it works. A fix you cannot exercise is a claim.
+- **The three states must account for the wall clock, or say what is
+  unaccounted.** A decomposition whose parts do not sum is a decomposition that
+  is hiding a fourth state. Print the residue.
+- **A sampled profile and a traced off-cpu series are not the same kind of
+  number.** One is a sample count scaled by a period, the other is a measured
+  duration. Where you put them in one table, the table says which is which.
+- **Every percentile you take is now marked if the run was lossy.** That is
+  stream F's `Shortfall`, and it is on `SeriesHist` and `SeriesSummary` already.
+  Your document should show a lossy run's decomposition beside a clean one, so a
+  reader sees what the mark changes.
 
 ---
 
-## Stream F — the distribution that does not say it is short
+## Stream P3 — the I/O path
 
-> **Mission.** One defect, finding 37 of `docs/open-findings.md`, and it is the
-> class this project exists to prevent: the tool telling a reader something that
-> is not true, by omission. You own `src/emit.rs` and `src/render.rs`.
+> **Mission.** What one read cost, from the syscall to the platter. The join the
+> sixth wave unblocked: `blk:rq@open_ts` with `scoped_eq`, `io.queue` into
+> `io.latency`, at 99.9 % on a five-second run.
 
-A `hist`, a `summary` or any percentile built from a run that dropped events or
-was throttled is rendered exactly like one built from a complete run. The events
-it is missing are **the slow ones** — whatever stalled the machine is what
-stopped the measuring — so every percentile from a lossy run is a lower bound,
-and nothing says so. A reader takes a p99 off it with nothing beside that number
-saying the distribution is short; the loss line is printed, and correct, and
-several lines away, and phrased as a count of events rather than as a statement
-about the shape.
+`ROADMAP.md` phase 4 is the decomposition this is half of, and its boundaries 5,
+6 and 7 are the ones you can reach today: FS to block submission, submission to
+completion, completion to the wakeup that released the reader. **Boundaries at
+the syscall edge need `fentry`, which this wave does not have** — `io.syscall`,
+`io.fs` and `io.fsync` have no collector and are behind stream S's rewrite of
+`attach.rs` plus a wave after this one. So your crossing starts at the block
+layer and says, in its own output, where it starts. A decomposition that omits
+its first segment without saying so is the failure this project exists to
+prevent.
 
-**What is already right, and you should not change it.** `poll` cannot produce
-`hist` at all — `CATALOG.md` §12 refuses it, because a histogram of a polled
-gauge is a histogram of when the poller looked. That is the same argument under
-another name and it closes the largest opening there was. The losses themselves
-are counted and surfaced: `dropped`, `throttled`, `late_ticks`, `failed_reads`,
-`undecoded`, and `loss_headline` prints all five. The invariant holds. You are
-adding the step after it.
+**The scoped key is the thing to show.** Drive enough I/O that a request pointer
+is recycled inside one run — the merge commit caught the same pointer under two
+open timestamps four milliseconds apart — and show that no completion was
+attributed to a request that had already finished. That check is the whole
+argument for the key being scoped rather than a pointer, and it belongs in a
+test and not only in a document.
 
-**What to build.**
+Evidence levels, on every line of the decomposition: boundary 6 is `IDENTITY`,
+boundary 7 is `KEY`, boundary 8 is `WAKEUP`. A reader has to be able to tell a
+propagated identity from two things happening at the same time.
 
-- A `hist`, `summary` or percentile from a run with `dropped` or `throttled`
-  above zero is marked **beside the value, not above it**, with what fraction of
-  events is unaccounted for.
-- The mark says which way the bias runs, because it only runs one way: **every
-  percentile is a lower bound**, never an estimate.
-- Where the number of missing events is unknown — the throttled case — it says
-  that instead of a fraction. `DECISIONS.md` already chose that answer for the
-  loss line: *"how many events happened inside that while is not recorded
-  anywhere"*, so a throttled run says it cannot tell how much it lost. Say the
-  same thing here rather than inventing an estimate.
+---
 
-**Traps, and there are three.**
+## Stream P4 — crossed families, and the machine as a confounder
 
-- `format.rs` declares what each format can carry and whether its encoder
-  exists, and a test crosses the claim against reality because a merge once
-  reverted an encoder and left the claim behind. Every format that can carry a
-  `hist` has to carry the mark too, or say it cannot.
-- `emit::WEIGHT_ATTR` exists so a kernel-built bucket standing for four hundred
-  measurements counts as four hundred. **Stream C is about to become its
-  heaviest user.** A weighted bucket and a lossy run are different facts and
-  must not be conflated: a bucket weighted 400 is complete, a run that dropped
-  400 events is not.
-- Findings 17 and 18 record two claims about kernel-side histograms that are
-  now false. Read them before touching the weighting path.
+> **Mission.** The question that invalidates other people's measurements:
+> **does the machine's own state explain what you just measured?**
+> `power.freq` and `power.throttle` against `cpu.instructions`;
+> `mem.pressure` against `io.bytes`.
 
-**Your scenarios are not a family's.** There is no workload here to choose a
-property. Substitute the losses instead: the `io` scenarios already show how,
-by substituting a `/proc/diskstats` the test wrote. A run whose `Losses` you set
-by hand, rendered in every format that carries a distribution, and checked for
-the mark — plus the negative, which matters as much: **a clean run must gain
+This is the one crossing with no single headline number, and its output is a
+verdict rather than a decomposition: *this run was thermally throttled for 1.2 s
+of its 5 s, and the instruction rate over that interval is not comparable to the
+rest*. Phase 8's harness invalidates a throttled run outright; you are the
+measurement that tells it to.
+
+**`mem.pressure` against `io.bytes` is the second half and the more interesting
+one**: under memory pressure the kernel reclaims, reclaim writes back, and the
+I/O you measure is the machine's and not the workload's. `mem.reclaim` collects
+since the sixth wave, so for the first time that claim can be shown rather than
+asserted.
+
+**Trap.** Both halves are correlations over time on a shared machine, which is
+`TEMPORAL` evidence — the weakest rung, and the one the ladder exists to keep
+honest. Do not dress it as anything else. A crossing that says *these two moved
+together* with `TEMPORAL` beside it is worth more than one that implies a cause.
+
+---
+
+## Stream S — the shared layer nobody owns
+
+> **Mission.** The twenty requests the sixth wave left under
+> `## Needs from another stream`, landed once. You own the shared eBPF layer and
+> `catalog/*.yaml`. Your handoff is `docs/families/shared-layer.md`, new.
+
+Read every `## Needs from another stream` section in `docs/open-findings.md`
+first and group them, because three are asked for twice by two families each and
+the point of this stream is that they are written once:
+
+- **`Btf::member_offset` that descends anonymous members** — asked by `io` and
+  by `net`. `folio.mapping` lives inside an anonymous union, and two sources
+  (`io.pagecache`, `io.readahead`) wait on nothing else.
+- **The values and names of an enum, by name** — asked by `io` and by `net`.
+- **The helper table**: `bpf_get_current_comm`, `bpf_get_current_cgroup_id`
+  (80), a bitwise `and`, and the three program fragments now written three
+  times.
+- **A cgroup target for `sched`** — six entries declare `cgroup: bpf_only` and
+  six collectors refuse it. The eBPF half is one helper; the other half is
+  `name_to_handle_at` on the cgroup directory, and belongs wherever
+  `Target::Cgroup` is already resolved.
+- **The catalog corrections**, each with the family that filed it: `sched.irq`
+  requires only the hard half of what it promises, `mem.reclaim` requires half
+  of the source it names, `mem.compaction` requires a beginning and no ending,
+  two `mem` entries declare a key nothing can carry, `direction` is not a filter
+  field, and three key declarations have no emitter.
+
+**The rule that makes this stream safe: a request is landed with the collector
+that wanted it, or it is not landed.** A helper added with no caller is a
+signature invented from a description — write the caller, or leave the request
+in the file with a note saying why it was not taken. Where you change a catalog
+entry's requirements, a source that was reported available and would have failed
+at attach is finding 15 all over again: re-probe and check what moved.
+
+**Do not start `fentry` here.** It is the next wave's, it is real mechanism, and
+this stream's value is that it is boring and finite.
+
+---
+
+## Stream E — `rate`, `topk` and `stack` are short in the same way
+
+> **Mission.** Finding 37 was scoped to `hist`, `summary` and percentiles because
+> three documents had agreed that scope. The argument for widening it is in
+> `docs/open-findings.md`, written by stream F on its way out.
+
+A run that dropped events understates its `rate`, its `topk` totals and its
+`stack` weights by exactly the same one-sided amount and for the same reason: the
+records a ring drops are the ones from the busiest moment. `Shortfall::of` is
+public and takes `(&Losses, records, per_record)`, so there is no new derivation
+to do. **What there is, is a decision about how the mark reads next to what
+those emits already say about themselves**: `Output::Stack` carries
+`unattributed` and `Output::TopK` carries `Rest`, and a mark bolted beside
+either is a second statement about missing data in different words. Make them
+one statement or keep them visibly separate, and write down which you chose.
+
+**Your second file is `src/encode.rs`, not `src/render.rs`.** The sixth wave's
+brief named the wrong one: `render.rs` renders requests, listings and refusals;
+`encode.rs` renders results, and `hist_text` is in it. Stream F declared the
+overstep rather than hiding it, which is why you have the right file list.
+
+`format.rs` declares what each format can carry and a test crosses that claim
+against reality, because a merge once reverted an encoder and left the claim
+behind. Every format that can carry a `topk` or a `stack` carries the mark too,
+or says it cannot.
+
+**And the negative matters as much as the positive: a clean run must gain
 nothing**, or the mark becomes noise and readers learn to ignore it.
 
 ---
 
 ## Rules
 
-The three that have held for six waves:
+The three that have held for seven waves:
 
-1. **The unit of ownership is a file set nobody else writes.** Here it is one
-   family directory plus that family's own files under `src/bpf/`, and for F two
-   files at the top of `src/`. The shared eBPF layer belongs to nobody.
-2. **The handoff is a file only that stream can write.** Yours is
-   `docs/families/<family>.md`, extended rather than replaced; F's is
-   `docs/families/emit.md`, new.
-3. **A source is landed when its scenarios are.** Four classes, defined in
-   `docs/briefs/wave-4-scenarios.md` and explained for a reader in `GUIDE.md`:
-   ground truth, the capability sweep, the loss path, the refusal. A collector
-   without them is half the work.
+1. **The unit of ownership is a file set nobody else writes.** Here it is a
+   file-name prefix for the four crossings, because a crossing belongs to no
+   family, and a named file list for S and E.
+2. **The handoff is a file only that stream can write**, and it is the
+   deliverable rather than a log about one:
+   `docs/scenarios/cross-<name>.md` for P1 to P4,
+   `docs/families/shared-layer.md` for S, `docs/families/emit.md` for E.
+3. **A crossing is landed when it says what evidence it has.** `IDENTITY` >
+   `KEY` > `WAKEUP` > `TEMPORAL`, on every joined result. A correlation backed by
+   a propagated identity and one backed by two things happening at the same time
+   are both correlations, and only one of them is evidence.
 
 A stream edits only its own paths. Needing something from another stream's files
 is not a reason to edit them: write it under `## Needs from another stream` in
-`docs/open-findings.md` with the exact signature wanted, and carry on.
+`docs/open-findings.md`, under a heading naming your stream, with the exact
+signature wanted, and carry on.
 
-**Build with `make`, not `cargo build`.** Every one of these needs `CAP_BPF` and
-`CAP_PERFMON`, and every relink drops them; a green suite on an unprivileged
-binary says nothing about any of this. `make check` clean before you hand over.
+**Build with `make`, not `cargo build`.** The preload shim is a workspace member
+nothing depends on, and `CAP_BPF` and `CAP_PERFMON` are file capabilities every
+relink drops. Both failures are silent: the tool reports fewer sources as
+available, which reads like the machine changed rather than the binary. Half of
+what every crossing here joins is an eBPF source, so a green suite on an
+unprivileged binary says nothing about any of it. `make check` clean before you
+hand over.
 
-One branch per stream, `feat/<family>-bpf` and `feat/emit-loss`, made by
-`scripts/spawn.sh`. Commit there; the coordinator merges.
+One branch per stream, made by `scripts/spawn.sh`. Commit there; the coordinator
+merges.
 
-**A last word on tests, because this wave will hit it.** Three of the last four
-sessions on this project lost time to a test that asserted what the machine was
-doing rather than what the tool did — a tracefs probe, a shared GPU, a namespace
-given 250 ms to build. Findings 11 and 35 have them. Where your scenario depends
-on something the machine may or may not provide, **assert the separation rather
-than a threshold, and where the property cannot be created, skip loudly with the
-numbers that show why.** A scenario that states its limit is worth more than one
-that hides it.
+**A last word on tests.** Three of the last five sessions on this project lost
+time to a test that asserted what the machine was doing rather than what the
+tool did, and this wave is more exposed to it than any before: a crossing is two
+sources on a shared machine at the same time, and the second-order effects the
+scenario wave hit — a shared GPU, a namespace given 250 ms, a parallel suite
+sharing the caches — are the normal case here rather than the edge. Assert the
+*separation* rather than a calibrated threshold, carry the reference's own
+resolution as slack, and where the property cannot be created, skip loudly with
+the numbers that show why. A scenario that states its limit is worth more than
+one that hides it.
