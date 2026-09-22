@@ -30,7 +30,9 @@ mod runtime;
 mod sched;
 mod task;
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::os::fd::RawFd;
 use std::time::Duration as StdDuration;
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,7 @@ use crate::event::{CollectorId, Event};
 use crate::request::{Mode, Target};
 use crate::resolve::{FilterPlacement, ResolvedRequest};
 
+pub use launch::Lifetime;
 pub use mem::heap::find_shim;
 
 /// Whose gap a refusal is, and therefore what the caller should do about it.
@@ -123,8 +126,9 @@ pub enum CollectError {
         whose: Whose,
     },
     #[error(
-        "one run observes one target, but this session asks for `{first}` and `{second}`; \
-         use one session per target"
+        "one run observes one workload -- a program, a process, a cgroup -- beside any number \
+         of machine targets (`system`, `cpu`, `iface`), but this session asks for `{first}` and \
+         `{second}`; use one session per workload"
     )]
     MixedTargets { first: String, second: String },
     #[error(
@@ -185,9 +189,14 @@ impl CollectError {
                 Whose::Build
             }
             CollectError::Start { whose, .. } => *whose,
-            CollectError::NoStopCondition
-            | CollectError::MixedTargets { .. }
-            | CollectError::ConflictingEnvironment { .. } => Whose::Request,
+            // Two collectors wanting different things of one launch is not a
+            // request that cannot mean anything: each asked for something real,
+            // and it is this build that cannot give a program two answers in
+            // one variable. Collectors that can share what they need say so
+            // through `Prepared::share_launch`, and what is left here is a gap
+            // in that, which is exit 3.
+            CollectError::ConflictingEnvironment { .. } => Whose::Build,
+            CollectError::NoStopCondition | CollectError::MixedTargets { .. } => Whose::Request,
             CollectError::Launch { .. } => Whose::Machine,
             CollectError::Several { refusals } => refusals
                 .iter()
@@ -255,6 +264,17 @@ pub struct Collection {
     /// What this collection cost, measured rather than declared.
     #[serde(default)]
     pub overhead: Overhead,
+    /// When the run's launched program ran, from the gate to the reap, on
+    /// every collection of a run that launched one -- including those of
+    /// machine targets beside it, since they share its window and it is the
+    /// whole they would be read against. `None` when nothing was launched.
+    ///
+    /// Not `observed_ns`, and deliberately beside it: the window opens once
+    /// every collector is attached and closes after the last drain, so it runs
+    /// past the program by the length of a drain, and a residue smaller than
+    /// that difference cannot be told from zero against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<Lifetime>,
 }
 
 /// What a filter the resolver could not push down did to a collection.
@@ -850,6 +870,30 @@ pub trait Prepared {
         Vec::new()
     }
 
+    /// Offered a collector prepared earlier for the same launch; answers
+    /// whether this one now reads through what that one set up, so that the
+    /// program is given it once.
+    ///
+    /// For collectors that hand the program a channel at exec -- a descriptor
+    /// in its environment -- and can read one channel between several of them.
+    /// Two such collectors that did not share would each want the variable to
+    /// name their own, and a program has one environment. The runner offers
+    /// every earlier collector of the launch in order and stops at the first
+    /// that is taken; what "the same" means is the collector's to decide, which
+    /// is why `earlier` arrives as itself rather than as a descriptor.
+    fn share_launch(&mut self, earlier: &mut dyn Prepared) -> bool {
+        let _ = earlier;
+        false
+    }
+
+    /// This collector as something [`Prepared::share_launch`] can downcast,
+    /// for the collectors that share. Opt-in rather than a supertrait, because
+    /// upcasting a trait object to `dyn Any` is newer than this crate's
+    /// declared toolchain.
+    fn shareable(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
+
     /// Set when this collector can only observe a program the tool launches,
     /// with the reason, so the refusal explains itself.
     fn requires_launch(&self) -> Option<&'static str> {
@@ -929,16 +973,19 @@ pub fn run_all_within(
     cheaper: &mut dyn Cheaper,
 ) -> Result<Vec<Collection>, CollectError> {
     assert!(!resolved.is_empty(), "a run needs at least one request");
-    let target = &resolved[0].request.target;
-    if let Some(other) = resolved
+    let workload = workload_of(resolved)?;
+    // Whether each request is about the workload, which decides what it is
+    // bound to, what its overhead is a percentage of, and whether its target
+    // going away ends the run. With no workload in the session every target
+    // is the run's own, as it was when a run had exactly one.
+    let about_workload: Vec<bool> = resolved
         .iter()
-        .find(|candidate| &candidate.request.target != target)
-    {
-        return Err(CollectError::MixedTargets {
-            first: target.to_string(),
-            second: other.request.target.to_string(),
-        });
-    }
+        .map(|resolved| workload.is_none_or(|workload| &resolved.request.target == workload))
+        .collect();
+    let launched_argv = match workload {
+        Some(Target::Launch(argv)) => Some(argv),
+        _ => None,
+    };
 
     // Asked first, because "no collector exists for this backend" is a
     // different answer from "this target is not wired up yet", and reporting
@@ -948,23 +995,39 @@ pub fn run_all_within(
     // session with five unbuilt sources used to report one of them and stop,
     // so fixing it took five runs; the validator has always answered for every
     // rejection at once, and this is the same courtesy one layer down.
-    let prepared: Vec<Box<dyn Prepared>> = all_or_nothing(resolved.iter().map(prepare))?;
+    let mut prepared: Vec<Box<dyn Prepared>> = all_or_nothing(resolved.iter().map(prepare))?;
 
-    let environment = merge_environments(&prepared)?;
+    // Only the collectors of the launch act on it. A machine target beside it
+    // is not given to the program, so what its collector would want of the
+    // program's environment -- nothing, for every collector written -- is not
+    // the program's business.
+    let launching: Vec<bool> = resolved
+        .iter()
+        .map(|resolved| matches!(resolved.request.target, Target::Launch(_)))
+        .collect();
+    share_launches(&mut prepared, &launching);
+    let environment = merge_environments(
+        prepared
+            .iter()
+            .zip(&launching)
+            .filter_map(|(prepared, launching)| launching.then_some(prepared.as_ref())),
+    )?;
 
     // A collector that can only be given to a program at exec is asked about
     // next, and before the stop condition, because the two refusals send the
     // reader to different places: "pass --duration" is advice for a request
     // that can work, and this one cannot. Answering the shallower question
     // first sent a caller off to add a flag that would change nothing.
-    if !matches!(target, Target::Launch(_)) {
-        for (index, prepared) in prepared.iter().enumerate() {
-            if let Some(reason) = prepared.requires_launch() {
-                return Err(CollectError::UnsupportedTarget {
-                    source_id: resolved[index].request.source.to_string(),
-                    target: format!("{} ({reason})", target.kind()),
-                });
-            }
+    for (index, prepared) in prepared.iter().enumerate() {
+        let target = &resolved[index].request.target;
+        if matches!(target, Target::Launch(_)) {
+            continue;
+        }
+        if let Some(reason) = prepared.requires_launch() {
+            return Err(CollectError::UnsupportedTarget {
+                source_id: resolved[index].request.source.to_string(),
+                target: format!("{} ({reason})", target.kind()),
+            });
         }
     }
 
@@ -983,7 +1046,7 @@ pub fn run_all_within(
     let snapshot = resolved
         .iter()
         .all(|resolved| resolved.request.mode == Mode::Snapshot);
-    if duration_ns.is_none() && !matches!(target, Target::Launch(_)) && !snapshot {
+    if duration_ns.is_none() && launched_argv.is_none() && !snapshot {
         return Err(CollectError::NoStopCondition);
     }
 
@@ -992,8 +1055,8 @@ pub fn run_all_within(
     // rather than a sample of one. It is held at a gate so that collectors are
     // attached before its first instruction; otherwise the interesting part of
     // a short program is over before anything is watching.
-    let mut child = match target {
-        Target::Launch(argv) => {
+    let mut child = match launched_argv {
+        Some(argv) => {
             Some(
                 launch::gated(argv, &environment).map_err(|error| CollectError::Launch {
                     program: argv.first().cloned().unwrap_or_default(),
@@ -1001,17 +1064,21 @@ pub fn run_all_within(
                 })?,
             )
         }
-        _ => None,
+        None => None,
     };
 
     // A launched program replaces the target's own identity: the collectors
     // observe the process that was just created, not a pid the request named.
     // A target that names no process -- an interface, the machine -- is passed
-    // through, and a collector that needs a pid refuses it by name.
-    let bound = match &child {
-        Some(child) => Target::Pid(vec![child.pid()]),
-        None => target.clone(),
-    };
+    // through, and a collector that needs a pid refuses it by name. Each
+    // request is bound to its own target: a core beside a program is the core.
+    let bound: Vec<Target> = resolved
+        .iter()
+        .map(|resolved| match (&child, &resolved.request.target) {
+            (Some(child), Target::Launch(_)) => Target::Pid(vec![child.pid()]),
+            (_, target) => target.clone(),
+        })
+        .collect();
 
     let mut collectors = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
@@ -1021,7 +1088,7 @@ pub fn run_all_within(
         // unmarked refusal here is a failure of this run. A collector refusing
         // a shape it has not implemented says so with `not_built`.
         let mut collector = prepared
-            .attach(&bound)
+            .attach(&bound[index])
             .map_err(|reason| CollectError::start(&source_id, reason, Whose::Machine))?;
         if let Err(reason) = collector.start() {
             if let Some(child) = child.as_mut() {
@@ -1070,15 +1137,21 @@ pub fn run_all_within(
     // opening counters is this tool's startup, not the price of the
     // measurement, and charging the measurement for it would make every short
     // run look ruinous.
-    let mut spending = Spending::open(
-        Meter::of(target, child.as_ref().map(|child| child.pid())),
-        bound.clone(),
-        resolved.to_vec(),
-        cheaper,
-    );
+    let launched_pid = child.as_ref().map(|child| child.pid());
+    let meters = resolved
+        .iter()
+        .map(|resolved| Meter::of(&resolved.request.target, launched_pid))
+        .collect();
+    let mut spending = Spending::open(meters, bound, resolved.to_vec(), cheaper);
     let started_ns = spending.opened_ns;
-    let (mut events, mut losses, stopped_because) =
-        drive(&mut collectors, &paces, &mut spending, || {
+    let wake = child.as_ref().and_then(|child| child.exit_fd());
+    let (mut events, mut losses, stopped_because) = drive(
+        &mut collectors,
+        &paces,
+        &about_workload,
+        wake,
+        &mut spending,
+        || {
             if let Some(child) = child.as_mut() {
                 if let Some(status) = child.finished() {
                     return Some(format!("the launched program exited with {status}"));
@@ -1090,7 +1163,8 @@ pub fn run_all_within(
                 }
                 _ => None,
             }
-        });
+        },
+    );
 
     // Whatever the kernel or the shim published between the last tick and the
     // stop still belongs to this run.
@@ -1110,6 +1184,7 @@ pub fn run_all_within(
     }
 
     let observed_ns = monotonic_ns().saturating_sub(started_ns);
+    let lifetime = child.as_ref().and_then(|child| child.lifetime());
     // Read once the child has been reaped: `getrusage(RUSAGE_CHILDREN)` is what
     // `time` prints, and it only prints it after the wait.
     let overheads = spending.close();
@@ -1141,9 +1216,68 @@ pub fn run_all_within(
                 filtered,
                 served_by: std::mem::take(&mut spending.served_by[index]),
                 overhead: overheads[index].clone(),
+                lifetime,
             }
         })
         .collect())
+}
+
+/// Whether a target names part of the machine rather than a workload: its
+/// collectors do not act on a program and do not decide when a run ends.
+///
+/// Wanted on `Target` itself (`docs/open-findings.md`, stream R's requests);
+/// kept here until it is, because this is the only caller.
+fn is_machine(target: &Target) -> bool {
+    matches!(target, Target::System | Target::Cpu(_) | Target::Iface(_))
+}
+
+/// The one workload target of a session, if it has one.
+///
+/// Any number of machine targets may sit beside it, because that is the shape
+/// of every confounder check: the machine's state is read at `system` or
+/// `cpu`, and the thing it might explain is measured on the program. Two
+/// workloads are still refused. They would have to share a launch, a stop
+/// condition and an overhead denominator, and each of those is a question with
+/// no single answer -- whose exit ends the run is the first of them.
+fn workload_of(resolved: &[ResolvedRequest]) -> Result<Option<&Target>, CollectError> {
+    let mut workload: Option<&Target> = None;
+    for resolved in resolved {
+        let target = &resolved.request.target;
+        if is_machine(target) {
+            continue;
+        }
+        match workload {
+            None => workload = Some(target),
+            Some(first) if first == target => {}
+            Some(first) => {
+                return Err(CollectError::MixedTargets {
+                    first: first.to_string(),
+                    second: target.to_string(),
+                })
+            }
+        }
+    }
+    Ok(workload)
+}
+
+/// Lets collectors of one launch read one channel between them, where they
+/// can.
+///
+/// Each is offered every earlier one in order, and the first that takes it
+/// wins; what "can" means is the collector's own answer, in
+/// [`Prepared::share_launch`].
+fn share_launches(prepared: &mut [Box<dyn Prepared>], launching: &[bool]) {
+    for later in 1..prepared.len() {
+        if !launching[later] {
+            continue;
+        }
+        let (earlier, rest) = prepared.split_at_mut(later);
+        for (index, earlier) in earlier.iter_mut().enumerate() {
+            if launching[index] && rest[0].share_launch(earlier.as_mut()) {
+                break;
+            }
+        }
+    }
 }
 
 /// How often a run carrying a budget looks at what it is spending.
@@ -1171,10 +1305,12 @@ struct Since {
 /// The cost half of a run: what it is spending, what it was allowed to spend,
 /// and where it turns when the two disagree.
 struct Spending<'a> {
-    meter: Meter,
-    /// The target the collectors are bound to, which a replacement has to be
+    /// What each collection's overhead is a percentage of: its own target's
+    /// cpu account, since a core beside a program is weighed against the core.
+    meters: Vec<Meter>,
+    /// The target each collector is bound to, which a replacement has to be
     /// attached to as well.
-    bound: Target,
+    bound: Vec<Target>,
     /// The request each collector is serving *now*. A degradation changes it,
     /// which is why the resolved request written before the run cannot be the
     /// record of what produced the numbers.
@@ -1189,7 +1325,7 @@ struct Spending<'a> {
     since: Vec<Since>,
     opened_ns: u64,
     self_cpu_opened_ns: u64,
-    observed_opened_ns: u64,
+    observed_opened: Vec<u64>,
     last_check_ns: u64,
     measurement_ns: u64,
     measurements: u64,
@@ -1204,8 +1340,8 @@ impl<'a> Spending<'a> {
     /// running: what was spent resolving, probing and attaching is this tool's
     /// startup, not the price of the measurement.
     fn open(
-        meter: Meter,
-        bound: Target,
+        meters: Vec<Meter>,
+        bound: Vec<Target>,
         serving: Vec<ResolvedRequest>,
         cheaper: &'a mut dyn Cheaper,
     ) -> Self {
@@ -1220,25 +1356,27 @@ impl<'a> Spending<'a> {
             .collect();
         let opened_ns = monotonic_ns();
         let self_cpu_opened_ns = rusage_ns(libc::RUSAGE_SELF);
-        let observed_opened_ns = meter.read().unwrap_or(0);
+        let observed_opened: Vec<u64> = meters
+            .iter()
+            .map(|meter| meter.read().unwrap_or(0))
+            .collect();
         Self {
-            meter,
+            meters,
             bound,
             serving,
             ceilings,
             cheaper,
             inside_ns: vec![0; count],
-            since: vec![
-                Since {
+            since: (0..count)
+                .map(|index| Since {
                     self_cpu_ns: self_cpu_opened_ns,
-                    observed_cpu_ns: observed_opened_ns,
+                    observed_cpu_ns: observed_opened.get(index).copied().unwrap_or(0),
                     inside_ns: 0,
-                };
-                count
-            ],
+                })
+                .collect(),
             opened_ns,
             self_cpu_opened_ns,
-            observed_opened_ns,
+            observed_opened,
             last_check_ns: opened_ns,
             measurement_ns: 0,
             measurements: 0,
@@ -1281,7 +1419,7 @@ impl<'a> Spending<'a> {
             attributed_cpu_ns,
             observed_cpu_ns: observed_cpu_ns
                 .map(|observed| observed.saturating_sub(since.observed_cpu_ns)),
-            observed_from: self.meter.describes(),
+            observed_from: self.meters[index].describes(),
             wall_ns: now_ns.saturating_sub(self.opened_ns),
             measurement_ns: self.measurement_ns,
             measurements: self.measurements,
@@ -1305,7 +1443,6 @@ impl<'a> Spending<'a> {
         }
         self.last_check_ns = entered_ns;
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
-        let observed_cpu_ns = self.meter.read();
         self.measurements += 1;
 
         let mut stop = None;
@@ -1313,6 +1450,7 @@ impl<'a> Spending<'a> {
             let Some(ceiling) = self.ceilings[index] else {
                 continue;
             };
+            let observed_cpu_ns = self.meters[index].read();
             let spent = self.spent(
                 index,
                 self.since[index],
@@ -1387,7 +1525,7 @@ impl<'a> Spending<'a> {
     ) -> Result<String, String> {
         let onto = next.backend.id.clone();
         let prepared = prepare(&next).map_err(|error| error.to_string())?;
-        let mut replacement = prepared.attach(&self.bound)?;
+        let mut replacement = prepared.attach(&self.bound[index])?;
         replacement.start()?;
 
         let mut trailing = collectors[index].stop();
@@ -1404,7 +1542,7 @@ impl<'a> Spending<'a> {
         // The replacement is weighed on its own account.
         self.since[index] = Since {
             self_cpu_ns: rusage_ns(libc::RUSAGE_SELF),
-            observed_cpu_ns: self.meter.read().unwrap_or(0),
+            observed_cpu_ns: self.meters[index].read().unwrap_or(0),
             inside_ns: self.inside_ns[index],
         };
         Ok(onto)
@@ -1416,18 +1554,26 @@ impl<'a> Spending<'a> {
     fn close(&mut self) -> Vec<Overhead> {
         let entered_ns = monotonic_ns();
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
-        let observed_cpu_ns = self.meter.read();
+        let observed_cpu_ns: Vec<Option<u64>> = self.meters.iter().map(Meter::read).collect();
         self.measurements += 1;
         let closed_ns = monotonic_ns();
         self.measurement_ns += closed_ns.saturating_sub(entered_ns);
 
-        let whole_run = Since {
-            self_cpu_ns: self.self_cpu_opened_ns,
-            observed_cpu_ns: self.observed_opened_ns,
-            inside_ns: 0,
-        };
         (0..self.ceilings.len())
-            .map(|index| self.spent(index, whole_run, self_cpu_ns, observed_cpu_ns, closed_ns))
+            .map(|index| {
+                let whole_run = Since {
+                    self_cpu_ns: self.self_cpu_opened_ns,
+                    observed_cpu_ns: self.observed_opened.get(index).copied().unwrap_or(0),
+                    inside_ns: 0,
+                };
+                self.spent(
+                    index,
+                    whole_run,
+                    self_cpu_ns,
+                    observed_cpu_ns[index],
+                    closed_ns,
+                )
+            })
             .collect()
     }
 }
@@ -1438,11 +1584,15 @@ impl Spending<'static> {
     /// that are about the pacing rather than the price.
     fn unweighed(count: usize) -> Spending<'static> {
         let mut spending = Spending::open(
-            Meter::Nothing("this run was not weighed"),
-            Target::System,
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             Box::leak(Box::new(StopWhenOverBudget)),
         );
+        spending.meters = (0..count)
+            .map(|_| Meter::Nothing("this run was not weighed"))
+            .collect();
+        spending.bound = vec![Target::System; count];
         spending.ceilings = vec![None; count];
         spending.inside_ns = vec![0; count];
         spending.since = vec![Since::default(); count];
@@ -1462,9 +1612,10 @@ impl Spending<'static> {
     /// them.
     fn weighed_against_this_process(serving: Vec<ResolvedRequest>) -> Spending<'static> {
         let own = std::process::id() as i32;
+        let count = serving.len();
         Spending::open(
-            Meter::Tasks(vec![own]),
-            Target::Pid(vec![own]),
+            (0..count).map(|_| Meter::Tasks(vec![own])).collect(),
+            vec![Target::Pid(vec![own]); count],
             serving,
             Box::leak(Box::new(StopWhenOverBudget)),
         )
@@ -1536,9 +1687,19 @@ fn pace_of(collector: &dyn Collector, mode: Mode) -> Pace {
 /// `ended` is consulted once per round and returns why the run should stop.
 /// It is a closure rather than a launched child and a deadline so that the
 /// convention can be tested against a stop condition a test controls.
+///
+/// `about_workload` says, per collector, whether its target going away ends the
+/// run. A core or an interface beside a program is read for as long as the
+/// program runs: one that disappears first stops being read, and its collection
+/// says from when, but the program is still the thing being measured. `wake`
+/// is a descriptor that becomes readable when the run should look again at
+/// once -- the launched program's pidfd -- so that a program exiting between
+/// two ticks ends the run at its exit rather than at the next tick.
 fn drive(
     collectors: &mut [Box<dyn Collector>],
     paces: &[Pace],
+    about_workload: &[bool],
+    wake: Option<RawFd>,
     spending: &mut Spending<'_>,
     mut ended: impl FnMut() -> Option<String>,
 ) -> (Vec<Vec<Event>>, Vec<Losses>, String) {
@@ -1553,6 +1714,9 @@ fn drive(
     // reading, and a counter's first read is the baseline the rest are against.
     let mut due_ns = vec![monotonic_ns(); collectors.len()];
     let mut done = vec![false; collectors.len()];
+    // Done because its target went away rather than because it was a single
+    // read, which is not a reason for the run to call itself a snapshot.
+    let mut ended_early = vec![false; collectors.len()];
 
     let stopped_because = loop {
         let round_started_ns = monotonic_ns();
@@ -1567,7 +1731,18 @@ fn drive(
                     sequences[index] += sampled.len() as u64;
                     events[index].append(&mut sampled);
                 }
-                Err(SampleError::TargetGone(reason)) => gone = Some(reason),
+                Err(SampleError::TargetGone(reason)) if about_workload[index] => {
+                    gone = Some(reason)
+                }
+                Err(SampleError::TargetGone(reason)) => {
+                    losses[index].note(format!(
+                        "stopped reading {:.3} s into the run, before the workload ended: {reason}",
+                        round_started_ns.saturating_sub(spending.opened_ns) as f64 / 1e9
+                    ));
+                    done[index] = true;
+                    ended_early[index] = true;
+                    continue;
+                }
                 Err(SampleError::Transient(reason)) => {
                     losses[index].failed_reads += 1;
                     losses[index].note(reason);
@@ -1605,6 +1780,9 @@ fn drive(
         }
 
         if done.iter().all(|done| *done) {
+            if ended_early.iter().all(|early| *early) {
+                break "every target of the run went away".to_owned();
+            }
             break "snapshot: a single read".to_owned();
         }
 
@@ -1630,12 +1808,40 @@ fn drive(
         if let Some(next_due_ns) = next_due_ns {
             let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
             if remaining_ns > 0 {
-                std::thread::sleep(StdDuration::from_nanos(remaining_ns));
+                sleep_or_wake(remaining_ns, wake);
             }
         }
     };
 
     (events, losses, stopped_because)
+}
+
+/// Sleeps for `ns`, or until `wake` becomes readable if that is sooner.
+///
+/// A readable `wake` is not consumed: a pidfd stays readable once its process
+/// has exited, and the round after this one is what asks why.
+fn sleep_or_wake(ns: u64, wake: Option<RawFd>) {
+    let Some(fd) = wake else {
+        std::thread::sleep(StdDuration::from_nanos(ns));
+        return;
+    };
+    let timeout = libc::timespec {
+        tv_sec: (ns / 1_000_000_000) as libc::time_t,
+        tv_nsec: (ns % 1_000_000_000) as libc::c_long,
+    };
+    let mut watched = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd this frame owns, and a timeout it owns; no signal
+    // mask is changed.
+    let result = unsafe { libc::ppoll(&mut watched, 1, &timeout, std::ptr::null()) };
+    if result < 0 {
+        // Interrupted, or refused: the tick is still an honest fallback, and
+        // the round after it asks the program directly.
+        std::thread::sleep(StdDuration::from_nanos(ns));
+    }
 }
 
 /// Evaluates the request's filter over what was collected.
@@ -1669,8 +1875,8 @@ fn apply_filter(resolved: &ResolvedRequest, events: &mut Vec<Event>) -> Option<F
 
 /// Collects what every collector needs in the launched program's environment,
 /// refusing a disagreement rather than letting one win silently.
-fn merge_environments(
-    prepared: &[Box<dyn Prepared>],
+fn merge_environments<'a>(
+    prepared: impl IntoIterator<Item = &'a dyn Prepared>,
 ) -> Result<Vec<(String, String)>, CollectError> {
     let mut merged: Vec<(String, String)> = Vec::new();
     for prepared in prepared {
@@ -1812,27 +2018,33 @@ mod tests {
             Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
             Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
         ];
-        let merged = merge_environments(&agreeing).expect("identical values agree");
+        let merged =
+            merge_environments(agreeing.iter().map(Box::as_ref)).expect("identical values agree");
         assert_eq!(merged.len(), 1, "the variable is set once, not twice");
 
         let conflicting: Vec<Box<dyn Prepared>> = vec![
             Box::new(Wants("LD_PRELOAD", "/lib/a.so")),
             Box::new(Wants("LD_PRELOAD", "/lib/b.so")),
         ];
-        match merge_environments(&conflicting) {
-            Err(CollectError::ConflictingEnvironment { variable, .. }) => {
-                assert_eq!(variable, "LD_PRELOAD");
+        match merge_environments(conflicting.iter().map(Box::as_ref)) {
+            Err(error @ CollectError::ConflictingEnvironment { .. }) => {
+                assert!(error.to_string().contains("LD_PRELOAD"), "{error}");
+                // Each collector asked for something real; that no single
+                // environment serves both is this build's gap, which is exit 3
+                // rather than the request's, which is exit 2.
+                assert_eq!(error.whose(), Whose::Build);
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
 
-    /// One run observes one target. Running two targets in sequence would
-    /// measure two different moments and present them as one window, and a join
-    /// across that would correlate a program with something that was not
-    /// happening at the same time.
+    /// One run observes one workload. Running two in sequence would measure
+    /// two different moments and present them as one window, and a join across
+    /// that would correlate a program with something that was not happening at
+    /// the same time. Machine targets beside a workload are
+    /// `tests/runner.rs`'s, measured.
     #[test]
-    fn a_session_asking_for_two_targets_is_refused_before_anything_starts() {
+    fn a_session_asking_for_two_workloads_is_refused_before_anything_starts() {
         let catalog = Catalog::embedded().unwrap();
         let capabilities = crate::capabilities::Capabilities::detect();
         let own = std::process::id() as i32;
@@ -2400,6 +2612,8 @@ mod tests {
                     interval: StdDuration::ZERO,
                     snapshot: false,
                 }],
+                &[true],
+                None,
                 &mut spending,
                 until(deadline_ns),
             );
@@ -2485,6 +2699,8 @@ mod tests {
                     interval: StdDuration::ZERO,
                     snapshot: false,
                 }],
+                &[true],
+                None,
                 &mut spending,
                 until(deadline_ns),
             );
@@ -2537,6 +2753,8 @@ mod tests {
                 interval: StdDuration::ZERO,
                 snapshot: false,
             }],
+            &[true],
+            None,
             &mut spending,
             until(deadline_ns),
         );
@@ -2572,6 +2790,8 @@ mod tests {
                 interval: StdDuration::ZERO,
                 snapshot: false,
             }],
+            &[true],
+            None,
             &mut spending,
             until(deadline_ns),
         );
@@ -2714,6 +2934,8 @@ mod tests {
                 interval,
                 snapshot: false,
             }],
+            &[true],
+            None,
             &mut Spending::unweighed(1),
             || (monotonic_ns() >= deadline_ns).then(|| "the deadline".to_owned()),
         );
@@ -2745,5 +2967,108 @@ mod tests {
              not an interval: it is a second point at the same offset",
             interval.as_nanos()
         );
+    }
+
+    /// A collector whose target is gone after a known number of reads.
+    struct Vanishing {
+        id: CollectorId,
+        reads_left: u32,
+        reads: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Collector for Vanishing {
+        fn id(&self) -> &CollectorId {
+            &self.id
+        }
+
+        fn value_attr(&self) -> &'static str {
+            "bytes"
+        }
+
+        fn sample(&mut self, _seq: u64) -> Result<Vec<Event>, SampleError> {
+            self.reads.set(self.reads.get() + 1);
+            if self.reads_left == 0 {
+                return Err(SampleError::TargetGone("the core went offline".to_owned()));
+            }
+            self.reads_left -= 1;
+            Ok(Vec::new())
+        }
+
+        fn stop(&mut self) -> Vec<Event> {
+            Vec::new()
+        }
+    }
+
+    /// Only the workload decides when a run ends. A machine target that goes
+    /// away first -- a core taken offline, an interface removed -- stops being
+    /// read, and its collection says from when; the workload beside it is
+    /// still read to the end. The same disappearance on the workload ends the
+    /// run, which is what it did before a run could have two targets.
+    #[test]
+    fn a_machine_target_going_away_does_not_end_the_workload_s_run() {
+        let pace = Pace {
+            interval: StdDuration::from_millis(10),
+            snapshot: false,
+        };
+        let vanishing = |reads: &std::rc::Rc<std::cell::Cell<u32>>| {
+            Box::new(Vanishing {
+                id: CollectorId::new("core"),
+                reads_left: 2,
+                reads: reads.clone(),
+            }) as Box<dyn Collector>
+        };
+        let workload_reads = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let clocked = || {
+            Box::new(Clocked {
+                id: CollectorId::new("program"),
+                reads_ns: workload_reads.clone(),
+                stopped_ns: std::rc::Rc::new(std::cell::Cell::new(0)),
+            }) as Box<dyn Collector>
+        };
+
+        let machine_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut collectors = vec![clocked(), vanishing(&machine_reads)];
+        let deadline_ns = monotonic_ns() + 100_000_000;
+        let (_, losses, stopped_because) = drive(
+            &mut collectors,
+            &[pace, pace],
+            &[true, false],
+            None,
+            &mut Spending::unweighed(2),
+            || (monotonic_ns() >= deadline_ns).then(|| "the deadline".to_owned()),
+        );
+        assert_eq!(stopped_because, "the deadline");
+        assert_eq!(
+            machine_reads.get(),
+            3,
+            "two good reads and the one that found it gone, and then it is left alone"
+        );
+        assert!(
+            workload_reads.borrow().len() >= 9,
+            "the workload is read to the end of a 100 ms window at 10 ms, got {} reads",
+            workload_reads.borrow().len()
+        );
+        assert!(
+            losses[1]
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("before the workload ended")
+                    && reason.contains("the core went offline")),
+            "the collection says it stopped early and why: {:?}",
+            losses[1].reasons
+        );
+
+        // The same collector as the workload ends the run.
+        let workload_gone = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut collectors = vec![vanishing(&workload_gone)];
+        let (_, _, stopped_because) = drive(
+            &mut collectors,
+            &[pace],
+            &[true],
+            None,
+            &mut Spending::unweighed(1),
+            || None,
+        );
+        assert_eq!(stopped_because, "the core went offline");
     }
 }
