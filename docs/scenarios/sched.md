@@ -547,6 +547,27 @@ is asserted one way.
 
 ---
 
+## The queue wait inside a block
+
+Added by the eighth wave's coordinator pass, closing the compute crossing's
+finding 1. Two scenarios, and the first of them is the one that matters:
+
+| Scenario | What it checks | Where the number comes from |
+|---|---|---|
+| `a_block_says_how_much_of_it_was_waiting_for_a_cpu` | `blocked_ns + queued_ns == total_ns`, the wait is inside the block, and under contention it is neither nothing nor everything | two spinners pinned to one core with `taskset`, so the sleeper's wakeups have to queue |
+| `a_block_whose_wakeup_was_not_seen_says_so_rather_than_reporting_no_wait` | a `queued_ns` of zero that means *unknown* is said in words | a machine-wide run, where some thread is always already asleep when the programs attach |
+
+The arithmetic is asserted and the threshold is not: how long a queue wait is
+belongs to the machine, and what belongs to the tool is whether it says so and
+whether its three numbers are consistent. Where this machine wakes every sleep
+onto a free cpu the contention half skips with the numbers, which is the honest
+form of "the property could not be created here".
+
+The cross-check against an independent counter is in `tests/cross_compute.rs`,
+because that is where the workload reports its own `schedstat`: **93.6 ms of
+queue wait reported against the kernel's 96.5 ms** for the same loop, under 30
+microseconds per wakeup apart.
+
 ## Defects found
 
 Ten from the earlier waves, in the order they cost a reader most, **three of

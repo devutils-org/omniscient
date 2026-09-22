@@ -109,6 +109,9 @@ pub struct OffCpuCollector {
     /// evicted by the time it was asked. Different failures, counted apart.
     unwalkable: u64,
     evicted_stacks: u64,
+    /// Blocks whose releasing wakeup this run did not see, so their queue wait
+    /// is unknown rather than zero.
+    blocks_without_a_wakeup: u64,
     /// Whether the frames behind a stack id will be read by anyone.
     wants_stacks: bool,
 }
@@ -128,6 +131,7 @@ impl OffCpuCollector {
             symbolizers: HashMap::new(),
             unwalkable: 0,
             evicted_stacks: 0,
+            blocks_without_a_wakeup: 0,
             wants_stacks,
         }
     }
@@ -162,6 +166,13 @@ impl OffCpuCollector {
         }
 
         for (index, entry) in entries.into_iter().enumerate() {
+            // A total with no queue wait at all is a row every one of whose
+            // blocks ended without a wakeup this run saw. Counted per block,
+            // because a row is a `(task, state, stack)` and its blocks are what
+            // the note is about.
+            if entry.queued_ns == 0 {
+                self.blocks_without_a_wakeup += entry.blocks;
+            }
             let mut attrs = attributes(&entry, window_ns);
             if let Some(id) = self.resolve_stack(&entry) {
                 attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
@@ -307,6 +318,13 @@ impl OffCpuCollector {
 fn attributes(entry: &OffCpu, window_ns: u64) -> Vec<Attr> {
     vec![
         Attr::uint("total_ns", entry.total_ns),
+        // The part of the total that was runnable rather than blocked, which
+        // `sched.runqlat` reports too: a decomposition that adds this source to
+        // that one counts it twice unless it subtracts this. Carried beside the
+        // total rather than taken out of it, so that nothing already written
+        // against `total_ns` changes meaning.
+        Attr::uint("queued_ns", entry.queued_ns),
+        Attr::uint("blocked_ns", entry.total_ns.saturating_sub(entry.queued_ns)),
         Attr::uint("blocks", entry.blocks),
         // The interval this total was collected over. Not a denominator: a
         // block is credited where it ended, so a wait longer than the tick
@@ -393,6 +411,15 @@ impl Collector for OffCpuCollector {
                 self.unwalkable
             ));
         }
+        if self.blocks_without_a_wakeup > 0 {
+            notes.push(format!(
+                "{} blocks ended without this run having seen the wakeup that released them, so \
+                 their `queued_ns` is zero because it is unknown rather than because there was no \
+                 wait: the task was woken before the programs attached, or by a path that does \
+                 not raise `sched_wakeup`",
+                self.blocks_without_a_wakeup
+            ));
+        }
         if self.evicted_stacks > 0 {
             notes.push(format!(
                 "{} blocks named a stack the kernel had already evicted from its stack map, so \
@@ -448,6 +475,7 @@ mod tests {
             tgid: 7,
             state: 1,
             total_ns: 1_000,
+            queued_ns: 0,
             blocks: 2,
             comm: "sleep".to_owned(),
             stack: None,
@@ -479,6 +507,7 @@ mod tests {
             // thread and not a program stuck on a disk.
             state: 0x402,
             total_ns: 1,
+            queued_ns: 0,
             blocks: 1,
             comm: "kworker".to_owned(),
             stack: None,

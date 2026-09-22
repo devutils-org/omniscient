@@ -5133,3 +5133,48 @@ spent rather than a total. Whether memcg-forced writeback on btrfs simply does
 not go through `wb_writeback`, or the budget arithmetic undercounts, is not
 settled. It was not investigated further, and `io.writeback` was kept out of
 the session so that nothing depends on it.
+
+---
+
+## 42. The queue wait inside a block, and the double count it was — closed
+
+The seventh wave's compute crossing filed it as its finding 1 and could not fix
+it: `sched.offcpu` times a block from the switch that took the task off the cpu
+to the switch that gave it one back, so the run queue wait after the wakeup is
+inside `total_ns` — and inside `sched.runqlat` as well, which opens a wait at
+that wakeup and counts it too. A decomposition adding the two sources counted
+those nanoseconds twice, and nothing anywhere said how many they were.
+
+**What it needed was the wakeup between the two switches**, which the program
+did not see. It has a second program now, on `sched_wakeup` — deliberately that
+tracepoint and not `sched_waking`, because `sched.runqlat` measures from
+`sched_wakeup` and a wait measured from the other one would be a different
+number that looked comparable. It stamps the moment into the in-flight entry the
+`sched_switch` program created, and never inserts: a wakeup for a task this run
+did not see block is not this source's business, and inserting there would grow
+the map with every wakeup on the machine.
+
+Every row now carries `queued_ns` and `blocked_ns` beside `total_ns`, which is
+left alone so that nothing written against it changes meaning.
+
+**The ground truth is the kernel's own `run_delay`.** In the crossing's own
+session — 100 sleeps of 5 ms in `SCHED_BATCH` beside a spinning shell on one cpu
+— the source reported **93.6 ms** of queue wait against the kernel's **96.5 ms**
+for the same loop: under 30 microseconds per wakeup apart, on an independent
+counter rather than a rearrangement of the tool's own numbers. The crossing's
+test asserts that agreement now, where it used to derive the wait by
+subtracting the requested sleep from the block.
+
+**A zero is not a measurement here, and the run says which zero it is.** A block
+whose releasing wakeup the run did not see — the task was already asleep when
+the programs attached, or was woken by a path that does not raise
+`sched_wakeup` — reports `queued_ns` of zero because it is unknown, and the
+collector counts those blocks and says so in its notes. A decomposition
+subtracting an unknown zero would be subtracting a guess.
+
+Two things this does not close. A task woken several times before it runs keeps
+the last stamp, which is the wait closest to the switch-in and is what
+`sched.runqlat` does with the same tracepoint, so the two agree — but both
+under-report a task that was woken, preempted before running, and woken again.
+And `sched.offcpu` still credits a block in full to the interval in which it
+ended, which is unchanged and is a different caveat.

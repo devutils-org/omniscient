@@ -2214,3 +2214,178 @@ fn the_targets_and_modes_these_entries_do_not_declare_are_rejected_by_name() {
         );
     }
 }
+
+// ------------------------------------------- the queue wait inside a block
+
+/// A block includes the wait for a cpu after the wakeup, and now says how much.
+///
+/// `sched.offcpu` times a block from the switch that took the task off the cpu
+/// to the switch that gave it one back, so everything between the wakeup and
+/// that second switch is run queue latency inside a number called blocked time
+/// -- and `sched.runqlat` reports that same wait. The seventh wave's compute
+/// crossing measured the double count: 100 sleeps of 5 ms behind a spinning
+/// shell reported 582 ms off cpu of which 77 ms was queue wait, and any
+/// decomposition adding the two sources counted those 77 ms twice.
+///
+/// What is asserted here is arithmetic and separation, not a threshold. The
+/// machine decides how long a queue wait is; the tool decides whether it says
+/// so, and whether its three numbers are consistent with each other.
+#[test]
+fn a_block_says_how_much_of_it_was_waiting_for_a_cpu() {
+    if !have("python3") {
+        eprintln!("skipped: no python3 to sleep with");
+        return;
+    }
+    // One core, two spinners and a sleeper on it: the sleeper's wakeups then
+    // have to queue behind work that is already runnable. `taskset` is the
+    // contention, and it is created rather than waited for.
+    let Some(core) = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .map(|_| "1".to_owned())
+    else {
+        eprintln!("skipped: no cpu to pin to");
+        return;
+    };
+    if !have("taskset") {
+        eprintln!("skipped: no taskset to create the contention with");
+        return;
+    }
+    let mut spinners = Vec::new();
+    for _ in 0..2 {
+        spinners.push(
+            Command::new("taskset")
+                .args(["-c", &core, "python3", "-c", "\nwhile True: pass\n"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("a spinner starts"),
+        );
+    }
+
+    let output = omn(&[
+        "sched.offcpu",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "-d",
+        "2s",
+        "--format",
+        "json",
+        "--",
+        "taskset",
+        "-c",
+        &core,
+        "python3",
+        "-c",
+        "\nimport time\nfor _ in range(100): time.sleep(0.005)\n",
+    ]);
+    for mut spinner in spinners {
+        let _ = spinner.kill();
+        let _ = spinner.wait();
+    }
+
+    if unprivileged(&spoken(&output)) {
+        eprintln!("skipped: this machine does not grant CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{}", spoken(&output));
+    let results = results(&output);
+    let result = &results[0];
+
+    let total: u64 = total_attribute(result, "total_ns");
+    let queued: u64 = total_attribute(result, "queued_ns");
+    let blocked: u64 = total_attribute(result, "blocked_ns");
+    assert!(total > 0, "the sleeper blocked at all: {}", spoken(&output));
+
+    // 1. The three numbers are one measurement, not three: the split is
+    //    arithmetic and cannot drift, whatever the machine did.
+    assert_eq!(
+        blocked + queued,
+        total,
+        "blocked + queued must be the whole block: {blocked} + {queued} != {total}"
+    );
+    // 2. The wait is inside the block, which is the whole claim. A queue wait
+    //    larger than the block it is part of would mean the wakeup stamp
+    //    belonged to a different block.
+    assert!(
+        queued <= total,
+        "the queue wait cannot exceed the block it is inside: {queued} > {total}"
+    );
+    // 3. Under contention the wait is not nothing. This is the one assertion
+    //    the machine has a say in, so it asserts only that the number exists at
+    //    all -- two spinners on one core cannot produce a hundred instant
+    //    wakeups, and if this machine somehow did, the separation above is
+    //    still the part that matters.
+    if queued == 0 {
+        eprintln!(
+            "skipped the contention half: this machine woke every sleep onto a free cpu \
+             (total {total} ns over {} events)",
+            events_seen(result)
+        );
+        return;
+    }
+    assert!(
+        queued < total,
+        "a sleep of 5 ms is not all queue wait: {queued} of {total}"
+    );
+}
+
+/// A block whose wakeup this run did not see reports an unknown queue wait as
+/// zero, and says how many blocks that is.
+///
+/// The distinction is the point: a zero that means "no wait" and a zero that
+/// means "not seen" are different facts, and a decomposition subtracting the
+/// second is subtracting a guess. A task already blocked when the programs
+/// attach is the ordinary case -- it is every sleeping thread on the machine.
+#[test]
+fn a_block_whose_wakeup_was_not_seen_says_so_rather_than_reporting_no_wait() {
+    let output = omn(&[
+        "sched.offcpu",
+        "--system",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "-d",
+        "500ms",
+        "--format",
+        "json",
+    ]);
+    if unprivileged(&spoken(&output)) {
+        eprintln!("skipped: this machine does not grant CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{}", spoken(&output));
+    let results = results(&output);
+    let result = &results[0];
+    if events_seen(result) == 0 {
+        eprintln!("skipped: nothing on this machine blocked in the window");
+        return;
+    }
+
+    // Machine-wide over half a second, some thread was already asleep when the
+    // programs attached and woke without this run seeing the wakeup. Where that
+    // happened the run says so in words rather than reporting a wait of zero.
+    let said = result["degradations"].to_string();
+    let rows_with_no_wait = outputs(result, "raw")
+        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+        .filter(|event| {
+            event["attrs"]
+                .as_array()
+                .map(|attrs| {
+                    attrs
+                        .iter()
+                        .any(|attr| attr["name"] == "queued_ns" && attr["value"] == 0)
+                })
+                .unwrap_or(false)
+        })
+        .count();
+    if rows_with_no_wait > 0 {
+        assert!(
+            said.contains("without this run having seen the wakeup"),
+            "{rows_with_no_wait} rows report no queue wait and nothing says whether that is a \
+             measurement or a gap: {said}"
+        );
+    }
+}

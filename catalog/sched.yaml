@@ -87,7 +87,7 @@
   emits: [hist, stack, topk, raw, summary]
   targets: {pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, container: bpf_only, system: native}
   keys: [task, cgroup]
-  filter_fields: [comm, pid, state]
+  filter_fields: [comm, pid, state, queued_ns, blocked_ns]
   determinism: low
   caveats:
     - "Expensive on switch-heavy workloads, which is why the totals are kept in
@@ -104,7 +104,17 @@
        the switch, and that state is on every event: `sleeping` is a program
        waiting for something to happen, `uninterruptible` is usually one
        waiting on a disk, and `idle` is a kernel worker the load average
-       deliberately ignores."
+       deliberately ignores.
+
+       And the wait *after* the wakeup is inside the block: a block is timed
+       from the switch out to the switch back in, so the run queue latency
+       between the wakeup and the cpu is part of `total_ns` -- and is what
+       `sched.runqlat` reports. Every event carries it as `queued_ns`, with
+       `blocked_ns = total_ns - queued_ns` beside it, so a decomposition can add
+       this source to `sched.runqlat` without counting the same nanoseconds
+       twice. A `queued_ns` of zero on a block whose wakeup the run did not see
+       means unknown rather than none, and the run says how many blocks that
+       is."
     - "A task still blocked when the run ends is in no total: its block has no
        end yet. The count of them is reported with the run, because a program
        that spends its life waiting would otherwise show almost nothing."

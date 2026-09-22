@@ -91,14 +91,26 @@ state no row covers.
 
 ## What the residue found
 
-### 1. `sched.offcpu` contains the run queue wait after every wakeup, which `sched.runqlat` also counts
+### 1. `sched.offcpu` contained the run queue wait after every wakeup, which `sched.runqlat` also counts — **fixed**
 
 `src/bpf/offcpu.rs` times a block from the `sched_switch` that took the task off
 the cpu to the `sched_switch` that gave it one back. A task that is woken and
 then waits for a turn is still off the cpu, so that wait is inside the block --
 and `sched.runqlat` opens a wait at the wakeup and counts it too. The catalog's
-caveat says *"blocked, not preempted"*, which is true: the preempted case is
-excluded. The woken-and-waiting case is not, and nothing says so.
+caveat said *"blocked, not preempted"*, which is true: the preempted case is
+excluded. The woken-and-waiting case was not, and nothing said so.
+
+**What closed it**, in the eighth wave's coordinator pass: a second program on
+`sched_wakeup` -- the same tracepoint `sched.runqlat` measures from, so the two
+talk about one wait -- stamps the moment into the in-flight entry the
+`sched_switch` program created. Every row now carries `queued_ns` and
+`blocked_ns` beside `total_ns`, and `blocked_ns + queued_ns == total_ns` is
+arithmetic rather than an estimate. Checked against the kernel's own `run_delay`
+for the loop in this crossing's own test: **93.6 ms reported against the
+kernel's 96.5 ms**, under 30 microseconds per wakeup apart, on an independent
+counter rather than a rearrangement of the tool's own numbers. A `queued_ns` of
+zero on a block whose wakeup the run did not see means unknown rather than none,
+and the run says how many blocks that is.
 
 `examples/cross-compute-queued-after-wakeup.yml` measures it against a number
 nobody has to take on trust. A Python process sleeps 100 times for 5 ms, in
@@ -430,9 +442,10 @@ the seven requests under stream P2 in `docs/open-findings.md` -- the other
 three are the polled row's closing read, the catalog caveat for finding 2, and
 the `never ran` wording -- in the order they are worth doing:
 
-1. **`queued_ns` on every `sched.offcpu` row** (finding 1). Without it the
-   decomposition has a double count whose size is unknown, and no amount of
-   engine work downstream fixes that.
+1. ~~**`queued_ns` on every `sched.offcpu` row** (finding 1)~~ — **landed**.
+   The double count was the one thing no amount of engine work downstream could
+   have fixed, so it went first: `total_ns - queued_ns` is the blocked row, and
+   the queue wait it takes out is the one `sched.runqlat` reports.
 2. **The launched program's lifetime in the results** (finding 4). It is the
    whole the parts are a decomposition of.
 3. **A decomposition in the engine**, declared beside the joins in a session,

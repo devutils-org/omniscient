@@ -56,6 +56,9 @@ const ARG_PREV_STATE: i16 = 24;
 /// one that holds an integer, and what comes back is a plausible number.
 const SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "unsigned int"];
 
+/// `sched_wakeup(struct task_struct *p)`, which the second program reads.
+const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
+
 /// `BPF_F_USER_STACK`: walk the task's own frames rather than the kernel's.
 ///
 /// The kernel half of an off-cpu stack is always the same few frames of
@@ -97,11 +100,11 @@ const DROP_TOTALS: u32 = 1;
 /// reads and the map descriptors all come from the same place. Every byte of
 /// each is written before it is handed to a helper: an uninitialised byte in a
 /// key makes two identical blocks land in two different buckets.
-const TOTAL_VALUE: i16 = -80;
-const TOTAL_KEY: i16 = -48;
-const IN_FLIGHT_VALUE: i16 = -32;
+const TOTAL_VALUE: i16 = -96;
+const TOTAL_KEY: i16 = -56;
+const IN_FLIGHT_VALUE: i16 = -40;
 const IN_FLIGHT_KEY: i16 = -8;
-const DROP_KEY: i16 = -88;
+const DROP_KEY: i16 = -104;
 
 /// The layout of a totals key, as byte offsets within it.
 ///
@@ -132,7 +135,18 @@ const VALUE_TOTAL_NS: i16 = 0;
 const VALUE_BLOCKS: i16 = 8;
 const VALUE_COMM: i16 = 16;
 const COMM_BYTES: usize = 16;
-const TOTAL_VALUE_BYTES: usize = 32;
+/// The part of `total_ns` the task spent **runnable**, waiting for a cpu after
+/// whatever it was blocked on released it.
+///
+/// A block is timed from the switch that took the task off the cpu to the
+/// switch that gave it one back, so the run queue wait after the wakeup is
+/// inside it -- and inside `sched.runqlat` as well, which measures exactly that
+/// wait from exactly the same tracepoint. Measured by the seventh wave's
+/// compute crossing: 100 sleeps of 5 ms behind a spinning shell reported 582 ms
+/// off cpu of which 77 ms was queue wait, and a decomposition adding the two
+/// sources counted those 77 ms twice with nothing saying so.
+const VALUE_QUEUED_NS: i16 = 32;
+const TOTAL_VALUE_BYTES: usize = 40;
 
 /// The in-flight map: thread id to when it left the cpu and in what state.
 ///
@@ -146,8 +160,20 @@ const IN_FLIGHT_STATE: i16 = 8;
 /// and its own call site is gone, so the id is carried across the block the
 /// same way the state is.
 const IN_FLIGHT_STACK: i16 = 16;
+/// When the task was made runnable again, written by the `sched_wakeup`
+/// program into an entry the `sched_switch` one created.
+///
+/// Zero means this run did not see the wakeup: the task was woken before the
+/// programs attached, or by a path that does not raise `sched_wakeup`. Zero is
+/// carried as zero rather than guessed, and the collector says how many blocks
+/// it applies to.
+///
+/// A task woken several times before it runs keeps the last stamp, which is
+/// the one closest to the switch-in. `sched.runqlat` does the same with the
+/// same tracepoint, so the two agree about what the wait was.
+const IN_FLIGHT_WOKEN: i16 = 24;
 const IN_FLIGHT_KEY_BYTES: usize = 4;
-const IN_FLIGHT_VALUE_BYTES: usize = 24;
+const IN_FLIGHT_VALUE_BYTES: usize = 32;
 
 /// One `(task, state)` pair's blocked time over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +182,14 @@ pub struct OffCpu {
     pub tgid: u32,
     pub state: u32,
     pub total_ns: u64,
+    /// The part of `total_ns` that was runnable rather than blocked: the run
+    /// queue wait between the wakeup and the switch back onto a cpu.
+    ///
+    /// `total_ns - queued_ns` is the time the task was actually waiting for
+    /// something, which is what a decomposition wants; `queued_ns` is the part
+    /// `sched.runqlat` also reports, which is what makes adding the two sources
+    /// a double count unless one of them subtracts it.
+    pub queued_ns: u64,
     /// How many separate blocks that time was spread over.
     pub blocks: u64,
     pub comm: String,
@@ -214,6 +248,7 @@ impl OffCpu {
             tgid: word(key, KEY_TGID as usize),
             state: word(key, KEY_STATE as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            queued_ns: long(value, VALUE_QUEUED_NS as usize),
             blocks: long(value, VALUE_BLOCKS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
             stack: {
@@ -269,6 +304,16 @@ fn instructions(
     program.jump_to("left", Insn::jset_imm(1, TASK_DEAD, 0));
     program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_TS, 8));
     program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_STATE, 1));
+    // No wakeup has been seen for this block yet. Written rather than left
+    // alone: every byte of a value handed to a helper has to be one this
+    // program put there, and a stale stamp from the stack would be read as a
+    // queue wait that did not happen.
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        IN_FLIGHT_VALUE + IN_FLIGHT_WOKEN,
+        0,
+    ));
     // The stack of the task that is leaving, taken here because here is the
     // only place it exists. `sched_switch` runs in the outgoing task's context
     // -- the scheduler has not switched the stack yet -- so the walk goes
@@ -337,6 +382,22 @@ fn instructions(
     // r1 through r5 and there is no callee-saved register left to hold it.
     program.push(Insn::ldx(BPF_W, 3, 0, IN_FLIGHT_STACK));
     program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STACK, 3));
+    // The wakeup stamp, and the queue wait it makes measurable. The slot it
+    // lands in is the same one the first-block template writes from, so both
+    // paths below read one place.
+    program.push(Insn::ldx(BPF_DW, 4, 0, IN_FLIGHT_WOKEN));
+    program.jump_to("no_wakeup", Insn::jeq_imm(4, 0, 0));
+    program.push(Insn::mov64_reg(5, 8));
+    program.push(Insn::sub64_reg(5, 4));
+    program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 5));
+    program.jump_to("queued_known", Insn::ja());
+    program.label("no_wakeup");
+    // A block whose wakeup this run did not see contributes nothing to the
+    // queue wait rather than an estimate of one. The collector counts these and
+    // says so, because a zero that means "not seen" and a zero that means "no
+    // wait" are different facts.
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 0));
+    program.label("queued_known");
 
     program.extend(Insn::load_map_fd(1, in_flight_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -356,6 +417,8 @@ fn instructions(
     // One allocation shared by every cpu, so the increment has to be one the
     // other cpus cannot interleave with.
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    program.push(Insn::ldx(BPF_DW, 1, R10, TOTAL_VALUE + VALUE_QUEUED_NS));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_QUEUED_NS, 1));
     program.push(Insn::mov64_imm(1, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_BLOCKS, 1));
     program.jump_to("done", Insn::ja());
@@ -363,6 +426,9 @@ fn instructions(
     program.label("first_block");
     program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_TOTAL_NS, 9));
     program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_BLOCKS, 1));
+    // `VALUE_QUEUED_NS` is already in the template: the switch-in path wrote it
+    // there, which is why it was written to that slot rather than to a scratch
+    // one.
     // The name is read once, when the entry is created, rather than on every
     // block: it does not change, and this is the hot path.
     read_field(
@@ -391,6 +457,55 @@ fn instructions(
     Ok(instructions)
 }
 
+/// The program on `sched_wakeup`: a blocked task has been made runnable.
+///
+/// It writes the moment into the in-flight entry the `sched_switch` program
+/// created and does nothing else -- it never inserts, because a wakeup for a
+/// task this run did not see block is not this source's business, and inserting
+/// there would make the map grow with every wakeup on the machine.
+///
+/// `sched_wakeup` rather than `sched_waking` deliberately: `sched.runqlat`
+/// measures the run queue wait from `sched_wakeup`, and a `queued_ns` measured
+/// from the other one would be a different number that looked comparable.
+fn wakeup_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
+    let signature = btf.tracepoint_signature("sched_wakeup")?;
+    if signature != WAKEUP_SIGNATURE {
+        return Err(format!(
+            "this kernel declares `sched_wakeup({})`, and this program is written for \
+             `sched_wakeup({})`: it reads the task being woken out of the first slot, and \
+             against another prototype that slot holds something else",
+            signature.join(", "),
+            WAKEUP_SIGNATURE.join(", "),
+        ));
+    }
+    let pid_offset = btf.member_offset("task_struct", "pid")?;
+
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
+    read_field(&mut program, IN_FLIGHT_KEY, 4, 7, pid_offset);
+    program.extend(Insn::load_map_fd(1, in_flight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    // Not blocked as far as this run knows: an ordinary wakeup of a task that
+    // was never off cpu inside the window, or one belonging to another process.
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, 0, IN_FLIGHT_WOKEN, 8));
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// A loaded, attached off-cpu program and the maps it fills.
 ///
 /// Dropping it detaches: the link, the program and the maps are file
@@ -402,6 +517,8 @@ pub struct OffCpuProgram {
     stacks: StackTraces,
     _program: OwnedFd,
     _link: OwnedFd,
+    _wakeup_program: OwnedFd,
+    _wakeup_link: OwnedFd,
 }
 
 /// `bpf_probe_read_kernel` is GPL-only, and reading a field out of a
@@ -466,6 +583,23 @@ impl OffCpuProgram {
         let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
 
+        let wakeup_instructions = wakeup_instructions(btf, in_flight.as_raw_fd())?;
+        let wakeup_program = syscall::prog_load(
+            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+            &wakeup_instructions,
+            "omn_offcpu_wake",
+            LICENSE,
+        )
+        .map_err(|error| {
+            if error.is_permission() {
+                super::permission_advice("loading a raw tracepoint program")
+            } else {
+                format!("the kernel refused the off-cpu wakeup program: {error}")
+            }
+        })?;
+        let wakeup_link = syscall::raw_tracepoint_open("sched_wakeup", wakeup_program.as_raw_fd())
+            .map_err(|error| format!("cannot attach to the `sched_wakeup` tracepoint: {error}"))?;
+
         Ok(Self {
             in_flight,
             totals,
@@ -473,6 +607,8 @@ impl OffCpuProgram {
             stacks,
             _program: program,
             _link: link,
+            _wakeup_program: wakeup_program,
+            _wakeup_link: wakeup_link,
         })
     }
 
@@ -555,6 +691,7 @@ mod tests {
             (VALUE_TOTAL_NS, 8),
             (VALUE_BLOCKS, 8),
             (VALUE_COMM, COMM_BYTES as i16),
+            (VALUE_QUEUED_NS, 8),
         ];
         for (fields, bytes, what) in [
             (&key[..], TOTAL_KEY_BYTES, "the totals key"),
@@ -689,7 +826,10 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
         let atomics = program.iter().filter(|insn| insn.code == 0xdb).count();
-        assert_eq!(atomics, 2, "the nanoseconds and the block count, both");
+        assert_eq!(
+            atomics, 3,
+            "the blocked nanoseconds, the queue wait inside them, and the block count"
+        );
     }
 
     #[test]

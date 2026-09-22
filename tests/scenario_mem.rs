@@ -2721,6 +2721,19 @@ fn compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where
     // case -- a thread that had to compact inside its own allocation -- and
     // `kcompactd` fires the same tracepoint from a kernel thread, which this
     // source sees and that counter does not.
+    // Two of these are evidence that compaction *ran* and one is not, which is
+    // the distinction this list was missing. `compact_stall` is a thread that
+    // had to compact inside its own allocation, and `compact_migrate_scanned`
+    // counts pages the compaction machinery actually walked: either one means
+    // there were episodes for this source to see. `compact_daemon_wake` counts
+    // kcompactd being *woken*, and a woken kcompactd that finds nothing worth
+    // moving goes back to sleep without raising `mm_compaction_begin` at all.
+    //
+    // Treating a wake as proof is how this test failed inside the full suite
+    // while passing alone: some neighbour's allocation woke the daemon, the
+    // daemon did nothing, and the source was asked to account for an episode
+    // that never happened.
+    let proof = ["compact_stall", "compact_migrate_scanned"];
     let counters = [
         "compact_stall",
         "compact_daemon_wake",
@@ -2768,6 +2781,14 @@ fn compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where
         .iter()
         .zip(before.iter().zip(after.iter()))
         .filter(|(_, (before, after))| after > before)
+        .filter(|(name, _)| proof.contains(name))
+        .map(|(name, (before, after))| format!("{name} {before} -> {after}"))
+        .collect();
+    let woken_only: Vec<String> = counters
+        .iter()
+        .zip(before.iter().zip(after.iter()))
+        .filter(|(_, (before, after))| after > before)
+        .filter(|(name, _)| !proof.contains(name))
         .map(|(name, (before, after))| format!("{name} {before} -> {after}"))
         .collect();
     let episodes: u64 = raw_events(result)
@@ -2781,12 +2802,21 @@ fn compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where
             .open("/proc/sys/vm/compact_memory")
             .is_ok();
         eprintln!(
-            "skipped: this machine did not compact. None of {counters:?} moved over the \
+            "skipped: this machine did not compact. None of {proof:?} moved over the \
              session's window, so there was nothing for the source to see, and \
              `/proc/sys/vm/compact_memory` is {}, which is the other way to ask and needs \
              root. `mem.compaction` attached and reported zero, which is the right answer \
-             and not a measurement",
-            if writable { "writable" } else { "not writable" }
+             and not a measurement.{}",
+            if writable { "writable" } else { "not writable" },
+            if woken_only.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " kcompactd was woken in the window ({}) and moved nothing, which is not \
+                     an episode and is why a wake is not in the proof list",
+                    woken_only.join(", ")
+                )
+            }
         );
         assert_eq!(
             episodes, 0,

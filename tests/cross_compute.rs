@@ -764,6 +764,18 @@ fn off_cpu_contains_the_queue_wait_that_runqlat_also_counts() {
         .iter()
         .filter_map(|event| attr(event, "total_ns"))
         .sum::<u64>() as f64;
+    // What the source now says the wait was, rather than what this test used to
+    // derive by subtraction. The eighth wave's coordinator pass added it:
+    // `sched.offcpu` stamps the wakeup into its in-flight entry from the same
+    // tracepoint `sched.runqlat` measures from, so the two talk about one wait.
+    let queued: f64 = sleeping
+        .iter()
+        .filter_map(|event| attr(event, "queued_ns"))
+        .sum::<u64>() as f64;
+    let blocked_only: f64 = sleeping
+        .iter()
+        .filter_map(|event| attr(event, "blocked_ns"))
+        .sum::<u64>() as f64;
     let blocks: u64 = sleeping
         .iter()
         .filter_map(|event| attr(event, "blocks"))
@@ -823,6 +835,37 @@ fn off_cpu_contains_the_queue_wait_that_runqlat_also_counts() {
         ms(excess),
         ms(loop_queued)
     );
+    // And the source says it itself now, which is the part this test used to
+    // have to derive. Checked against the kernel's own `run_delay` for the
+    // loop, which is an independent counter and not a rearrangement of the
+    // tool's own numbers: 93.6 ms against the kernel's 96.5 ms when this was
+    // written, a difference of under 30 microseconds per wakeup.
+    assert!(
+        (queued - loop_queued).abs() <= slack,
+        "the queue wait `sched.offcpu` reports must be the kernel's own: {:.1} ms against \
+         {:.1} ms, slack {:.1} ms: {summary}",
+        ms(queued),
+        ms(loop_queued),
+        ms(slack)
+    );
+    // The split is arithmetic and cannot drift from the total it came out of.
+    assert!(
+        (blocked_only + queued - off_cpu).abs() < 1.0,
+        "blocked + queued must be the whole block: {:.1} + {:.1} != {:.1}",
+        ms(blocked_only),
+        ms(queued),
+        ms(off_cpu)
+    );
+    // Which is what makes the row a decomposition can use: what is left after
+    // the queue wait is the sleep the workload asked for, and nothing else.
+    assert!(
+        (blocked_only - requested).abs() <= slack,
+        "with the queue wait taken out, the block is the requested sleep: {:.1} ms against \
+         {:.1} ms: {summary}",
+        ms(blocked_only),
+        ms(requested)
+    );
+
     // Which sched.runqlat counts as well, for the whole process.
     let kernel_runnable = run.truth("runq_ns") as f64;
     let waits = total(run.labelled("runnable"), task, "count");
