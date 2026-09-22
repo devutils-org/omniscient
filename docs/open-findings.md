@@ -5178,3 +5178,96 @@ the last stamp, which is the wait closest to the switch-in and is what
 under-report a task that was woken, preempted before running, and woken again.
 And `sched.offcpu` still credits a block in full to the interval in which it
 ended, which is unchanged and is a different caveat.
+## Needs from another stream — the eighth wave, stream R (the run model)
+
+Written by the stream that let a workload and machine targets share one run,
+stamped the launched program's lifetime, and made the heap sources share one
+shim pipe per launch. `docs/families/runner.md` has the measurements. In the
+order they are worth doing.
+
+### To whoever owns `src/emit.rs` (nobody), and stream J for `src/encode.rs`: publish the lifetime
+
+`Collection::lifetime: Option<collect::Lifetime>` is set on every collection of a
+run that launched a program, and nothing copies it into `emit::Results`, so no
+format carries it. It is the `whole` the decomposition needs (P2's finding 4).
+Wanted:
+
+```rust
+// src/emit.rs, in `Results`
+/// When the run's launched program ran, from the gate to its exit. Absent
+/// when nothing was launched.
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub lifetime: Option<crate::collect::Lifetime>,
+
+// src/emit.rs, where `Results` is built from a `Collection`
+lifetime: collection.lifetime,
+```
+
+and in the text encoder, once per run rather than per result, something like
+`the launched program ran 212.4 ms (gate to exit; the exit is bracketed to the
+last 209.5 ms)` -- or `..., stopped by the run` when `terminated`. The bracket
+has to be printed beside the length: with the pidfd, `exited_ns` is typically
+2 ms late while `exited_err_ns` is the whole time the runner slept, and a reader
+given only the first would over-trust a residue.
+
+### To stream J for `src/request.rs`: `Target::is_machine`
+
+The run model needs it and it is a fact about targets, not about the runner. It
+is a private `is_machine` in `src/collect/mod.rs` today; once this lands that
+function goes:
+
+```rust
+impl Target {
+    /// A target that names part of the machine rather than a workload: its
+    /// collectors do not act on a program and do not decide when a run ends.
+    pub fn is_machine(&self) -> bool {
+        matches!(self, Target::System | Target::Cpu(_) | Target::Iface(_))
+    }
+}
+```
+
+### To the coordinator, for `tests/cross_memory.rs` and `docs/scenarios/cross-memory.md`: D3 is fixed, and its tripwire is red
+
+`d3_two_shim_sources_on_one_launch_are_refused_as_a_request_rather_than_as_the_build`
+fails now, as its own message says it should. `mem.heap.alloc` and
+`mem.heap.retained` on one launch run, exit 0, from one pipe. Replace the three
+assertions after `let output = run_written(&[], SESSION);` with:
+
+```rust
+assert!(
+    output.status.success(),
+    "two shim sources on one launch share one pipe: {}",
+    stderr(&output)
+);
+```
+
+and rename it `d3_two_shim_sources_on_one_launch_share_one_pipe`. D3 moves to
+fixed in `docs/scenarios/cross-memory.md`, and the crossing's two sessions can
+fold into one. `tests/runner.rs`'s
+`two_heap_sources_on_one_launch_share_the_shim_and_each_sees_all_of_it` is the
+ground truth for the sharing itself.
+
+### To the coordinator and the owners of the files named: "one run observes one target" is no longer true
+
+Comments that explain a design by that rule, and now mislead:
+
+- `src/main.rs:737` and `src/encode.rs:1518` -- "one window against one target";
+  one window is still true, one target is not. Joins now merge events of a
+  workload and of machine targets, which is the point.
+- `tests/cross_io.rs:686`, `tests/scenario_mem.rs:2037`,
+  `tests/scenario_sched.rs:2084` and `examples/cross-machine-frequency.yml` --
+  each explains a split or a system-wide target by it. The frequency crossing's
+  second `omn` can become one session: `cpu.instructions` on the launch beside
+  `power.freq` and `cpu.cycles` on the core.
+- `DECISIONS.md`'s session-versus-daemon line is untouched: a run is still one
+  window and one document, and `docs/families/runner.md` says which two
+  extensions would not be.
+
+### To whoever owns `tests/scenario_cpu.rs`: the known-instruction scenario flaps under load, before this wave too
+
+`a_known_number_of_retired_instructions_is_counted_as_that_number` failed 4 of
+25 on the parent of stream R's commit and 4 of 25 on it, interleaved, with half
+the cores spinning; it failed once in three runs on an idle machine. The failing
+runs overshoot by +0.69 %, and the large run's excess over 10^9 (13.85 M) is
+twice the startup run's count (6.97 M), which points at something counted twice
+in the large run rather than at noise. Not investigated further.

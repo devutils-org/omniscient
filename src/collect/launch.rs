@@ -13,16 +13,65 @@
 //!
 //! The pid does not change across the exec, so an event attached before the
 //! program exists follows it into the program.
+//!
+//! Both ends of the program's life are stamped here, because this is the only
+//! place that sees them: the write that opens the gate, and the wait that finds
+//! the program gone. What lies between is the whole a decomposition of the
+//! program's time is a decomposition *of*, and the window a run reports is not
+//! it -- the window opens after the collectors are attached and closes after
+//! the last drain, which is milliseconds either side.
 
 use std::ffi::CString;
 use std::io;
+use std::os::fd::RawFd;
+
+use serde::{Deserialize, Serialize};
+
+use crate::clock::monotonic_ns;
+
+/// When a launched program ran, on `CLOCK_MONOTONIC`.
+///
+/// The start is exact and the end is not, and the struct says by how much. The
+/// gate is a write this process makes, so the moment before it is a bound the
+/// program cannot have started ahead of. The exit is something the kernel
+/// tells this process about when it next asks, so all that is known is the last
+/// time the program was seen alive and the first time it was seen gone: the
+/// exit happened in `[exited_ns - exited_err_ns, exited_ns]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lifetime {
+    /// `CLOCK_MONOTONIC` just before the write that released the gate. The
+    /// program's first instruction is after it.
+    pub released_ns: u64,
+    /// `CLOCK_MONOTONIC` when the wait found the program gone. Its exit is at
+    /// or before this.
+    pub exited_ns: u64,
+    /// How long before `exited_ns` the program was last seen alive: the exit
+    /// happened somewhere in that interval, and nothing here can say where.
+    pub exited_err_ns: u64,
+    /// The program did not end by itself: the run's duration elapsed, or a
+    /// collector failed, and this tool killed it. `exited_ns` is then the
+    /// reap after the kill, which is the tool's deadline rather than anything
+    /// the program did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub terminated: bool,
+}
 
 /// A program forked and waiting for permission to exec.
 pub struct Gated {
     pid: i32,
     /// Written to once, to release the child.
     gate: i32,
+    /// Readable once the program has exited, so a run can sleep on it rather
+    /// than finding out a tick late. `-1` where `pidfd_open` is refused, and
+    /// then the tick is what the exit is known to.
+    pidfd: RawFd,
     status: Option<i32>,
+    released_ns: Option<u64>,
+    /// The last moment the program is known to have been alive: the instant
+    /// before a wait that found it still running.
+    alive_ns: u64,
+    exited: Option<(u64, u64)>,
+    terminated: bool,
 }
 
 impl Gated {
@@ -30,16 +79,25 @@ impl Gated {
         self.pid
     }
 
+    /// A descriptor that becomes readable when the program exits, when the
+    /// kernel would give one.
+    pub fn exit_fd(&self) -> Option<RawFd> {
+        (self.pidfd >= 0).then_some(self.pidfd)
+    }
+
     /// Lets the child exec.
     pub fn release(&mut self) {
         if self.gate >= 0 {
             let go = [1u8];
+            let released_ns = monotonic_ns();
             // SAFETY: writing one byte to a pipe this process owns.
             unsafe {
                 libc::write(self.gate, go.as_ptr() as *const libc::c_void, 1);
                 libc::close(self.gate);
             }
             self.gate = -1;
+            self.released_ns = Some(released_ns);
+            self.alive_ns = released_ns;
         }
     }
 
@@ -48,13 +106,17 @@ impl Gated {
         if let Some(status) = self.status {
             return Some(describe(status));
         }
+        let asked_ns = monotonic_ns();
         let mut status = 0;
         // SAFETY: waiting on a child of this process, without blocking.
         let result = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
         if result == self.pid {
+            let seen_ns = monotonic_ns();
             self.status = Some(status);
+            self.exited = Some((seen_ns, seen_ns.saturating_sub(self.alive_ns)));
             Some(describe(status))
         } else {
+            self.alive_ns = asked_ns;
             None
         }
     }
@@ -71,6 +133,27 @@ impl Gated {
             libc::waitpid(self.pid, &mut status, 0);
             self.status = Some(status);
         }
+        let reaped_ns = monotonic_ns();
+        // Its end is somewhere after it was last seen running, which may be
+        // before the signal: a program that exited a moment before it was
+        // killed is a zombie the signal still reaches, and nothing tells the
+        // two apart. So the interval starts there, not at the kill.
+        self.exited = Some((reaped_ns, reaped_ns.saturating_sub(self.alive_ns)));
+        self.terminated = true;
+    }
+
+    /// When the program ran, once it has been released and has ended. `None`
+    /// before either: a program that never passed the gate never ran, and one
+    /// still running has no end to report.
+    pub fn lifetime(&self) -> Option<Lifetime> {
+        let released_ns = self.released_ns?;
+        let (exited_ns, exited_err_ns) = self.exited?;
+        Some(Lifetime {
+            released_ns,
+            exited_ns,
+            exited_err_ns,
+            terminated: self.terminated,
+        })
     }
 }
 
@@ -79,6 +162,11 @@ impl Drop for Gated {
         // A child still parked at the gate would wait forever.
         self.release();
         self.terminate();
+        if self.pidfd >= 0 {
+            // SAFETY: closing a descriptor this handle owns, once.
+            unsafe { libc::close(self.pidfd) };
+            self.pidfd = -1;
+        }
     }
 }
 
@@ -179,10 +267,24 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
 
     // SAFETY: closing the end of the pipe this process does not use.
     unsafe { libc::close(read_fd) };
+    // SAFETY: `pidfd_open` on a child of this process that cannot have been
+    // reaped yet, so the pid still names it. Refused only on a kernel older
+    // than 5.3, below this project's floor, and then the run falls back to its
+    // tick.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
+    if pidfd >= 0 {
+        // SAFETY: marking a descriptor this process just opened.
+        unsafe { libc::fcntl(pidfd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
     Ok(Gated {
         pid,
         gate: write_fd,
+        pidfd: pidfd.max(-1),
         status: None,
+        released_ns: None,
+        alive_ns: 0,
+        exited: None,
+        terminated: false,
     })
 }
 

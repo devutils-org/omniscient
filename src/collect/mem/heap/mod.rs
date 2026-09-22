@@ -10,6 +10,14 @@
 //! A preloaded library can only be given to a program at exec, so these sources
 //! work on a program `omn` launches and on nothing else. Saying that plainly is
 //! better than attaching to a running process and reporting an empty heap.
+//!
+//! Several of them on one launch read **one** pipe. A program has one
+//! environment and the shim writes to the one descriptor `OMN_HEAP_FD` names,
+//! so a pipe each would be two answers for one variable -- which is how asking
+//! for allocations and retained memory of one program used to be refused.
+//! Whichever collector drains first reads what the shim wrote and hands every
+//! other collector of the launch its own copy of the bytes, so each decodes,
+//! counts its losses and remembers as if the pipe were its own.
 
 mod alloc;
 mod live;
@@ -17,8 +25,10 @@ mod pagemap;
 mod retained;
 mod state;
 
+use std::cell::RefCell;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::collect::{Collector, Losses, Prepared};
 use crate::request::{Mode, Target};
@@ -102,13 +112,96 @@ impl Which {
     }
 }
 
+/// The shim's pipe, and every collector of one launch that reads it.
+///
+/// Bytes rather than records are fanned out, so that a record split across
+/// two reads is reassembled by each reader exactly as it was with a pipe of
+/// its own, and a drop the shim reports is counted by every source it cost.
+struct Pipe {
+    read_fd: RawFd,
+    /// Open until the program has been forked with its copy, and then closed:
+    /// the read end reports end-of-file only once no writer is left.
+    write_fd: RawFd,
+    /// Bytes read and not yet taken, one buffer per reader.
+    unread: Vec<Vec<u8>>,
+}
+
+impl Pipe {
+    fn new(read_fd: RawFd, write_fd: RawFd) -> Self {
+        Self {
+            read_fd,
+            write_fd,
+            unread: Vec::new(),
+        }
+    }
+
+    /// A new reader, which sees everything read from now on.
+    fn subscribe(&mut self) -> usize {
+        self.unread.push(Vec::new());
+        self.unread.len() - 1
+    }
+
+    fn close_write(&mut self) {
+        if self.write_fd >= 0 {
+            // SAFETY: closing a descriptor this pipe owns, once.
+            unsafe { libc::close(self.write_fd) };
+            self.write_fd = -1;
+        }
+    }
+
+    /// Reads whatever the shim has written, gives every reader a copy, and
+    /// returns what `reader` had not taken yet.
+    fn take(&mut self, reader: usize) -> Vec<u8> {
+        let mut collected = Vec::new();
+        let mut buffer = [0u8; 64 * 1024];
+        if self.read_fd < 0 {
+            return std::mem::take(&mut self.unread[reader]);
+        }
+        loop {
+            // SAFETY: reading into a buffer we own, from a descriptor we own.
+            let read = unsafe {
+                libc::read(
+                    self.read_fd,
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            if read > 0 {
+                collected.extend_from_slice(&buffer[..read as usize]);
+                continue;
+            }
+            // Zero means the program is gone; a negative return with EAGAIN
+            // means there is simply nothing more right now.
+            break;
+        }
+        if !collected.is_empty() {
+            for unread in &mut self.unread {
+                unread.extend_from_slice(&collected);
+            }
+        }
+        std::mem::take(&mut self.unread[reader])
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        self.close_write();
+        if self.read_fd >= 0 {
+            // SAFETY: closing a descriptor this pipe owns, once, when the
+            // last reader of it is gone.
+            unsafe { libc::close(self.read_fd) };
+        }
+    }
+}
+
 /// Holds the pipe and the shim path, before the observed program exists.
 pub struct HeapPrepared {
     which: Which,
     interval: std::time::Duration,
     shim: PathBuf,
-    read_fd: RawFd,
-    write_fd: RawFd,
+    /// Shared with every other heap collector of the same launch once
+    /// [`Prepared::share_launch`] has been asked.
+    pipe: Rc<RefCell<Pipe>>,
 }
 
 impl HeapPrepared {
@@ -153,8 +246,7 @@ impl HeapPrepared {
             which,
             interval,
             shim,
-            read_fd,
-            write_fd,
+            pipe: Rc::new(RefCell::new(Pipe::new(read_fd, write_fd))),
         })
     }
 }
@@ -163,8 +255,32 @@ impl Prepared for HeapPrepared {
     fn launch_environment(&self) -> Vec<(String, String)> {
         vec![
             ("LD_PRELOAD".to_owned(), self.shim.display().to_string()),
-            ("OMN_HEAP_FD".to_owned(), self.write_fd.to_string()),
+            (
+                "OMN_HEAP_FD".to_owned(),
+                self.pipe.borrow().write_fd.to_string(),
+            ),
         ]
+    }
+
+    fn share_launch(&mut self, earlier: &mut dyn Prepared) -> bool {
+        let Some(earlier) = earlier
+            .shareable()
+            .and_then(|earlier| earlier.downcast_mut::<HeapPrepared>())
+        else {
+            return false;
+        };
+        // The same shim, so the same stream: what differs between the heap
+        // sources is what they remember, not what they read. This one's own
+        // pipe is closed as the last handle to it goes.
+        if earlier.shim != self.shim {
+            return false;
+        }
+        self.pipe = Rc::clone(&earlier.pipe);
+        true
+    }
+
+    fn shareable(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 
     fn requires_launch(&self) -> Option<&'static str> {
@@ -183,9 +299,8 @@ impl Prepared for HeapPrepared {
         })?;
         // The child has its own copy now. Closing this one is what makes the
         // read end report end-of-file when the program exits.
-        // SAFETY: closing a descriptor this process owns, once.
-        unsafe { libc::close(self.write_fd) };
-        let stream = Stream::new(self.read_fd, pid);
+        self.pipe.borrow_mut().close_write();
+        let stream = Stream::reading(Rc::clone(&self.pipe), pid);
         Ok(match self.which {
             Which::Alloc => Box::new(alloc::AllocCollector::new(stream)),
             Which::Live => Box::new(live::LiveCollector::new(stream, self.interval)),
@@ -200,7 +315,8 @@ impl Prepared for HeapPrepared {
 /// with the records: the decoding, the reassembly of a record split across two
 /// reads, and the accounting of what the shim had to drop belong here once.
 pub struct Stream {
-    read_fd: RawFd,
+    pipe: Rc<RefCell<Pipe>>,
+    reader: usize,
     pid: i32,
     /// Bytes of a record that arrived split across two reads.
     pending: Vec<u8>,
@@ -209,9 +325,17 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// A stream that is the only reader of `read_fd`.
+    #[cfg(test)]
     fn new(read_fd: RawFd, pid: i32) -> Self {
+        Self::reading(Rc::new(RefCell::new(Pipe::new(read_fd, -1))), pid)
+    }
+
+    fn reading(pipe: Rc<RefCell<Pipe>>, pid: i32) -> Self {
+        let reader = pipe.borrow_mut().subscribe();
         Self {
-            read_fd,
+            pipe,
+            reader,
             pid,
             pending: Vec::new(),
             losses: Losses::default(),
@@ -230,26 +354,7 @@ impl Stream {
     }
 
     fn read_available(&mut self) -> Vec<u8> {
-        let mut collected = Vec::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            // SAFETY: reading into a buffer we own, from a descriptor we own.
-            let read = unsafe {
-                libc::read(
-                    self.read_fd,
-                    buffer.as_mut_ptr().cast::<libc::c_void>(),
-                    buffer.len(),
-                )
-            };
-            if read > 0 {
-                collected.extend_from_slice(&buffer[..read as usize]);
-                continue;
-            }
-            // Zero means the program is gone; a negative return with EAGAIN
-            // means there is simply nothing more right now.
-            break;
-        }
-        collected
+        self.pipe.borrow_mut().take(self.reader)
     }
 
     fn decode(&mut self, bytes: &[u8]) -> Vec<Record> {
@@ -289,11 +394,9 @@ impl Stream {
         records
     }
 
-    /// Closes the read end and reports what the run could not see.
+    /// Reports what the run could not see. The read end closes with the last
+    /// stream reading it.
     fn close(&mut self) {
-        // SAFETY: closing a descriptor this collector owns, once.
-        unsafe { libc::close(self.read_fd) };
-
         // A program that reported nothing is almost never a program that
         // allocated nothing. Saying which explanations are plausible beats
         // presenting an empty heap as a measurement.
@@ -368,6 +471,31 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].ptr, 0x1000);
         assert_eq!(records[0].size, 4096);
+    }
+
+    #[test]
+    fn every_reader_of_one_pipe_sees_every_record_once() {
+        let (writer, first) = piped();
+        let pipe = Rc::clone(&first.pipe);
+        let mut first = first;
+        let mut second = Stream::reading(pipe, 1);
+        let bytes = record(OP_ALLOC, 0x1000, 4096);
+        // Split across two drains, taken by different readers, so each has
+        // to reassemble from the half it was handed.
+        write(writer, &bytes[..20]);
+        assert!(first.drain().is_empty());
+        write(writer, &bytes[20..]);
+        write(writer, &record(OP_DROPPED, 0, 3));
+        let by_second = second.drain();
+        let by_first = first.drain();
+        assert_eq!(by_first, by_second);
+        assert_eq!(by_first.len(), 1);
+        assert_eq!(by_first[0].size, 4096);
+        // A second drain finds nothing: fanned out, not replayed.
+        assert!(first.drain().is_empty() && second.drain().is_empty());
+        // What the shim dropped cost both sources.
+        assert_eq!(first.losses().dropped, 3);
+        assert_eq!(second.losses().dropped, 3);
     }
 
     #[test]
