@@ -4575,3 +4575,135 @@ stream's changes failed one run in three, and that one was not a margin —
 `0 bytes traced for the 16777216 the workload read`. The flakiness is older than
 this stream and worse than the document says, and a total miss is a different
 fact from a 1 % shortfall. It belongs to whoever owns `io`.
+## Needs from another stream — the seventh wave, stream P1 (memory, end to end)
+
+Five requests, each with the defect behind it in `docs/scenarios/cross-memory.md`
+and, where one exists, the test in `tests/cross_memory.rs` that pins today's
+behaviour and says what to change when it moves. None blocks the crossing: it
+is landed in two sessions, with the `TEMPORAL` half done as arithmetic in the
+test and labelled as such. Each one would move a line of that document from
+prose into the tool's own output.
+
+### To whoever owns `src/join.rs`: say `TEMPORAL` for crediting within a key by recency (D1)
+
+`eq` on `task` from `mem.heap.alloc` to `mem.rss` prints `evidence KEY` and lists
+one row per allocation. Every allocator call replaces the one open state for
+the task (`peak_open: 1`, `replaced` in the thousands), so each reading goes to
+the call that came last. `KEY` is right for the association, and
+`tests/join_engine.rs` rightly holds `proc.threads -> proc.fd` to it. It is
+wrong for the rows: which replaced state got a reading was decided by time.
+
+Wanted, with no change to `evidence` itself:
+
+```rust
+pub struct Correlation {
+    // ...
+    /// How a downstream event was credited to one state among several that
+    /// held the same identity in turn. `None` when no state was replaced, so
+    /// the association and the crediting are the same claim. `Some(Temporal)`
+    /// when states were replaced: the key says which identity, the clock said
+    /// which of its states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within_key: Option<Evidence>,
+}
+```
+
+set in `assemble` from `states.replaced > 0` for `eq` and `scoped_eq` (not for
+`interval`, whose replaced ranges are an address handed back out, and not for
+`wakeup`). The text encoder would print it beside the evidence, for instance
+`evidence KEY, TEMPORAL within task`. The pinning test only requires the word
+`TEMPORAL` to appear somewhere in the correlation, so any shape will do.
+
+### To whoever owns `src/join.rs` and `src/catalog.rs`: a match kind that is `TEMPORAL` by construction
+
+The half of this crossing that puts a resident size beside the ranges is done in
+`tests/cross_memory.rs`, because no match kind can express it. It is always the
+same computation: a polled total's change between two readings, credited to the
+states that opened or closed between them.
+
+```rust
+// catalog.rs
+pub enum MatchKind { Interval, Eq, ScopedEq, Wakeup, Between }
+
+// join.rs
+/// `between`: each `to` reading's change since the previous reading with the
+/// same `via` key is credited to the `from` states that opened or closed in
+/// that interval. Always `Evidence::Temporal`; `check` refuses it when `to` is
+/// not a `poll` or `snapshot` source, since a traced event has no previous
+/// reading to differ from.
+fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError>;
+```
+
+`via: task` for this crossing. With it, the second column of the first table in
+`docs/scenarios/cross-memory.md` becomes a join line with `evidence TEMPORAL` on
+it, rather than a table in a document.
+
+### To whoever owns `catalog/mem.yaml`: three entries declare a `mem` key no collector emits (D2)
+
+| Entry | Declares | Events carry |
+|---|---|---|
+| `mem.rss` | `keys: [task, cgroup, mem]` | `task` |
+| `mem.heap.live` | `keys: [task, mem]` | `task` |
+| `mem.heap.retained` | `keys: [task, mem]` | `task` |
+
+This is the sixth wave's `proc.syscall` finding in three more places, and here
+it costs a whole run: an `interval` join on `mem` onto `mem.rss` validates,
+measures, and exits 1 at the join with nothing printed. Drop `mem` from
+`mem.rss`. For the two heap entries, drop it unless the next request lands, in
+which case it becomes true. `examples/mem-fragmentation.yml` asks for `mem` on
+both `mem.heap.retained` and `mem.rss`, and would need the line changed.
+
+### To whoever owns `src/collect/mem/heap/`: per-range residency of live allocations
+
+The one `KEY` this crossing is missing: "the resident pages an allocation still
+holds at the end". `retained.rs` already scans `/proc/[pid]/pagemap` over the
+freed ranges. The same scan over `LiveSet` published per range would make it a
+measurement:
+
+```rust
+// one event per live range at each poll of mem.heap.live, under emit: raw
+Event {
+    kind: "mem.heap.live",
+    keys: vec![KeyValue::task(pid), KeyValue::Mem { base, len }],
+    attrs: vec![Attr::uint("bytes", len), Attr::uint("resident", pages_present * page)],
+    ..
+}
+```
+
+An `eq` on `mem` from `mem.heap.alloc` would then join each allocation to its
+own residency at `KEY`, and D2's heap rows would be true rather than dropped.
+The cost is the scan, which is bounded by the live set, and should be declared
+on the backend rather than discovered.
+
+### To whoever owns `src/collect/mod.rs` and `src/collect/mem/heap/mod.rs`: one shim stream per launch (D3)
+
+`mem.heap.alloc` and `mem.heap.retained` on one launched program are refused
+with `two collectors disagree about OMN_HEAP_FD` and **exit 2**.
+
+- `CollectError::ConflictingEnvironment` is classed `Whose::Request`. The
+  request validates and means something; the build cannot serve it. Per
+  `DECISIONS.md` ("Valid, and not built is exit 3") it should be
+  `Whose::Build`, whichever collectors disagree.
+- The real fix is for every preload collector of one launch to share one pipe:
+  a `HeapPrepared` for a launch that already has one reuses its `write_fd` and
+  fans the drained records out to each collector. Then the crossing is one
+  session and not two, and the decomposition can be joined to the ranges it
+  decomposes.
+
+### To stream E for `src/encode.rs`, stream S for `catalog/mem.yaml`, and the coordinator for `DECISIONS.md`: the mTHP explanation is contradicted by measurement (D4)
+
+The note under every interval join (`src/encode.rs:231`), the `mem.faults`
+caveat, `DECISIONS.md` "What the measurement taught" and
+`docs/scenarios/mem.md` all explain flat fault counts with *multi-size* THP, as
+in "the kernel picks larger folios for larger regions". On the development
+machine every multi-size size is `never`, and the counts are predicted exactly,
+21 of 21 at seven sizes, by one fault per aligned 2 MiB page a mapping wholly
+covers plus one per 4 KiB page outside them. An 8 MiB mapping costs 515 faults,
+or 4 when it lands on four aligned huge pages, which it did on five runs of
+twelve. The table is in `docs/scenarios/cross-memory.md`. What is true on every
+kernel is what the note should say: fault counts depend on how a range is
+backed and on where it lands, so two ranges of one size can differ by two
+orders of magnitude; the THP mode is in the environment. The first half of the
+note, "EVENTS counts faults, not bytes", is right and matters most.
+
+---
