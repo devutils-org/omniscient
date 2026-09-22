@@ -136,6 +136,16 @@ impl Entry {
     pub fn backend(&self, id: &str) -> Option<&Backend> {
         self.backends.iter().find(|backend| backend.id == id)
     }
+
+    /// Whether every backend of this chain delivers drained totals, so that
+    /// whichever the resolver picks, one event stands for many occurrences.
+    ///
+    /// Every rather than any: a chain where one backend streams an event per
+    /// occurrence can still serve a join that needs one, and which backend a
+    /// run gets is the resolver's to decide after validation.
+    pub fn always_drained(&self) -> bool {
+        !self.backends.is_empty() && self.backends.iter().all(|backend| backend.drained)
+    }
 }
 
 /// One way of obtaining a source.
@@ -160,6 +170,17 @@ pub struct Backend {
     /// pick either without the result changing meaning.
     #[serde(default, skip_serializing_if = "is_false")]
     pub equivalent: bool,
+    /// One event stands for many occurrences, added up in the kernel and
+    /// drained on a tick: `sched.offcpu`'s rows are `(task, state, stack) ->
+    /// total_ns` over a hundred milliseconds, not one block each.
+    ///
+    /// Declared rather than inferred because the join engine has to know it
+    /// before the run. A `wakeup` join credits each downstream event to one
+    /// wakeup, and a drained total holds a hundred blocks that a hundred
+    /// different wakeups released: it matches, reports WAKEUP, and every block
+    /// in it goes to whichever wakeup came last before the drain.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub drained: bool,
     /// The join this backend needs to produce a value at all, when it derives
     /// one from two separate events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +231,11 @@ pub enum MatchKind {
     Interval,
     /// The wakeup chain ties them: the only join that crosses a block.
     Wakeup,
+    /// A polled total's change between two readings, credited to the states
+    /// that opened or closed in between. Nothing ties the two sides but the
+    /// clock, so it is the one match whose evidence is TEMPORAL by
+    /// construction.
+    Between,
 }
 
 impl MatchKind {
@@ -219,6 +245,7 @@ impl MatchKind {
             MatchKind::ScopedEq => "scoped_eq",
             MatchKind::Interval => "interval",
             MatchKind::Wakeup => "wakeup",
+            MatchKind::Between => "between",
         }
     }
 }

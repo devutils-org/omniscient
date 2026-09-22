@@ -689,8 +689,8 @@ fn the_resident_size_is_live_plus_retained_plus_a_residue_that_is_printed() {
 // The defects the crossing found, pinned
 // ---------------------------------------------------------------------------
 
-/// D1. A join on `task` credits each reading to one allocation by recency, and
-/// says only KEY.
+/// D1, now fixed: a join on `task` credits each reading to one allocation by
+/// recency, and says so.
 ///
 /// `eq` on `task` from an allocation to a resident size validates and runs.
 /// That the reading and the allocation belong to one process is a shared key,
@@ -698,10 +698,11 @@ fn the_resident_size_is_live_plus_retained_plus_a_residue_that_is_printed() {
 /// proc.fd` to exactly that. What is not KEY is the attribution the output
 /// lists: a task names the process, not the allocation, so every allocator call
 /// replaces the state before it, only one is ever open, and each reading goes
-/// to whichever call came last. Which allocation a reading is credited to is
-/// decided by time, and nothing in the correlation says TEMPORAL.
+/// to whichever call came last. The correlation carried KEY alone until the
+/// eighth wave's stream J added `within_key`: it now says KEY for the
+/// association and TEMPORAL for the crediting (`docs/families/join.md`).
 #[test]
-fn d1_a_join_on_task_credits_each_reading_to_the_latest_allocation_and_says_only_key() {
+fn d1_a_join_on_task_credits_each_reading_to_the_latest_allocation_and_says_temporal_within_it() {
     const SESSION: &str = "\
 name: an allocation joined to a resident size by task
 format: json
@@ -743,11 +744,10 @@ joins:
         "every reading after the first allocation is credited to one of them: {join}"
     );
     assert_eq!(join["evidence"], "KEY", "the two sides do share a task");
-    assert!(
-        !join.to_string().contains("TEMPORAL"),
-        "D1 is fixed: the correlation now says that which replaced state a reading was credited \
-         to is TEMPORAL. Make this assert where it says so, and move D1 to fixed in \
-         docs/scenarios/cross-memory.md\n{join}"
+    assert_eq!(
+        join["within_key"], "TEMPORAL",
+        "which replaced state a reading was credited to is the clock's choice, and the \
+         correlation has to say so beside the KEY: {join}"
     );
 }
 

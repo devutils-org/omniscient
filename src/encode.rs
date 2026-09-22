@@ -13,11 +13,11 @@ use crate::emit::{Bucket, Output, Results, SeriesHist, SeriesKey, Shortfall, Sta
 use crate::error::ParseError;
 use crate::event::{Event, KeyValue};
 use crate::format::OutputFormat;
-use crate::join::{Correlation, Outcome};
+use crate::join::{Breakdown, Correlation, DecompositionOutput, Evidence, Outcome, Row};
 use crate::scalar::Duration;
 
-/// Everything one run produced: what each source measured, and what the joins
-/// made of it together.
+/// Everything one run produced: what each source measured, what the joins
+/// made of it together, and what the decompositions split it into.
 ///
 /// It is one document rather than several because several would not be one:
 /// concatenating two JSON documents produces a file no parser accepts, and a
@@ -27,6 +27,8 @@ pub struct RunOutput {
     pub results: Vec<Results>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joins: Vec<Correlation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decompositions: Vec<DecompositionOutput>,
 }
 
 /// Encodes a whole run.
@@ -44,6 +46,10 @@ pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, Pa
                 text.push('\n');
                 text.push_str(&self::correlation(format, correlation)?);
             }
+            for decomposition in &output.decompositions {
+                text.push('\n');
+                text.push_str(&self::decomposition(format, decomposition)?);
+            }
             Ok(text)
         }
         OutputFormat::Ndjson => {
@@ -53,6 +59,9 @@ pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, Pa
             }
             for correlation in &output.joins {
                 text.push_str(&self::correlation(format, correlation)?);
+            }
+            for decomposition in &output.decompositions {
+                text.push_str(&self::decomposition(format, decomposition)?);
             }
             Ok(text)
         }
@@ -111,11 +120,40 @@ pub fn correlation(format: OutputFormat, correlation: &Correlation) -> Result<St
 
 fn correlation_text(correlation: &Correlation) -> String {
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "join {}  {} -> {}  evidence {}",
-        correlation.rule, correlation.from, correlation.to, correlation.evidence
-    );
+    match correlation.within_key {
+        Some(within) => {
+            let _ = writeln!(
+                out,
+                "join {}  {} -> {}  evidence {}, {within} within the key",
+                correlation.rule, correlation.from, correlation.to, correlation.evidence
+            );
+            let _ = writeln!(
+                out,
+                "  the key says whose each event is; which of that key's successive states it \
+                 went to, the clock decided: {} states were replaced by the next of the same key",
+                correlation.states.replaced
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "join {}  {} -> {}  evidence {}",
+                correlation.rule, correlation.from, correlation.to, correlation.evidence
+            );
+        }
+    }
+    if correlation.match_kind == MatchKind::Eq && correlation.evidence == Evidence::Temporal {
+        let _ = writeln!(
+            out,
+            "  `eq` compares a recycled identifier without the scope that says which life of it \
+             is meant, so an event lands on whichever life held it last: two events at one \
+             address around the same time, which is TEMPORAL. `scoped_eq` tells the lives apart"
+        );
+    }
+    if correlation.match_kind == MatchKind::Between {
+        between_text(correlation, &mut out);
+        return out;
+    }
 
     let total = correlation.matched + correlation.unmatched;
     let share = if total == 0 {
@@ -163,8 +201,27 @@ fn correlation_text(correlation: &Correlation) -> String {
     // other three -- which reads as "these allocations were empty" rather than
     // as "this join is not about ranges".
     let ranged = correlation.match_kind == MatchKind::Interval;
+    let chains = correlation.match_kind == MatchKind::Wakeup;
     let (heading, column) = table_words(correlation.match_kind);
     let _ = writeln!(out, "\n  {heading}");
+    if chains {
+        let _ = writeln!(
+            out,
+            "    {column:<44} {:>8} {:>8}  LAST",
+            "WAKEUPS", "EVENTS"
+        );
+        for attribution in &correlation.top {
+            let _ = writeln!(
+                out,
+                "    {:<44} {:>8} {:>8}  {}",
+                attribution.key,
+                attribution.wakeups.unwrap_or(1),
+                attribution.matched,
+                outcome(attribution.outcome, correlation.match_kind)
+            );
+        }
+        return out;
+    }
     if ranged {
         let _ = writeln!(
             out,
@@ -208,6 +265,7 @@ fn unmatched_reason(kind: MatchKind) -> &'static str {
         MatchKind::Eq => "carried a key no open state had",
         MatchKind::ScopedEq => "carried a key no open state had in that scope",
         MatchKind::Wakeup => "followed no wakeup this run saw",
+        MatchKind::Between => "moved in no interval where a state opened or closed",
     }
 }
 
@@ -217,6 +275,7 @@ fn table_words(kind: MatchKind) -> (&'static str, &'static str) {
         MatchKind::Interval => ("heaviest ranges", "RANGE"),
         MatchKind::Eq | MatchKind::ScopedEq => ("heaviest keys", "KEY"),
         MatchKind::Wakeup => ("heaviest wakeup chains", "CHAIN"),
+        MatchKind::Between => ("heaviest intervals", "KEY"),
     }
 }
 
@@ -228,11 +287,11 @@ fn table_words(kind: MatchKind) -> (&'static str, &'static str) {
 fn counting_note(kind: MatchKind) -> Option<&'static str> {
     match kind {
         MatchKind::Interval => Some(
-            "EVENTS counts faults, not bytes, and on a kernel with multi-size transparent huge \
-             pages it does not even rank by bytes: the kernel picks larger folios for larger \
-             regions, so a 1 MiB and a 32 MiB allocation both fault a few hundred times. Read it \
-             as where the faults happened, not as how much memory they cost; the THP mode is in \
-             the environment.",
+            "EVENTS counts faults, not bytes, and does not even rank by bytes: how many faults a \
+             range takes depends on how the kernel backs it -- huge pages, multi-size folios or \
+             base pages -- and on where it lands, so two ranges of one size can differ by two \
+             orders of magnitude. Read it as where the faults happened, not as how much memory \
+             they cost; the THP mode is in the environment.",
         ),
         _ => None,
     }
@@ -251,8 +310,279 @@ fn outcome(outcome: Outcome, kind: MatchKind) -> &'static str {
         (Outcome::Closed, _) => "closed",
         (Outcome::Expired, _) => "expired",
         (Outcome::Overflowed, _) => "evicted",
-        (Outcome::StillOpen, MatchKind::Wakeup) => "never ran",
+        // Not "never ran": a chain with events attributed to it did run, and
+        // what is true of it is that no later wakeup ended it.
+        (Outcome::StillOpen, MatchKind::Wakeup) => "still open at the end",
         (Outcome::StillOpen, _) => "live",
+    }
+}
+
+/// The body of a `between` correlation, which counts readings and credits
+/// changes rather than attributing events.
+fn between_text(correlation: &Correlation, out: &mut String) {
+    let total = correlation.matched + correlation.unmatched;
+    let share = if total == 0 {
+        0.0
+    } else {
+        100.0 * correlation.matched as f64 / total as f64
+    };
+    let _ = writeln!(
+        out,
+        "  {} of {} `{}` readings moved in an interval where a `{}` state opened or closed \
+         ({share:.1} %)",
+        correlation.matched, total, correlation.to, correlation.from
+    );
+    if let Some(readings) = &correlation.readings {
+        let quiet = correlation.unmatched.saturating_sub(readings.baselines);
+        let amount = |value: f64| magnitude(&readings.value, value);
+        let _ = writeln!(
+            out,
+            "  the other {}: {} the first reading of its key, with nothing to differ from; {} \
+             moved by {} with nothing opening or closing around them",
+            correlation.unmatched,
+            readings.baselines,
+            quiet,
+            amount(readings.uncredited)
+        );
+        let _ = writeln!(
+            out,
+            "  `{}` read as a {}; credited in all: {}",
+            readings.value,
+            readings.reading.as_str(),
+            amount(readings.credited)
+        );
+        let states = &correlation.states;
+        let _ = writeln!(
+            out,
+            "  states: {} opened or closed, {} taken into an interval, {} before the first \
+             reading of their key, {} after the last",
+            states.opened, states.closed, readings.before_first, states.still_open
+        );
+        if !states.is_clean() {
+            let _ = writeln!(
+                out,
+                "  EVICTED: {} expired past the window, {} dropped because the map was full. \
+                 Credits are missing, not absent.",
+                states.expired, states.overflowed
+            );
+        }
+
+        if correlation.top.is_empty() {
+            let _ = writeln!(out, "\n  nothing was credited");
+        } else {
+            let origin = correlation
+                .top
+                .iter()
+                .map(|attribution| attribution.opened_ns)
+                .min()
+                .unwrap_or(0);
+            let ms = |ns: u64| ns.saturating_sub(origin) as f64 / 1e6;
+            let _ = writeln!(
+                out,
+                "\n  heaviest intervals, in ms from the first shown\n    {:<24} {:>10} {:>10} \
+                 {:>14} {:>7} {:>7}",
+                "KEY", "FROM", "TO", "CHANGE", "OPENED", "CLOSED"
+            );
+            for attribution in &correlation.top {
+                let Some(change) = &attribution.change else {
+                    continue;
+                };
+                let _ = writeln!(
+                    out,
+                    "    {:<24} {:>10.1} {:>10.1} {:>14} {:>7} {:>7}",
+                    attribution.key,
+                    ms(attribution.opened_ns),
+                    ms(attribution.closed_ns.unwrap_or(attribution.opened_ns)),
+                    amount(change.delta),
+                    change.opened,
+                    change.closed
+                );
+            }
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\n  TEMPORAL, and nothing more: each change is credited to what opened or closed while \
+         it happened. That is consistent with one moving the other, and it does not say which \
+         state moved the total, or by how much."
+    );
+}
+
+/// A signed amount of what an attribute holds, for reading only: the
+/// structured formats carry the number as it was.
+fn magnitude(attr: &str, value: f64) -> String {
+    let sign = if value < 0.0 { "-" } else { "+" };
+    if attr == "bytes" || attr.ends_with("_bytes") {
+        format!("{sign}{}", bytes(value.abs()))
+    } else if attr == "ns" || attr.ends_with("_ns") {
+        format!("{sign}{}", duration(value.abs()))
+    } else {
+        format!("{value:+}")
+    }
+}
+
+/// A signed amount in a decomposition's unit.
+fn amount_in(unit: Unit, value: f64) -> String {
+    let sign = if value < 0.0 { "-" } else { "" };
+    match unit {
+        Unit::Ns => format!("{sign}{}", duration(value.abs())),
+        Unit::Bytes => format!("{sign}{}", bytes(value.abs())),
+        _ => format!("{value}"),
+    }
+}
+
+/// Encodes a decomposition in the session's output format.
+///
+/// Every format that carries a join carries this beside it, and for the same
+/// reason: `OutputFormat::carries_correlations` says which, and the profile
+/// and trace formats are not among them.
+pub fn decomposition(
+    format: OutputFormat,
+    decomposition: &DecompositionOutput,
+) -> Result<String, ParseError> {
+    match format {
+        OutputFormat::Text => Ok(decomposition_text(decomposition)),
+        OutputFormat::Ndjson => {
+            let line = serde_json::to_string(decomposition).map_err(|error| {
+                ParseError::new(format!("cannot encode the decomposition: {error}"))
+            })?;
+            Ok(format!("{line}\n"))
+        }
+        format if format.renders_documents() => format.serialize_document(decomposition),
+        format => Err(ParseError::new(format!(
+            "`{format}` has no encoder for a decomposition: {}",
+            format.describe()
+        ))),
+    }
+}
+
+fn decomposition_text(decomposition: &DecompositionOutput) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "decompose {}  per {}, in {}",
+        decomposition.id, decomposition.by, decomposition.unit
+    );
+    if decomposition.tables.is_empty() {
+        let _ = writeln!(
+            out,
+            "  no event of any part carried a `{}` key, so there is nothing to decompose",
+            decomposition.by
+        );
+        return out;
+    }
+    if decomposition.keys_seen > decomposition.tables.len() {
+        let _ = writeln!(
+            out,
+            "  the {} heaviest of {} keys the parts named",
+            decomposition.tables.len(),
+            decomposition.keys_seen
+        );
+    }
+    for table in &decomposition.tables {
+        breakdown_text(decomposition.unit, table, &mut out);
+    }
+    let _ = writeln!(
+        out,
+        "\n  A negative residue is something counted twice; a positive one is a state no row \
+         covers."
+    );
+    out
+}
+
+fn breakdown_text(unit: Unit, table: &Breakdown, out: &mut String) {
+    let amount = |row: &Row| match (row.amount, &row.short) {
+        (Some(value), Some(_)) => format!("{} {}", Shortfall::MARK, amount_in(unit, value)),
+        (Some(value), None) => amount_in(unit, value),
+        (None, _) => "not read".to_owned(),
+    };
+    let resolution = |row: &Row| match row.resolution {
+        Some(0.0) => "exact".to_owned(),
+        Some(value) => format!("+-{}", amount_in(unit, value)),
+        None => "-".to_owned(),
+    };
+    let share = |row: &Row| match (row.amount, table.whole.amount) {
+        (Some(value), Some(whole)) if whole != 0.0 && row.state != "whole" => {
+            format!("{:.1} %", 100.0 * value / whole)
+        }
+        _ => String::new(),
+    };
+
+    let _ = writeln!(out, "\n  {}", table.key);
+    let _ = writeln!(
+        out,
+        "    {:<12} {:<18} {:<12} {:<8} {:<9} {:>14} {:>12} {:>7}",
+        "STATE", "SOURCE", "VALUE", "KIND", "EVIDENCE", "AMOUNT", "RESOLUTION", "SHARE"
+    );
+    for row in table.rows.iter().chain(std::iter::once(&table.whole)) {
+        if row.state == "whole" {
+            let _ = writeln!(
+                out,
+                "    {:<12} {:>65}",
+                "parts",
+                table
+                    .parts
+                    .map_or("not read".to_owned(), |parts| amount_in(unit, parts))
+            );
+        }
+        let _ = writeln!(
+            out,
+            "    {:<12} {:<18} {:<12} {:<8} {:<9} {:>14} {:>12} {:>7}",
+            row.state,
+            row.source,
+            row.value,
+            row.kind.as_str(),
+            row.evidence.map_or("-", |evidence| evidence.as_str()),
+            amount(row),
+            resolution(row),
+            share(row)
+        );
+    }
+    let residue = table.residue.map_or("not read".to_owned(), |residue| {
+        let sign = if residue >= 0.0 { "+" } else { "" };
+        format!("{sign}{}", amount_in(unit, residue))
+    });
+    let _ = writeln!(
+        out,
+        "    {:<12} {:<18} {:<12} {:<8} {:<9} {:>14} {:>12}",
+        "RESIDUE",
+        "whole - parts",
+        "",
+        "",
+        "",
+        residue,
+        table
+            .residue_resolution
+            .map_or("-".to_owned(), |value| format!(
+                "+-{}",
+                amount_in(unit, value)
+            ))
+    );
+    for row in table.rows.iter().chain(std::iter::once(&table.whole)) {
+        if let Some(note) = &row.note {
+            let _ = writeln!(out, "      {}: {note}", row.state);
+        }
+        if let Some(missing) = &row.missing {
+            let _ = writeln!(out, "      {}: not read, {missing}", row.state);
+        }
+        if let Some(short) = &row.short {
+            let _ = writeln!(
+                out,
+                "      {}: a lower bound, `{}` says: {}",
+                row.state, row.source, short.note
+            );
+        }
+    }
+    let kinds: std::collections::BTreeSet<&str> =
+        table.rows.iter().map(|row| row.kind.as_str()).collect();
+    if kinds.len() > 1 {
+        let _ = writeln!(
+            out,
+            "      the rows are {} numbers, which are not the same kind of number: a sample count is \
+             a count times a period, a traced sum is every occurrence added up, a poll is short \
+             by what came after its last reading",
+            kinds.into_iter().collect::<Vec<_>>().join(" and ")
+        );
     }
 }
 
@@ -272,6 +602,7 @@ pub fn results(format: OutputFormat, results: &Results) -> Result<String, ParseE
             &RunOutput {
                 results: vec![results.clone()],
                 joins: Vec::new(),
+                decompositions: Vec::new(),
             },
         ),
         format if format.renders_documents() => format.serialize_document(results),
@@ -1637,6 +1968,15 @@ fn chrome(output: &RunOutput) -> Result<String, ParseError> {
                     join.matched + join.unmatched
                 ))
                 .collect::<Vec<_>>(),
+            "decompositions": output
+                .decompositions
+                .iter()
+                .map(|decomposition| format!(
+                    "{}: {} keys (this format carries no decompositions; ask for json to read \
+                     them)",
+                    decomposition.id, decomposition.keys_seen
+                ))
+                .collect::<Vec<_>>(),
         },
     });
     serde_json::to_string_pretty(&document)
@@ -1930,9 +2270,14 @@ mod tests {
                     closed_ns: Some(20),
                     matched: 12,
                     outcome: crate::join::Outcome::Closed,
+                    change: None,
+                    wakeups: None,
                 }],
                 total_attributed: 12,
+                within_key: None,
+                readings: None,
             }],
+            decompositions: Vec::new(),
         }
     }
 
@@ -2123,6 +2468,7 @@ mod tests {
         let run = RunOutput {
             results: vec![profile()],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
 
@@ -2153,6 +2499,7 @@ mod tests {
         let run = RunOutput {
             results: vec![profile(), second],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
         assert!(encoded.contains("profile;main;work;read "), "{encoded}");
@@ -2167,6 +2514,7 @@ mod tests {
         let run = RunOutput {
             results: vec![profile()],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let encoded = run_output(OutputFormat::Speedscope, &run).expect("encoding");
         let document: serde_json::Value =
@@ -2204,6 +2552,7 @@ mod tests {
         let run = RunOutput {
             results: vec![sample()],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let encoded = run_output(OutputFormat::Speedscope, &run).expect("encoding");
         let document: serde_json::Value =
@@ -2241,6 +2590,7 @@ mod tests {
         let run = RunOutput {
             results: vec![ranked()],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let error = run_output(OutputFormat::Folded, &run).unwrap_err();
         assert!(error.message().contains("emitted no stacks"), "{error}");
@@ -2260,6 +2610,7 @@ mod tests {
         let run = RunOutput {
             results: vec![empty],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let error = run_output(OutputFormat::Folded, &run).unwrap_err();
         assert!(
@@ -2314,6 +2665,7 @@ mod tests {
         let run = RunOutput {
             results: vec![profile()],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let error = run_output(OutputFormat::Pprof, &run).unwrap_err();
         assert!(error.message().contains("not text"), "{error}");
@@ -2329,6 +2681,7 @@ mod tests {
         let run = RunOutput {
             results: vec![ranked()],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let error = run_output(OutputFormat::Pprof, &run).unwrap_err();
         assert!(error.message().contains("emitted no stacks"), "{error}");
@@ -2375,6 +2728,7 @@ mod tests {
             &RunOutput {
                 results: vec![empty],
                 joins: Vec::new(),
+                decompositions: Vec::new(),
             },
         )
         .unwrap_err();
@@ -2394,6 +2748,7 @@ mod tests {
             &RunOutput {
                 results: vec![histogram()],
                 joins: Vec::new(),
+                decompositions: Vec::new(),
             },
         )
         .unwrap_err();
@@ -2406,6 +2761,7 @@ mod tests {
             &RunOutput {
                 results: vec![empty],
                 joins: Vec::new(),
+                decompositions: Vec::new(),
             },
         )
         .unwrap_err();
@@ -2428,6 +2784,7 @@ mod tests {
             &RunOutput {
                 results: vec![lossy],
                 joins: Vec::new(),
+                decompositions: Vec::new(),
             },
         )
         .expect("encoding");
@@ -2466,6 +2823,7 @@ mod tests {
         let run = RunOutput {
             results: vec![profile(), second, third],
             joins: Vec::new(),
+            decompositions: Vec::new(),
         };
         let bytes = run_output_bytes(OutputFormat::Pprof, &run).expect("encoding");
         // The names are in the string table, which is not compressed away: the
@@ -2502,8 +2860,12 @@ mod tests {
                 closed_ns: None,
                 matched: 3,
                 outcome: Outcome::Closed,
+                change: None,
+                wakeups: None,
             }],
             total_attributed: 3,
+            within_key: None,
+            readings: None,
         }
     }
 
@@ -2520,8 +2882,12 @@ mod tests {
         assert!(text.contains("RANGE"), "{text}");
         assert!(text.contains("4.0 KiB"), "{text}");
         assert!(text.contains("freed"), "{text}");
-        // The fault-counting caveat belongs to this kind and only this one.
-        assert!(text.contains("multi-size transparent huge"), "{text}");
+        // The fault-counting caveat belongs to this kind and only this one,
+        // and it says what is true on every kernel rather than a mechanism:
+        // `docs/scenarios/cross-memory.md` measured the counts predicted by
+        // 2 MiB alignment on a machine with every multi-size size off (D4).
+        assert!(text.contains("two orders of magnitude"), "{text}");
+        assert!(!text.contains("picks larger folios"), "{text}");
     }
 
     /// A wakeup join borrowed all of it: it reported chains between tasks as
@@ -2555,5 +2921,141 @@ mod tests {
 
         let scoped = correlation_text(&correlated(MatchKind::ScopedEq, "blk:0x10@99", 0));
         assert!(scoped.contains("in that scope"), "{scoped}");
+    }
+
+    /// A correlation that credits within a key by recency says so on its
+    /// first line, beside the evidence it has for the key itself.
+    #[test]
+    fn crediting_within_a_key_by_the_clock_is_said_beside_the_key() {
+        let mut correlation = correlated(MatchKind::Eq, "task:7", 0);
+        correlation.within_key = Some(Evidence::Temporal);
+        correlation.states.replaced = 41;
+        let text = correlation_text(&correlation);
+        let first = text.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("evidence KEY, TEMPORAL within the key"),
+            "{text}"
+        );
+        assert!(text.contains("41 states were replaced"), "{text}");
+    }
+
+    /// A folded chain names how many wakeups it stands for, and a chain whose
+    /// latest wakeup nothing ended is still open -- not "never ran", which is
+    /// false of a chain with events attributed to it.
+    #[test]
+    fn a_wakeup_chain_counts_its_wakeups_and_is_still_open_rather_than_never_run() {
+        let mut correlation = correlated(MatchKind::Wakeup, "task:7 -> task:9", 0);
+        correlation.top[0].wakeups = Some(602);
+        correlation.top[0].matched = 604;
+        correlation.top[0].outcome = Outcome::StillOpen;
+        let text = correlation_text(&correlation);
+        assert!(text.contains("WAKEUPS"), "{text}");
+        assert!(text.contains("602"), "{text}");
+        assert!(text.contains("still open at the end"), "{text}");
+        assert!(!text.contains("never ran"), "{text}");
+    }
+
+    /// A `between` correlation counts readings, says how much moved with
+    /// nothing around it, and ends on what its evidence does not say.
+    #[test]
+    fn a_between_join_reads_as_intervals_and_says_what_temporal_does_not_claim() {
+        let mut correlation = correlated(MatchKind::Between, "task:7", 0);
+        correlation.evidence = Evidence::Temporal;
+        correlation.top[0].change = Some(crate::join::Change {
+            delta: -32.0 * 1024.0 * 1024.0,
+            opened: 0,
+            closed: 4,
+        });
+        correlation.readings = Some(crate::join::Readings {
+            value: "bytes".into(),
+            reading: crate::join::Reading::Level,
+            baselines: 1,
+            credited: -32.0 * 1024.0 * 1024.0,
+            uncredited: 4096.0,
+            before_first: 0,
+        });
+        let text = correlation_text(&correlation);
+        assert!(text.contains("evidence TEMPORAL"), "{text}");
+        assert!(text.contains("heaviest intervals"), "{text}");
+        assert!(text.contains("-32.0 MiB"), "{text}");
+        assert!(text.contains("the first reading of its key"), "{text}");
+        assert!(text.contains("+4.0 KiB with nothing opening"), "{text}");
+        assert!(text.contains("does not say which state"), "{text}");
+        assert!(!text.contains("freed"), "{text}");
+    }
+
+    fn row(state: &str, kind: crate::join::Kind, amount: Option<f64>) -> Row {
+        Row {
+            state: state.into(),
+            source: "sched.offcpu".into(),
+            value: "total_ns".into(),
+            kind,
+            evidence: Some(Evidence::Key),
+            amount,
+            resolution: Some(0.0),
+            readings: 3,
+            short: None,
+            missing: None,
+            note: None,
+        }
+    }
+
+    fn decomposed(residue: f64) -> DecompositionOutput {
+        use crate::join::Kind;
+        let mut whole = row("whole", Kind::Window, Some(100e6));
+        whole.evidence = None;
+        whole.resolution = None;
+        DecompositionOutput {
+            id: "where".into(),
+            by: crate::request::KeyKind::Task,
+            unit: Unit::Ns,
+            tables: vec![Breakdown {
+                key: "task:9".into(),
+                whole,
+                rows: vec![
+                    row("on-cpu", Kind::Sampled, Some(60e6)),
+                    row("blocked", Kind::Traced, Some(100e6 - 60e6 - residue)),
+                ],
+                parts: Some(100e6 - residue),
+                residue: Some(residue),
+                residue_resolution: Some(1e6),
+            }],
+            keys_seen: 2,
+        }
+    }
+
+    /// The residue is printed signed, a negative one included, and the table
+    /// says its rows are different kinds of number.
+    #[test]
+    fn a_decomposition_prints_a_signed_residue_and_the_kind_of_each_row() {
+        let text = decomposition_text(&decomposed(-5e6));
+        assert!(text.contains("RESIDUE"), "{text}");
+        assert!(
+            text.contains("-5.00ms"),
+            "a negative residue keeps its sign: {text}"
+        );
+        assert!(text.contains("sampled"), "{text}");
+        assert!(text.contains("traced"), "{text}");
+        assert!(text.contains("sampled and traced"), "{text}");
+        assert!(text.contains("counted twice"), "{text}");
+        assert!(text.contains("the 1 heaviest of 2 keys"), "{text}");
+
+        let positive = decomposition_text(&decomposed(2.5e6));
+        assert!(positive.contains("+2.50ms"), "{positive}");
+    }
+
+    /// A row that could not be read says so and takes the residue with it,
+    /// rather than reading as a zero that makes the rest add up.
+    #[test]
+    fn a_row_that_was_not_read_is_said_to_be_missing_rather_than_zero() {
+        let mut output = decomposed(0.0);
+        let table = &mut output.tables[0];
+        table.rows[1].amount = None;
+        table.rows[1].missing = Some("no `sched.offcpu` event carried `queued_ns`".into());
+        table.parts = None;
+        table.residue = None;
+        let text = decomposition_text(&output);
+        assert!(text.contains("not read"), "{text}");
+        assert!(text.contains("carried `queued_ns`"), "{text}");
     }
 }

@@ -5133,3 +5133,105 @@ spent rather than a total. Whether memcg-forced writeback on btrfs simply does
 not go through `wb_writeback`, or the budget arithmetic undercounts, is not
 settled. It was not investigated further, and `io.writeback` was kept out of
 the session so that nothing depends on it.
+
+---
+
+## Needs from another stream — the eighth wave, stream J (the join engine)
+
+Six requests, none blocking: everything the brief gave stream J works with its
+scenarios, and `docs/families/join.md` is the record. Each is a place where
+what the engine can now say is limited by something outside it.
+
+### To the coordinator, for `examples/README.md` and `GUIDE.md`: three rows
+
+`the_session_indexes_hold_exactly_the_sessions_on_disk` is red on
+`feat/join-engine` for exactly these three sessions, as the brief anticipates.
+The same three rows go in both files:
+
+```
+| `join-between-residency.yml` | What moved the resident size, asked by key and by the clock -- and a decoy the clock gets wrong, at TEMPORAL. |
+| `join-decompose-memory.yml` | The rise in resident size split into live and retained bytes, with a signed residue the program predicts. |
+| `join-decompose-compute.yml` | One task's wall clock split into on-cpu, runnable and blocked, each row's kind and resolution, and its releasers ranked by chain. |
+```
+
+The scenario documents also still describe as open what this stream closed:
+`docs/scenarios/cross-memory.md` D1, `cross-compute.md` findings 5 and 6 (and
+the `never ran` wording), `cross-io.md` defects 3 and 4.
+
+### To whoever owns `CATALOG.md`: the `drained` backend field
+
+`Backend::drained` is new in `src/catalog.rs`, beside `equivalent`:
+
+```yaml
+- {id: "bpf:raw_tp", requires: [...], cost: med, drained: true}
+```
+
+It means one event stands for many occurrences, added up in the kernel and
+drained on a tick, and it is what lets the validator refuse a `wakeup` join onto
+such a source before the run. §1 of `CATALOG.md` should list it with that
+sentence.
+
+### To whoever owns each family's catalog: `drained: true` on the rest
+
+Only `sched.offcpu` and `sched.runqlat` carry it, the two the compute crossing
+measured. Every collector below marks its rows with `weight` or `window_ns`, so
+a `wakeup` join onto any of them is refused anyway, but after the run, on the
+first event, which costs the measurement. Flagging them moves the refusal
+before it. Read from the code, not measured:
+
+| Source | Backend served | Marks its rows with |
+|---|---|---|
+| `sched.migrations`, `sched.lock`, `sched.futex`, `sched.irq`, `sched.numa_balance` | `bpf:raw_tp` | `window_ns`, and `weight` for lock, futex, irq |
+| `proc.syscall` | `bpf:raw_tp` | `weight`, `window_ns` |
+| `net.softirq`, `net.qdisc` | `bpf:raw_tp` | `weight`, `window_ns` |
+| `gpu.job` | `bpf:tp` | `window_ns` |
+| `mem.stall` | its eBPF backend | `weight`, `window_ns` |
+| `mem.heap.alloc` | the backend `src/collect/mem/allocations.rs` serves | `weight`, `window_ns`. Only that backend: the shim streams one event per call, so `always_drained` stays false for the entry, as it should |
+
+`Entry::always_drained` is true only when every backend of a chain is marked,
+so a partial flag never refuses a chain that has a per-occurrence backend.
+
+### To whoever owns `src/collect/mem/heap/`: a free that carries its size
+
+The shim writes `bytes=0` on every free (`src/collect/mem/heap/alloc.rs`), so
+no `closes` predicate can pick four 8 MiB frees out of the thousands of small
+ones an interpreter makes. `examples/join-between-residency.yml` therefore
+cannot credit the −32 MiB of its freed phase to anything, and says so. The shim
+already tracks every live allocation with its size (`mem.heap.live` reads that
+table), so:
+
+```rust
+// in the free record, where `bytes` is 0 today
+Attr::uint("bytes", tracked_size.unwrap_or(0)),   // the size the allocation was made with
+Attr::uint("freed_untracked", u64::from(tracked_size.is_none())),
+```
+
+would let a session write `closes: "op == 'free' && bytes >= 1048576"`.
+
+### To stream R, once the lifetime is in the results: `whole: lifetime`
+
+The exact whole of a time decomposition is the launched program's life. Until
+`Results` (or `RunOutput`) carries it, `whole: window` is the only span, printed
+as an upper bound. With stream R's `Lifetime { released_ns, exited_ns,
+exited_err_ns }` in place, the engine change is one variant:
+
+```rust
+// src/join.rs
+pub enum Span { Window, Lifetime }
+// in `decompose`: amount = exited_ns - released_ns, resolution = exited_err_ns,
+// kind = Kind::Window becomes a `Kind::Lifetime` that is a measurement, not a bound
+```
+
+`decompose` already receives the results, so the signature does not change.
+Whoever lands the field can add the variant, or leave it to the join engine's
+next owner.
+
+### To whoever owns `man/omn.1`: `between` and `decompose:`
+
+The manual's session section shows one `interval` join and no `decompose:`
+block, and its EVIDENCE section defines `TEMPORAL` as "they overlapped in time",
+which no match produced until now. Three things produce it since this wave:
+`between`, `eq` on a recycled pointer, and `within_key` on an `eq` that replaced
+states. `docs/families/join.md` has the fields `between` and `decompose:` take,
+what each refuses, and the definition the engine applies: a correlation whose
+only ground is the clock.

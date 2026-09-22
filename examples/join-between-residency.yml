@@ -1,0 +1,129 @@
+# What moved the resident size -- and how much does the answer know?
+#
+#   omn -f examples/join-between-residency.yml
+#
+# Two joins over the same two streams, and they are the point of the session:
+# one question asked two ways, answered at two evidence levels.
+#
+#   by-task      `eq` on `task`: each resident-size reading goes to the state
+#                of its process. The association is a KEY -- both events name
+#                the process -- but every allocation replaces the state before
+#                it, so which allocation a reading lands on is whichever came
+#                last. The join says so: `evidence KEY, TEMPORAL within the
+#                key`.
+#
+#   residency    `between`: each reading's change since the reading before is
+#                credited to the allocations that opened in that interval. It
+#                is the join the memory crossing asked for, and it says
+#                TEMPORAL, because the clock is the only thing that ties the
+#                two sides together.
+#
+# The program has four phases, 400 ms apart, and prints each on standard error
+# with the CLOCK_MONOTONIC instant it began, the bytes it wrote and the number
+# of large blocks it allocated:
+#
+#   kept       four 8 MiB blocks, every byte written, kept to the end
+#   returned   four more, written, then freed 400 ms later
+#   freed      those four freed: 32 MiB given back
+#   decoy      one 1 MiB block allocated and NEVER WRITTEN, and at the same
+#              moment 16 MiB mapped with `mmap` and written. The allocation
+#              tracker sees the block and not the mapping.
+#
+# The decoy is why the evidence level matters. `between` credits the decoy
+# interval's +16 MiB to the 1 MiB block, which holds one page -- because it is
+# what opened while the total moved. That is exactly what TEMPORAL means, and a
+# reader told KEY would have believed the block cost 16 MiB.
+#
+# Two things this session does not do, each for its reason:
+#
+#   - It has no `closes`. A free carries no size, so a predicate cannot pick
+#     the four large frees out of the thousands of small ones the interpreter
+#     makes, and a `closes` that matched every free would put a state change
+#     in every interval. The freed phase's -32 MiB is therefore credited to
+#     nothing, and is reported as moving with nothing opening or closing
+#     around it -- which is true of this join.
+#   - It does not guarantee a phase lands in one interval. A phase that
+#     straddles a reading puts part of its change in the next interval, where
+#     nothing opened. One poll is the resolution of TEMPORAL evidence here.
+name: what moved the resident size, asked two ways
+format: text
+
+requests:
+  - label: allocations
+    source: mem.heap.alloc
+    target: &program
+      launch:
+        - python3
+        - -c
+        - |
+          import ctypes, mmap, sys, time
+
+          libc = ctypes.CDLL(None)
+          libc.malloc.restype = ctypes.c_void_p
+          libc.malloc.argtypes = [ctypes.c_size_t]
+          libc.free.argtypes = [ctypes.c_void_p]
+          libc.mallopt(-3, 1 << 20)   # M_MMAP_THRESHOLD: every large block is its own mapping
+
+          MiB = 1 << 20
+
+          def now():
+              return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+          def phase(name, at, written, blocks):
+              sys.stderr.write('PHASE %s %d %d %d\n' % (name, at, written, blocks))
+
+          def make(count, size):
+              blocks = [libc.malloc(size) for _ in range(count)]
+              for block in blocks:
+                  ctypes.memset(block, 1, size)
+              return blocks
+
+          time.sleep(0.4)
+          at = now(); kept = make(4, 8 * MiB); phase('kept', at, 32 * MiB, 4)
+          time.sleep(0.4)
+          at = now(); returned = make(4, 8 * MiB); phase('returned', at, 32 * MiB, 4)
+          time.sleep(0.4)
+          at = now()
+          for block in returned:
+              libc.free(block)
+          phase('freed', at, -32 * MiB, 0)
+          time.sleep(0.4)
+          at = now()
+          decoy = libc.malloc(1 * MiB)
+          mapping = mmap.mmap(-1, 16 * MiB)
+          # One byte per page, so that nothing written here is itself an
+          # allocation the tracker would see.
+          for offset in range(0, 16 * MiB, mmap.PAGESIZE):
+              mapping[offset] = 1
+          phase('decoy', at, 16 * MiB, 1)
+          time.sleep(0.4)
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  # Raw as well: the test reads the reading after each phase's interval, to
+  # see where a phase that straddled a reading put the rest of its change.
+  - label: resident
+    source: mem.rss
+    target: *program
+    mode: poll@100ms
+    emit: [timeline, raw]
+    keys: [task]
+
+joins:
+  - id: by-task
+    from: mem.heap.alloc
+    to: mem.rss
+    via: task
+    match: eq
+    window: 60s
+
+  - id: residency
+    from: mem.heap.alloc
+    to: mem.rss
+    via: task
+    match: between
+    value: bytes
+    reading: level
+    opens: "op == 'alloc' && bytes >= 1048576"
+    window: 60s

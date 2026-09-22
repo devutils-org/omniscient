@@ -28,15 +28,17 @@
 #   join scoped  io.queue -> io.latency  evidence KEY
 #     2997 of 15001 `io.latency` events attributed (20.0 %); 12004 carried a key
 #     no open state had in that scope
-#   join bare  io.queue -> io.latency  evidence KEY
+#   join bare  io.queue -> io.latency  evidence TEMPORAL
 #     14493 of 15001 `io.latency` events attributed (96.6 %); 508 carried a key
 #     no open state had
 #
-# 11496 completions credited to a stranger, by a join that reports the same
-# evidence level as the one that got it right. That is the argument for the
-# key being scoped, and it is also a finding about the evidence ladder: the
-# engine calls both KEY, because it derives the level from the key kind and the
-# match rather than from whether the key can tell two lives apart.
+# 11496 completions credited to a stranger. That is the argument for the key
+# being scoped, and it was also a finding about the evidence ladder: the engine
+# used to call both KEY, deriving the level from the key kind and the match
+# rather than from whether the match can tell two lives apart. Since the eighth
+# wave it rates `eq` on a recycled pointer TEMPORAL -- two events at one address
+# around the same time, which is all a bare pointer establishes -- and says why
+# under the join.
 #
 # The asymmetry is deliberate and it is not exotic. A session that narrows the
 # issuing side -- to one process, one cgroup, one device -- and not the

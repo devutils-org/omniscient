@@ -233,6 +233,25 @@ fn check_joins(
                 rule.id
             ));
         }
+
+        // What the rule means against these sources, collected this way:
+        // the match kind's own refusals, found before anything is attached.
+        let collected = [&rule.from, &rule.to]
+            .iter()
+            .all(|kind| present.contains(&kind.as_str()));
+        if collected {
+            if let Err(error) = crate::join::check_in(rule, &session.requests, catalog) {
+                rejections.push(Rejection::new(error.to_string()));
+            }
+        }
+    }
+
+    for decomposition in &session.decompose {
+        if let Err(error) =
+            crate::join::check_decomposition(decomposition, &session.requests, catalog)
+        {
+            rejections.push(Rejection::new(error.to_string()));
+        }
     }
 }
 

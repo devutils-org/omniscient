@@ -23,9 +23,22 @@
 # which is TEMPORAL.
 #
 # The per-switch join in `cross-compute-where-the-time-went.yml` does not have
-# this problem: one `sched.switches` event is one switch. The fix for this one
-# is a join that reads the weight a drained event carries, or a `sched.offcpu`
-# that drains per block; both are requests in `docs/open-findings.md`.
+# this problem: one `sched.switches` event is one switch.
+#
+# THE JOIN IS NOW REFUSED, before anything is attached. The catalog marks every
+# `sched.offcpu` backend `drained`, and the validator refuses a `wakeup` join
+# onto a source whose events stand for many occurrences, naming the source to
+# use instead:
+#
+#   error: rule `what-released-the-block` matches by `wakeup` onto
+#   `sched.offcpu`, whose events are totals drained from the kernel: each
+#   stands for many occurrences, and a wakeup can release only one. [...] Join
+#   onto a source with one event per occurrence, such as `sched.switches`
+#   exit 2
+#
+# So the rule is below as a comment, and what this session still measures is
+# the reason for the refusal: how many blocks each drained event holds, against
+# the kernel's count of the task's voluntary switches.
 name: a wakeup join onto a drained total
 format: text
 
@@ -64,12 +77,15 @@ requests:
     emit: [topk:3]
     keys: [task]
 
-joins:
-  - id: what-released-the-block
-    from: sched.wakeup
-    to: sched.offcpu
-    via: task
-    match: wakeup
-    waker: waker_tid
-    window: 10s
-    top: 5
+# The rule the validator refuses, kept so that `tests/cross_compute.rs` can ask
+# for it and check that the refusal still happens:
+#
+# joins:
+#   - id: what-released-the-block
+#     from: sched.wakeup
+#     to: sched.offcpu
+#     via: task
+#     match: wakeup
+#     waker: waker_tid
+#     window: 10s
+#     top: 5

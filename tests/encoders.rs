@@ -521,6 +521,7 @@ fn a_profile_larger_than_one_gzip_block_comes_back_whole() {
     let run = RunOutput {
         results: vec![results],
         joins: Vec::new(),
+        decompositions: Vec::new(),
     };
 
     let bytes = encode::run_output_bytes(OutputFormat::Pprof, &run).expect("a pprof file");
@@ -569,6 +570,7 @@ fn a_unit_pprof_does_not_know_is_written_under_its_own_name_and_said_so() {
     let run = RunOutput {
         results: vec![results],
         joins: Vec::new(),
+        decompositions: Vec::new(),
     };
 
     let profile = decode_profile(&encode::run_output_bytes(OutputFormat::Pprof, &run).unwrap());
