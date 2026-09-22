@@ -4510,3 +4510,121 @@ its clock is a different domain rather than an uncertain one, and it would need
 a `Determinism` the enum refuses to have.
 
 ---
+
+## Needs from another stream — stream P4 (crossed families, the machine as a confounder)
+
+Five requests from the seventh wave's machine-confounder crossing. None of them
+blocked the stream: each is worked around in `tests/cross_machine.rs` and
+explained in `docs/scenarios/cross-machine.md`. Each one is also a place where
+the workaround is weaker than the tool should be.
+
+### To whoever owns `src/join.rs` and `src/catalog.rs`: a match kind whose evidence is `TEMPORAL`
+
+`Evidence::Temporal` exists and nothing produces it: `join::evidence` maps
+`wakeup` to `WAKEUP` and every other match to `KEY` or `IDENTITY`. A confounder
+check is two things happening on the same core, or on the same machine, at the
+same time, and writing it as `match: eq` on `cpu` would print `KEY` beside it.
+That is the dressing-up the evidence ladder exists to prevent. So the
+frequency crossing is arithmetic in a test rather than a `joins:` entry.
+
+```rust
+// src/catalog.rs
+pub enum MatchKind {
+    Eq,
+    ScopedEq,
+    Interval,
+    Wakeup,
+    /// The downstream event's window overlaps the upstream event's window on
+    /// the same key (or on no key). Evidence is always TEMPORAL.
+    Overlap,
+}
+
+// src/join.rs, in `evidence`
+MatchKind::Overlap => Evidence::Temporal,
+```
+
+The semantics are these. A `from` event with an `interval_ns` attribute (every
+polled source carries one) opens a state covering `[ts - interval_ns, ts]`,
+filed under its `via` key, and it replaces the previous state for that key. A
+`to` event is attributed to every open state its own window overlaps. The
+attribution carries the overlap as a share of the `to` event's window, so a
+count spanning ten frequency ticks is split ten ways rather than credited to
+the last tick. `via` should be allowed to be absent for machine-wide state
+(`mem.pressure` has no key).
+
+### To whoever owns `src/collect/mod.rs`: more than one target in one run
+
+`CollectError::MixedTargets` refuses any session whose requests name two
+targets. Every confounder check has exactly that shape: the machine's state is
+`system` or `cpu`, and the measurement is `pid`, `launch` or `cgroup`. The
+frequency crossing has to run a second `omn` beside the first, counting the
+loop's own instructions by pid, because a `cpu`-target counter also counts
+whatever else ran on that core. Measured under load, that was 70% of the core.
+The reclaim crossing reads the machine's PSI instead of the cgroup's, and the
+machine's value dilutes the cgroup's stall by the number of busy cpus (12.5 ms
+read as 6.0 ms).
+
+The minimum that would serve: allow any number of targets whose kinds are among
+`system`, `cpu` and `iface` (the machine's) beside at most one workload target
+(`launch`, `pid`, `tid`, `cgroup` or `container`). Only the workload target
+drives the stop condition and the launch.
+
+```rust
+// src/collect/mod.rs: what `MixedTargets` would still refuse
+fn compatible(a: &Target, b: &Target) -> bool {
+    a == b || a.is_machine() || b.is_machine()
+}
+
+// src/request.rs
+impl Target {
+    /// A target that names part of the machine rather than a workload: its
+    /// collectors do not act on a program and do not decide when a run ends.
+    pub fn is_machine(&self) -> bool {
+        matches!(self, Target::System | Target::Cpu(_) | Target::Iface(_))
+    }
+}
+```
+
+### To whoever owns `src/collect/cpu/` and `catalog/cpu.yaml`: a per-tick read of a counting PMU event
+
+`cpu.instructions` and `cpu.cycles` offer `count`, which is one number for the
+window, and `sample`, which is refused until sampling lands with stacks. So no
+verdict can say *when*. `BRIEF.md` asks for "throttled for 1.2 s of 5 s, and the
+instruction rate over that interval is not comparable to the rest", and the
+tool has a frequency timeline and no instruction timeline to split it with.
+The counter is already open and already read at the end, so what is wanted is
+the same read at an interval:
+
+```yaml
+# catalog/cpu.yaml, on every pmu counting entry
+modes: [count, poll, sample]
+emits: [summary, rate, timeline, raw, hist, topk, stack]
+```
+
+Here `mode: poll@100ms` reads the counter each tick and emits the delta, with
+`interval_ns` like every polled source, so the `Overlap` match above can pair
+it with `power.freq` tick by tick.
+
+### To whoever owns `catalog/power.yaml`: `power.throttle`'s eBPF backend names a temperature tracepoint
+
+The first backend of `power.throttle` is `bpf:raw_tp` requiring
+`raw_tracepoint:thermal_temperature`. That tracepoint reports a thermal zone's
+temperature on each update, not a throttling event. A collector written against
+it would measure temperature and call it throttling. The events that mean a
+throttle are `thermal_zone_trip` (a trip point crossed) and `cdev_update` (a
+cooling device changing state), and on AMD neither the hardware nor the kernel
+publishes the package power limits' effect as an event at all. The effective
+frequency is the only observable of it. This matters now because the backend is
+reported `available` here, so the first collector written for it will be taken
+at its word.
+
+### To whoever owns `src/collect/io/writeback.rs`: 2.6 MiB of flusher progress beside 90 MiB of kworker writes
+
+In one run of `examples/cross-machine-reclaim-io.yml` with the program capped
+at 32 MiB on btrfs, `io.writeback` reported 667 pages of progress while
+`io.latency` attributed 90 MiB of writes on the same device to kworkers during
+the program's run. The collector already documents that `nr_pages` is a budget
+spent rather than a total. Whether memcg-forced writeback on btrfs simply does
+not go through `wb_writeback`, or the budget arithmetic undercounts, is not
+settled. It was not investigated further, and `io.writeback` was kept out of
+the session so that nothing depends on it.
