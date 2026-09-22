@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and eighteen sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and twenty-five sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and eighteen
+make demo-all           # the tour and then all one hundred and twenty-five
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -333,6 +333,13 @@ Each is `omn -f examples/<file>`. The whole family is
 | `runtime-jit-sweep.yml` | Does every axis `runtime.jit` declares actually work? |
 | `runtime-jit.yml` | What did the runtime compile, and when? |
 | `runtime-not-built.yml` | The three `runtime` sources this build does not implement, and the backend of |
+| `runtime-usdt-gc.yml` | How long did the collector stop the program? |
+| `runtime-usdt-alloc.yml` | What did the runtime allocate, and how much of it? |
+| `runtime-usdt-probes.yml` | A probe you name, in a program that publishes it. |
+| `runtime-usdt-libc.yml` | The probes libc was built with, in a program that did not ask for them. |
+| `runtime-usdt-threads.yml` | A probe follows the process, not the thread that started it. |
+| `runtime-usdt-flood.yml` | More hits than the ring holds, and every one of them accounted for. |
+| `runtime-usdt-absent.yml` | A runtime built without its probes is refused, and says what it does carry. |
 
 ## cross-family
 

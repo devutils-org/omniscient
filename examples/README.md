@@ -1,6 +1,6 @@
 # Examples
 
-A hundred and eighteen sessions. Each is the same object a command line builds,
+A hundred and twenty-five sessions. Each is the same object a command line builds,
 written down, so a reader can run it and a test can run it identically.
 
 ```console
@@ -176,6 +176,13 @@ for.
 | `runtime-jit-sweep.yml` | Does every axis `runtime.jit` declares actually work? |
 | `runtime-jit.yml` | What did the runtime compile, and when? |
 | `runtime-not-built.yml` | The three `runtime` sources this build does not implement, and the backend of |
+| `runtime-usdt-gc.yml` | How long did the collector stop the program? |
+| `runtime-usdt-alloc.yml` | What did the runtime allocate, and how much of it? |
+| `runtime-usdt-probes.yml` | A probe you name, in a program that publishes it. |
+| `runtime-usdt-libc.yml` | The probes libc was built with, in a program that did not ask for them. |
+| `runtime-usdt-threads.yml` | A probe follows the process, not the thread that started it. |
+| `runtime-usdt-flood.yml` | More hits than the ring holds, and every one of them accounted for. |
+| `runtime-usdt-absent.yml` | A runtime built without its probes is refused, and says what it does carry. |
 
 ## cross-family
 

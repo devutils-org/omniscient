@@ -415,9 +415,10 @@ sessions asked for the key and were told it was carried —
 reader wants instead is the one D1 describes, and the `between` match kind is
 what would give it the evidence level it deserves.
 
-### D3 — allocations and retained memory cannot be asked of one program, and the refusal blames the request
+### D3 — allocations and retained memory could not be asked of one program — **fixed**
 
-Pinned by `d3_two_shim_sources_on_one_launch_are_refused_as_a_request_rather_than_as_the_build`.
+Pinned by `d3_two_shim_sources_share_one_launch_and_both_answer`, which now
+asserts the fix rather than the defect.
 
 ```
 error: two collectors disagree about `OMN_HEAP_FD` in the launched program's environment (`4` and `6`)
@@ -433,10 +434,25 @@ and it comes before the launch. Two things are wrong with it:
   request means something, `omn validate` accepts it, and it is the build that
   cannot serve it: `DECISIONS.md` settled that as exit 3.
 - **It is why this crossing is two sessions.** "Which allocation cost memory and
-  did it stay" is one question about one program, and the tool cannot ask it in
-  one run. One shim stream per launch, fanned out to every preload collector
+  did it stay" is one question about one program, and the tool could not ask it
+  in one run. One shim stream per launch, fanned out to every preload collector
   that wants it, would let the whole crossing be one session and the
   decomposition be joined to the ranges.
+
+**What closed it**, in the eighth wave: the run-model stream gave a launch one
+shim stream that every shim-backed source reads, so the run that used to be
+refused now succeeds and both sources report. The test asserts both halves —
+that it ran, and that both sources are in the document, because "it ran" and
+"both measured" are different claims and only the second is the fix.
+
+**The two sessions are kept**, and that is a choice rather than an oversight.
+They can now be folded into one, and what each asks is still a different
+question: `cross-memory-which-allocation.yml` asks which allocation cost memory
+while the program runs, and `cross-memory-did-it-stay.yml` asks what the
+allocator kept after it gave the memory back. Folding them would make one
+session that answers both and shows neither clearly. What the fix unblocks is
+the thing the split cost: a decomposition joined to the ranges, in one run,
+which belongs with the `decompose:` block rather than with this document.
 
 ### D4 — the explanation printed under every interval join is contradicted by the measurement
 

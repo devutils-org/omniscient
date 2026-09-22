@@ -821,16 +821,18 @@ joins:
     );
 }
 
-/// D3. Allocations and retained memory cannot be asked of one launched program,
-/// and the refusal blames the request.
+/// D3, now fixed: allocations and retained memory can be asked of one launched
+/// program, and both answer.
 ///
-/// Each shim-backed source opens its own pipe and puts its descriptor in the
-/// child's environment, so two of them disagree about `OMN_HEAP_FD` and the run
-/// is refused before it starts. That is honest -- neither pipe wins silently --
-/// and it exits 2, "the request cannot mean anything", where the request means
-/// something and the build cannot serve it: `DECISIONS.md` makes that exit 3.
+/// Each shim-backed source used to open its own pipe and put its descriptor in
+/// the child's environment, so two of them disagreed about `OMN_HEAP_FD` and the
+/// run was refused before it started -- honestly, since neither pipe could win
+/// silently, but with exit 2 where the request meant something and only the
+/// build could not serve it. The eighth wave's run-model stream gave a launch
+/// one shim stream that every shim-backed source reads, so the question this
+/// crossing had to ask in two sessions is one session's now.
 #[test]
-fn d3_two_shim_sources_on_one_launch_are_refused_as_a_request_rather_than_as_the_build() {
+fn d3_two_shim_sources_share_one_launch_and_both_answer() {
     const SESSION: &str = "\
 name: allocations and retained memory of one program
 format: json
@@ -850,22 +852,34 @@ requests:
         "the session is valid against the catalog: {}",
         stderr(&validated)
     );
+    if !has_python() {
+        eprintln!("SKIPPED: this machine has no python3 to launch the workload");
+        return;
+    }
     let output = run_written(&[], SESSION);
-    assert!(
-        stderr(&output).contains("OMN_HEAP_FD"),
-        "the refusal names what the two collectors disagree about: {}",
-        stderr(&output)
-    );
-    assert_ne!(
-        code(&output),
-        0,
-        "two pipes for one program cannot both win"
-    );
     assert_eq!(
         code(&output),
-        2,
-        "D3 is fixed, or half fixed. Exit 3 is the build refusing, and a run that succeeds is \
-         the shim shared: either way update this assertion, move D3 in \
-         docs/scenarios/cross-memory.md, and fold the two sessions of the crossing into one"
+        0,
+        "one launch now carries one shim stream, and both sources read it: {}",
+        stderr(&output)
     );
+    assert!(
+        !stderr(&output).contains("OMN_HEAP_FD"),
+        "nothing should be left disagreeing about the shim's descriptor: {}",
+        stderr(&output)
+    );
+    // Both sources have to be in the document, because "it ran" and "both
+    // measured" are different claims and only the second is the fix.
+    let document = json(&output);
+    for source in ["mem.heap.alloc", "mem.heap.retained"] {
+        assert!(
+            document["results"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|result| result["source"] == source),
+            "{source} is missing from a run that was supposed to serve both: {}",
+            stdout(&output)
+        );
+    }
 }
