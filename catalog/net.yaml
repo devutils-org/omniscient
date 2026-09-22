@@ -46,7 +46,7 @@
   emits: [hist, topk, raw, timeline, summary]
   targets: {system: native}
   keys: [sock, task]
-  filter_fields: [comm, saddr, sport, family]
+  filter_fields: [comm, saddr, sport, family, cookie]
   determinism: low
 
 - id: net.tcp.rtt

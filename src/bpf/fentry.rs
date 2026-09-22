@@ -76,8 +76,9 @@ pub(crate) const BPF_H: u8 = 0x08;
 /// `dst += src`, `dst <<= imm` and `if dst >= src goto`, which `insn.rs` does
 /// not have. The encodings are `include/uapi/linux/bpf_common.h`'s.
 pub(crate) fn add64_reg(dst: u8, src: u8) -> Insn {
+    // `BPF_ALU64 | BPF_ADD | BPF_X`, where `BPF_ADD` is zero.
     Insn {
-        code: 0x07 | 0x00 | 0x08,
+        code: 0x07 | 0x08,
         regs: (dst & 0xf) | ((src & 0xf) << 4),
         off: 0,
         imm: 0,
@@ -570,11 +571,14 @@ impl Link {
     /// The kernel counts it in `bpf_prog_info.recursion_misses`, and this is
     /// that count.
     ///
-    /// Measured here, and it is not rare under load: a hundred threads reading
-    /// a thousand files made the file layer three calls short of the program's
-    /// own total, and a second tracer on the same machine -- whose programs run
-    /// on every one of those reads to check whether it is theirs -- lost a
-    /// three-hundred-millisecond read outright.
+    /// **Not observed on this machine**, in three runs of a hundred threads
+    /// reading a thousand files: the count stayed at zero. It is read anyway,
+    /// because it is the one loss of this attach kind that nothing else can
+    /// see, and a count that is zero because it was read is a different
+    /// statement from one that is zero because nobody asked. The file layer's
+    /// three missing calls that first looked like this were the trampoline
+    /// rebuilds `entry_instructions` counts instead -- other tests of the suite
+    /// attaching to `vfs_read` while those reads were in flight.
     pub fn misses(&self) -> u64 {
         recursion_misses(&self.program).unwrap_or(0)
     }

@@ -59,6 +59,7 @@ impl Prepared for Prepare {
             filtered_out: 0,
             still_pending: 0,
             unnamed: 0,
+            by_descriptor: true,
         }))
     }
 }
@@ -80,6 +81,8 @@ pub struct FsyncCollector {
     still_pending: usize,
     /// Syncs whose file the descriptor walk could not find.
     unnamed: u64,
+    /// Whether this kernel had `do_fsync` to time.
+    by_descriptor: bool,
 }
 
 impl FsyncCollector {
@@ -232,7 +235,9 @@ impl Collector for FsyncCollector {
 
     fn start(&mut self) -> Result<(), String> {
         self.mounts = Some(Mounts::read());
-        self.program = Some(FsyncProgram::load(self.narrowing)?);
+        let program = FsyncProgram::load(self.narrowing)?;
+        self.by_descriptor = program.by_descriptor;
+        self.program = Some(program);
         Ok(())
     }
 
@@ -274,6 +279,13 @@ impl Collector for FsyncCollector {
              sync_file_range(2) are not"
                 .to_owned(),
         ];
+        if !self.by_descriptor {
+            notes.push(
+                "this kernel has no do_fsync in its BTF, so fsync and fdatasync are timed where \
+                 they reach vfs_fsync; if that is inlined too, they are not timed at all"
+                    .to_owned(),
+            );
+        }
         if self.failed > 0 {
             notes.push(format!(
                 "{} of {} syncs returned an error, and each carries its errno: a sync that \
@@ -352,6 +364,7 @@ mod tests {
             filtered_out: 0,
             still_pending: 0,
             unnamed: 0,
+            by_descriptor: true,
         }
     }
 

@@ -338,11 +338,11 @@ mod tests {
     #[test]
     fn a_kernel_device_number_is_reported_the_way_stat_reports_it() {
         let kernel = (259 << 20) | 300;
-        let expected = unsafe { libc::makedev(259, 300) };
+        let expected = libc::makedev(259, 300);
         assert_eq!(stat_dev(kernel), expected);
         assert_eq!(major_minor(kernel), (259, 300));
         // A btrfs subvolume's anonymous device: major zero.
-        assert_eq!(stat_dev(41), unsafe { libc::makedev(0, 41) });
+        assert_eq!(stat_dev(41), libc::makedev(0, 41));
     }
 
     #[test]
