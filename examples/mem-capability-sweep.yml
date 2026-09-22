@@ -40,7 +40,7 @@ requests:
         - "import time\nheld = bytearray(96 * 1024 * 1024)\nheld[::4096] = b'A' * len(held[::4096])\nworking = memoryview(held)[:8 * 1024 * 1024]\ndeadline = time.time() + 0.6\nwhile time.time() < deadline:\n    for offset in range(0, len(working), 4096):\n        working[offset] = 1\n"
     mode: poll@100ms
     emit: [timeline, summary]
-    keys: [task, cgroup, mem]
+    keys: [task, cgroup]
 
   - label: private footprint, one number
     source: mem.uss

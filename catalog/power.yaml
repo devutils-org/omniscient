@@ -127,8 +127,8 @@
   summary: "Thermal and power-limit throttling (PL1 / PL2)"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:thermal_temperature", "kernel>=5.8"], cost: free}
-    - {id: "bpf:tp", requires: ["tracepoint:thermal:thermal_temperature", "bpf"], cost: free, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:thermal_zone_trip", "raw_tracepoint:cdev_update", "kernel>=5.8"], cost: free}
+    - {id: "bpf:tp", requires: ["tracepoint:thermal:thermal_zone_trip", "tracepoint:thermal:cdev_update", "bpf"], cost: free, equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/thermal_throttle"], cost: free,
        degraded: "counts, not moments: how many times the part throttled during the interval, not
                   when it started or how long it lasted"}
@@ -141,6 +141,15 @@
   caveats:
     - "A throttled run must be invalidated, not averaged in. This is a guardrail
        collected unconditionally, not an opt-in metric."
+    - "The eBPF backends watch a trip point being crossed and a cooling device
+       changing state, which are the two events that mean the machine is
+       throttling. `thermal_temperature` is not one of them: it reports a zone's
+       temperature on every update, and a collector written against it would
+       measure temperature and call it throttling."
+    - "On AMD parts neither the hardware nor the kernel publishes the package
+       power limits' effect as an event at all, so the effective frequency is
+       the only observable of it. That is a property of the part, not a gap in
+       this source."
     - "`thermal_throttle` is an x86 thermal-interrupt interface. It is absent on
        AMD parts, on ARM and in most virtual machines, and its absence is not
        evidence that nothing throttled: it means throttling cannot be seen this

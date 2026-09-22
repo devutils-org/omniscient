@@ -34,7 +34,7 @@ requests:
     target: {launch: [python3, -c, "import time\nheld = bytearray(256 * 1024 * 1024)\nworking = memoryview(held)[:16 * 1024 * 1024]\ndeadline = time.time() + 3\nwhile time.time() < deadline:\n    for offset in range(0, len(working), 4096):\n        working[offset] = 1\n"]}
     mode: poll@250ms
     emit: [timeline, summary]
-    keys: [task, cgroup, mem]
+    keys: [task, cgroup]
 
   - label: touched
     source: mem.wss

@@ -21,4 +21,4 @@ requests:
         - "import time; b = []; [(b.append(bytearray(8 << 20)), time.sleep(0.2)) for _ in range(5)]"
     mode: poll@100ms
     emit: [timeline, summary]
-    keys: [task, cgroup, mem]
+    keys: [task, cgroup]

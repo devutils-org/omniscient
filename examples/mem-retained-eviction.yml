@@ -37,4 +37,4 @@ requests:
         - "import ctypes, time\nlibc = ctypes.CDLL(None)\nlibc.malloc.restype = ctypes.c_void_p\nlibc.free.argtypes = [ctypes.c_void_p]\nblocks = []\nfor i in range(140000):\n    blocks.append(libc.malloc(4096))\n    if i % 400 == 0:\n        time.sleep(0.001)\nfor i, p in enumerate(blocks):\n    libc.free(p)\n    if i % 400 == 0:\n        time.sleep(0.001)\n"
     mode: poll@200ms
     emit: [timeline, summary]
-    keys: [task, mem]
+    keys: [task]

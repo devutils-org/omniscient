@@ -128,6 +128,12 @@
   caveats:
     - "The unwind mode (fp / dwarf / lbr) must be declared: dwarf copies the stack
        on every sample, with far higher volume and cost."
+    - "A time-based sample counts the time the task held its cpu, including the
+       interrupts that ran on it meanwhile, and at high rates those interrupts
+       are this profile's own. The kernel's own on-cpu figure leaves interrupt
+       time out on a kernel built with IRQ_TIME_ACCOUNTING, so the two differ by
+       exactly the time the task lost to interrupts: 0.7 % at 997 Hz and 28 % at
+       100 kHz on the machine this was measured on."
 
 - id: cpu.oncpu_time
   family: cpu

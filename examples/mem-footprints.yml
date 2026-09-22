@@ -33,7 +33,7 @@ requests:
         - "import time\ntime.sleep(0.3)\nblock = bytearray(64 * 1024 * 1024)\nblock[::4096] = b'A' * len(block[::4096])\ntime.sleep(0.4)\n"
     mode: poll@50ms
     emit: [timeline, summary]
-    keys: [task, mem]
+    keys: [task]
 
   - label: proportional
     source: mem.pss

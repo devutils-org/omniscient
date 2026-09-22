@@ -382,9 +382,10 @@ The request is not to demote the join. It is to say both things: `KEY` for the
 association, and `TEMPORAL` for the crediting within a key whenever a state was
 replaced before its events arrived.
 
-### D2 — a join on a key the catalog declares and no event carries is refused after the run
+### D2 — a join on a key no event carries was refused after the run — **fixed**
 
-Pinned by `d2_a_join_on_a_key_the_catalog_declares_and_no_event_carries_is_refused_after_the_run`.
+Pinned by `d2_a_join_on_a_key_no_event_carries_is_refused_before_the_run_is_paid_for`,
+which now asserts the fix rather than the defect.
 
 `catalog/mem.yaml` declares `keys: [task, cgroup, mem]` on `mem.rss`, and `[task,
 mem]` on `mem.heap.live` and `mem.heap.retained`. None of the three collectors
@@ -400,11 +401,19 @@ exit 1
 with nothing on standard output. The refusal is right and it is late:
 `join::check` exists so that a rule that cannot match is found before a
 measurement is paid for, and it cannot find this one, because the validator
-trusts the catalog's `keys`. It is the sixth wave's finding about `proc.syscall`
-and `mem.kmalloc` in three more places, and the first of them to cost a run
-rather than an empty table. `examples/mem-fragmentation.yml` asks for `keys:
-[task, mem]` on `mem.heap.retained` and `[task, cgroup, mem]` on `mem.rss`, and
-is told both are carried.
+trusts the catalog's `keys`. It was the sixth wave's finding about
+`proc.syscall` and `mem.kmalloc` in three more places, and the first of them to
+cost a run rather than an empty table.
+
+**What closed it**, in the coordinator's pass at the end of this wave: `mem` is
+gone from the three entries, so the validator refuses the rule with exit 2
+before anything is attached, naming the keys the source does carry. Six shipped
+sessions asked for the key and were told it was carried —
+`mem-fragmentation.yml`, `mem-backend-agreement.yml`, `mem-capability-sweep.yml`,
+`mem-footprints.yml`, `mem-retained-eviction.yml`, `mem-rss-run.yml` and
+`mem-working-set.yml` — and each now asks for what its source has. The join a
+reader wants instead is the one D1 describes, and the `between` match kind is
+what would give it the evidence level it deserves.
 
 ### D3 — allocations and retained memory cannot be asked of one program, and the refusal blames the request
 

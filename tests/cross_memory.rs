@@ -751,16 +751,18 @@ joins:
     );
 }
 
-/// D2. A join on `mem` onto a resident size validates, measures the whole run,
-/// and then throws it away.
+/// D2, now fixed: a join on `mem` onto a resident size is refused before
+/// anything is measured.
 ///
-/// The catalog declares `mem` on `mem.rss`, so the validator accepts the rule;
-/// no `mem.rss` event carries the key, so the engine refuses it after the
-/// collectors have stopped, and exits 1 with nothing on standard output. The
-/// refusal is right and it is late: `join::check` exists to find a rule that
-/// cannot match before a measurement is paid for.
+/// The catalog used to declare `mem` on `mem.rss`, so the validator accepted
+/// the rule, the run was paid for in full, and the engine threw it away at the
+/// join -- exit 1 with nothing on standard output. This crossing filed that as
+/// D2, the seventh wave's coordinator pass dropped the key from the three
+/// entries no collector emits it for, and the refusal is now where
+/// `join::check` was always supposed to make it: at validation, naming the keys
+/// the source does carry.
 #[test]
-fn d2_a_join_on_a_key_the_catalog_declares_and_no_event_carries_is_refused_after_the_run() {
+fn d2_a_join_on_a_key_no_event_carries_is_refused_before_the_run_is_paid_for() {
     const SESSION: &str = "\
 name: an allocation joined to a resident size by address
 format: json
@@ -783,31 +785,39 @@ joins:
     closes: \"op == 'free'\"
     window: 60s
 ";
+    // The validator is the whole test now, and it needs no workload: a rule
+    // that cannot match is refused without a machine, which is the difference
+    // the fix made.
     let validated = run_written(&["validate"], SESSION);
+    assert_eq!(
+        code(&validated),
+        2,
+        "a join on a key the source does not carry is a rejected request: {}{}",
+        stdout(&validated),
+        stderr(&validated)
+    );
+    assert!(
+        stderr(&validated).contains("which `mem.rss` does not carry"),
+        "the refusal names the key: {}",
+        stderr(&validated)
+    );
+    assert!(
+        stderr(&validated).contains("`mem.rss` carries task"),
+        "and the keys the source does have, so the rule can be rewritten: {}",
+        stderr(&validated)
+    );
+
     if !has_python() {
-        eprintln!("SKIPPED: this machine has no python3 to launch the workload");
+        eprintln!("SKIPPED: this machine has no python3, so the run itself is not checked");
         return;
     }
+    // And nothing is measured: the same session run for real is refused with
+    // the same code, not after the collectors have stopped.
     let output = run_written(&[], SESSION);
-    let refused = stderr(&output).contains("which `mem.rss` events do not carry");
-
-    assert!(
-        refused,
-        "the engine must refuse a join on a key no event carries, however late: {}",
-        stderr(&output)
-    );
-    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert_eq!(code(&output), 2, "{}", stderr(&output));
     assert!(
         stdout(&output).trim().is_empty(),
         "the run was refused and printed results anyway"
-    );
-    assert!(
-        validated.status.success(),
-        "D2 is fixed: `omn validate` now refuses a join on `mem` onto `mem.rss`, before anything \
-         is measured. Make this assert the refusal and move D2 to fixed in \
-         docs/scenarios/cross-memory.md\n{}{}",
-        stdout(&validated),
-        stderr(&validated)
     );
 }
 
