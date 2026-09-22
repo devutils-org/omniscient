@@ -52,19 +52,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, Counters, Hash};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
-
-/// `bpf_get_current_comm`.
-///
-/// Not in `insn::helper` because this is the first program in the layer that
-/// needs it: the other three read `comm` out of a `task_struct` a scheduler
-/// tracepoint handed them, and a block tracepoint hands over a request. It
-/// belongs in the shared list rather than here, and the request to move it is
-/// under `## Needs from another stream` in `docs/open-findings.md`.
-const GET_CURRENT_COMM: i32 = 16;
 
 /// Which two moments a program set measures between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,21 +342,6 @@ const OPEN_DROP_KEY: i16 = -48;
 /// `struct request` comes through it.
 const LICENSE: &str = "GPL";
 
-/// Reads `size` bytes of a kernel structure into the program's stack.
-///
-/// The same six instructions `runqlat.rs` writes, for the same reason: the
-/// pointer came out of a tracepoint argument and the verifier knows nothing
-/// about what it points at, so a plain load is refused and
-/// `bpf_probe_read_kernel` is the way in.
-fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
-
 /// Adds one to a slot of the per-cpu counter array.
 ///
 /// `resume` is where control goes both when the count has been made and when
@@ -449,7 +425,7 @@ fn open_instructions(
     program.push(Insn::mov64_reg(1, R10));
     program.push(Insn::add64_imm(1, (ENTRY_VALUE + VAL_COMM) as i32));
     program.push(Insn::mov64_imm(2, 16));
-    program.push(Insn::call(GET_CURRENT_COMM));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
 
     program.push(Insn::stx(BPF_DW, R10, ENTRY_KEY, 7));
     program.extend(Insn::load_map_fd(1, inflight_fd));
@@ -620,7 +596,7 @@ fn close_instructions(
         program.push(Insn::mov64_reg(1, R10));
         program.push(Insn::add64_imm(1, EV_COMM as i32));
         program.push(Insn::mov64_imm(2, 16));
-        program.push(Insn::call(GET_CURRENT_COMM));
+        program.push(Insn::call(helper::GET_CURRENT_COMM));
 
         // The record's own tid and tgid sit where an entry's would, so the
         // comparison is the same one the open program makes.
@@ -663,7 +639,7 @@ fn close_instructions(
             program.push(Insn::mov64_reg(1, R10));
             program.push(Insn::add64_imm(1, EV_COMM as i32));
             program.push(Insn::mov64_imm(2, 16));
-            program.push(Insn::call(GET_CURRENT_COMM));
+            program.push(Insn::call(helper::GET_CURRENT_COMM));
             if let Some((slot, wanted)) = submitter.comparison(EV_TID - VAL_TID) {
                 program.push(Insn::ldx(BPF_W, 1, R10, slot));
                 program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
@@ -711,9 +687,9 @@ impl BlockProgram {
 
         let ring_map =
             syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_blk_ring")
-                .map_err(|error| format!("cannot create the block ring buffer: {error}"))?;
+                .map_err(|error| map_failure("block ring buffer", error))?;
         let counters = Counters::create(DROP_SLOTS, "omn_blk_count")
-            .map_err(|error| format!("cannot create the block drop counter: {error}"))?;
+            .map_err(|error| map_failure("block drop counter", error))?;
 
         let inflight = match stage.opens_at() {
             Some(_) => Some(
@@ -723,7 +699,7 @@ impl BlockProgram {
                     MAX_INFLIGHT,
                     stage.map_name(),
                 )
-                .map_err(|error| format!("cannot create the in-flight request map: {error}"))?,
+                .map_err(|error| map_failure("in-flight request map", error))?,
             ),
             None => None,
         };

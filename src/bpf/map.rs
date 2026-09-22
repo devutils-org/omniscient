@@ -33,6 +33,30 @@ use super::syscall::{
     self, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_STACK_TRACE,
 };
 
+/// A map this layer could not create, said in a way a reader can act on.
+///
+/// Every program here attaches `permission_advice` to its `prog_load`, and a
+/// program load is not the first privileged thing a collector does -- **map
+/// creation is**, and it fails first. So what somebody without `CAP_BPF`
+/// actually saw, from every collector written before the seventh wave, was
+///
+/// ```text
+/// cannot create the `sched_process_exec` ring buffer: Operation not permitted (os error 1)
+/// ```
+///
+/// which names neither the capability nor the way to get it. Nobody noticed for
+/// four waves because the message only appears on a machine without the
+/// capabilities, which is not the machine any of this was written on.
+///
+/// `what` is the map, without its article: "off-cpu in-flight map".
+pub fn map_failure(what: &str, error: io::Error) -> String {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        super::permission_advice(&format!("creating the {what}"))
+    } else {
+        format!("cannot create the {what}: {error}")
+    }
+}
+
 /// A `BPF_MAP_TYPE_HASH` shared with a program, addressed as bytes.
 ///
 /// Key and value are byte strings here rather than types, because the layer
@@ -357,5 +381,31 @@ mod tests {
                 eprintln!("skipped: this machine does not let this process create a map: {error}");
             }
         }
+    }
+
+    /// The advice has to arrive on the first privileged call a collector makes,
+    /// which is this one and not the program load. A reader whose kernel
+    /// refuses gets the capability and the command, not `os error 1`.
+    #[test]
+    fn a_map_refused_on_privilege_grounds_names_the_capability() {
+        let refused = io::Error::from(io::ErrorKind::PermissionDenied);
+        let message = map_failure("off-cpu in-flight map", refused);
+        assert!(message.contains("CAP_BPF"), "{message}");
+        assert!(message.contains("setcap"), "{message}");
+        assert!(message.contains("off-cpu in-flight map"), "{message}");
+    }
+
+    /// And a failure that is not about privilege says what it was, rather than
+    /// sending a reader to grant a capability they already have. A full map
+    /// table and a refused one are different problems.
+    #[test]
+    fn a_map_refused_for_any_other_reason_is_reported_as_itself() {
+        let full = io::Error::from(io::ErrorKind::OutOfMemory);
+        let message = map_failure("syscall histogram map", full);
+        assert!(!message.contains("CAP_BPF"), "{message}");
+        assert!(
+            message.starts_with("cannot create the syscall histogram map"),
+            "{message}"
+        );
     }
 }

@@ -33,7 +33,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::net_program::{
     count_drop, expect_signature, load, read_field, read_narrow, GET_CURRENT_COMM,
 };
@@ -378,11 +378,11 @@ impl TcpLifetimeProgram {
 
         let ring_map =
             syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_tcp_life")
-                .map_err(|error| format!("cannot create the connection ring buffer: {error}"))?;
+                .map_err(|error| map_failure("connection ring buffer", error))?;
         let open = Hash::create(OPEN_KEY_BYTES, OPEN_VALUE_BYTES, MAX_OPEN, "omn_tcp_open")
-            .map_err(|error| format!("cannot create the open connection map: {error}"))?;
+            .map_err(|error| map_failure("open connection map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_tcp_lost")
-            .map_err(|error| format!("cannot create the connection counters: {error}"))?;
+            .map_err(|error| map_failure("connection counters", error))?;
 
         let instructions = instructions(
             btf,

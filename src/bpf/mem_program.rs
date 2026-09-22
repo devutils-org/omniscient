@@ -21,16 +21,15 @@
 
 use std::os::fd::OwnedFd;
 
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::syscall;
+use super::insn::{self, helper, Insn, Log2Labels, Program, BPF_DW, R10};
 
-/// `bpf_get_current_comm(void *buf, u32 size)`.
-///
-/// Not in `insn::helper`, which names the eight the layer used before this
-/// family. Declared here rather than added there because `insn.rs` is the
-/// shared layer and a stream does not edit it; the request to hoist both of
-/// these is written down in `docs/families/mem.md`.
-pub const GET_CURRENT_COMM: i32 = 16;
+// Written once in `insn.rs` since the seventh wave. `bucket_low` keeps this
+// family's name for it: the arithmetic is the layout's and carries no unit,
+// where a `mem` bucket may hold pages, bytes or nanoseconds.
+pub use super::insn::bucket_low_ns as bucket_low;
+pub use super::insn::count_drop;
+pub use super::insn::helper::GET_CURRENT_COMM;
+use super::syscall;
 
 /// `bpf_get_current_cgroup_id(void)`.
 ///
@@ -50,47 +49,27 @@ pub const COMM_BYTES: usize = 16;
 /// on some kernels. Every program in this family declares GPL for that reason.
 pub const LICENSE: &str = "GPL";
 
-/// The steps of the unrolled `log2`, as (shift, the label that skips it).
+/// This family's own labels for the shared unrolled log2.
 ///
-/// There is no count-leading-zeros instruction in BPF and no loop worth writing
-/// on a path this hot, so the exponent is found by binary search: six compares
-/// and no branch that depends on anything but the value.
-const LOG2_STEPS: [(i32, &str); 6] = [
-    (32, "mem_log2_32"),
-    (16, "mem_log2_16"),
-    (8, "mem_log2_8"),
-    (4, "mem_log2_4"),
-    (2, "mem_log2_2"),
-    (1, "mem_log2_1"),
+/// The sequence itself is `insn::push_log2_bucket`, which is where the one
+/// definition of `emit::BucketLayout::Log2`'s numbering lives. What stays here
+/// is the label set, because a label is defined once per instruction stream.
+const LOG2: Log2Labels = [
+    "mem_log2_32",
+    "mem_log2_16",
+    "mem_log2_8",
+    "mem_log2_4",
+    "mem_log2_2",
+    "mem_log2_1",
+    "mem_log2_done",
 ];
 
 /// Computes the log2 bucket of the value in `value_reg` into `r3`.
 ///
-/// The numbering is `emit::BucketLayout::Log2`'s, deliberately: zero is bucket
-/// zero and everything else is `floor(log2(v)) + 1`, so bucket *k* holds
-/// `[2^(k-1), 2^k)` on both sides of the kernel boundary. A histogram built
-/// here passes through the emit layer's own bucketing unchanged instead of
-/// being re-bucketed into something that is neither.
-///
-/// `r1` and `r2` are scratch. A program must not call a helper between this and
-/// the store of `r3`.
+/// A program may only call this once: the labels are fixed, and a second call
+/// in the same program would place each of them twice.
 pub fn push_log2_bucket(program: &mut Program, value_reg: u8) {
-    program.push(Insn::mov64_reg(1, value_reg));
-    program.push(Insn::mov64_imm(3, 0));
-    // A value of exactly zero is bucket zero, not the log2 of zero.
-    program.jump_to("mem_log2_done", Insn::jeq_imm(1, 0, 0));
-    for (shift, label) in LOG2_STEPS {
-        program.push(Insn::mov64_reg(2, 1));
-        program.push(Insn::rsh64_imm(2, shift));
-        program.jump_to(label, Insn::jeq_imm(2, 0, 0));
-        program.push(Insn::add64_imm(3, shift));
-        program.push(Insn::mov64_reg(1, 2));
-        program.label(label);
-    }
-    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
-    // bucket 0 can mean "below one" rather than "exactly one".
-    program.push(Insn::add64_imm(3, 1));
-    program.label("mem_log2_done");
+    insn::push_log2_bucket(program, value_reg, &LOG2);
 }
 
 /// The same function, in Rust, as the reference the tests check the search
@@ -105,22 +84,6 @@ pub fn push_log2_bucket(program: &mut Program, value_reg: u8) {
 #[cfg(test)]
 pub fn log2_bucket(value: u64) -> u32 {
     u64::BITS - value.leading_zeros()
-}
-
-/// The low bound of a log2 bucket, which is the value that travels on an event.
-///
-/// It is the one number the emit layer's own bucketing maps back to exactly the
-/// bucket it came from, so a histogram built in the kernel and one built in
-/// userspace from these events put the measurements in the same places.
-pub fn bucket_low(bucket: u32) -> u64 {
-    match bucket {
-        0 => 0,
-        // Unreachable from a bucket this family computes -- the values are page
-        // counts, byte counts and nanosecond counts -- but a shift that would
-        // overflow is a panic rather than a wrong answer, so it is written down.
-        k if k >= 64 => 1 << 63,
-        k => 1 << (k - 1),
-    }
 }
 
 /// Reads `bpf_get_current_pid_tgid()` onto the stack at `at`.
@@ -162,30 +125,6 @@ pub fn read_cgroup_id(program: &mut Program, into: i16, wanted: bool) {
     }
     program.push(Insn::call(GET_CURRENT_CGROUP_ID));
     program.push(Insn::stx(BPF_DW, R10, into, 0));
-}
-
-/// Adds one to a slot of the per-cpu drop counter.
-///
-/// `resume` is where control goes both when the count has been made and when
-/// the counter could not be found: failing to record a loss is not a reason to
-/// stop recording measurements.
-pub fn count_drop(
-    program: &mut Program,
-    drops_fd: i32,
-    key_at: i16,
-    slot: u32,
-    resume: &'static str,
-) {
-    program.push(Insn::st_imm(BPF_W, R10, key_at, slot as i32));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, key_at as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
-    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
 }
 
 /// Loads a raw tracepoint program, turning a refusal into something to read.
@@ -280,35 +219,6 @@ mod tests {
                     "bucket {bucket} and the one below it overlap"
                 );
             }
-        }
-    }
-
-    /// The unrolled binary search has to compute `floor(log2(v)) + 1`, which is
-    /// what the emit layer's index is. Checked against the same shift
-    /// arithmetic the instruction stream performs, because the instructions
-    /// themselves cannot be run outside the kernel.
-    #[test]
-    fn the_unrolled_log2_is_the_same_arithmetic_as_the_layouts() {
-        let unrolled = |value: u64| -> u32 {
-            if value == 0 {
-                return 0;
-            }
-            let (mut value, mut exponent) = (value, 0u32);
-            for (shift, _) in LOG2_STEPS {
-                let shifted = value >> shift;
-                if shifted != 0 {
-                    exponent += shift as u32;
-                    value = shifted;
-                }
-            }
-            exponent + 1
-        };
-        for value in [0u64, 1, 2, 3, 4, 7, 8, 4096, 999_999, 1 << 40, u64::MAX] {
-            assert_eq!(
-                unrolled(value),
-                log2_bucket(value),
-                "{value} is bucketed differently by the two"
-            );
         }
     }
 

@@ -33,8 +33,8 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::insn::{self, count_drop, helper, Insn, Log2Labels, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, Counters, Hash};
 use super::syscall;
 
 /// Helper numbers this family needs and the shared `insn::helper` module does
@@ -180,77 +180,18 @@ impl SyscallRow {
     }
 }
 
-/// Adds one to a slot of the per-cpu drop counter.
-///
-/// `resume` is where control goes both when the count has been made and when
-/// the counter could not be found: failing to record a loss is not a reason to
-/// stop recording measurements.
-fn count_drop(program: &mut Program, drops_fd: i32, slot: u32, resume: &'static str) {
-    program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot as i32));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, DROP_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
-    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
-}
-
-/// The steps of the unrolled `log2`, as (shift, the label that skips it).
-///
-/// There is no count-leading-zeros instruction in BPF and no loop worth writing
-/// on a path this hot, so the exponent is found by binary search: six compares,
-/// thirty instructions, and no branch that depends on anything but the value.
-const LOG2_STEPS: [(i32, &str); 6] = [
-    (32, "log2_32"),
-    (16, "log2_16"),
-    (8, "log2_8"),
-    (4, "log2_4"),
-    (2, "log2_2"),
-    (1, "log2_1"),
+/// This program's own labels for the shared unrolled log2, which is
+/// `insn::push_log2_bucket` -- one definition of `emit::BucketLayout::Log2`'s
+/// numbering, where there were five.
+const LOG2: Log2Labels = [
+    "log2_32",
+    "log2_16",
+    "log2_8",
+    "log2_4",
+    "log2_2",
+    "log2_1",
+    "log2_done",
 ];
-
-/// Computes the log2 bucket of the duration in `value_reg` into `r3`.
-///
-/// The numbering is `emit::BucketLayout::Log2`'s: zero is bucket zero and
-/// everything else is `floor(log2(v)) + 1`, so bucket *k* holds `[2^(k-1),
-/// 2^k)` on both sides of the kernel boundary.
-fn push_log2_bucket(program: &mut Program, value_reg: u8) {
-    program.push(Insn::mov64_reg(1, value_reg));
-    program.push(Insn::mov64_imm(3, 0));
-    // A call that took no measurable time -- both events inside one clock tick
-    // -- is bucket zero, not the log2 of zero.
-    program.jump_to("log2_done", Insn::jeq_imm(1, 0, 0));
-    for (shift, label) in LOG2_STEPS {
-        program.push(Insn::mov64_reg(2, 1));
-        program.push(Insn::rsh64_imm(2, shift));
-        program.jump_to(label, Insn::jeq_imm(2, 0, 0));
-        program.push(Insn::add64_imm(3, shift));
-        program.push(Insn::mov64_reg(1, 2));
-        program.label(label);
-    }
-    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
-    // bucket 0 can mean "below one" rather than "exactly one".
-    program.push(Insn::add64_imm(3, 1));
-    program.label("log2_done");
-}
-
-/// A map this layer could not create, said in a way a reader can act on.
-///
-/// `EPERM` from `BPF_MAP_CREATE` is the *first* thing an unprivileged run hits
-/// -- before any program is loaded, which is where the rest of this layer
-/// attaches its advice -- so a bare "Operation not permitted" here is what
-/// somebody without `CAP_BPF` actually sees, and it names neither the
-/// capability nor the way to get it.
-fn map_failure(what: &str, error: std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
-        super::permission_advice(&format!("creating the {what}"))
-    } else {
-        format!("cannot create the {what}: {error}")
-    }
-}
 
 /// Refuses a kernel whose tracepoint is not the shape the program reads.
 fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
@@ -325,7 +266,7 @@ fn enter_instructions(
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     // The map is full: this call will never be timed, and nothing else anywhere
     // would record that it happened.
-    count_drop(&mut program, drops_fd, DROP_PENDING, "done");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_PENDING, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -387,7 +328,7 @@ fn exit_instructions(
     program.push(Insn::mov64_reg(9, 1));
 
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_NR, 7));
-    push_log2_bucket(&mut program, 9);
+    insn::push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
     program.extend(Insn::load_map_fd(1, rows_fd));
@@ -419,7 +360,7 @@ fn exit_instructions(
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
-    count_drop(&mut program, drops_fd, DROP_ROWS, "done");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));

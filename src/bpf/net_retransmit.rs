@@ -20,7 +20,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::Counters;
+use super::map::{map_failure, Counters};
 use super::net_program::{count_drop, expect_signature, load, read_field, read_narrow};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
@@ -203,9 +203,9 @@ impl RetransmitProgram {
         let has_error = btf.tracepoint_signature("tcp_retransmit_skb")?.len() == WITH_ERROR.len();
 
         let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_retrans")
-            .map_err(|error| format!("cannot create the retransmission ring buffer: {error}"))?;
+            .map_err(|error| map_failure("retransmission ring buffer", error))?;
         let drops = Counters::create(1, "omn_retr_lost")
-            .map_err(|error| format!("cannot create the retransmission counter: {error}"))?;
+            .map_err(|error| map_failure("retransmission counter", error))?;
 
         let instructions = instructions(btf, ring_map.as_raw_fd(), drops.as_raw_fd())?;
         let program = load(&instructions, "omn_retransmit")?;

@@ -30,10 +30,10 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::sched_common::{
-    bucket_low_ns, count_drop, count_update_failure, extra_helper, push_log2_bucket, read_field,
-    text_of, Log2Labels, E2BIG,
+    bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, read_field, text_of,
+    Log2Labels, E2BIG,
 };
 use super::syscall;
 
@@ -270,7 +270,7 @@ fn exit_instructions(
     program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_NAME) as i32));
     program.push(Insn::mov64_imm(2, NAME_BYTES as i32));
     program.push(Insn::ldx(BPF_DW, 3, R10, SCRATCH));
-    program.push(Insn::call(extra_helper::PROBE_READ_KERNEL_STR));
+    program.push(Insn::call(helper::PROBE_READ_KERNEL_STR));
 
     program.extend(Insn::load_map_fd(1, rows_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -326,11 +326,11 @@ impl IrqProgram {
         // A per-cpu array of one `u64`: this build's in-flight timestamp, one
         // per cpu, which is the whole state these two programs share.
         let in_flight = Counters::create(1, "omn_irq_open")
-            .map_err(|error| format!("cannot create the interrupt in-flight slot: {error}"))?;
+            .map_err(|error| map_failure("interrupt in-flight slot", error))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_irq_hist")
-            .map_err(|error| format!("cannot create the interrupt histogram map: {error}"))?;
+            .map_err(|error| map_failure("interrupt histogram map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_irq_drop")
-            .map_err(|error| format!("cannot create the interrupt drop counter: {error}"))?;
+            .map_err(|error| map_failure("interrupt drop counter", error))?;
 
         let entry = entry_instructions(btf, in_flight.as_raw_fd())?;
         let exit = exit_instructions(
@@ -480,7 +480,7 @@ mod tests {
             .map(|insn| insn.imm)
             .collect();
         assert!(calls.contains(&helper::PROBE_READ_KERNEL));
-        assert!(calls.contains(&extra_helper::PROBE_READ_KERNEL_STR));
+        assert!(calls.contains(&helper::PROBE_READ_KERNEL_STR));
     }
 
     /// `bpf_probe_read_kernel_str` stops at the terminator and leaves the rest

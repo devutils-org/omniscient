@@ -14,20 +14,13 @@
 //! on -- and a generic version of them would hide exactly what a reader of
 //! those files needs to see.
 
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{Insn, Program};
 
-/// Helpers this layer's own `insn::helper` does not list yet.
-///
-/// They are numbers in the kernel's `bpf_func_id` enum, and naming them here
-/// rather than in `insn.rs` keeps this wave out of a file five streams share.
-/// The request to move them is in `docs/open-findings.md`.
-pub mod extra_helper {
-    /// `bpf_get_current_comm(buf, size)`.
-    pub const GET_CURRENT_COMM: i32 = 16;
-    /// `bpf_probe_read_kernel_str(dst, size, unsafe_ptr)`, which stops at the
-    /// terminator rather than reading a fixed span past the end of a string.
-    pub const PROBE_READ_KERNEL_STR: i32 = 115;
-}
+// The fragments these four programs share with every other family now live in
+// `insn.rs`, where one copy decides what every kernel-built histogram in this
+// repository does. They are re-exported here so that a `sched` program reads as
+// one import, and because the seventh wave moved them rather than the sixth.
+pub use super::insn::{bucket_low_ns, count_drop, push_log2_bucket, read_field, Log2Labels};
 
 /// `BPF_F_USER_STACK`: walk the task's own stack rather than the kernel's.
 ///
@@ -39,43 +32,6 @@ pub mod extra_helper {
 /// restricts to root, and `CAP_SYS_ADMIN` is more than the two capabilities
 /// this project settled on.
 pub const BPF_F_USER_STACK: i32 = 1 << 8;
-
-/// Reads `size` bytes of a kernel structure into the program's stack.
-///
-/// `bpf_probe_read_kernel` rather than a plain load: the pointer came out of a
-/// tracepoint argument and the verifier knows nothing about what it points at.
-pub fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
-
-/// Adds one to a slot of a per-cpu drop counter.
-///
-/// `resume` is where control goes both when the count has been made and when
-/// the counter could not be found: failing to record a loss is not a reason to
-/// stop recording measurements.
-pub fn count_drop(
-    program: &mut Program,
-    drops_fd: i32,
-    drop_key: i16,
-    slot: u32,
-    resume: &'static str,
-) {
-    program.push(Insn::st_imm(BPF_W, R10, drop_key, slot as i32));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, drop_key as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
-    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
-}
 
 /// Errno values `bpf_map_update_elem` returns, negated the way a program sees
 /// them.
@@ -119,63 +75,6 @@ pub fn count_update_failure(
         program.label(next);
     }
     count_drop(program, drops_fd, drop_key, fallback_slot, resume);
-}
-
-/// The steps of the unrolled `log2`, as (shift, the label that skips it).
-///
-/// There is no count-leading-zeros instruction in BPF and no loop worth writing
-/// on a path this hot, so the exponent is found by binary search: six compares,
-/// thirty instructions, no branches that depend on anything but the value.
-///
-/// Each program passes its own labels, because two copies of this in one
-/// instruction stream would define the same label twice.
-pub type Log2Labels = [&'static str; 7];
-
-/// Computes the log2 bucket of the value in `value_reg` into `r3`.
-///
-/// The numbering is `emit::BucketLayout::Log2`'s, deliberately: zero is bucket
-/// zero and everything else is `floor(log2(v)) + 1`, so that bucket *k* holds
-/// `[2^(k-1), 2^k)` on both sides of the kernel boundary. That is what lets a
-/// histogram built in the kernel pass through the emit layer's own bucketing
-/// without being re-bucketed into something else.
-///
-/// `r1` and `r2` are scratch, which is safe because nothing between here and
-/// the next helper call reads them.
-pub fn push_log2_bucket(program: &mut Program, value_reg: u8, labels: &Log2Labels) {
-    const SHIFTS: [i32; 6] = [32, 16, 8, 4, 2, 1];
-    program.push(Insn::mov64_reg(1, value_reg));
-    program.push(Insn::mov64_imm(3, 0));
-    // A wait of exactly zero nanoseconds -- two events inside one clock tick --
-    // is bucket zero, not the log2 of zero.
-    program.jump_to(labels[6], Insn::jeq_imm(1, 0, 0));
-    for (step, shift) in SHIFTS.iter().enumerate() {
-        program.push(Insn::mov64_reg(2, 1));
-        program.push(Insn::rsh64_imm(2, *shift));
-        program.jump_to(labels[step], Insn::jeq_imm(2, 0, 0));
-        program.push(Insn::add64_imm(3, *shift));
-        program.push(Insn::mov64_reg(1, 2));
-        program.label(labels[step]);
-    }
-    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
-    // bucket 0 can mean "below one" rather than "exactly one".
-    program.push(Insn::add64_imm(3, 1));
-    program.label(labels[6]);
-}
-
-/// The low bound of a log2 bucket, in the same numbering the program uses.
-///
-/// This is the value that travels on an event, because it is the one the emit
-/// layer's own log2 bucketing maps back to exactly this bucket: a histogram
-/// built in the kernel and one built in userspace from these events agree.
-pub fn bucket_low_ns(bucket: u32) -> u64 {
-    match bucket {
-        0 => 0,
-        // A duration is a nanosecond count and `bucket` is derived from one, so
-        // this cannot reach 64 -- but a shift that would overflow is a panic
-        // rather than a wrong answer, so the case is written down.
-        k if k >= 64 => 1 << 63,
-        k => 1 << (k - 1),
-    }
 }
 
 /// Where a name ends inside a fixed-width field.

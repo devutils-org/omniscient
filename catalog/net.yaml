@@ -33,9 +33,9 @@
       equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
-  targets: {pid: bpf_only, cgroup: bpf_only, container: bpf_only, system: native}
-  keys: [sock, task, req]
-  filter_fields: [comm, daddr, dport, saddr, sport, family]
+  targets: {system: native}
+  keys: [sock, task]
+  filter_fields: [comm, saddr, sport, family]
   determinism: low
 
 - id: net.tcp.rtt
@@ -76,7 +76,7 @@
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
   keys: [sock, task]
-  filter_fields: [daddr, dport, saddr, sport]
+  filter_fields: [saddr, sport]
   determinism: low
 
 - id: net.drops
@@ -187,12 +187,12 @@
   summary: "Transmit scheduling latency"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_dequeue", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue", "raw_tracepoint:qdisc_dequeue", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_enqueue", "tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [hist, raw, summary, timeline]
   targets: {system: native, iface: bpf_only}
-  keys: [sock]
+  keys: [iface]
   filter_fields: [iface]
   determinism: low
 

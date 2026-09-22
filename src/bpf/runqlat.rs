@@ -34,8 +34,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::insn::{
+    self, count_drop, helper, read_field, Insn, Log2Labels, Program, BPF_DW, BPF_W, R10,
+};
+use super::map::{map_failure, Counters, Hash};
 use super::syscall;
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context.
@@ -185,37 +187,6 @@ impl RunqLat {
     }
 }
 
-/// Reads `size` bytes of a kernel structure into the program's stack.
-///
-/// `bpf_probe_read_kernel` rather than a plain load: the pointer came out of a
-/// tracepoint argument and the verifier knows nothing about what it points at.
-fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
-
-/// Adds one to a slot of the per-cpu drop counter.
-///
-/// `resume` is where control goes both when the count has been made and when
-/// the counter could not be found: failing to record a loss is not a reason to
-/// stop recording measurements.
-fn count_drop(program: &mut Program, drops_fd: i32, slot: u32, resume: &'static str) {
-    program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot as i32));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, DROP_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
-    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
-}
-
 /// Everything both enqueue sites need: the maps to write into, where the two
 /// fields of a `task_struct` are on this kernel, and whose tasks to keep.
 ///
@@ -279,49 +250,21 @@ fn enqueue(program: &mut Program, at: &Enqueue, task_reg: u8, ts_reg: u8, resume
     program.jump_to(resume, Insn::jsge_imm(0, 0, 0));
     // The map is full: this wait will never be timed, and nothing else
     // anywhere would record that it happened.
-    count_drop(program, drops_fd, DROP_QUEUED, resume);
+    count_drop(program, drops_fd, DROP_KEY, DROP_QUEUED, resume);
 }
 
-/// The steps of the unrolled `log2`, as (shift, the label that skips it).
-///
-/// There is no count-leading-zeros instruction in BPF and no loop worth writing
-/// on a path this hot, so the exponent is found by binary search: six compares,
-/// thirty instructions, no branches that depend on anything but the value.
-const LOG2_STEPS: [(i32, &str); 6] = [
-    (32, "log2_32"),
-    (16, "log2_16"),
-    (8, "log2_8"),
-    (4, "log2_4"),
-    (2, "log2_2"),
-    (1, "log2_1"),
+/// This program's own labels for the shared unrolled log2, which is
+/// `insn::push_log2_bucket` -- one definition of `emit::BucketLayout::Log2`'s
+/// numbering, where there were five.
+const LOG2: Log2Labels = [
+    "log2_32",
+    "log2_16",
+    "log2_8",
+    "log2_4",
+    "log2_2",
+    "log2_1",
+    "log2_done",
 ];
-
-/// Computes the log2 bucket of the wait in `value_reg` into `r3`.
-///
-/// The numbering is `emit::BucketLayout::Log2`'s, deliberately: zero is bucket
-/// zero and everything else is `floor(log2(v)) + 1`, so that bucket *k* holds
-/// `[2^(k-1), 2^k)` on both sides of the kernel boundary. `r1` and `r2` are
-/// scratch, which is safe because nothing between here and the next helper call
-/// reads them.
-fn push_log2_bucket(program: &mut Program, value_reg: u8) {
-    program.push(Insn::mov64_reg(1, value_reg));
-    program.push(Insn::mov64_imm(3, 0));
-    // A wait of exactly zero nanoseconds -- two events inside one clock tick --
-    // is bucket zero, not the log2 of zero.
-    program.jump_to("log2_done", Insn::jeq_imm(1, 0, 0));
-    for (shift, label) in LOG2_STEPS {
-        program.push(Insn::mov64_reg(2, 1));
-        program.push(Insn::rsh64_imm(2, shift));
-        program.jump_to(label, Insn::jeq_imm(2, 0, 0));
-        program.push(Insn::add64_imm(3, shift));
-        program.push(Insn::mov64_reg(1, 2));
-        program.label(label);
-    }
-    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
-    // bucket 0 can mean "below one" rather than "exactly one".
-    program.push(Insn::add64_imm(3, 1));
-    program.label("log2_done");
-}
 
 /// The program on `sched_wakeup`: a task has just become runnable.
 fn wakeup_instructions(
@@ -458,7 +401,7 @@ fn switch_instructions(
     program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_CPU, 0));
 
-    push_log2_bucket(&mut program, 9);
+    insn::push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
     // The thread id is already on the stack from the lookup just done.
@@ -499,7 +442,7 @@ fn switch_instructions(
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
-    count_drop(&mut program, drops_fd, DROP_ROWS, "done");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -543,11 +486,11 @@ impl RunqLatProgram {
             MAX_QUEUED,
             "omn_runq_wait",
         )
-        .map_err(|error| format!("cannot create the run queue map: {error}"))?;
+        .map_err(|error| map_failure("run queue map", error))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_runq_hist")
-            .map_err(|error| format!("cannot create the run queue histogram map: {error}"))?;
+            .map_err(|error| map_failure("run queue histogram map", error))?;
         let drops = Counters::create(2, "omn_runq_drop")
-            .map_err(|error| format!("cannot create the run queue drop counter: {error}"))?;
+            .map_err(|error| map_failure("run queue drop counter", error))?;
 
         let wakeup = wakeup_instructions(btf, target_tgid, queued.as_raw_fd(), drops.as_raw_fd())?;
         let switch = switch_instructions(
@@ -720,31 +663,6 @@ mod tests {
     /// what the emit layer's index is. Checked here against the same shift
     /// arithmetic the instruction stream performs, because the instructions
     /// themselves cannot be run outside the kernel.
-    #[test]
-    fn the_unrolled_log2_is_the_same_arithmetic_as_the_layouts() {
-        let unrolled = |value: u64| -> u64 {
-            if value == 0 {
-                return 0;
-            }
-            let (mut value, mut exponent) = (value, 0u64);
-            for (shift, _) in LOG2_STEPS {
-                let shifted = value >> shift;
-                if shifted != 0 {
-                    exponent += shift as u64;
-                    value = shifted;
-                }
-            }
-            exponent + 1
-        };
-        for value in [0u64, 1, 2, 3, 4, 7, 8, 1_000, 999_999, 1 << 40, u64::MAX] {
-            assert_eq!(
-                unrolled(value),
-                reference_index(value),
-                "{value} ns is bucketed differently by the two"
-            );
-        }
-    }
-
     /// Invariant 6, checked in the instruction stream rather than trusted.
     /// `bpf_ktime_get_boot_ns` includes suspend time, and a wait computed from
     /// one reading of each clock is not a wait at all.

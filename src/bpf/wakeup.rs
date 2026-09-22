@@ -17,7 +17,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::Counters;
+use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
@@ -210,9 +210,9 @@ impl WakeupProgram {
         let bytes = ring_bytes(requested_ring_bytes);
 
         let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_wakeups")
-            .map_err(|error| format!("cannot create the wakeup ring buffer: {error}"))?;
+            .map_err(|error| map_failure("wakeup ring buffer", error))?;
         let drops = Counters::create(1, "omn_wake_drop")
-            .map_err(|error| format!("cannot create the drop counter: {error}"))?;
+            .map_err(|error| map_failure("drop counter", error))?;
 
         let instructions = instructions(btf, target_tgid, ring_map.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(

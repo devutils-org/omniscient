@@ -35,7 +35,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::net_program::{bucket_low_ns, count_drop, expect_signature, load, push_log2_bucket};
 use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY};
 
@@ -322,11 +322,11 @@ impl SoftIrqProgram {
         // handler started. A per-cpu array rather than a hash because there is
         // at most one open handler per (cpu, vector) and no atomic is needed.
         let at = syscall::map_create(BPF_MAP_TYPE_PERCPU_ARRAY, 4, 8, VECTORS, "omn_sirq_at")
-            .map_err(|error| format!("cannot create the softirq entry map: {error}"))?;
+            .map_err(|error| map_failure("softirq entry map", error))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sirq_hist")
-            .map_err(|error| format!("cannot create the softirq histogram map: {error}"))?;
+            .map_err(|error| map_failure("softirq histogram map", error))?;
         let counters = Counters::create(COUNTER_SLOTS, "omn_sirq_lost")
-            .map_err(|error| format!("cannot create the softirq counters: {error}"))?;
+            .map_err(|error| map_failure("softirq counters", error))?;
 
         let entry = entry_instructions(btf, vectors, at.as_raw_fd())?;
         let exit = exit_instructions(

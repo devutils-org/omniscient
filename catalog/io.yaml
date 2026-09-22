@@ -243,7 +243,8 @@
   summary: "Readahead effectiveness (pages read ahead vs pages used)"
   unit: count
   backends:
-    - {id: "bpf:tp", requires: ["tracepoint:filemap:*", "bpf"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: low, equivalent: true}
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, summary, hist]

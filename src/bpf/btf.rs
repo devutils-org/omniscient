@@ -162,7 +162,22 @@ impl Btf {
         self.by_name.contains_key(name)
     }
 
-    /// The byte offset of `member` within `struct_name`.
+    /// The byte offset of `member` within `struct_name`, descending into the
+    /// anonymous structs and unions the kernel uses to overlay one object on
+    /// another.
+    ///
+    /// An anonymous member has no name of its own, so C addresses its fields as
+    /// if they were the outer type's. This does the same, which is not an
+    /// extension of the model but the model: `folio.mapping` and
+    /// `sk_buff.protocol` are declared inside anonymous unions, and a lookup
+    /// that stopped at the direct members would report them absent from a
+    /// kernel that has them.
+    ///
+    /// Direct members are searched before anonymous ones, at every level. C
+    /// forbids the ambiguity that would make the order observable -- a name in
+    /// an anonymous member may not shadow one of the enclosing type -- so the
+    /// rule matters only for a malformed blob, where finding the named member
+    /// is the better answer.
     pub fn member_offset(&self, struct_name: &str, member: &str) -> Result<i32, String> {
         let candidates = self
             .by_name
@@ -173,36 +188,141 @@ impl Btf {
             if entry.kind != KIND_STRUCT && entry.kind != KIND_UNION {
                 continue;
             }
-            for slot in 0..entry.vlen as usize {
-                let at = entry.members_at + slot * 12;
-                let name_off = self.word(at) as usize;
-                let offset = self.word(at + 8);
-                let Some(name) = read_string(&self.buffer, self.string_offset + name_off) else {
-                    continue;
-                };
-                if name != member {
-                    continue;
-                }
-                // With the kind flag set, the low 24 bits are the bit offset and
-                // the top 8 are the bitfield width. Without it, the whole word
-                // is the bit offset.
-                let bit_offset = if entry.kind_flag {
-                    offset & 0x00ff_ffff
-                } else {
-                    offset
-                };
+            if let Some(offset) = self.offset_within(*index, member, struct_name, 0)? {
+                return Ok(offset);
+            }
+        }
+        Err(format!(
+            "this kernel's `{struct_name}` has no member named `{member}`, directly or in an \
+             anonymous struct or union inside it"
+        ))
+    }
+
+    /// The offset of `member` inside one composite type, or `None` when it is
+    /// not in there at all. `Err` is reserved for a member that was found and
+    /// cannot be addressed, which is a different answer from absence.
+    ///
+    /// The depth bound is the same argument as `describe`'s: BTF can be cyclic
+    /// through a struct that points at itself, and a nesting deeper than this
+    /// is not a layout any program here reads.
+    fn offset_within(
+        &self,
+        index: usize,
+        member: &str,
+        struct_name: &str,
+        depth: usize,
+    ) -> Result<Option<i32>, String> {
+        if depth > 8 {
+            return Ok(None);
+        }
+        let entry = &self.types[index];
+        let mut anonymous = Vec::new();
+        for slot in 0..entry.vlen as usize {
+            let at = entry.members_at + slot * 12;
+            let name_off = self.word(at) as usize;
+            let member_type = self.word(at + 4);
+            let offset = self.word(at + 8);
+            // With the kind flag set, the low 24 bits are the bit offset and
+            // the top 8 are the bitfield width. Without it, the whole word
+            // is the bit offset.
+            let bit_offset = if entry.kind_flag {
+                offset & 0x00ff_ffff
+            } else {
+                offset
+            };
+            let Some(name) = read_string(&self.buffer, self.string_offset + name_off) else {
+                continue;
+            };
+            if name == member {
                 if bit_offset % 8 != 0 {
                     return Err(format!(
                         "`{struct_name}.{member}` is a bitfield at bit {bit_offset}, which this \
                          reader cannot address"
                     ));
                 }
-                return Ok((bit_offset / 8) as i32);
+                return Ok(Some((bit_offset / 8) as i32));
+            }
+            if name.is_empty() {
+                anonymous.push((member_type, bit_offset));
             }
         }
-        Err(format!(
-            "this kernel's `{struct_name}` has no member named `{member}`"
-        ))
+        for (member_type, bit_offset) in anonymous {
+            let Some(inner) = self.composite(member_type) else {
+                continue;
+            };
+            if bit_offset % 8 != 0 {
+                continue;
+            }
+            if let Some(offset) = self.offset_within(inner, member, struct_name, depth + 1)? {
+                return Ok(Some(offset + (bit_offset / 8) as i32));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The index of the struct or union `type_id` names, through whatever
+    /// typedefs and qualifiers stand in the way. `None` for anything else: a
+    /// pointer to a struct is not a member of the outer type, it is a field in
+    /// it, and a program reads it with its own load.
+    fn composite(&self, type_id: u32) -> Option<usize> {
+        let mut id = type_id as usize;
+        for _ in 0..8 {
+            let entry = self.types.get(id)?;
+            match entry.kind {
+                KIND_STRUCT | KIND_UNION => return Some(id),
+                KIND_TYPEDEF | KIND_CONST | KIND_VOLATILE | KIND_RESTRICT => {
+                    id = entry.size_or_type as usize;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The name this kernel gives `value` in `enum_name`, when it has one.
+    ///
+    /// For a field an event carries as the kernel's own number. The numbering
+    /// is a property of the kernel that is running: `enum skb_drop_reason`
+    /// grows every release and `enum wb_reason` has lost a member, so a table
+    /// compiled in here would be a property of the kernel this was built
+    /// against. A mislabelled drop reason does not read as wrong, it reads as a
+    /// different fault.
+    pub fn enum_variant(&self, enum_name: &str, value: i64) -> Option<&str> {
+        for index in self.by_name.get(enum_name)? {
+            let entry = &self.types[*index];
+            // The kind flag on an enum means its values are signed, which is
+            // what decides whether the stored word is widened or sign-extended.
+            let signed = entry.kind_flag;
+            let (stride, width) = match entry.kind {
+                KIND_ENUM => (8, 4),
+                KIND_ENUM64 => (12, 8),
+                _ => continue,
+            };
+            for slot in 0..entry.vlen as usize {
+                let at = entry.members_at + slot * stride;
+                let declared = if width == 4 {
+                    let word = self.word(at + 4);
+                    if signed {
+                        i64::from(word as i32)
+                    } else {
+                        i64::from(word)
+                    }
+                } else {
+                    let raw = u64::from(self.word(at + 4)) | (u64::from(self.word(at + 8)) << 32);
+                    if signed {
+                        raw as i64
+                    } else if raw > i64::MAX as u64 {
+                        continue;
+                    } else {
+                        raw as i64
+                    }
+                };
+                if declared == value {
+                    return self.string_at(self.word(at) as usize);
+                }
+            }
+        }
+        None
     }
 
     /// The arguments a raw tracepoint hands its program, as the running kernel
@@ -282,6 +402,14 @@ impl Btf {
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "?".to_owned()),
         }
+    }
+
+    /// A name out of the string section, borrowed rather than copied, for the
+    /// callers that hand one straight back to their own caller.
+    fn string_at(&self, name_off: usize) -> Option<&str> {
+        let rest = self.buffer.get(self.string_offset + name_off..)?;
+        let end = rest.iter().position(|byte| *byte == 0)?;
+        std::str::from_utf8(&rest[..end]).ok()
     }
 
     fn entry(&self, type_id: u32) -> Result<&TypeEntry, String> {
@@ -413,6 +541,53 @@ mod tests {
                 self.types.extend_from_slice(&offset.to_ne_bytes());
             }
             self
+        }
+
+        /// A struct or a union whose members carry a type each, and whose name
+        /// may be empty -- which is what makes it anonymous, and is the case
+        /// the offsets here exist to test.
+        fn composite(
+            &mut self,
+            kind: u8,
+            name: &str,
+            members: &[(&str, u32, u32)],
+            size: u32,
+        ) -> u32 {
+            let name_off = if name.is_empty() {
+                0
+            } else {
+                self.string(name)
+            };
+            let info = ((kind as u32) << 24) | members.len() as u32;
+            let id = self.header(name_off, info, size);
+            for (member, member_type, offset) in members {
+                let member_off = if member.is_empty() {
+                    0
+                } else {
+                    self.string(member)
+                };
+                self.types.extend_from_slice(&member_off.to_ne_bytes());
+                self.types.extend_from_slice(&member_type.to_ne_bytes());
+                self.types.extend_from_slice(&offset.to_ne_bytes());
+            }
+            id
+        }
+
+        /// An enum as BTF stores one: a header, then `(name, value)` pairs of
+        /// eight bytes each. `signed` sets the kind flag.
+        fn enumeration(&mut self, name: &str, variants: &[(&str, i32)], signed: bool) -> u32 {
+            let name_off = self.string(name);
+            let mut info = ((KIND_ENUM as u32) << 24) | variants.len() as u32;
+            if signed {
+                info |= 1 << 31;
+            }
+            let id = self.header(name_off, info, 4);
+            for (variant, value) in variants {
+                let variant_off = self.string(variant);
+                self.types.extend_from_slice(&variant_off.to_ne_bytes());
+                self.types.extend_from_slice(&value.to_ne_bytes());
+            }
+            id
         }
 
         /// A type of a kind this parser skips over rather than indexes, to
@@ -617,5 +792,169 @@ mod tests {
             "sched_waking is a tracepoint on every kernel this tool supports"
         );
         assert!(!btf.has_type("btf_trace_not_a_tracepoint"));
+    }
+
+    #[test]
+    fn a_member_of_an_anonymous_struct_is_addressed_as_if_it_were_the_outer_type_s() {
+        // struct outer { u32 head; struct { u32 wanted; }; };
+        // The anonymous member starts at byte 8, and `wanted` is 4 bytes into
+        // it, so the answer is 12 -- which is what C would compute.
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let inner = builder.composite(KIND_STRUCT, "", &[("wanted", scalar, 4 * 8)], 8);
+        builder.composite(
+            KIND_STRUCT,
+            "outer",
+            &[("head", scalar, 0), ("", inner, 8 * 8)],
+            16,
+        );
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert_eq!(btf.member_offset("outer", "head"), Ok(0));
+        assert_eq!(btf.member_offset("outer", "wanted"), Ok(12));
+    }
+
+    #[test]
+    fn a_member_two_anonymous_levels_down_carries_both_enclosing_offsets() {
+        // This is `struct folio`'s shape: a struct inside a union inside the
+        // outer type, which is where `mapping` lives and why a lookup that
+        // stopped at the direct members reported it absent.
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let deepest = builder.composite(KIND_STRUCT, "", &[("mapping", scalar, 3 * 8)], 8);
+        let union = builder.composite(KIND_UNION, "", &[("", deepest, 0)], 8);
+        builder.composite(
+            KIND_STRUCT,
+            "folio_like",
+            &[("flags", scalar, 0), ("", union, 8 * 8)],
+            16,
+        );
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert_eq!(btf.member_offset("folio_like", "mapping"), Ok(11));
+    }
+
+    #[test]
+    fn a_named_member_is_preferred_to_one_inside_an_anonymous_member() {
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let inner = builder.composite(KIND_STRUCT, "", &[("field", scalar, 0)], 8);
+        builder.composite(
+            KIND_STRUCT,
+            "outer",
+            &[("field", scalar, 0), ("", inner, 8 * 8)],
+            16,
+        );
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert_eq!(btf.member_offset("outer", "field"), Ok(0));
+    }
+
+    #[test]
+    fn a_member_in_no_anonymous_branch_is_still_refused_by_name() {
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let inner = builder.composite(KIND_STRUCT, "", &[("elsewhere", scalar, 0)], 8);
+        builder.composite(KIND_STRUCT, "outer", &[("", inner, 0)], 8);
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        let error = btf.member_offset("outer", "absent").unwrap_err();
+        assert!(error.contains("absent"), "{error}");
+        assert!(error.contains("anonymous"), "{error}");
+    }
+
+    #[test]
+    fn a_pointer_to_a_struct_is_a_field_rather_than_a_member_to_descend_into() {
+        // `folio.mapping` is an `address_space *`, and `address_space.host` is
+        // not one of `folio`'s members. Following a pointer would answer an
+        // offset in the wrong object.
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let pointed = builder.composite(KIND_STRUCT, "pointed", &[("host", scalar, 0)], 8);
+        let pointer = builder.pointer(pointed);
+        builder.composite(KIND_STRUCT, "outer", &[("", pointer, 0)], 8);
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert!(btf.member_offset("outer", "host").is_err());
+    }
+
+    #[test]
+    fn an_enum_value_is_named_by_the_kernel_rather_than_by_a_table() {
+        let mut builder = BtfBuilder::new();
+        builder.enumeration(
+            "reason_like",
+            &[("FIRST", 0), ("SECOND", 1), ("LATER", 47)],
+            false,
+        );
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert_eq!(btf.enum_variant("reason_like", 0), Some("FIRST"));
+        assert_eq!(btf.enum_variant("reason_like", 47), Some("LATER"));
+        // A value this kernel does not declare has no name, and saying so is
+        // the whole point: a number with no name is better than a wrong name.
+        assert_eq!(btf.enum_variant("reason_like", 48), None);
+        assert_eq!(btf.enum_variant("no_such_enum", 0), None);
+    }
+
+    #[test]
+    fn a_signed_enum_s_negative_value_is_not_read_as_a_large_positive_one() {
+        let mut builder = BtfBuilder::new();
+        builder.enumeration("errno_like", &[("OK", 0), ("FAILED", -1)], true);
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert_eq!(btf.enum_variant("errno_like", -1), Some("FAILED"));
+        assert_eq!(btf.enum_variant("errno_like", 4_294_967_295), None);
+    }
+
+    #[test]
+    fn the_running_kernel_declares_the_overlaid_fields_three_collectors_could_not_reach() {
+        let Some(btf) = kernel_btf() else {
+            return;
+        };
+        // Each of these is inside an anonymous union or struct on every kernel
+        // that has it, and each is a field a sixth-wave collector shipped
+        // without: `net.drops` carried no interface, and `io.pagecache` could
+        // not reach the inode behind a folio.
+        let mut offsets = Vec::new();
+        for (structure, member) in [
+            ("sk_buff", "protocol"),
+            ("sk_buff", "skb_iif"),
+            ("sock_common", "skc_daddr"),
+            ("sock_common", "skc_dport"),
+        ] {
+            let offset = btf
+                .member_offset(structure, member)
+                .unwrap_or_else(|error| panic!("{structure}.{member}: {error}"));
+            offsets.push((structure, member, offset));
+        }
+        // What is asserted is that each one resolves, and that they are not all
+        // the same field -- not where any of them is. `skc_daddr` is at zero on
+        // this kernel, being the first member of the union it lives in, which
+        // is why an "overlaid fields are not at zero" assertion would have been
+        // asserting the layout rather than the lookup.
+        let daddr = offsets[2].2;
+        let dport = offsets[3].2;
+        assert_ne!(
+            daddr, dport,
+            "skc_daddr and skc_dport resolved to one offset: {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn the_running_kernel_names_its_own_drop_reasons() {
+        let Some(btf) = kernel_btf() else {
+            return;
+        };
+        // Zero is `SKB_NOT_DROPPED_YET` on this kernel and was expected here to
+        // be `SKB_DROP_REASON_NOT_SPECIFIED`, which is the argument for reading
+        // the table out of the running kernel in one line: the guess was a
+        // name, it was wrong, and a wrong name does not read as wrong -- it
+        // reads as a different fault.
+        let first = btf.enum_variant("skb_drop_reason", 0);
+        let first = first.unwrap_or_else(|| panic!("this kernel names no drop reason zero"));
+        assert!(first.starts_with("SKB_"), "{first}");
+
+        let far_past_the_end = btf.enum_variant("skb_drop_reason", 100_000);
+        assert_eq!(far_past_the_end, None, "{far_past_the_end:?}");
     }
 }

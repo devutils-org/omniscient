@@ -4510,3 +4510,68 @@ its clock is a different domain rather than an uncertain one, and it would need
 a `Determinism` the enum refuses to have.
 
 ---
+
+---
+
+## 41. The sixth wave's requests, landed once — stream S of the seventh
+
+The five family streams of the sixth wave wrote roughly twenty requests under
+`## Needs from another stream` rather than reaching into files they did not own.
+None had been landed when the seventh wave was dispatched, and three of them had
+been asked for twice by two families independently, which is what a coordinator
+stream exists for.
+
+`docs/families/shared-layer.md` is the full record: what was landed, what turned
+out to be something else, and what was left with the reason. In short:
+
+- **`Btf::member_offset` descends anonymous members** (asked by `io` and `net`),
+  which unblocks `io.pagecache` and makes `skc_daddr`, `skc_dport`,
+  `skb->protocol` and `skb->skb_iif` reachable for the first time.
+- **`Btf::enum_variant`** (asked by `io` and `net`) reads the kernel's own
+  `(name, value)` pairs, so a drop reason can be named by the kernel that is
+  running rather than by a table compiled in here.
+- **`insn::helper` names `GET_CURRENT_COMM` and `PROBE_READ_KERNEL_STR`**, which
+  four families had declared locally, and **`Insn::and64_imm` exists**.
+- **Five copies of `push_log2_bucket`, eight of `read_field`, six of
+  `count_drop` and four of `bucket_low_ns` became one each**, with one test
+  where there were four. The labels stay with the caller, because a label is
+  defined once per instruction stream.
+- **The capability advice moved onto map creation**, where the first privileged
+  failure actually happens, across 51 sites in 18 files.
+- **`attach::tracefs_root` and `attach::tracepoint_layout`** are published, so
+  the classic tracepoint path has one `format` parser rather than two.
+- **Eight catalog entries stopped promising what nothing can serve**, and
+  `io.readahead`'s glob became two names — the one change that moved the
+  numbers, from 86 usable on this machine to 87.
+
+Two things worth carrying out of it.
+
+**The refusals moved a layer earlier, and two scenarios had asserted the old
+one.** `mem.kmalloc -k mem` was refused by the collector at attach (exit 3) and
+is now refused by the validator (exit 2), because the entry no longer declares a
+key nothing can carry. The same for `net.tcp.lifetime --pid`. Both scenarios now
+assert the earlier refusal, and the `net` one needed a different source for its
+third case entirely — `net.socket`, which resolves onto `bpf:fentry` and has no
+collector — because "a target the catalog offers and this build cannot serve" is
+no longer true of `net.tcp.lifetime`. A shipped session, `examples/web-latency.yml`,
+stopped validating for the same reason and is now written against what the
+source serves.
+
+**Two assumptions were corrected by the kernel, both inside the tests written
+for this change.** `sock_common.skc_daddr` is at offset zero, so an "overlaid
+fields are not at zero" assertion would have been asserting the layout rather
+than the lookup. And value zero of `enum skb_drop_reason` is `SKB_NOT_DROPPED_YET`,
+not the `SKB_DROP_REASON_NOT_SPECIFIED` the test expected — the guess was a
+name, it was wrong, and it would have been wrong silently in every rendered drop
+table. That is the argument for reading the kernel's table, made by its own test
+before the feature had a caller.
+
+### `docs/scenarios/io.md` records that `scenario_io` never flaps, and it does
+
+Measured while this stream ran, with four agents on the machine and a load
+average near 5 on 24 cores: two failures in three runs of `scenario_io` alone,
+both within about 1 % of a threshold. The same file on the tree *before* this
+stream's changes failed one run in three, and that one was not a margin —
+`0 bytes traced for the 16777216 the workload read`. The flakiness is older than
+this stream and worse than the document says, and a total miss is a different
+fact from a 1 % shortfall. It belongs to whoever owns `io`.

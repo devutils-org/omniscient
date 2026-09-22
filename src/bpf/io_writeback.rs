@@ -25,8 +25,8 @@
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, Counters, Hash};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
@@ -126,15 +126,6 @@ const SCRATCH: i16 = EVENT - 40;
 
 const ENTRY_KEY_BYTES: usize = 8;
 const ENTRY_VALUE_BYTES: usize = 16;
-
-fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
 
 fn count(program: &mut Program, counters_fd: i32, slot: u32, resume: &'static str) {
     program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot as i32));
@@ -317,11 +308,11 @@ impl WritebackProgram {
         let bytes = ring_bytes(requested_ring_bytes);
 
         let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_wb_ring")
-            .map_err(|error| format!("cannot create the writeback ring buffer: {error}"))?;
+            .map_err(|error| map_failure("writeback ring buffer", error))?;
         let counters = Counters::create(DROP_SLOTS, "omn_wb_count")
-            .map_err(|error| format!("cannot create the writeback drop counter: {error}"))?;
+            .map_err(|error| map_failure("writeback drop counter", error))?;
         let open = Hash::create(ENTRY_KEY_BYTES, ENTRY_VALUE_BYTES, MAX_OPEN, "omn_wb_open")
-            .map_err(|error| format!("cannot create the writeback round map: {error}"))?;
+            .map_err(|error| map_failure("writeback round map", error))?;
 
         let start = start_instructions(btf, open.as_raw_fd(), counters.as_raw_fd())?;
         let written = written_instructions(

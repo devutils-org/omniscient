@@ -10,7 +10,7 @@
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
-  keys: [task, req, file]
+  keys: [task]
   filter_fields: [comm, syscall, pid]
   determinism: low
   caveats:
@@ -27,7 +27,7 @@
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only, container: bpf_only}
-  keys: [task, cgroup]
+  keys: [task]
   filter_fields: [comm, filename]
   determinism: medium
 
@@ -41,7 +41,7 @@
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only, container: bpf_only}
-  keys: [task, cgroup]
+  keys: [task]
   filter_fields: [comm, code]
   determinism: medium
 

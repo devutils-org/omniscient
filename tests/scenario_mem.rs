@@ -2646,10 +2646,19 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
         );
     }
 
-    // 3: a key the catalog offers and an aggregating collector cannot carry.
-    // The identity of one allocation is exactly what counting in the kernel
-    // discards, and answering with an unkeyed series would put every task's
-    // allocations in one anonymous heap.
+    // 3: a key an aggregating collector cannot carry, refused before anything
+    // is attached. The identity of one allocation is exactly what counting in
+    // the kernel discards, and answering with an unkeyed series would put every
+    // task's allocations in one anonymous heap.
+    //
+    // This refusal moved a layer earlier in the seventh wave, and the movement
+    // is the improvement: the entry used to declare `keys: [task, mem]`, so the
+    // validator accepted `-k mem`, the resolver chose a backend, and the
+    // collector refused at attach with exit 3. The key is no longer declared,
+    // so the validator refuses it with exit 2 -- before the machine is touched,
+    // and while naming the key that does exist. An invalid combination is
+    // refused with the reason, and the earliest layer that can see it is the
+    // one that should.
     let keyed = run(&[
         "mem.kmalloc",
         "--system",
@@ -2662,14 +2671,17 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
         "-d",
         "200ms",
     ]);
-    if !unprivileged(&keyed) {
-        assert_eq!(code(&keyed), EXIT_NO_COLLECTOR, "{}", stderr(&keyed));
-        assert!(
-            stderr(&keyed).contains("mem:[base,len)") && stderr(&keyed).contains("task"),
-            "the refusal names the key it cannot carry and the one to use: {}",
-            stderr(&keyed)
-        );
-    }
+    assert_eq!(
+        code(&keyed),
+        EXIT_REJECTED,
+        "a key the source does not carry is a rejected request, not a missing collector: {}",
+        stderr(&keyed)
+    );
+    assert!(
+        stderr(&keyed).contains("`mem` key") && stderr(&keyed).contains("carries task"),
+        "the refusal names the key it cannot carry and the one it has: {}",
+        stderr(&keyed)
+    );
 }
 
 /// Compaction, which this machine will not perform on request.

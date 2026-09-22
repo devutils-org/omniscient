@@ -50,6 +50,7 @@ const BPF_X: u8 = 0x08;
 /// ALU operations.
 const BPF_ADD: u8 = 0x00;
 const BPF_SUB: u8 = 0x10;
+const BPF_AND: u8 = 0x50;
 const BPF_RSH: u8 = 0x70;
 const BPF_MOV: u8 = 0xb0;
 
@@ -76,8 +77,25 @@ pub mod helper {
     pub const KTIME_GET_NS: i32 = 5;
     pub const GET_SMP_PROCESSOR_ID: i32 = 8;
     pub const GET_CURRENT_PID_TGID: i32 = 14;
+    /// `bpf_get_current_comm(buf, size)`.
+    ///
+    /// For a program attached to something that is not a scheduler tracepoint:
+    /// a block request, a `sys_exit` or a socket hands over no task at all, so
+    /// the caller's name cannot be read out of a `task_struct` the way the
+    /// scheduler programs read it. Resolving it from `/proc/<tid>/comm` at
+    /// drain time answers for whoever holds that tid *then*, which for a
+    /// short-lived task is somebody else.
+    pub const GET_CURRENT_COMM: i32 = 16;
     pub const GET_STACKID: i32 = 27;
     pub const PROBE_READ_KERNEL: i32 = 113;
+    /// `bpf_probe_read_kernel_str(dst, size, unsafe_ptr)`.
+    ///
+    /// Not interchangeable with `PROBE_READ_KERNEL`: it stops at the
+    /// terminator, where a fixed span over a `const char *` reads past the end
+    /// of whatever allocation holds the name. It does not zero the rest of the
+    /// destination, so the slot has to be cleared first -- otherwise the map
+    /// carries this program's own stack contents to userspace.
+    pub const PROBE_READ_KERNEL_STR: i32 = 115;
     pub const RINGBUF_OUTPUT: i32 = 130;
 }
 
@@ -112,6 +130,17 @@ impl Insn {
     /// `dst -= src`
     pub fn sub64_reg(dst: u8, src: u8) -> Self {
         Self::new(BPF_ALU64 | BPF_SUB | BPF_X, dst, src, 0, 0)
+    }
+
+    /// `dst &= imm`
+    ///
+    /// Masking flag bits off a value the way the kernel does. The four-byte
+    /// load trick -- write a register to the stack and read it back with
+    /// `BPF_W` -- truncates to 32 bits and nothing narrower, so without this a
+    /// program strips two flag bits by conditional subtraction: correct, and
+    /// eight instructions where two do.
+    pub fn and64_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU64 | BPF_AND | BPF_K, dst, 0, 0, imm)
     }
 
     /// `dst >>= imm`, unsigned.
@@ -355,6 +384,138 @@ impl Program {
     }
 }
 
+// The sequences below are instructions rather than single opcodes, and they are
+// here because a program built as instructions has no compiler to notice that
+// two copies of one sequence have drifted apart. Each of them was written
+// between two and eight times across the family programs before it was moved
+// here, and `push_log2_bucket` is the one that made it urgent: it decides which
+// bucket every kernel-built histogram in this repository puts a measurement in,
+// and two copies disagreeing by one report every duration in the neighbouring
+// bucket -- a factor of two -- with nothing anywhere saying so.
+
+/// Reads `size` bytes of a kernel structure into the program's stack.
+///
+/// `bpf_probe_read_kernel` rather than a plain load: the pointer came out of a
+/// tracepoint argument and the verifier knows nothing about what it points at.
+pub fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, into as i32));
+    program.push(Insn::mov64_imm(2, size));
+    program.push(Insn::mov64_reg(3, from));
+    program.push(Insn::add64_imm(3, field_offset));
+    program.push(Insn::call(helper::PROBE_READ_KERNEL));
+}
+
+/// Reads a field narrower than a word into a four-byte slot, zero-extended.
+///
+/// Much of what these programs want out of the kernel is two bytes wide -- an
+/// address family, a protocol number, a port -- and the loads this layer
+/// exposes take four or eight. So the slot is cleared first and the kernel is
+/// asked for exactly the field's own width: what lands is the field, and the
+/// bytes beside it are zero rather than whatever the stack held.
+///
+/// Reading four bytes and masking would be the other way round, and it reads
+/// one to three bytes of the next field to do it -- a fault where the field is
+/// the last of a page-aligned structure, and a wrong number the rest of the
+/// time.
+pub fn read_narrow(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
+    program.push(Insn::st_imm(BPF_W, R10, into, 0));
+    read_field(program, into, size, from, field_offset);
+}
+
+/// Follows a pointer field into a register.
+///
+/// `scratch` is eight bytes of stack the read lands in before the load; `into`
+/// is where the pointer is wanted, and should be one of `r6` through `r9` if
+/// anything after the next helper call reads it.
+pub fn read_pointer(program: &mut Program, scratch: i16, into: u8, from: u8, field_offset: i32) {
+    program.push(Insn::st_imm(BPF_DW, R10, scratch, 0));
+    read_field(program, scratch, 8, from, field_offset);
+    program.push(Insn::ldx(BPF_DW, into, R10, scratch));
+}
+
+/// Adds one to a slot of a per-cpu drop counter.
+///
+/// `drop_key` is four bytes of stack the key is written into. `resume` is where
+/// control goes both when the count has been made and when the counter could
+/// not be found: failing to record a loss is not a reason to stop recording
+/// measurements.
+pub fn count_drop(
+    program: &mut Program,
+    drops_fd: i32,
+    drop_key: i16,
+    slot: u32,
+    resume: &'static str,
+) {
+    program.push(Insn::st_imm(BPF_W, R10, drop_key, slot as i32));
+    program.extend(Insn::load_map_fd(1, drops_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, drop_key as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
+    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
+    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+    program.push(Insn::add64_imm(1, 1));
+    program.push(Insn::stx(BPF_DW, 0, 0, 1));
+}
+
+/// The labels the unrolled `log2` jumps to, six steps and the end.
+///
+/// There is no count-leading-zeros instruction in BPF and no loop worth writing
+/// on a path this hot, so the exponent is found by binary search: six compares,
+/// thirty instructions, no branch that depends on anything but the value.
+///
+/// Each call passes its own labels, because two of these in one instruction
+/// stream would define the same label twice.
+pub type Log2Labels = [&'static str; 7];
+
+/// Computes the log2 bucket of the value in `value_reg` into `r3`.
+///
+/// The numbering is `emit::BucketLayout::Log2`'s, deliberately: zero is bucket
+/// zero and everything else is `floor(log2(v)) + 1`, so that bucket *k* holds
+/// `[2^(k-1), 2^k)` on both sides of the kernel boundary. That is what lets a
+/// histogram built in the kernel pass through the emit layer's own bucketing
+/// without being re-bucketed into something else.
+///
+/// `r1` and `r2` are scratch, which is safe because nothing between here and
+/// the next helper call reads them.
+pub fn push_log2_bucket(program: &mut Program, value_reg: u8, labels: &Log2Labels) {
+    const SHIFTS: [i32; 6] = [32, 16, 8, 4, 2, 1];
+    program.push(Insn::mov64_reg(1, value_reg));
+    program.push(Insn::mov64_imm(3, 0));
+    // A measurement of exactly zero nanoseconds -- two events inside one clock
+    // tick -- is bucket zero, not the log2 of zero.
+    program.jump_to(labels[6], Insn::jeq_imm(1, 0, 0));
+    for (step, shift) in SHIFTS.iter().enumerate() {
+        program.push(Insn::mov64_reg(2, 1));
+        program.push(Insn::rsh64_imm(2, *shift));
+        program.jump_to(labels[step], Insn::jeq_imm(2, 0, 0));
+        program.push(Insn::add64_imm(3, *shift));
+        program.push(Insn::mov64_reg(1, 2));
+        program.label(labels[step]);
+    }
+    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
+    // bucket 0 can mean "below one" rather than "exactly one".
+    program.push(Insn::add64_imm(3, 1));
+    program.label(labels[6]);
+}
+
+/// The low bound of a log2 bucket, in the same numbering the program uses.
+///
+/// This is the value that travels on an event, because it is the one the emit
+/// layer's own log2 bucketing maps back to exactly this bucket: a histogram
+/// built in the kernel and one built in userspace from these events agree.
+pub fn bucket_low_ns(bucket: u32) -> u64 {
+    match bucket {
+        0 => 0,
+        // A duration is a nanosecond count and `bucket` is derived from one, so
+        // this cannot reach 64 -- but a shift that would overflow is a panic
+        // rather than a wrong answer, so the case is written down.
+        k if k >= 64 => 1 << 63,
+        k => 1 << (k - 1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +688,124 @@ mod tests {
     fn a_call_to_no_helper_is_caught() {
         let error = audit(&[Insn::call(0), Insn::exit()]).unwrap_err();
         assert!(error.contains("helper numbers start at 1"), "{error}");
+    }
+
+    /// The bucket index the emit layer computes, written as the machine's own
+    /// count-leading-zeros rather than as the six-step search the program
+    /// performs. `emit::BucketLayout::Log2` documents exactly this: bucket 0
+    /// holds what is below one, and bucket *k* holds `[2^(k-1), 2^k)`.
+    ///
+    /// Deliberately not a call into `emit`, and deliberately not the same
+    /// arithmetic as the instruction stream: an independent expression of the
+    /// definition is the only thing that can catch the search being off by one.
+    fn reference_index(value: u64) -> u64 {
+        u64::from(u64::BITS - value.leading_zeros())
+    }
+
+    /// The kernel's bucketing and the emit layer's must be the same function.
+    ///
+    /// This is the whole reason a histogram can be built in the kernel at all:
+    /// the rows come back as `(bucket, count)` and are rendered by a layer that
+    /// computes bucket indices itself. If the two disagree by one, every
+    /// measurement is reported in the neighbouring bucket -- a factor of two --
+    /// and nothing anywhere says so.
+    ///
+    /// Four copies of this test existed, one beside each copy of the sequence.
+    /// One sequence needs one.
+    #[test]
+    fn the_kernels_buckets_and_the_emit_layers_are_the_same_buckets() {
+        assert_eq!(bucket_low_ns(0), 0, "bucket zero holds only zero");
+        for bucket in 1..48u32 {
+            let low = bucket_low_ns(bucket);
+            assert_eq!(
+                reference_index(low),
+                u64::from(bucket),
+                "bucket {bucket} starts at {low}, which the emit layer buckets elsewhere"
+            );
+            assert_eq!(
+                reference_index(low * 2 - 1),
+                u64::from(bucket),
+                "the top of bucket {bucket} is in it too"
+            );
+        }
+    }
+
+    /// The unrolled binary search has to compute `floor(log2(v)) + 1`, checked
+    /// against the same shift arithmetic the instruction stream performs --
+    /// the instructions themselves cannot be run outside the kernel.
+    #[test]
+    fn the_unrolled_log2_is_the_same_arithmetic_as_the_layouts() {
+        let unrolled = |value: u64| -> u64 {
+            if value == 0 {
+                return 0;
+            }
+            let (mut value, mut exponent) = (value, 0u64);
+            for shift in [32, 16, 8, 4, 2, 1] {
+                let shifted = value >> shift;
+                if shifted != 0 {
+                    exponent += shift as u64;
+                    value = shifted;
+                }
+            }
+            exponent + 1
+        };
+        for value in [0u64, 1, 2, 3, 4, 7, 8, 1_000, 999_999, 1 << 40, u64::MAX] {
+            assert_eq!(
+                unrolled(value),
+                reference_index(value),
+                "{value} is bucketed differently by the two"
+            );
+        }
+    }
+
+    /// One log2 in one program places each of its labels once, which is what
+    /// the caller-supplied label set exists for: two copies in one instruction
+    /// stream would define the same label twice and the builder would refuse.
+    #[test]
+    fn two_log2_searches_in_one_program_keep_their_labels_apart() {
+        const FIRST: Log2Labels = ["a32", "a16", "a8", "a4", "a2", "a1", "a_done"];
+        const SECOND: Log2Labels = ["b32", "b16", "b8", "b4", "b2", "b1", "b_done"];
+        let mut program = Program::new();
+        push_log2_bucket(&mut program, 7, &FIRST);
+        push_log2_bucket(&mut program, 8, &SECOND);
+        program.push(Insn::exit());
+        let built = program.build();
+        audit(&built).expect("two searches in one stream are a well-formed sequence");
+    }
+
+    /// The narrow read clears its slot before the kernel writes into it. A slot
+    /// left alone holds whatever the last event put there, and a two-byte
+    /// address family read into it comes back with two bytes of somebody
+    /// else's port above it.
+    #[test]
+    fn a_narrow_read_clears_its_slot_first() {
+        let mut program = Program::new();
+        read_narrow(&mut program, -16, 2, 7, 24);
+        program.push(Insn::exit());
+        let built = program.build();
+        assert_eq!(built[0], Insn::st_imm(BPF_W, R10, -16, 0));
+        assert!(
+            built
+                .iter()
+                .any(|insn| insn.code == 0x85 && insn.imm == helper::PROBE_READ_KERNEL),
+            "the field itself is read through bpf_probe_read_kernel"
+        );
+        let size = built
+            .iter()
+            .find(|insn| insn.code == 0xb7 && insn.regs & 0xf == 2)
+            .expect("a size in r2");
+        assert_eq!(size.imm, 2, "the kernel is asked for the field's own width");
+        audit(&built).expect("a well-formed sequence");
+    }
+
+    /// `and64_imm` is the ALU64 `and` with an immediate, and the encoding is
+    /// checked rather than assumed: a wrong opcode here masks with something
+    /// else and the verifier accepts it.
+    #[test]
+    fn a_bitwise_and_is_encoded_as_the_alu64_and() {
+        let masked = Insn::and64_imm(6, !3);
+        assert_eq!(masked.code, BPF_ALU64 | BPF_AND | BPF_K);
+        assert_eq!(masked.regs & 0xf, 6);
+        assert_eq!(masked.imm, !3);
     }
 }

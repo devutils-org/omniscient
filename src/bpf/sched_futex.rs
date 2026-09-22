@@ -32,10 +32,10 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash, StackTraces};
+use super::map::{map_failure, Counters, Hash, StackTraces};
 use super::sched_common::{
-    bucket_low_ns, count_drop, count_update_failure, extra_helper, push_log2_bucket, read_field,
-    text_of, Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
+    bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, read_field, text_of,
+    Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
 };
 use super::syscall;
 
@@ -456,7 +456,7 @@ fn exit_instructions(
     program.push(Insn::mov64_reg(1, R10));
     program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_COMM) as i32));
     program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
-    program.push(Insn::call(extra_helper::GET_CURRENT_COMM));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
 
     program.extend(Insn::load_map_fd(1, rows_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -517,13 +517,13 @@ impl FutexProgram {
             MAX_WAITING,
             "omn_futex_wait",
         )
-        .map_err(|error| format!("cannot create the futex wait map: {error}"))?;
+        .map_err(|error| map_failure("futex wait map", error))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_futex_hist")
-            .map_err(|error| format!("cannot create the futex histogram map: {error}"))?;
+            .map_err(|error| map_failure("futex histogram map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_futex_drop")
-            .map_err(|error| format!("cannot create the futex drop counter: {error}"))?;
+            .map_err(|error| map_failure("futex drop counter", error))?;
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_futex_stk")
-            .map_err(|error| format!("cannot create the futex stack map: {error}"))?;
+            .map_err(|error| map_failure("futex stack map", error))?;
 
         let enter = enter_instructions(btf, whose, waiting.as_raw_fd(), drops.as_raw_fd())?;
         let exit = exit_instructions(

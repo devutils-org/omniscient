@@ -33,7 +33,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::mem_program::{
     bucket_low, check_signature, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id,
     read_comm, read_pid_tgid, word,
@@ -484,11 +484,11 @@ impl StallProgram {
         let [live_name, rows_name, drops_name, begin_name, end_name] = stall.names();
 
         let in_flight = Hash::create(START_KEY_BYTES, START_VALUE_BYTES, MAX_IN_FLIGHT, live_name)
-            .map_err(|error| format!("cannot create the in-flight map: {error}"))?;
+            .map_err(|error| map_failure("in-flight map", error))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
-            .map_err(|error| format!("cannot create the stall histogram map: {error}"))?;
+            .map_err(|error| map_failure("stall histogram map", error))?;
         let drops = Counters::create(DROP_SLOTS, drops_name)
-            .map_err(|error| format!("cannot create the stall drop counter: {error}"))?;
+            .map_err(|error| map_failure("stall drop counter", error))?;
 
         let begin = begin_instructions(target_tgid, in_flight.as_raw_fd(), drops.as_raw_fd())?;
         let begin_program = load(&begin, begin_name)?;

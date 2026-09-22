@@ -34,22 +34,10 @@
 //! and the instruction stream's own shape. `docs/families/gpu.md` says which
 //! is which, and says it in those words.
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
-
 use super::attach::{self, PerfAttachment, Scope};
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
-use super::sched_common::{count_update_failure, extra_helper, text_of, BPF_NOEXIST, E2BIG};
-
-/// Where `tracefs` may be mounted, best first.
-///
-/// The same two paths `attach.rs` knows, which it does not publish. The
-/// request to publish one root finder and one format reader is in
-/// `docs/open-findings.md`; until it lands this is a second copy of two
-/// constants rather than a stream editing a file it does not own.
-const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
+use super::map::{map_failure, Counters, Hash};
+use super::sched_common::{count_update_failure, text_of, BPF_NOEXIST, E2BIG};
 
 /// The tracepoints, by the category and name tracefs files them under.
 pub const CATEGORY: &str = "gpu_scheduler";
@@ -137,100 +125,11 @@ impl GpuJob {
 
 // ------------------------------------------------------------ the format file
 
-/// One field of a classic tracepoint's record, as its `format` file states it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Field {
-    pub offset: i16,
-    pub size: usize,
-    /// Whether the field is a `__data_loc`, which holds a packed
-    /// `(offset, length)` pair rather than the value itself.
-    pub dynamic: bool,
-}
-
-/// Every field of a tracepoint's record, by name.
-pub type Layout = BTreeMap<String, Field>;
-
-/// Reads and parses `<tracefs>/events/<category>/<name>/format`.
-pub fn layout_of(category: &str, name: &str) -> Result<Layout, String> {
-    let Some(root) = TRACEFS_ROOTS
-        .iter()
-        .map(PathBuf::from)
-        .find(|root| root.join("events").is_dir())
-    else {
-        return Err(format!(
-            "`tracefs` is not mounted at {}, so `{category}:{name}` has no field layout to read; \
-             this source has no raw tracepoint backend to fall back to, because its tracepoints \
-             live in a module and are absent from the kernel's own BTF",
-            TRACEFS_ROOTS.join(" or ")
-        ));
-    };
-    let path = root.join("events").join(category).join(name).join("format");
-    let text = fs::read_to_string(&path).map_err(|error| {
-        format!(
-            "{} cannot be read ({error}); the classic tracepoint path needs this file's field \
-             offsets and there is no other place they are published",
-            path.display()
-        )
-    })?;
-    Ok(parse_layout(&text))
-}
-
-/// Parses the `field:` lines of a `format` file.
-///
-/// The shape has been stable for as long as tracefs has existed:
-///
-/// ```text
-///     field:u64 fence_context;   offset:24;   size:8;   signed:0;
-///     field:__data_loc char[] name;   offset:12;   size:4;   signed:0;
-/// ```
-///
-/// The separators the kernel writes are tabs; they are spaces above only so
-/// that this doc comment does not carry one.
-///
-/// The declaration before the semicolon is C, so the field's name is its last
-/// identifier -- after any array brackets, which belong to the type.
-pub fn parse_layout(text: &str) -> Layout {
-    let mut layout = Layout::new();
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("field:") else {
-            continue;
-        };
-        let mut offset = None;
-        let mut size = None;
-        let mut declaration = "";
-        for part in rest.split(';') {
-            let part = part.trim();
-            if let Some(value) = part.strip_prefix("offset:") {
-                offset = value.trim().parse::<i16>().ok();
-            } else if let Some(value) = part.strip_prefix("size:") {
-                size = value.trim().parse::<usize>().ok();
-            } else if !part.is_empty() && declaration.is_empty() {
-                declaration = part;
-            }
-        }
-        let (Some(offset), Some(size)) = (offset, size) else {
-            continue;
-        };
-        // The name is the last identifier of the declaration, with any array
-        // bounds stripped: `char name[16]` names `name`, not `name[16]`.
-        let Some(name) = declaration
-            .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .find(|token| !token.is_empty())
-        else {
-            continue;
-        };
-        layout.insert(
-            name.to_owned(),
-            Field {
-                offset,
-                size,
-                dynamic: declaration.contains("__data_loc"),
-            },
-        );
-    }
-    layout
-}
+// Read by `attach::tracepoint_layout` since the seventh wave. This file carried
+// the second copy of the two tracefs mount paths and of the `format` parser,
+// and `gpu.job` is the only collector here on the classic tracepoint path --
+// so the next one to take that path would have written a third.
+pub use super::attach::{tracepoint_layout as layout_of, Layout};
 
 /// The offset of a field that must be a plain eight-byte value.
 ///
@@ -323,7 +222,7 @@ fn run_instructions(fences: Fences, in_flight_fd: i32, drops_fd: i32) -> Result<
     program.push(Insn::mov64_reg(1, R10));
     program.push(Insn::add64_imm(1, (VALUE + VALUE_COMM) as i32));
     program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
-    program.push(Insn::call(extra_helper::GET_CURRENT_COMM));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
 
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, VALUE + VALUE_TIME_NS, 0));
@@ -457,11 +356,11 @@ impl GpuJobProgram {
         let fences = Fences::discover()?;
 
         let in_flight = Hash::create(KEY_BYTES, VALUE_BYTES, MAX_IN_FLIGHT, "omn_drm_open")
-            .map_err(|error| format!("cannot create the GPU job in-flight map: {error}"))?;
+            .map_err(|error| map_failure("GPU job in-flight map", error))?;
         let done = Hash::create(KEY_BYTES, VALUE_BYTES, MAX_DONE, "omn_drm_done")
-            .map_err(|error| format!("cannot create the GPU job map: {error}"))?;
+            .map_err(|error| map_failure("GPU job map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_drm_drop")
-            .map_err(|error| format!("cannot create the GPU job drop counter: {error}"))?;
+            .map_err(|error| map_failure("GPU job drop counter", error))?;
 
         let run_program = run_instructions(fences, in_flight.as_raw_fd(), drops.as_raw_fd())?;
         let done_program = done_instructions(
@@ -537,6 +436,7 @@ impl GpuJobProgram {
 
 #[cfg(test)]
 mod tests {
+    use super::super::attach::{parse_layout, Field};
     use super::*;
 
     /// The `format` file of `drm_run_job` as Linux 6.12 writes it. Kept

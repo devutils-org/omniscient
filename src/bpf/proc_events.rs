@@ -24,28 +24,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::Counters;
+use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
-
-/// Helper numbers this family needs and the shared `insn::helper` module does
-/// not name yet.
-///
-/// The request to move them there is in `docs/open-findings.md`; a stream does
-/// not edit the shared layer, and a local constant is the honest way to carry
-/// on meanwhile. The number is the one in the kernel's own `bpf_func_id`, which
-/// is an ABI: it is not going to change under this file.
-mod extra_helper {
-    /// `bpf_probe_read_kernel_str(dst, size, unsafe_ptr)`.
-    ///
-    /// Not the same as a fixed-size `bpf_probe_read_kernel` over a `char *`:
-    /// this one stops at the terminator and never reads past it, and on failure
-    /// it zeroes the whole destination rather than leaving stack behind. Both
-    /// matter here, because the destination is part of a record that is about
-    /// to be published and every byte of it has to have been written.
-    pub const PROBE_READ_KERNEL_STR: i32 = 115;
-}
 
 /// `bpf_probe_read_kernel` is GPL-only, and every one of these programs reads a
 /// field out of a `task_struct` through it.
@@ -302,19 +284,6 @@ const SIG_NUMBER: i16 = SIG_EVENT + 40;
 const SIG_RESULT: i16 = SIG_EVENT + 44;
 const SIG_DROP_KEY: i16 = SIG_EVENT - 8;
 
-/// Reads `size` bytes of a kernel structure onto the program's stack.
-///
-/// `bpf_probe_read_kernel` rather than a plain load: the pointer came out of a
-/// tracepoint argument and the verifier knows nothing about what it points at.
-fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
-
 /// Publishes the record on the stack, and counts it when the ring is full.
 ///
 /// A full ring returns an error, the event is gone, and nothing anywhere else
@@ -347,21 +316,6 @@ fn publish(
     program.push(Insn::ldx(BPF_DW, 1, 0, 0));
     program.push(Insn::add64_imm(1, 1));
     program.push(Insn::stx(BPF_DW, 0, 0, 1));
-}
-
-/// A map this layer could not create, said in a way a reader can act on.
-///
-/// `EPERM` from `BPF_MAP_CREATE` is the *first* thing an unprivileged run hits
-/// -- before any program is loaded, which is where the rest of this layer
-/// attaches its advice -- so a bare "Operation not permitted" here is what
-/// somebody without `CAP_BPF` actually sees, and it names neither the
-/// capability nor the way to get it.
-fn map_failure(what: &str, error: std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
-        super::permission_advice(&format!("creating the {what}"))
-    } else {
-        format!("cannot create the {what}: {error}")
-    }
 }
 
 /// Refuses a kernel whose tracepoint is not the shape the program reads.
@@ -416,7 +370,7 @@ fn exec_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>
     program.push(Insn::add64_imm(1, EXEC_FILENAME as i32));
     program.push(Insn::mov64_imm(2, PATH_BYTES as i32));
     program.push(Insn::ldx(BPF_DW, 3, R10, EXEC_PATH_PTR));
-    program.push(Insn::call(extra_helper::PROBE_READ_KERNEL_STR));
+    program.push(Insn::call(helper::PROBE_READ_KERNEL_STR));
 
     publish(
         &mut program,
@@ -944,7 +898,7 @@ mod tests {
         let program = exec_instructions(&btf, 3, 4).expect("a program");
         let called = helpers_called(&program);
         assert!(
-            called.contains(&extra_helper::PROBE_READ_KERNEL_STR),
+            called.contains(&helper::PROBE_READ_KERNEL_STR),
             "the filename must be read with bpf_probe_read_kernel_str"
         );
         assert_eq!(

@@ -35,7 +35,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::mem_program::{
     bucket_low, check_signature, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id,
     read_comm, read_pid_tgid, word,
@@ -430,9 +430,9 @@ impl AllocProgram {
         let (rows_name, drops_name, program_names) = allocator.map_prefix();
 
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
-            .map_err(|error| format!("cannot create the allocation histogram map: {error}"))?;
+            .map_err(|error| map_failure("allocation histogram map", error))?;
         let drops = Counters::create(1, drops_name)
-            .map_err(|error| format!("cannot create the allocation drop counter: {error}"))?;
+            .map_err(|error| map_failure("allocation drop counter", error))?;
 
         let mut programs = Vec::new();
         let mut links = Vec::new();

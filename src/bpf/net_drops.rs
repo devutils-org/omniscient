@@ -35,7 +35,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::Counters;
+use super::map::{map_failure, Counters};
 use super::net_program::{count_drop, expect_signature, load, read_field, read_narrow};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
@@ -249,9 +249,9 @@ impl DropProgram {
         let has_rx_socket = btf.tracepoint_signature("kfree_skb")?.len() == WITH_RX_SOCKET.len();
 
         let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_drops")
-            .map_err(|error| format!("cannot create the drop ring buffer: {error}"))?;
+            .map_err(|error| map_failure("drop ring buffer", error))?;
         let drops = Counters::create(1, "omn_drop_lost")
-            .map_err(|error| format!("cannot create the drop counter: {error}"))?;
+            .map_err(|error| map_failure("drop counter", error))?;
 
         let instructions = instructions(btf, ring_map.as_raw_fd(), drops.as_raw_fd())?;
         let program = load(&instructions, "omn_kfree_skb")?;

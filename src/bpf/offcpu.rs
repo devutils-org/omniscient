@@ -39,8 +39,8 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash, StackTraces};
+use super::insn::{count_drop, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, Counters, Hash, StackTraces};
 use super::syscall;
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context: one 64-bit
@@ -227,39 +227,6 @@ impl OffCpu {
     }
 }
 
-/// Reads `size` bytes of a kernel structure into the program's stack.
-///
-/// `bpf_probe_read_kernel` rather than a plain load: the pointer came out of a
-/// tracepoint argument, the verifier knows nothing about what it points at,
-/// and a load that faults in a tracepoint is not something to find out about
-/// in production.
-fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
-
-/// Adds one to a slot of the per-cpu drop counter.
-///
-/// `resume` is where control goes both when the count has been made and when
-/// the counter itself could not be found, because failing to record a loss is
-/// not a reason to stop recording measurements.
-fn count_drop(program: &mut Program, drops_fd: i32, slot: u32, resume: &'static str) {
-    program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot as i32));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, DROP_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
-    // Per-cpu, so this slot belongs to this cpu alone and no atomic is needed.
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
-}
-
 /// Builds the program for a target, or for the whole machine.
 fn instructions(
     btf: &Btf,
@@ -344,7 +311,7 @@ fn instructions(
     program.jump_to("left", Insn::jsge_imm(0, 0, 0));
     // The map is full: this block will never be attributed, and nothing else
     // anywhere would record that it happened.
-    count_drop(&mut program, drops_fd, DROP_IN_FLIGHT, "left");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_IN_FLIGHT, "left");
     program.label("left");
 
     // ---- the task coming back ----
@@ -413,7 +380,7 @@ fn instructions(
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
-    count_drop(&mut program, drops_fd, DROP_TOTALS, "done");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_TOTALS, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -461,18 +428,18 @@ impl OffCpuProgram {
             MAX_IN_FLIGHT,
             "omn_offcpu_run",
         )
-        .map_err(|error| format!("cannot create the off-cpu in-flight map: {error}"))?;
+        .map_err(|error| map_failure("off-cpu in-flight map", error))?;
         let totals = Hash::create(
             TOTAL_KEY_BYTES,
             TOTAL_VALUE_BYTES,
             MAX_TOTALS,
             "omn_offcpu_sum",
         )
-        .map_err(|error| format!("cannot create the off-cpu total map: {error}"))?;
+        .map_err(|error| map_failure("off-cpu total map", error))?;
         let drops = Counters::create(2, "omn_offcpu_drop")
-            .map_err(|error| format!("cannot create the off-cpu drop counter: {error}"))?;
+            .map_err(|error| map_failure("off-cpu drop counter", error))?;
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_offcpu_stk")
-            .map_err(|error| format!("cannot create the off-cpu stack map: {error}"))?;
+            .map_err(|error| map_failure("off-cpu stack map", error))?;
 
         let instructions = instructions(
             btf,

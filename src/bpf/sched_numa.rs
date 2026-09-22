@@ -30,7 +30,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::sched_common::{count_update_failure, read_field, text_of, E2BIG};
 use super::syscall;
 
@@ -209,9 +209,9 @@ impl NumaProgram {
     pub fn load() -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_numa_rows")
-            .map_err(|error| format!("cannot create the NUMA balancing map: {error}"))?;
+            .map_err(|error| map_failure("NUMA balancing map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_numa_drop")
-            .map_err(|error| format!("cannot create the NUMA balancing drop counter: {error}"))?;
+            .map_err(|error| map_failure("NUMA balancing drop counter", error))?;
 
         let instructions = instructions(btf, rows.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(

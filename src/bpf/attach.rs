@@ -38,6 +38,7 @@
 //! question the attach will actually ask, by reading the file the attach will
 //! actually read.
 
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -407,11 +408,111 @@ fn open_and_set(
     })
 }
 
-fn tracefs_root() -> Option<PathBuf> {
+/// Where this machine has `tracefs`, if it has it anywhere.
+///
+/// Published because the classic tracepoint path needs more than the numeric
+/// id: a program reading a record's fields needs their offsets, and both live
+/// under the same root. `sched_drm.rs` carried a second copy of these two paths
+/// until the seventh wave, and whoever took the next classic tracepoint would
+/// have written a third.
+pub fn tracefs_root() -> Option<PathBuf> {
     TRACEFS_ROOTS
         .iter()
         .map(PathBuf::from)
         .find(|root| root.join("events").is_dir())
+}
+
+/// One field of a classic tracepoint's record, as its `format` file states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub offset: i16,
+    pub size: usize,
+    /// Whether the field is a `__data_loc`, which holds a packed
+    /// `(offset, length)` pair rather than the value itself.
+    pub dynamic: bool,
+}
+
+/// Every field of a tracepoint's record, by name.
+pub type Layout = BTreeMap<String, Field>;
+
+/// Reads and parses `<tracefs>/events/<category>/<name>/format`.
+///
+/// A raw tracepoint needs none of this -- it is handed the arguments and BTF
+/// says what they are. A classic one hands over a record, and the offsets
+/// within it are published here and nowhere else.
+pub fn tracepoint_layout(category: &str, name: &str) -> Result<Layout, String> {
+    let Some(root) = tracefs_root() else {
+        return Err(format!(
+            "`tracefs` is not mounted at {}, so `{category}:{name}` has no field layout to read",
+            TRACEFS_ROOTS.join(" or ")
+        ));
+    };
+    let path = root.join("events").join(category).join(name).join("format");
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "{} cannot be read ({error}); the classic tracepoint path needs this file's field \
+             offsets and there is no other place they are published",
+            path.display()
+        )
+    })?;
+    Ok(parse_layout(&text))
+}
+
+/// Parses the `field:` lines of a `format` file.
+///
+/// The shape has been stable for as long as tracefs has existed:
+///
+/// ```text
+///     field:u64 fence_context;   offset:24;   size:8;   signed:0;
+///     field:__data_loc char[] name;   offset:12;   size:4;   signed:0;
+/// ```
+///
+/// The separators the kernel writes are tabs; they are spaces above only so
+/// that this doc comment does not carry one.
+///
+/// The declaration before the semicolon is C, so the field's name is its last
+/// identifier -- after any array brackets, which belong to the type.
+pub fn parse_layout(text: &str) -> Layout {
+    let mut layout = Layout::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("field:") else {
+            continue;
+        };
+        let mut offset = None;
+        let mut size = None;
+        let mut declaration = "";
+        for part in rest.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix("offset:") {
+                offset = value.trim().parse::<i16>().ok();
+            } else if let Some(value) = part.strip_prefix("size:") {
+                size = value.trim().parse::<usize>().ok();
+            } else if !part.is_empty() && declaration.is_empty() {
+                declaration = part;
+            }
+        }
+        let (Some(offset), Some(size)) = (offset, size) else {
+            continue;
+        };
+        // The name is the last identifier of the declaration, with any array
+        // bounds stripped: `char name[16]` names `name`, not `name[16]`.
+        let Some(name) = declaration
+            .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .find(|token| !token.is_empty())
+        else {
+            continue;
+        };
+        layout.insert(
+            name.to_owned(),
+            Field {
+                offset,
+                size,
+                dynamic: declaration.contains("__data_loc"),
+            },
+        );
+    }
+    layout
 }
 
 fn current_uid() -> u32 {

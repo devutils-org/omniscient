@@ -25,8 +25,8 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, Counters, Hash};
 use super::syscall;
 
 /// Arguments of `sched_migrate_task`, in the raw tracepoint's context.
@@ -102,16 +102,6 @@ impl Migration {
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
         })
     }
-}
-
-/// Reads `size` bytes of a kernel structure into the program's stack.
-fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
 }
 
 fn instructions(
@@ -220,9 +210,9 @@ impl MigrationProgram {
     pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_migr_rows")
-            .map_err(|error| format!("cannot create the migration map: {error}"))?;
+            .map_err(|error| map_failure("migration map", error))?;
         let drops = Counters::create(1, "omn_migr_drop")
-            .map_err(|error| format!("cannot create the migration drop counter: {error}"))?;
+            .map_err(|error| map_failure("migration drop counter", error))?;
 
         let instructions = instructions(btf, target_tgid, rows.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(

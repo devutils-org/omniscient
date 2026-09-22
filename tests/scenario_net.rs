@@ -3051,11 +3051,15 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "a target the catalog never offered is a request that cannot mean anything: {complaint}"
     );
 
-    // 3 -- this build has not written it. The catalog *does* offer
-    // `net.tcp.lifetime` for a process, and this backend cannot serve one for a
-    // reason that is about the measurement rather than about the machine: both
-    // ends of a connection become established in softirq context, so the task
-    // current at that moment is whichever one the interrupt landed on.
+    // Still 2, and it is the seventh wave that moved it there. Asking
+    // `net.tcp.lifetime` for one process used to resolve, attach and be refused
+    // by the collector with exit 3 -- because both ends of a connection become
+    // established in softirq context, so the task current at that moment is
+    // whichever one the interrupt landed on, and the catalog offered a `pid`
+    // target anyway. The entry no longer offers it, so the request is refused
+    // before the machine is touched. A collector refusing what the catalog
+    // promised is a gap somebody can close; a catalog that stops promising it
+    // is the gap closed.
     let outcome = omn(&[
         "net.tcp.lifetime",
         "--pid",
@@ -3070,12 +3074,37 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
     let complaint = stderr(&outcome);
     assert_eq!(
         code(&outcome),
-        3,
-        "a target the catalog offers and this build cannot serve is the build's gap: {complaint}"
+        2,
+        "a target the catalog never offers is a request that cannot mean anything: {complaint}"
     );
     assert!(
-        complaint.contains("softirq context") && complaint.contains("--system"),
-        "the refusal should say why and what to ask for instead: {complaint}"
+        complaint.contains("declares no `pid` support") && complaint.contains("system"),
+        "the refusal should say what the source does accept: {complaint}"
+    );
+
+    // 3 -- this build has not written it. `net.socket` resolves onto
+    // `bpf:fentry`, which is an attach kind this layer does not have, and the
+    // answer says so in those words: not "this machine cannot", which would
+    // send a reader to change a kernel that is already capable.
+    let outcome = omn(&[
+        "net.socket",
+        "--system",
+        "--mode",
+        "trace",
+        "--duration",
+        "200ms",
+        "--emit",
+        "raw",
+    ]);
+    let complaint = stderr(&outcome);
+    assert_eq!(
+        code(&outcome),
+        3,
+        "a backend this build has not written is the build's gap: {complaint}"
+    );
+    assert!(
+        complaint.contains("no collector is written") && complaint.contains("net.socket"),
+        "the refusal should name the source and say it is this build: {complaint}"
     );
     assert!(
         complaint.contains("The request itself is valid"),

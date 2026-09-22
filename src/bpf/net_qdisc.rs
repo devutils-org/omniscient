@@ -30,7 +30,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{Counters, Hash};
+use super::map::{map_failure, Counters, Hash};
 use super::net_program::{
     bucket_low_ns, count_drop, expect_signature, load, push_log2_bucket, read_field, read_narrow,
     read_pointer,
@@ -326,11 +326,11 @@ impl QdiscProgram {
             MAX_QUEUED,
             "omn_qd_wait",
         )
-        .map_err(|error| format!("cannot create the queued packet map: {error}"))?;
+        .map_err(|error| map_failure("queued packet map", error))?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_qd_hist")
-            .map_err(|error| format!("cannot create the qdisc histogram map: {error}"))?;
+            .map_err(|error| map_failure("qdisc histogram map", error))?;
         let counters = Counters::create(COUNTER_SLOTS, "omn_qd_lost")
-            .map_err(|error| format!("cannot create the qdisc counters: {error}"))?;
+            .map_err(|error| map_failure("qdisc counters", error))?;
 
         let enqueue = enqueue_instructions(btf, queued.as_raw_fd(), counters.as_raw_fd())?;
         let dequeue = dequeue_instructions(

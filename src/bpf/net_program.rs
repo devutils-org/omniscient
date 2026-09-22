@@ -20,7 +20,12 @@
 use std::os::fd::OwnedFd;
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{self, Insn, Log2Labels, Program};
+
+// Written once in `insn.rs` since the seventh wave, and re-exported here so a
+// `net` program still reads as one import.
+pub(super) use super::insn::helper::GET_CURRENT_COMM;
+pub(super) use super::insn::{bucket_low_ns, count_drop, read_field, read_narrow, read_pointer};
 use super::syscall;
 
 /// The license these programs declare.
@@ -31,148 +36,27 @@ use super::syscall;
 /// what the kernel is asking about; `omn` itself stays under its own license.
 pub(super) const LICENSE: &str = "GPL";
 
-/// `bpf_get_current_comm`, which `insn::helper` does not name yet.
+/// This family's own labels for the shared unrolled log2.
 ///
-/// Declared here rather than reaching into the shared module, for the same
-/// reason as the helpers above: the request to move it is in
-/// `docs/open-findings.md`.
-pub(super) const GET_CURRENT_COMM: i32 = 16;
-
-/// Reads `size` bytes of a kernel structure into the program's stack.
-///
-/// `bpf_probe_read_kernel` rather than a plain load: the pointer came out of a
-/// tracepoint argument and the verifier knows nothing about what it points at.
-pub(super) fn read_field(program: &mut Program, into: i16, size: i32, from: u8, field_offset: i32) {
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, into as i32));
-    program.push(Insn::mov64_imm(2, size));
-    program.push(Insn::mov64_reg(3, from));
-    program.push(Insn::add64_imm(3, field_offset));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL));
-}
-
-/// Reads a field narrower than a word into a four-byte slot, zero-extended.
-///
-/// Most of what this family wants out of the kernel is two bytes wide -- an
-/// address family, a protocol number, a port -- and the instruction encoding
-/// this layer exposes loads four or eight. So the slot is cleared first and the
-/// kernel is asked for exactly the field's own width: what lands is the field,
-/// and the bytes beside it are zero rather than whatever the stack held.
-///
-/// Reading four bytes and masking would be the other way round, and it reads
-/// one to three bytes of the next field to do it -- which is a fault where the
-/// field is the last of a page-aligned structure, and a wrong number the rest
-/// of the time.
-pub(super) fn read_narrow(
-    program: &mut Program,
-    into: i16,
-    size: i32,
-    from: u8,
-    field_offset: i32,
-) {
-    program.push(Insn::st_imm(BPF_W, R10, into, 0));
-    read_field(program, into, size, from, field_offset);
-}
-
-/// Follows a pointer field into a register.
-///
-/// `scratch` is four bytes of stack the read lands in before the load; the
-/// register is where the pointer is wanted. `into` should be one of `r6`
-/// through `r9` if anything after the next helper call reads it.
-pub(super) fn read_pointer(
-    program: &mut Program,
-    scratch: i16,
-    into: u8,
-    from: u8,
-    field_offset: i32,
-) {
-    program.push(Insn::st_imm(BPF_DW, R10, scratch, 0));
-    read_field(program, scratch, 8, from, field_offset);
-    program.push(Insn::ldx(BPF_DW, into, R10, scratch));
-}
-
-/// Adds one to a slot of a per-cpu drop counter.
-///
-/// `resume` is where control goes both when the count has been made and when
-/// the counter could not be found: failing to record a loss is not a reason to
-/// stop recording measurements.
-pub(super) fn count_drop(
-    program: &mut Program,
-    drops_fd: i32,
-    drop_key: i16,
-    slot: u32,
-    resume: &'static str,
-) {
-    program.push(Insn::st_imm(BPF_W, R10, drop_key, slot as i32));
-    program.extend(Insn::load_map_fd(1, drops_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, drop_key as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to(resume, Insn::jeq_imm(0, 0, 0));
-    // Per-cpu, so this slot belongs to this cpu alone and needs no atomic.
-    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
-    program.push(Insn::add64_imm(1, 1));
-    program.push(Insn::stx(BPF_DW, 0, 0, 1));
-}
-
-/// The steps of the unrolled `log2`, as (shift, the label that skips it).
-///
-/// There is no count-leading-zeros instruction in BPF and no loop worth writing
-/// on a path this hot, so the exponent is found by binary search: six compares,
-/// thirty instructions, no branches that depend on anything but the value.
-const LOG2_STEPS: [(i32, &str); 6] = [
-    (32, "net_log2_32"),
-    (16, "net_log2_16"),
-    (8, "net_log2_8"),
-    (4, "net_log2_4"),
-    (2, "net_log2_2"),
-    (1, "net_log2_1"),
+/// The sequence itself is `insn::push_log2_bucket`, which is where the one
+/// definition of `emit::BucketLayout::Log2`'s numbering lives. What stays here
+/// is the label set, because a label is defined once per instruction stream.
+const LOG2: Log2Labels = [
+    "net_log2_32",
+    "net_log2_16",
+    "net_log2_8",
+    "net_log2_4",
+    "net_log2_2",
+    "net_log2_1",
+    "net_log2_done",
 ];
 
 /// Computes the log2 bucket of the value in `value_reg` into `r3`.
 ///
-/// The numbering is `emit::BucketLayout::Log2`'s, deliberately: zero is bucket
-/// zero and everything else is `floor(log2(v)) + 1`, so that bucket *k* holds
-/// `[2^(k-1), 2^k)` on both sides of the kernel boundary. `r1` and `r2` are
-/// scratch, which is safe because nothing between here and the next helper call
-/// reads them.
-///
 /// A program may only call this once: the labels are fixed, and a second call
 /// in the same program would place each of them twice.
 pub(super) fn push_log2_bucket(program: &mut Program, value_reg: u8) {
-    program.push(Insn::mov64_reg(1, value_reg));
-    program.push(Insn::mov64_imm(3, 0));
-    // A duration of exactly zero nanoseconds -- two events inside one clock
-    // tick -- is bucket zero, not the log2 of zero.
-    program.jump_to("net_log2_done", Insn::jeq_imm(1, 0, 0));
-    for (shift, label) in LOG2_STEPS {
-        program.push(Insn::mov64_reg(2, 1));
-        program.push(Insn::rsh64_imm(2, shift));
-        program.jump_to(label, Insn::jeq_imm(2, 0, 0));
-        program.push(Insn::add64_imm(3, shift));
-        program.push(Insn::mov64_reg(1, 2));
-        program.label(label);
-    }
-    // `floor(log2(v))` is the exponent; the layout's index is one more, so that
-    // bucket 0 can mean "below one" rather than "exactly one".
-    program.push(Insn::add64_imm(3, 1));
-    program.label("net_log2_done");
-}
-
-/// The low bound of a log2 bucket, which is the value that travels on an event.
-///
-/// It is the one number the emit layer's own bucketing maps back to exactly
-/// this bucket, so a histogram built in the kernel and one built in userspace
-/// from these events put the same measurement in the same place.
-pub(super) fn bucket_low_ns(bucket: u32) -> u64 {
-    match bucket {
-        0 => 0,
-        // A duration is a nanosecond count and `bucket` is derived from one, so
-        // this cannot reach 64 -- but a shift that would overflow is a panic
-        // rather than a wrong answer, so the case is written down.
-        k if k >= 64 => 1 << 63,
-        k => 1 << (k - 1),
-    }
+    insn::push_log2_bucket(program, value_reg, &LOG2);
 }
 
 /// Refuses a kernel whose tracepoint is not the shape a program was written
@@ -228,68 +112,6 @@ pub(super) fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The bucket index the emit layer computes, written as the machine's own
-    /// count-leading-zeros rather than as the six-step search the program
-    /// performs. `emit::BucketLayout::Log2` documents exactly this: bucket 0
-    /// holds what is below one, and bucket *k* holds `[2^(k-1), 2^k)`.
-    ///
-    /// Deliberately not a call into `emit`, and deliberately not the same
-    /// arithmetic as the instruction stream: an independent expression of the
-    /// definition is the only thing that can catch the search being off by one.
-    fn reference_index(value: u64) -> u64 {
-        u64::from(u64::BITS - value.leading_zeros())
-    }
-
-    /// The kernel's bucketing and the emit layer's must be the same function.
-    ///
-    /// This is the whole reason a histogram can be built in the kernel at all:
-    /// the rows come back as `(bucket, count)` and are rendered by a layer that
-    /// computes bucket indices itself. If the two disagree by one, every
-    /// duration is reported in the neighbouring bucket -- a factor of two --
-    /// and nothing anywhere says so.
-    #[test]
-    fn the_kernels_buckets_and_the_emit_layers_are_the_same_buckets() {
-        assert_eq!(bucket_low_ns(0), 0, "bucket zero holds only zero");
-        for bucket in 1..48u32 {
-            let low = bucket_low_ns(bucket);
-            assert_eq!(
-                reference_index(low),
-                u64::from(bucket),
-                "bucket {bucket} starts at {low}, which the emit layer buckets elsewhere"
-            );
-            assert_eq!(
-                reference_index(low * 2 - 1),
-                u64::from(bucket),
-                "the top of bucket {bucket} is in it too"
-            );
-        }
-    }
-
-    /// The narrow read clears its slot before the kernel writes into it. A slot
-    /// left alone holds whatever the last event put there, and a two-byte
-    /// address family read into it comes back with two bytes of somebody
-    /// else's port above it.
-    #[test]
-    fn a_narrow_read_clears_its_slot_first() {
-        let mut program = Program::new();
-        read_narrow(&mut program, -16, 2, 7, 24);
-        program.push(Insn::exit());
-        let built = program.build();
-        assert_eq!(built[0], Insn::st_imm(BPF_W, R10, -16, 0));
-        assert!(
-            built
-                .iter()
-                .any(|insn| insn.code == 0x85 && insn.imm == helper::PROBE_READ_KERNEL),
-            "the field itself is read through bpf_probe_read_kernel"
-        );
-        let size = built
-            .iter()
-            .find(|insn| insn.code == 0xb7 && insn.regs & 0xf == 2)
-            .expect("a size in r2");
-        assert_eq!(size.imm, 2, "the kernel is asked for the field's own width");
-        super::super::insn::audit(&built).expect("a well-formed sequence");
-    }
 
     /// Every accepted prototype is accepted, and a kernel declaring something
     /// else is refused with both the shape it has and the shapes the program

@@ -198,7 +198,7 @@
 
 - id: sched.irq
   family: sched
-  summary: "Time spent in hard and soft interrupt handlers"
+  summary: "Time spent in hard interrupt handlers"
   unit: ns
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry", "raw_tracepoint:irq_handler_exit", "kernel>=5.8"], cost: med}

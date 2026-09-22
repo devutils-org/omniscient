@@ -120,7 +120,7 @@
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cgroup: bpf_only}
-  keys: [task, mem, cgroup]
+  keys: [task, cgroup]
   filter_fields: [order, comm]
   determinism: medium
 
@@ -134,7 +134,7 @@
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native}
-  keys: [task, mem]
+  keys: [task]
   filter_fields: [bytes, comm]
   determinism: medium
 
@@ -374,8 +374,8 @@
   summary: "Direct reclaim"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin", "raw_tracepoint:mm_vmscan_direct_reclaim_end", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin", "raw_tracepoint:mm_vmscan_direct_reclaim_end", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_begin", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cgroup: bpf_only, pid: bpf_only, container: bpf_only}
@@ -388,8 +388,8 @@
   summary: "Memory compaction"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin", "raw_tracepoint:mm_compaction_end", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "tracepoint:compaction:mm_compaction_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
   targets: {system: native}

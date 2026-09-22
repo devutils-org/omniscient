@@ -14,13 +14,25 @@ format: text
 
 requests:
   # Where the request enters and leaves.
+  #
+  # This one is machine-wide where the other four are per process, and the
+  # reason is the family's own: both ends of a connection reach
+  # `TCP_ESTABLISHED` in softirq context, outside any process, so there is no
+  # task to narrow to at the moment that matters. The socket cookie is the
+  # identity instead, which is what the `sock` key carries into the join.
+  #
+  # The peer port is not filtered on for the same species of reason: the
+  # collector reports the local endpoint, because `skc_dport` lives in an
+  # anonymous union of `sock_common`. The BTF walk that reaches it landed in the
+  # seventh wave; the collector read has not, so `dport` is not offered and a
+  # session that asked for it is refused rather than served a silent `saddr`.
   - label: connection
     source: net.tcp.lifetime
-    target: {pid: 4242}
+    target: system
     mode: trace
     emit: [raw, topk:10]
-    keys: [sock, task, req]
-    filter: "dport == 443"
+    keys: [sock, task]
+    filter: "sport == 443"
 
   # Who unblocks whom: the only join that crosses a block.
   - label: wakeups
