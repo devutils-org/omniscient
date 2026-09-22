@@ -45,7 +45,7 @@ requests:
         - /bin/sh
         - -c
         - |
-          C=$(($(nproc) - 1))
+          C=$(($(nproc) / 2))
           timeout 20 taskset -c $C /bin/sh -c 'while :; do :; done' &
           exec taskset -c $C python3 -c "$1" "$!"
         - sh

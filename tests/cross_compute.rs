@@ -203,7 +203,7 @@ fn outputs<'a>(result: &'a Value, emit: &'a str) -> impl Iterator<Item = &'a Val
         .filter(move |output| output["emit"] == emit)
 }
 
-fn raw_events<'a>(result: &'a Value) -> impl Iterator<Item = &'a Value> {
+fn raw_events(result: &Value) -> impl Iterator<Item = &Value> {
     outputs(result, "raw").flat_map(|output| {
         output["events"]
             .as_array()
@@ -664,7 +664,7 @@ fn every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it() {
         .and_then(|series| series["events"].as_u64())
         .unwrap_or(0);
     assert!(
-        driver_woken >= ROUND_TRIPS && driver_woken <= ROUND_TRIPS + ROUND_TRIPS / 10,
+        (ROUND_TRIPS..=ROUND_TRIPS + ROUND_TRIPS / 10).contains(&driver_woken),
         "the driver is woken once per round trip and a few times by its children, saw \
          {driver_woken}"
     );
