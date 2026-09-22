@@ -1,0 +1,106 @@
+# Did the machine's clock explain the instruction rate you just measured?
+#
+#   taskset -c 2 sh -c 'while :; do :; done' &
+#   omn -f examples/cross-machine-frequency.yml
+#
+# An instruction rate is three things multiplied together, and only one of
+# them belongs to the program:
+#
+#   instructions / wall  =  instructions / cycle  x  cycles / second  x  residue
+#                             (the code)              (the machine)
+#
+# Two runs of the same loop can differ by ten percent because a neighbour woke
+# up on another core and the package's boost budget went to it -- the loop did
+# not change, the clock did. And two runs can differ by forty percent at the
+# same clock because the core's SMT sibling started running something, and the
+# two threads now share one core's issue width. Both look like "the program got
+# slower" in an instruction rate, and they are opposite diagnoses: the first is
+# a confounder to invalidate, the second is contention to report.
+#
+# This session collects the three factors on one core so they can be told
+# apart. `cpu.instructions` and `cpu.cycles` are the same PMU read twice over
+# the same window, so their ratio is exact. `power.freq` is a different
+# instrument entirely -- `cpuinfo_avg_freq`, which the processor derives from
+# aperf/mperf and which knows nothing about the cycle counter -- and every
+# event names whether it read the effective frequency or only the requested
+# one. Only the effective one can do this job.
+#
+# **The residue is the check, and it is printed rather than rounded away.**
+# `cycles / (wall x frequency)` is how much of the window the core spent
+# counting cycles at the clock sysfs reported. On a core held busy it is one,
+# and measured here it is 0.994-1.006. Anything else is either a core that
+# idled -- which is why the spin loop is part of the recipe -- or two
+# instruments that disagree about the clock, and either way the decomposition
+# is hiding a state and says so.
+#
+# Measured on this machine (Ryzen 9 3900X, amd-pstate-epp), core 5:
+#
+#   condition                     GHz    IPC    Ginstr/s
+#   the core alone                4.37   2.33   10.17
+#   every other core spinning     4.00   2.32    9.27    frequency: all of it
+#   its SMT sibling spinning      4.30   1.44    6.21    frequency: 1/30 of it
+#
+# `tests/cross_machine.rs` creates these conditions and checks that the tool
+# puts each change on the factor the test changed.
+#
+# **On a shared machine, count the program rather than the core.** A counter on
+# a core counts whatever ran there, and a stranger given a turn on this core
+# adds its instructions to the loop's. The test therefore runs a second session
+# beside this one, `cpu.instructions` and `cpu.cycles` on the loop's pid, and
+# keeps this one for the clock and for the core's cycles -- which is where the
+# residue gets its meaning: the loop's cycles over `wall x frequency` is the
+# share of the window the loop had its core, and measured under a load average
+# of thirty it fell to 0.30 while its IPC did not move at all. Two runs because
+# one run observes one target.
+#
+# **Evidence: TEMPORAL.** The frequency and the counters are tied together by
+# a core number and by overlapping in time, and nothing propagated from one to
+# the other. Here that is sound because the target is the core itself and the
+# spin loop never leaves it -- but that is the test's arrangement, not
+# something the tool can see. The join engine has no match kind whose evidence
+# is TEMPORAL, so this pairing is not a `joins:` entry: an `eq` on `cpu` would
+# print `KEY` beside a correlation that is two things happening on the same core
+# at the same time. `docs/scenarios/cross-machine.md` has the request.
+#
+# **What this session cannot say: when.** `cpu.instructions` in `count` mode is
+# one number for the window, so a verdict of "the clock dropped for 1.2 s of 5 s
+# and the instruction rate over those 1.2 s is not comparable to the rest" has
+# a frequency timeline to stand on and no instruction timeline to split.
+#
+# `power.throttle` is not here, and on this machine it cannot be: it has no
+# backend that collects on AMD, and a session that asks for it is refused
+# whole. The effective frequency is what power and thermal limiting look like
+# on this part, which is why it is the half of the guardrail that is present.
+name: did the clock explain the instruction rate
+format: text
+duration: 2s
+
+requests:
+  # The program's half: retired instructions on the core. The target is the
+  # core rather than a process because the frequency belongs to the core, and
+  # one run observes one target.
+  - label: instructions
+    source: cpu.instructions
+    target:
+      cpu: "2"
+    mode: count
+    emit: [rate, summary]
+
+  # The same PMU over the same window: instructions / cycles is exact.
+  - label: cycles
+    source: cpu.cycles
+    target:
+      cpu: "2"
+    mode: count
+    emit: [rate, summary]
+
+  # The machine's half, from a different instrument. `raw` is kept because each
+  # event says `measures=effective` or `measures=requested`, and a requested
+  # frequency explains nothing about a slowdown: it is what the governor asked
+  # for, not what the core ran at.
+  - label: frequency
+    source: power.freq
+    target:
+      cpu: "2"
+    mode: poll@100ms
+    emit: [timeline, summary, raw]

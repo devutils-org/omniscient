@@ -1,0 +1,108 @@
+# Was the I/O you just measured the program's, or the memory limit's?
+#
+#   omn -f examples/cross-machine-reclaim-io.yml &
+#   sh -c 'echo $$ > <a cgroup with memory.max=32M>/cgroup.procs
+#          exec python3 -c "
+#   import os, time
+#   with open(\"/var/tmp/omn-churn\", \"wb\") as f:
+#       for _ in range(96): f.write(os.urandom(1 << 20))
+#   time.sleep(0.3)
+#   with open(\"/var/tmp/omn-churn\", \"rb\") as f:
+#       while f.read(1 << 20): pass
+#   os.unlink(\"/var/tmp/omn-churn\")"'
+#
+# The program writes 96 MiB and reads it straight back. Run without a limit,
+# the read is served from the page cache and the device sees nothing at all:
+# measured here, zero bytes read and zero written over the whole window, the
+# writes still sitting dirty for the flusher to take thirty seconds later.
+# Run inside a cgroup capped at 32 MiB, the same program, the same system
+# calls, the same bytes:
+#
+#   device read     94.9 MiB   -- the pages it wrote were evicted before it
+#                                 read them, so every read went to the disk
+#   device write    98.3 MiB   -- the limit forced writeback inside the window
+#                                 instead of thirty seconds after it
+#   reclaimed      42312 pages, by the program's own thread, in its cgroup
+#   memory stall     4.3 ms of the machine's PSI
+#
+# One hundred and ninety megabytes of I/O that the program's code does not
+# explain and its memory limit does. An I/O benchmark run in a container near
+# its limit is measuring the limit.
+#
+# **The evidence is three rungs, and they are kept apart.**
+#
+#   * The reads carry the task that submitted them: `io.latency` reads the
+#     submitter off the block layer, and for a read that is the program
+#     itself. IDENTITY, and the `io.latency` caveat says so.
+#   * The join below ties those reads to a task that was reclaiming: the same
+#     tid on a `mem.reclaim` event and on an `io.latency` event. KEY. It says
+#     the thread that stalled for memory is the thread that read from the
+#     disk, which is evidence; it does not say the stall caused the read.
+#   * The writes carry a kworker, because writeback leaves the program's
+#     context behind, and the device bytes of `io.bytes` carry nothing but the
+#     device. What ties them to the memory limit is that they happened while
+#     the cgroup was reclaiming. TEMPORAL, and on a shared machine any other
+#     program's I/O in the same tick is indistinguishable from it.
+#
+# `tests/cross_machine.rs` runs the program both ways, reads the program's own
+# `/proc/self/io` and the cgroup's own `memory.stat` as the references, and
+# checks every rung against them.
+#
+# **Why everything targets the system.** The limit is the cgroup's but the
+# consequence is the device's, and one run observes one target: a session that
+# asks for `system` beside a cgroup is refused. The reclaim events carry the
+# cgroup as a key, so they are scoped after the fact.
+#
+# **One subtlety in the join.** `mem.reclaim` builds its histogram in the
+# kernel and emits one event per bucket per 100 ms window, stamped when the
+# window closes. A join state opens there, not at the first stall, so reads
+# issued in the same window as the first reclaim are unmatched. The workload
+# above sleeps 300 ms between writing and reading for exactly that reason.
+name: the I/O a memory limit made
+format: text
+duration: 3s
+
+requests:
+  # What the device moved, per device, every 100 ms. The raw events keep reads
+  # and writes apart; the aggregates add them.
+  - label: device
+    source: io.bytes
+    target: system
+    mode: poll@100ms
+    emit: [timeline, raw]
+
+  # How much of each tick some task on the machine spent stalled on memory.
+  # The machine's PSI rather than the cgroup's, for the same reason as above;
+  # a stall in a child cgroup is a stall at the root.
+  - label: pressure
+    source: mem.pressure
+    target: system
+    mode: poll@100ms
+    emit: [timeline, raw]
+
+  # Every reclaim episode, with the task and the cgroup that paid for it.
+  - label: reclaim
+    source: mem.reclaim
+    target: system
+    mode: trace
+    emit: [summary, raw]
+    keys: [task, cgroup]
+
+  # Every block request, with its submitter. `topk` by task is the IDENTITY
+  # rung: whose reads these were.
+  - label: requests
+    source: io.latency
+    target: system
+    mode: trace
+    emit: [topk, raw]
+    keys: [task]
+
+joins:
+  # A read submitted by a thread that was itself reclaiming. KEY: one tid on
+  # both sides, not a propagated identity, and not a cause.
+  - id: reads-of-a-reclaiming-task
+    from: mem.reclaim
+    to: io.latency
+    via: task
+    match: eq
+    window: 10s
