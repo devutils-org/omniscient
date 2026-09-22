@@ -1,0 +1,75 @@
+# What a wakeup join onto a drained total attributes, and why the first session
+# does not use it.
+#
+#   omn -f examples/cross-compute-drained-wakeup.yml
+#
+# `sched.wakeup -> sched.offcpu` reads like "what released each block", and it
+# is the join `BRIEF_NEXT.md` names for this crossing. It is not that, and this
+# session shows why with the half-blocked workload's 600 round trips.
+#
+# `sched.offcpu` keeps its totals in the kernel and drains them every 100 ms: one
+# event is one `(task, state, stack)` over one interval, and it stands for as
+# many blocks as its `blocks` attribute says -- 159, 171, 169 and 101 for the
+# pipe read here. A wakeup join credits each `to` event to the wakeup that most
+# recently released that task, so each drained total, all of its blocks, goes to
+# whichever wakeup came last before the drain. The engine then reports
+# `15 of 15 events attributed` at evidence WAKEUP, for 612 blocks.
+#
+# Measured on this machine: the responder released the driver 602 times, and
+# the last drain's pipe blocks -- a hundred of them, every one released by the
+# responder -- were credited to one of the short-lived children the driver
+# waits for after its loop, which woke it once. The level printed beside that
+# is WAKEUP; what it rests on is two things happening close together in time,
+# which is TEMPORAL.
+#
+# The per-switch join in `cross-compute-where-the-time-went.yml` does not have
+# this problem: one `sched.switches` event is one switch. The fix for this one
+# is a join that reads the weight a drained event carries, or a `sched.offcpu`
+# that drains per block; both are requests in `docs/open-findings.md`.
+name: a wakeup join onto a drained total
+format: text
+
+requests:
+  - label: blocked
+    source: sched.offcpu
+    target: &halves
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"
+            while read -r _ <&4; do
+              j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+              echo y >&5
+            done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0
+          while [ $i -lt 600 ]; do
+            j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+            echo x >&3; read -r _ <&6
+            i=$((i + 1))
+          done
+          exec 3>&- 6<&-; rm -rf "$D"
+          V=$(grep '^voluntary_ctxt' /proc/$$/status); V=${V##*[!0-9]}
+          echo "omn-truth tid=$$ voluntary=$V" >&2
+    mode: trace
+    emit: [raw]
+    keys: [task]
+
+  - label: released-by
+    source: sched.wakeup
+    target: *halves
+    mode: trace
+    emit: [topk:3]
+    keys: [task]
+
+joins:
+  - id: what-released-the-block
+    from: sched.wakeup
+    to: sched.offcpu
+    via: task
+    match: wakeup
+    waker: waker_tid
+    window: 10s
+    top: 5

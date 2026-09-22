@@ -1,0 +1,94 @@
+# The same decomposition from a run that lost samples, to read beside a clean one.
+#
+#   omn -f examples/cross-compute-lossy-profile.yml
+#
+# Exactly `cross-compute-where-the-time-went.yml`, with one change: the profile
+# asks for 100 000 samples a second instead of 997. That is past
+# `kernel.perf_event_max_sample_rate` on any machine, so the kernel throttles
+# the event and the ring overflows while the drain is behind, and the run says
+# both. The on-cpu row of the decomposition is read off that profile; the two
+# traced rows are totals kept in the kernel and lose nothing.
+#
+# What the mark changes. The profile's `hist` carries `short by at least N of M
+# events`, every count in it is marked `>=`, and the decomposition's on-cpu row,
+# which is that count times a period, is short by the same samples. Its residue
+# turns positive, and the mark is what accounts for it: add the dropped samples
+# back and the residue closes, to within the throttled windows nobody counted.
+#
+# And the row is short of something specific, which is not the kernel's own
+# on-cpu figure. A `cpu-clock` sample fires on the time a task holds its cpu,
+# and that time includes the interrupts that ran on it meanwhile; the kernel's
+# `/proc/<pid>/schedstat` leaves interrupt time out (`IRQ_TIME_ACCOUNTING`,
+# built into this kernel). Measured on this machine, one shell spin loop at four
+# rates, against its own wall clock:
+#
+#                 wall    kernel on cpu   (recorded + dropped) x period
+#       997 Hz  1063.5 ms     1056.1 ms        1063.2 ms
+#    10 000 Hz  1105.5 ms     1067.1 ms        1104.0 ms
+#    50 000 Hz  1337.7 ms     1138.5 ms        1337.3 ms
+#   100 000 Hz  1725.2 ms     1234.3 ms        1716.1 ms   (783 throttled)
+#
+# The samples, dropped ones included, are the wall clock. The kernel's figure is
+# the wall clock minus a fourth state -- the task was current and an interrupt
+# had the cpu -- which is 0.7 % at 997 Hz and 28 % at 100 kHz, because at that
+# rate the interrupts are the profiler's own. That is the observer effect, and
+# the decomposition is where it shows: in the kernel's own accounting it is in
+# no state at all.
+# `docs/scenarios/cross-compute.md` has both decompositions side by side.
+name: the same decomposition, from a lossy profile
+format: text
+
+requests:
+  - label: on-cpu
+    source: cpu.profile
+    target: &halves
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          S=$(date +%s%N)
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"
+            while read -r _ <&4; do
+              j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+              echo y >&5
+            done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0
+          while [ $i -lt 600 ]; do
+            j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+            echo x >&3; read -r _ <&6
+            i=$((i + 1))
+          done
+          exec 3>&- 6<&-; rm -rf "$D"
+          E=$(date +%s%N)
+          read -r ON RQ SL < /proc/$$/schedstat
+          V=$(grep '^voluntary_ctxt' /proc/$$/status); V=${V##*[!0-9]}
+          echo "omn-truth tid=$$ wall_ns=$((E - S)) oncpu_ns=$ON runq_ns=$RQ slices=$SL voluntary=$V" >&2
+    mode: sample@100000hz
+    # `hist` carries the mark; `topk` will too once stream E lands, and until
+    # then it renders a lossy count exactly like a clean one.
+    emit: [topk, hist]
+    stack: fp
+    keys: [task]
+
+  - label: on-cpu-polled
+    source: cpu.oncpu_time
+    target: *halves
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task]
+
+  - label: runnable
+    source: sched.runqlat
+    target: *halves
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+
+  - label: blocked
+    source: sched.offcpu
+    target: *halves
+    mode: trace
+    emit: [raw]
+    keys: [task]

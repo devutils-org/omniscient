@@ -1,0 +1,134 @@
+# Where did one task's wall clock go -- on a cpu, waiting for one, or blocked?
+#
+#   omn -f examples/cross-compute-where-the-time-went.yml
+#
+# This is thread state analysis for one task, and the first piece of the layer
+# `ROADMAP.md` phase 10 describes: it answers "why is this slow", which is the
+# question people arrive with. Three states cover a task's life, and each has a
+# source that already collects and is already checked on its own:
+#
+#   on cpu      `cpu.profile`, a SAMPLE COUNT: every sample stands for one
+#               period of the task holding a cpu (1.003 ms at 997 Hz), so the
+#               time is a count multiplied by a period, with a count's
+#               resolution -- and it includes the interrupts that ran while the
+#               task held the cpu, which the kernel's own figure leaves out
+#   runnable    `sched.runqlat`, a TRACED DURATION: the exact sum of every wait
+#               between becoming runnable and getting a cpu
+#   blocked     `sched.offcpu`, a TRACED DURATION: the exact sum of every block
+#
+# plus `cpu.oncpu_time`, the kernel's own cpu accounting read on a 50 ms poll, as
+# a second opinion on the first row that is a different kind of number again.
+#
+# THE THREE ROWS DO NOT ADD UP, AND THIS SESSION DOES NOT ADD THEM. The tool has
+# no decomposition yet (the request is in `docs/open-findings.md`, under stream
+# P2), so the arithmetic lives in `tests/cross_compute.rs` and the table in
+# `docs/scenarios/cross-compute.md`. Two things keep the sum from being the wall
+# clock, and a reader adding the rows by hand has to know both:
+#
+#   - `sched.offcpu` times a block from the moment the task left the cpu to the
+#     moment it got one back, so the run queue wait after every wakeup is inside
+#     it -- and inside `sched.runqlat` too. The overlap is at most the runnable
+#     row, and nothing here says how much of that row it is.
+#   - A launched program's lifetime is in no output. The run's window is an upper
+#     bound on it, and the workload prints its own clock, a lower bound.
+#
+# What the rows are tied to the task by is KEY: every source is filtered to the
+# launched process in the kernel and carries `task:tid`. The join below is the
+# only one that says more, at WAKEUP: every time the task was switched out, it is
+# credited to the wakeup that started the run it was switched out of. That is
+# joined onto `sched.switches` and not onto `sched.offcpu`, because a
+# `sched.offcpu` event is a drained total standing for a hundred blocks, and a
+# wakeup join onto it credits all hundred to whichever wakeup came last --
+# `cross-compute-drained-wakeup.yml` shows that happening.
+#
+# The workload is `sched-half-blocked.yml`: a driver and a responder pass a byte
+# through two fifos 600 times and both spin 100 shell iterations before
+# answering, so the driver is on the cpu for its own spin and blocked for the
+# responder's, equal by construction. At the end the driver prints the kernel's
+# own accounting of itself, from `/proc/self/schedstat` and
+# `/proc/self/status`, on stderr: that line is the ground truth each row is
+# checked against, and the tool reads none of it.
+name: where the time of one task went
+format: text
+
+requests:
+  - label: on-cpu
+    source: cpu.profile
+    target: &halves
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          S=$(date +%s%N)
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"
+            while read -r _ <&4; do
+              j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+              echo y >&5
+            done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0
+          while [ $i -lt 600 ]; do
+            j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+            echo x >&3; read -r _ <&6
+            i=$((i + 1))
+          done
+          exec 3>&- 6<&-; rm -rf "$D"
+          E=$(date +%s%N)
+          read -r ON RQ SL < /proc/$$/schedstat
+          V=$(grep '^voluntary_ctxt' /proc/$$/status); V=${V##*[!0-9]}
+          echo "omn-truth tid=$$ wall_ns=$((E - S)) oncpu_ns=$ON runq_ns=$RQ slices=$SL voluntary=$V" >&2
+    mode: sample@997hz
+    # `hist` is here for one reason: it is the only emit of `cpu.profile` that
+    # carries the mark a lossy run puts on its counts. A histogram of samples
+    # that each count one is otherwise not worth reading.
+    emit: [topk, hist]
+    stack: fp
+    keys: [task]
+
+  - label: on-cpu-polled
+    source: cpu.oncpu_time
+    target: *halves
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task]
+
+  - label: runnable
+    source: sched.runqlat
+    target: *halves
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+
+  - label: blocked
+    source: sched.offcpu
+    target: *halves
+    mode: trace
+    emit: [raw, stack]
+    keys: [task]
+
+  - label: released-by
+    source: sched.wakeup
+    target: *halves
+    mode: trace
+    emit: [topk:3]
+    keys: [task]
+
+  - label: switched-out
+    source: sched.switches
+    target: *halves
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+joins:
+  - id: what-released-each-run
+    from: sched.wakeup
+    to: sched.switches
+    via: task
+    match: wakeup
+    waker: waker_tid
+    # A task not woken again within ten seconds is a task that has stopped
+    # blocking; its last state is counted as still open, not held forever.
+    window: 10s
+    top: 5

@@ -4707,3 +4707,174 @@ orders of magnitude; the THP mode is in the environment. The first half of the
 note, "EVENTS counts faults, not bytes", is right and matters most.
 
 ---
+## Needs from another stream — stream P2, the compute crossing
+
+Written by the stream that put `cpu.profile`, `sched.runqlat` and
+`sched.offcpu` in one table for one task. Every request below is backed by a
+measurement in `docs/scenarios/cross-compute.md`, whose finding number is given,
+and none of them was worked around in a file this stream does not own. In the
+order they are worth doing.
+
+### To whoever owns `src/bpf/offcpu.rs` and `src/collect/sched/offcpu.rs`: split the queue wait out of a block — finding 1
+
+A block is timed from the switch that took the task off the cpu to the switch
+that gave it one back, so the run queue wait after the wakeup is inside
+`total_ns` — and inside `sched.runqlat` as well. Measured: 100 sleeps of 5 ms
+behind a spinning shell report 582 ms off cpu, of which 77 ms is the kernel's
+own queue wait, which `sched.runqlat` reports too. Any decomposition that adds
+the two counts it twice, and nothing today says how much of the runnable row
+that is.
+
+The program already has both switches; what it lacks is the wakeup between
+them, which `src/bpf/runqlat.rs` already hooks. Wanted, per row:
+
+```rust
+// in the sched.offcpu event, beside what is there now
+Attr::uint("total_ns", switched_in - switched_out),   // unchanged, so nothing breaks
+Attr::uint("queued_ns", switched_in - woken),         // new: the part that was runnable
+```
+
+with `woken` written into the in-flight entry by a `sched_wakeup` program, and
+`queued_ns = 0` for a block whose wakeup the run did not see (say so in a
+note). `total_ns - queued_ns` is then the blocked row, and the catalog caveat
+*"blocked, not preempted"* can add *"and the wait after the wakeup is
+`queued_ns`"*.
+
+### To whoever owns `src/collect/mod.rs` and `src/collect/launch.rs`: the launched program's lifetime — finding 4
+
+The whole of a decomposition is the task's lifetime, and no output carries it.
+`observed_ns` runs from the release to the last drain and was 14 to 146 ms past
+the workload's own clock here, so every residue is a range and a double count
+smaller than that cannot be proven. `Gated` sees both ends already.
+
+```rust
+// in Collection, and so in every result
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub lifetime: Option<Lifetime>,
+
+pub struct Lifetime {
+    /// `CLOCK_MONOTONIC` at the write that released the gate.
+    pub released_ns: u64,
+    /// When the reap saw it, with how late the reap could have been.
+    pub exited_ns: u64,
+    pub exited_err_ns: u64,
+}
+```
+
+`exited_err_ns` is the runner's tick unless the exit is taken from a pidfd
+becoming readable, which would make it the wakeup latency instead. Either is
+honest if it is carried.
+
+### To whoever owns `src/join.rs`, `src/request.rs` and `src/encode.rs`: a decomposition beside the joins — the whole crossing
+
+Today the arithmetic is in `tests/cross_compute.rs`, and a session prints three
+sources that do not add up. Wanted, in a session:
+
+```yaml
+decompose:
+  - id: where-the-time-went
+    whole: lifetime                         # the request above
+    parts:
+      - {state: on-cpu,   from: cpu.profile,   value: samples}    # count x period
+      - {state: runnable, from: sched.runqlat, value: total_ns}
+      - {state: blocked,  from: sched.offcpu,  value: total_ns, less: queued_ns}
+```
+
+```rust
+pub struct Decomposition { pub id: String, pub whole: Whole, pub parts: Vec<Part> }
+pub struct Part { pub state: String, pub from: SourceId, pub value: PartValue, pub less: Option<String> }
+pub enum PartValue { Samples, Attr(String) }
+
+// and in RunOutput, beside `joins`
+pub struct DecompositionOutput {
+    pub id: String,
+    pub whole_ns: u64,
+    pub whole_err_ns: u64,
+    pub rows: Vec<Row>,
+    /// Signed, and never rounded away: negative is time counted twice,
+    /// positive is a state no row covers.
+    pub residue_ns: i64,
+}
+pub struct Row {
+    pub state: String,
+    pub source: SourceId,
+    pub kind: Kind,               // Sampled | Polled | Traced
+    pub evidence: Evidence,       // KEY for a row filtered to the task
+    pub ns: u64,
+    pub resolution_ns: u64,       // a period for a sample count, zero for a trace
+    pub short: Option<emit::Shortfall>,
+}
+```
+
+Refused at validation when a part's source is not in the session or carries a
+different `task` than the whole. The residue is the point of the output; a
+row that says `interrupted` where a sampled on-cpu part and the kernel's own
+figure differ (finding 2) belongs in it once the kernel's figure is a source.
+
+### To whoever owns `src/validate.rs` and `catalog/*.yaml`: refuse a wakeup join onto a drained total — finding 5
+
+`sched.wakeup -> sched.offcpu` credits each drained `sched.offcpu` event — a
+hundred blocks — to whichever wakeup came last before the drain, and prints
+WAKEUP beside it. What it rests on is proximity in time. Measured: 11 events for
+607 blocks, `11 of 11 attributed`, the last hundred blocks credited to a child
+that woke the task once.
+
+The invariant is *refused with the reason, never degraded silently*. Wanted, a
+backend flag and a refusal:
+
+```yaml
+# catalog/sched.yaml, on the sched.offcpu and sched.runqlat backends
+drained: true     # one event stands for many occurrences, totalled in the kernel
+```
+
+```rust
+// in check_joins
+Rejection::new(format!(
+    "rule `{id}` matches by `wakeup` onto `{to}`, whose events are totals drained \
+     from the kernel: each stands for many blocks, and a wakeup can only release one. \
+     Join onto a source with one event per occurrence, such as `sched.switches`"
+))
+```
+
+The alternative — a `weight` attribute the engine counts `matched` in — makes the
+count right and the attribution still wrong, which is worse.
+
+### To whoever owns `src/join.rs` and `src/encode.rs`: rank a wakeup join by chain — finding 6
+
+`assemble` ranks attribution *states*, and a wakeup join opens one per wakeup:
+1230 states of one or two events each, topped by whichever wakeups preceded a
+preemption. The table is headed `heaviest wakeup chains` and never shows the
+chain that released the task 602 times. Wanted, for `MatchKind::Wakeup` only,
+before the sort and the truncation:
+
+```rust
+// merge finished attributions with an equal `key`, summing `matched`,
+// keeping the earliest `opened_ns` and the latest `closed_ns`
+```
+
+And in `outcome`: `(Outcome::StillOpen, MatchKind::Wakeup)` renders
+`never ran`, including for states with events attributed — the task did run.
+`still open at the end` is what happened.
+
+### To whoever owns `src/collect/cpu/oncpu.rs`: a closing read from the reap — finding 8
+
+`cpu.oncpu_time` via `fs:proc` on a launched program read 10 to 26 ms short of
+the kernel's own figure in every run, always by a multiple of the tick: the cpu
+spent after the last poll is in no reading. For a launched program the reap has
+the exact answer, `wait4`'s `rusage`, and a closing reading from it would make
+the row exact at the end. This is the open question `STATE.md` calls *the
+closing read of a polled counter*, met a third time.
+
+### To whoever owns `catalog/cpu.yaml`: what a `cpu-clock` sample counts — finding 2
+
+A sample fires on the time a task holds its cpu, interrupts included; the
+kernel's `schedstat` on-cpu figure leaves interrupt time out on a kernel built
+with `IRQ_TIME_ACCOUNTING`. The two differ by 0.7 % at 997 Hz and 28 % at
+100 kHz, where the interrupts are the profiler's own. Wanted, a caveat on
+`cpu.profile`:
+
+> A time-based sample counts the time the task held its cpu, including the
+> interrupts that ran on it meanwhile, and at high rates those interrupts are
+> this profile's own. The kernel's own on-cpu figure leaves interrupt time out,
+> so the two differ by exactly the time the task lost to interrupts: 0.7 % at
+> 997 Hz and 28 % at 100 kHz on the machine this was measured on.
