@@ -1,0 +1,101 @@
+# Did it stay? What the allocator kept after the program gave it back.
+#
+#   omn -f examples/cross-memory-did-it-stay.yml
+#
+# The same program as `examples/cross-memory-which-allocation.yml`, byte for
+# byte, and the second half of the same question. That session says which
+# allocation faulted and which was freed. This one says what a free returned to
+# the machine, and it has to be a second session: `mem.heap.alloc` and
+# `mem.heap.retained` each give the program a preloaded shim with a pipe of its
+# own, and one launched program cannot carry two. Asked in one session, the run
+# is refused before it starts -- see `docs/scenarios/cross-memory.md`, D3. So
+# nothing here is added to anything there: each table is one run's.
+#
+# `free` does two different things, and this program does both on purpose:
+#
+#   - the four 8 MiB blocks it frees were each served by their own mapping, and
+#     `free` unmaps them. The resident size falls by 32 MiB and nothing is
+#     retained;
+#   - the 256 blocks of 64 KiB it frees came from the arena, between blocks that
+#     are still live. glibc keeps every page: the resident size does not move,
+#     and 16 MiB is retained.
+#
+# `mem.heap.retained` measures that directly, by address rather than by
+# subtraction: the shim says which ranges were freed, `/proc/[pid]/pagemap`
+# says which of their pages are still in memory. Each reading also carries
+# `live` (bytes asked for and not freed) and `rss`, read at the same instant.
+# Those three are what the decomposition in the document is made of, and all
+# three come from one event, so adding them up mixes no clocks and no runs:
+#
+#   rise in rss  =  rise in live  +  rise in retained  +  residue
+#
+# The residue is printed rather than rounded away. Most of it is predicted by
+# the program: a page shared between a freed block and a live one is counted as
+# live by the retained scan, which is why that number is a lower bound, and the
+# program prints on standard error how many whole pages its freed blocks
+# cover (`ARENA <blocks> <bytes> <whole-page bytes>`).
+#
+# The evidence is not the same on every line. Retained bytes are KEY: an
+# address inside a range the shim recorded as freed, even though the engine
+# never sees it as a join. The residency after each free is TEMPORAL: a total
+# for the process that changed in the interval the free happened in.
+name: did it stay -- what the allocator kept after the program gave it back
+format: text
+
+requests:
+  - label: retained
+    source: mem.heap.retained
+    target: &program
+      launch:
+        - python3
+        - -c
+        - |
+          import ctypes, mmap, resource, sys, time
+
+          libc = ctypes.CDLL(None)
+          libc.malloc.restype = ctypes.c_void_p
+          libc.malloc.argtypes = [ctypes.c_size_t]
+          libc.free.argtypes = [ctypes.c_void_p]
+          # M_MMAP_THRESHOLD. Fixing it also stops glibc raising it the first
+          # time a mapped block is freed, which would move the next ones into
+          # the arena.
+          libc.mallopt(-3, 1 << 20)
+
+          MiB = 1 << 20
+          PAGE = mmap.PAGESIZE
+
+          def faults():
+              return resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+
+          def make(fate, count, size):
+              blocks = [libc.malloc(size) for _ in range(count)]
+              for block in blocks:
+                  before = faults()
+                  ctypes.memset(block, 1, size)
+                  if size >= MiB:
+                      sys.stderr.write('BLOCK %s %d %d %d\n' % (fate, block, size, faults() - before))
+              return blocks
+
+          def whole_pages(blocks, size):
+              return sum(((b + size) // PAGE - (b + PAGE - 1) // PAGE) * PAGE for b in blocks)
+
+          time.sleep(0.3)
+          kept = make('kept', 4, 8 * MiB)
+          time.sleep(0.3)
+          returned = make('returned', 4, 8 * MiB)
+          time.sleep(0.3)
+          for block in returned:
+              libc.free(block)
+          time.sleep(0.3)
+          held = make('held', 512, 64 << 10)
+          time.sleep(0.3)
+          freed = held[::2]
+          sys.stderr.write('ARENA %d %d %d\n' % (len(freed), len(freed) * (64 << 10), whole_pages(freed, 64 << 10)))
+          for block in freed:
+              libc.free(block)
+          time.sleep(0.4)
+    mode: poll@100ms
+    # Raw carries `live`, `rss` and `freed_span` beside the retained bytes;
+    # the timeline carries the retained bytes alone.
+    emit: [timeline, raw]
+    keys: [task]

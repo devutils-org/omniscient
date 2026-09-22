@@ -1,0 +1,141 @@
+# Which allocation cost memory, and which of them stayed?
+#
+#   omn -f examples/cross-memory-which-allocation.yml
+#
+# Three sources on one launched program, and they answer three different
+# questions with three different grades of evidence:
+#
+#   mem.heap.alloc   which ranges the program asked for, and when it gave each
+#                    one back
+#   mem.faults       which addresses the kernel had to make real
+#   mem.rss          how many bytes the process holds in RAM, read on a tick
+#
+# The join below ties a fault to the range it fell inside. Both sides carry
+# `mem:[base,len)`, so the join says KEY, and it is the only line of this
+# session that says anything about one allocation.
+#
+# The resident size is beside the join, not in it, and that is deliberate. A
+# reading of `mem.rss` is a total for the process, taken at an instant: no key
+# on it names an allocation, and no rule in this engine can attach one. What
+# the timeline shows is that residency rose by 32 MiB in the interval four
+# 8 MiB ranges opened in, and fell by 32 MiB in the interval four were freed
+# in. That is consistent with them, and it is TEMPORAL: two things that
+# happened at the same time. It is not a measurement of what any one of them
+# costs.
+#
+# Nor are the fault counts bytes, and this program is chosen to show it. With
+# transparent huge pages on, a range takes one fault per aligned 2 MiB page it
+# wholly covers and one per 4 KiB page outside them. An 8 MiB mapping usually
+# covers three, and costs 515 faults; when it lands where it covers four, it
+# costs 4. Where it lands changes from run to run. Same bytes, a factor of a
+# hundred in faults. Bytes come from `mem.rss`, which measures bytes.
+#
+# The program, and what it guarantees:
+#
+#   - the threshold above which glibc serves a block with its own mapping is
+#     fixed at 1 MiB, so every 8 MiB block is a mapping that `free` unmaps;
+#   - after 300 ms of quiet, four 8 MiB blocks are made and every byte written:
+#     these are kept until the end;
+#   - 300 ms later four more, written the same way, and 300 ms after that they
+#     are freed;
+#   - 300 ms later 512 blocks of 64 KiB from the arena, written, and after
+#     another 300 ms every other one is freed. `examples/cross-memory-did-it-
+#     stay.yml` measures what that leaves behind. Here those ranges open no
+#     state: `opens` asks only for the eight large ones, so the arena's faults
+#     are counted as falling outside every open range, which is what they did;
+#   - for each large block it prints, on standard error, its address and the
+#     minor faults `getrusage` counted across its own write. That is the
+#     kernel's count for exactly that allocation, and the test holds the join
+#     to it range by range.
+#
+# The join ranks ranges by fault count, which is the wrong order for this
+# question: the huge-page range is 8 MiB and ranks below every other large
+# one. `docs/scenarios/cross-memory.md` has the table that puts bytes, faults
+# and fates side by side with the evidence each column rests on.
+name: which allocation cost memory, and which of them stayed
+format: text
+
+requests:
+  - label: allocations
+    source: mem.heap.alloc
+    target: &program
+      launch:
+        - python3
+        - -c
+        - |
+          import ctypes, mmap, resource, sys, time
+
+          libc = ctypes.CDLL(None)
+          libc.malloc.restype = ctypes.c_void_p
+          libc.malloc.argtypes = [ctypes.c_size_t]
+          libc.free.argtypes = [ctypes.c_void_p]
+          # M_MMAP_THRESHOLD. Fixing it also stops glibc raising it the first
+          # time a mapped block is freed, which would move the next ones into
+          # the arena.
+          libc.mallopt(-3, 1 << 20)
+
+          MiB = 1 << 20
+          PAGE = mmap.PAGESIZE
+
+          def faults():
+              return resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+
+          def make(fate, count, size):
+              blocks = [libc.malloc(size) for _ in range(count)]
+              for block in blocks:
+                  before = faults()
+                  ctypes.memset(block, 1, size)
+                  if size >= MiB:
+                      sys.stderr.write('BLOCK %s %d %d %d\n' % (fate, block, size, faults() - before))
+              return blocks
+
+          def whole_pages(blocks, size):
+              return sum(((b + size) // PAGE - (b + PAGE - 1) // PAGE) * PAGE for b in blocks)
+
+          time.sleep(0.3)
+          kept = make('kept', 4, 8 * MiB)
+          time.sleep(0.3)
+          returned = make('returned', 4, 8 * MiB)
+          time.sleep(0.3)
+          for block in returned:
+              libc.free(block)
+          time.sleep(0.3)
+          held = make('held', 512, 64 << 10)
+          time.sleep(0.3)
+          freed = held[::2]
+          sys.stderr.write('ARENA %d %d %d\n' % (len(freed), len(freed) * (64 << 10), whole_pages(freed, 64 << 10)))
+          for block in freed:
+              libc.free(block)
+          time.sleep(0.4)
+    mode: trace
+    emit: [summary]
+    keys: [task, mem]
+
+  # Every fault, not a sample: a sampled subset would attribute a fraction of
+  # each range and make an allocation look cheaper than it was.
+  - label: faults
+    source: mem.faults
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task, mem]
+
+  # Raw as well as the timeline: a timeline carries offsets from its own first
+  # point, and saying which reading came after which range opened needs the
+  # clock both sides share.
+  - label: resident
+    source: mem.rss
+    target: *program
+    mode: poll@100ms
+    emit: [timeline, raw]
+    keys: [task]
+
+joins:
+  - id: pages-of-allocation
+    from: mem.heap.alloc
+    to: mem.faults
+    via: mem
+    match: interval
+    opens: "op == 'alloc' && bytes >= 1048576"
+    closes: "op == 'free'"
+    window: 60s
