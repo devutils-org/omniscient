@@ -5219,3 +5219,12 @@ Comments that explain a design by that rule, and now mislead:
 - `DECISIONS.md`'s session-versus-daemon line is untouched: a run is still one
   window and one document, and `docs/families/runner.md` says which two
   extensions would not be.
+
+### To whoever owns `tests/scenario_cpu.rs`: the known-instruction scenario flaps under load, before this wave too
+
+`a_known_number_of_retired_instructions_is_counted_as_that_number` failed 4 of
+25 on the parent of stream R's commit and 4 of 25 on it, interleaved, with half
+the cores spinning; it failed once in three runs on an idle machine. The failing
+runs overshoot by +0.69 %, and the large run's excess over 10^9 (13.85 M) is
+twice the startup run's count (6.97 M), which points at something counted twice
+in the large run rather than at noise. Not investigated further.

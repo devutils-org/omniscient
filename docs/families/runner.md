@@ -247,3 +247,13 @@ failed once in the full suite (`the window that held it reports 0.002 against
 `--system` target, which this stream's changes leave as it was, and it is the
 `scenario_io` flapping `BRIEF.md` warns about: an "idle" window on a machine
 the rest of the suite is loading.
+
+And `tests/scenario_cpu.rs`'s `a_known_number_of_retired_instructions_is_counted_as_that_number`
+failed once in the full suite and once in three runs alone:
+`1000000000 instructions was counted at 1006884276 (+0.688 %); the runs were
+1013851439 and 6967163`. Because it counts a launched program, which is the path
+this stream changed, it was run against the parent commit: **4 of 25 failed on
+the parent and 4 of 25 on this branch**, interleaved, with half the cores
+spinning. It is not this stream's. The shape is worth the `cpu` family's time:
+the excess is almost exactly twice the startup run's 6.97 M, as if the large run
+had counted a startup more than once.
