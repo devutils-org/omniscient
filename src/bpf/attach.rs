@@ -64,6 +64,8 @@ pub mod fentry;
 pub mod io_fsync;
 #[path = "io_vfs.rs"]
 pub mod io_vfs;
+#[path = "net_connect.rs"]
+pub mod net_connect;
 #[path = "net_socket.rs"]
 pub mod net_socket;
 

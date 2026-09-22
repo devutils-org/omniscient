@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
-use crate::bpf::attach::fentry::{DrainLosses, Row};
+use crate::bpf::attach::fentry::{Drained, Row};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -39,11 +39,16 @@ pub const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(100);
 
 /// The loaded programs, whichever source they belong to.
 pub trait Rows {
-    fn drain(&self) -> Result<(Vec<Row>, DrainLosses), String>;
-    fn still_pending(&self) -> usize;
-    /// `(pending, rows)`: calls lost because a thread could not be stamped, and
-    /// calls lost because their row could not be created.
-    fn dropped(&self) -> (u64, u64);
+    /// The rows of the interval before the last one; with `last`, of both.
+    fn drain(&self, last: bool) -> Result<Drained, String>;
+    /// Stamps left at the end, as `(in flight, orphaned)`.
+    fn still_pending(&self) -> (usize, usize);
+    /// `(pending, rows, orphaned)`: calls lost because a thread could not be
+    /// stamped, because their row could not be created, and because the
+    /// kernel skipped their exit half.
+    fn dropped(&self) -> (u64, u64, u64);
+    /// Runs of the programs the kernel skipped, which lost the call outright.
+    fn missed(&self) -> u64;
 }
 
 /// What one source makes of a row: the keys its event carries, and the
@@ -84,6 +89,8 @@ pub struct HistogramCollector {
     predicate: Option<FilterExpr>,
     dropped_pending: u64,
     dropped_rows: u64,
+    orphaned: u64,
+    missed: u64,
     window_opened_ns: u64,
     /// Calls this run bucketed, which is what the event count is not.
     calls: u64,
@@ -108,6 +115,8 @@ impl HistogramCollector {
             predicate,
             dropped_pending: 0,
             dropped_rows: 0,
+            orphaned: 0,
+            missed: 0,
             window_opened_ns: 0,
             calls: 0,
             rows: 0,
@@ -130,13 +139,16 @@ impl HistogramCollector {
         }
     }
 
-    fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
+    fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64, last: bool) {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let closed_ns = monotonic_ns();
-        let window_ns = closed_ns.saturating_sub(self.window_opened_ns);
-        let (rows, drain_losses) = match program.drain() {
+        let Drained {
+            rows,
+            losses: drain_losses,
+            opened_ns,
+            closed_ns,
+        } = match program.drain(last) {
             Ok(drained) => drained,
             Err(reason) => {
                 // The rows are still in the map and arrive with the next drain;
@@ -146,7 +158,9 @@ impl HistogramCollector {
                 return;
             }
         };
-        self.window_opened_ns = closed_ns;
+        // The interval the rows were counted over, which the program knows:
+        // they were written one drain ago, not since the last one.
+        let window_ns = closed_ns.saturating_sub(opened_ns);
         if drain_losses.vanished > 0 {
             self.losses.undecoded += drain_losses.vanished;
             self.losses
@@ -191,7 +205,7 @@ impl HistogramCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let (pending, rows) = program.dropped();
+        let (pending, rows, orphaned) = program.dropped();
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
             self.losses.note(format!(
@@ -209,8 +223,30 @@ impl HistogramCollector {
             );
             self.dropped_rows = rows;
         }
+        if orphaned > self.orphaned {
+            self.losses.dropped += orphaned - self.orphaned;
+            self.losses.note(ORPHANED);
+            self.orphaned = orphaned;
+        }
+        let missed = program.missed();
+        if missed > self.missed {
+            self.losses.dropped += missed - self.missed;
+            self.losses.note(format!(
+                "the kernel skipped a run of these programs because one was already running on \
+                 that cpu, preempted halfway, so {} was never timed and every count here is a \
+                 lower bound",
+                self.call
+            ));
+            self.missed = missed;
+        }
     }
 }
+
+/// Why a call whose exit half never ran is a loss, in the words a reader sees.
+pub const ORPHANED: &str = "the exit half of a call never ran: another tracer attached to or \
+    detached from the same kernel function while the call was in flight, and the kernel \
+    rebuilds a function's trampoline so that calls in flight skip their exit programs -- the \
+    longest calls are the likeliest to be lost this way";
 
 /// What every event of a kernel-built histogram carries, whatever the source.
 fn common_attributes(row: &Row, window_ns: u64) -> Vec<Attr> {
@@ -256,17 +292,21 @@ impl Collector for HistogramCollector {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let mut events = Vec::new();
-        self.drain_into(&mut events, seq);
+        self.drain_into(&mut events, seq, false);
         self.absorb_drops();
         Ok(events)
     }
 
     fn stop(&mut self) -> Vec<Event> {
         let mut trailing = Vec::new();
-        self.drain_into(&mut trailing, u64::MAX / 2);
+        self.drain_into(&mut trailing, u64::MAX / 2, true);
         self.absorb_drops();
         if let Some(program) = self.program.as_ref() {
-            let open = program.still_pending();
+            let (open, orphaned) = program.still_pending();
+            if orphaned > 0 {
+                self.losses.dropped += orphaned as u64;
+                self.losses.note(ORPHANED);
+            }
             if open > 0 {
                 self.notes.push(format!(
                     "{open} thread{} inside {} when the run ended; that call has no end yet and \

@@ -194,7 +194,15 @@
   summary: "I/O latency as the application sees it"
   unit: ns
   backends:
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low}
+    # The syscall table's own entry points, timed at both halves and counted
+    # in the kernel: the one layer the compiler cannot inline into the
+    # dispatcher. They read their arguments out of the saved registers, so the
+    # names are x86-64's, and another architecture reports them missing. Not
+    # `ksys_read`: `ksys_pread64` and `ksys_pwrite64` are inlined into their
+    # syscalls, and three hundred pwrites put no call through them. Not
+    # `vfs_read` either: that is `io.fs`, and the descriptor is exactly what
+    # this layer has and that one does not.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__x64_sys_read", "fentry:__x64_sys_write", "fentry:__x64_sys_pread64", "fentry:__x64_sys_pwrite64"], cost: low}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med,
        degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,
@@ -202,24 +210,45 @@
   modes: [trace, count]
   emits: [hist, topk, raw, rate, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
-  keys: [task, file, req]
-  filter_fields: [comm, fd, bytes]
+  keys: [task]
+  filter_fields: [comm, fd, bytes, op, syscall]
   determinism: low
+  caveats:
+    - "An event is a histogram row, not a call: `count` says how many calls it
+       stands for and `lat_ns` is the low bound of their log2 bucket. The exact
+       total is `total_ns`."
+    - "read, write, pread64, pwrite64 and their vectored forms. sendfile,
+       splice, io_uring and page faults on a mapping are I/O this does not see."
+    - "The descriptor keys the row, and a descriptor names nothing outside its
+       process: the file is `io.fs`'s key, not this one's."
 
 - id: io.fs
   family: io
   summary: "VFS and filesystem latency"
   unit: ns
   backends:
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:ext4:*", "bpf"], cost: low, degraded: "filesystem-specific tracepoints"}
+    # The one place every filesystem passes, so a machine with btrfs and xfs
+    # mounted gets both answers, each labelled with its own name. The
+    # `tracepoint:ext4:*` backend this entry used to carry is gone: a glob is
+    # not a name, and converting it would have meant choosing which filesystem
+    # `io.fs` is about. `docs/families/io.md` has the decision.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, degraded: "no BTF: struct layouts are not portable"}
-  modes: [trace]
+  modes: [trace, count]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
-  keys: [task, file, req]
-  filter_fields: [comm, dev, ino, bytes]
+  keys: [file, task]
+  filter_fields: [comm, dev, ino, bytes, fs, op]
   determinism: low
+  caveats:
+    - "Regular files only. vfs_read also serves pipes, sockets and terminals,
+       and a reader blocked on an empty pipe is not filesystem latency; that
+       wait is in io.syscall and not here."
+    - "The file key's device is the superblock's. On btrfs that is not the
+       st_dev stat(2) reports -- every subvolume has its own anonymous device --
+       and inode numbers repeat across subvolumes, so there the key names the
+       filesystem and the inode, not always one file."
+    - "An event is a histogram row, not a call: `count` says how many."
 
 - id: io.pagecache
   family: io
@@ -275,15 +304,25 @@
   summary: "Synchronization latency (fsync, fdatasync)"
   unit: ns
   backends:
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_fsync_range"], cost: low}
+    # `fsync(2)` does not reach `vfs_fsync_range`, the function this entry
+    # used to name: on the development machine the compiler inlined it, and
+    # `vfs_fsync`, into `do_fsync`, and twenty-five syncs put zero calls
+    # through either. All three are timed, `do_fsync` where the kernel has
+    # it, and a nested pair is one event.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_fsync", "fentry:vfs_fsync_range"], cost: low}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low,
        degraded: "no BTF: struct offsets are not portable across kernels"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, launch: native, cgroup: bpf_only, system: native}
-  keys: [task, file]
-  filter_fields: [comm, dev, ino]
+  keys: [file, task]
+  filter_fields: [comm, dev, ino, call, fs]
   determinism: low
+  caveats:
+    - "fsync, fdatasync and msync(MS_SYNC). sync(2), syncfs(2) and
+       sync_file_range(2) take other paths and are not here."
+    - "A sync that returned an error made nothing durable; its event carries
+       the errno, and its duration is not a commit's."
 
 - id: io.pressure
   family: io

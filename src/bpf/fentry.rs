@@ -556,7 +556,83 @@ fn load(
 /// the program goes when its last reference does.
 pub struct Link {
     _link: OwnedFd,
-    _program: OwnedFd,
+    program: OwnedFd,
+}
+
+impl Link {
+    /// Runs of this program the kernel skipped, and counted only for itself.
+    ///
+    /// A trampoline guards each program with a per-cpu counter, and on a
+    /// preemptible kernel a run can be preempted halfway: the next hit of the
+    /// same program on that cpu finds the counter taken and is not run at all.
+    /// That is a call this source never timed, and nothing the program keeps
+    /// can say so -- neither its drop counter nor its ring nor its maps saw it.
+    /// The kernel counts it in `bpf_prog_info.recursion_misses`, and this is
+    /// that count.
+    ///
+    /// Measured here, and it is not rare under load: a hundred threads reading
+    /// a thousand files made the file layer three calls short of the program's
+    /// own total, and a second tracer on the same machine -- whose programs run
+    /// on every one of those reads to check whether it is theirs -- lost a
+    /// three-hundred-millisecond read outright.
+    pub fn misses(&self) -> u64 {
+        recursion_misses(&self.program).unwrap_or(0)
+    }
+}
+
+/// `BPF_OBJ_GET_INFO_BY_FD`.
+const BPF_OBJ_GET_INFO_BY_FD: i32 = 15;
+
+#[repr(C)]
+struct InfoAttr {
+    bpf_fd: u32,
+    info_len: u32,
+    info: u64,
+}
+
+/// Reads `recursion_misses` out of a program's `bpf_prog_info`, at the offset
+/// the running kernel's own BTF gives it: the structure grows at its end with
+/// every release, and the kernel copies no more than the length it is told.
+fn recursion_misses(program: &OwnedFd) -> Result<u64, String> {
+    static OFFSET: OnceLock<Result<usize, String>> = OnceLock::new();
+    let offset = OFFSET
+        .get_or_init(|| {
+            crate::bpf::kernel_btf()?
+                .member_offset("bpf_prog_info", "recursion_misses")
+                .map(|offset| offset as usize)
+        })
+        .clone()?;
+    let mut info = vec![0u8; offset + 8];
+    let mut attr = InfoAttr {
+        bpf_fd: program.as_raw_fd() as u32,
+        info_len: info.len() as u32,
+        info: info.as_mut_ptr() as u64,
+    };
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_OBJ_GET_INFO_BY_FD,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<InfoAttr>() as u32,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "cannot read the program's own statistics: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    if (attr.info_len as usize) < offset + 8 {
+        return Err("this kernel's bpf_prog_info ends before recursion_misses".to_owned());
+    }
+    Ok(u64::from_ne_bytes(
+        info[offset..offset + 8].try_into().expect("8"),
+    ))
+}
+
+/// Every run the kernel skipped across a set of links.
+pub fn misses(links: &[Link]) -> u64 {
+    links.iter().map(Link::misses).sum()
 }
 
 /// Loads `instructions` against one half of `function` and attaches them.
@@ -615,7 +691,7 @@ pub fn attach(
     }
     Ok(Link {
         _link: unsafe { OwnedFd::from_raw_fd(fd as RawFd) },
-        _program: program,
+        program,
     })
 }
 
@@ -653,12 +729,25 @@ const ENTRY_DROP_KEY: i16 = -20;
 /// Writes the entry half of a timed pair.
 ///
 /// `gate` runs first, with the context in `r6`, and may jump to [`SKIP`] to
-/// leave a call untimed; it may use `r1` through `r5` and `r7`. Shared with
-/// the streaming sources, whose entry half is the same stamp.
+/// leave a call untimed; it may use `r1` through `r5` and `r7`.
+///
+/// **A stamp already there is an exit that never ran.** The functions a pair
+/// times do not nest on one thread, so the only way a thread arrives at the
+/// entry half with a stamp of its own still in the map is that the exit half of
+/// its previous call was skipped -- and the kernel does skip it: when any
+/// tracer attaches to or detaches from the same function, the trampoline is
+/// rebuilt, and the old one is patched first so that calls still in flight
+/// return *around* their exit programs. A second tracer attaching for thirty
+/// milliseconds in the middle of a three-hundred-millisecond read removed that
+/// read from this one's histogram, deterministically, with nothing counted.
+/// So the stamp is written only if absent; a stamp found is counted in
+/// `orphan_slot` and then replaced, so the thread is timed again from this
+/// call on.
 pub(crate) fn entry_instructions(
     pending_fd: i32,
     drops_fd: i32,
     drop_slot: u32,
+    orphan_slot: u32,
     narrowing: Narrowing,
     gate: &dyn Fn(&mut Program),
 ) -> Result<Vec<Insn>, String> {
@@ -684,16 +773,23 @@ pub(crate) fn entry_instructions(
     }
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, ENTRY_PEND_VALUE, 0));
-    program.extend(Insn::load_map_fd(1, pending_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, ENTRY_PEND_KEY as i32));
-    program.push(Insn::mov64_reg(3, R10));
-    program.push(Insn::add64_imm(3, ENTRY_PEND_VALUE as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    stamp(&mut program, pending_fd, BPF_NOEXIST);
+    program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+    program.jump_to("full", Insn::jne_imm(0, -EEXIST, 0));
+    // An exit half that never ran, counted before its stamp is replaced.
+    count_drop(
+        &mut program,
+        drops_fd,
+        ENTRY_DROP_KEY,
+        orphan_slot,
+        "restamp",
+    );
+    program.label("restamp");
+    stamp(&mut program, pending_fd, 0);
     program.jump_to(SKIP, Insn::jsge_imm(0, 0, 0));
     // The map is full: this call will never be timed, and nothing else
     // anywhere would record that it was made.
+    program.label("full");
     count_drop(&mut program, drops_fd, ENTRY_DROP_KEY, drop_slot, SKIP);
     program.label(SKIP);
     program.push(Insn::mov64_imm(0, 0));
@@ -701,6 +797,18 @@ pub(crate) fn entry_instructions(
     let instructions = program.build();
     insn::audit(&instructions)?;
     Ok(instructions)
+}
+
+/// Writes the thread's stamp with the update flags given, leaving the helper's
+/// answer in `r0`.
+fn stamp(program: &mut Program, pending_fd: i32, flags: i32) {
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_PEND_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ENTRY_PEND_VALUE as i32));
+    program.push(Insn::mov64_imm(4, flags));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
 }
 
 /// Closes a pending stamp: leaves the duration in `r9` and falls through, or
@@ -784,6 +892,8 @@ const EEXIST: i32 = 17;
 /// Slots of the histogram's drop counter.
 pub const DROP_PENDING: u32 = 0;
 pub const DROP_ROWS: u32 = 1;
+/// Calls whose exit half the kernel skipped; see [`entry_instructions`].
+pub const DROP_ORPHANED: u32 = 2;
 
 const LOG2: Log2Labels = [
     "fx_log2_32",
@@ -795,6 +905,55 @@ const LOG2: Log2Labels = [
     "fx_log2_done",
 ];
 
+/// The labels one copy of the row section jumps between. The section is
+/// emitted once per row map, and a label is defined once per program, so each
+/// copy has its own.
+struct RowLabels {
+    rows: &'static str,
+    first: &'static str,
+    moved: &'static str,
+    first_moved: &'static str,
+    first_named: &'static str,
+    lost_race: &'static str,
+    raced_moved: &'static str,
+    raced_out: &'static str,
+}
+
+const ROWS_A: RowLabels = RowLabels {
+    rows: "a_rows",
+    first: "a_first",
+    moved: "a_moved",
+    first_moved: "a_first_moved",
+    first_named: "a_first_named",
+    lost_race: "a_lost_race",
+    raced_moved: "a_raced_moved",
+    raced_out: "a_raced_out",
+};
+
+const ROWS_B: RowLabels = RowLabels {
+    rows: "b_rows",
+    first: "b_first",
+    moved: "b_moved",
+    first_moved: "b_first_moved",
+    first_named: "b_first_named",
+    lost_race: "b_lost_race",
+    raced_moved: "b_raced_moved",
+    raced_out: "b_raced_out",
+};
+
+/// Where the exit half's generation key sits on its stack.
+const EXIT_GEN_KEY: i16 = -96;
+
+/// The maps an exit half writes into.
+#[derive(Clone, Copy)]
+struct ExitMaps {
+    pending: i32,
+    /// A one-word array: which of the two row maps is being written.
+    generation: i32,
+    rows: [i32; 2],
+    drops: i32,
+}
+
 /// Writes the exit half of a timed pair.
 ///
 /// `fill` runs with the context in `r6` and the duration in `r9`, both of
@@ -803,14 +962,12 @@ const LOG2: Log2Labels = [
 /// [`FILL_AUX`], which are zero when it starts.
 fn exit_instructions(
     timed: &Timed,
-    pending_fd: i32,
-    rows_fd: i32,
-    drops_fd: i32,
+    maps: ExitMaps,
     fill: &dyn Fn(&mut Program, &Timed) -> Result<(), String>,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
-    close_stamp(&mut program, pending_fd, EXIT_PEND_KEY, "done");
+    close_stamp(&mut program, maps.pending, EXIT_PEND_KEY, "done");
 
     for slot in 0..(ROW_KEY_BYTES as i16 / 8) {
         program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY + slot * 8, 0));
@@ -828,22 +985,48 @@ fn exit_instructions(
     insn::push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
-    lookup_row(&mut program, rows_fd);
-    program.jump_to("first", Insn::jeq_imm(0, 0, 0));
-    accumulate(&mut program, ["moved", "done"]);
+    // Which row map is being written this interval. An array's element zero
+    // always exists; the null check is the verifier's, and the fallback is
+    // the first map.
+    program.push(Insn::st_imm(BPF_W, R10, EXIT_GEN_KEY, 0));
+    program.extend(Insn::load_map_fd(1, maps.generation));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, EXIT_GEN_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(ROWS_A.rows, Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.jump_to(ROWS_B.rows, Insn::jne_imm(1, 0, 0));
+    row_section(&mut program, maps.rows[0], maps.drops, &ROWS_A);
+    row_section(&mut program, maps.rows[1], maps.drops, &ROWS_B);
 
-    program.label("first");
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Adds the call to its row in one row map, creating the row if it is the
+/// first, and counts a call that found no room. Every path ends at `done`.
+fn row_section(program: &mut Program, rows_fd: i32, drops_fd: i32, labels: &RowLabels) {
+    program.label(labels.rows);
+    lookup_row(program, rows_fd);
+    program.jump_to(labels.first, Insn::jeq_imm(0, 0, 0));
+    accumulate(program, [labels.moved, "done"]);
+
+    program.label(labels.first);
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_BYTES, 0));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 0));
-    program.jump_to("first_moved", Insn::jsge_imm(8, 1, 0));
-    program.jump_to("first_named", Insn::jsge_imm(8, 0, 0));
+    program.jump_to(labels.first_moved, Insn::jsge_imm(8, 1, 0));
+    program.jump_to(labels.first_named, Insn::jsge_imm(8, 0, 0));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 1));
-    program.jump_to("first_named", Insn::ja());
-    program.label("first_moved");
+    program.jump_to(labels.first_named, Insn::ja());
+    program.label(labels.first_moved);
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_BYTES, 8));
-    program.label("first_named");
+    program.label(labels.first_named);
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COMM, 0));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COMM + 8, 0));
     program.push(Insn::mov64_reg(1, R10));
@@ -861,30 +1044,25 @@ fn exit_instructions(
     program.push(Insn::mov64_imm(4, BPF_NOEXIST));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
-    program.jump_to("lost_race", Insn::jeq_imm(0, -EEXIST, 0));
+    program.jump_to(labels.lost_race, Insn::jeq_imm(0, -EEXIST, 0));
     // The histogram is full: this call is in no bucket.
-    count_drop(&mut program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
+    count_drop(program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
     program.jump_to("done", Insn::ja());
 
     // Another cpu created the row between the lookup and the insert. Its row
     // is there now, so this call is added to it -- once, straight-line: a jump
     // back to the first lookup is a loop the verifier cannot bound, and it
     // refuses the program for it.
-    program.label("lost_race");
-    lookup_row(&mut program, rows_fd);
-    program.jump_to("raced_out", Insn::jeq_imm(0, 0, 0));
-    accumulate(&mut program, ["raced_moved", "done"]);
-    // Created and gone again between two instructions: only a drain removes a
-    // row, so this is a drain racing the program, and the call is lost.
-    program.label("raced_out");
-    count_drop(&mut program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
-
-    program.label("done");
-    program.push(Insn::mov64_imm(0, 0));
-    program.push(Insn::exit());
-    let instructions = program.build();
-    insn::audit(&instructions)?;
-    Ok(instructions)
+    program.label(labels.lost_race);
+    lookup_row(program, rows_fd);
+    program.jump_to(labels.raced_out, Insn::jeq_imm(0, 0, 0));
+    accumulate(program, [labels.raced_moved, "done"]);
+    // Created and gone again between two instructions. Nothing removes a row
+    // from a map that is being written -- the drain takes the other one -- so
+    // this is not expected to happen, and it is counted if it does.
+    program.label(labels.raced_out);
+    count_drop(program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
+    program.jump_to("done", Insn::ja());
 }
 
 /// Looks the row key up, leaving the value pointer or null in `r0`.
@@ -980,11 +1158,34 @@ pub struct HistogramSpec<'a> {
 }
 
 /// A loaded, attached histogram and the maps it counts into.
+///
+/// **Two row maps, and the drain only ever empties the one nobody is writing.**
+/// The first version drained one map with lookup-and-delete while the programs
+/// wrote into it, which is what every counting program in this layer did, and
+/// it loses calls without counting them: an exit half that has looked a row up
+/// adds to it a few instructions later, and a drain that took the row in
+/// between has already copied it out -- the increment lands in a freed element,
+/// or, the map being preallocated, in whatever key the element was handed to
+/// next. Measured: a hundred thousand reads, 55192 counted, 44807 dropped, one
+/// gone without a trace.
+///
+/// So a one-word array says which map is being written, and a drain empties
+/// the other one and then flips the word. A map is only ever drained after it
+/// has been out of use for a whole interval, which is a hundred thousand times
+/// longer than the few instructions between an exit half reading the word and
+/// writing the row. The price is that a row reaches userspace one interval
+/// late, and the event says which interval it belongs to.
 pub struct HistogramProgram {
     pending: Hash,
-    rows: Hash,
+    rows: [Hash; 2],
+    generation: OwnedFd,
     drops: Counters,
-    _links: Vec<Link>,
+    /// Which map the programs are writing now.
+    writing: std::cell::Cell<usize>,
+    /// When the current map started being written, and when the other one did.
+    flipped_at: std::cell::Cell<u64>,
+    previous_flip: std::cell::Cell<u64>,
+    links: Vec<Link>,
 }
 
 /// What one drain found beside the rows.
@@ -992,6 +1193,55 @@ pub struct HistogramProgram {
 pub struct DrainLosses {
     pub vanished: u64,
     pub truncated: bool,
+}
+
+/// One drain: the rows, what the drain itself lost, and the interval the rows
+/// were counted over -- which is not the interval since the last drain, because
+/// the rows drained now were written during the one before it.
+#[derive(Debug, Default)]
+pub struct Drained {
+    pub rows: Vec<Row>,
+    pub losses: DrainLosses,
+    pub opened_ns: u64,
+    pub closed_ns: u64,
+}
+
+/// `BPF_MAP_TYPE_ARRAY` and `BPF_MAP_UPDATE_ELEM`, which `syscall.rs` does
+/// not offer outside its own tests.
+const BPF_MAP_TYPE_ARRAY: u32 = 2;
+const BPF_MAP_UPDATE_ELEM: i32 = 2;
+
+#[repr(C)]
+struct MapUpdateAttr {
+    map_fd: u32,
+    pad: u32,
+    key: u64,
+    value: u64,
+    flags: u64,
+}
+
+/// Writes one `u32` into element zero of a one-word array.
+fn write_word(map: &OwnedFd, value: u32) -> io::Result<()> {
+    let key = 0u32;
+    let mut attr = MapUpdateAttr {
+        map_fd: map.as_raw_fd() as u32,
+        pad: 0,
+        key: &key as *const u32 as u64,
+        value: &value as *const u32 as u64,
+        flags: 0,
+    };
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_MAP_UPDATE_ELEM,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<MapUpdateAttr>() as u32,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 impl HistogramProgram {
@@ -1003,15 +1253,32 @@ impl HistogramProgram {
             &format!("{}_pend", spec.name),
         )
         .map_err(|error| map_failure(&format!("{} pending map", spec.name), error))?;
-        let rows = Hash::create(
-            ROW_KEY_BYTES,
-            ROW_VALUE_BYTES,
-            spec.max_rows,
-            &format!("{}_rows", spec.name),
+        let row_map = |which: &str| {
+            Hash::create(
+                ROW_KEY_BYTES,
+                ROW_VALUE_BYTES,
+                spec.max_rows,
+                &format!("{}_rows{which}", spec.name),
+            )
+            .map_err(|error| map_failure(&format!("{} histogram map", spec.name), error))
+        };
+        let rows = [row_map("a")?, row_map("b")?];
+        let generation = crate::bpf::syscall::map_create(
+            BPF_MAP_TYPE_ARRAY,
+            4,
+            4,
+            1,
+            &format!("{}_gen", spec.name),
         )
-        .map_err(|error| map_failure(&format!("{} histogram map", spec.name), error))?;
-        let drops = Counters::create(2, &format!("{}_drop", spec.name))
+        .map_err(|error| map_failure(&format!("{} generation word", spec.name), error))?;
+        let drops = Counters::create(3, &format!("{}_drop", spec.name))
             .map_err(|error| map_failure(&format!("{} drop counter", spec.name), error))?;
+        let maps = ExitMaps {
+            pending: pending.as_raw_fd(),
+            generation: generation.as_raw_fd(),
+            rows: [rows[0].as_raw_fd(), rows[1].as_raw_fd()],
+            drops: drops.as_raw_fd(),
+        };
 
         // Every instruction stream is built before anything is attached, so a
         // kernel that refuses one of them refuses the source before any of it
@@ -1022,16 +1289,11 @@ impl HistogramProgram {
                 pending.as_raw_fd(),
                 drops.as_raw_fd(),
                 DROP_PENDING,
+                DROP_ORPHANED,
                 spec.narrowing,
                 &|program| (spec.gate)(program, timed),
             )?;
-            let exit = exit_instructions(
-                timed,
-                pending.as_raw_fd(),
-                rows.as_raw_fd(),
-                drops.as_raw_fd(),
-                spec.fill,
-            )?;
+            let exit = exit_instructions(timed, maps, spec.fill)?;
             built.push((timed, entry, exit));
         }
 
@@ -1056,44 +1318,109 @@ impl HistogramProgram {
                 &format!("{}_e", spec.name),
             )?);
         }
+        let now = crate::clock::monotonic_ns();
         Ok(Self {
             pending,
             rows,
+            generation,
             drops,
-            _links: links,
+            writing: std::cell::Cell::new(0),
+            flipped_at: std::cell::Cell::new(now),
+            previous_flip: std::cell::Cell::new(now),
+            links,
         })
     }
 
-    /// Takes every row accumulated since the last drain.
-    pub fn drain(&self) -> Result<(Vec<Row>, DrainLosses), String> {
-        let drained = self
-            .rows
+    /// Takes the rows of the interval before the last one, and starts a new
+    /// interval.
+    ///
+    /// With `last`, it is the end of the run: the programs are pointed away
+    /// from the map being written, given a moment to finish the calls they
+    /// were closing, and both maps are emptied.
+    pub fn drain(&self, last: bool) -> Result<Drained, String> {
+        let idle = 1 - self.writing.get();
+        let mut drained = Drained {
+            opened_ns: self.previous_flip.get(),
+            closed_ns: self.flipped_at.get(),
+            ..Default::default()
+        };
+        self.take(idle, &mut drained)?;
+        // The idle map is empty now and becomes the one written.
+        write_word(&self.generation, idle as u32)
+            .map_err(|error| format!("cannot flip the histogram's generation: {error}"))?;
+        let now = crate::clock::monotonic_ns();
+        self.previous_flip.set(self.flipped_at.get());
+        self.flipped_at.set(now);
+        self.writing.set(idle);
+        if last {
+            // A call that read the generation before the flip may still be
+            // adding to the map just retired. A tracing program runs for
+            // microseconds; a millisecond is a thousand of them.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.take(1 - idle, &mut drained)?;
+            drained.closed_ns = now;
+        }
+        Ok(drained)
+    }
+
+    fn take(&self, which: usize, into: &mut Drained) -> Result<(), String> {
+        let taken = self.rows[which]
             .drain()
             .map_err(|error| format!("cannot read the histogram: {error}"))?;
-        let mut losses = DrainLosses {
-            vanished: drained.vanished,
-            truncated: drained.truncated,
-        };
-        let mut rows = Vec::with_capacity(drained.entries.len());
-        for (key, value) in &drained.entries {
+        into.losses.vanished += taken.vanished;
+        into.losses.truncated |= taken.truncated;
+        for (key, value) in &taken.entries {
             match Row::decode(key, value) {
-                Some(row) => rows.push(row),
-                None => losses.vanished += 1,
+                Some(row) => into.rows.push(row),
+                None => into.losses.vanished += 1,
             }
         }
-        Ok((rows, losses))
+        Ok(())
     }
 
-    /// Threads inside a timed function right now. Their call is real and in no
-    /// bucket, because it has no end yet.
-    pub fn still_pending(&self) -> usize {
-        self.pending.len().unwrap_or(0)
+    /// The stamps still in the map, split into calls genuinely in flight and
+    /// calls whose exit was skipped: a stamp whose thread no longer exists
+    /// cannot be a call in progress.
+    pub fn still_pending(&self) -> (usize, usize) {
+        split_stamps(&self.pending)
     }
 
-    /// Calls the programs could not record, as `(pending, rows)`.
-    pub fn dropped(&self) -> (u64, u64) {
-        (self.drops.read(DROP_PENDING), self.drops.read(DROP_ROWS))
+    /// Calls the programs could not record, as `(pending, rows, orphaned)`.
+    pub fn dropped(&self) -> (u64, u64, u64) {
+        (
+            self.drops.read(DROP_PENDING),
+            self.drops.read(DROP_ROWS),
+            self.drops.read(DROP_ORPHANED),
+        )
     }
+
+    /// Runs the kernel skipped; see [`Link::misses`].
+    pub fn missed(&self) -> u64 {
+        misses(&self.links)
+    }
+}
+
+/// Splits a pending map keyed by thread id into `(in flight, orphaned)`.
+///
+/// `/proc/<tid>` answers for any thread on the machine, leader or not, so a
+/// stamp whose thread is gone is an exit half that never ran rather than a call
+/// still going. Shared with the streaming sources, whose stamps are keyed the
+/// same way.
+pub fn split_stamps(pending: &Hash) -> (usize, usize) {
+    let Ok((keys, _)) = pending.keys() else {
+        return (0, 0);
+    };
+    let mut split = (0, 0);
+    for key in keys {
+        let Some(tid) = key.get(..4) else { continue };
+        let tid = u32::from_ne_bytes(tid.try_into().expect("4"));
+        if std::path::Path::new("/proc").join(tid.to_string()).exists() {
+            split.0 += 1;
+        } else {
+            split.1 += 1;
+        }
+    }
+    split
 }
 
 /// How many functions this kernel's BTF declares, for a message that has to
@@ -1105,6 +1432,47 @@ pub fn function_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn maps() -> ExitMaps {
+        ExitMaps {
+            pending: 3,
+            generation: 6,
+            rows: [5, 7],
+            drops: 4,
+        }
+    }
+
+    /// The exit half writes into whichever row map the generation word names,
+    /// and into no other: both maps appear in it, each in its own section, and
+    /// the word is read before either.
+    #[test]
+    fn the_exit_half_writes_into_the_map_the_generation_names() {
+        let Some(index) = functions() else { return };
+        let timed = Timed {
+            function: index.function("vfs_read").expect("vfs_read"),
+            op: 0,
+        };
+        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
+        let loads = |fd: i32| {
+            exit.iter()
+                .enumerate()
+                .filter(|(_, insn)| insn.code == 0x18 && insn.imm == fd)
+                .map(|(at, _)| at)
+                .collect::<Vec<_>>()
+        };
+        let generation = loads(6);
+        let (a, b) = (loads(5), loads(7));
+        assert_eq!(generation.len(), 1, "the word is read once");
+        assert!(!a.is_empty() && !b.is_empty(), "both maps are written");
+        assert!(
+            generation[0] < a[0] && generation[0] < b[0],
+            "the word is read before either map is touched"
+        );
+        assert!(
+            a.iter().all(|at| b.iter().all(|other| at < other)),
+            "one section per map"
+        );
+    }
 
     fn functions() -> Option<&'static FunctionIndex> {
         match index() {
@@ -1208,8 +1576,8 @@ mod tests {
             function: index.function("vfs_read").expect("vfs_read"),
             op: 0,
         };
-        let entry = entry_instructions(3, 4, 0, Narrowing::default(), &|_| {}).expect("entry");
-        let exit = exit_instructions(&timed, 3, 5, 4, &|_, _| Ok(())).expect("exit");
+        let entry = entry_instructions(3, 4, 0, 2, Narrowing::default(), &|_| {}).expect("entry");
+        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
         for (what, program) in [("entry", entry), ("exit", exit)] {
             let calls: Vec<i32> = program
                 .iter()
@@ -1237,9 +1605,10 @@ mod tests {
             function: index.function("vfs_read").expect("vfs_read"),
             op: 0,
         };
-        let exit = exit_instructions(&timed, 3, 5, 4, &|_, _| Ok(())).expect("exit");
-        // Twice over: the ordinary path, and the one a lost insert race takes.
-        assert_eq!(exit.iter().filter(|insn| insn.code == 0xdb).count(), 8);
+        let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
+        // Four times over: the ordinary path and the one a lost insert race
+        // takes, in each of the two row maps.
+        assert_eq!(exit.iter().filter(|insn| insn.code == 0xdb).count(), 16);
     }
 
     /// Every byte of the row key and value is written by the program, and no
@@ -1277,6 +1646,7 @@ mod tests {
             (ROW_KEY, ROW_KEY_BYTES as i16),
             (EXIT_PEND_KEY, 8),
             (EXIT_DROP_KEY, 4),
+            (EXIT_GEN_KEY, 4),
         ];
         for (index, (at, size)) in regions.iter().enumerate() {
             assert!(*at >= -512 && at + size <= 0);

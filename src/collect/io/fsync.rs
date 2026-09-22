@@ -52,6 +52,8 @@ impl Prepared for Prepare {
             mounts: None,
             dropped_pending: 0,
             dropped_ring: 0,
+            orphaned: 0,
+            missed: 0,
             seen: 0,
             failed: 0,
             filtered_out: 0,
@@ -70,6 +72,8 @@ pub struct FsyncCollector {
     mounts: Option<Mounts>,
     dropped_pending: u64,
     dropped_ring: u64,
+    orphaned: u64,
+    missed: u64,
     seen: u64,
     failed: u64,
     filtered_out: u64,
@@ -183,7 +187,12 @@ impl FsyncCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
-        let (pending, ring) = program.dropped();
+        let (pending, ring, orphaned) = program.dropped();
+        if orphaned > self.orphaned {
+            self.losses.dropped += orphaned - self.orphaned;
+            self.losses.note(super::histogram::ORPHANED);
+            self.orphaned = orphaned;
+        }
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
             self.losses.note(
@@ -199,6 +208,15 @@ impl FsyncCollector {
                  run's count of them is short",
             );
             self.dropped_ring = ring;
+        }
+        let missed = program.missed();
+        if missed > self.missed {
+            self.losses.dropped += missed - self.missed;
+            self.losses.note(
+                "the kernel skipped a run of these programs because one was already running on \
+                 that cpu, preempted halfway, so a sync went untimed",
+            );
+            self.missed = missed;
         }
     }
 }
@@ -230,7 +248,12 @@ impl Collector for FsyncCollector {
         self.drain_into(&mut trailing, u64::MAX / 2);
         self.absorb_counters();
         if let Some(program) = self.program.as_ref() {
-            self.still_pending = program.still_pending();
+            let (open, orphaned) = program.still_pending();
+            self.still_pending = open;
+            if orphaned > 0 {
+                self.losses.dropped += orphaned as u64;
+                self.losses.note(super::histogram::ORPHANED);
+            }
         }
         self.program = None;
         trailing
@@ -322,6 +345,8 @@ mod tests {
             mounts: None,
             dropped_pending: 0,
             dropped_ring: 0,
+            orphaned: 0,
+            missed: 0,
             seen: 0,
             failed: 0,
             filtered_out: 0,

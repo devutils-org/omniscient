@@ -569,19 +569,20 @@ fn every_mode_and_emit_the_catalog_offers_is_served_or_refused_by_name() {
 fn something_this_source_does(source: &str) -> (&'static str, &'static str) {
     match source {
         "io.inflight" | "io.pressure" => ("snapshot", "raw"),
-        "io.latency" | "io.queue" | "io.size" | "io.writeback" => ("trace", "summary"),
+        "io.latency" | "io.queue" | "io.size" | "io.writeback" | "io.syscall" | "io.fs"
+        | "io.fsync" => ("trace", "summary"),
         _ => ("count", "summary"),
     }
 }
 
 /// The sources of this family that have a collector in this build.
 ///
-/// Five through `/proc/diskstats` and PSI, and four through the block layer's
-/// own raw tracepoints. The two mechanisms answer different questions and the
+/// Five through `/proc/diskstats` and PSI, four through the block layer's own
+/// raw tracepoints, and three through fentry. The two mechanisms answer different questions and the
 /// sweep covers both: a combination the catalog offers and the build cannot
 /// serve is a promise broken in the one place nobody looks, and that is as
 /// true of an eBPF backend as of a file.
-fn collected_sources() -> [&'static str; 9] {
+fn collected_sources() -> [&'static str; 12] {
     [
         "io.bytes",
         "io.iops",
@@ -592,6 +593,10 @@ fn collected_sources() -> [&'static str; 9] {
         "io.queue",
         "io.size",
         "io.writeback",
+        // The eighth wave's three, over fentry.
+        "io.syscall",
+        "io.fs",
+        "io.fsync",
     ]
 }
 
@@ -2897,6 +2902,813 @@ fn the_block_sessions_run_and_say_what_they_found() {
                 "{name}: `{}` did not report how many events it saw",
                 result["label"]
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The layers above the block one: `io.syscall`, `io.fs` and `io.fsync`
+//
+// Three sources over fentry, the eighth wave's attach kind, and the first in
+// this family that see a call rather than a request. Ground truth here is a
+// number of calls the workload made, on descriptors and inodes it reports
+// itself, and every scenario is a launched Python program for that reason: it
+// states what it did in a file the test reads afterwards, so the reference is
+// the program's own account and never the tool's.
+//
+// The four classes, for all three sources:
+//
+// - **ground truth**: a known number of reads, writes and syncs, found call for
+//   call on the descriptor and the inode the program names; a pipe wait the
+//   program timed itself, found in one layer and absent from the other;
+// - **the capability sweep**: the three are in `collected_sources` above;
+// - **the loss path**: more distinct rows in one drain than the histogram
+//   holds, and more syncs in one drain than the ring holds;
+// - **the refusal**: a cgroup target, a mode the source cannot mean, and a
+//   binary without the capabilities.
+//
+// `docs/families/io.md` has what each one measured and what it could not.
+
+/// Whether this build can attach an fentry program at all, and why not.
+///
+/// The same argument as `no_bpf_here`: the capabilities are file capabilities
+/// every relink drops, and a suite that quietly passed without them would be
+/// reporting a green attach kind that never ran.
+fn no_fentry_here() -> Option<String> {
+    let output = run(&[
+        "io.fs", "--system", "-m", "trace", "-e", "summary", "-d", "100ms",
+    ]);
+    if output.status.success() {
+        return None;
+    }
+    Some(format!(
+        "this build cannot attach an fentry program: {}. `make` grants CAP_BPF and CAP_PERFMON \
+         to target/debug/omn, and every `cargo build` drops them again",
+        stderr(&output).lines().next().unwrap_or("").trim()
+    ))
+}
+
+/// Writes a session of several requests on one launched program, and runs it.
+///
+/// The CLI takes one source; a session takes any number on one target, which is
+/// what lets two layers be measured over the same calls.
+fn run_on_launch(name: &str, requests: &[(&str, &str, &str, &str)], argv: &[&str]) -> Output {
+    let launch = argv
+        .iter()
+        .map(|arg| {
+            format!(
+                "        - {}",
+                serde_json::to_string(arg).expect("a string")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut text = format!("name: {name}\nformat: json\nrequests:\n");
+    for (label, source, mode, emits) in requests {
+        text.push_str(&format!(
+            "  - label: {label}\n    source: {source}\n    target:\n      launch:\n{launch}\n    \
+             mode: {mode}\n    emit: [{emits}]\n"
+        ));
+    }
+    let path = scratch(&format!("{name}.yml"));
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the scratch directory");
+    std::fs::write(&path, text).expect("the session");
+    run(&["-f", path.to_str().expect("a path"), "--format", "json"])
+}
+
+/// A workload script, written where the scratch files are.
+fn script(name: &str, body: &str) -> PathBuf {
+    let path = scratch(name);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the scratch directory");
+    std::fs::write(&path, body).expect("the workload");
+    path
+}
+
+/// What the workload says it did.
+fn account(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("the workload wrote no account to {path:?}: {error}"));
+    serde_json::from_str(&text).expect("the account parses")
+}
+
+fn attr_u64(event: &BTreeMap<String, serde_json::Value>, name: &str) -> u64 {
+    event
+        .get(name)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("an event carries `{name}`: {event:?}"))
+}
+
+fn attr_text<'a>(event: &'a BTreeMap<String, serde_json::Value>, name: &str) -> &'a str {
+    event
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("an event carries `{name}`: {event:?}"))
+}
+
+use std::collections::BTreeMap;
+
+/// The superblock device a path's filesystem is mounted from, as
+/// `/proc/self/mountinfo` states it: the longest mount point that contains the
+/// path. This is the reference for `io.fs`'s file key, and it is deliberately
+/// not `stat(2)`: on btrfs `stat` reports a per-subvolume device the VFS never
+/// sees, which is `docs/families/io.md`'s finding.
+fn mounted_device(path: &Path) -> (u64, String) {
+    let canonical = std::fs::canonicalize(path).expect("a path that exists");
+    let text = std::fs::read_to_string("/proc/self/mountinfo").expect("mountinfo");
+    let mut best: Option<(usize, u64, String)> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let mount = Path::new(fields[4]);
+        if !canonical.starts_with(mount) {
+            continue;
+        }
+        let depth = mount.components().count();
+        if best.as_ref().is_some_and(|(seen, _, _)| *seen >= depth) {
+            continue;
+        }
+        let (major, minor) = fields[2].split_once(':').expect("major:minor");
+        let dev = libc::makedev(
+            major.parse().expect("a major"),
+            minor.parse().expect("a minor"),
+        );
+        best = Some((depth, dev, fields[separator + 1].to_owned()));
+    }
+    let (_, dev, fs) = best.expect("a mount holds every path");
+    (dev, fs)
+}
+
+/// The `file` key of an event, as `(dev, ino)`.
+fn file_key(event: &serde_json::Value) -> Option<(u64, u64)> {
+    event["keys"].as_array()?.iter().find_map(|key| {
+        let file = key.get("file")?;
+        Some((file["dev"].as_u64()?, file["ino"].as_u64()?))
+    })
+}
+
+/// A result's raw events, each with its keys as well as its attributes.
+fn raw_with_keys(
+    result: &serde_json::Value,
+) -> Vec<(serde_json::Value, BTreeMap<String, serde_json::Value>)> {
+    output_of(result, "raw")["events"]
+        .as_array()
+        .expect("a raw emit carries its events")
+        .iter()
+        .map(|event| {
+            let attrs = event["attrs"]
+                .as_array()
+                .expect("attributes")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().expect("a name").to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect();
+            (event.clone(), attrs)
+        })
+        .collect()
+}
+
+const KNOWN_CALLS: &str = r#"
+import json, os, sys
+source, target, account = sys.argv[1], sys.argv[2], sys.argv[3]
+reads, read_bytes = 500, 4096
+writes, write_bytes = 300, 1000
+# Descriptors high enough that nothing the interpreter opened before this
+# line can have had the same number: a descriptor key names a number, and
+# numbers are reused the moment they are closed.
+r = os.dup2(os.open(source, os.O_RDONLY), 200)
+for _ in range(reads):
+    assert len(os.read(r, read_bytes)) == read_bytes
+w = os.dup2(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644), 201)
+block = b"w" * write_bytes
+for i in range(writes):
+    assert os.pwrite(w, block, i * write_bytes) == write_bytes
+json.dump({
+    "read_fd": r, "read_ino": os.fstat(r).st_ino, "reads": reads, "read_bytes": read_bytes,
+    "write_fd": w, "write_ino": os.fstat(w).st_ino, "writes": writes,
+    "write_bytes": write_bytes,
+}, open(account, "w"))
+"#;
+
+/// Five hundred reads of 4096 bytes and three hundred `pwrite`s of 1000, on two
+/// descriptors the program names, found call for call in both layers.
+///
+/// The reference is the program's loop bounds and the descriptors and inodes
+/// `fstat` gave it -- nothing the tool computed. Two layers are asked over the
+/// same calls, and each has its own identity for them: `io.syscall` keys the
+/// row by descriptor, `io.fs` by `file:<superblock dev>+<ino>`. Both must reach
+/// the same counts, exactly, and the same bytes, exactly.
+#[test]
+fn a_known_number_of_reads_and_writes_is_counted_call_for_call_in_both_layers() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let source = scratch("fentry-known-calls.src");
+    std::fs::write(&source, incompressible(4 << 20)).expect("a file to read");
+    let target = scratch("fentry-known-calls.dst");
+    let account_path = scratch("fentry-known-calls.json");
+    let workload = script("fentry-known-calls.py", KNOWN_CALLS);
+    let output = run_on_launch(
+        "fentry-known-calls",
+        &[
+            ("syscall", "io.syscall", "trace", "raw, hist"),
+            ("fs", "io.fs", "trace", "raw, hist"),
+        ],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            source.to_str().expect("a path"),
+            target.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let document = json(&output);
+
+    // The descriptor layer.
+    let mut by_fd: BTreeMap<(u64, String), (u64, u64)> = BTreeMap::new();
+    for (_, event) in raw_with_keys(result(&document, "syscall")) {
+        let entry = by_fd
+            .entry((
+                attr_u64(&event, "fd"),
+                attr_text(&event, "syscall").to_owned(),
+            ))
+            .or_default();
+        entry.0 += attr_u64(&event, "count");
+        entry.1 += attr_u64(&event, "bytes");
+    }
+    let reads = did["reads"].as_u64().expect("reads");
+    let writes = did["writes"].as_u64().expect("writes");
+    let read_fd = did["read_fd"].as_u64().expect("a descriptor");
+    let write_fd = did["write_fd"].as_u64().expect("a descriptor");
+    assert_eq!(
+        by_fd.get(&(read_fd, "read".to_owned())),
+        Some(&(reads, reads * did["read_bytes"].as_u64().expect("bytes"))),
+        "io.syscall on descriptor {read_fd}: {by_fd:?}"
+    );
+    assert_eq!(
+        by_fd.get(&(write_fd, "pwrite64".to_owned())),
+        Some(&(writes, writes * did["write_bytes"].as_u64().expect("bytes"))),
+        "io.syscall on descriptor {write_fd}: {by_fd:?}"
+    );
+
+    // The file layer, keyed by what mountinfo and fstat say independently.
+    let (dev, fs) = mounted_device(&source);
+    let mut by_file: BTreeMap<((u64, u64), String), (u64, u64)> = BTreeMap::new();
+    let mut named_fs = Vec::new();
+    for (raw, event) in raw_with_keys(result(&document, "fs")) {
+        let key = file_key(&raw).expect("every io.fs event names its file");
+        if key.1 == did["read_ino"].as_u64().expect("an inode") {
+            named_fs.push(attr_text(&event, "fs").to_owned());
+        }
+        let entry = by_file
+            .entry((key, attr_text(&event, "op").to_owned()))
+            .or_default();
+        entry.0 += attr_u64(&event, "count");
+        entry.1 += attr_u64(&event, "bytes");
+    }
+    let read_key = (dev, did["read_ino"].as_u64().expect("an inode"));
+    let write_key = (dev, did["write_ino"].as_u64().expect("an inode"));
+    assert_eq!(
+        by_file.get(&(read_key, "read".to_owned())),
+        Some(&(reads, reads * 4096)),
+        "io.fs on file {read_key:?}, which mountinfo and fstat name: {by_file:?}"
+    );
+    assert_eq!(
+        by_file.get(&(write_key, "write".to_owned())),
+        Some(&(writes, writes * 1000)),
+        "io.fs on file {write_key:?}: {by_file:?}"
+    );
+    assert!(
+        named_fs.iter().all(|name| *name == fs),
+        "the filesystem is named from mountinfo, which says `{fs}`: {named_fs:?}"
+    );
+}
+
+const PIPE_WAIT: &str = r#"
+import json, os, sys, threading, time
+account = sys.argv[1]
+r, w = os.pipe()
+r = os.dup2(r, 202)
+def later():
+    time.sleep(0.3)
+    os.write(w, b"x")
+threading.Thread(target=later).start()
+started = time.monotonic_ns()
+os.read(r, 1)
+waited = time.monotonic_ns() - started
+json.dump({"pipe_fd": r, "waited_ns": waited}, open(account, "w"))
+"#;
+
+/// A read that waits three hundred milliseconds on an empty pipe is three
+/// hundred milliseconds in `io.syscall` and none at all in `io.fs`.
+///
+/// This is the separation the two layers exist for, created on purpose. The
+/// program times its own `os.read` around the call, and the syscall layer must
+/// land inside that interval: at most what the program saw, and within a
+/// millisecond of it, because the Python around the call is microseconds. The
+/// file layer must not have it at all, because a pipe is not a regular file --
+/// which is a decision, stated in `src/bpf/io_vfs.rs`, rather than an accident.
+#[test]
+fn a_pipe_wait_is_in_the_syscall_layer_and_not_in_the_file_layer() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let account_path = scratch("fentry-pipe-wait.json");
+    let workload = script("fentry-pipe-wait.py", PIPE_WAIT);
+    let output = run_on_launch(
+        "fentry-pipe-wait",
+        &[
+            ("syscall", "io.syscall", "trace", "raw"),
+            ("fs", "io.fs", "trace", "raw"),
+        ],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let waited = did["waited_ns"].as_u64().expect("the program's own clock");
+    let pipe_fd = did["pipe_fd"].as_u64().expect("the pipe");
+    assert!(waited >= 300_000_000, "the program slept {waited} ns");
+
+    let document = json(&output);
+    let on_pipe: Vec<u64> = raw_with_keys(result(&document, "syscall"))
+        .into_iter()
+        .filter(|(_, event)| attr_u64(event, "fd") == pipe_fd && attr_text(event, "op") == "read")
+        .map(|(_, event)| attr_u64(&event, "total_ns"))
+        .collect();
+    let dropped = losses(result(&document, "syscall"))["dropped"]
+        .as_u64()
+        .expect("a drop count");
+    if on_pipe.is_empty() && dropped > 0 {
+        // Another tracer's workload on the same machine can make the kernel
+        // skip a run of these programs -- they run on every read anywhere, to
+        // check whose it is -- and a skipped run is a lost call. It is counted,
+        // which is the part that must hold; the property itself could not be
+        // created in this run.
+        eprintln!(
+            "skipped: the pipe read is in no row and the run counted {dropped} lost call(s): \
+             {}",
+            losses(result(&document, "syscall"))["reasons"]
+        );
+        return;
+    }
+    assert_eq!(
+        on_pipe.len(),
+        1,
+        "one read of the pipe, one row, and nothing counted as lost: {on_pipe:?}"
+    );
+    let timed = on_pipe[0];
+    assert!(
+        timed <= waited && waited - timed < 1_000_000,
+        "the syscall layer timed {timed} ns inside a call the program timed at {waited} ns"
+    );
+
+    let fs_total: u64 = raw_with_keys(result(&document, "fs"))
+        .iter()
+        .map(|(_, event)| attr_u64(event, "total_ns"))
+        .sum();
+    assert!(
+        fs_total < waited / 10,
+        "the file layer holds {fs_total} ns for a program whose only long call was a {waited} ns \
+         pipe wait: a pipe is not a filesystem"
+    );
+}
+
+const SYNCS: &str = r#"
+import json, mmap, os, sys
+path, account = sys.argv[1], sys.argv[2]
+fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+dirty, clean, flushes = 20, 5, 3
+for _ in range(dirty):
+    os.write(fd, os.urandom(65536))
+    os.fsync(fd)
+for _ in range(clean):
+    os.fdatasync(fd)
+mapping = mmap.mmap(fd, 65536)
+for i in range(flushes):
+    mapping[i] = 1
+    mapping.flush()
+mapping.close()
+json.dump({"fd": fd, "ino": os.fstat(fd).st_ino, "dirty": dirty, "clean": clean,
+           "flushes": flushes}, open(account, "w"))
+"#;
+
+/// Twenty `fsync`s of freshly written data, five `fdatasync`s of nothing, and
+/// three `msync`s through a mapping: twenty-eight events, each on the file the
+/// program names, each named for the call it was, and each timed at the
+/// function the kernel actually routed it through.
+///
+/// The first two reach `do_fsync` on this machine -- the function the catalog
+/// named is inlined into it, `src/bpf/io_fsync.rs` has the measurement -- and
+/// the third reaches `vfs_fsync_range` by its argument. So this is also the
+/// check that both identities, the descriptor walk and the typed argument,
+/// produce the same file key.
+///
+/// The separation is the second property: a sync with 64 KiB to write waits
+/// for the device and one with nothing to write does not. The two medians are
+/// asserted apart by a factor of ten, which is three orders of magnitude inside
+/// what this machine measures.
+#[test]
+fn every_sync_is_one_event_on_the_file_it_named() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = scratch("fentry-syncs.bin");
+    let account_path = scratch("fentry-syncs.json");
+    let workload = script("fentry-syncs.py", SYNCS);
+    let output = run_on_launch(
+        "fentry-syncs",
+        &[("fsync", "io.fsync", "trace", "raw")],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            path.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let (dev, _) = mounted_device(&path);
+    let file = (dev, did["ino"].as_u64().expect("an inode"));
+    let document = json(&output);
+    let events = raw_with_keys(result(&document, "fsync"));
+    let mine: Vec<_> = events
+        .iter()
+        .filter(|(raw, _)| file_key(raw) == Some(file))
+        .collect();
+    let by = |call: &str, via: &str| -> Vec<u64> {
+        let mut found: Vec<u64> = mine
+            .iter()
+            .filter(|(_, event)| attr_text(event, "call") == call && attr_text(event, "via") == via)
+            .map(|(_, event)| attr_u64(event, "lat_ns"))
+            .collect();
+        found.sort_unstable();
+        found
+    };
+    let whole: Vec<u64> = by("fsync", "do_fsync")
+        .into_iter()
+        .chain(by("fsync", "vfs_fsync"))
+        .collect();
+    let clean: Vec<u64> = by("fdatasync", "do_fsync")
+        .into_iter()
+        .chain(by("fdatasync", "vfs_fsync"))
+        .collect();
+    let ranged = by("fdatasync", "vfs_fsync_range");
+    assert_eq!(
+        (whole.len(), clean.len(), ranged.len()),
+        (20, 5, 3),
+        "twenty fsyncs, five fdatasyncs and three msyncs on {file:?}, and nothing else: {mine:?}"
+    );
+    assert_eq!(
+        mine.len(),
+        events.len(),
+        "the program synced one file, and every event must name it: {events:?}"
+    );
+    let fd = did["fd"].as_i64().expect("a descriptor");
+    assert!(
+        mine.iter().all(|(_, event)| {
+            attr_text(event, "via") == "vfs_fsync_range"
+                || event.get("fd").and_then(serde_json::Value::as_i64) == Some(fd)
+        }),
+        "a sync that arrived by descriptor carries descriptor {fd}"
+    );
+    let median = |values: &[u64]| values[values.len() / 2];
+    assert!(
+        median(&whole) > 10 * median(&clean),
+        "a sync with 64 KiB to write ({} ns) and one with nothing to write ({} ns) must be \
+         apart by more than an order of magnitude",
+        median(&whole),
+        median(&clean)
+    );
+}
+
+const MANY_ROWS: &str = r#"
+import json, os, resource, sys, threading
+directory, account = sys.argv[1], sys.argv[2]
+files, threads = 1000, 100
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 4096), hard))
+os.makedirs(directory, exist_ok=True)
+fds = []
+for i in range(files):
+    path = os.path.join(directory, f"{i}")
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(b"x")
+    fds.append(os.open(path, os.O_RDONLY))
+start = threading.Barrier(threads)
+def reader():
+    start.wait()
+    for fd in fds:
+        os.pread(fd, 1, 0)
+workers = [threading.Thread(target=reader) for _ in range(threads)]
+for worker in workers:
+    worker.start()
+for worker in workers:
+    worker.join()
+json.dump({"fds": fds, "inos": [os.fstat(fd).st_ino for fd in fds],
+           "reads": files * threads}, open(account, "w"))
+"#;
+
+/// A hundred threads each reading a thousand files once is a hundred thousand
+/// distinct rows, three times what the histogram holds in one drain, and every
+/// call that found no row is counted as lost.
+///
+/// The property that closes against a number: every read the program made is
+/// either in a row or in the drop count, so the two together are at least the
+/// program's own total, and the rows alone are at most it. A run that dropped
+/// calls without counting them fails the first; a run that counted a call twice
+/// fails the second. Both layers are asked over the same workload, because both
+/// key a row on something the workload has a thousand of.
+///
+/// Where the machine cannot make the workload fast enough to fill one drain's
+/// worth of rows, nothing is dropped and the property cannot be created: that
+/// is a skip, with the numbers, and never a pass.
+#[test]
+fn more_rows_than_the_histogram_holds_are_counted_as_lost_and_the_rest_are_exact() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let directory = scratch("fentry-many-rows");
+    let account_path = scratch("fentry-many-rows.json");
+    let workload = script("fentry-many-rows.py", MANY_ROWS);
+    let output = run_on_launch(
+        "fentry-many-rows",
+        &[
+            ("syscall", "io.syscall", "trace", "raw"),
+            ("fs", "io.fs", "trace", "raw"),
+        ],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            directory.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let reads = did["reads"].as_u64().expect("reads");
+    let fds: std::collections::BTreeSet<u64> = did["fds"]
+        .as_array()
+        .expect("fds")
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    let inos: std::collections::BTreeSet<u64> = did["inos"]
+        .as_array()
+        .expect("inos")
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    let document = json(&output);
+    type Mine<'a> = &'a dyn Fn(&BTreeMap<String, serde_json::Value>) -> bool;
+    let by_fd = |event: &BTreeMap<String, serde_json::Value>| {
+        attr_text(event, "syscall") == "pread64" && fds.contains(&attr_u64(event, "fd"))
+    };
+    let by_ino = |event: &BTreeMap<String, serde_json::Value>| {
+        attr_text(event, "op") == "read" && inos.contains(&attr_u64(event, "ino"))
+    };
+    let layers: [(&str, Mine); 2] = [("syscall", &by_fd), ("fs", &by_ino)];
+    for (label, mine) in layers {
+        let run = result(&document, label);
+        let counted: u64 = raw_with_keys(run)
+            .iter()
+            .filter(|(_, event)| mine(event))
+            .map(|(_, event)| attr_u64(event, "count"))
+            .sum();
+        let dropped = losses(run)["dropped"].as_u64().expect("a drop count");
+        if dropped == 0 {
+            eprintln!(
+                "skipped ({label}): {counted} of {reads} reads were counted and none dropped, so \
+                 this machine did not fill a drain's worth of rows -- the histogram holds 32768 \
+                 per 100 ms, and the loss path was not created"
+            );
+            assert_eq!(
+                counted, reads,
+                "with nothing dropped, every read is in a row"
+            );
+            continue;
+        }
+        assert!(
+            counted + dropped >= reads,
+            "{label}: {counted} counted and {dropped} dropped, for {reads} reads the program \
+             made: calls were lost without being counted"
+        );
+        assert!(
+            counted <= reads,
+            "{label}: {counted} counted for {reads} reads: a call was counted twice"
+        );
+        let reasons = losses(run)["reasons"].to_string();
+        assert!(
+            reasons.contains("lower bound"),
+            "{label}: a lossy histogram must say its counts are a floor: {reasons}"
+        );
+    }
+}
+
+/// Each of the three refuses what it cannot serve, with the reason and the
+/// exit code that belongs to it.
+///
+/// - a cgroup target is the build's gap (3), and names the helper it needs;
+/// - a `poll` is a request that cannot mean anything (2): a latency is the gap
+///   between two halves of one call;
+/// - `io.fsync` in `count` is the same (2), because the catalog declares it in
+///   `trace` alone -- one event per sync is the point of the source;
+/// - and a binary without the capabilities is this machine's gap (1), naming
+///   both capabilities and how to grant them. That binary is a copy of this
+///   one, which is exactly what a relink produces: file capabilities do not
+///   survive it.
+#[test]
+fn the_fentry_io_sources_refuse_with_the_reason_that_is_actually_missing() {
+    for source in ["io.syscall", "io.fs", "io.fsync"] {
+        let cgroup = run(&[
+            source,
+            "--cgroup",
+            "/sys/fs/cgroup",
+            "-m",
+            "trace",
+            "-e",
+            "summary",
+            "-d",
+            "100ms",
+        ]);
+        let complaint = stderr(&cgroup);
+        if cgroup.status.code() == Some(EXIT_NO_BACKEND) {
+            eprintln!("skipped the cgroup refusal of {source}: {complaint}");
+        } else {
+            assert_eq!(
+                cgroup.status.code(),
+                Some(EXIT_NOT_IMPLEMENTED),
+                "{source}: {complaint}"
+            );
+            assert!(
+                complaint.contains("bpf_get_current_cgroup_id"),
+                "{source}: the refusal should name what would serve it: {complaint}"
+            );
+        }
+
+        let polled = run(&[
+            source,
+            "--system",
+            "-m",
+            "poll@100ms",
+            "-e",
+            "summary",
+            "-d",
+            "200ms",
+        ]);
+        assert_eq!(
+            polled.status.code(),
+            Some(EXIT_REJECTED),
+            "{source}: {}",
+            stderr(&polled)
+        );
+        assert!(
+            stderr(&polled).contains("poll"),
+            "{source}: {}",
+            stderr(&polled)
+        );
+    }
+    let counted = run(&[
+        "io.fsync", "--system", "-m", "count", "-e", "summary", "-d", "200ms",
+    ]);
+    assert_eq!(
+        counted.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&counted)
+    );
+
+    let bare = scratch("omn-without-capabilities");
+    std::fs::create_dir_all(bare.parent().expect("a parent")).expect("the scratch directory");
+    std::fs::copy(BINARY, &bare).expect("a copy of the binary");
+    for source in ["io.syscall", "io.fs", "io.fsync"] {
+        let output = Command::new(&bare)
+            .args([
+                source, "--system", "-m", "trace", "-e", "summary", "-d", "100ms",
+            ])
+            .output()
+            .expect("the copy runs");
+        let complaint = stderr(&output);
+        if output.status.success() {
+            // Root, or a kernel that lets anyone load a tracing program: the
+            // copy is as privileged as the original and there is no refusal to
+            // see.
+            eprintln!("skipped the capability refusal of {source}: the copy collected");
+            continue;
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_NO_BACKEND),
+            "{source}: {complaint}"
+        );
+        assert!(
+            complaint.contains("CAP_BPF") && complaint.contains("setcap"),
+            "{source}: a binary without the capabilities must be told which and how: {complaint}"
+        );
+    }
+}
+
+/// A second tracer attaching to the same function in the middle of a call
+/// removes that call from this one's histogram, and the run must say so.
+///
+/// This is not a defect of this collector and it cannot be fixed here: when any
+/// fentry or fexit program is attached to or detached from a function, the
+/// kernel rebuilds that function's trampoline, and it patches the old one first
+/// so that calls still in flight return around their exit programs. So the
+/// three-hundred-millisecond pipe read below loses its exit half the moment a
+/// second `omn` attaches for thirty milliseconds -- deterministically, and on
+/// any machine where two tracers share a function.
+///
+/// What this scenario holds the collector to is the invariant: the stamp the
+/// read left is found, the loss is counted, and the reason names the
+/// mechanism. The control run beside it, with no second tracer, must find the
+/// read and count nothing.
+#[test]
+fn a_call_whose_exit_the_kernel_skipped_is_counted_as_lost() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let workload = script("fentry-skipped-exit.py", PIPE_WAIT);
+    for disturbed in [false, true] {
+        let account_path = scratch(&format!("fentry-skipped-exit-{disturbed}.json"));
+        let second = disturbed.then(|| {
+            std::thread::spawn(|| {
+                // Inside the read's three hundred milliseconds: the program
+                // starts, its thread starts sleeping, and then this attaches.
+                std::thread::sleep(Duration::from_millis(150));
+                run(&[
+                    "io.syscall",
+                    "--system",
+                    "-m",
+                    "trace",
+                    "-e",
+                    "summary",
+                    "-d",
+                    "30ms",
+                ])
+            })
+        });
+        let output = run(&[
+            "io.syscall",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "python3",
+            workload.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ]);
+        if let Some(second) = second {
+            let second = second.join().expect("the second tracer ran");
+            assert!(second.status.success(), "{}", stderr(&second));
+        }
+        assert!(output.status.success(), "{}", stderr(&output));
+        let did = account(&account_path);
+        let pipe_fd = did["pipe_fd"].as_u64().expect("the pipe");
+        let document = json(&output);
+        let run = &document["results"][0];
+        let found = raw_with_keys(run)
+            .iter()
+            .any(|(_, event)| attr_u64(event, "fd") == pipe_fd && attr_text(event, "op") == "read");
+        let dropped = losses(run)["dropped"].as_u64().expect("a drop count");
+        let reasons = losses(run)["reasons"].to_string();
+        // The invariant, for both runs: the read is in a row, or it is counted
+        // as lost and the loss names why. The control cannot be promised
+        // undisturbed -- the rest of this suite attaches to the same function
+        // at the same moment -- so it is held to the same line.
+        assert!(
+            found || (dropped >= 1 && reasons.contains("exit half of a call never ran")),
+            "the read is in no row, and the run did not count it as a skipped exit: \
+             dropped {dropped}, {reasons}"
+        );
+        match (disturbed, found) {
+            (true, true) => eprintln!(
+                "skipped: the second tracer missed the read's window, so the lost exit was not \
+                 created in this run"
+            ),
+            (false, false) => eprintln!(
+                "note: the control was disturbed by another tracer in the suite, and counted it"
+            ),
+            _ => {}
         }
     }
 }

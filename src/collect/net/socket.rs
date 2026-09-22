@@ -25,11 +25,11 @@ pub struct Prepare {
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        if self.mode != Mode::Trace {
+        if !matches!(self.mode, Mode::Trace | Mode::Count) {
             return Err(format!(
                 "`{}` mode cannot measure how long a send or a receive took: it is the gap \
-                 between the two halves of one call, and the catalog declares `net.socket` in \
-                 `trace` alone",
+                 between the two halves of one call, and a sample that catches one without the \
+                 other has no duration",
                 self.mode
             ));
         }
@@ -69,18 +69,6 @@ impl Prepared for Prepare {
     }
 }
 
-/// `AF_*`, the frozen numbering `socket(2)` takes.
-fn family_name(family: u16) -> &'static str {
-    match family {
-        1 => "unix",
-        2 => "inet",
-        10 => "inet6",
-        16 => "netlink",
-        17 => "packet",
-        _ => "other",
-    }
-}
-
 fn describe() -> Describe {
     Box::new(|row: &Row| {
         let (family, dport) = family_and_port(row.aux);
@@ -93,7 +81,9 @@ fn describe() -> Describe {
                     _ => "unknown",
                 },
             ),
-            Attr::text("family", family_name(family)),
+            // The kernel's `AF_*` number, as `net.tcp.lifetime` carries it, so a
+            // `family == 2` predicate means the same thing across the family.
+            Attr::uint("family", u64::from(family)),
             Attr::uint("dport", u64::from(dport)),
         ];
         let task = KeyValue::task(row.tid as i32);
@@ -109,16 +99,20 @@ fn describe() -> Describe {
 }
 
 impl Rows for SocketProgram {
-    fn drain(&self) -> Result<(Vec<Row>, fentry::DrainLosses), String> {
-        SocketProgram::drain(self)
+    fn drain(&self, last: bool) -> Result<fentry::Drained, String> {
+        SocketProgram::drain(self, last)
     }
 
-    fn still_pending(&self) -> usize {
+    fn still_pending(&self) -> (usize, usize) {
         SocketProgram::still_pending(self)
     }
 
-    fn dropped(&self) -> (u64, u64) {
+    fn dropped(&self) -> (u64, u64, u64) {
         SocketProgram::dropped(self)
+    }
+
+    fn missed(&self) -> u64 {
+        SocketProgram::missed(self)
     }
 }
 

@@ -114,9 +114,9 @@ fn first(source: &str, ids: &[i32], kind: &str) -> Result<i32, String> {
 /// What the functions timed do not see, which is part of what the number is.
 fn coverage(layer: Layer) -> String {
     match layer {
-        Layer::Syscall => "timed at ksys_read, ksys_write, ksys_pread64 and ksys_pwrite64: \
-                           readv/writev, sendfile, splice, io_uring and page faults on a \
-                           mapping are I/O this does not see"
+        Layer::Syscall => "timed at the x86-64 syscall entry points of read, write, pread64, \
+                           pwrite64 and their vectored forms: sendfile, splice, io_uring and \
+                           page faults on a mapping are I/O this does not see"
             .to_owned(),
         Layer::Fs => "timed at vfs_read and vfs_write, regular files only: a pipe, a socket or \
                       a terminal is not a filesystem, and readv/writev, io_uring and mmap \
@@ -228,16 +228,20 @@ fn describe(layer: Layer) -> super::histogram::Describe {
 }
 
 impl Rows for VfsProgram {
-    fn drain(&self) -> Result<(Vec<Row>, fentry::DrainLosses), String> {
-        VfsProgram::drain(self)
+    fn drain(&self, last: bool) -> Result<fentry::Drained, String> {
+        VfsProgram::drain(self, last)
     }
 
-    fn still_pending(&self) -> usize {
+    fn still_pending(&self) -> (usize, usize) {
         VfsProgram::still_pending(self)
     }
 
-    fn dropped(&self) -> (u64, u64) {
+    fn dropped(&self) -> (u64, u64, u64) {
         VfsProgram::dropped(self)
+    }
+
+    fn missed(&self) -> u64 {
+        VfsProgram::missed(self)
     }
 }
 

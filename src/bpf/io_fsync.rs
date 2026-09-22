@@ -70,6 +70,15 @@ const MAX_PENDING: u32 = 16384;
 /// Slots of the drop counter.
 const DROP_PENDING: u32 = 0;
 const DROP_RING: u32 = 1;
+/// Syncs whose exit half the kernel skipped; see `fentry::entry_instructions`.
+const DROP_ORPHANED: u32 = 2;
+
+/// How young an outer function's stamp must be for an inner entry to count as
+/// nested in it. `do_fsync` reaches `vfs_fsync` a descriptor lookup later,
+/// which is well under a microsecond; a stamp older than this is a sync whose
+/// exit half never ran, and treating it as an outer call would leave the thread
+/// untimed from then on.
+const NEST_WINDOW_NS: i32 = 50_000;
 
 /// The ring: 128 KiB holds about fourteen hundred records between two drains
 /// ten milliseconds apart, which is a hundred and forty thousand syncs a
@@ -268,12 +277,44 @@ fn entry_instructions(
     program.push(Insn::add64_imm(2, PEND_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
     program.push(Insn::add64_imm(3, PEND_VALUE as i32));
-    // Only if absent: a thread already stamped is inside an outer function of
-    // the three, and that call is the one being timed.
+    // Only if absent. A thread already stamped is either inside an outer
+    // function of the three -- and that call is the one being timed -- or it
+    // is a sync whose exit half the kernel skipped, and the two are told apart
+    // below.
     program.push(Insn::mov64_imm(4, BPF_NOEXIST));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
-    program.jump_to(SKIP, Insn::jeq_imm(0, -EEXIST, 0));
+    program.jump_to("full", Insn::jne_imm(0, -EEXIST, 0));
+
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+    // A function at this depth or deeper cannot be the outer call of this one:
+    // the stamp is an orphan.
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_TAG));
+    program.jump_to("orphan", Insn::jsge_imm(1, shape.via as i32, 0));
+    // A shallower function, stamped a moment ago, is the call this one is
+    // nested in. Stamped long ago, it is an orphan all the same.
+    program.push(Insn::ldx(BPF_DW, 2, 0, PEND_TS));
+    program.push(Insn::ldx(BPF_DW, 1, R10, PEND_VALUE + PEND_TS));
+    program.push(Insn::sub64_reg(1, 2));
+    program.jump_to("orphan", Insn::jsge_imm(1, NEST_WINDOW_NS, 0));
+    program.jump_to(SKIP, Insn::ja());
+
+    program.label("orphan");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ORPHANED, "restamp");
+    program.label("restamp");
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, PEND_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to(SKIP, Insn::jsge_imm(0, 0, 0));
+    program.label("full");
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_PENDING, SKIP);
     program.label(SKIP);
     program.push(Insn::mov64_imm(0, 0));
@@ -445,20 +486,22 @@ pub struct FsyncProgram {
     ring: RingBuffer,
     drops: Counters,
     pending: Hash,
-    _links: Vec<Link>,
+    links: Vec<Link>,
+    /// Whether `do_fsync` was found and timed.
+    pub by_descriptor: bool,
 }
 
 impl FsyncProgram {
     pub fn load(narrowing: Narrowing) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
-        let by_descriptor = fentry::expect("do_fsync", &[&FD_SIGNATURE])?;
+        // `do_fsync` is static: a kernel that inlines it into the two
+        // syscalls has no `FUNC` for it, and on that kernel `vfs_fsync` is the
+        // one the syscalls call out of line. So it is timed where it exists
+        // and its absence is not a refusal.
+        let by_descriptor = fentry::expect("do_fsync", &[&FD_SIGNATURE]).ok();
         let whole = fentry::expect("vfs_fsync", &[&WHOLE_SIGNATURE])?;
         let range = fentry::expect("vfs_fsync_range", &[&RANGE_SIGNATURE])?;
-        let shapes = [
-            Shape {
-                function: &by_descriptor,
-                via: Via::Descriptor,
-            },
+        let mut shapes = vec![
             Shape {
                 function: &whole,
                 via: Via::Whole,
@@ -468,13 +511,22 @@ impl FsyncProgram {
                 via: Via::Range,
             },
         ];
+        if let Some(function) = by_descriptor.as_ref() {
+            shapes.insert(
+                0,
+                Shape {
+                    function,
+                    via: Via::Descriptor,
+                },
+            );
+        }
         let offsets = Offsets::read(btf)?;
 
         let bytes = ring_bytes(RING_BYTES);
         let ring_map =
             syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_fsync_ring")
                 .map_err(|error| map_failure("fsync ring buffer", error))?;
-        let drops = Counters::create(2, "omn_fsync_drop")
+        let drops = Counters::create(3, "omn_fsync_drop")
             .map_err(|error| map_failure("fsync drop counter", error))?;
         let pending = Hash::create(4, PEND_VALUE_BYTES, MAX_PENDING, "omn_fsync_pend")
             .map_err(|error| map_failure("fsync pending map", error))?;
@@ -517,7 +569,8 @@ impl FsyncProgram {
             ring,
             drops,
             pending,
-            _links: links,
+            links,
+            by_descriptor: by_descriptor.is_some(),
         })
     }
 
@@ -528,13 +581,24 @@ impl FsyncProgram {
         });
     }
 
-    /// `(pending, ring)`: syncs never timed, and syncs timed and never seen.
-    pub fn dropped(&self) -> (u64, u64) {
-        (self.drops.read(DROP_PENDING), self.drops.read(DROP_RING))
+    /// `(pending, ring, orphaned)`: syncs never timed, syncs timed and never
+    /// seen, and syncs whose exit half the kernel skipped.
+    pub fn dropped(&self) -> (u64, u64, u64) {
+        (
+            self.drops.read(DROP_PENDING),
+            self.drops.read(DROP_RING),
+            self.drops.read(DROP_ORPHANED),
+        )
     }
 
-    pub fn still_pending(&self) -> usize {
-        self.pending.len().unwrap_or(0)
+    /// Runs the kernel skipped; see `fentry::Link::misses`.
+    pub fn missed(&self) -> u64 {
+        fentry::misses(&self.links)
+    }
+
+    /// Stamps left, as `(in flight, orphaned)`.
+    pub fn still_pending(&self) -> (usize, usize) {
+        fentry::split_stamps(&self.pending)
     }
 }
 

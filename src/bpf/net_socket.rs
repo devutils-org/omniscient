@@ -147,16 +147,20 @@ impl SocketProgram {
         Ok(Self { inner, missing })
     }
 
-    pub fn drain(&self) -> Result<(Vec<fentry::Row>, fentry::DrainLosses), String> {
-        self.inner.drain()
+    pub fn drain(&self, last: bool) -> Result<fentry::Drained, String> {
+        self.inner.drain(last)
     }
 
-    pub fn still_pending(&self) -> usize {
+    pub fn still_pending(&self) -> (usize, usize) {
         self.inner.still_pending()
     }
 
-    pub fn dropped(&self) -> (u64, u64) {
+    pub fn dropped(&self) -> (u64, u64, u64) {
         self.inner.dropped()
+    }
+
+    pub fn missed(&self) -> u64 {
+        self.inner.missed()
     }
 }
 

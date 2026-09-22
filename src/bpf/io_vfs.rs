@@ -4,19 +4,33 @@
 //! gap between two moments of the same call:
 //!
 //! ```text
-//!   ksys_read ─┬─ fdget_pos ── vfs_read ─┬─ rw_verify_area ── ->read_iter ── ... block
-//!              │                         │
-//!              └──────── io.syscall ─────┴──────────── io.fs ──────────────┘
+//!   __x64_sys_read ─┬─ fdget_pos ── vfs_read ─┬─ rw_verify_area ── ->read_iter ── ... block
+//!                   │                         │
+//!                   └────── io.syscall ───────┴──────────── io.fs ─────────────┘
 //! ```
 //!
-//! **`io.syscall` is timed at `ksys_read`, `ksys_write`, `ksys_pread64` and
-//! `ksys_pwrite64`**: the functions the four syscalls are one line around, so
-//! the interval is the call the application made, less only the entry stub.
-//! What that adds over the layer below is the descriptor: the table lookup and,
-//! for a file shared between threads, the file position lock, which serialises
-//! two readers of one descriptor in the syscall and never in the filesystem.
-//! The row is keyed by the descriptor, which is what the catalog's `fd` filter
-//! field has always needed and what nothing below this layer knows.
+//! **`io.syscall` is timed at the syscall table's own entry points**:
+//! `__x64_sys_read`, `_write`, `_pread64` and `_pwrite64`, and the four
+//! vectored ones where the kernel has them. The interval is the call the
+//! application made, less only the entry stub. What it adds over the layer below
+//! is the descriptor: the table lookup and, for a file shared between threads,
+//! the file position lock, which serialises two readers of one descriptor in the
+//! syscall and never in the filesystem. The row is keyed by the descriptor,
+//! which is what the catalog's `fd` filter field has always needed and what
+//! nothing below this layer knows.
+//!
+//! **Why the wrappers, and not the `ksys_*` functions one level in.** The
+//! wrappers take a `struct pt_regs *` and read their arguments out of it, which
+//! makes this layer x86-64's -- the requirement names `__x64_sys_read`, and on
+//! another architecture the probe reports it missing rather than this program
+//! reading the wrong registers. The architecture-neutral `ksys_read` family
+//! was the first choice and is what this file was written against, and it is
+//! **not on the path**: measured here, five hundred `read`s were counted and
+//! three hundred `pwrite64`s were not, because the compiler inlined
+//! `ksys_pread64` and `ksys_pwrite64` into their syscalls and kept out-of-line
+//! copies for the compat callers. The syscall table's entries cannot be inlined
+//! into it -- the dispatcher calls them from another compilation unit -- so they
+//! are the one layer that is on the path by construction.
 //!
 //! **`io.fs` is timed at `vfs_read` and `vfs_write`, for regular files only.**
 //! That is the decision the seventh wave left, and the reasons are three:
@@ -57,17 +71,28 @@ pub enum Op {
     Write = 1,
     Pread = 2,
     Pwrite = 3,
+    Readv = 4,
+    Writev = 5,
+    Preadv = 6,
+    Pwritev = 7,
 }
 
 impl Op {
+    const ALL: [Op; 8] = [
+        Op::Read,
+        Op::Write,
+        Op::Pread,
+        Op::Pwrite,
+        Op::Readv,
+        Op::Writev,
+        Op::Preadv,
+        Op::Pwritev,
+    ];
+
     pub fn from_row(op: u32) -> Option<Self> {
-        match op {
-            0 => Some(Op::Read),
-            1 => Some(Op::Write),
-            2 => Some(Op::Pread),
-            3 => Some(Op::Pwrite),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|candidate| *candidate as u32 == op)
     }
 
     /// The name a reader filters on, which is the syscall's.
@@ -77,11 +102,15 @@ impl Op {
             Op::Write => "write",
             Op::Pread => "pread64",
             Op::Pwrite => "pwrite64",
+            Op::Readv => "readv",
+            Op::Writev => "writev",
+            Op::Preadv => "preadv",
+            Op::Pwritev => "pwritev",
         }
     }
 
     pub fn is_write(self) -> bool {
-        matches!(self, Op::Write | Op::Pwrite)
+        matches!(self, Op::Write | Op::Pwrite | Op::Writev | Op::Pwritev)
     }
 }
 
@@ -94,12 +123,25 @@ pub enum Layer {
     Fs,
 }
 
-/// The prototypes each layer reads. The descriptor is the first argument of
-/// the syscall layer, the file the first of the VFS layer, and the return value
-/// is in the slot after the last argument of either.
-const KSYS_RW: [&str; 3] = ["unsigned int", "char *", "size_t"];
-const KSYS_PRW: [&str; 4] = ["unsigned int", "char *", "size_t", "loff_t"];
+/// The prototypes each layer reads. A syscall wrapper takes the saved
+/// registers and nothing else; the VFS layer takes the file first. The return
+/// value is in the slot after the last argument of either.
+const WRAPPER: [&str; 1] = ["pt_regs *"];
 const VFS_RW: [&str; 4] = ["file *", "char *", "size_t", "loff_t *"];
+
+/// The syscall wrappers `io.syscall` times, and whether each is required. The
+/// four plain ones are the catalog's requirement; the vectored ones are timed
+/// where they exist.
+const WRAPPERS: [(&str, Op, bool); 8] = [
+    ("__x64_sys_read", Op::Read, true),
+    ("__x64_sys_write", Op::Write, true),
+    ("__x64_sys_pread64", Op::Pread, true),
+    ("__x64_sys_pwrite64", Op::Pwrite, true),
+    ("__x64_sys_readv", Op::Readv, false),
+    ("__x64_sys_writev", Op::Writev, false),
+    ("__x64_sys_preadv", Op::Preadv, false),
+    ("__x64_sys_pwritev", Op::Pwritev, false),
+];
 
 /// `S_IFMT` and `S_IFREG`, from the frozen `stat(2)` ABI.
 const S_IFMT: i32 = 0o170000;
@@ -125,12 +167,26 @@ impl VfsProgram {
     pub fn load(layer: Layer, narrowing: Narrowing) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
         let timed = match layer {
-            Layer::Syscall => vec![
-                timed("ksys_read", &KSYS_RW, Op::Read)?,
-                timed("ksys_write", &KSYS_RW, Op::Write)?,
-                timed("ksys_pread64", &KSYS_PRW, Op::Pread)?,
-                timed("ksys_pwrite64", &KSYS_PRW, Op::Pwrite)?,
-            ],
+            Layer::Syscall => {
+                if !cfg!(target_arch = "x86_64") {
+                    return Err(format!(
+                        "`io.syscall` is timed at the syscall table's entry points, which take \
+                         the saved registers, and this build reads x86-64's; on {} the \
+                         registers are laid out differently and reading them as x86-64's \
+                         would report another argument as the descriptor",
+                        std::env::consts::ARCH
+                    ));
+                }
+                let mut timed = Vec::new();
+                for (name, op, required) in WRAPPERS {
+                    match self::timed(name, &WRAPPER, op) {
+                        Ok(found) => timed.push(found),
+                        Err(reason) if required => return Err(reason),
+                        Err(_) => {}
+                    }
+                }
+                timed
+            }
             Layer::Fs => vec![
                 timed("vfs_read", &VFS_RW, Op::Read)?,
                 timed("vfs_write", &VFS_RW, Op::Write)?,
@@ -145,10 +201,13 @@ impl VfsProgram {
         let fill = |program: &mut Program, _: &Timed| {
             match layer {
                 Layer::Syscall => {
-                    // The descriptor, a 32-bit argument in a 64-bit slot: the
-                    // word store keeps the low half, which is all of it, and
-                    // leaves the high half the zero the key started as.
+                    // The descriptor is the first argument, so it is in `di`
+                    // of the saved registers: a typed load through the
+                    // wrapper's one argument. It is an `unsigned int` in a
+                    // 64-bit register, and the word store keeps the low half,
+                    // which is all of it.
                     program.push(Insn::ldx(BPF_DW, 1, 6, 0));
+                    program.push(Insn::ldx(BPF_DW, 1, 1, offsets.di as i16));
                     program.push(Insn::stx(BPF_W, R10, FILL_OBJECT, 1));
                 }
                 Layer::Fs => file_identity(program, &offsets),
@@ -170,16 +229,20 @@ impl VfsProgram {
         Ok(Self { layer, inner })
     }
 
-    pub fn drain(&self) -> Result<(Vec<fentry::Row>, fentry::DrainLosses), String> {
-        self.inner.drain()
+    pub fn drain(&self, last: bool) -> Result<fentry::Drained, String> {
+        self.inner.drain(last)
     }
 
-    pub fn still_pending(&self) -> usize {
+    pub fn still_pending(&self) -> (usize, usize) {
         self.inner.still_pending()
     }
 
-    pub fn dropped(&self) -> (u64, u64) {
+    pub fn dropped(&self) -> (u64, u64, u64) {
         self.inner.dropped()
+    }
+
+    pub fn missed(&self) -> u64 {
+        self.inner.missed()
     }
 }
 
@@ -192,6 +255,8 @@ fn timed(name: &str, shape: &[&str], op: Op) -> Result<Timed, String> {
 
 /// Where the fields a file's identity is made of sit on this kernel.
 struct FileOffsets {
+    /// The first argument's register, in the syscall wrappers' `pt_regs`.
+    di: i32,
     f_inode: i32,
     i_mode: i32,
     i_ino: i32,
@@ -202,6 +267,7 @@ struct FileOffsets {
 impl FileOffsets {
     fn read(btf: &Btf) -> Result<Self, String> {
         Ok(Self {
+            di: btf.member_offset("pt_regs", "di")?,
             f_inode: btf.member_offset("file", "f_inode")?,
             i_mode: btf.member_offset("inode", "i_mode")?,
             i_ino: btf.member_offset("inode", "i_ino")?,
@@ -281,10 +347,13 @@ mod tests {
 
     #[test]
     fn every_op_has_the_name_of_the_syscall_it_came_from() {
-        for op in [Op::Read, Op::Write, Op::Pread, Op::Pwrite] {
+        for op in Op::ALL {
             assert_eq!(Op::from_row(op as u32), Some(op));
+            assert!(WRAPPERS
+                .iter()
+                .any(|(name, of, _)| *of == op && name.ends_with(op.name())));
         }
         assert_eq!(Op::from_row(9), None);
-        assert!(Op::Pwrite.is_write() && !Op::Pread.is_write());
+        assert!(Op::Pwritev.is_write() && !Op::Preadv.is_write());
     }
 }
