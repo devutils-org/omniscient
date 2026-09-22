@@ -16,6 +16,7 @@ mod packet;
 mod procfs;
 mod qdisc;
 mod retransmit;
+mod socket;
 mod softirq;
 mod softirqs;
 mod tcp_rtt;
@@ -73,6 +74,13 @@ pub fn factories() -> Vec<Factory> {
                 // Carried into the collector because the resolver credits every
                 // `bpf` backend with filtering in the kernel and then leaves
                 // its events alone; see `softirq::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // Every send and receive, over fentry and bucketed in the kernel.
+        Factory::new("net.socket", "bpf:fentry", |resolved| {
+            Ok(Box::new(socket::Prepare {
+                mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))
         }),

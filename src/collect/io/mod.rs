@@ -21,12 +21,16 @@
 
 mod block;
 mod diskstats;
+mod fsync;
+pub(super) mod histogram;
 mod pressure;
+pub(super) mod vfs;
 mod writeback;
 
 use std::collections::BTreeMap;
 
 use super::Factory;
+use crate::bpf::attach::io_vfs::Layer;
 use block::Measure;
 use diskstats::Metric;
 
@@ -105,6 +109,29 @@ pub fn factories() -> Vec<Factory> {
         Factory::new("io.size", "bpf:raw_tp", |resolved| {
             Ok(Box::new(block::Prepare {
                 measure: Measure::Size,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // The two layers above the block one, over fentry and bucketed in the
+        // kernel: the call the application made, and the part of it the VFS
+        // and the filesystem spent on a regular file.
+        Factory::new("io.syscall", "bpf:fentry", |resolved| {
+            Ok(Box::new(vfs::Prepare {
+                layer: Layer::Syscall,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("io.fs", "bpf:fentry", |resolved| {
+            Ok(Box::new(vfs::Prepare {
+                layer: Layer::Fs,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("io.fsync", "bpf:fentry", |resolved| {
+            Ok(Box::new(fsync::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))

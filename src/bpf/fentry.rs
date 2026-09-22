@@ -1,0 +1,1313 @@
+//! `bpf:fentry`: a program attached to a kernel function by its BTF type id.
+//!
+//! The fourth attach kind, and the one this project waited three waves for. A
+//! raw tracepoint reaches the places the kernel chose to publish; a kprobe
+//! reaches any symbol, and hands its program a `pt_regs` whose meaning depends
+//! on the calling convention and on nothing the verifier checks. An fentry
+//! program is attached to a *function*, named by its id in the kernel's own
+//! BTF, and that changes three things at once:
+//!
+//! - **It is typed.** The verifier knows the prototype, so an argument that is
+//!   a `struct file *` arrives as a pointer the verifier can follow, and a load
+//!   of `file->f_inode` is checked against the running kernel's layout at load
+//!   time. A load of the wrong size or at an offset that is not a member is
+//!   refused: the program *fails to load* rather than reading the wrong field.
+//!   `the_verifier_refuses_a_load_that_is_not_a_member` below is that claim,
+//!   checked on this kernel.
+//! - **It is cheaper per call.** A kprobe traps through an `int3` or an ftrace
+//!   handler that saves every register; fentry is a direct call from a BPF
+//!   trampoline patched into the function's own `nop`.
+//! - **Its exit half sees the arguments and the return value together.** An
+//!   `fexit` program's context is the entry arguments followed by the return
+//!   value, so a latency and what the call returned are one event rather than
+//!   two probes to be paired.
+//!
+//! The load carries `expected_attach_type` and `attach_btf_id`, which is what
+//! makes it a tracing program; the attach is `BPF_RAW_TRACEPOINT_OPEN` with no
+//! name, which the kernel routes to the trampoline for a program of this type.
+//!
+//! ## Why this file reads BTF itself
+//!
+//! `btf.rs` answers "where is this field" and "does this type exist", and
+//! neither is the question an fentry load asks: it wants the *type id* of a
+//! `FUNC`, and the prototype that `FUNC` points at. The shared parser keeps its
+//! ids private and this stream does not own it, so this file carries a small
+//! index of its own -- functions by name, and enough of the type section to
+//! describe a parameter -- and the request to fold it into `Btf` is under
+//! `## Needs from another stream` in `docs/open-findings.md`. It reads the
+//! same file, so the two cannot disagree about which kernel is running.
+//!
+//! ## What a requirement `fentry:<function>` means
+//!
+//! That the running kernel's BTF declares a `FUNC` of that name. pahole emits a
+//! `FUNC` only for functions with an address in the ftrace table -- an inlined
+//! function has none -- so the presence of the entry is the kernel's own answer
+//! to "can a trampoline be put here". Where this process may load a tracing
+//! program, the probe goes one step further and loads the smallest one against
+//! the function, which is what catches a kernel built without the trampoline
+//! support that BTF alone cannot reveal.
+
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::{Mutex, OnceLock};
+
+use crate::bpf::insn::{self, count_drop, helper, Insn, Log2Labels, Program, BPF_DW, BPF_W, R10};
+use crate::bpf::map::{map_failure, Counters, Hash};
+use crate::bpf::Support;
+
+/// `BPF_PROG_TYPE_TRACING`, from `include/uapi/linux/bpf.h`. Frozen UAPI.
+const BPF_PROG_TYPE_TRACING: u32 = 26;
+
+/// `enum bpf_attach_type`: the two halves of a function.
+const BPF_TRACE_FENTRY: u32 = 24;
+const BPF_TRACE_FEXIT: u32 = 25;
+
+/// `bpf()` commands this file issues itself.
+const BPF_PROG_LOAD: i32 = 5;
+const BPF_RAW_TRACEPOINT_OPEN: i32 = 17;
+
+/// The half-word operand width. `insn.rs` names the two widest; a typed
+/// load has to be exactly the member's width, so the narrow one is needed
+/// here and nowhere else yet.
+pub(crate) const BPF_H: u8 = 0x08;
+
+/// `dst += src`, `dst <<= imm` and `if dst >= src goto`, which `insn.rs` does
+/// not have. The encodings are `include/uapi/linux/bpf_common.h`'s.
+pub(crate) fn add64_reg(dst: u8, src: u8) -> Insn {
+    Insn {
+        code: 0x07 | 0x00 | 0x08,
+        regs: (dst & 0xf) | ((src & 0xf) << 4),
+        off: 0,
+        imm: 0,
+    }
+}
+
+pub(crate) fn lsh64_imm(dst: u8, imm: i32) -> Insn {
+    Insn {
+        code: 0x07 | 0x60,
+        regs: dst & 0xf,
+        off: 0,
+        imm,
+    }
+}
+
+pub(crate) fn jge_reg(dst: u8, src: u8) -> Insn {
+    Insn {
+        code: 0x05 | 0x30 | 0x08,
+        regs: (dst & 0xf) | ((src & 0xf) << 4),
+        off: 0,
+        imm: 0,
+    }
+}
+
+/// Where `bpf_get_socket_cookie` sits in `bpf_func_id`. For a tracing program
+/// it takes a `struct sock *` and generates the cookie if nothing has yet,
+/// which is what makes it a key rather than a zero.
+pub(crate) const GET_SOCKET_COOKIE: i32 = 46;
+
+/// How much verifier log to keep, as in `syscall.rs`.
+const LOG_BYTES: usize = 64 * 1024;
+
+const VMLINUX_BTF: &str = "/sys/kernel/btf/vmlinux";
+const BTF_MAGIC: u16 = 0xeb9f;
+
+const KIND_INT: u8 = 1;
+const KIND_PTR: u8 = 2;
+const KIND_ARRAY: u8 = 3;
+const KIND_STRUCT: u8 = 4;
+const KIND_UNION: u8 = 5;
+const KIND_ENUM: u8 = 6;
+const KIND_VOLATILE: u8 = 9;
+const KIND_CONST: u8 = 10;
+const KIND_RESTRICT: u8 = 11;
+const KIND_FUNC: u8 = 12;
+const KIND_FUNC_PROTO: u8 = 13;
+const KIND_VAR: u8 = 14;
+const KIND_DATASEC: u8 = 15;
+const KIND_DECL_TAG: u8 = 17;
+const KIND_TYPE_TAG: u8 = 18;
+const KIND_ENUM64: u8 = 19;
+
+/// Which half of a function a program runs at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// `fentry`: before the first instruction, with the arguments.
+    Entry,
+    /// `fexit`: after the return, with the arguments and the return value.
+    Exit,
+}
+
+impl Side {
+    fn attach_type(self) -> u32 {
+        match self {
+            Side::Entry => BPF_TRACE_FENTRY,
+            Side::Exit => BPF_TRACE_FEXIT,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Side::Entry => "fentry",
+            Side::Exit => "fexit",
+        }
+    }
+}
+
+/// A kernel function as its BTF declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    pub name: String,
+    /// The `FUNC`'s type id, which is what the load names.
+    pub id: u32,
+    /// Each parameter's type, as a person would write it: `file *`, `size_t`.
+    pub params: Vec<String>,
+    /// The return type, `void` for none.
+    pub returns: String,
+}
+
+impl Function {
+    /// The context offset of argument `index`.
+    ///
+    /// A tracing program's context is an array of `u64`, one per argument in
+    /// declaration order, whatever each argument's own width.
+    pub fn arg(&self, index: usize) -> i16 {
+        debug_assert!(
+            index < self.params.len(),
+            "{} has no argument {index}",
+            self.name
+        );
+        (index * 8) as i16
+    }
+
+    /// The context offset of the return value, in an `fexit` program: the
+    /// slot after the last argument.
+    pub fn ret(&self) -> i16 {
+        (self.params.len() * 8) as i16
+    }
+}
+
+struct TypeEntry {
+    kind: u8,
+    vlen: u16,
+    name_at: usize,
+    size_or_type: u32,
+    members_at: usize,
+}
+
+/// The functions the running kernel's BTF declares, and enough of the type
+/// section to describe their parameters.
+pub struct FunctionIndex {
+    buffer: Vec<u8>,
+    string_offset: usize,
+    types: Vec<TypeEntry>,
+    functions: HashMap<String, u32>,
+}
+
+impl std::fmt::Debug for FunctionIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FunctionIndex")
+            .field("functions", &self.functions.len())
+            .finish()
+    }
+}
+
+impl FunctionIndex {
+    fn from_kernel() -> Result<Self, String> {
+        let buffer = std::fs::read(VMLINUX_BTF).map_err(|error| {
+            format!(
+                "cannot read {VMLINUX_BTF} ({error}); an fentry program is attached by a type id \
+                 out of that file and there is nowhere else to get one"
+            )
+        })?;
+        Self::parse(buffer)
+    }
+
+    fn parse(buffer: Vec<u8>) -> Result<Self, String> {
+        if buffer.len() < 24 || u16::from_ne_bytes([buffer[0], buffer[1]]) != BTF_MAGIC {
+            return Err(format!(
+                "{VMLINUX_BTF} is not native-endian BTF, so no function can be looked up in it"
+            ));
+        }
+        let word = |at: usize| u32::from_ne_bytes(buffer[at..at + 4].try_into().expect("4"));
+        let header_len = word(4) as usize;
+        let type_offset = header_len + word(8) as usize;
+        let type_len = word(12) as usize;
+        let string_offset = header_len + word(16) as usize;
+        if type_offset + type_len > buffer.len() || string_offset > buffer.len() {
+            return Err("the BTF header points past the end of the blob".into());
+        }
+
+        // Type id 0 is void and has no entry in the section.
+        let mut types = vec![TypeEntry {
+            kind: 0,
+            vlen: 0,
+            name_at: 0,
+            size_or_type: 0,
+            members_at: 0,
+        }];
+        let mut functions = HashMap::new();
+        let mut at = type_offset;
+        let end = type_offset + type_len;
+        while at + 12 <= end {
+            let name_at = word(at) as usize;
+            let info = word(at + 4);
+            let vlen = (info & 0xffff) as u16;
+            let kind = ((info >> 24) & 0x1f) as u8;
+            let members_at = at + 12;
+            let extra = match kind {
+                KIND_INT | KIND_VAR | KIND_DECL_TAG => 4,
+                KIND_ARRAY => 12,
+                KIND_STRUCT | KIND_UNION | KIND_DATASEC | KIND_ENUM64 => vlen as usize * 12,
+                KIND_ENUM | KIND_FUNC_PROTO => vlen as usize * 8,
+                _ => 0,
+            };
+            let id = types.len() as u32;
+            if kind == KIND_FUNC && name_at != 0 {
+                if let Some(name) = string(&buffer, string_offset + name_at) {
+                    // The first declaration wins. A name declared twice is two
+                    // static functions in two files, and which one a caller
+                    // meant is not something this can know; the kernel refuses
+                    // the ambiguity the same way.
+                    functions.entry(name.to_owned()).or_insert(id);
+                }
+            }
+            types.push(TypeEntry {
+                kind,
+                vlen,
+                name_at,
+                size_or_type: word(at + 8),
+                members_at,
+            });
+            at = members_at + extra;
+        }
+        Ok(Self {
+            buffer,
+            string_offset,
+            types,
+            functions,
+        })
+    }
+
+    fn word(&self, at: usize) -> u32 {
+        u32::from_ne_bytes(self.buffer[at..at + 4].try_into().expect("4"))
+    }
+
+    fn name(&self, name_at: usize) -> &str {
+        string(&self.buffer, self.string_offset + name_at).unwrap_or("")
+    }
+
+    /// The function of this name, with its prototype, or why there is none.
+    pub fn function(&self, name: &str) -> Result<Function, String> {
+        let id = *self.functions.get(name).ok_or_else(|| {
+            format!(
+                "this kernel's BTF declares no function `{name}`: it is not in this kernel, or it \
+                 is inlined everywhere it is called and so has no address a trampoline could \
+                 patch"
+            )
+        })?;
+        let func = &self.types[id as usize];
+        let proto = self
+            .types
+            .get(func.size_or_type as usize)
+            .filter(|proto| proto.kind == KIND_FUNC_PROTO)
+            .ok_or_else(|| format!("this kernel's `{name}` points at no prototype"))?;
+        let params = (0..proto.vlen as usize)
+            .map(|slot| self.describe(self.word(proto.members_at + slot * 8 + 4), 0))
+            .collect();
+        Ok(Function {
+            name: name.to_owned(),
+            id,
+            params,
+            returns: self.describe(proto.size_or_type, 0),
+        })
+    }
+
+    /// A type as a person would write it, qualifiers stepped through because
+    /// they do not change which slot a program reads.
+    fn describe(&self, type_id: u32, depth: usize) -> String {
+        if depth > 4 {
+            return "...".to_owned();
+        }
+        let Some(entry) = self.types.get(type_id as usize) else {
+            return "?".to_owned();
+        };
+        match entry.kind {
+            0 => "void".to_owned(),
+            KIND_PTR => format!("{} *", self.describe(entry.size_or_type, depth + 1)),
+            KIND_CONST | KIND_VOLATILE | KIND_RESTRICT | KIND_TYPE_TAG => {
+                self.describe(entry.size_or_type, depth + 1)
+            }
+            _ => match self.name(entry.name_at) {
+                "" => "?".to_owned(),
+                name => name.to_owned(),
+            },
+        }
+    }
+
+    fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+}
+
+fn string(buffer: &[u8], at: usize) -> Option<&str> {
+    let rest = buffer.get(at..)?;
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    std::str::from_utf8(&rest[..end]).ok()
+}
+
+/// The running kernel's functions, read once.
+pub fn index() -> Result<&'static FunctionIndex, String> {
+    static INDEX: OnceLock<Result<FunctionIndex, String>> = OnceLock::new();
+    INDEX
+        .get_or_init(FunctionIndex::from_kernel)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// The function a program is about to be built against, refused by name when
+/// its prototype is not one of the shapes the program reads.
+///
+/// The verifier checks every typed load, but not *which argument* a program
+/// meant: `vfs_read` and `vfs_write` both take four arguments, and a program
+/// that reads the byte count out of slot three would read the position pointer
+/// on a kernel that swapped them. So the shape is compared first, the way
+/// `Btf::tracepoint_signature` is compared for a raw tracepoint.
+pub fn expect(name: &str, accepted: &[&[&str]]) -> Result<Function, String> {
+    let function = index()?.function(name)?;
+    if accepted.iter().any(|shape| function.params == *shape) {
+        return Ok(function);
+    }
+    Err(format!(
+        "this kernel declares `{name}({})`, and this program is written for {}: it reads its \
+         arguments out of fixed slots, and against another prototype those slots hold something \
+         else",
+        function.params.join(", "),
+        accepted
+            .iter()
+            .map(|shape| format!("`{name}({})`", shape.join(", ")))
+            .collect::<Vec<_>>()
+            .join(" or "),
+    ))
+}
+
+/// The probe behind a `fentry:<function>` requirement.
+///
+/// Answered from the kernel's BTF, which any user can read. Where this process
+/// may load a tracing program, the answer is confirmed by loading the smallest
+/// one against the function -- a verifier pass over two instructions, nothing
+/// attached -- and remembered, because a run asks the same question once per
+/// backend per source.
+pub fn support(function: &str) -> Support {
+    static CONFIRMED: OnceLock<Mutex<HashMap<String, Support>>> = OnceLock::new();
+    let index = match index() {
+        Ok(index) => index,
+        Err(reason) => {
+            return Support::Unchecked(format!(
+                "whether `{function}` can be traced cannot be checked: {reason}"
+            ))
+        }
+    };
+    let found = match index.function(function) {
+        Ok(found) => found,
+        Err(reason) => return Support::No(reason),
+    };
+    let cache = CONFIRMED.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(known) = cache.lock().expect("the probe cache").get(function) {
+        return known.clone();
+    }
+    let probe = [Insn::mov64_imm(0, 0), Insn::exit()];
+    let answer = match load(&found, Side::Entry, &probe, "omn_fentry_prb") {
+        Ok(_) => Support::Yes,
+        // Not privileged enough to ask: the BTF answer stands, and the `bpf`
+        // requirement beside this one is what reports the privilege.
+        Err(error) if error.is_permission() => Support::Yes,
+        Err(error) => Support::No(format!(
+            "`{function}` is in this kernel's BTF and a tracing program cannot be loaded against \
+             it: {error}"
+        )),
+    };
+    cache
+        .lock()
+        .expect("the probe cache")
+        .insert(function.to_owned(), answer.clone());
+    answer
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct TracingLoadAttr {
+    prog_type: u32,
+    insn_cnt: u32,
+    insns: u64,
+    license: u64,
+    log_level: u32,
+    log_size: u32,
+    log_buf: u64,
+    kern_version: u32,
+    prog_flags: u32,
+    prog_name: [u8; 16],
+    prog_ifindex: u32,
+    expected_attach_type: u32,
+    prog_btf_fd: u32,
+    func_info_rec_size: u32,
+    func_info: u64,
+    func_info_cnt: u32,
+    line_info_rec_size: u32,
+    line_info: u64,
+    line_info_cnt: u32,
+    attach_btf_id: u32,
+    /// Zero means `vmlinux`; a module's function would name the module's BTF
+    /// object here.
+    attach_btf_obj_fd: u32,
+    core_relo_cnt: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct RawTracepointOpenAttr {
+    name: u64,
+    prog_fd: u32,
+    pad: u32,
+}
+
+/// Why a tracing program did not load.
+#[derive(Debug)]
+pub struct LoadError {
+    pub error: io::Error,
+    pub verifier_log: String,
+}
+
+impl LoadError {
+    pub fn is_permission(&self) -> bool {
+        matches!(
+            self.error.raw_os_error(),
+            Some(libc::EPERM) | Some(libc::EACCES)
+        )
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.verifier_log.is_empty() {
+            write!(f, "{}", self.error)
+        } else {
+            write!(
+                f,
+                "{}; the verifier said:\n{}",
+                self.error, self.verifier_log
+            )
+        }
+    }
+}
+
+fn kernel_name(name: &str) -> [u8; 16] {
+    let mut buffer = [0u8; 16];
+    let len = name.len().min(15);
+    buffer[..len].copy_from_slice(&name.as_bytes()[..len]);
+    buffer
+}
+
+/// Loads a tracing program against one half of `function`.
+fn load(
+    function: &Function,
+    side: Side,
+    instructions: &[Insn],
+    name: &str,
+) -> Result<OwnedFd, LoadError> {
+    let license = CString::new("GPL").expect("no interior NUL");
+    let mut log = vec![0u8; LOG_BYTES];
+    let mut attr = TracingLoadAttr {
+        prog_type: BPF_PROG_TYPE_TRACING,
+        insn_cnt: instructions.len() as u32,
+        insns: instructions.as_ptr() as u64,
+        license: license.as_ptr() as u64,
+        log_level: 1,
+        log_size: log.len() as u32,
+        log_buf: log.as_mut_ptr() as u64,
+        prog_name: kernel_name(name),
+        expected_attach_type: side.attach_type(),
+        attach_btf_id: function.id,
+        ..Default::default()
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_PROG_LOAD,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<TracingLoadAttr>() as u32,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        let end = log.iter().position(|byte| *byte == 0).unwrap_or(log.len());
+        return Err(LoadError {
+            error,
+            verifier_log: String::from_utf8_lossy(&log[..end]).trim().to_owned(),
+        });
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// A program attached to one half of a function.
+///
+/// Dropping it detaches: the link is what holds the trampoline in place, and
+/// the program goes when its last reference does.
+pub struct Link {
+    _link: OwnedFd,
+    _program: OwnedFd,
+}
+
+/// Loads `instructions` against one half of `function` and attaches them.
+pub fn attach(
+    function: &Function,
+    side: Side,
+    instructions: &[Insn],
+    prog_name: &str,
+) -> Result<Link, String> {
+    let program = load(function, side, instructions, prog_name).map_err(|error| {
+        if error.is_permission() {
+            crate::bpf::permission_advice(&format!(
+                "loading an {} program on `{}`",
+                side.word(),
+                function.name
+            ))
+        } else {
+            format!(
+                "the kernel refused the {} program on `{}`: {error}",
+                side.word(),
+                function.name
+            )
+        }
+    })?;
+    // No name: for a tracing program the kernel attaches to the function the
+    // load named, through a trampoline, and a name here is refused.
+    let mut attr = RawTracepointOpenAttr {
+        name: 0,
+        prog_fd: program.as_raw_fd() as u32,
+        pad: 0,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_RAW_TRACEPOINT_OPEN,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<RawTracepointOpenAttr>() as u32,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::EPERM) | Some(libc::EACCES) => crate::bpf::permission_advice(&format!(
+                "attaching an {} program to `{}`",
+                side.word(),
+                function.name
+            )),
+            _ => format!(
+                "the {} program on `{}` loaded and the kernel would not attach it: {error}. A \
+                 function in BTF whose trampoline cannot be installed is usually one ftrace \
+                 refuses -- notrace, or already claimed by a direct call",
+                side.word(),
+                function.name
+            ),
+        });
+    }
+    Ok(Link {
+        _link: unsafe { OwnedFd::from_raw_fd(fd as RawFd) },
+        _program: program,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The timed pair: the shape most fentry sources take.
+//
+// An entry program stamps the calling thread and an exit program closes the
+// stamp, so the latency of one call is the gap between the two halves of the
+// same function on the same thread. Three sources in this build are that
+// shape -- `io.syscall`, `io.fs` and `net.socket` -- and differ only in which
+// functions they time and what they read out of the arguments to key a row.
+// The arithmetic in between is written once, here.
+
+/// Whose calls a program keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Narrowing {
+    /// A thread group: a process target.
+    pub tgid: Option<u32>,
+    /// A thread: a thread target.
+    pub tid: Option<u32>,
+}
+
+/// The label the entry program's gate jumps to when a call is not to be timed.
+pub const SKIP: &str = "done";
+
+/// The pending map: thread id to the moment it entered the function.
+const PEND_KEY_BYTES: usize = 4;
+const PEND_VALUE_BYTES: usize = 8;
+
+/// Stack of the entry program.
+const ENTRY_PEND_KEY: i16 = -8;
+const ENTRY_PEND_VALUE: i16 = -16;
+const ENTRY_DROP_KEY: i16 = -20;
+
+/// Writes the entry half of a timed pair.
+///
+/// `gate` runs first, with the context in `r6`, and may jump to [`SKIP`] to
+/// leave a call untimed; it may use `r1` through `r5` and `r7`. Shared with
+/// the streaming sources, whose entry half is the same stamp.
+pub(crate) fn entry_instructions(
+    pending_fd: i32,
+    drops_fd: i32,
+    drop_slot: u32,
+    narrowing: Narrowing,
+    gate: &dyn Fn(&mut Program),
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    gate(&mut program);
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::mov64_reg(7, 0));
+    if let Some(tgid) = narrowing.tgid {
+        program.push(Insn::mov64_reg(1, 7));
+        program.push(Insn::rsh64_imm(1, 32));
+        program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+    }
+    // The whole slot is cleared, then the low word written: the key is four
+    // bytes and a stack slot is eight, and the kernel hashes what it is told
+    // the key is -- but a word store is also the only way to take the low half
+    // of the register without an instruction `insn.rs` does not have.
+    program.push(Insn::st_imm(BPF_DW, R10, ENTRY_PEND_KEY, 0));
+    program.push(Insn::stx(BPF_W, R10, ENTRY_PEND_KEY, 7));
+    if let Some(tid) = narrowing.tid {
+        program.push(Insn::ldx(BPF_W, 1, R10, ENTRY_PEND_KEY));
+        program.jump_to(SKIP, Insn::jne_imm(1, tid as i32, 0));
+    }
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, ENTRY_PEND_VALUE, 0));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_PEND_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ENTRY_PEND_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to(SKIP, Insn::jsge_imm(0, 0, 0));
+    // The map is full: this call will never be timed, and nothing else
+    // anywhere would record that it was made.
+    count_drop(&mut program, drops_fd, ENTRY_DROP_KEY, drop_slot, SKIP);
+    program.label(SKIP);
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Closes a pending stamp: leaves the duration in `r9` and falls through, or
+/// jumps to `done` when this thread has no stamp.
+///
+/// Uses `r1` through `r5`, and leaves the thread's `pid_tgid` in `r7` and the
+/// closing timestamp in `r8` -- one reading, so that an event's time and its
+/// duration cannot disagree by whatever ran between two.
+pub(crate) fn close_stamp(program: &mut Program, pending_fd: i32, key: i16, done: &'static str) {
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::mov64_reg(7, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, key, 0));
+    program.push(Insn::stx(BPF_W, R10, key, 7));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, key as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    // A thread this run never saw enter: it was already inside the function
+    // when the programs attached, or the entry was not kept.
+    program.jump_to(done, Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 9, 0, 0));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, key as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    program.push(Insn::sub64_reg(0, 9));
+    program.push(Insn::mov64_reg(9, 0));
+}
+
+/// One function a histogram times, and what its row is labelled.
+#[derive(Debug, Clone)]
+pub struct Timed {
+    pub function: Function,
+    /// The row's `op`, which is how a reader tells a read from a write.
+    pub op: u32,
+}
+
+/// The row map: a key naming whose call it was and into which bucket it fell,
+/// and a value holding how many, how long in total, and what they returned.
+///
+/// One layout for every histogram source, so one decoder serves all of them.
+/// `object`, `dev` and `aux` are the source's to fill: a descriptor, an inode,
+/// a socket cookie; a device; an address family and a port.
+const ROW_KEY_BYTES: usize = 32;
+const KEY_TID: i16 = 0;
+const KEY_TGID: i16 = 4;
+const KEY_OP: i16 = 8;
+const KEY_BUCKET: i16 = 12;
+const KEY_OBJECT: i16 = 16;
+const KEY_DEV: i16 = 24;
+const KEY_AUX: i16 = 28;
+
+const ROW_VALUE_BYTES: usize = 48;
+const VALUE_COUNT: i16 = 0;
+const VALUE_TOTAL_NS: i16 = 8;
+/// The sum of the positive return values: bytes, for every function timed
+/// here. A call that returned an error moved nothing and adds nothing.
+const VALUE_BYTES: i16 = 16;
+/// Calls that returned a negative value, which is an errno.
+const VALUE_ERRORS: i16 = 24;
+const VALUE_COMM: i16 = 32;
+const COMM_BYTES: usize = 16;
+
+/// Stack of the exit program.
+const ROW_VALUE: i16 = -48;
+const ROW_KEY: i16 = -80;
+const EXIT_PEND_KEY: i16 = -88;
+const EXIT_DROP_KEY: i16 = -92;
+
+/// Where a `fill` callback writes the three fields that are the source's own.
+pub const FILL_OBJECT: i16 = ROW_KEY + KEY_OBJECT;
+pub const FILL_DEV: i16 = ROW_KEY + KEY_DEV;
+pub const FILL_AUX: i16 = ROW_KEY + KEY_AUX;
+
+/// `BPF_NOEXIST`, and the errno an insert gets when another cpu won the race.
+const BPF_NOEXIST: i32 = 1;
+const EEXIST: i32 = 17;
+
+/// Slots of the histogram's drop counter.
+pub const DROP_PENDING: u32 = 0;
+pub const DROP_ROWS: u32 = 1;
+
+const LOG2: Log2Labels = [
+    "fx_log2_32",
+    "fx_log2_16",
+    "fx_log2_8",
+    "fx_log2_4",
+    "fx_log2_2",
+    "fx_log2_1",
+    "fx_log2_done",
+];
+
+/// Writes the exit half of a timed pair.
+///
+/// `fill` runs with the context in `r6` and the duration in `r9`, both of
+/// which it must leave alone; it may use `r1` through `r5` and `r7`, and
+/// writes the source's own key fields at [`FILL_OBJECT`], [`FILL_DEV`] and
+/// [`FILL_AUX`], which are zero when it starts.
+fn exit_instructions(
+    timed: &Timed,
+    pending_fd: i32,
+    rows_fd: i32,
+    drops_fd: i32,
+    fill: &dyn Fn(&mut Program, &Timed) -> Result<(), String>,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    close_stamp(&mut program, pending_fd, EXIT_PEND_KEY, "done");
+
+    for slot in 0..(ROW_KEY_BYTES as i16 / 8) {
+        program.push(Insn::st_imm(BPF_DW, R10, ROW_KEY + slot * 8, 0));
+    }
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TID, 7));
+    program.push(Insn::mov64_reg(1, 7));
+    program.push(Insn::rsh64_imm(1, 32));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
+    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_OP, timed.op as i32));
+    fill(&mut program, timed)?;
+
+    // What the call returned, read after `fill` so that `fill` may use r8's
+    // neighbours freely. Signed: a negative return is an errno.
+    program.push(Insn::ldx(BPF_DW, 8, 6, timed.function.ret()));
+    insn::push_log2_bucket(&mut program, 9, &LOG2);
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
+
+    lookup_row(&mut program, rows_fd);
+    program.jump_to("first", Insn::jeq_imm(0, 0, 0));
+    accumulate(&mut program, ["moved", "done"]);
+
+    program.label("first");
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_BYTES, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 0));
+    program.jump_to("first_moved", Insn::jsge_imm(8, 1, 0));
+    program.jump_to("first_named", Insn::jsge_imm(8, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 1));
+    program.jump_to("first_named", Insn::ja());
+    program.label("first_moved");
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_BYTES, 8));
+    program.label("first_named");
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COMM, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COMM + 8, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_COMM) as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ROW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ROW_VALUE as i32));
+    // Only if absent: two cpus closing the first call of the same row at once
+    // would otherwise both insert, and the second would overwrite the first's
+    // count. The loser is told `EEXIST` and adds to the winner's row instead.
+    program.push(Insn::mov64_imm(4, BPF_NOEXIST));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.jump_to("lost_race", Insn::jeq_imm(0, -EEXIST, 0));
+    // The histogram is full: this call is in no bucket.
+    count_drop(&mut program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
+    program.jump_to("done", Insn::ja());
+
+    // Another cpu created the row between the lookup and the insert. Its row
+    // is there now, so this call is added to it -- once, straight-line: a jump
+    // back to the first lookup is a loop the verifier cannot bound, and it
+    // refuses the program for it.
+    program.label("lost_race");
+    lookup_row(&mut program, rows_fd);
+    program.jump_to("raced_out", Insn::jeq_imm(0, 0, 0));
+    accumulate(&mut program, ["raced_moved", "done"]);
+    // Created and gone again between two instructions: only a drain removes a
+    // row, so this is a drain racing the program, and the call is lost.
+    program.label("raced_out");
+    count_drop(&mut program, drops_fd, EXIT_DROP_KEY, DROP_ROWS, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Looks the row key up, leaving the value pointer or null in `r0`.
+fn lookup_row(program: &mut Program, rows_fd: i32) {
+    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ROW_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+}
+
+/// Adds one call -- duration in `r9`, return value in `r8` -- to the row `r0`
+/// points at, then jumps to the second label.
+///
+/// One allocation shared by every cpu, so every accumulation is atomic.
+fn accumulate(program: &mut Program, [moved, done]: [&'static str; 2]) {
+    program.push(Insn::mov64_imm(1, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_COUNT, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    program.jump_to(moved, Insn::jsge_imm(8, 1, 0));
+    program.jump_to(done, Insn::jsge_imm(8, 0, 0));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_ERRORS, 1));
+    program.jump_to(done, Insn::ja());
+    program.label(moved);
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_BYTES, 8));
+    program.jump_to(done, Insn::ja());
+}
+
+/// One `(task, op, object, bucket)` row's calls over one drain interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub tid: u32,
+    pub tgid: u32,
+    pub op: u32,
+    /// `emit::BucketLayout::Log2`'s numbering.
+    pub bucket: u32,
+    pub object: u64,
+    pub dev: u32,
+    pub aux: u32,
+    pub count: u64,
+    /// The exact sum of the durations, which the bucket cannot give back.
+    pub total_ns: u64,
+    pub bytes: u64,
+    pub errors: u64,
+    pub comm: String,
+}
+
+impl Row {
+    pub fn bucket_low_ns(&self) -> u64 {
+        insn::bucket_low_ns(self.bucket)
+    }
+
+    fn decode(key: &[u8], value: &[u8]) -> Option<Self> {
+        if key.len() < ROW_KEY_BYTES || value.len() < ROW_VALUE_BYTES {
+            return None;
+        }
+        let word = |bytes: &[u8], at: i16| {
+            u32::from_ne_bytes(bytes[at as usize..at as usize + 4].try_into().expect("4"))
+        };
+        let long = |bytes: &[u8], at: i16| {
+            u64::from_ne_bytes(bytes[at as usize..at as usize + 8].try_into().expect("8"))
+        };
+        let comm = &value[VALUE_COMM as usize..VALUE_COMM as usize + COMM_BYTES];
+        let end = comm.iter().position(|b| *b == 0).unwrap_or(comm.len());
+        Some(Self {
+            tid: word(key, KEY_TID),
+            tgid: word(key, KEY_TGID),
+            op: word(key, KEY_OP),
+            bucket: word(key, KEY_BUCKET),
+            object: long(key, KEY_OBJECT),
+            dev: word(key, KEY_DEV),
+            aux: word(key, KEY_AUX),
+            count: long(value, VALUE_COUNT),
+            total_ns: long(value, VALUE_TOTAL_NS),
+            bytes: long(value, VALUE_BYTES),
+            errors: long(value, VALUE_ERRORS),
+            comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
+        })
+    }
+}
+
+/// What a histogram source asks of the shared shape.
+pub struct HistogramSpec<'a> {
+    /// A prefix for the maps and programs, which is what `bpftool` shows.
+    pub name: &'static str,
+    pub timed: Vec<Timed>,
+    pub narrowing: Narrowing,
+    /// The entry half's gate; see [`entry_instructions`].
+    pub gate: &'a dyn Fn(&mut Program, &Timed),
+    /// The exit half's key fields; see [`exit_instructions`].
+    pub fill: &'a dyn Fn(&mut Program, &Timed) -> Result<(), String>,
+    pub max_pending: u32,
+    pub max_rows: u32,
+}
+
+/// A loaded, attached histogram and the maps it counts into.
+pub struct HistogramProgram {
+    pending: Hash,
+    rows: Hash,
+    drops: Counters,
+    _links: Vec<Link>,
+}
+
+/// What one drain found beside the rows.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DrainLosses {
+    pub vanished: u64,
+    pub truncated: bool,
+}
+
+impl HistogramProgram {
+    pub fn load(spec: HistogramSpec<'_>) -> Result<Self, String> {
+        let pending = Hash::create(
+            PEND_KEY_BYTES,
+            PEND_VALUE_BYTES,
+            spec.max_pending,
+            &format!("{}_pend", spec.name),
+        )
+        .map_err(|error| map_failure(&format!("{} pending map", spec.name), error))?;
+        let rows = Hash::create(
+            ROW_KEY_BYTES,
+            ROW_VALUE_BYTES,
+            spec.max_rows,
+            &format!("{}_rows", spec.name),
+        )
+        .map_err(|error| map_failure(&format!("{} histogram map", spec.name), error))?;
+        let drops = Counters::create(2, &format!("{}_drop", spec.name))
+            .map_err(|error| map_failure(&format!("{} drop counter", spec.name), error))?;
+
+        // Every instruction stream is built before anything is attached, so a
+        // kernel that refuses one of them refuses the source before any of it
+        // runs.
+        let mut built = Vec::with_capacity(spec.timed.len());
+        for timed in &spec.timed {
+            let entry = entry_instructions(
+                pending.as_raw_fd(),
+                drops.as_raw_fd(),
+                DROP_PENDING,
+                spec.narrowing,
+                &|program| (spec.gate)(program, timed),
+            )?;
+            let exit = exit_instructions(
+                timed,
+                pending.as_raw_fd(),
+                rows.as_raw_fd(),
+                drops.as_raw_fd(),
+                spec.fill,
+            )?;
+            built.push((timed, entry, exit));
+        }
+
+        // Every exit before any entry. A stamp whose exit is not attached yet
+        // is a call that will never be closed -- harmless, the next call on the
+        // thread overwrites it -- whereas the other order is never worse than
+        // this one and sometimes is.
+        let mut links = Vec::with_capacity(spec.timed.len() * 2);
+        for (timed, _, exit) in &built {
+            links.push(attach(
+                &timed.function,
+                Side::Exit,
+                exit,
+                &format!("{}_x", spec.name),
+            )?);
+        }
+        for (timed, entry, _) in &built {
+            links.push(attach(
+                &timed.function,
+                Side::Entry,
+                entry,
+                &format!("{}_e", spec.name),
+            )?);
+        }
+        Ok(Self {
+            pending,
+            rows,
+            drops,
+            _links: links,
+        })
+    }
+
+    /// Takes every row accumulated since the last drain.
+    pub fn drain(&self) -> Result<(Vec<Row>, DrainLosses), String> {
+        let drained = self
+            .rows
+            .drain()
+            .map_err(|error| format!("cannot read the histogram: {error}"))?;
+        let mut losses = DrainLosses {
+            vanished: drained.vanished,
+            truncated: drained.truncated,
+        };
+        let mut rows = Vec::with_capacity(drained.entries.len());
+        for (key, value) in &drained.entries {
+            match Row::decode(key, value) {
+                Some(row) => rows.push(row),
+                None => losses.vanished += 1,
+            }
+        }
+        Ok((rows, losses))
+    }
+
+    /// Threads inside a timed function right now. Their call is real and in no
+    /// bucket, because it has no end yet.
+    pub fn still_pending(&self) -> usize {
+        self.pending.len().unwrap_or(0)
+    }
+
+    /// Calls the programs could not record, as `(pending, rows)`.
+    pub fn dropped(&self) -> (u64, u64) {
+        (self.drops.read(DROP_PENDING), self.drops.read(DROP_ROWS))
+    }
+}
+
+/// How many functions this kernel's BTF declares, for a message that has to
+/// say how much was searched.
+pub fn function_count() -> usize {
+    index().map(FunctionIndex::function_count).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn functions() -> Option<&'static FunctionIndex> {
+        match index() {
+            Ok(index) => Some(index),
+            Err(reason) => {
+                eprintln!("skipped: {reason}");
+                None
+            }
+        }
+    }
+
+    /// The load attribute is read by offset against `union bpf_attr`, and a
+    /// field one slot out is not an error: it is a program attached to the
+    /// wrong function, or a log buffer where the license should be.
+    #[test]
+    fn the_load_attribute_matches_the_kernels_layout() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(offset_of!(TracingLoadAttr, expected_attach_type), 68);
+        assert_eq!(offset_of!(TracingLoadAttr, prog_btf_fd), 72);
+        assert_eq!(offset_of!(TracingLoadAttr, func_info), 80);
+        assert_eq!(offset_of!(TracingLoadAttr, line_info), 96);
+        assert_eq!(offset_of!(TracingLoadAttr, attach_btf_id), 108);
+        assert_eq!(offset_of!(TracingLoadAttr, attach_btf_obj_fd), 112);
+        assert_eq!(size_of::<TracingLoadAttr>(), 120);
+        assert_eq!(size_of::<RawTracepointOpenAttr>(), 16);
+    }
+
+    /// The prototypes the five sources are written against, read back from
+    /// this kernel. If one of these moves, the program refuses by name rather
+    /// than reading a slot that now holds something else -- and this test is
+    /// where the move is first seen.
+    #[test]
+    fn the_functions_the_five_sources_time_have_the_prototypes_they_read() {
+        let Some(index) = functions() else { return };
+        for (name, params) in [
+            ("vfs_read", &["file *", "char *", "size_t", "loff_t *"][..]),
+            ("vfs_write", &["file *", "char *", "size_t", "loff_t *"][..]),
+            ("ksys_read", &["unsigned int", "char *", "size_t"][..]),
+            ("ksys_write", &["unsigned int", "char *", "size_t"][..]),
+            (
+                "vfs_fsync_range",
+                &["file *", "loff_t", "loff_t", "int"][..],
+            ),
+            // `sockaddr_unsized *` since 7.x; the connect program accepts both.
+            (
+                "tcp_v4_connect",
+                &["sock *", "sockaddr_unsized *", "int"][..],
+            ),
+            ("tcp_finish_connect", &["sock *", "sk_buff *"][..]),
+            ("sock_recvmsg", &["socket *", "msghdr *", "int"][..]),
+        ] {
+            let function = index.function(name).expect("a function every kernel has");
+            assert_eq!(function.params, params, "{name}");
+            assert!(function.id > 0);
+        }
+    }
+
+    /// A function the kernel does not have is missing, not unknown: the answer
+    /// is in a file this process read.
+    #[test]
+    fn a_function_this_kernel_does_not_have_is_missing_rather_than_unknown() {
+        if functions().is_none() {
+            return;
+        }
+        let Support::No(reason) = support("definitely_not_a_kernel_function") else {
+            panic!("an absent function must be reported missing");
+        };
+        assert!(reason.contains("declares no function"), "{reason}");
+    }
+
+    /// A prototype that is not one of the accepted shapes is refused, and the
+    /// refusal carries both the shape found and the shape wanted.
+    #[test]
+    fn a_prototype_that_moved_is_refused_by_name() {
+        if functions().is_none() {
+            return;
+        }
+        let error = expect("vfs_read", &[&["int"]]).unwrap_err();
+        assert!(error.contains("file *"), "{error}");
+        assert!(error.contains("`vfs_read(int)`"), "{error}");
+    }
+
+    /// The return value of an `fexit` program is in the slot after the last
+    /// argument, and a program that read it one slot early would report the
+    /// position pointer as a byte count.
+    #[test]
+    fn the_return_value_sits_after_the_arguments() {
+        let Some(index) = functions() else { return };
+        let read = index.function("vfs_read").expect("vfs_read");
+        assert_eq!(read.ret(), 32);
+        assert_eq!(read.arg(2), 16);
+    }
+
+    /// Both halves of the pair take one timestamp each, from the monotonic
+    /// clock and no other.
+    #[test]
+    fn the_pair_reads_the_monotonic_clock_and_no_other() {
+        let Some(index) = functions() else { return };
+        const KTIME_GET_BOOT_NS: i32 = 125;
+        let timed = Timed {
+            function: index.function("vfs_read").expect("vfs_read"),
+            op: 0,
+        };
+        let entry = entry_instructions(3, 4, 0, Narrowing::default(), &|_| {}).expect("entry");
+        let exit = exit_instructions(&timed, 3, 5, 4, &|_, _| Ok(())).expect("exit");
+        for (what, program) in [("entry", entry), ("exit", exit)] {
+            let calls: Vec<i32> = program
+                .iter()
+                .filter(|insn| insn.code == 0x85)
+                .map(|insn| insn.imm)
+                .collect();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|id| **id == helper::KTIME_GET_NS)
+                    .count(),
+                1,
+                "the {what} half"
+            );
+            assert!(!calls.contains(&KTIME_GET_BOOT_NS), "the {what} half");
+        }
+    }
+
+    /// Four atomic adds per path, one per field a row accumulates, and no
+    /// plain store into a row another cpu can see.
+    #[test]
+    fn a_row_is_accumulated_atomically() {
+        let Some(index) = functions() else { return };
+        let timed = Timed {
+            function: index.function("vfs_read").expect("vfs_read"),
+            op: 0,
+        };
+        let exit = exit_instructions(&timed, 3, 5, 4, &|_, _| Ok(())).expect("exit");
+        // Twice over: the ordinary path, and the one a lost insert race takes.
+        assert_eq!(exit.iter().filter(|insn| insn.code == 0xdb).count(), 8);
+    }
+
+    /// Every byte of the row key and value is written by the program, and no
+    /// region of the stack overlaps another.
+    #[test]
+    fn the_row_layout_covers_every_byte_and_the_stack_does_not_overlap() {
+        let key = [
+            (KEY_TID, 4),
+            (KEY_TGID, 4),
+            (KEY_OP, 4),
+            (KEY_BUCKET, 4),
+            (KEY_OBJECT, 8),
+            (KEY_DEV, 4),
+            (KEY_AUX, 4),
+        ];
+        let value = [
+            (VALUE_COUNT, 8),
+            (VALUE_TOTAL_NS, 8),
+            (VALUE_BYTES, 8),
+            (VALUE_ERRORS, 8),
+            (VALUE_COMM, COMM_BYTES as i16),
+        ];
+        for (fields, bytes) in [(&key[..], ROW_KEY_BYTES), (&value[..], ROW_VALUE_BYTES)] {
+            let mut covered = vec![false; bytes];
+            for (at, size) in fields {
+                for byte in *at..*at + *size {
+                    assert!(!covered[byte as usize]);
+                    covered[byte as usize] = true;
+                }
+            }
+            assert!(covered.iter().all(|byte| *byte));
+        }
+        let regions = [
+            (ROW_VALUE, ROW_VALUE_BYTES as i16),
+            (ROW_KEY, ROW_KEY_BYTES as i16),
+            (EXIT_PEND_KEY, 8),
+            (EXIT_DROP_KEY, 4),
+        ];
+        for (index, (at, size)) in regions.iter().enumerate() {
+            assert!(*at >= -512 && at + size <= 0);
+            for (other_at, other_size) in &regions[index + 1..] {
+                assert!(at + size <= *other_at || other_at + other_size <= *at);
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_of_the_wrong_size_is_refused_rather_than_padded() {
+        assert!(Row::decode(&[0; 8], &[0; ROW_VALUE_BYTES]).is_none());
+        assert!(Row::decode(&[0; ROW_KEY_BYTES], &[0; 8]).is_none());
+    }
+
+    /// The histogram's buckets are the emit layer's buckets: the value that
+    /// travels on an event is the low bound, and it has to land back in the
+    /// same bucket. An independent statement of the definition, not a call
+    /// into the code under test.
+    #[test]
+    fn the_kernels_buckets_and_the_emit_layers_are_the_same_buckets() {
+        for bucket in 1..48u32 {
+            let low = insn::bucket_low_ns(bucket);
+            assert_eq!(
+                u64::from(u64::BITS - low.leading_zeros()),
+                u64::from(bucket)
+            );
+            assert_eq!(
+                u64::from(u64::BITS - (low - 1).leading_zeros()),
+                u64::from(bucket - 1)
+            );
+        }
+    }
+}

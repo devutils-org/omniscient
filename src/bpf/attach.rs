@@ -50,6 +50,23 @@ use perf_event_open_sys as sys;
 use super::insn::Insn;
 use super::{syscall, Support};
 
+// The fifth attach kind, and the programs built on it.
+//
+// Declared here rather than beside the other programs in `bpf/mod.rs` because
+// that file belongs to no stream of the eighth wave and this one owns only
+// `attach.rs`, `fentry.rs` and the `io*`/`net*` programs. `#[path]` resolves
+// against this file's directory, so the files sit where they would anyway;
+// moving these lines into `mod.rs` is a request in `docs/open-findings.md`,
+// and costs nothing but the lines.
+#[path = "fentry.rs"]
+pub mod fentry;
+#[path = "io_fsync.rs"]
+pub mod io_fsync;
+#[path = "io_vfs.rs"]
+pub mod io_vfs;
+#[path = "net_socket.rs"]
+pub mod net_socket;
+
 /// Where `tracefs` may be mounted, best first.
 const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
 
@@ -158,13 +175,24 @@ pub fn uprobe_type() -> Result<u32, String> {
     dynamic_pmu_type(UPROBE_PMU, "uprobe")
 }
 
-/// The probe behind the `kprobe` and `uprobe` requirement strings.
+/// The probe behind the `kprobe`, `uprobe` and `fentry:<function>`
+/// requirement strings: every attach kind this file owns that is not a
+/// tracepoint.
 ///
 /// Asked of the machine rather than assumed. The type numbers are handed out at
 /// boot in the order the PMUs register, so there is no constant that could be
 /// right, and an event opened on the wrong type does not fail -- it counts
 /// something else.
+///
+/// `capabilities.rs` calls this with every requirement it has not otherwise
+/// answered, which is what let the fentry probe land without an edit there:
+/// until the eighth wave, the eight `fentry:` requirements in the catalog read
+/// `unverified`, and the resolver passed over every `bpf:fentry` backend for a
+/// requirement nobody had asked about.
 pub fn probe_type_support(kind: &str) -> Option<Support> {
+    if let Some(function) = kind.strip_prefix("fentry:") {
+        return Some(fentry::support(function));
+    }
     let read = match kind {
         "kprobe" => kprobe_type(),
         "uprobe" => uprobe_type(),
