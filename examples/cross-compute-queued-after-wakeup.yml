@@ -1,0 +1,84 @@
+# A known amount of sleep, and the part of "blocked" that was not.
+#
+#   omn -f examples/cross-compute-queued-after-wakeup.yml
+#
+# The decomposition's two traced rows overlap, and this session measures by how
+# much against a number nobody has to take on trust. A Python process sleeps
+# 100 times for 5 ms: 500 ms of requested sleep, written into its source. It
+# shares one cpu with a spinning shell, and it puts itself in `SCHED_BATCH`,
+# which needs no privilege and changes exactly one thing: a batch task that is
+# woken does not preempt the task on the cpu, so it waits for the scheduler's
+# next tick. Every wakeup is therefore followed by a queue wait of up to a
+# tick, and the scheduler, not the measurement, decides how long.
+#
+# The program then reports, on stderr, what the kernel says about that loop:
+# how long it took by its own monotonic clock, and how much of it
+# `/proc/self/schedstat` says was spent on the cpu and waiting for one.
+#
+# Measured on this machine, three runs:
+#
+#   requested sleep                         500.0 ms
+#   `sched.offcpu`, 100 blocks            582.4 / 578.8 / 580.7 ms
+#   the loop's own clock minus its cpu    582.5 / 578.9 / 580.8 ms
+#   the kernel's queue wait in the loop    77.0 /  73.6 /  75.6 ms
+#   `sched.runqlat` for the whole process  84.35 / 83.13 / 83.94 ms
+#   the kernel's queue wait, whole process 84.43 / 83.21 / 84.01 ms
+#
+# `sched.offcpu` is the loop's wall clock, to a tenth of a millisecond: it is
+# the requested sleep, plus five milliseconds of timer slack, plus every
+# nanosecond the kernel says the task then waited for a cpu -- and those same
+# nanoseconds are in `sched.runqlat`. A decomposition that adds the two counts
+# 75 ms of a 580 ms loop twice.
+#
+# Neither row is wrong. `sched.offcpu` answers "how long was the task off the
+# cpu after it blocked", and a woken task still waiting for a turn is off the
+# cpu. What is missing is the split, and the request for it is in
+# `docs/open-findings.md` under stream P2.
+name: queued after every wakeup
+format: text
+
+requests:
+  - label: blocked
+    source: sched.offcpu
+    target: &sleeper
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          C=$(($(nproc) - 1))
+          timeout 20 taskset -c $C /bin/sh -c 'while :; do :; done' &
+          exec taskset -c $C python3 -c "$1" "$!"
+        - sh
+        - |
+          import os, signal, sys, time
+
+          def schedstat():
+              on_cpu, queued, _ = open("/proc/self/schedstat").read().split()
+              return int(on_cpu), int(queued)
+
+          SLEEPS, EACH = 100, 0.005
+          hog = int(sys.argv[1])
+          os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+          on0, queued0 = schedstat()
+          started = time.monotonic_ns()
+          for _ in range(SLEEPS):
+              time.sleep(EACH)
+          ended = time.monotonic_ns()
+          on1, queued1 = schedstat()
+          os.kill(hog, signal.SIGTERM)
+          print(f"omn-truth tid={os.getpid()} requested_ns={round(SLEEPS * EACH * 1e9)} "
+                f"loop_ns={ended - started} loop_oncpu_ns={on1 - on0} "
+                f"loop_runq_ns={queued1 - queued0} oncpu_ns={on1} runq_ns={queued1}",
+                file=sys.stderr)
+    mode: trace
+    emit: [raw]
+    keys: [task]
+
+  - label: runnable
+    source: sched.runqlat
+    target: *sleeper
+    mode: trace
+    # `raw` because each row carries the exact `total_ns` of the waits it stands
+    # for; a summary of these rows is built from bucketed values.
+    emit: [raw]
+    keys: [task]

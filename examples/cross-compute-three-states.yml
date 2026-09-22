@@ -1,0 +1,87 @@
+# The same task with all three states large at once, and the rows adding up to
+# more than the task lived.
+#
+#   omn -f examples/cross-compute-three-states.yml
+#
+# `cross-compute-where-the-time-went.yml` runs on an idle machine, where the
+# runnable state is a fraction of a percent: every time the driver is woken
+# there is a free cpu for it. That is the ordinary case, and the one where the
+# decomposition's two rows that overlap cannot be seen to overlap. So this
+# session takes it away: the driver, its responder and a spinning shell are all
+# pinned to one cpu, and the driver now spends about a third of its life
+# waiting for a turn.
+#
+# Measured on this machine: on cpu 190 ms, runnable 230 ms, off cpu 296 ms --
+# 716 ms of parts for a task that the run's own window says lived at most
+# 692 ms. The parts exceed the whole, which no decomposition can do, and the
+# difference is the run queue wait after each wakeup: `sched.offcpu` times a
+# block until the task gets the cpu back, so that wait is in its row and in
+# `sched.runqlat`'s. Printing the residue is what shows it, and it is negative.
+#
+# The pin is to the last cpu this process may use, whichever that is. The
+# spinning shell is started under `timeout`, so a driver that dies early does
+# not leave it running, and the driver stops it on its way out.
+#
+# Every row is tied to the task by KEY, as in the first session. There is no
+# join here: this session is about the arithmetic, and the join is the first
+# session's.
+name: all three states at once
+format: text
+
+requests:
+  - label: on-cpu
+    source: cpu.profile
+    target: &contended
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          C=$(($(nproc) - 1))
+          exec taskset -c $C /bin/sh -c "$1"
+        - sh
+        - |
+          S=$(date +%s%N)
+          timeout 20 /bin/sh -c 'while :; do :; done' & H=$!
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"
+            while read -r _ <&4; do
+              j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+              echo y >&5
+            done; } &
+          exec 3>"$D/a" 6<"$D/b"
+          i=0
+          while [ $i -lt 600 ]; do
+            j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+            echo x >&3; read -r _ <&6
+            i=$((i + 1))
+          done
+          exec 3>&- 6<&-; rm -rf "$D"; kill $H
+          E=$(date +%s%N)
+          read -r ON RQ SL < /proc/$$/schedstat
+          V=$(grep '^voluntary_ctxt' /proc/$$/status); V=${V##*[!0-9]}
+          echo "omn-truth tid=$$ wall_ns=$((E - S)) oncpu_ns=$ON runq_ns=$RQ slices=$SL voluntary=$V" >&2
+    mode: sample@997hz
+    emit: [topk, hist]
+    stack: fp
+    keys: [task]
+
+  - label: on-cpu-polled
+    source: cpu.oncpu_time
+    target: *contended
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task]
+
+  - label: runnable
+    source: sched.runqlat
+    target: *contended
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+
+  - label: blocked
+    source: sched.offcpu
+    target: *contended
+    mode: trace
+    emit: [raw]
+    keys: [task]
