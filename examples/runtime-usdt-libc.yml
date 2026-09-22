@@ -1,0 +1,42 @@
+# The probes libc was built with, in a program that did not ask for them.
+#
+#   omn -f examples/runtime-usdt-libc.yml
+#
+#   The fixture is built by `cargo test --test scenario_runtime`, from the C source
+#   in that file, against systemtap's own <sys/sdt.h>. To build it by hand:
+#
+#     mkdir -p target/omn-usdt-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE/,/^\/\* END FIXTURE/p' tests/scenario_runtime.rs \
+#       | cc -O0 -pthread -x c -o target/omn-usdt-fixture/fixture -
+#
+#   `-O0` on purpose: it keeps locals on the stack, so some argument
+#   descriptors are memory operands (`-8@-16(%rbp)`) and the user-memory read
+#   is exercised, not only registers and constants.
+#
+# glibc carries about eighty USDT probes of its own: `setjmp`, `longjmp`, the
+# condition variables, the allocator's arena events. Any program that links it
+# carries them too, so this is the target whose notes a machine can be relied
+# on to have -- they were put there by glibc's build, not by this project.
+#
+# Ground truth: `jumps 25` does twenty-five `setjmp`/`longjmp` round trips on
+# one `jmp_buf` and prints that buffer's address. `libc:setjmp` passes the
+# buffer as its first argument and `libc:longjmp` passes it too, with the value
+# (3) as its second. So exactly twenty-five hits of each probe carry that
+# address, and every `longjmp` carries 3.
+#
+# There is one more `setjmp` than the program wrote, and it is glibc's own:
+# `__libc_start_call_main` sets one up before `main` runs. That is why the
+# check is on the buffer's address rather than on the count of every `setjmp`
+# -- the probe is right and the naive expectation is not.
+name: libc's own probes
+format: text
+
+requests:
+  - label: jumps
+    source: runtime.custom
+    target:
+      launch: [target/omn-usdt-fixture/fixture, jumps, "25"]
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]
+    filter: "provider == 'libc' && (probe == 'setjmp' || probe == 'longjmp')"

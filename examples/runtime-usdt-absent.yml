@@ -1,0 +1,25 @@
+# A runtime built without its probes is refused, and says what it does carry.
+#
+#   omn -f examples/runtime-usdt-absent.yml        # exit 1 on most machines
+#
+# The python3 of most distributions is built without --with-dtrace, so it
+# carries no `python:gc__start`. Reporting no pauses for it would read as a
+# runtime that never collected. So the request is refused, and the refusal
+# lists every object the program would map and what each one's ELF actually
+# holds: the interpreter's missing `.note.stapsdt`, libc's eighty probes, and
+# so on. That list is the answer to "why not", and it is read before anything
+# is attached.
+#
+# Where python3 *is* built with its probes (Fedora's is), this session measures
+# instead: five `gc.collect()` calls are five full collections, generation 2.
+name: a runtime without its probes
+format: text
+
+requests:
+  - label: python-pauses
+    source: runtime.gc
+    target:
+      launch: [python3, -c, "import gc\nfor _ in range(5): gc.collect()"]
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]

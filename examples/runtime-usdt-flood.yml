@@ -1,0 +1,55 @@
+# More hits than the ring holds, and every one of them accounted for.
+#
+#   omn -f examples/runtime-usdt-flood.yml
+#
+#   The fixture is built by `cargo test --test scenario_runtime`, from the C source
+#   in that file, against systemtap's own <sys/sdt.h>. To build it by hand:
+#
+#     mkdir -p target/omn-usdt-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE/,/^\/\* END FIXTURE/p' tests/scenario_runtime.rs \
+#       | cc -O0 -pthread -x c -o target/omn-usdt-fixture/fixture -
+#
+#   `-O0` on purpose: it keeps locals on the stack, so some argument
+#   descriptors are memory operands (`-8@-16(%rbp)`) and the user-memory read
+#   is exercised, not only registers and constants.
+#
+# A probe on a hot path fires faster than the ring can be drained, and the BPF
+# ring buffer does not report its own overflows: the program counts every hit
+# it could not reserve room for. Whether this particular run overflows is a
+# fact about this machine at this moment. What is not is the sum.
+#
+# Two requests on the same run, one per shape:
+#
+# - `streamed` hands every hit up whole, as `trace` does. The hits delivered
+#   plus the hits the program counted as dropped must be exactly two million,
+#   whichever way the race went.
+# - `counted` is `count` mode with nothing left of the filter once the probe is
+#   chosen, so each hit is one increment in the kernel and nothing crosses the
+#   ring. It must be exactly two million, with nothing lost.
+#
+# Both still pay the trap: measured here at about 520 ns a hit counted and 700
+# streamed, against 2 ns for the loop iteration it interrupts. Two million
+# hits turn a 4 ms program into one that runs for over a second.
+#
+# Ground truth: `ticks 2000000` fires the tick probe two million times and
+# says so.
+name: taken plus lost is fired
+format: text
+
+requests:
+  - label: streamed
+    source: runtime.custom
+    target: &flood
+      launch: [target/omn-usdt-fixture/fixture, ticks, "2000000"]
+    mode: trace
+    keys: [task]
+    emit: [summary]
+    filter: "provider == 'omn_fixture' && probe == 'tick'"
+
+  - label: counted
+    source: runtime.custom
+    target: *flood
+    mode: count
+    keys: [task]
+    emit: [summary]
+    filter: "provider == 'omn_fixture' && probe == 'tick'"

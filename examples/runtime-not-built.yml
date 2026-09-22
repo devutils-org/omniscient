@@ -1,31 +1,24 @@
-# The three `runtime` sources this build does not implement, and the backend of
-# the fourth that it does not implement either.
+# The two `runtime` backends this build does not implement.
 #
 #   omn -f examples/runtime-not-built.yml          # exit 3, and why
 #   omn -f examples/runtime-not-built.yml --dump-request
 #
 # Valid, resolvable, and not written. Exit 3, which is not exit 1 and not exit
-# 2; see `proc-not-built.yml` for the three-way distinction and
-# docs/scenarios/proc.md for the defect in it.
+# 2; see `proc-not-built.yml` for the three-way distinction.
 #
-# The first request is the second half of `runtime-backends.yml`: the same
-# source that measured there, pinned to the backend that is not written. It
-# must exit 3 and name the backend, exactly as an entirely unimplemented source
-# does -- "this build does not have it" is one answer whether it is a whole
-# source or one road to it.
+# USDT landed in the eighth wave, so `runtime.gc`, `runtime.alloc` and
+# `runtime.custom` collect now (`runtime-usdt-*.yml`). What is left is two
+# roads, each pinned here so the answer is "this build does not have it" rather
+# than a resolver quietly taking the other one:
 #
-# The other three wait on `bpf:usdt`: reading the ELF notes of the target and
-# putting a uprobe on the address they name. That mechanism does not exist in
-# `src/bpf/`, which attaches exactly one way, `BPF_RAW_TRACEPOINT_OPEN`.
-#
-# There is a second refusal underneath these, which this build cannot yet
-# reach and which matters more than the first. A runtime built without its
-# probes has no `usdt:gc` marker to attach to, and reporting no pauses for it
-# would be a lie: absence is the normal case, since the python3 of most
-# distributions is built without --with-dtrace and a Java runtime needs
-# +ExtendedDTraceProbes. `runtime.gc`'s caveat promises that the refusal names
-# the missing probe. Nothing can check that promise until a collector exists to
-# make it; see "What cannot be verified here" in docs/scenarios/runtime.md.
+# - `runtime.jit` over `bpf:usdt`. The mechanism exists; what is missing is the
+#   table of which probes are a compilation -- HotSpot's
+#   `method__compile__begin`/`end` carry the method's name as a pointer and a
+#   length, which needs a string read this build's USDT program does not do.
+#   The map backend measures instead, and says what it degrades.
+# - `runtime.custom` over `bpf:uprobe`, a probe on a symbol rather than a
+#   marker. Nothing declares which symbol yet, and the kernel's `uprobe` PMU
+#   wants CAP_SYS_ADMIN besides -- see docs/families/runtime.md.
 #
 # Only the first request is reached: the run stops at the first source it
 # cannot serve.
@@ -47,32 +40,11 @@ requests:
     emit: [raw, summary]
     backend: force:bpf:usdt
 
-  # A pause the process did not choose and cannot see: the one measurement that
-  # only the runtime can report, because only the runtime knows it stopped.
-  - label: gc-pauses
-    source: runtime.gc
-    target: *any-runtime
-    mode: trace
-    keys: [task, req]
-    emit: [hist, timeline, summary]
-
-  # The runtime's own allocation -- an object, a boxed value, a generation --
-  # which is not the C allocator beneath it. For a managed runtime the two are
-  # unrelated: V8 maps its heap directly and never calls malloc for it, so
-  # `mem.heap.alloc` and this source measure different things and neither is a
-  # substitute for the other.
-  - label: object-allocation
-    source: runtime.alloc
-    target: *any-runtime
-    mode: trace
-    keys: [task, mem]
-    emit: [hist, topk, summary]
-
-  # The extension point: this family is not closed, and this is where a user
-  # declares a probe of their own on a symbol or a USDT marker.
-  - label: a-probe-of-your-own
+  # A probe on a symbol, which is the second road of the extension point.
+  - label: a-symbol-of-your-own
     source: runtime.custom
     target: *any-runtime
     mode: trace
-    keys: [task, req]
-    emit: [hist, topk, summary]
+    keys: [task]
+    emit: [summary]
+    backend: force:bpf:uprobe

@@ -1,7 +1,10 @@
 //! Scenarios for the `runtime` family.
 //!
 //! Every test here runs a session that is also a file in `examples/`, so a
-//! reader can reproduce any of them by hand with `omn -f examples/<name>.yml`.
+//! reader can reproduce any of them by hand with `omn -f examples/<name>.yml`
+//! -- except the two that cannot be a file: a `--pid` target, whose pid exists
+//! only once the test has started it, and a binary without its capabilities,
+//! which is a copy the test makes.
 //!
 //! Ground truth in this family comes in two shapes, and both are used below
 //! because neither is sufficient alone.
@@ -656,14 +659,15 @@ fn an_entry_is_timestamped_no_more_precisely_than_the_reads_allow() {
 // Class D -- the refusal
 // ---------------------------------------------------------------------------
 
-/// `examples/runtime-not-built.yml`: three sources and one backend this build
-/// does not implement, all valid and all exiting 3.
+/// `examples/runtime-not-built.yml`: the two backends of this family this
+/// build does not implement, both valid and both exiting 3.
 ///
 /// The session validates cleanly and resolves onto a backend before it stops,
 /// which is what makes the answer "not written yet" rather than "you asked for
-/// something impossible".
+/// something impossible". USDT landed in the eighth wave, so the three sources
+/// that used to be here collect now and have scenarios of their own below.
 #[test]
-fn the_sources_this_build_does_not_implement_exit_three_and_name_the_backend() {
+fn the_backends_this_build_does_not_implement_exit_three_and_name_themselves() {
     let validated = omn(&["validate", "-f", &example("runtime-not-built.yml")]);
     assert!(
         validated.status.success(),
@@ -684,20 +688,33 @@ fn the_sources_this_build_does_not_implement_exit_three_and_name_the_backend() {
         stderr(&output)
     );
 
-    // And each of the three unimplemented sources, asked for on its own, gives
-    // the same answer naming itself.
-    for source in ["runtime.gc", "runtime.alloc", "runtime.custom"] {
+    // Each pinned road, asked for on its own, gives the same answer naming
+    // itself.
+    for (source, backend) in [
+        ("runtime.jit", "bpf:usdt"),
+        ("runtime.custom", "bpf:uprobe"),
+    ] {
         let output = omn(&[
-            source, "--mode", "trace", "--emit", "summary", "--", "sh", "-c", "true",
+            source,
+            "--backend",
+            &format!("force:{backend}"),
+            "--mode",
+            "trace",
+            "--emit",
+            "summary",
+            "--",
+            "sh",
+            "-c",
+            "true",
         ]);
         assert_eq!(
             output.status.code(),
             Some(3),
-            "`{source}`: {}",
+            "`{source}` over `{backend}`: {}",
             stderr(&output)
         );
         assert!(
-            stderr(&output).contains(source) && stderr(&output).contains("bpf:usdt"),
+            stderr(&output).contains(source) && stderr(&output).contains(backend),
             "`{source}`: the refusal must name the source and the backend: {}",
             stderr(&output)
         );
@@ -913,5 +930,646 @@ fn defect_2_the_match_operator_is_a_substring_test_and_says_so() {
         !described,
         "THE REST OF DEFECT 2 IS FIXED: the manual now says what `=~` does. Drop this \
          assertion and the remaining half of defect 2 in docs/scenarios/runtime.md."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// USDT -- `runtime.custom`, `runtime.gc`, `runtime.alloc`
+// ---------------------------------------------------------------------------
+//
+// Ground truth for a probe is a program that fires it a number of times it
+// chose, with arguments it chose, and says so. No runtime on the development
+// machine is built with its probes, so the program is this fixture, built at
+// test time against systemtap's own <sys/sdt.h> -- the notes are written by the
+// header every USDT-carrying program uses, not by anything in this project.
+// Where the fixture stands in for a runtime (CPython's `gc__start`, HotSpot's
+// `object__alloc`) it publishes that runtime's exact probe shape, and the
+// scenario says it is not that runtime.
+//
+// libc is the other target whose notes a machine can be relied on to have:
+// glibc's own build put about eighty probes in it.
+
+/// The fixture's C source. Between the two marker lines so that
+/// `examples/runtime-usdt-*.yml` can say how to build it by hand with `sed`.
+const FIXTURE_SOURCE: &str = r#"
+/* BEGIN FIXTURE -- omn's USDT fixture. Every probe it fires, it also counts and
+ * reports on stdout, which is what the scenarios check the tool against. */
+#define _SDT_HAS_SEMAPHORES 1
+#include <sys/sdt.h>
+#include <pthread.h>
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+unsigned short omn_fixture_tick_semaphore __attribute__((section(".probes")));
+unsigned short omn_fixture_guarded_semaphore __attribute__((section(".probes")));
+unsigned short python_gc__start_semaphore __attribute__((section(".probes")));
+unsigned short python_gc__done_semaphore __attribute__((section(".probes")));
+unsigned short hotspot_object__alloc_semaphore __attribute__((section(".probes")));
+
+struct record { long pad; long value; };
+
+static long now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000L + ts.tv_nsec;
+}
+
+static void __attribute__((noinline)) ticks(long n) {
+    struct record *r = malloc(sizeof *r);
+    long guarded = 0;
+    for (long i = 0; i < n; i++) {
+        r->value = 1000 + i;
+        /* a register, a signed short, a constant, and a value behind a pointer */
+        DTRACE_PROBE4(omn_fixture, tick, i, (short)-i, 7, r->value);
+        if (omn_fixture_guarded_semaphore) {
+            DTRACE_PROBE1(omn_fixture, guarded, i);
+            guarded++;
+        }
+        __asm__ volatile("" ::: "memory");
+    }
+    printf("fixture: ticks=%ld guarded=%ld\n", n, guarded);
+    free(r);
+}
+
+struct job { long n; };
+static void *thread_ticks(void *arg) {
+    long n = ((struct job *)arg)->n;
+    for (long i = 0; i < n; i++) DTRACE_PROBE4(omn_fixture, tick, i, (short)-i, 7, i);
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = argc > 1 ? argv[1] : "ticks";
+    long n = argc > 2 ? atol(argv[2]) : 10;
+    long m = argc > 3 ? atol(argv[3]) : 0;
+    printf("fixture: pid=%d semaphores tick=%u guarded=%u gc=%u\n", getpid(),
+           omn_fixture_tick_semaphore, omn_fixture_guarded_semaphore, python_gc__start_semaphore);
+    fflush(stdout);
+    if (!strcmp(mode, "wait")) {
+        /* For a --pid target: running before anything attaches, it waits for
+         * its own semaphore to be raised -- which is the attach -- then ticks. */
+        long waited = 0;
+        while (!omn_fixture_tick_semaphore && waited < 10000) {
+            struct timespec d = { 0, 1000000L };
+            nanosleep(&d, NULL);
+            waited++;
+        }
+        printf("fixture: waited_ms=%ld semaphores tick=%u guarded=%u\n", waited,
+               omn_fixture_tick_semaphore, omn_fixture_guarded_semaphore);
+        fflush(stdout);
+        ticks(n);
+    } else if (!strcmp(mode, "ticks")) {
+        ticks(n);
+    } else if (!strcmp(mode, "threads")) {  /* n threads, m ticks each */
+        pthread_t t[64];
+        struct job job = { m };
+        for (long i = 0; i < n && i < 64; i++) pthread_create(&t[i], NULL, thread_ticks, &job);
+        for (long i = 0; i < n && i < 64; i++) pthread_join(t[i], NULL);
+        printf("fixture: threads=%ld each=%ld\n", n, m);
+    } else if (!strcmp(mode, "gc")) {       /* n pauses of m ms, CPython's probe shape */
+        for (long i = 0; i < n; i++) {
+            int generation = (int)(i % 3);
+            DTRACE_PROBE1(python, gc__start, generation);
+            long t0 = now_ns();
+            struct timespec d = { m / 1000, (m % 1000) * 1000000L };
+            nanosleep(&d, NULL);
+            long t1 = now_ns();
+            long collected = 100 + i;
+            DTRACE_PROBE1(python, gc__done, collected);
+            printf("fixture: pause=%ld generation=%d collected=%ld own_ns=%ld\n", i, generation, collected, t1 - t0);
+        }
+    } else if (!strcmp(mode, "alloc")) {    /* n objects, sizes 16, 32, ...; HotSpot's probe shape */
+        long total = 0;
+        for (long i = 0; i < n; i++) {
+            long size = 16 * (i + 1);
+            DTRACE_PROBE4(hotspot, object__alloc, 1, "Fixture", 7, size);
+            total += size;
+        }
+        printf("fixture: objects=%ld bytes=%ld\n", n, total);
+    } else if (!strcmp(mode, "jumps")) {    /* n setjmp/longjmp pairs through libc's own probes */
+        static jmp_buf buf;
+        volatile long done = 0;
+        for (long i = 0; i < n; i++) if (setjmp(buf) == 0) { done++; longjmp(buf, 3); }
+        printf("fixture: jumps=%ld buf=%lu\n", (long)done, (unsigned long)&buf);
+    }
+    return 0;
+}
+/* END FIXTURE */
+"#;
+
+/// Where the fixture is built. The examples launch it by this path, relative to
+/// the repository root, so it is not `CARGO_TARGET_DIR`.
+fn fixture_path() -> PathBuf {
+    root().join("target/omn-usdt-fixture/fixture")
+}
+
+/// Builds the fixture once per test process, or says why it cannot.
+fn fixture() -> Result<PathBuf, String> {
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let path = fixture_path();
+            let dir = path.parent().expect("a directory");
+            std::fs::create_dir_all(dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            let source = dir.join("fixture.c");
+            std::fs::write(&source, FIXTURE_SOURCE).map_err(|error| error.to_string())?;
+            // Built beside and renamed, so a half-written binary is never at the
+            // path the examples launch.
+            let partial = dir.join(format!("fixture.{}", std::process::id()));
+            let built = Command::new("cc")
+                .args(["-O0", "-pthread", "-o"])
+                .arg(&partial)
+                .arg(&source)
+                .output()
+                .map_err(|error| {
+                    format!("no C compiler (`cc`) to build the fixture with: {error}")
+                })?;
+            if !built.status.success() {
+                return Err(format!(
+                    "the fixture did not build -- most likely <sys/sdt.h> is missing, which \
+                     systemtap's development headers provide:\n{}",
+                    String::from_utf8_lossy(&built.stderr)
+                ));
+            }
+            std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+            Ok(path)
+        })
+        .clone()
+}
+
+/// Whether this binary can attach a USDT program at all, answered by trying,
+/// with the reason when it cannot. A binary rebuilt with `cargo build` rather
+/// than `make` has lost its capabilities, and every scenario below would fail
+/// for that one reason; they skip instead, and say so.
+fn usdt_ready() -> Result<PathBuf, String> {
+    static READY: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    READY
+        .get_or_init(|| {
+            let fixture = fixture()?;
+            let probe = omn(&[
+                "runtime.custom",
+                "--mode",
+                "count",
+                "--emit",
+                "summary",
+                "--filter",
+                "provider == 'omn_fixture' && probe == 'tick'",
+                "--",
+                fixture.to_str().expect("a UTF-8 path"),
+                "ticks",
+                "1",
+            ]);
+            if probe.status.success() {
+                return Ok(fixture);
+            }
+            let message = stderr(&probe);
+            if message.contains("CAP_BPF") {
+                return Err(format!(
+                    "this binary cannot load a USDT program; build with `make`, which grants \
+                     CAP_BPF and CAP_PERFMON, rather than `cargo build`, which drops them:\n{message}"
+                ));
+            }
+            panic!("a one-tick USDT run failed for a reason that is not privileges:\n{message}");
+        })
+        .clone()
+}
+
+macro_rules! needs_usdt {
+    () => {
+        match usdt_ready() {
+            Ok(path) => path,
+            Err(reason) => {
+                eprintln!("skipped: {reason}");
+                return;
+            }
+        }
+    };
+}
+
+/// The `fixture: key=value ...` lines the fixture printed, in order.
+fn fixture_says(output: &Output) -> Vec<std::collections::BTreeMap<String, String>> {
+    stdout(output)
+        .lines()
+        .filter_map(|line| line.strip_prefix("fixture: "))
+        .map(|line| {
+            line.split_whitespace()
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+fn said(lines: &[std::collections::BTreeMap<String, String>], key: &str) -> i64 {
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| line.get(key))
+        .unwrap_or_else(|| panic!("the fixture never said `{key}`: {lines:?}"))
+        .parse()
+        .expect("a number")
+}
+
+fn int_attr(event: &serde_json::Value, name: &str) -> i64 {
+    attr(event, name)
+        .as_i64()
+        .unwrap_or_else(|| panic!("`{name}` is not an integer on {event}"))
+}
+
+fn successful_session(name: &str) -> (Output, serde_json::Value) {
+    let output = session(name);
+    assert!(
+        output.status.success(),
+        "`{name}` failed:\n{}",
+        stderr(&output)
+    );
+    let doc = document(&output);
+    (output, doc)
+}
+
+/// `examples/runtime-usdt-probes.yml`: fifty hits of a probe the program fired
+/// fifty times, each carrying the four arguments the program passed -- one in
+/// a register, one a signed short, one a constant, one behind a pointer.
+///
+/// And the guarded probe: it only fires while its semaphore is raised, and the
+/// fixture counts how often it saw it raised. The kernel maintains that
+/// counter through the link, so for a launched program it is raised before
+/// `main`, which the fixture reports from its first line.
+#[test]
+fn a_named_probe_arrives_once_per_hit_carrying_the_arguments_the_program_passed() {
+    needs_usdt!();
+    let (output, doc) = successful_session("runtime-usdt-probes.yml");
+    let says = fixture_says(&output);
+    assert_eq!(said(&says, "ticks"), 50);
+
+    let ticks = events(result(&doc, "ticks"));
+    assert_eq!(ticks.len(), 50, "one event per hit, no more and no fewer");
+    let mut indices: Vec<i64> = ticks.iter().map(|event| int_attr(event, "arg0")).collect();
+    indices.sort_unstable();
+    assert_eq!(indices, (0..50).collect::<Vec<_>>());
+    for event in &ticks {
+        let index = int_attr(event, "arg0");
+        assert_eq!(attr(event, "provider"), "omn_fixture");
+        assert_eq!(attr(event, "probe"), "tick");
+        assert_eq!(
+            int_attr(event, "arg1"),
+            -index,
+            "a signed short, sign-extended: {event}"
+        );
+        assert_eq!(
+            int_attr(event, "arg2"),
+            7,
+            "a constant folded into the descriptor: {event}"
+        );
+        assert_eq!(
+            int_attr(event, "arg3"),
+            1000 + index,
+            "a value read from user memory: {event}"
+        );
+    }
+
+    // The guarded probe fired exactly as often as the fixture saw its
+    // semaphore raised, and it was raised from the program's first line.
+    let guarded = said(&says, "guarded");
+    assert_eq!(
+        guarded, 50,
+        "the kernel kept the semaphore raised for the whole run: {says:?}"
+    );
+    assert!(
+        says[0].get("guarded").is_some_and(|value| value != "0"),
+        "the semaphore must be raised before main runs: {says:?}"
+    );
+    let summary = emitted(result(&doc, "guarded"), "summary");
+    let counted: f64 = summary["series"]
+        .as_array()
+        .expect("series")
+        .iter()
+        .map(|series| series["last"].as_f64().expect("a count"))
+        .sum();
+    assert_eq!(counted as i64, guarded, "{summary}");
+}
+
+/// `examples/runtime-usdt-libc.yml`: libc's own probes, in a program that
+/// asked for none of them.
+///
+/// Twenty-five round trips on one `jmp_buf`: exactly twenty-five `setjmp` and
+/// twenty-five `longjmp` hits name that buffer, and every such `longjmp` passes
+/// the value 3. The run also sees glibc's own `setjmp` from before `main`, on
+/// a different buffer -- which is why the check keys on the address.
+#[test]
+fn libcs_own_probes_count_the_round_trips_on_the_programs_own_buffer() {
+    needs_usdt!();
+    let (output, doc) = successful_session("runtime-usdt-libc.yml");
+    let says = fixture_says(&output);
+    assert_eq!(said(&says, "jumps"), 25);
+    let buffer = said(&says, "buf");
+
+    let all = events(result(&doc, "jumps"));
+    let on_buffer = |probe: &str| -> Vec<serde_json::Value> {
+        all.iter()
+            .filter(|event| attr(event, "probe") == probe && int_attr(event, "arg0") == buffer)
+            .cloned()
+            .collect()
+    };
+    assert_eq!(on_buffer("setjmp").len(), 25, "{all:?}");
+    let longjmps = on_buffer("longjmp");
+    assert_eq!(longjmps.len(), 25);
+    assert!(
+        longjmps.iter().all(|event| int_attr(event, "arg1") == 3),
+        "{longjmps:?}"
+    );
+    assert!(
+        all.iter()
+            .any(|event| attr(event, "probe") == "setjmp" && int_attr(event, "arg0") != buffer),
+        "glibc sets up a jmp_buf of its own before main; a run that does not see it has missed \
+         the start of the program"
+    );
+}
+
+/// `examples/runtime-usdt-gc.yml`: five injected pauses in CPython's probe
+/// shape.
+///
+/// Each reported pause must contain the fixture's own measurement of its
+/// sleep, and exceed it by less than half of it -- the separation between
+/// "this pause" and "not this pause", not a calibrated threshold. The
+/// generation and the collected count are the program's own arguments and
+/// must match exactly.
+#[test]
+fn a_pause_is_the_time_between_the_runtimes_own_two_probes() {
+    needs_usdt!();
+    let (output, doc) = successful_session("runtime-usdt-gc.yml");
+    let says = fixture_says(&output);
+    let own: Vec<&std::collections::BTreeMap<String, String>> = says
+        .iter()
+        .filter(|line| line.contains_key("pause"))
+        .collect();
+    assert_eq!(own.len(), 5);
+
+    let result = result(&doc, "pauses");
+    let mut pauses = events(result);
+    assert_eq!(pauses.len(), 5, "one event per pause, not per probe");
+    pauses.sort_by_key(|event| event["ts_ns"].as_u64());
+    for (event, line) in pauses.iter().zip(own) {
+        let own_ns: i64 = line["own_ns"].parse().unwrap();
+        let pause_ns = int_attr(event, "pause_ns");
+        assert!(
+            pause_ns >= own_ns && pause_ns - own_ns < own_ns / 2,
+            "the pause is {pause_ns} ns and the fixture timed its own sleep at {own_ns} ns: {event}"
+        );
+        assert_eq!(
+            int_attr(event, "generation"),
+            line["generation"].parse::<i64>().unwrap()
+        );
+        assert_eq!(
+            int_attr(event, "collected"),
+            line["collected"].parse::<i64>().unwrap()
+        );
+        assert_eq!(attr(event, "provider"), "python");
+        assert_eq!(attr(event, "phase"), "collect");
+    }
+    // The emits that make a pause readable are there and agree on the count.
+    assert_eq!(emitted(result, "hist")["series"][0]["count"], 5);
+    assert!(emitted(result, "timeline").is_object());
+}
+
+/// `examples/runtime-usdt-alloc.yml`: a hundred objects of sizes the fixture
+/// chose, in HotSpot's probe shape; their count and their bytes exactly.
+#[test]
+fn every_allocation_the_runtime_reported_is_counted_with_its_size() {
+    needs_usdt!();
+    let (output, doc) = successful_session("runtime-usdt-alloc.yml");
+    let says = fixture_says(&output);
+    let hist = &emitted(result(&doc, "objects"), "hist")["series"][0];
+    assert_eq!(hist["count"].as_i64(), Some(said(&says, "objects")));
+    assert_eq!(
+        hist["sum"].as_f64().map(|sum| sum as i64),
+        Some(said(&says, "bytes"))
+    );
+    assert_eq!(hist["min"].as_f64(), Some(16.0));
+    assert_eq!(hist["max"].as_f64(), Some(1600.0));
+}
+
+/// `examples/runtime-usdt-threads.yml`: eight threads created after the run
+/// started, five hundred hits each, all of them this run's.
+#[test]
+fn a_probe_follows_every_thread_of_the_process() {
+    needs_usdt!();
+    let (output, doc) = successful_session("runtime-usdt-threads.yml");
+    let says = fixture_says(&output);
+    let (threads, each) = (said(&says, "threads"), said(&says, "each"));
+    let pid = said(&says, "pid");
+
+    let all = events(result(&doc, "threads"));
+    assert_eq!(all.len() as i64, threads * each);
+    let mut per_thread = std::collections::BTreeMap::new();
+    for event in &all {
+        *per_thread.entry(int_attr(event, "tid")).or_insert(0i64) += 1;
+        assert_eq!(int_attr(event, "pid"), pid);
+    }
+    assert_eq!(per_thread.len() as i64, threads, "{per_thread:?}");
+    assert!(
+        per_thread.values().all(|count| *count == each),
+        "{per_thread:?}"
+    );
+    assert!(
+        !per_thread.contains_key(&pid),
+        "the main thread fired none of them"
+    );
+}
+
+/// `examples/runtime-usdt-flood.yml`: two million hits through both shapes.
+///
+/// Streamed, the hits delivered plus the hits the program counted as dropped
+/// are exactly two million; whether this run overflowed is a fact about the
+/// machine at that moment, so it is printed, not asserted. Counted in the
+/// kernel, it is exactly two million with nothing lost.
+#[test]
+fn hits_taken_plus_hits_lost_is_hits_fired() {
+    needs_usdt!();
+    let (output, doc) = successful_session("runtime-usdt-flood.yml");
+    let fired = said(&fixture_says(&output), "ticks");
+
+    let streamed = result(&doc, "streamed");
+    let taken = emitted(streamed, "summary")["series"][0]["count"]
+        .as_i64()
+        .unwrap_or(0);
+    let lost = streamed["losses"]["dropped"]
+        .as_i64()
+        .expect("a drop count");
+    eprintln!("flood: {fired} fired, {taken} streamed, {lost} dropped by the ring");
+    assert_eq!(taken + lost, fired, "{streamed}");
+
+    let counted = result(&doc, "counted");
+    let total = emitted(counted, "summary")["series"][0]["last"]
+        .as_f64()
+        .expect("a count") as i64;
+    assert_eq!(total, fired, "{counted}");
+    assert_eq!(counted["losses"]["dropped"], 0, "{counted}");
+}
+
+/// A process that was running before anything attached.
+///
+/// The fixture waits for its own semaphore to be raised -- which is the
+/// attach -- and only then fires. So it reports, from inside, that the kernel
+/// raised the semaphore of a running process, and how long it waited; and
+/// every tick after that is this run's.
+#[test]
+fn a_running_process_is_reached_and_its_semaphore_raised_from_outside() {
+    let fixture = needs_usdt!();
+    let child = Command::new(&fixture)
+        .args(["wait", "20"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the fixture starts");
+    let pid = child.id().to_string();
+    let output = omn(&[
+        "runtime.custom",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--duration",
+        "3s",
+        "--filter",
+        "provider == 'omn_fixture' && probe == 'tick'",
+        "--pid",
+        &pid,
+    ]);
+    let fixture_output = child.wait_with_output().expect("the fixture finishes");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let says = fixture_says(&fixture_output);
+    assert!(
+        said(&says, "waited_ms") < 10_000,
+        "the fixture gave up waiting: nothing raised its semaphore: {says:?}"
+    );
+    let doc = document(&output);
+    let ticks = &doc["results"][0]["outputs"][0]["events"];
+    assert_eq!(ticks.as_array().map(Vec::len), Some(20), "{doc}");
+}
+
+/// The extension point without a probe named is a request that cannot mean
+/// anything, and the refusal lists what the target carries -- which is what
+/// the reader needs to write the filter.
+#[test]
+fn a_custom_request_that_names_no_probe_is_refused_with_the_inventory() {
+    let fixture = needs_usdt!();
+    let output = omn(&[
+        "runtime.custom",
+        "--mode",
+        "trace",
+        "--emit",
+        "summary",
+        "--",
+        fixture.to_str().unwrap(),
+        "ticks",
+        "1",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let message = stderr(&output);
+    for expected in ["names none", "omn_fixture:tick", "libc.so.6", "libc:setjmp"] {
+        assert!(
+            message.contains(expected),
+            "missing `{expected}`: {message}"
+        );
+    }
+}
+
+/// `examples/runtime-usdt-absent.yml`: a real runtime.
+///
+/// On a machine whose python3 is built without --with-dtrace -- most of them,
+/// and the development machine -- the request is refused, and the refusal
+/// says what each object's ELF actually contained, python3's own included.
+/// Where python3 has its probes, five `gc.collect()` calls must come back as
+/// five full collections. Either way this asserts something; neither branch
+/// is a skip.
+#[test]
+fn a_runtime_without_its_probes_is_refused_naming_what_its_elf_contained() {
+    needs_usdt!();
+    let Ok(python) = Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+    else {
+        eprintln!("skipped: no shell to look for python3 with");
+        return;
+    };
+    let python = String::from_utf8_lossy(&python.stdout).trim().to_owned();
+    if python.is_empty() {
+        eprintln!(
+            "skipped: no python3 on PATH, so there is no real runtime to check; the fixture \
+             scenarios above cover the mechanism"
+        );
+        return;
+    }
+    let output = session("runtime-usdt-absent.yml");
+    if output.status.success() {
+        let doc = document(&output);
+        let pauses = events(result(&doc, "python-pauses"));
+        let full = pauses
+            .iter()
+            .filter(|event| int_attr(event, "generation") == 2)
+            .count();
+        assert!(
+            full >= 5,
+            "five gc.collect() calls are five full collections: {pauses:?}"
+        );
+        return;
+    }
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        message.contains("python:gc__start"),
+        "the refusal names what it looked for: {message}"
+    );
+    assert!(
+        message.contains("python3"),
+        "the refusal names the runtime it read: {message}"
+    );
+    assert!(
+        message.contains("no `.note.stapsdt`") || message.contains("probe site"),
+        "the refusal says what the ELF contained: {message}"
+    );
+}
+
+/// The same request from a copy of the binary, which carries no file
+/// capabilities -- a copy never does. It must be refused naming the two
+/// capabilities and how to grant them, never served by something lesser.
+#[test]
+fn without_its_capabilities_the_binary_refuses_and_names_them() {
+    let fixture = needs_usdt!();
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: running as root, which has every capability a copy could lack");
+        return;
+    }
+    let copy = std::env::temp_dir().join(format!("omn-uncapable-{}", std::process::id()));
+    std::fs::copy(BINARY, &copy).expect("a copy of the binary");
+    let output = Command::new(&copy)
+        .args([
+            "runtime.custom",
+            "--mode",
+            "trace",
+            "--emit",
+            "summary",
+            "--filter",
+            "provider == 'omn_fixture' && probe == 'tick'",
+            "--",
+            fixture.to_str().unwrap(),
+            "ticks",
+            "3",
+        ])
+        .output()
+        .expect("the copy runs");
+    let _ = std::fs::remove_file(&copy);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        message.contains("CAP_BPF") && message.contains("setcap"),
+        "{message}"
     );
 }

@@ -1,0 +1,40 @@
+# What did the runtime allocate, and how much of it?
+#
+#   omn -f examples/runtime-usdt-alloc.yml
+#
+#   The fixture is built by `cargo test --test scenario_runtime`, from the C source
+#   in that file, against systemtap's own <sys/sdt.h>. To build it by hand:
+#
+#     mkdir -p target/omn-usdt-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE/,/^\/\* END FIXTURE/p' tests/scenario_runtime.rs \
+#       | cc -O0 -pthread -x c -o target/omn-usdt-fixture/fixture -
+#
+#   `-O0` on purpose: it keeps locals on the stack, so some argument
+#   descriptors are memory operands (`-8@-16(%rbp)`) and the user-memory read
+#   is exercised, not only registers and constants.
+#
+# The runtime's own allocation -- an object -- which only the runtime can
+# report, and which for a managed runtime has nothing to do with `malloc`.
+# Only a runtime that publishes an allocation's *size* can serve a source whose
+# unit is bytes, and HotSpot's `object__alloc` is the one that does, under
+# -XX:+ExtendedDTraceProbes.
+#
+# **The workload is not HotSpot.** The fixture publishes HotSpot's probe shape
+# -- provider `hotspot`, `object__alloc(tid, class, class_len, size)` -- for
+# objects whose sizes it chose: `alloc 100` reports 100 objects of 16, 32, ...,
+# 1600 bytes, 80800 bytes in all, and prints both numbers.
+#
+# Ground truth: exactly 100 allocations, and their bytes summed to exactly
+# what the fixture printed. No emit here is `raw`: this source is an
+# allocation profile and declares only the emits that aggregate.
+name: runtime allocations
+format: text
+
+requests:
+  - label: objects
+    source: runtime.alloc
+    target:
+      launch: [target/omn-usdt-fixture/fixture, alloc, "100"]
+    mode: trace
+    keys: [task]
+    emit: [hist, summary]

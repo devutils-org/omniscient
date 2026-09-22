@@ -5271,3 +5271,120 @@ the cores spinning; it failed once in three runs on an idle machine. The failing
 runs overshoot by +0.69 %, and the large run's excess over 10^9 (13.85 M) is
 twice the startup run's count (6.97 M), which points at something counted twice
 in the large run rather than at noise. Not investigated further.
+## Needs from another stream — the eighth wave, stream U (USDT and the `runtime` family)
+
+What the USDT work needed from files it does not own. The record of what was
+measured is `docs/families/runtime.md`.
+
+### To stream T, for `src/bpf/attach.rs`: the `uprobe` PMU needs CAP_SYS_ADMIN, so add a uprobe-multi attach
+
+`attach::uprobe` had never been called. Called for the first time, with
+`cap_bpf,cap_perfmon+ep` effective (`CapEff: 000000c000000000`) and
+`perf_event_paranoid = -1` on 7.2.6:
+
+```
+perf_event_open, uprobe PMU, pid = target    EACCES
+perf_event_open, uprobe PMU, pid = 0         EACCES
+perf_event_open, uprobe PMU, cpu = 0         EACCES
+perf_event_open, kprobe PMU, cpu = 0         fd
+BPF_LINK_CREATE, BPF_TRACE_UPROBE_MULTI      fd
+```
+
+`perf_uprobe_event_init` keeps `CAP_SYS_ADMIN` where the kprobe PMU accepts
+`CAP_PERFMON`. So `bpf:uprobe` cannot attach under the project's privilege
+model, and a uprobe-multi link (6.6) can -- with a process scope, and with
+semaphores maintained by the kernel through `ref_ctr_offsets`. Stream U carries
+the link in a fenced section of `src/bpf/usdt.rs` and would like it here:
+
+```rust
+/// A uprobe-multi link: one loaded program on `offsets` in `path`, for `pid`'s
+/// thread group or for every process when `None`.
+pub struct UprobeLink { /* link fd, program fd */ }
+
+pub fn uprobe_multi(
+    path: &Path,
+    offsets: &[u64],
+    ref_ctr_offsets: Option<&[u64]>,
+    cookies: Option<&[u64]>,
+    pid: Option<i32>,
+    instructions: &[Insn],
+    prog_name: &str,
+) -> Result<UprobeLink, String>;
+```
+
+And the probe half, which is finding 15's shape: `probe_type_support("uprobe")`
+answers from `/sys/bus/event_source/devices/uprobe/type`, so `omn list` reports
+`uprobe` **available** on this machine while every open is refused. It should
+be answered by what the attach actually needs.
+
+### To whoever owns `src/bpf/syscall.rs`: `prog_load` with an attach type, and `link_create`
+
+A uprobe-multi program must be loaded with `expected_attach_type =
+BPF_TRACE_UPROBE_MULTI` (48), which `prog_load` never sets; fentry needs the
+same field plus `attach_btf_id`, so stream T will want this too and it should
+land once:
+
+```rust
+pub fn prog_load_for(
+    prog_type: u32,
+    expected_attach_type: u32,
+    attach_btf_id: u32,
+    instructions: &[Insn],
+    name: &str,
+    license: &str,
+) -> Result<OwnedFd, LoadError>;
+
+pub fn link_create_uprobe_multi(
+    prog_fd: RawFd,
+    path: &CStr,
+    offsets: &[u64],
+    ref_ctr_offsets: Option<&[u64]>,
+    cookies: Option<&[u64]>,
+    pid: u32,
+) -> io::Result<OwnedFd>;
+```
+
+### To whoever owns `src/bpf/insn.rs`: five encodings and a helper
+
+Declared locally in `usdt.rs`'s `mod local` for now: `Insn::lsh64_imm`,
+`Insn::arsh64_imm`, `Insn::or64_imm`, `Insn::add64_reg`,
+`Insn::ld_imm64(dst, i64) -> [Insn; 2]`, and
+`helper::PROBE_READ_USER = 112`. Sign-extending a USDT argument from its
+declared width is `lsh` then `arsh`; nothing else here needed a 64-bit constant
+until a descriptor carried one.
+
+### To the coordinator: one line in `src/bpf/mod.rs`, and the indexes
+
+`pub mod usdt;` was added to `src/bpf/mod.rs`, which no stream owns and which a
+new file under `src/bpf/` cannot do without. Seven sessions were added,
+`examples/runtime-usdt-{probes,libc,gc,alloc,threads,flood,absent}.yml`, and
+`examples/runtime-not-built.yml` was rewritten; `examples/README.md` and
+`GUIDE.md` need their rows, which is the one red test on `feat/usdt`
+(`cli::the_session_indexes_hold_exactly_the_sessions_on_disk`).
+`docs/scenarios/runtime.md` says USDT cannot be verified here; it now is.
+
+### To whoever owns `src/resolve.rs`: the kernel placement is true for part of a filter
+
+`placement` credits every `bpf` backend with "evaluates predicates in the
+program". For USDT, the part of a filter about the probe (`provider`, `probe`,
+`object`) is evaluated before anything is attached and a probe it excludes
+costs nothing; a predicate on `comm` is evaluated per hit in the collector,
+after the trap has been paid. The collector reports how many hits it removed;
+the resolved record still says all of it ran in the kernel.
+
+### To `sched`, for `sched.mutex`: glibc publishes the mutex
+
+`libc:mutex_entry`, `mutex_acquired` and `mutex_release` are in this machine's
+`libc.so.6`, each with the mutex address as its first argument -- in `rdi`,
+`rbx` or `r8` depending on the site, which is why `usdt.rs` builds one program
+per site. `sched.mutex` waits on "the
+preload shim, pointed elsewhere"; a USDT route needs no preload and reaches a
+running process. The lock wait is `acquired - entry` per thread per address.
+
+### Two tests that fail under a parallel workspace run and pass alone
+
+Neither is in a file stream U touched. Each failed once in `cargo test
+--workspace --no-fail-fast` and passed three times out of three on its own:
+
+- `collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
+- `cross_compute::a_half_blocked_task_decomposes_into_what_the_kernel_says_it_did`

@@ -8,19 +8,31 @@
   summary: "Garbage collection pauses"
   unit: ns
   backends:
-    - {id: "bpf:usdt", requires: ["usdt:gc"], cost: low,
-       degraded: "requires a runtime built with probes (Java +ExtendedDTraceProbes, Python --with-dtrace)"}
+    # What the machine must provide is a uprobe and a loaded program. Whether
+    # the runtime carries the probes is a fact about the target, read from its
+    # ELF notes at attach and refused there by name -- the same reason
+    # `runtime.jit` requires `/tmp` rather than the map.
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: low}
   modes: [trace]
   emits: [hist, timeline, raw, topk, summary]
   targets: {pid: native, launch: native}
-  keys: [task, req]
-  filter_fields: [comm, generation]
+  keys: [task]
+  filter_fields: [comm, generation, provider, phase]
   determinism: low
   caveats:
     - "A runtime built without its probes reports no probe, which is not the same
        as a runtime that did not pause. Absence is the normal case: the python3
        of most distributions is built without --with-dtrace, and a Java runtime
-       needs +ExtendedDTraceProbes. The refusal names the missing probe."
+       needs +ExtendedDTraceProbes. The refusal names the probes it looked for
+       and lists what each object the target maps actually carries."
+    - "A pause is the time between the runtime's own begin and end probes on one
+       thread: python gc__start/gc__done, node gc__start/gc__done, hotspot
+       gc__begin/gc__end, ruby's mark and sweep pairs as two phases. It is the
+       runtime's account of its collector, not a measurement of how long the
+       program's other threads were stopped."
+    - "Each probe hit is a uprobe trap into the kernel, measured at about 740 ns
+       against 132 ns for a preload shim on the same event. Two per pause is
+       nothing; it is the per-hit price every USDT source pays."
 
 - id: runtime.jit
   family: runtime
@@ -62,30 +74,63 @@
   summary: "Runtime-level allocation activity (objects, not the C heap under it)"
   unit: bytes
   backends:
-    - {id: "bpf:usdt", requires: ["usdt:alloc"], cost: med}
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: med}
   modes: [trace, poll]
   emits: [hist, topk, stack, timeline, summary]
   targets: {pid: native, launch: native}
-  keys: [task, mem]
-  filter_fields: [comm, bytes]
+  keys: [task]
+  filter_fields: [comm, bytes, provider]
   determinism: high
   caveats:
     - "This is the runtime's own allocation -- an object, a boxed value, a
        generation -- which only the runtime can report. The C allocator beneath
        it is mem.heap.alloc, and for a managed runtime the two are unrelated:
        V8 maps its heap directly and never calls malloc for it."
+    - "Only a runtime that publishes an allocation's size can serve a source
+       whose unit is bytes: hotspot's object__alloc, under
+       -XX:+ExtendedDTraceProbes. Ruby's object__create names a class and no
+       size, and CPython and node publish no allocation probe at all."
+    - "One uprobe trap per object, at about 740 ns each: a runtime allocating a
+       million objects a second is a different program under this source. That
+       is why the band is med, and why the allocation probe is off by default in
+       the runtimes that have one."
 
 - id: runtime.custom
   family: runtime
   summary: "User-declared probe on an arbitrary symbol or USDT marker"
   unit: count
   backends:
-    - {id: "bpf:usdt", requires: ["usdt"], cost: med}
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: med,
+       filter_fields: [comm, provider, probe, object]}
     - {id: "bpf:uprobe", requires: ["uprobe", "bpf"], cost: high,
+       filter_fields: [comm],
        degraded: "~1-2 us per hit: only viable on low-rate call sites"}
   modes: [trace, count]
   emits: [hist, topk, stack, raw, rate, summary]
   targets: {pid: native, tid: native, launch: native}
-  keys: [task, req]
-  filter_fields: [comm]
+  keys: [task]
+  filter_fields: [comm, provider, probe, object]
   determinism: low
+  caveats:
+    - "The probe is named through the filter, by provider and probe: --filter
+       \"provider == 'libc' && probe == 'setjmp'\". A request that names no probe
+       is refused, and the refusal lists what the target carries. The probe
+       part of the filter decides what is attached, so a probe it excludes
+       costs nothing; the rest of it is evaluated on each hit."
+    - "Arguments are reported as arg0, arg1, ... as the probe's descriptor
+       declares them, signed where it says signed. One the build cannot read --
+       a symbol-relative or indexed operand, or user memory that faulted -- is
+       absent from the event rather than zero, and the run counts it."
+    - "For a launched program the probes are found before it execs, in the
+       executable and the libraries its dynamic section names. A library it
+       loads later with dlopen is not among them, and the run lists what it
+       read."
+    - "A probe guarded by a semaphore only fires while its counter is raised.
+       The kernel raises it through the link, in the target's image of the file,
+       from before a launched program's first instruction. On a kernel older
+       than 6.6 the sites go through the uprobe PMU instead, which needs
+       CAP_SYS_ADMIN and maintains no semaphore, and the run says so."
+    - "Each hit is a uprobe trap into the kernel, measured at about 740 ns
+       against 132 ns for a preload shim on the same event. USDT is how a
+       program you did not launch is reached, not a cheap way to reach one you
+       did."
