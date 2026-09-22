@@ -1,0 +1,36 @@
+# A probe follows the process, not the thread that started it.
+#
+#   omn -f examples/runtime-usdt-threads.yml
+#
+#   The fixture is built by `cargo test --test scenario_runtime`, from the C source
+#   in that file, against systemtap's own <sys/sdt.h>. To build it by hand:
+#
+#     mkdir -p target/omn-usdt-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE/,/^\/\* END FIXTURE/p' tests/scenario_runtime.rs \
+#       | cc -O0 -pthread -x c -o target/omn-usdt-fixture/fixture -
+#
+#   `-O0` on purpose: it keeps locals on the stack, so some argument
+#   descriptors are memory operands (`-8@-16(%rbp)`) and the user-memory read
+#   is exercised, not only registers and constants.
+#
+# The breakpoint is in a file every thread of the process shares, and the link
+# that carries it is scoped to a process. So a probe fired by a thread created
+# after the run started is still this run's -- which the older route, a perf
+# event opened on one task, does not promise by construction.
+#
+# Ground truth: `threads 8 500` starts eight threads that fire
+# `omn_fixture:tick` five hundred times each and prints both numbers. Four
+# thousand hits, from eight thread ids that are not the main thread's, five
+# hundred each.
+name: every thread of the process
+format: text
+
+requests:
+  - label: threads
+    source: runtime.custom
+    target:
+      launch: [target/omn-usdt-fixture/fixture, threads, "8", "500"]
+    mode: trace
+    keys: [task]
+    emit: [raw, summary]
+    filter: "provider == 'omn_fixture' && probe == 'tick'"

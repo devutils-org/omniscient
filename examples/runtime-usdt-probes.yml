@@ -1,0 +1,51 @@
+# A probe you name, in a program that publishes it.
+#
+#   omn -f examples/runtime-usdt-probes.yml
+#
+#   The fixture is built by `cargo test --test scenario_runtime`, from the C source
+#   in that file, against systemtap's own <sys/sdt.h>. To build it by hand:
+#
+#     mkdir -p target/omn-usdt-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE/,/^\/\* END FIXTURE/p' tests/scenario_runtime.rs \
+#       | cc -O0 -pthread -x c -o target/omn-usdt-fixture/fixture -
+#
+#   `-O0` on purpose: it keeps locals on the stack, so some argument
+#   descriptors are memory operands (`-8@-16(%rbp)`) and the user-memory read
+#   is exercised, not only registers and constants.
+#
+# `runtime.custom` is the extension point of this family: the probe is named
+# through the filter, by `provider` and `probe`, and only the sites the filter
+# can match are attached. Every other probe the program carries costs nothing.
+#
+# Ground truth is the fixture's own count. `ticks 50` fires `omn_fixture:tick`
+# fifty times with arguments it chose -- the index, its negation as a short,
+# the constant 7, and 1000 plus the index read through a pointer -- and fires
+# `omn_fixture:guarded` only while that probe's semaphore is raised, counting
+# how often it saw it raised. It prints both counts. The first request must
+# see exactly fifty ticks carrying exactly those arguments; the second counts
+# the guarded probe, and must agree with what the fixture says it did.
+#
+# What this costs is the part to read twice. Each hit is a uprobe trap into the
+# kernel, measured at about 740 ns against 132 ns for a preload shim on the same
+# event. USDT is how a program you did not launch is reached, and how a program
+# names its own events -- not a cheap way to count them.
+name: a probe you name
+format: text
+
+requests:
+  - label: ticks
+    source: runtime.custom
+    target: &fixture
+      launch: [target/omn-usdt-fixture/fixture, ticks, "50"]
+    mode: trace
+    keys: [task]
+    emit: [raw, summary, rate, topk]
+    filter: "provider == 'omn_fixture' && probe == 'tick'"
+
+  - label: guarded
+    source: runtime.custom
+    target: *fixture
+    mode: count
+    keys: [task]
+    emit: [summary]
+    filter: "provider == 'omn_fixture' && probe == 'guarded'"

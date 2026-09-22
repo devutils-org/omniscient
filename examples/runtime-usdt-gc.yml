@@ -1,0 +1,46 @@
+# How long did the collector stop the program?
+#
+#   omn -f examples/runtime-usdt-gc.yml
+#
+#   The fixture is built by `cargo test --test scenario_runtime`, from the C source
+#   in that file, against systemtap's own <sys/sdt.h>. To build it by hand:
+#
+#     mkdir -p target/omn-usdt-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE/,/^\/\* END FIXTURE/p' tests/scenario_runtime.rs \
+#       | cc -O0 -pthread -x c -o target/omn-usdt-fixture/fixture -
+#
+#   `-O0` on purpose: it keeps locals on the stack, so some argument
+#   descriptors are memory operands (`-8@-16(%rbp)`) and the user-memory read
+#   is exercised, not only registers and constants.
+#
+# A garbage-collection pause is two probes the runtime fires on one thread: a
+# begin and an end. `runtime.gc` knows the pairs of the runtimes that publish
+# them -- python's `gc__start`/`gc__done`, node's, HotSpot's, ruby's mark and
+# sweep -- and the pause is the time between them.
+#
+# **The workload is not CPython.** No runtime on the development machine is
+# built with its probes (the python3 of most distributions is built without
+# --with-dtrace), so the fixture publishes CPython's exact probe shape --
+# provider `python`, `gc__start(int generation)`, `gc__done(long collected)`
+# -- around a pause it injects and times itself. That checks everything this
+# build does with those probes; whether a real CPython is read the same way is
+# checked by `runtime-usdt-absent.yml`'s scenario wherever one is installed
+# with them.
+#
+# Ground truth: `gc 5 20` makes five pauses of a 20 ms sleep, with generations
+# 0, 1, 2, 0, 1 and collected counts 100 to 104, and prints its own
+# CLOCK_MONOTONIC measurement of each sleep. Each pause the tool reports must
+# contain the fixture's own measurement -- the probes sit just outside the
+# fixture's clock reads -- and exceed it by no more than the cost of a probe
+# and a clock read.
+name: collector pauses
+format: text
+
+requests:
+  - label: pauses
+    source: runtime.gc
+    target:
+      launch: [target/omn-usdt-fixture/fixture, gc, "5", "20"]
+    mode: trace
+    keys: [task]
+    emit: [raw, hist, timeline, summary]
