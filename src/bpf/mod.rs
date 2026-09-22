@@ -56,6 +56,8 @@ mod sched_irq;
 mod sched_lock;
 mod sched_numa;
 mod syscall;
+// Stream U's: reading `.note.stapsdt` and putting a uprobe on what it names.
+pub mod usdt;
 mod wakeup;
 
 use std::sync::atomic::{AtomicBool, Ordering};
