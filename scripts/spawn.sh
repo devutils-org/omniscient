@@ -1,105 +1,114 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh cross-memory
-#   cd ../omniscient-cross-memory && claude     # paste the prompt it printed
+#   scripts/spawn.sh join-engine
+#   cd ../omniscient-join-engine && claude     # paste the prompt it printed
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
 #
-# This wave's four crossings touch no file under src/ at all, which is what lets
-# the two engine streams run beside them. The two session indexes --
-# examples/README.md and GUIDE.md -- belong to the coordinator: every crossing
-# writes sessions and none of them lists its own, because after the sixth wave
-# both indexes were twenty-eight sessions short for exactly that reason.
+# This wave divides by layer rather than by family, so the lock is a named file
+# list per stream. The shared eBPF layer -- btf.rs, insn.rs, map.rs, syscall.rs
+# -- belongs to nobody; attach.rs belongs to the fentry stream, because fentry
+# is an attach kind. The two session indexes, examples/README.md and GUIDE.md,
+# belong to the coordinator and are held to the sessions on disk by a test, so a
+# session added without a row is a red suite rather than a silent gap.
 set -euo pipefail
 
 declare -A OWNS=(
-    [cross-memory]="examples/cross-memory-*.yml tests/cross_memory.rs"
-    [cross-compute]="examples/cross-compute-*.yml tests/cross_compute.rs"
-    [cross-io]="examples/cross-io-*.yml tests/cross_io.rs"
-    [cross-machine]="examples/cross-machine-*.yml tests/cross_machine.rs"
-    [shared-layer]="src/bpf/attach.rs src/bpf/btf.rs src/bpf/insn.rs src/bpf/map.rs src/bpf/syscall.rs src/bpf/mod.rs catalog/*.yaml"
-    [emit-short]="src/emit.rs src/encode.rs tests/aggregation.rs tests/encoders.rs"
+    [join-engine]="src/join.rs src/request.rs src/session.rs src/encode.rs the MatchKind enum in src/catalog.rs tests/join_engine.rs examples/join-*.yml"
+    [run-model]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/collect/mem/heap/** tests/runner.rs"
+    [fentry]="src/bpf/attach.rs src/bpf/fentry.rs src/bpf/io*.rs src/bpf/net*.rs src/collect/io/** src/collect/net/** catalog/io.yaml catalog/net.yaml examples/io-*.yml examples/net-*.yml tests/scenario_io.rs tests/scenario_net.rs"
+    [usdt]="src/bpf/usdt.rs src/collect/runtime/** catalog/runtime.yaml examples/runtime-*.yml tests/scenario_runtime.rs"
 )
 declare -A TITLE=(
-    [cross-memory]="Stream P1 -- memory, end to end"
-    [cross-compute]="Stream P2 -- compute, end to end, and where phase 10 starts"
-    [cross-io]="Stream P3 -- the I/O path"
-    [cross-machine]="Stream P4 -- crossed families, and the machine as a confounder"
-    [shared-layer]="Stream S -- the shared layer nobody owns"
-    [emit-short]="Stream E -- rate, topk and stack are short in the same way"
+    [join-engine]="Stream J -- the join engine, and the decomposition"
+    [run-model]="Stream R -- the run model"
+    [fentry]="Stream T -- fentry, and the five sources behind it"
+    [usdt]="Stream U -- USDT, and the runtime family"
 )
 declare -A LOG=(
-    [cross-memory]="docs/scenarios/cross-memory.md"
-    [cross-compute]="docs/scenarios/cross-compute.md"
-    [cross-io]="docs/scenarios/cross-io.md"
-    [cross-machine]="docs/scenarios/cross-machine.md"
-    [shared-layer]="docs/families/shared-layer.md"
-    [emit-short]="docs/families/emit.md"
+    [join-engine]="docs/families/join.md"
+    [run-model]="docs/families/runner.md"
+    [fentry]="docs/families/io.md and docs/families/net.md"
+    [usdt]="docs/families/runtime.md"
 )
 
-CROSSING_WORK='Every source your crossing joins already collects and is already checked against
-ground truth -- so nothing here is new mechanism, and that is the point. What is
-new is the arithmetic that puts two families in one table, and the honesty about
-what that table is missing.
+ENGINE_WORK='Three of the seventh wave four crossings independently asked for the same missing
+match kind, which is a gap in the model rather than a preference: a `between`
+whose evidence is TEMPORAL by construction. Today the only rule that validates
+between an allocation and a resident size is `eq` on task, and it reports KEY --
+which overstates what crediting-by-recency knows. The evidence level is the
+point of the change, not the arithmetic.
 
-You own no file under src/. If expressing your crossing needs a change in the
-engine, that is a request under "## Needs from another stream" in
-docs/open-findings.md, with the exact signature you want, under a heading naming
-your stream -- not an edit. Nor do you edit examples/README.md or GUIDE.md: the
-two session indexes belong to the coordinator, who regenerates them at the merge.
+The decomposition is the second half, and two streams wrote down the same shape
+for it in docs/open-findings.md: a whole, a list of parts, and a **signed
+residue that is never rounded away**. Each row carries its kind (sampled,
+polled, traced), its evidence, its resolution and its Shortfall. A sampled
+profile and a traced duration are not the same kind of number, and the table
+has to say which is which.
 
-Start from examples/allocation-cost.yml, which is a join that works today, and
-from docs/scenarios/<family>.md for what each workload guarantees -- the scenario
-wave wrote a "## Workloads" section into every one of them for this wave.
+Read docs/scenarios/cross-memory.md and cross-compute.md first: both compute in
+a test what you are about to make the engine say, and their numbers are the
+check on your version.
 
-**A crossing is landed when it says what evidence it has**: IDENTITY > KEY >
-WAKEUP > TEMPORAL, on every joined result. A correlation backed by a propagated
-identity and one backed by two things happening at the same time are both
-correlations, and only one of them is evidence. And a decomposition whose parts
-do not sum to the whole is hiding a state: print the residue rather than
-rounding it away.'
+Trap: src/encode.rs renders results and src/render.rs renders requests and
+refusals. The sixth wave brief named the wrong one and cost a stream an hour.'
 
-SHARED_WORK='Read every "## Needs from another stream" section in docs/open-findings.md before
-you write anything, and group them: three are asked for twice by two families
-each, and the whole value of this stream is that they are written once. That is
-what the second wave learned and what the third paid for by not doing.
+RUNNER_WORK='`CollectError::MixedTargets` refuses any session naming two targets, and every
+confounder check has exactly that shape: the machine state is system or cpu, the
+measurement is pid or cgroup. The machine crossing had to run a second omn
+beside the first, and measured what that costs -- a cpu-target counter also
+counts whatever else ran on that core, which under load was 70% of it, and the
+machine PSI diluted a 12.5 ms cgroup stall to 6.0 ms.
 
-**A request is landed with the collector that wanted it, or it is not landed.**
-A helper added with no caller is a signature invented from a description. Where
-the caller lives in a file you do not own, say so in your log and leave the
-request in place rather than reaching into another stream.
+docs/open-findings.md has the minimum that would serve and the two functions it
+needs: any number of machine targets beside at most one workload target, with
+only the workload target driving the launch and the stop condition.
 
-Where you change a catalog entry requirements, re-probe: a source reported
-available that would then fail at attach is finding 15 all over again, and it
-cost this project thirty sources reading available once already. Say what moved,
-in numbers, in your log.
+Trap: everything here changes what a run *is*, which is what DECISIONS.md open
+line on session-versus-daemon is about. Do not settle that line in passing. If a
+change would make a run something other than one window and one document, write
+it down instead.'
 
-Do not start fentry. It is the next wave, it is real mechanism, and this stream
-is valuable because it is boring and finite.'
+FENTRY_WORK='BPF_PROG_TYPE_TRACING with an attach_btf_id: typed by BTF, cheaper per call than
+a kprobe, and it fails to load rather than reading the wrong field.
+Btf::tracepoint_signature is the pattern to copy for reading a prototype, and
+member_offset descends anonymous members since the seventh wave -- so the fields
+these five sources need are reachable.
 
-EMIT_WORK='Finding 37 was scoped to hist, summary and percentiles because three documents
-had agreed that scope; stream F wrote the argument for widening it on its way
-out, at the end of docs/open-findings.md. Shortfall::of is public and takes
-(&Losses, records, per_record), so there is no new derivation to do.
+io.fs glob is yours to decide, and it is the one the seventh wave deliberately
+left: converting tracepoint:ext4:* means choosing which filesystem io.fs is
+about, and a machine with btrfs and xfs mounted would get the ext4 answer or
+nothing. Its first backend is bpf:fentry on vfs_read, which is the right answer
+and is now a mechanism you have. Name what you attach to and say why.
 
-What there is, is a decision: Output::Stack already carries unattributed and
-Output::TopK already carries Rest, and each is that emit own statement about
-what it does not account for. A mark bolted beside either is a second such
-statement in different words. Make them one statement or keep them visibly
-separate, and write down which you chose and why.
+Trap: io.syscall and net.socket sit on paths that fire on everything. Aggregate
+in the kernel or do not land them -- src/bpf/runqlat.rs is the worked example,
+and insn::push_log2_bucket is one shared sequence now, so a histogram you build
+agrees with the emit layer by construction rather than by luck.
 
-Your second file is src/encode.rs, not src/render.rs -- render.rs renders
-requests, listings and refusals, and hist_text is in encode.rs. format.rs
-declares what each format can carry and a test crosses that claim against
-reality, so every format that can carry a topk or a stack carries the mark too,
-or says it cannot.
+A source is landed when its scenarios are, in all four classes.'
 
-And the negative matters as much as the positive: **a clean run must gain
-nothing**, or the mark becomes noise and readers learn to ignore it.'
+USDT_WORK='The uprobe half exists. What is missing is reading .note.stapsdt: a base address,
+a semaphore address, a provider and a name, plus the argument descriptors that
+say where each argument lives at the probe site.
+
+The measurement that frames this, from docs/open-findings.md: a preload shim
+costs 132 ns against a uprobe 740 ns for the same event. USDT is not the cheap
+path; it is the path that reaches a program you did not launch and cannot
+preload into, and one that names its own events rather than having them guessed.
+Say that in your log rather than letting a reader assume a probe is free.
+
+You own src/bpf/usdt.rs and read src/bpf/attach.rs without writing it: the
+uprobe attach is already there, and parsing an ELF note section is not an attach
+kind. If you find you need a change in attach.rs, that is a request to stream T,
+not an edit.
+
+Trap: pick a target whose notes you can rely on, and where you cannot, skip
+loudly with what the ELF actually contained.'
 
 stream="${1:-}"
 if [[ -z "$stream" || -z "${OWNS[$stream]:-}" ]]; then
@@ -119,9 +128,10 @@ else
 fi
 
 case "$stream" in
-    shared-layer) WORK="$SHARED_WORK" ;;
-    emit-short) WORK="$EMIT_WORK" ;;
-    *) WORK="$CROSSING_WORK" ;;
+    join-engine) WORK="$ENGINE_WORK" ;;
+    run-model) WORK="$RUNNER_WORK" ;;
+    fentry) WORK="$FENTRY_WORK" ;;
+    usdt) WORK="$USDT_WORK" ;;
 esac
 
 cat <<PROMPT
