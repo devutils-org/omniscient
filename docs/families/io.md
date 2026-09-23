@@ -35,10 +35,11 @@ Four through the block layer's own raw tracepoints, one request at a time.
 | `io.size` | `block_rq_issue` | the length of one request at the moment it was issued |
 | `io.writeback` | `writeback_start` -> `writeback_written` | one turn of the flusher's loop: how long it ran, how many pages it wrote, which filesystem |
 
-Five remain (`syscall`, `fs`, `pagecache`, `readahead`, `fsync`) and are named
-below with what each is blocked on. `io.bytes` and `io.pressure` also declare a
-`fs:cgroup` backend -- `io.stat` and `io.pressure` under a cgroup -- which waits
-for a cgroup target.
+Three more -- `io.syscall`, `io.fs` and `io.fsync`, the layers above the block
+one -- collect through fentry since the eighth wave, and are the third part of
+this document. Two remain (`pagecache`, `readahead`). `io.bytes` and
+`io.pressure` also declare a `fs:cgroup` backend -- `io.stat` and `io.pressure`
+under a cgroup -- which waits for a cgroup target.
 
 ## What the implementation had to decide
 
@@ -513,19 +514,13 @@ shape as the filter gap this document recorded two waves ago and it is not
 specific to `io`; it is worth a finding of its own when somebody owns the emit
 layer.
 
-## The five that are left, and what each waits for
+## The five that were left
 
-| Source | Waits for |
-|---|---|
-| `io.pagecache` | a `Btf::member_offset` that descends anonymous members, to reach `folio.mapping`. Item 2 of the sixth wave's needs. |
-| `io.readahead` | the same, plus the catalog entry that replaces its glob with the two tracepoints named in item 4. |
-| `io.fs` | **fentry.** Its first backend is `bpf:fentry` on `vfs_read`, and the `tracepoint:ext4:*` fallback is deliberately not converted: choosing one filesystem's tracepoints would answer for ext4 on a machine running btrfs. |
-| `io.syscall` | fentry on `vfs_read`/`vfs_write`. Its `bpf:raw_tp` fallback on `raw_syscalls:sys_enter` exists and is what stream D is doing for `proc.syscall`; the two should share a program rather than each writing one. |
-| `io.fsync` | fentry on `vfs_fsync_range`. |
-
-Three of the five are the same missing mechanism. `docs/bpf-layer.md` names it
-under "What is not here yet", and it is now the single largest thing standing
-between this family and the layer above the block one.
+Three of them -- `io.syscall`, `io.fs` and `io.fsync` -- are the third part of
+this document: the eighth wave wrote fentry, and they collect through it. The
+two that remain are `io.pagecache` and `io.readahead`, which wait on a
+collector rather than a mechanism since `Btf::member_offset` learned to descend
+anonymous members in the seventh wave; neither was this stream's to write.
 
 ## Notes for whoever comes next
 
@@ -554,3 +549,276 @@ between this family and the layer above the block one.
   `CARGO_TARGET_TMPDIR` is inside the build directory, which is on the
   repository's own filesystem, and `tests/scenario_io.rs` says so where it
   matters.
+
+---
+
+# The layers above the block one, through fentry
+
+The third part of this document is the eighth wave's: three sources over a new
+attach kind, `BPF_PROG_TYPE_TRACING` with an `attach_btf_id`, and the first in
+this family that see a *call* rather than a request. What follows is where each
+is attached and why, what that took, what was measured, and three ways a call
+was lost that nothing in this project counted until now.
+
+| Source | Timed at | Shape | An event carries |
+|---|---|---|---|
+| `io.syscall` | `__x64_sys_read`, `_write`, `_pread64`, `_pwrite64`, and `_readv`, `_writev`, `_preadv`, `_pwritev` where the kernel has them | counted in the kernel | one row: a task, a syscall, a descriptor and a log2 bucket, with how many calls, their exact total, the bytes they returned and the errors |
+| `io.fs` | `vfs_read`, `vfs_write`, regular files only | counted in the kernel | the same row keyed by `file:<superblock dev>+<ino>`, with the filesystem named from `mountinfo` |
+| `io.fsync` | `do_fsync`, `vfs_fsync`, `vfs_fsync_range` | one record per sync | one sync: its file, its descriptor where it had one, `fsync` or `fdatasync`, the range, the return value and which function it was timed at |
+
+`src/bpf/fentry.rs` is the attach kind and the timed pair the two histogram
+sources share; `src/bpf/io_vfs.rs` and `src/bpf/io_fsync.rs` are the programs;
+`src/collect/io/histogram.rs` is the collector half every kernel-built
+histogram of this shape uses, `net.socket` included.
+
+## The attach kind, in one paragraph
+
+A tracing program is loaded against a function's type id in the kernel's own
+BTF and attached through `BPF_RAW_TRACEPOINT_OPEN` with no name. Its context is
+the function's arguments, one `u64` each, and an exit half gets the return
+value in the slot after the last. The point is that the arguments are *typed*:
+a `struct file *` arrives as a pointer the verifier follows, so
+`file->f_inode->i_sb->s_dev` is three plain loads, each checked at load time
+against the member it lands on -- the verifier's own log reads
+`R1=ptr_file() ... R1=ptr_inode() ... R1=ptr_super_block()`. A load of the
+wrong width is refused, which is why `i_mode` is read as a half-word
+(`fentry::BPF_H`). The requirement `fentry:<function>` is answered from the
+kernel's BTF and confirmed by loading two instructions against the function,
+through the probe hook `capabilities.rs` already calls; every one of the eight
+`fentry:` requirements the catalog carried read `unverified` before this.
+
+## A function in BTF is not a function on the path
+
+**This is the finding of this part, and it happened three times.** The catalog
+named a function for each source, the function exists, it is in BTF, a program
+loads and attaches against it -- and the calls being measured never pass
+through it, because the compiler inlined it into its caller and kept an
+out-of-line copy for someone else. Nothing fails. The source reports a quiet
+machine.
+
+| Named | What passes through it | Measured |
+|---|---|---|
+| `vfs_fsync_range` | `msync`, nfsd -- not `fsync(2)` | 25 syncs, **0** calls, machine-wide, no loss; 25 at `do_fsync` |
+| `vfs_fsync` | nothing, here | 0 of the same 25 |
+| `ksys_pread64`, `ksys_pwrite64` | the compat syscalls -- not `pread64(2)` | 300 `pwrite64`s, **0** calls; 500 `read`s through `ksys_read` found |
+| `sock_sendmsg` | the kernel's own senders -- not `send(2)` | 2000 sends, **0** calls (`net.socket`, in `net.md`) |
+
+So every source here is checked against a known workload before a function
+name is trusted, and each was moved to where the calls actually are:
+
+- **`io.syscall` is timed at the syscall table's own entry points**, the one
+  layer that cannot be inlined into the dispatcher: it calls them from another
+  compilation unit. They take a `struct pt_regs *` and read their arguments out
+  of it, so the layer is x86-64's -- the requirement names `__x64_sys_read`,
+  another architecture's probe reports it missing, and the collector refuses by
+  name rather than reading another architecture's registers as x86-64's. The
+  vectored four came with it for nothing: same prototype, descriptor in `di`.
+- **`io.fsync` times all three of `do_fsync`, `vfs_fsync` and
+  `vfs_fsync_range`**, because which one a sync reaches is the compiler's
+  decision and differs between builds. The stamp records which function opened
+  it; an inner call finds the thread stamped and leaves it alone, and an exit
+  closes only its own function's stamp, so one sync is one event whether the
+  three are nested or inlined. `do_fsync` has no `struct file *`, so there the
+  file is found the way the kernel found it a moment before --
+  `current->files->fdt->fd[fd]`, bounded by `max_fds` first and walked with
+  probe reads, because an index into a table is not a typed load. The event
+  says `via=do_fsync` so a reader can tell the walk from the typed argument.
+
+## Where `io.fs` is attached, and why
+
+The decision the seventh wave left. `io.fs` is timed at **`vfs_read` and
+`vfs_write`, for regular files only**, for three reasons:
+
+1. **It is the one place every filesystem passes.** The alternative the catalog
+   carried was `tracepoint:ext4:*`, which answers for ext4 on a machine running
+   btrfs -- this one -- and for nothing on xfs. A function below the VFS and
+   above the filesystem is `->read_iter`, an indirect call with a different
+   target per filesystem; choosing a target is choosing a filesystem again. The
+   glob backend is gone from the entry, and the YAML says why beside it.
+2. **The filesystem is named rather than chosen.** Each row carries the
+   superblock's device, which `/proc/self/mountinfo` maps to a filesystem type,
+   so a machine with btrfs and xfs mounted gets both, each labelled `fs=btrfs`
+   or `fs=xfs`.
+3. **A pipe is not a filesystem.** `vfs_read` also serves pipes, sockets and
+   terminals, and a reader blocked on an empty pipe for ten seconds is not ten
+   seconds of filesystem latency. The entry half reads `f_inode->i_mode` and
+   times regular files only. That is also the separation the scenarios check
+   between the two layers: a 300 ms pipe wait is in `io.syscall` and absent from
+   `io.fs`, by construction.
+
+## What the implementation had to decide
+
+**Both histogram sources count in the kernel.** Every read on the machine
+passes both layers, so a ring record per call would be a measurement whose
+cost grows with the thing measured. What the kernel keeps is a row per
+`(task, op, object, log2 bucket)` holding the count, the exact total, the bytes
+the calls returned and the calls that failed -- `src/bpf/runqlat.rs`'s shape,
+held once in `fentry::HistogramProgram` for the three sources that use it. An
+event is a row: `lat_ns` is the bucket's low bound, which is what the emit
+layer's own log2 bucketing maps back to the same bucket, and `count` and
+`weight` say how many calls it stands for. Measured: `dd` reading 4 MiB in
+4 KiB blocks came back as 8 rows, and the histogram the emit layer built from
+them held `n=1025`, which is 1024 reads and the one that found the end.
+
+**A row is created only if absent**, with `BPF_NOEXIST`. Two cpus closing the
+first call of the same row at once would otherwise both insert, and the second
+would overwrite the first's count. The loser is told `EEXIST` and adds to the
+winner's row -- once, straight-line, because a jump back to the lookup is a
+loop the verifier refuses (`infinite loop detected at insn 111` was the first
+version's answer).
+
+**A descriptor key names a number, and numbers are reused.** The interpreter
+opens its own script as descriptor 3, closes it, and the workload's first
+`open` gets descriptor 3 again. The first scenario found 596 reads on
+descriptor 3 for a program that made 500. That is not a defect: a descriptor is
+what the syscall layer has, and a row keyed by it is exactly as ambiguous as
+the descriptor. The file is `io.fs`'s key, and the caveat on `io.syscall` says
+so. The scenarios `dup2` their descriptors high enough that nothing else had
+the number.
+
+**On btrfs the file key is the superblock's device, and that is not
+`st_dev`.** btrfs gives every subvolume its own anonymous device and reports
+*that* from `stat`, while `inode->i_sb->s_dev` -- the only device a program at
+the VFS can read without knowing the filesystem -- is one device for the whole
+filesystem, and it is the one `mountinfo` prints. Measured under `/home`:
+`stat` says `0:45`, the superblock and `mountinfo` say `0:28`. So the key's
+device is written in `stat`'s encoding and named `sb_dev` on the event, the
+scenario checks it against `mountinfo` rather than against `stat`, and the
+catalog's caveat says the rest: inode numbers repeat across subvolumes, so on
+btrfs the key names the filesystem and the inode, not always one file.
+
+**A sync is streamed, not counted.** A database commits a few hundred times a
+second, so a ring record per sync costs nothing worth measuring and keeps what a
+histogram would throw away: which file, which range, which call -- the event a
+slow commit can be named by, and joined on `file` to `io.fs`'s reads and writes
+of the same file.
+
+## Three losses nothing counted
+
+The invariant is that a loss is counted and shown, always. Writing these
+sources found three ways a call disappeared with nothing counting it, each
+measured, and each now in `Losses::dropped` with its own reason.
+
+**1. A drain racing the exit half's increment.** Every counting program in this
+layer drained its map with lookup-and-delete while the programs kept writing
+into it. An exit half that has looked a row up adds to it a few instructions
+later; a drain that took the row in between has already copied it out, and the
+increment lands in a freed element -- or, the map being preallocated, in
+whatever key the element was handed to next. Measured: a hundred threads
+reading a thousand files, **55192 counted and 44807 dropped, for 100000
+reads** -- one gone without a trace. `HistogramProgram` now keeps two row maps
+and a generation word: a drain empties the map that has been out of use for a
+whole interval, then flips the word. The price is that a row reaches userspace
+one interval late, and the event's `window_ns` is the interval it was counted
+over rather than the time since the last drain. `sched.runqlat` and
+`proc.syscall` drain the same way the first version did; the finding is filed
+for them.
+
+**2. The kernel skipping the exit half of a call in flight.** When *any* fentry
+or fexit program is attached to or detached from a function -- by this tool, by
+another run of it, by `bpftrace` -- the kernel rebuilds that function's
+trampoline, and it patches the old one first so that calls still in flight
+return *around* their exit programs. A 300 ms pipe read disappeared from
+`io.syscall` the moment a second `omn` attached to `__x64_sys_read` for 30 ms,
+**deterministically: 0 rows with the second tracer, 1 without**, and nothing
+counted. It cannot be prevented from here; it can be found. The stamp the
+entry half left is still in the pending map, so the entry half now stamps only
+if absent and counts a stamp it finds as an exit that never ran, and at the end
+a stamp whose thread no longer exists is counted the same way rather than as a
+call in flight. The longest calls are the likeliest to be lost this way, which
+is the worst kind of loss for a latency source, and the reason says so.
+`tests/scenario_io.rs` has the second tracer on purpose.
+
+**3. The kernel skipping a run of a preempted program.** A trampoline guards
+each program with a per-cpu counter, and on a preemptible kernel -- this one is
+`CONFIG_PREEMPT=y` -- a run preempted halfway makes the next hit of the same
+program on that cpu skip it, counted only in `bpf_prog_info.recursion_misses`.
+Every program's count is read, at the offset the kernel's own BTF gives the
+field. **It was not observed here**: zero in three runs of the hundred-thread
+workload. It is read anyway, because it is the one loss of this attach kind
+that nothing else could see.
+
+## What was measured
+
+Every reference below is the workload's own account -- its loop bounds, what
+`fstat` and `mountinfo` told it, its own clock around a call -- and never the
+tool's.
+
+- **Five hundred reads of 4096 bytes and three hundred `pwrite64`s of 1000,
+  exactly, in both layers.** `io.syscall` finds `(500, 2048000)` on the read
+  descriptor and `(300, 300000)` on the write one; `io.fs` finds the same two
+  pairs on `file:<dev>+<ino>` for the inodes `fstat` gave, with the device
+  `mountinfo` gives and `fs=btrfs`.
+- **A 300 ms pipe wait**, timed by the program at 300,061,039 ns, is
+  300,044,259 ns in `io.syscall` -- 17 us inside it -- and absent from `io.fs`.
+- **Twenty `fsync`s, five `fdatasync`s and three `msync`s**: 28 events, all on
+  the file the program named, 25 `via=do_fsync` carrying the program's
+  descriptor and 3 `via=vfs_fsync_range`. A sync with 64 KiB to write and one
+  with nothing to write sit three orders of magnitude apart (1 to 4 ms against
+  about 1 us); the scenario asserts a factor of ten between the medians.
+- **The loss path**: a hundred threads each `pread`ing a thousand files once is
+  a hundred thousand distinct rows against a histogram that holds 32768 per
+  drain. Measured, `io.syscall` dropped between 12698 and 13910 calls over four
+  runs and `io.fs` 45031 in the one run it was read from; the run says every
+  count is a lower bound, and the rows plus the drops are never fewer than the
+  reads.
+
+## What it costs, and what that did to the rest of the suite
+
+**Attaching is the expensive part.** A 1 ms run of `io.syscall` takes 660 ms of
+wall time -- sixteen programs, each attach and detach a trampoline rebuild --
+against 387 ms for a raw-tracepoint source; `io.fs` and `io.fsync` take about
+400. **Trampoline rebuilds are serialised machine-wide**: six `io.syscall` runs
+started together took 2.2 to 2.4 s each. Once attached, a call costs the
+trampoline and the program -- `io.fs` over `dd` charged 0.4 ms of cpu against
+the target's 2.8 ms, a 14 % the tiny target makes large.
+
+That serialisation is why `a_task_moved_between_two_cpus_is_counted_once_per_move`
+in `tests/family_sched.rs` failed once in this wave's suite and passes alone:
+it gives `omn` a fixed 800 ms to attach before it starts moving the task, and
+with this stream's scenarios attaching beside it that is no longer enough. The
+fix is in that file -- wait for the run to report it is attached, not for a
+fixed delay -- and is filed rather than made. This stream's own sweeps push
+their traffic for as long as the run lasts for the same reason.
+
+## What this part cannot do
+
+- **A cgroup target is refused** with exit 3, naming `bpf_get_current_cgroup_id`,
+  like the rest of the family.
+- **`io.syscall` is x86-64's.** On another architecture the requirement is
+  missing and the resolver falls through to `bpf:raw_tp`, which has no
+  collector.
+- **`io_uring`, `sendfile`, `splice` and page faults on a mapping** pass none of
+  these functions; every run says so in its notes.
+- **`count` gets `raw` and `summary`, not `hist`.** A counted kernel histogram
+  is still a histogram, but the mode x emit matrix says a count is one number
+  per series, and the matrix is not this stream's.
+- **The `bpf:kprobe` backends of all three have no collector.** On a kernel
+  with BTF they would answer the same question with no type checking; nobody
+  on such a kernel needs them, and `examples/net-not-built.yml` uses the
+  equivalent `net` ones as its example of exit 3.
+- **The catalog lost two keys it never produced.** `req` on all three and
+  `file` on `io.syscall` were promises no backend kept; the keys now list what
+  events carry.
+
+## Sessions
+
+- `examples/io-three-layers.yml` -- one program's reads at the syscall, in the
+  VFS and at the device, with a pipe wait that only the first sees.
+- `examples/io-syncs.yml` -- twenty syncs that wait for the device and five that
+  do not, and three through a mapping, each named for the function that timed
+  it.
+
+Both need rows in `examples/README.md` and `GUIDE.md`, which are the
+coordinator's; the test holding the indexes to the disk is red on this branch
+until then, as the brief said it would be.
+
+## Needs from another stream
+
+Filed under `### From stream T` in `docs/open-findings.md`, each with the
+signature wanted: a function lookup in `Btf` so `fentry.rs` can drop its own
+index; the tracing load, a nameless raw-tracepoint open, a map update and a
+program-info read in `syscall.rs`; the module lines in `bpf/mod.rs`; the
+half-word width and three instructions in `insn.rs`; the drain race and the two
+kernel-side losses for the owners of `runqlat.rs` and `proc_syscall.rs`; and the
+fixed attach delay in `tests/family_sched.rs`.

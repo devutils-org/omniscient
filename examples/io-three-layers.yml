@@ -1,0 +1,52 @@
+# One program's reads, measured at three layers at once.
+#
+#   omn -f examples/io-three-layers.yml
+#
+# The launched program writes 32 MiB, drops it from the page cache, and reads
+# it back in 1 MiB reads -- then waits a quarter of a second on an empty pipe.
+# Three sources watch it, and each answers a different question about the same
+# calls:
+#
+#   io.syscall   the read(2) the program made, per descriptor
+#   io.fs        the same reads inside the VFS, per file -- and not the pipe
+#   io.latency   the block requests those reads turned into, per device
+#
+# The gap between the layers is the diagnosis, and this session is built so
+# that every gap has a known cause. The 32 reads of the file are about as long
+# at the syscall as in the VFS -- the descriptor adds nothing -- and each is far
+# longer than any one block request under it, because a 1 MiB read waits for
+# several of them. The pipe wait is 250 ms at the syscall and absent from the
+# VFS entirely: a pipe is not a filesystem, and `io.fs` times regular files
+# only. `src/bpf/io_vfs.rs` says where each layer is attached and why.
+#
+# The file is written into the current directory and removed again, so run
+# this from somewhere on a real block device: a tmpfs has no block layer, and
+# `io.latency` then reports nothing -- which reads exactly like a tool that
+# does not work.
+name: three layers of one program's reads
+format: text
+
+requests:
+  - label: syscall
+    source: io.syscall
+    target:
+      launch: &workload
+        - python3
+        - -c
+        - "import os,threading,time; p='omn-layers.bin'; b=os.urandom(1<<20); f=open(p,'wb'); [f.write(b) for _ in range(32)]; f.flush(); os.fsync(f.fileno()); f.close(); d=os.open(p,os.O_RDONLY); os.posix_fadvise(d,0,0,os.POSIX_FADV_DONTNEED); [None for _ in iter(lambda: os.read(d,1<<20), b'')]; os.close(d); os.remove(p); r,w=os.pipe(); threading.Timer(0.25, lambda: os.write(w,b'x')).start(); os.read(r,1)"
+    mode: trace
+    emit: [hist, summary]
+
+  - label: vfs
+    source: io.fs
+    target:
+      launch: *workload
+    mode: trace
+    emit: [hist, summary]
+
+  - label: device
+    source: io.latency
+    target:
+      launch: *workload
+    mode: trace
+    emit: [hist, summary]

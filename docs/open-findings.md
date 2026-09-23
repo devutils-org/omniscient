@@ -5482,3 +5482,126 @@ key on the program's stack. Both would have produced plausible numbers.
 field per row -- `now - duration` where the row is created -- and what makes it
 worth doing once per source rather than in a shared layer is that each keeps its
 own value layout.
+## Needs from another stream — stream T (fentry, and the five sources behind it)
+
+What the eighth wave's fentry stream needed from files it did not own, and
+three losses it found in a shape other programs share. `docs/families/io.md`
+and `docs/families/net.md` are the stream's record; this is only what someone
+else has to do.
+
+### To whoever owns `src/bpf/btf.rs`: a function's type id and prototype
+
+`src/bpf/fentry.rs` carries a small BTF index of its own, because an fentry load
+needs the type id of a `FUNC` and `Btf` keeps its ids private. It reads the same
+file, so the two cannot disagree, but it is a second parser. Wanted:
+
+```rust
+pub struct Function { pub id: u32, pub params: Vec<String>, pub returns: String }
+impl Btf {
+    /// The `FUNC` of this name and the prototype it points at.
+    pub fn function(&self, name: &str) -> Result<Function, String>;
+}
+```
+
+With it, `fentry::FunctionIndex` goes and `fentry::expect` calls `Btf`.
+
+### To whoever owns `src/bpf/syscall.rs`: four commands `fentry.rs` issues itself
+
+- `prog_load` cannot name an attach type or a target: a tracing load needs
+  `expected_attach_type`, `attach_btf_id` and `attach_btf_obj_fd`, which sit
+  past the end of `ProgLoadAttr` (offsets 68, 108 and 112 of `union bpf_attr`).
+  Wanted: `pub fn prog_load_tracing(attach_type: u32, attach_btf_id: u32,
+  instructions: &[Insn], name: &str, license: &str) -> Result<OwnedFd, LoadError>`.
+- `raw_tracepoint_open` takes a `&str`, and a tracing program is attached with
+  no name at all. Wanted: `name: Option<&str>`.
+- `map_update` exists under `#[cfg(test)]` only; the histogram's generation word
+  is written from userspace on every drain. Wanted: the same function, public.
+- `BPF_OBJ_GET_INFO_BY_FD`, for `bpf_prog_info.recursion_misses`. Wanted:
+  `pub fn prog_info(fd: RawFd, bytes: usize) -> io::Result<Vec<u8>>`.
+
+`fentry.rs` issues all four itself until then, each with its own attribute
+struct and a layout test.
+
+### To whoever owns `src/bpf/mod.rs`: five module lines
+
+`fentry`, `io_fsync`, `io_vfs`, `net_connect` and `net_socket` are declared in
+`src/bpf/attach.rs` with `#[path]`, because `mod.rs` belonged to no stream of
+the wave. They belong beside the other programs:
+
+```rust
+pub mod fentry; mod io_fsync; mod io_vfs; mod net_connect; mod net_socket;
+```
+
+with the types re-exported the way `io::BlockProgram` is, and the five
+`#[path]` lines removed from `attach.rs`. Nothing else changes.
+
+### To whoever owns `src/bpf/insn.rs`: one width, three instructions, two helpers
+
+A typed load has to be exactly the member's width, so `BPF_H` is needed; and
+`add64_reg`, `lsh64_imm` and `jge_reg` are hand-encoded in `fentry.rs`. The
+helpers `GET_SOCKET_COOKIE` (46) and `GET_CURRENT_TASK` (35) are declared
+locally by `fentry.rs` and `io_fsync.rs`.
+
+### To whoever owns `src/bpf/runqlat.rs` and `src/bpf/proc_syscall.rs`: three losses nothing counts
+
+Measured while writing `io.syscall` and `io.fs`, which have the same shape, and
+now counted there; each applies to these two as they stand.
+
+1. **A drain racing the program's increment.** Both drain their row map with
+   lookup-and-delete while the programs write into it. A program that has looked
+   a row up adds to it a few instructions later; a drain that took the row in
+   between has copied it already, and the increment lands in a freed element --
+   or, the map being preallocated, in whatever key the element went to next.
+   Measured: 55192 counted and 44807 dropped for 100000 reads, one gone without
+   a trace. `fentry::HistogramProgram` keeps two maps and a generation word and
+   drains only the one out of use for a whole interval; the same would serve.
+2. **The kernel skipping a run of a preempted program.** Raw tracepoints and
+   trampolines both guard each program with a per-cpu counter, and on a
+   preemptible kernel a run preempted halfway makes the next hit on that cpu
+   skip it, counted only in `bpf_prog_info.recursion_misses`. Not observed on
+   this machine, but read by every fentry source; the same read would serve.
+3. **(fentry only) the kernel skipping the exit half of a call in flight** when
+   any tracer attaches to or detaches from the same function. Not these two's
+   problem -- a raw tracepoint has no trampoline -- and written here so that
+   nobody reaches for fexit expecting otherwise.
+
+### To whoever owns `src/join.rs`: an event without the rule's key is unattributable, not a malformed rule
+
+`missing_key` refuses the whole rule at the first `to` event that lacks the key.
+`net.tcp.lifetime` legitimately emits such events -- a server-side socket whose
+cookie nothing ever asked for -- so `net.tcp.connect -> net.tcp.lifetime` on
+`sock` was refused over ten connections that all joined.
+`examples/net-handshake-to-close.yml` filters on `cookie > 0` to get past it.
+Wanted: such an event counted as unattributed, with a count of its own in the
+join's report, and the refusal kept for a rule whose side can *never* carry the
+key -- which `check` already knows from the catalog.
+
+### To whoever owns `tests/family_sched.rs`: a fixed attach delay
+
+`a_task_moved_between_two_cpus_is_counted_once_per_move` gives `omn` 800 ms to
+attach before it starts moving the task, and failed once in this wave's suite
+with 0 of 20 counted; it passes alone. fentry attaches rebuild trampolines,
+which the kernel serialises machine-wide: a 1 ms run of `io.syscall` takes
+660 ms, and six at once 2.2 to 2.4 s each. Wanted: wait for the run to report
+that it is attached -- or keep moving the task until the run ends -- rather than
+for a fixed delay.
+
+### To whoever owns `src/request.rs`: `count` on a kernel-built histogram
+
+A counted `io.syscall`, `io.fs` or `net.socket` is still a histogram -- rows of
+`(key, bucket, count)` summed over the run -- and the mode x emit matrix refuses
+`hist` and `topk` in `count` because a count is one number per series. For these
+three it is not. Not blocking: `trace` serves both.
+
+### To the coordinator
+
+- Rows for `examples/io-three-layers.yml`, `examples/io-syncs.yml`,
+  `examples/net-fentry-sweep.yml` and `examples/net-handshake-to-close.yml` in
+  `examples/README.md` and `GUIDE.md`; the index test is red on this branch
+  until then.
+- `docs/bpf-layer.md` lists fentry under "What is not here yet". It is here:
+  `src/bpf/fentry.rs`, attached through `BPF_RAW_TRACEPOINT_OPEN` with no name,
+  and the requirement class is `fentry:<function>`, answered from BTF and a
+  load. `CATALOG.md` may want the class named too.
+- `STATE.md`'s table of what waits for fentry: `io.syscall`, `io.fs`,
+  `io.fsync`, `net.tcp.connect` and `net.socket` collect through it.

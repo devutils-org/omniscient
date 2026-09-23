@@ -3,8 +3,9 @@
 #   omn -f examples/net-not-built.yml            # exit 3
 #   omn -f examples/net-not-built.yml --dump-request
 #
-# Three of the fifteen `net` sources have no collector, and the catalog
-# describes them anyway -- that is the point. The request resolves, validates
+# One of the fifteen `net` sources has no collector at all, and several have
+# backends that none serves; the catalog describes them anyway -- that is the
+# point. The request resolves, validates
 # and dumps, and the refusal says which backend is missing rather than
 # pretending the source does not exist.
 #
@@ -24,10 +25,14 @@
 #
 # All three of them now collect, through a `bpf:raw_tp` backend put ahead of
 # the classic one by finding 9 and served by the collectors of the sixth wave.
-# What is left in this file needs **fentry** -- BTF-typed attach,
-# `BPF_PROG_TYPE_TRACING` with an `attach_btf_id` -- which the eBPF layer does
-# not have. That is the same shape of gap the raw tracepoint pass closed for
-# the other three, one mechanism further on.
+# The two this file asked for next waited on **fentry**, and the eighth wave
+# wrote it: `net.tcp.connect` and `net.socket` collect through `bpf:fentry`
+# now, which is the day the comment below said this file would stop being an
+# example. It keeps the same two sources and asks for the backend *behind*
+# their first one -- `bpf:kprobe`, pinned with `backend: force:` -- which is
+# valid, which this machine serves, and which nothing in this build collects.
+# The gap is the build's, so the answer is still 3, and it will stay 3 until
+# somebody writes a kprobe collector nobody on a BTF kernel needs.
 #
 # Exit 3 is a different answer from exit 1. Exit 1 is a problem with this run,
 # and retrying or raising privileges may help. Exit 3 is a problem with this
@@ -40,24 +45,25 @@
 # this stage reports one missing collector at a time. The second request is
 # here so that `--dump-request` shows both, and so that this file stops being
 # an example the day they land.
-name: two sources this build does not collect
+name: two backends this build does not collect
 duration: 500ms
 format: text
 
 requests:
-  # fentry on tcp_v4_connect: BTF-typed attach, which this kernel publishes and
-  # this build does not write. The build's gap, so exit 3.
+  # A kprobe on tcp_v4_connect: the same handshake, without BTF. This kernel
+  # has the kprobe PMU and this build has no collector for it, so exit 3.
   - label: connect
     source: net.tcp.connect
+    backend: force:bpf:kprobe
     target: system
     mode: trace
     emit: [raw]
     keys: [sock]
 
-  # fentry on sock_sendmsg: the write-side latency a socket sees, before any of
-  # it reaches a queueing discipline.
+  # A kprobe on the send and receive paths, for the same reason.
   - label: socket-write
     source: net.socket
+    backend: force:bpf:kprobe
     target: system
     mode: trace
     emit: [hist]

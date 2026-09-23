@@ -8,14 +8,25 @@
   summary: "TCP connection setup latency"
   unit: ns
   backends:
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect"], cost: low}
+    # Opened where the caller sends the SYN, closed where the kernel learns
+    # the answer: `tcp_finish_connect` for a SYN-ACK, `tcp_done_with_error`
+    # for a RST or a timeout, the connect call's own return for a failure
+    # before any packet left. The close runs in softirq, so the stamp carries
+    # the caller.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error"], cost: low}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
-  keys: [task, sock, req]
-  filter_fields: [comm, daddr, dport, family]
+  keys: [sock, task]
+  filter_fields: [comm, daddr, dport, family, outcome]
   determinism: low
+  caveats:
+    - "Every handshake ends established, refused or failed, and each outcome
+       is its own latency: a refusal in 30 us is not a fast connection."
+    - "A SYN the peer dropped is retransmitted after the kernel's initial RTO,
+       one second, so a handshake near 1 s is a lost SYN rather than a slow
+       peer."
 
 - id: net.tcp.lifetime
   family: net
@@ -35,7 +46,7 @@
   emits: [hist, topk, raw, timeline, summary]
   targets: {system: native}
   keys: [sock, task]
-  filter_fields: [comm, saddr, sport, family]
+  filter_fields: [comm, saddr, sport, family, cookie]
   determinism: low
 
 - id: net.tcp.rtt
@@ -152,15 +163,26 @@
   summary: "Socket read and write latency"
   unit: ns
   backends:
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_sendmsg", "fentry:sock_recvmsg"], cost: low}
+    # Receives at `sock_recvmsg`, for every family. Sends at the families'
+    # own `sendmsg`, because every syscall path inlines `__sock_sendmsg` and
+    # `sock_sendmsg` sees only the kernel's own senders: measured, 2000 sends
+    # and zero calls.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_recvmsg", "fentry:inet_sendmsg"], cost: low}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med,
        degraded: "no BTF: struct offsets are not portable across kernels"}
-  modes: [trace]
+  modes: [trace, count]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
-  keys: [sock, task, req]
-  filter_fields: [comm, bytes, dport]
+  keys: [sock, task]
+  filter_fields: [comm, bytes, dport, family, op]
   determinism: low
+  caveats:
+    - "Sends are timed for inet, inet6 and unix sockets only; receives for
+       every family. Compare the two directions within those families."
+    - "A receive's latency includes the wait for data. A blocking recv that
+       waited a second for its peer is one second here, and is not a slow
+       network."
+    - "An event is a histogram row, not a call: `count` says how many."
 
 - id: net.backlog
   family: net

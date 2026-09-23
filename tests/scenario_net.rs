@@ -1330,8 +1330,8 @@ fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() 
     assert_eq!(code(&outcome), 3, "{}", stderr(&outcome));
     let complaint = stderr(&outcome);
     assert!(
-        complaint.contains("net.tcp.connect") && complaint.contains("bpf:fentry"),
-        "the refusal should name the source and the backend it needs: {complaint}"
+        complaint.contains("net.tcp.connect") && complaint.contains("bpf:kprobe"),
+        "the refusal should name the source and the backend it was pinned to: {complaint}"
     );
     assert!(
         complaint.contains("The request itself is valid"),
@@ -1343,20 +1343,34 @@ fn a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend() 
     // Five sources have come off this list: `net.tcp.lifetime`,
     // `net.tcp.retransmit`, `net.drops`, `net.qdisc` and `net.softirq` all
     // collect now, through the `bpf:raw_tp` backend the catalog pass put ahead
-    // of their classic one. What is left needs a mechanism rather than a
-    // collector -- BTF-typed attach for two of them, an XDP program for the
-    // third -- which is the same shape of gap one step further on.
-    let unbuilt: &[(&str, &str, &str)] = &[
-        ("net.tcp.connect", "trace", "bpf:fentry"),
-        ("net.socket", "trace", "bpf:fentry"),
-        ("net.xdp", "count", "bpf"),
+    // of their classic one, and the eighth wave took two more off it:
+    // `net.tcp.connect` and `net.socket` collect through `bpf:fentry`. What is
+    // left is their kprobe backend, pinned, and `net.xdp`, which needs an XDP
+    // program -- the same shape of gap, one mechanism further on.
+    let unbuilt: &[(&str, &str, &str, Option<&str>)] = &[
+        (
+            "net.tcp.connect",
+            "trace",
+            "bpf:kprobe",
+            Some("force:bpf:kprobe"),
+        ),
+        (
+            "net.socket",
+            "trace",
+            "bpf:kprobe",
+            Some("force:bpf:kprobe"),
+        ),
+        ("net.xdp", "count", "bpf", None),
     ];
-    for (source, mode, backend) in unbuilt {
+    for (source, mode, backend, pinned) in unbuilt {
         let mut args: Vec<&str> = vec![source];
         if *source == "net.xdp" {
             args.extend_from_slice(&["--iface", "lo"]);
         } else {
             args.push("--system");
+        }
+        if let Some(pinned) = pinned {
+            args.extend_from_slice(&["--backend", pinned]);
         }
         let emit = if *mode == "count" { "rate" } else { "raw" };
         args.extend_from_slice(&["--mode", mode, "--duration", "200ms", "--emit", emit]);
@@ -3082,10 +3096,11 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "the refusal should say what the source does accept: {complaint}"
     );
 
-    // 3 -- this build has not written it. `net.socket` resolves onto
-    // `bpf:fentry`, which is an attach kind this layer does not have, and the
-    // answer says so in those words: not "this machine cannot", which would
-    // send a reader to change a kernel that is already capable.
+    // 3 -- this build has not written it. `net.socket` pinned to its
+    // `bpf:kprobe` backend, which this machine serves and no collector does,
+    // and the answer says so in those words: not "this machine cannot", which
+    // would send a reader to change a kernel that is already capable. It was
+    // the unpinned request until the eighth wave wrote `bpf:fentry`.
     let outcome = omn(&[
         "net.socket",
         "--system",
@@ -3095,6 +3110,8 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "200ms",
         "--emit",
         "raw",
+        "--backend",
+        "force:bpf:kprobe",
     ]);
     let complaint = stderr(&outcome);
     assert_eq!(
@@ -3222,4 +3239,746 @@ fn the_second_road_of_every_ebpf_net_chain_is_named_when_it_is_forced() {
             "`{source}` was served by something other than the backend it was forced onto"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The two sources over fentry: `net.tcp.connect` and `net.socket`
+// ---------------------------------------------------------------------------
+//
+// The eighth wave's attach kind. Ground truth here is the kernel's own answer
+// for the workload's own sockets: `SO_COOKIE` is `getsockopt`, asked by the
+// program of the socket it holds, and it is the number both sources key their
+// series on. A count of handshakes and sends the program made, the port it
+// connected to, the errno it was given, and a wait it timed itself complete
+// the reference; none of it comes from the tool.
+//
+// The four classes: the sweep (`examples/net-fentry-sweep.yml`), the ground
+// truth below, the loss path (a pending map and a histogram driven past their
+// capacity on purpose), and the refusal. `docs/families/net.md` has what each
+// measured.
+
+/// Where a workload and its account live: inside the build directory, on the
+/// repository's own filesystem, like every other scratch file of this suite.
+fn fx_scratch(name: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the scratch directory");
+    path
+}
+
+/// Runs `omn` with a launched Python workload, and reads back what the
+/// workload says it did.
+fn fx_launch(args: &[&str], name: &str, body: &str) -> (Output, serde_json::Value) {
+    let workload = fx_scratch(&format!("{name}.py"));
+    std::fs::write(&workload, body).expect("the workload");
+    let account = fx_scratch(&format!("{name}.json"));
+    let _ = std::fs::remove_file(&account);
+    let mut full: Vec<&str> = args.to_vec();
+    full.extend_from_slice(&["--format", "json", "--", "python3"]);
+    let workload = workload.to_str().expect("a path").to_owned();
+    let account_arg = account.to_str().expect("a path").to_owned();
+    full.push(&workload);
+    full.push(&account_arg);
+    let output = omn(&full);
+    let did = std::fs::read_to_string(&account)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    (output, did)
+}
+
+/// A raw event's attributes, by name.
+fn fx_attrs(event: &serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    event["attrs"]
+        .as_array()
+        .expect("attributes")
+        .iter()
+        .map(|attr| {
+            (
+                attr["name"].as_str().expect("a name").to_owned(),
+                attr["value"].clone(),
+            )
+        })
+        .collect()
+}
+
+fn fx_raw(result: &serde_json::Value) -> Vec<BTreeMap<String, serde_json::Value>> {
+    result["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .find(|output| output["emit"] == "raw")
+        .expect("a raw emit")["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(fx_attrs)
+        .collect()
+}
+
+fn fx_u64(event: &BTreeMap<String, serde_json::Value>, name: &str) -> u64 {
+    event
+        .get(name)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("an event carries `{name}`: {event:?}"))
+}
+
+fn fx_text<'a>(event: &'a BTreeMap<String, serde_json::Value>, name: &str) -> &'a str {
+    event
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("an event carries `{name}`: {event:?}"))
+}
+
+/// Whether this build can attach an fentry program, and why not.
+fn fx_no_fentry_here() -> Option<String> {
+    let outcome = omn(&[
+        "net.socket",
+        "--system",
+        "--mode",
+        "trace",
+        "--duration",
+        "100ms",
+        "--emit",
+        "summary",
+    ]);
+    if code(&outcome) == 0 {
+        return None;
+    }
+    Some(format!(
+        "this build cannot attach an fentry program: {}",
+        stderr(&outcome).lines().next().unwrap_or("").trim()
+    ))
+}
+
+/// The sweep for the two fentry sources: every emit each declares, in every
+/// mode the matrix lets it have, over one window with traffic running.
+#[test]
+fn the_fentry_leg_of_the_sweep_answers_with_every_emit_it_promised() {
+    if let Some(reason) = fx_no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let measuring = Command::new(BINARY)
+        .args(["-f", &session("net-fentry-sweep.yml"), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    // Traffic for as long as the run lasts, rather than once at a guessed
+    // moment: attaching fentry programs rebuilds trampolines, which the kernel
+    // serialises machine-wide, and under this suite a run's attach has been
+    // measured at more than two seconds. A single burst sent a quarter of a
+    // second in lands before the window opens on exactly the runs that matter.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let traffic = {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                push_through_loopback(64 * 1024);
+                pause(50);
+            }
+        })
+    };
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    traffic.join().expect("the traffic thread");
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    for (label, wanted) in [
+        ("handshakes", &["hist", "topk", "raw", "summary"][..]),
+        (
+            "sends-and-receives",
+            &["hist", "topk", "raw", "summary"][..],
+        ),
+        ("counted", &["raw", "summary"][..]),
+    ] {
+        let result = labelled(&run, label);
+        assert_eq!(emits(result), wanted, "`{label}` emitted the wrong set");
+        assert_eq!(result["backend"], "bpf:fentry", "`{label}`");
+        let seen = result["events_seen"].as_u64().expect("an event count");
+        assert!(
+            seen > 0,
+            "`{label}` watched a connection open, carry 64 KiB and close, and saw nothing"
+        );
+    }
+}
+
+const FX_SOCKETS: &str = r#"
+import json, os, socket, struct, sys, threading, time
+account = sys.argv[1]
+SO_COOKIE = 57
+cookie = lambda s: struct.unpack("Q", s.getsockopt(socket.SOL_SOCKET, SO_COOKIE, 8))[0]
+listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(1)
+port = listener.getsockname()[1]
+state = {}
+def serve():
+    conn, _ = listener.accept()
+    state["server_cookie"] = cookie(conn)
+    total = 0
+    while total < 2 * 1000 * 4096:
+        data = conn.recv(65536)
+        if not data: break
+        total += len(data)
+    state["received"] = total
+    # The injected wait: the client's next receive blocks until this sends.
+    time.sleep(0.3)
+    conn.send(b"!")
+    conn.recv(1)
+    conn.close()
+server = threading.Thread(target=serve); server.start()
+client = socket.create_connection(("127.0.0.1", port))
+block = b"x" * 4096
+for _ in range(1000):
+    client.send(block)
+for _ in range(1000):
+    os.write(client.fileno(), block)
+started = time.monotonic_ns()
+client.recv(1)
+waited = time.monotonic_ns() - started
+client.send(b".")
+server.join()
+# The byte that ends the exchange is a send too: 2001, and one byte more.
+json.dump({"cookie": cookie(client), "port": port, "sends": 2001, "bytes": 2000 * 4096 + 1,
+           "waited_ns": waited, **state}, open(account, "w"))
+client.close()
+"#;
+
+/// Two thousand sends of 4096 bytes on one socket, found on that socket's own
+/// cookie, byte for byte; the server's receives, found on its; and a receive
+/// that waited three hundred milliseconds for its peer, found at the length
+/// the program timed.
+///
+/// Every reference is the program's: the cookies are `getsockopt(SO_COOKIE)`
+/// on the sockets it holds, the sends are its loop bound, and the wait is its
+/// own clock around the call. The half of the sends made with `write(2)` are
+/// the check that the send path is the family's `sendmsg` and not
+/// `sock_sendmsg`: `src/bpf/net_socket.rs` has why, and a program attached to
+/// the latter counts none of these.
+#[test]
+fn every_send_and_receive_is_found_on_the_socket_that_made_it() {
+    if let Some(reason) = fx_no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let (outcome, did) = fx_launch(
+        &["net.socket", "--mode", "trace", "--emit", "raw"],
+        "fx-sockets",
+        FX_SOCKETS,
+    );
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    let result = &run["results"][0];
+    let events = fx_raw(result);
+    let client = did["cookie"].as_u64().expect("the client's cookie");
+    let server = did["server_cookie"].as_u64().expect("the server's cookie");
+    let on = |cookie: u64, op: &str| -> (u64, u64, Vec<u64>) {
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.get("cookie").and_then(serde_json::Value::as_u64) == Some(cookie)
+                    && fx_text(event, "op") == op
+            })
+            .collect();
+        (
+            mine.iter().map(|event| fx_u64(event, "count")).sum(),
+            mine.iter().map(|event| fx_u64(event, "bytes")).sum(),
+            mine.iter().map(|event| fx_u64(event, "total_ns")).collect(),
+        )
+    };
+    let dropped = result["losses"]["dropped"].as_u64().expect("a drop count");
+    if dropped > 0 {
+        eprintln!(
+            "note: the run counted {dropped} lost call(s): {}",
+            result["losses"]["reasons"]
+        );
+    }
+
+    // The client's sends: the loop bound, the bytes, exactly -- or short by no
+    // more than what the run counted as lost.
+    let (sends, sent, _) = on(client, "send");
+    let wanted = did["sends"].as_u64().expect("sends");
+    assert!(
+        sends <= wanted && sends + dropped >= wanted,
+        "{sends} sends on the client's socket {client} for the {wanted} it made, {dropped} lost"
+    );
+    if dropped == 0 {
+        assert_eq!(sent, did["bytes"].as_u64().expect("bytes"));
+    }
+    // The port the client connected to, on every one of its rows.
+    let port = did["port"].as_u64().expect("the port");
+    assert!(events
+        .iter()
+        .filter(|event| event.get("cookie").and_then(serde_json::Value::as_u64) == Some(client))
+        .all(|event| fx_u64(event, "dport") == port && fx_u64(event, "family") == 2));
+
+    // The server's receives carry every byte the client sent: the stream the
+    // server counted itself, and the closing byte its last receive took.
+    let (_, received, _) = on(server, "recv");
+    if dropped == 0 {
+        assert_eq!(
+            received,
+            did["received"].as_u64().expect("received") + 1,
+            "the server's receives on its socket {server}"
+        );
+    }
+
+    // The injected wait: the client's one receive, at the length the program
+    // timed around it -- inside that interval, and within a millisecond of it.
+    let waited = did["waited_ns"].as_u64().expect("the program's own clock");
+    assert!(waited >= 300_000_000, "the server slept {waited} ns");
+    let (receives, _, totals) = on(client, "recv");
+    if receives == 0 && dropped > 0 {
+        eprintln!("skipped the wait: the client's receive is in the {dropped} counted as lost");
+        return;
+    }
+    assert_eq!(receives, 1, "the client received once");
+    let timed = totals[0];
+    assert!(
+        timed <= waited && waited - timed < 1_000_000,
+        "the receive was timed at {timed} ns inside a call the program timed at {waited} ns"
+    );
+}
+
+const FX_CONNECTS: &str = r#"
+import json, socket, struct, sys, time
+account = sys.argv[1]
+SO_COOKIE = 57
+listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(64)
+port = listener.getsockname()[1]
+spare = socket.socket(); spare.bind(("127.0.0.1", 0)); closed = spare.getsockname()[1]; spare.close()
+cookies = []
+for _ in range(20):
+    c = socket.create_connection(("127.0.0.1", port))
+    cookies.append(struct.unpack("Q", c.getsockopt(socket.SOL_SOCKET, SO_COOKIE, 8))[0])
+    listener.accept()[0].close()
+    c.close()
+refused = 0
+for _ in range(5):
+    try:
+        socket.create_connection(("127.0.0.1", closed))
+    except ConnectionRefusedError:
+        refused += 1
+# A listener whose accept queue is full drops the next SYN, and the client
+# resends it after the kernel's initial retransmission timeout, one second.
+# With a backlog of zero, one established connection is a full queue.
+full = socket.socket(); full.bind(("127.0.0.1", 0)); full.listen(0)
+full_port = full.getsockname()[1]
+queued = socket.create_connection(("127.0.0.1", full_port), timeout=5)
+import threading
+def drain():
+    time.sleep(0.5)
+    for _ in range(2):
+        full.accept()[0].close()
+threading.Thread(target=drain).start()
+started = time.monotonic_ns()
+slow = socket.create_connection(("127.0.0.1", full_port), timeout=5)
+slow_ns = time.monotonic_ns() - started
+slow_cookie = struct.unpack("Q", slow.getsockopt(socket.SOL_SOCKET, SO_COOKIE, 8))[0]
+json.dump({"port": port, "closed": closed, "cookies": cookies, "refused": refused,
+           "full_port": full_port, "slow_ns": slow_ns, "slow_cookie": slow_cookie},
+          open(account, "w"))
+"#;
+
+/// Twenty handshakes that succeed, five that are refused, and one whose first
+/// SYN is dropped: each found with its outcome, its port, its errno and the
+/// cookie the program's own socket reports.
+///
+/// The one lost SYN is the injected delay. A listener with a full accept queue
+/// drops the SYN, and the client resends it after the kernel's initial
+/// retransmission timeout -- one second, `TCP_TIMEOUT_INIT` -- so that
+/// handshake must come back at least a second long and the twenty on an idle
+/// listener must come back three orders of magnitude shorter. The separation is
+/// asserted, not a calibrated threshold: the slow one is above a second, and
+/// every fast one is below a tenth of it.
+#[test]
+fn every_handshake_is_found_with_its_outcome_and_the_lost_syn_takes_a_second() {
+    if let Some(reason) = fx_no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let (outcome, did) = fx_launch(
+        &["net.tcp.connect", "--mode", "trace", "--emit", "raw"],
+        "fx-connects",
+        FX_CONNECTS,
+    );
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    let result = &run["results"][0];
+    let events = fx_raw(result);
+    let port = did["port"].as_u64().expect("the port");
+    let closed = did["closed"].as_u64().expect("the closed port");
+    let full_port = did["full_port"].as_u64().expect("the full listener's port");
+    let dropped = result["losses"]["dropped"].as_u64().expect("a drop count");
+    assert_eq!(dropped, 0, "{}", result["losses"]);
+
+    let established: Vec<_> = events
+        .iter()
+        .filter(|event| fx_u64(event, "dport") == port)
+        .collect();
+    assert_eq!(established.len(), 20, "twenty handshakes to {port}");
+    assert!(established
+        .iter()
+        .all(|event| fx_text(event, "outcome") == "established"));
+    let cookies: std::collections::BTreeSet<u64> = did["cookies"]
+        .as_array()
+        .expect("cookies")
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    let found: std::collections::BTreeSet<u64> = established
+        .iter()
+        .map(|event| fx_u64(event, "cookie"))
+        .collect();
+    assert_eq!(
+        found, cookies,
+        "each handshake carries the cookie SO_COOKIE gives its socket"
+    );
+
+    let refused: Vec<_> = events
+        .iter()
+        .filter(|event| fx_u64(event, "dport") == closed)
+        .collect();
+    assert_eq!(
+        refused.len() as u64,
+        did["refused"].as_u64().expect("refused")
+    );
+    assert!(refused.iter().all(|event| {
+        fx_text(event, "outcome") == "refused"
+            && event.get("errno").and_then(serde_json::Value::as_i64) == Some(111)
+    }));
+
+    let to_full: Vec<_> = events
+        .iter()
+        .filter(|event| fx_u64(event, "dport") == full_port)
+        .collect();
+    let slow = to_full
+        .iter()
+        .find(|event| {
+            event.get("cookie").and_then(serde_json::Value::as_u64) == did["slow_cookie"].as_u64()
+        })
+        .expect("the handshake whose SYN was dropped");
+    let slow_ns = fx_u64(slow, "lat_ns");
+    assert!(
+        slow_ns >= 1_000_000_000 && slow_ns <= did["slow_ns"].as_u64().expect("its own clock"),
+        "a handshake behind one dropped SYN took {slow_ns} ns; the kernel resends after one \
+         second, and the program timed {} ns around it",
+        did["slow_ns"]
+    );
+    let slowest_fast = established
+        .iter()
+        .map(|event| fx_u64(event, "lat_ns"))
+        .max()
+        .expect("twenty");
+    assert!(
+        slowest_fast < 100_000_000,
+        "an idle loopback handshake took {slowest_fast} ns, which is not apart from a lost SYN"
+    );
+}
+
+const FX_HANDSHAKE_STORM: &str = r#"
+import json, resource, socket, sys, time
+account = sys.argv[1]
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 16384), hard))
+full = socket.socket(); full.bind(("127.0.0.1", 0)); full.listen(0)
+port = full.getsockname()[1]
+sockets = []
+for _ in range(5000):
+    s = socket.socket(); s.setblocking(False)
+    s.connect_ex(("127.0.0.1", port))
+    sockets.append(s)
+time.sleep(0.2)
+json.dump({"connects": len(sockets), "port": port}, open(account, "w"))
+"#;
+
+/// Five thousand handshakes in flight at once against a listener that drops
+/// their SYNs is more than the pending map holds, and every one that found no
+/// room is counted.
+///
+/// The number closes: the map holds 4096, the listener's queue lets a couple
+/// through before it is full, and the rest stay in `SYN_SENT` for the whole
+/// run. So the drops are five thousand less the map's capacity, less the few
+/// that established and freed a slot -- and the run must say its handshake
+/// count is short, and that the stamps still in the map are handshakes still in
+/// flight rather than lost.
+#[test]
+fn more_handshakes_in_flight_than_the_map_holds_are_counted_as_lost() {
+    if let Some(reason) = fx_no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let (outcome, did) = fx_launch(
+        &["net.tcp.connect", "--mode", "trace", "--emit", "summary"],
+        "fx-handshake-storm",
+        FX_HANDSHAKE_STORM,
+    );
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    let result = &run["results"][0];
+    let connects = did["connects"].as_u64().expect("connects");
+    const CAPACITY: u64 = 4096;
+    let dropped = result["losses"]["dropped"].as_u64().expect("a drop count");
+    assert!(
+        dropped <= connects - CAPACITY && dropped + 16 >= connects - CAPACITY,
+        "{connects} handshakes in flight and a map of {CAPACITY}: {dropped} dropped, where \
+         {} is the arithmetic",
+        connects - CAPACITY
+    );
+    let reasons = result["losses"]["reasons"].to_string();
+    assert!(reasons.contains("in flight at once"), "{reasons}");
+    let notes = result["degradations"].to_string();
+    assert!(
+        notes.contains("still in flight"),
+        "the stamps left in the map are handshakes still in SYN_SENT, and the run says so: \
+         {notes}"
+    );
+}
+
+const FX_MANY_SOCKETS: &str = r#"
+import json, socket, struct, sys, threading
+account = sys.argv[1]
+SO_COOKIE = 57
+pairs, threads = 1000, 100
+ends = [socket.socketpair() for _ in range(pairs)]
+cookies = [struct.unpack("Q", a.getsockopt(socket.SOL_SOCKET, SO_COOKIE, 8))[0] for a, _ in ends]
+start = threading.Barrier(threads)
+def sender():
+    start.wait()
+    for a, _ in ends:
+        a.send(b"x")
+workers = [threading.Thread(target=sender) for _ in range(threads)]
+for w in workers: w.start()
+for w in workers: w.join()
+json.dump({"cookies": cookies, "sends": pairs * threads}, open(account, "w"))
+"#;
+
+/// A hundred threads each sending one byte on a thousand sockets is a hundred
+/// thousand rows, three times what the histogram holds per drain: every send is
+/// in a row or in the drop count, and none is in both.
+#[test]
+fn more_socket_rows_than_the_histogram_holds_are_counted_as_lost_and_the_rest_are_exact() {
+    if let Some(reason) = fx_no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let (outcome, did) = fx_launch(
+        &["net.socket", "--mode", "trace", "--emit", "raw"],
+        "fx-many-sockets",
+        FX_MANY_SOCKETS,
+    );
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    let result = &run["results"][0];
+    let cookies: std::collections::BTreeSet<u64> = did["cookies"]
+        .as_array()
+        .expect("cookies")
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    let sends = did["sends"].as_u64().expect("sends");
+    let counted: u64 = fx_raw(result)
+        .iter()
+        .filter(|event| {
+            fx_text(event, "op") == "send"
+                && event
+                    .get("cookie")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|cookie| cookies.contains(&cookie))
+        })
+        .map(|event| fx_u64(event, "count"))
+        .sum();
+    let dropped = result["losses"]["dropped"].as_u64().expect("a drop count");
+    if dropped == 0 {
+        eprintln!(
+            "skipped: {counted} of {sends} sends counted and none dropped, so this machine did \
+             not fill a drain's worth of rows and the loss path was not created"
+        );
+        assert_eq!(counted, sends);
+        return;
+    }
+    assert!(
+        counted + dropped >= sends && counted <= sends,
+        "{counted} counted and {dropped} dropped for {sends} sends"
+    );
+    assert!(result["losses"]["reasons"]
+        .to_string()
+        .contains("lower bound"));
+}
+
+/// Each refuses what it cannot serve, with the exit code that belongs to it: a
+/// mode it cannot mean (2), a cgroup target this build cannot narrow to (3),
+/// and a binary without the capabilities (1) -- a copy of this one, which is
+/// what a relink produces.
+#[test]
+fn the_fentry_net_sources_refuse_with_the_reason_that_is_actually_missing() {
+    let polled = omn(&[
+        "net.socket",
+        "--system",
+        "--mode",
+        "poll@100ms",
+        "--duration",
+        "200ms",
+        "--emit",
+        "summary",
+    ]);
+    assert_eq!(code(&polled), 2, "{}", stderr(&polled));
+    let counted = omn(&[
+        "net.tcp.connect",
+        "--system",
+        "--mode",
+        "count",
+        "--duration",
+        "200ms",
+        "--emit",
+        "summary",
+    ]);
+    assert_eq!(code(&counted), 2, "{}", stderr(&counted));
+    for source in ["net.socket", "net.tcp.connect"] {
+        let cgroup = omn(&[
+            source,
+            "--cgroup",
+            "/sys/fs/cgroup",
+            "--mode",
+            "trace",
+            "--duration",
+            "100ms",
+            "--emit",
+            "summary",
+        ]);
+        let complaint = stderr(&cgroup);
+        if code(&cgroup) == 1 {
+            eprintln!("skipped the cgroup refusal of {source}: {complaint}");
+        } else {
+            assert_eq!(code(&cgroup), 3, "{source}: {complaint}");
+            assert!(
+                complaint.contains("bpf_get_current_cgroup_id"),
+                "{complaint}"
+            );
+        }
+    }
+    let bare = fx_scratch("omn-net-without-capabilities");
+    std::fs::copy(BINARY, &bare).expect("a copy of the binary");
+    for source in ["net.socket", "net.tcp.connect"] {
+        let output = Command::new(&bare)
+            .args([
+                source,
+                "--system",
+                "--mode",
+                "trace",
+                "--duration",
+                "100ms",
+                "--emit",
+                "summary",
+            ])
+            .output()
+            .expect("the copy runs");
+        if output.status.success() {
+            eprintln!("skipped the capability refusal of {source}: the copy collected");
+            continue;
+        }
+        let complaint = stderr(&output);
+        assert_eq!(code(&output), 1, "{source}: {complaint}");
+        assert!(
+            complaint.contains("CAP_BPF") && complaint.contains("setcap"),
+            "{source}: {complaint}"
+        );
+    }
+}
+
+/// A connection opened in one source and closed in another is joined by its
+/// cookie with nothing else in the session.
+///
+/// Until `net.tcp.connect` existed this join needed `net.tcp.rtt` beside it,
+/// for no reason but that its `sock_diag` poll was what made the kernel assign
+/// cookies (`docs/scenarios/net.md` item 11). `net.tcp.connect` asks for the
+/// cookie at the handshake, so the field `net.tcp.lifetime` reads at the close
+/// is set. The reference is the connections this test makes, identified by the
+/// local ports the kernel gave their client sockets: each of them must close
+/// with a cookie and be attributed to its handshake.
+#[test]
+fn a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone() {
+    if let Some(reason) = fx_no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let measuring = Command::new(BINARY)
+        .args([
+            "-f",
+            &session("net-handshake-to-close.yml"),
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    // Connections for as long as the run lasts, for the reason the fentry
+    // sweep gives: an attach under this suite can take seconds.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let traffic = {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut ports = Vec::new();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut client = TcpStream::connect(listener.local_addr().expect("an address"))
+                    .expect("connect");
+                ports.push(client.local_addr().expect("a local address").port());
+                let (mut server, _) = listener.accept().expect("accept");
+                client.write_all(&[7u8; 4096]).expect("send");
+                let mut sink = [0u8; 4096];
+                server.read_exact(&mut sink).expect("receive");
+                drop(client);
+                drop(server);
+                pause(20);
+            }
+            ports
+        })
+    };
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let ports = traffic.join().expect("the traffic thread");
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let run = results(&outcome);
+    let closed = fx_raw(labelled(&run, "closed"));
+    let opened = fx_raw(labelled(&run, "opened"));
+    // The connections that both opened and closed inside the window.
+    let mine: Vec<u16> = ports
+        .iter()
+        .copied()
+        .filter(|port| {
+            opened
+                .iter()
+                .any(|event| fx_u64(event, "sport") == u64::from(*port))
+                && closed
+                    .iter()
+                    .any(|event| fx_u64(event, "sport") == u64::from(*port))
+        })
+        .collect();
+    assert!(
+        mine.len() >= 3,
+        "{} connections made, {} of them seen at both ends inside the window",
+        ports.len(),
+        mine.len()
+    );
+    for port in &mine {
+        let open = opened
+            .iter()
+            .find(|event| fx_u64(event, "sport") == u64::from(*port))
+            .expect("the handshake");
+        let close = closed
+            .iter()
+            .find(|event| fx_u64(event, "sport") == u64::from(*port))
+            .expect("the close");
+        assert_eq!(
+            open.get("cookie"),
+            close.get("cookie"),
+            "the connection from port {port} carries one cookie from its handshake to its close"
+        );
+    }
+    let joins = run["joins"].to_string();
+    assert!(
+        joins.contains("handshake-to-close") && joins.contains("KEY"),
+        "the join is reported, with KEY evidence: {joins}"
+    );
 }

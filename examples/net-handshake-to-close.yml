@@ -1,0 +1,68 @@
+# From the SYN to the FIN: one connection, joined across two sources by its
+# cookie, with nothing else in the session.
+#
+#   omn -f examples/net-handshake-to-close.yml
+#
+# `net.tcp.connect` sees a connection open and `net.tcp.lifetime` sees it
+# close, and the two share nothing but the socket. They are joined on
+# `sock:cookie`, and **that join used to need a third source**: the kernel
+# generates a socket's cookie only when something asks for one, the raw
+# tracepoint `net.tcp.lifetime` attaches to can only read the field, and on a
+# socket nothing had dumped it read zero. `examples/net-connection-life.yml`
+# put `net.tcp.rtt` in the session for that reason alone -- its `sock_diag`
+# poll is what asked.
+#
+# `net.tcp.connect` asks. It calls `bpf_get_socket_cookie` at the handshake,
+# which assigns the cookie there and then, so by the time the connection
+# closes the field `net.tcp.lifetime` reads is set, and the number is the one
+# `SO_COOKIE` and `ss -e` report for the same socket. Each client-side close is
+# attributed to its handshake, with `KEY` evidence.
+#
+# **The server-side closes are filtered out, and why is a finding.** A socket
+# taken off a listen queue never called `connect`, so nothing asked for its
+# cookie and its close carries no `sock` key. The join engine treats an event
+# without the rule's key as a rule that does not fit its sources and refuses
+# the whole join at the first one -- rather than counting it as unattributable,
+# which is what it is. `docs/open-findings.md` has the request; until it lands,
+# `cookie > 0` keeps only the closes that can be joined, and says so here.
+#
+# Both requests watch the whole machine -- `net.tcp.lifetime` offers nothing
+# narrower, and one run observes one target -- so bring the traffic. In another
+# terminal, while this runs:
+#
+#   python3 -c 'import socket
+#   l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(16)
+#   for _ in range(10):
+#       c = socket.create_connection(l.getsockname()); s, _ = l.accept()
+#       c.sendall(b"x" * 4096); s.recv(8192); c.close(); s.close()'
+#
+# Measured here: ten connections, `10 of 10 net.tcp.lifetime events
+# attributed (100.0 %)`, evidence KEY.
+name: from the handshake to the close
+format: text
+
+requests:
+  - label: opened
+    source: net.tcp.connect
+    target: system
+    mode: trace
+    emit: [raw, summary]
+    keys: [sock]
+
+  - label: closed
+    source: net.tcp.lifetime
+    target: system
+    mode: trace
+    emit: [raw, summary]
+    keys: [sock]
+    filter: "cookie > 0"
+
+joins:
+  - id: handshake-to-close
+    from: net.tcp.connect
+    to: net.tcp.lifetime
+    via: sock
+    match: eq
+    window: 30s
+
+duration: 1500ms

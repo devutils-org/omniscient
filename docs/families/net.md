@@ -200,6 +200,8 @@ Implemented, with ground truth:
 | `net.drops` | `bpf:raw_tp` | 512 datagrams to a closed port, and `Udp: NoPorts` |
 | `net.qdisc` | `bpf:raw_tp` | 50 ms injected by `netem`, recovered from `total_ns` as 50.0018 ms |
 | `net.softirq` | `bpf:raw_tp` | `/proc/softirqs`, read around the run, bounding it exactly |
+| `net.tcp.connect` | `bpf:fentry` | twenty handshakes, five refusals and one dropped SYN, each found with its outcome, its port, its errno and the cookie `SO_COOKIE` gives the program's own socket; the dropped SYN at the kernel's one-second initial RTO |
+| `net.socket` | `bpf:fentry` | 2001 sends on one socket, byte for byte, on the cookie `SO_COOKIE` gives it; a receive that waited 300 ms for its peer, at the length the program timed |
 
 Blocked, and on what:
 
@@ -208,7 +210,6 @@ Blocked, and on what:
 | `net.capture` | `CAP_NET_RAW`. `AF_PACKET` is refused at uid 1000, so a collector here could not be given a ground truth, which is the standard this family is held to. The probe reports it as a privilege to grant, not a kernel to change. |
 | `net.hwts` | Owning the socket. `SO_TIMESTAMPING` is set per socket, so reaching an arbitrary process's sockets means the preload shim. It also needs a NIC with a PHC; loopback has none. |
 | `net.xdp` | Privileges, and an XDP program to attach. |
-| `tcp.connect`, `socket` | **fentry**: BTF-typed attach, `BPF_PROG_TYPE_TRACING` with an `attach_btf_id`, which `src/bpf/attach.rs` does not have. Both would carry `sock:cookie` and join to `net.tcp.rtt` without a translation, on the terms finding 11 of `docs/scenarios/net.md` sets out. |
 
 ## Needs from the shared layer
 
@@ -271,3 +272,130 @@ It is the kernel's smoothed estimate — what the stack currently believes about
 the path, which is what drives its own congestion decisions. It is not a
 measured packet round trip. `net.hwts` is the source that splits real latency
 into NIC, kernel and application segments.
+
+---
+
+## The two sources over fentry
+
+The eighth wave's: `net.tcp.connect` and `net.socket`, on the attach kind this
+family had been waiting on -- `BPF_PROG_TYPE_TRACING` with an `attach_btf_id`,
+in `src/bpf/fentry.rs`. `docs/families/io.md` has the attach kind itself and the
+three losses it found; what follows is what the two `net` sources needed.
+
+| Source | Opened at | Closed at | Shape |
+|---|---|---|---|
+| `net.tcp.connect` | `tcp_v4_connect`, `tcp_v6_connect` | `tcp_finish_connect` (established), `tcp_done_with_error` (refused or timed out), the connect's own error return (failed) | one record per handshake |
+| `net.socket` | `sock_recvmsg`; `inet_sendmsg`, `inet6_sendmsg`, `unix_stream_sendmsg`, `unix_dgram_sendmsg` | the same functions' exit halves | counted in the kernel, a row per `(task, op, socket, log2 bucket)` |
+
+### The cookie is generated, not found
+
+`net.tcp.lifetime` reads `skc_cookie`, which is zero on any socket nothing has
+dumped -- finding 11 of `docs/scenarios/net.md`, and the reason
+`examples/net-connection-life.yml` carries `net.tcp.rtt` for nothing but its
+`sock_diag` poll. A tracing program can call `bpf_get_socket_cookie` on a
+`struct sock *`, which **assigns** the cookie if nothing has yet. Both fentry
+sources do, so their key is the number `SO_COOKIE` and `ss -e` report for the
+same socket -- checked: 20 of 20 handshakes, and the one socket of the send
+scenario, against `getsockopt(SO_COOKIE)` asked by the program of its own
+sockets.
+
+It changes what the rest of the family can do, too. A connection whose
+handshake `net.tcp.connect` saw has its cookie set by the time it closes, so
+`net.tcp.lifetime` reads it there, and the two join on `sock:cookie` **with
+nothing else in the session**: `examples/net-handshake-to-close.yml`, measured
+at `10 of 10 net.tcp.lifetime events attributed (100.0 %)`, evidence `KEY`.
+
+The server-side closes of the same connections carry no cookie -- a socket
+taken off a listen queue never called `connect`, and nothing asked -- and the
+join engine refuses a whole rule at the first `to` event without its key, as a
+rule that does not fit its sources. The session filters on `cookie > 0` and
+says so, `net.tcp.lifetime` declares the `cookie` filter field its events
+always carried, and the request that such an event be counted as
+unattributable instead is filed for the join engine's stream.
+
+### A handshake closes in someone else's context
+
+The SYN-ACK is processed in softirq, on whatever cpu took the packet, so at the
+close the current task is whoever the interrupt landed on. The stamp is
+therefore keyed by the **socket** and carries the connecting task, its thread
+id and its name with it, and every event names the task that called `connect`
+-- never the bystander. Every handshake ends in one of three outcomes and each
+is its own event: `established`, `refused` with the errno the application was
+given (111 for a RST), or `failed` when the connect call returned an error
+before a SYN left. A handshake a program abandons while still in `SYN_SENT`
+closes through none of them and is counted at the end as still in flight.
+
+**A dropped SYN is the injected delay this source can be checked against.** A
+listener whose accept queue is full drops the next SYN, and the client resends
+it after the kernel's initial retransmission timeout, one second. With a
+backlog of zero, one queued connection is a full queue; the scenario's slow
+handshake comes back above a second and inside the interval the program timed
+around its own `connect`, while twenty handshakes to an idle listener come back
+under a tenth of that. The catalog's caveat now says it in the reader's terms:
+a handshake near one second is a lost SYN, not a slow peer.
+
+### The send path is not `sock_sendmsg`
+
+The catalog named `sock_sendmsg` and `sock_recvmsg`, the obvious mirror pair,
+and the first run found every receive and **none of 2000 sends**. Every syscall
+path -- `send`, `sendto`, `sendmsg`, `write` on a socket -- calls
+`__sock_sendmsg`, which is not a symbol at all on this kernel: the compiler
+inlined it everywhere, and `sock_sendmsg` is the out-of-line copy the kernel's
+own senders use. What each of those paths does call out of line is the
+family's `sock->ops->sendmsg`, and the four families that carry nearly all
+traffic share one prototype, so sends are timed at `inet_sendmsg`,
+`inet6_sendmsg`, `unix_stream_sendmsg` and `unix_dgram_sendmsg` and receives
+stay at `sock_recvmsg`. **The two directions are therefore not symmetric**: a
+send on a netlink or packet socket is not timed and a receive on one is. Every
+run says so, and so does the caveat. Half the scenario's sends are `write(2)`
+on the socket, which is the check that the send path is the right one.
+
+### What was measured
+
+- **2001 sends and 8,192,001 bytes** on the client's socket, and the same bytes
+  received on the server's, each on the cookie its own `getsockopt(SO_COOKIE)`
+  reports. Both numbers came out one more than the scenario first expected --
+  the byte that ends the exchange is a send too -- and both times the tool was
+  right and the expectation wrong.
+- **A receive that waited 300 ms** for its peer, timed by the program around
+  its own call, lands inside that interval in `net.socket`.
+- **Twenty established, five refused with errno 111**, each on the port the
+  program connected to, and one handshake behind a dropped SYN at over one
+  second.
+- **The loss paths.** Five thousand non-blocking connects parked in `SYN_SENT`
+  against a full listener is more than the 4096 handshakes the pending map
+  holds. Measured: **903 dropped** -- five thousand, less the 4096 the map
+  holds, less the one handshake the queue let through, which established and
+  freed its slot -- and 4096 reported still in flight at the end. A hundred threads each sending one byte on a thousand socket pairs is
+  a hundred thousand histogram rows, and the rows plus the drops are never
+  fewer than the sends.
+
+### What these two cannot do
+
+- **`net.socket` sends are timed for inet, inet6 and unix sockets only**, for
+  the reason above.
+- **A receive's latency includes the wait for data.** A blocking `recv` that
+  waited a second for its peer is a second here, and is not a slow network;
+  the caveat says it.
+- **`net.tcp.connect` sees the client side only.** A server's accepted sockets
+  never called `connect`; `net.tcp.lifetime` is where they appear.
+- **A cgroup target is refused** with exit 3, naming
+  `bpf_get_current_cgroup_id`.
+- **Their `bpf:kprobe` backends have no collector**, which is what
+  `examples/net-not-built.yml` now pins to show exit 3: the two sources the
+  file used to ask for collect through `bpf:fentry`, which was the day its
+  own comment said it would stop being an example.
+- **The exit half of a call in flight can be lost** when another tracer
+  attaches to the same function, which `io.md` has in full. Counted, not
+  prevented; a long blocking `recv` is the likeliest casualty.
+
+### Sessions
+
+- `examples/net-fentry-sweep.yml` -- every emit both declare, in every mode the
+  matrix allows.
+- `examples/net-handshake-to-close.yml` -- the join above.
+- `examples/net-not-built.yml` -- rewritten to pin the unbuilt `bpf:kprobe`
+  backends.
+
+The first two need rows in `examples/README.md` and `GUIDE.md`, which are the
+coordinator's.

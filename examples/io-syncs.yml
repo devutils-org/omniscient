@@ -1,0 +1,34 @@
+# What does a sync cost, and which ones waited for the device?
+#
+#   omn -f examples/io-syncs.yml
+#
+# Twenty `fsync`s of freshly written data, then five `fdatasync`s of nothing,
+# then three `msync`s through a mapping. `io.fsync` reports one event per sync,
+# each on the file it made durable -- `file:<device>+<inode>`, the same key
+# `io.fs` puts on that file's reads and writes -- and each named for the call
+# it was:
+#
+#   call=fsync      via=do_fsync          the twenty, found through fd 3
+#   call=fdatasync  via=do_fsync          the five, a microsecond or two each
+#   call=fdatasync  via=vfs_fsync_range   the three msyncs, by their argument
+#
+# The first twenty wait for the device and the next five do not, and the
+# histogram shows it as two humps three orders of magnitude apart. `via` is
+# there because the function the catalog used to name for this source is not
+# the one `fsync(2)` reaches on this machine: the compiler inlined it, and the
+# measurement that found that is in `src/bpf/io_fsync.rs`.
+#
+# The file is written into the current directory and removed again.
+name: what each sync cost
+format: text
+
+requests:
+  - label: syncs
+    source: io.fsync
+    target:
+      launch:
+        - python3
+        - -c
+        - "import mmap,os; p='omn-syncs.bin'; fd=os.open(p,os.O_RDWR|os.O_CREAT|os.O_TRUNC,0o644); [ (os.write(fd,os.urandom(65536)), os.fsync(fd)) for _ in range(20)]; [os.fdatasync(fd) for _ in range(5)]; m=mmap.mmap(fd,65536); [ (m.__setitem__(i,1), m.flush()) for i in range(3)]; m.close(); os.close(fd); os.remove(p)"
+    mode: trace
+    emit: [hist, topk, raw, summary]
