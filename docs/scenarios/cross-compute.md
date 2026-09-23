@@ -327,7 +327,7 @@ switch that ends the wait and its `run_delay` stops early, while the tool reads
 wakeup; a busy one mostly is not. It is written down because it is the kind of
 difference that reads as a bug in whichever tool the reader trusts less.
 
-### 8. `cpu.oncpu_time` on a launched program is short by its last poll
+### 8. `cpu.oncpu_time` on a launched program is short by its last poll — **the exact figure is carried now**
 
 The polled second opinion read between 170 and 190 ms against the kernel's
 190.3 to 206.0 across the runs here: always a multiple of ten, always short, by
@@ -337,6 +337,25 @@ the open question `STATE.md` names -- *the closing read of a polled counter* --
 met on a third family. For a launched program the reap already has the exact
 answer: `wait4` returns the child's `rusage`. The test holds the row to one poll
 and one tick of the kernel's figure and no closer.
+
+**What landed**, in the eighth wave's coordinator pass, and it is deliberately
+not a closing read. `Collector::stop`'s own documentation says why: the runner
+closes the window itself, so a further read there produces a second point at
+the same offset with a value near zero and drags every summary computed over the
+series. What the reap has is not another point, it is the **total** -- so it
+rides on the lifetime, beside the whole that a decomposition's parts are parts
+of, and the series stays the series it is.
+
+Measured by `the_reap_carries_the_cpu_the_last_poll_missed`: a busy loop asked
+for a second of cpu, the polled series summed **990.0 ms** -- a round multiple
+of the tick -- and the reap handed over **1006.5 ms**. The test asserts the two
+numbers against each other and against their own resolutions, never either one
+on its own: how much cpu a busy loop gets belongs to the machine, and that the
+polls and the reap agree to within a poll and a tick belongs to the tool.
+
+The open question itself is not settled by this. `net` takes a closing read,
+`io` and `power` deliberately do not, and a launched program is the one case
+where the kernel volunteers the answer without being asked again.
 
 ---
 

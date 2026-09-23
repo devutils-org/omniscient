@@ -54,6 +54,28 @@ pub struct Lifetime {
     /// the program did.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub terminated: bool,
+    /// User plus system cpu the program spent, as the kernel handed it over at
+    /// the reap: `wait4`'s `rusage`, exact to the microsecond.
+    ///
+    /// It is here because it is the one cpu figure for a launched program that
+    /// nothing has to round. `cpu.oncpu_time` reads `/proc/<pid>/stat` in ticks
+    /// of a hundredth of a second and stops being able to read anything the
+    /// moment the process is gone, so its series is short by the cpu spent
+    /// after the last poll -- always by a multiple of the tick, and by 10 to
+    /// 26 ms in the seventh wave's measurements. The series stays what it is,
+    /// a series; this is the total it sums towards.
+    ///
+    /// Absent when the program has not been reaped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ns: Option<u64>,
+}
+
+/// User plus system cpu of one `rusage`, in nanoseconds.
+fn cpu_ns(usage: &libc::rusage) -> u64 {
+    let of = |time: &libc::timeval| {
+        (time.tv_sec.max(0) as u64) * 1_000_000_000 + (time.tv_usec.max(0) as u64) * 1_000
+    };
+    of(&usage.ru_utime) + of(&usage.ru_stime)
 }
 
 /// A program forked and waiting for permission to exec.
@@ -72,6 +94,8 @@ pub struct Gated {
     alive_ns: u64,
     exited: Option<(u64, u64)>,
     terminated: bool,
+    /// The child's own cpu accounting, taken from the reap.
+    cpu_ns: Option<u64>,
 }
 
 impl Gated {
@@ -108,11 +132,21 @@ impl Gated {
         }
         let asked_ns = monotonic_ns();
         let mut status = 0;
-        // SAFETY: waiting on a child of this process, without blocking.
-        let result = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+        // `wait4` rather than `waitpid` for one field: the kernel hands over
+        // the child's own cpu accounting at the reap, exact to the microsecond,
+        // where `/proc/<pid>/stat` is in ticks of a hundredth of a second and
+        // stops being readable the moment the process is gone. That is the
+        // difference `cpu.oncpu_time` on a launched program was short by --
+        // always a multiple of the tick, because the cpu spent after the last
+        // poll is in no reading.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: waiting on a child of this process, without blocking, into
+        // two locals this function owns.
+        let result = unsafe { libc::wait4(self.pid, &mut status, libc::WNOHANG, &mut usage) };
         if result == self.pid {
             let seen_ns = monotonic_ns();
             self.status = Some(status);
+            self.cpu_ns = Some(cpu_ns(&usage));
             self.exited = Some((seen_ns, seen_ns.saturating_sub(self.alive_ns)));
             Some(describe(status))
         } else {
@@ -130,8 +164,10 @@ impl Gated {
         unsafe {
             libc::kill(self.pid, libc::SIGKILL);
             let mut status = 0;
-            libc::waitpid(self.pid, &mut status, 0);
+            let mut usage: libc::rusage = std::mem::zeroed();
+            libc::wait4(self.pid, &mut status, 0, &mut usage);
             self.status = Some(status);
+            self.cpu_ns = Some(cpu_ns(&usage));
         }
         let reaped_ns = monotonic_ns();
         // Its end is somewhere after it was last seen running, which may be
@@ -153,6 +189,7 @@ impl Gated {
             exited_ns,
             exited_err_ns,
             terminated: self.terminated,
+            cpu_ns: self.cpu_ns,
         })
     }
 }
@@ -277,6 +314,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
         unsafe { libc::fcntl(pidfd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
     Ok(Gated {
+        cpu_ns: None,
         pid,
         gate: write_fd,
         pidfd: pidfd.max(-1),

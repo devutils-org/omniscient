@@ -783,3 +783,84 @@ fn the_lifetime_reaches_the_results_document_with_its_bracket() {
         "the bracket cannot be wider than the life it brackets: {lifetime}"
     );
 }
+
+/// The reap carries the cpu the polls could not see, and the two say so
+/// together.
+///
+/// `cpu.oncpu_time` reads `/proc/<pid>/stat`, which is in ticks of a hundredth
+/// of a second and stops being readable the moment the process is gone. So its
+/// series is short by whatever the program spent after the last poll -- always
+/// by a multiple of the tick, and by 10 to 26 ms in the compute crossing's
+/// measurements, which is its finding 8. `wait4`'s `rusage` has the exact
+/// figure and the runner now carries it on the lifetime.
+///
+/// What is asserted is the relationship between the two numbers and their own
+/// resolutions, not either number: how much cpu a busy loop gets belongs to the
+/// machine, and that the polled series and the reap agree to within a poll and
+/// a tick belongs to the tool.
+#[test]
+fn the_reap_carries_the_cpu_the_last_poll_missed() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    const POLL_NS: f64 = 50_000_000.0;
+    const TICK_NS: f64 = 10_000_000.0;
+
+    let output = run(&[
+        "cpu.oncpu_time",
+        "--mode",
+        "poll@50ms",
+        "--emit",
+        "timeline",
+        "--duration",
+        "5s",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        "import time\nend = time.time() + 1.0\nwhile time.time() < end: pass",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+        eprintln!("skipped: the run did not produce one json document");
+        return;
+    };
+    let result = &document["results"][0];
+
+    let polled: f64 = result["outputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|output| output["series"].as_array().into_iter().flatten())
+        .flat_map(|series| series["points"].as_array().into_iter().flatten())
+        .filter_map(|point| point["value"].as_f64())
+        .sum();
+    let exact = result["lifetime"]["cpu_ns"]
+        .as_f64()
+        .expect("the reap's own cpu figure rides on the lifetime");
+
+    assert!(
+        polled > 0.0 && exact > 0.0,
+        "a busy loop burns cpu: polled {polled}, reaped {exact}"
+    );
+    // The polls cannot have seen more than the program actually spent, beyond
+    // the tick they are rounded to.
+    assert!(
+        polled <= exact + TICK_NS,
+        "the polled series says {:.1} ms and the kernel handed over {:.1} ms at the reap",
+        polled / 1e6,
+        exact / 1e6
+    );
+    // And what they missed is bounded by their own resolution: the cpu spent
+    // after the last poll, plus the tick that poll was rounded to. 990.0 ms
+    // against 1006.5 ms when this was written.
+    assert!(
+        exact - polled <= POLL_NS + TICK_NS,
+        "the reap says {:.1} ms and the polls saw {:.1} ms, which is more than one poll and one \
+         tick apart",
+        exact / 1e6,
+        polled / 1e6
+    );
+}
