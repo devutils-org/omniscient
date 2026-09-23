@@ -1,0 +1,43 @@
+# One file read twice, the first time from the device and the second from the
+# page cache -- and the two readings of the page cache's own tracepoints.
+#
+#   omn -f examples/io-cold-then-warm.yml
+#
+# The launched program writes 16 MiB, syncs it and tells the page cache to
+# forget it, then reads it whole twice in 1 MiB reads, a third of a second
+# apart. Two sources watch the same reads:
+#
+#   io.pagecache   misses: pages the cache had to fill, with the pages looked up
+#   io.readahead   ahead:  pages filled minus pages looked up
+#
+# What each must say is known before the run. The file is 4096 pages, and two
+# whole reads look up 8192 of them. The first read has to fill every page and
+# the second none, so `misses` totals 4096 on the file -- half its lookups --
+# and `ahead` totals 4096 - 8192 = -4096: over the run, the reader was served
+# 4096 pages that were already there. The ranking puts the file first, above
+# the few pages the interpreter's own modules took; the summary shows the
+# window the cold read spent filling and the one the warm read spent finding. `tests/scenario_io.rs` checks the same counts against `mincore(2)`.
+#
+# The file is written into the current directory and removed again, so run
+# this from a real filesystem: a tmpfs has no page cache lookups of this kind,
+# and both sources then report nothing on the file.
+name: a file read cold, then warm
+format: text
+
+requests:
+  - label: cache
+    source: io.pagecache
+    target:
+      launch: &workload
+        - python3
+        - -c
+        - "import os,time; p='omn-cold-warm.bin'; b=os.urandom(1<<20); f=open(p,'wb'); [f.write(b) for _ in range(16)]; f.flush(); os.fsync(f.fileno()); f.close(); d=os.open(p,os.O_RDONLY); os.posix_fadvise(d,0,0,os.POSIX_FADV_DONTNEED); [None for _ in iter(lambda: os.read(d,1<<20), b'')]; time.sleep(0.3); os.lseek(d,0,0); [None for _ in iter(lambda: os.read(d,1<<20), b'')]; os.close(d); os.remove(p)"
+    mode: trace
+    emit: [topk, summary]
+
+  - label: ahead
+    source: io.readahead
+    target:
+      launch: *workload
+    mode: trace
+    emit: [rate, summary]

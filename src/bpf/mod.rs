@@ -30,6 +30,7 @@ pub mod attach;
 pub mod btf;
 mod insn;
 mod io;
+mod io_pagecache;
 mod io_writeback;
 mod map;
 mod mem_alloc;
@@ -64,6 +65,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 pub use io::{BlockEvent, BlockProgram, Stage, Submitter, NO_OPEN, SCOPE_IS_OURS};
+pub use io_pagecache::{
+    Narrowing as PageCacheNarrowing, PageCacheProgram, PageCacheRow,
+    LAST_KEPT_NS as PAGE_CACHE_LAST_KEPT_NS,
+};
 pub use io_writeback::{Writeback, WritebackProgram};
 pub use mem_alloc::{AllocProgram, AllocRow, Allocator};
 pub use mem_stall::{Stall, StallDrops, StallProgram, StallRow, SCOPE_CGROUP, SCOPE_GLOBAL};

@@ -5855,3 +5855,69 @@ assert!((sum - expected).abs() <= 2.0 * f64::EPSILON * sum.abs().max(1.0));
 ```
 
 or asserting the summary's own `sum` field, if it carries one, exactly.
+
+## Needs from another stream — the ninth wave, stream P (the page cache)
+
+Three requests, none blocking: `io.pagecache` and `io.readahead` collect and
+their scenarios pass, and `docs/families/io.md` is the record.
+
+### To whoever owns `tests/cli.rs`: a test that ran out of candidates
+
+`a_valid_request_with_no_collector_names_the_ones_that_exist` looks for a
+source with no collector that declares `trace`, `raw` and a system target, and
+`io.pagecache` and `io.readahead` were the last two. What is left uncollected
+declares other shapes, and streams S and B are collecting four more of them.
+Choosing the mode and emit from the entry itself keeps the test about the
+refusal rather than about which sources are left. There is no public mode-emit
+predicate to ask, so the test asks the binary: every declared pair, the first
+that the validator does not reject (exit 2), and then the assertions as they
+are.
+
+```rust
+let candidates: Vec<(String, String, String)> = catalog
+    .entries()
+    .iter()
+    .filter(|entry| {
+        entry.backends.iter().all(|backend| {
+            !omn::collect::implements(&entry.id.to_string(), &backend.id)
+        }) && entry.target_support(omn::request::TargetKind::System)
+            != omn::catalog::TargetSupport::No
+    })
+    .flat_map(|entry| {
+        entry.modes.iter().flat_map(move |mode| {
+            entry.emits.iter().map(move |emit| {
+                (entry.id.to_string(), mode.as_str().to_owned(), emit.as_str().to_owned())
+            })
+        })
+    })
+    .collect();
+let output = candidates
+    .iter()
+    .map(|(source, mode, emit)| {
+        let mut args = vec![source.as_str(), "--system", "-m", mode, "-e", emit];
+        if mode != "snapshot" {
+            args.extend(["-d", "1s"]);
+        }
+        run(&args)
+    })
+    .find(|output| output.status.code() != Some(EXIT_REJECTED))
+    .expect("this build does not collect every source in the catalog");
+```
+
+### To whoever owns `src/bpf/syscall.rs`: `map_update` outside `#[cfg(test)]`
+
+The page cache programs keep each thread's last lookup in a plain hash map, and
+userspace sweeps threads idle for a second. An entry the kernel refreshes
+between the sweep's look and its removal is lost; with `map_update` it could be
+put back. The signature is the one that exists, without the attribute:
+
+```rust
+pub fn map_update(map_fd: RawFd, key: &[u8], value: &[u8]) -> io::Result<()>
+```
+
+### To stream V, for after `bpf_task_storage` lands: the map it replaces
+
+`src/bpf/io_pagecache.rs`'s `last` map is per-thread state that should die with
+the thread, which is what task storage is. Once `map.rs` has it, the sweep and
+the race above both go away; the program reads and writes four `u64`s at
+offsets 0, 8, 16 and 24 of a thread's entry.

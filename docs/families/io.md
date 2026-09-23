@@ -883,3 +883,247 @@ program-info read in `syscall.rs`; the module lines in `bpf/mod.rs`; the
 half-word width and three instructions in `insn.rs`; the drain race and the two
 kernel-side losses for the owners of `runqlat.rs` and `proc_syscall.rs`; and the
 fixed attach delay in `tests/family_sched.rs`.
+
+---
+
+# The page cache, through its own tracepoints
+
+The ninth wave's stream P: `io.pagecache` and `io.readahead`, which had waited
+only on a collector since the seventh wave landed the BTF walk into
+`folio.mapping`. Both collect now, over one program pair in
+`src/bpf/io_pagecache.rs`, read two ways by `src/collect/io/pagecache.rs`.
+
+## What is collected
+
+Two raw tracepoints on either side of a read:
+
+```text
+  read(2) ── filemap_read ── filemap_get_pages ─┬─ readahead ── __filemap_add_folio ──> mm_filemap_add_to_page_cache(folio)
+                                                └──────────────────────────────────────> mm_filemap_get_pages(mapping, start, end)
+```
+
+- `mm_filemap_get_pages` is **what a read looked up**: the pages of
+  `[start, end]`, found in the cache or brought in by the readahead the call
+  set off. It is the denominator.
+- `mm_filemap_add_to_page_cache` is **what the cache had to fill**: one folio
+  entering one file's cache, in the context of the task whose read caused it
+  (synchronous and asynchronous readahead both run in the reader).
+
+Counted in the kernel, one row per `(task, file)` per 100 ms drain: pages looked
+up, lookups, pages filled, the folios they came in, and pages created. The file
+is `mapping->host->i_ino` and `->i_sb->s_dev`, the same key `io.fs` carries.
+
+| Source | Value | Meaning |
+|---|---|---|
+| `io.pagecache` | `misses` | pages the cache had to fill for this task and file, on demand or read ahead |
+| `io.readahead` | `ahead` | pages filled minus pages looked up, signed |
+
+Every event carries both halves (`lookups`, `filled`, `created`, `folios`,
+`lookup_calls`) whichever the value is. The series is keyed by file first,
+because both questions are about a file and one file read by two processes is
+one series.
+
+## What the implementation had to decide
+
+**1. `io.pagecache` needs both tracepoints, and its catalog entry said one.** It
+required `mm_filemap_add_to_page_cache` alone, and a fill count alone is a miss
+count with nothing to be a share of. It requires `mm_filemap_get_pages` too
+now, which is the tracepoint `io.readahead` already named. On a kernel without
+it both sources report the backend missing rather than half a ratio.
+
+**2. A page a write appends is not a miss, and the kernel says which it is at
+the instant.** Before this was told apart, a workload that only writes new
+files read as a cache that never hits: an append adds a folio to the cache like
+any read miss. The difference is visible when the folio is added, because a
+write extends `i_size` only *after* its folio is in the cache and filled, and
+readahead never reads past the end of the file. So the program reads the host
+inode's `i_size`, and a folio whose index is at or past the page the file ends
+in is counted as `created`; one inside the file as `filled`. Measured: a
+megabyte appended in sixteen writes is **256 created, 0 filled, 0 looked up**.
+What this cannot separate is a whole-page overwrite of a page that was not
+cached: that is a fill with no read behind it, and is a miss here. The catalog
+says so.
+
+**3. `filemap_get_pages` reports a read's whole remaining range once per batch
+of folios.** This was the first measurement and the one that changed the
+design. `filemap_read` loops over batches of at most 31 folios, and each call
+traces `[position, end of read]`, so a 1 MiB read reports `[0, 255]`, then
+`[31, 255]`, then `[62, 255]`. Summing the ranges counted **3168 pages looked up
+for a 1024-page file**, in 24 calls for four reads. A call from the same
+thread, on the same mapping, with the same end and a start that has advanced is
+the read it continues, and now adds nothing: the program keeps each thread's
+last `(mapping, start, end, ts)` in a per-thread hash map. After it: **1024
+pages in 4 lookups**, cold and warm.
+
+That state cannot live in the drained row -- a drain landing between two batches
+of one read would forget it and count the rest again -- and a plain hash map has
+no eviction, so a thread that exits keeps its entry. Userspace sweeps entries
+idle for more than a second, once a second. An entry the kernel refreshes
+between the sweep's look and its removal is lost, and is counted with the
+threads the map had no room for: both mean a later batch may be counted as a
+lookup of its own, and the run then says `lookups` is an upper bound.
+`bpf_task_storage` (stream V's, this wave) is the right home for this state: it
+dies with the task and needs no sweep. It was not there to use.
+
+**4. A lookup's range is clamped to the file.** The range's end is where the
+read's buffer ends, so a 1 MiB read of a 100 KiB file reports 256 pages of which
+25 exist, and the read at EOF that returns zero reports a range entirely past
+the end. The program clamps to the pages `i_size` spans, and a lookup wholly
+past the end counts nothing -- which is why the four 1 MiB reads of a 4 MiB file
+are four lookups and not five.
+
+**5. A folio is not a page.** btrfs on this kernel fills the cache with large
+folios -- a cold 4 MiB read came in as 640 folios, a 16 MiB one as 856 -- so the
+page count is read out of the folio: one page unless `PG_head` is set, and
+`_nr_pages` then. `PG_head`'s bit is looked up in the running kernel's
+`enum pageflags` rather than written down; the enum moves between releases.
+
+**6. `ahead` is a signed difference, not a ratio.** A ratio of two window counts
+does not add up: the window in which readahead filled a thousand pages and the
+next in which the reader consumed them have ratios whose mean means nothing. A
+difference does -- the sum of every window's `ahead` is the run's -- so `rate`
+over a series is exact however the drains fell. It goes negative for a reader
+served from the cache, and a log2 histogram has no bucket for a negative
+number, so `io.readahead` no longer declares `hist`.
+
+**7. Rows are stamped at their first event**, as finding 44 asks of every
+bucketed source: each row records when it was created. The scenario checks it
+against the workload's own `CLOCK_MONOTONIC`: every row of a file falls inside
+the phase that read it.
+
+## Ground truth
+
+The workloads report the page cache's own state through `mincore(2)` -- a
+syscall on a mapping, a different door into the kernel than a tracepoint, and
+nothing the tool computed. Mapping a file and asking touches no page.
+
+| Workload | Reference | Measured |
+|---|---|---|
+| 4 MiB read cold in 1 MiB reads | 1024 pages not resident before | 1024 filled, 1024 looked up in 4 lookups |
+| the same, warm | 1024 resident before | 0 filled, 1024 looked up in 4 lookups |
+| first 4 MiB of a cold 64 MiB file, 64 KiB reads | 1024 read, resident after settling | 2816 filled, **+1792 ahead** |
+| 256 random pages of a cold 64 MiB file | 256 read | 256 filled, **0 ahead** |
+| 1 MiB appended in 16 writes | 256 pages written | 256 created, 0 missed |
+| `examples/io-cold-then-warm.yml` | 4096-page file read twice | 4096 misses; warm window exactly -4096 |
+
+The sequential-against-random case is asserted as a separation (sequential
+ahead > 0, random at most an eighth of it), not a size: how far the kernel reads
+ahead is its window, which starts at `read_ahead_kb` -- 128 KiB here -- and grows
+while the reader keeps up.
+
+## The cold lookups are a floor, and the kernel is why
+
+The first version of these scenarios asserted a cold read's lookups exactly, and
+failed about one run in five while the rest of the file ran beside it: 1023
+pages of 1024 in 4 lookups; a session's cold window +48 where it should be 0;
+88 and 96 in others. No loss was reported, the warm windows were always exact,
+and twelve runs under an artificial load of a hundred reading threads were all
+exact. The number itself was the clue: a shortfall of 1, 48, 88 or 96 pages is
+the size of a *first folio batch*, not of a read.
+
+`filemap_get_pages` fires its tracepoint on one return only. When the last folio
+of a batch is still locked under readahead I/O, `filemap_update_page` waits for
+it, returns `AOP_TRUNCATED_PAGE`, and `filemap_get_pages` drops that folio and
+returns the rest of the batch -- successfully, and without the tracepoint. The
+read carries on; its next call is then the first one this program sees, it does
+not continue anything it knows, and it is counted from where it starts. The
+first batch was looked up unseen.
+
+So: **warm lookups are exact** (no folio is locked, no early return), **cold
+lookups are a floor**, short by at most a read's first batch, and **random
+single-page reads are exact** either way (a batch of one folio cannot take that
+return). The scenarios assert exactly that, and both catalog entries carry it as
+a caveat. On a cold sequential read `ahead` can be a few pages high for the
+same reason. The backend that would make it exact is `fentry:filemap_read`,
+whose `kiocb` and `iov_iter` give a read's range once, at entry; this stream
+did not write it.
+
+## The loss path
+
+A hundred threads each reading a thousand one-byte files is a hundred thousand
+`(task, file)` rows against a map of 16384 per drain. Measured: **100000 reads =
+65483 counted + 34520 dropped** (the three extra are fills, and one run of the
+programs the kernel skipped), and the run says its totals are a lower bound. The
+kernel skipping a run -- `recursion_misses` on the program -- is read and
+counted as a loss too: it happened thirteen times in one such run.
+
+## What it costs
+
+About **400 ns per read** in the reader's own time: 1024 warm 64 KiB reads took
+4.6 ms bare and 5.0 ms with `io.pagecache` attached. The collector's own cpu is
+0.4 to 0.7 ms per run, a drain every 100 ms walking one row per `(task, file)`.
+
+## What this part cannot do
+
+- **A page a fault brings in is a miss with no lookup.** `filemap_fault` does
+  not pass through `filemap_get_pages`, so a program that reads through `mmap`
+  shows misses and no lookups. `mm_filemap_fault` and `mm_filemap_map_pages`
+  would give the lookup side, and counting a fault-around's sixteen pages as
+  sixteen lookups is a decision for whoever does it.
+- **Whether a page read ahead was used before it was evicted.** `ahead` says
+  how far readahead ran in front of the reader, not whether the reader caught
+  up. That needs `mm_filemap_delete_from_page_cache` and a per-page record of
+  what was read ahead and not yet looked up, which is a different program.
+- **A cgroup target.** `io.pagecache` declares one; this build narrows by
+  thread group and thread only, and refuses a cgroup with exit 3 naming
+  `bpf_get_current_cgroup_id`, as `io.fs` does.
+- **tmpfs and shmem.** Neither passes `filemap_get_pages` or
+  `__filemap_add_folio`, so both sources are silent on them -- which is why every
+  scenario writes under the build directory.
+
+## Declared overstep
+
+**Four lines in `src/bpf/mod.rs`**, which no stream owns this wave: the `mod
+io_pagecache;` declaration beside `mod io;`, and one `pub use` of its three
+types and the sweep constant. A new file under `src/bpf/` cannot be compiled
+without them, and `attach.rs`'s `#[path]` precedent is a file nobody owns
+either. The lines touch nothing stream V's `request*.rs` declarations would sit
+beside.
+
+## Sessions
+
+- `examples/io-cold-then-warm.yml` -- one file read twice, cold and warm, under
+  both sources: 4096 misses, and -4096 ahead.
+- `examples/io-readahead-patterns.yml` -- readahead in front of a sequential
+  reader, and not in front of a random one.
+
+The rows for `examples/README.md` and `GUIDE.md`, the same in both:
+
+```
+| `io-cold-then-warm.yml` | One file read cold and then warm: every page missed once, and the second read served from the cache. |
+| `io-readahead-patterns.yml` | Readahead in front of a sequential reader, and not in front of a random one. |
+```
+
+`GUIDE.md` line 130 still names `io.readahead` among the sources left without a
+collector.
+
+## Tests red on this branch, and why
+
+- `tests/cli.rs` `the_session_indexes_hold_exactly_the_sessions_on_disk`: the
+  two sessions above, until the coordinator adds the rows.
+- `tests/cli.rs` `a_valid_request_with_no_collector_names_the_ones_that_exist`:
+  it looks for a source with no collector that declares `trace`, `raw` and a
+  system target, and `io.pagecache` and `io.readahead` were the last two. What
+  is left uncollected declares other modes. The change it needs is in
+  `docs/open-findings.md` under stream P.
+
+The one `make check` before the commit, then `cargo test --workspace
+--no-fail-fast`: 1545 passed and 5 failed. Beside the two above,
+`tests/aggregation.rs` `two_emits_of_one_request_describe_the_same_events` is
+the one-ulp float comparison stream J filed, red on `main` too;
+`tests/cross_compute.rs` `three_states_at_once_still_match_the_kernel_and_their_residue_is_printed`
+passed alone; and `tests/scenario_mem.rs`
+`both_huge_page_backends_read_the_same_promotion_counter`, in the tally of
+finding 43's neighbours, failed alone as well, with the two backends 30 huge
+pages apart on every one of five rounds (`[(377, 347, 3), ...]`). It reads
+machine-wide THP counters and nothing on this branch touches `mem`; it is
+reported here for stream B rather than fixed, and it is the one of the five
+worth watching, because it failed twice in a row.
+
+## Needs from another stream
+
+Under `## Needs from another stream — the ninth wave, stream P` in
+`docs/open-findings.md`: the `cli.rs` test above; `map_update` out of
+`#[cfg(test)]` in `syscall.rs`, so the sweep can put back an entry the kernel
+refreshed; and, for when `bpf_task_storage` lands, the per-thread map it would
+replace.
