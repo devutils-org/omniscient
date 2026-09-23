@@ -107,6 +107,17 @@ pub enum Target {
 }
 
 impl Target {
+    /// Whether this names part of the machine rather than a workload: its
+    /// collectors do not act on a program and do not decide when a run ends.
+    ///
+    /// That is what lets any number of machine targets sit beside one workload
+    /// target in a run -- the shape of every confounder check, where the
+    /// machine's state is read at `system` or `cpu` and the thing it might
+    /// explain is measured on the program.
+    pub fn is_machine(&self) -> bool {
+        matches!(self, Target::System | Target::Cpu(_) | Target::Iface(_))
+    }
+
     /// The process to observe, when the target names one.
     ///
     /// A target that names no process is not an error: an interface or the

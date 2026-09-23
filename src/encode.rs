@@ -762,6 +762,30 @@ fn text(results: &Results) -> String {
         approximate(results.observed_ns),
         results.stopped_because
     );
+    // The launched program's own life, which is a different number from the
+    // run's window and the one a residue is a residue of. The bracket goes
+    // beside the length because a reader given only the length would trust a
+    // residue smaller than the bracket.
+    if let Some(life) = &results.lifetime {
+        let lived = life.exited_ns.saturating_sub(life.released_ns);
+        let ending = if life.terminated {
+            "stopped by the run".to_owned()
+        } else {
+            format!(
+                "the exit bracketed to the last {}",
+                approximate(life.exited_err_ns)
+            )
+        };
+        let cpu = life
+            .cpu_ns
+            .map(|cpu| format!(", {} of cpu at the reap", approximate(cpu)))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "  the launched program ran {} (gate to exit; {ending}){cpu}",
+            approximate(lived)
+        );
+    }
 
     if results.losses.is_clean() {
         let _ = writeln!(out, "  no loss: every read succeeded and no tick ran late");
@@ -814,10 +838,12 @@ fn text(results: &Results) -> String {
                         Some(per_second) => {
                             let _ = writeln!(
                                 out,
-                                "    {:<14} {} over {}  =  {}/s",
+                                "    {:<14} {}{} over {}  {}  {}/s",
                                 rate.key,
+                                bound(rate.short.as_ref()),
                                 quantity(rate.total, results.unit),
                                 approximate(rate.window_ns),
+                                comparison(rate.short.as_ref()),
                                 quantity(per_second, results.unit),
                             );
                         }
@@ -831,6 +857,7 @@ fn text(results: &Results) -> String {
                         }
                     }
                 }
+                push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
             Output::Summary { series } => {
                 let _ = writeln!(out, "  summary");
@@ -894,9 +921,10 @@ fn text(results: &Results) -> String {
                 for (rank, total) in series.iter().enumerate() {
                     let _ = writeln!(
                         out,
-                        "    {:>2}. {:<20} {:>12}  over {} events",
+                        "    {:>2}. {:<20} {:>2}{:>12}  over {} events",
                         rank + 1,
                         total.key,
+                        bound(total.short.as_ref()),
                         quantity(total.total, results.unit),
                         total.events
                     );
@@ -914,11 +942,20 @@ fn text(results: &Results) -> String {
                         rest.events
                     );
                 }
+                // Separate from the line above on purpose: that is what the
+                // ranking measured and left out, this is what nothing measured.
+                if let Some(short) = series.iter().find_map(|one| one.short.as_ref()) {
+                    push_shortfall(&mut out, Some(short));
+                    let _ = writeln!(
+                        out,
+                        "    the totals are lower bounds, so the order above can be wrong"
+                    );
+                }
             }
             Output::Stack {
                 stacks,
                 unattributed,
-                ..
+                short,
             } => {
                 let _ = writeln!(out, "  stack");
                 for stack in stacks {
@@ -939,6 +976,9 @@ fn text(results: &Results) -> String {
                 if stacks.is_empty() && *unattributed == 0 {
                     let _ = writeln!(out, "    no events");
                 }
+                // Records that never arrived, as against the events above that
+                // arrived without a stack: two facts, said as two lines.
+                push_shortfall(&mut out, short.as_ref());
             }
             Output::Raw { events } => {
                 let _ = writeln!(out, "  raw");
@@ -3067,5 +3107,70 @@ mod tests {
         let text = decomposition_text(&output);
         assert!(text.contains("not read"), "{text}");
         assert!(text.contains("carried `queued_ns`"), "{text}");
+    }
+
+    /// The text a person reads carries the same mark the structured formats
+    /// do, on a rate, a ranking and a profile -- and a clean run gains none of
+    /// it. `Rest` and `unattributed` keep their own lines: what a ranking left
+    /// out and measured, and what arrived without a stack, are not what nothing
+    /// measured at all.
+    #[test]
+    fn a_lossy_rate_ranking_and_profile_say_so_in_text_and_a_clean_one_does_not() {
+        let losses = Losses {
+            dropped: 10,
+            ..Default::default()
+        };
+        let short = Shortfall::of(&losses, 90, false).expect("a dropped run is short");
+        let build = |short: Option<Shortfall>| {
+            let mut results = sample();
+            results.outputs = vec![
+                Output::Rate {
+                    series: vec![crate::emit::SeriesRate {
+                        key: "task:7".into(),
+                        events: 90,
+                        total: 900.0,
+                        per_second: Some(900.0),
+                        window_ns: 1_000_000_000,
+                        short: short.clone(),
+                    }],
+                },
+                Output::TopK {
+                    k: 10,
+                    series: vec![SeriesTotal {
+                        key: "task:7".into(),
+                        events: 90,
+                        total: 900.0,
+                        short: short.clone(),
+                    }],
+                    rest: Rest::default(),
+                },
+                Output::Stack {
+                    stacks: Vec::new(),
+                    unattributed: 3,
+                    short: short.clone(),
+                },
+            ];
+            text(&results)
+        };
+
+        let lossy = build(Some(short));
+        assert!(
+            lossy.matches(Shortfall::MARK).count() >= 3,
+            "the rate, the ranking and the profile each carry the mark:\n{lossy}"
+        );
+        assert!(
+            lossy.contains("the order above can be wrong"),
+            "a ranking of lower bounds has to say its order is not certain:\n{lossy}"
+        );
+        assert!(
+            lossy.contains("3 events carried no stack"),
+            "`unattributed` keeps its own line beside the mark:\n{lossy}"
+        );
+
+        let clean = build(None);
+        assert!(
+            !clean.contains(Shortfall::MARK) && !clean.contains("can be wrong"),
+            "a clean run gains nothing, or the mark becomes noise:\n{clean}"
+        );
     }
 }

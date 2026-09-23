@@ -282,9 +282,60 @@ joins:
 .EE
 .RE
 .PP
-Every request in one session observes one target over one window. Running them
-one after another would measure several different moments and present them as
-one, and a join across that would correlate a program with its own past.
+Every request in one session is collected over one window. Running them one
+after another would measure several different moments and present them as one,
+and a join across that would correlate a program with its own past. A session
+has at most one \fIworkload\fR target \(em \fBlaunch\fR, \fBpid\fR, \fBtid\fR,
+\fBcgroup\fR or \fBcontainer\fR \(em and any number of \fImachine\fR targets
+beside it (\fBsystem\fR, \fBcpu\fR, \fBiface\fR): that is the shape of every
+confounder check, where the machine's state is read beside the program it might
+explain. Only the workload target decides when the run ends.
+.SS Joins
+A join is declared beside its sources and matches their events by a key.
+.TP
+.B interval
+An event is credited to the state whose range it falls in: an allocation's
+pages to the allocation. Opened and closed by predicates.
+.TP
+.B eq
+Both sides carry the same key. Which of several open states of one key an
+event goes to is decided by recency, and is reported as \fBwithin_key:
+TEMPORAL\fR beside the \fBKEY\fR, because recency is the clock and not the key.
+.TP
+.B scoped_eq
+The same, on a key whose values are recycled: a request pointer is scoped by
+the moment it was opened, \fBblk:\fIptr\fB@\fIopen_ts\fR.
+.TP
+.B wakeup
+A task's run is credited to the wakeup that began it. Refused before the run
+onto a \fBdrained\fR source, whose events are sums of blocks.
+.TP
+.B between
+A polled total's change between two readings is credited to the states that
+opened or closed in that interval. \fBTEMPORAL\fR by construction.
+.SS Decompositions
+A \fBdecompose:\fR block splits a whole into parts, per key:
+.PP
+.RS
+.EX
+decompose:
+  \- id: where\-the\-time\-went
+    whole: lifetime
+    parts:
+      \- {state: on\-cpu,   from: cpu.profile,   value: samples}
+      \- {state: runnable, from: sched.runqlat, value: total_ns}
+      \- {state: blocked,  from: sched.offcpu,  value: total_ns, less: queued_ns}
+.EE
+.RE
+.PP
+The whole is \fBwindow\fR (the run, from its start to the last drain: an upper
+bound), \fBlifetime\fR (the launched program, from the gate to the reap: exact
+at the start, bracketed at the exit, and refused where nothing was launched),
+or a measurement read off a source. Each row says what kind of number it is \(em
+sampled, polled, traced, counted \(em and its resolution. The residue is
+\fIwhole \- parts\fR, signed and never rounded away: negative is something
+counted twice, positive is a state no row covers, and one inside its own
+resolution is the decomposition holding.
 .SH EVIDENCE
 Every correlated result carries the grounds it was obtained on, because a
 correlation backed by a propagated identity and one backed by two things
@@ -300,7 +351,9 @@ Both sides carry the same typed key.
 A wakeup chain links them: the only join that crosses a block.
 .TP
 .B TEMPORAL
-They overlapped in time. A hypothesis, nothing more.
+They overlapped in time. A hypothesis, nothing more. What \fBbetween\fR
+produces, and what \fBwithin_key\fR says of an \fBeq\fR join's choice between
+states.
 .SH EXIT STATUS
 .TP
 .B 0

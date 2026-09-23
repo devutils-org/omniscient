@@ -107,6 +107,19 @@ caveats:
 `targets`: `native` (filtered at the backend level), `bpf_only` (filtered inside
 the program), `no` (invalid combination, must fail validation).
 
+Two fields a backend may carry beside `cost`, and each is a statement about what
+its events mean rather than about how it is reached:
+
+- `equivalent: true` — this fallback loses nothing against the backend above it.
+  A backend that is not first either says this or says what it `degraded`s;
+  saying neither is refused when the catalog loads.
+- `drained: true` — one event stands for many occurrences, added up in the
+  kernel and read on a tick. It is what lets the validator refuse a `wakeup`
+  join onto such a source *before* the run: a wakeup releases one block, and an
+  event that is a sum of blocks cannot be the one it released. An entry is
+  `always_drained` only when every backend of its chain is, so a partial flag
+  never refuses a chain that still has a per-occurrence backend.
+
 ---
 
 ## 2. Family `cpu`

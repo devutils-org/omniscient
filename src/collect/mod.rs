@@ -1222,15 +1222,6 @@ pub fn run_all_within(
         .collect())
 }
 
-/// Whether a target names part of the machine rather than a workload: its
-/// collectors do not act on a program and do not decide when a run ends.
-///
-/// Wanted on `Target` itself (`docs/open-findings.md`, stream R's requests);
-/// kept here until it is, because this is the only caller.
-fn is_machine(target: &Target) -> bool {
-    matches!(target, Target::System | Target::Cpu(_) | Target::Iface(_))
-}
-
 /// The one workload target of a session, if it has one.
 ///
 /// Any number of machine targets may sit beside it, because that is the shape
@@ -1243,7 +1234,7 @@ fn workload_of(resolved: &[ResolvedRequest]) -> Result<Option<&Target>, CollectE
     let mut workload: Option<&Target> = None;
     for resolved in resolved {
         let target = &resolved.request.target;
-        if is_machine(target) {
+        if target.is_machine() {
             continue;
         }
         match workload {
