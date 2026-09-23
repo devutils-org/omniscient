@@ -53,14 +53,21 @@
     # through BPF_RAW_TRACEPOINT_OPEN, against the kernel's own BTF. The
     # classic path below needs a numeric id out of tracefs and sees exactly
     # the same events, which is the ordering DECISIONS.md settled.
+    #
+    # Both are bucketed in the kernel and drained on a tick, so one event is a
+    # `(task, bucket) -> count` row standing for every wait in it: `drained`
+    # is what lets a `wakeup` join be refused before the run rather than
+    # credit a hundred waits to the last wakeup before the drain.
     - id: "bpf:raw_tp"
       requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup", "raw_tracepoint:sched_switch", "kernel>=6.1"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
+      drained: true
     - id: "bpf:tp"
       requires: ["tracepoint:sched:sched_wakeup", "tracepoint:sched:sched_switch", "bpf"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
+      drained: true
       equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, summary]
@@ -74,14 +81,16 @@
   summary: "Blocked time with the blocking stack"
   unit: ns
   backends:
-    - {id: "bpf:tp:stacks", requires: ["tracepoint:sched:sched_switch", "bpf", "callchain"], cost: high}
+    # Every backend adds the blocks up in the kernel and drains the totals on a
+    # tick, which is what `drained` says: one event is a hundred blocks.
+    - {id: "bpf:tp:stacks", requires: ["tracepoint:sched:sched_switch", "bpf", "callchain"], cost: high, drained: true}
     # Same events as `bpf:tp`, attached the way this tool attaches: through
     # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
     # path needs a numeric id out of tracefs. Ordered ahead of it for the
     # reason DECISIONS.md settled: strictly fewer requirements, same events.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: med,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: med, drained: true,
        degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med,
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med, drained: true,
        degraded: "no stacks: tells you how long, not where"}
   modes: [trace]
   emits: [hist, stack, topk, raw, summary]

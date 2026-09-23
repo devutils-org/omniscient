@@ -196,6 +196,24 @@ impl OutputFormat {
         }
     }
 
+    /// Whether the format can carry what the joins and the decompositions of
+    /// a session produce.
+    ///
+    /// A profile is a tree of frames and a trace is a timeline; neither has a
+    /// place for "these events were tied together on this evidence" or "this
+    /// whole split into these rows, with this residue". `chrome` names them in
+    /// its metadata so that their absence is visible, and asks for `json`.
+    pub fn carries_correlations(self) -> bool {
+        matches!(
+            self,
+            OutputFormat::Text
+                | OutputFormat::Json
+                | OutputFormat::Yaml
+                | OutputFormat::Toml
+                | OutputFormat::Ndjson
+        )
+    }
+
     /// Whether this format's encoder exists yet.
     ///
     /// Formats are declared before their encoder lands so that the surface is

@@ -1,0 +1,132 @@
+# Where did one task's wall clock go -- said by the tool, with its residue.
+#
+#   omn -f examples/join-decompose-compute.yml
+#
+# The compute crossing's table, which `tests/cross_compute.rs` had to build out
+# of the JSON because the engine could not say it. Three states cover a task's
+# life, each has a source, and the three are three different kinds of number:
+#
+#   on-cpu     `cpu.profile`, SAMPLED: a count of samples, each standing for one
+#              period, so the row is a count times a period with a count's
+#              resolution -- one period
+#   runnable   `sched.runqlat`, TRACED: every wait, summed in the kernel; exact
+#   blocked    `sched.offcpu`, TRACED: every block, summed in the kernel; exact
+#
+# The whole is the run's window: from the release to the last drain. It is an
+# upper bound on the task's life, loose by however late that drain was, so the
+# residue is an upper bound too. The launched program's exact lifetime is in no
+# output of this build; `docs/families/join.md` has the request for it.
+#
+# THE RESIDUE HAS A KNOWN DOUBLE COUNT IN IT. `sched.offcpu` times a block from
+# leaving the cpu to getting it back, so the run queue wait after each wakeup
+# is inside it -- and inside `sched.runqlat` as well. The decomposition prints
+# what the rows say and does not guess the overlap: when `sched.offcpu` carries
+# the queued part (`queued_ns`, requested of its owner), `blocked` becomes
+# `{value: total_ns, less: queued_ns}` and the overlap leaves the residue.
+#
+# The join is the one the compute crossing settled on: every switch the task
+# made, credited to the wakeup that began the run it ended. Its table ranks
+# CHAINS -- the responder that released the driver six hundred times is one
+# row, not six hundred rows of one event each.
+#
+# It does not join onto `sched.offcpu`, and cannot: a `sched.offcpu` event is a
+# total drained every 100 ms, and the validator refuses a wakeup join onto one
+# before the run -- `omn validate` names `sched.switches` as the source to use.
+#
+# The workload is the crossing's half-blocked ping-pong: a driver and a
+# responder pass a byte through two fifos 600 times, both spinning 100 shell
+# iterations before answering. The driver prints the kernel's own accounting of
+# itself on stderr, prefixed `omn-truth`, with the responder's pid; the tool
+# reads none of it.
+name: where the time of one task went, decomposed
+format: text
+
+requests:
+  - label: on-cpu
+    source: cpu.profile
+    target: &halves
+      launch:
+        - /bin/sh
+        - -c
+        - |
+          S=$(date +%s%N)
+          D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+          { exec 4<"$D/a" 5>"$D/b"
+            while read -r _ <&4; do
+              j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+              echo y >&5
+            done; } &
+          R=$!
+          exec 3>"$D/a" 6<"$D/b"
+          i=0
+          while [ $i -lt 600 ]; do
+            j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+            echo x >&3; read -r _ <&6
+            i=$((i + 1))
+          done
+          exec 3>&- 6<&-; rm -rf "$D"
+          E=$(date +%s%N)
+          read -r ON RQ SL < /proc/$$/schedstat
+          V=$(grep '^voluntary_ctxt' /proc/$$/status); V=${V##*[!0-9]}
+          echo "omn-truth tid=$$ responder=$R wall_ns=$((E - S)) oncpu_ns=$ON runq_ns=$RQ slices=$SL voluntary=$V" >&2
+    mode: sample@997hz
+    # `hist` is here for one reason: it is the only emit of `cpu.profile` that
+    # carries the mark a lossy run puts on its counts. A histogram of samples
+    # that each count one is otherwise not worth reading.
+    emit: [topk, hist]
+    stack: fp
+    keys: [task]
+
+  - label: on-cpu-polled
+    source: cpu.oncpu_time
+    target: *halves
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task]
+
+  - label: runnable
+    source: sched.runqlat
+    target: *halves
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+
+  - label: blocked
+    source: sched.offcpu
+    target: *halves
+    mode: trace
+    emit: [raw, stack]
+    keys: [task]
+
+  - label: released-by
+    source: sched.wakeup
+    target: *halves
+    mode: trace
+    emit: [topk:3]
+    keys: [task]
+
+  - label: switched-out
+    source: sched.switches
+    target: *halves
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+joins:
+  - id: what-released-each-run
+    from: sched.wakeup
+    to: sched.switches
+    via: task
+    match: wakeup
+    waker: waker_tid
+    window: 10s
+    top: 5
+
+decompose:
+  - id: where-the-time-went
+    whole: window
+    parts:
+      - {state: on-cpu, from: cpu.profile, value: samples}
+      - {state: runnable, from: sched.runqlat, value: total_ns}
+      - {state: blocked, from: sched.offcpu, value: total_ns}
+    top: 2

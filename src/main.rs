@@ -740,6 +740,7 @@ fn measure(
     let mut run = encode::RunOutput {
         results: Vec::new(),
         joins: Vec::new(),
+        decompositions: Vec::new(),
     };
     let mut costs: Vec<MeasuredCost> = Vec::new();
     let mut served_by: Vec<ResolvedRequest> = Vec::new();
@@ -764,6 +765,20 @@ fn measure(
 
     for rule in &session.joins {
         run.joins.push(join::apply(rule, &merged)?);
+    }
+    // The served requests rather than the session's: a budget can lower a
+    // sampling rate, and a sample stands for the period it was taken at.
+    let served: Vec<omn::request::Request> = served_by
+        .iter()
+        .map(|serving| serving.request.clone())
+        .collect();
+    for decomposition in &session.decompose {
+        run.decompositions.push(join::decompose(
+            decomposition,
+            &served,
+            &run.results,
+            &merged,
+        ));
     }
 
     // Bytes rather than a `String`, because one of the nine formats is not

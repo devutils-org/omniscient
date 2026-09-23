@@ -1010,6 +1010,14 @@ pub struct Session {
     /// numbers, and the rule without the sources gives nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joins: Vec<crate::join::Rule>,
+    /// Wholes to split into the parts the requests measured, with what is
+    /// left over.
+    ///
+    /// Declared here for the reason a join is: the parts are rows of one
+    /// table only because they were collected over one window against one
+    /// target, which is what this session is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decompose: Vec<crate::join::Decomposition>,
 }
 
 impl Session {
@@ -1023,6 +1031,7 @@ impl Session {
             format,
             requests: vec![request],
             joins: Vec::new(),
+            decompose: Vec::new(),
         }
     }
 

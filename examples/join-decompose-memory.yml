@@ -1,0 +1,103 @@
+# Where did the rise in resident size go: into live blocks, into memory the
+# allocator kept, or into neither?
+#
+#   omn -f examples/join-decompose-memory.yml
+#
+# The memory crossing's decomposition, said by the tool rather than computed
+# in a test. Every `mem.heap.retained` reading carries three numbers taken at
+# the same instant -- the resident size of the process (`rss`), the bytes it
+# asked for and has not freed (`live`), and the resident pages of the ranges
+# it freed (`bytes`, the retained scan) -- so one reading at each end of the
+# run decomposes the rise, with no second clock and no second run.
+#
+#   whole      rss,   last reading less first
+#   live       live,  the same
+#   retained   bytes, the same
+#   RESIDUE    what is resident and in neither row
+#
+# The residue is printed signed and is not rounded into either row, and most
+# of it is predicted. The retained scan counts a page shared between a freed
+# block and a live neighbour as live, so those pages are resident, are not
+# live bytes and are not retained bytes: they are the residue. The program
+# prints how many there are (`ARENA <blocks> <bytes> <whole-page bytes>`), and
+# the difference between the freed bytes and the whole-page bytes is the part
+# of the residue it predicts.
+#
+# Every row is `polled`, read as a level, and tied to the task by KEY: every
+# reading carries `task:tid`. None has a resolution the table can state in
+# bytes, which is why the residue has none either.
+#
+# `filter: "live > 0"` is on every row for one reason: the first poll of a
+# launched program can land before it exec'd, and reads this tool's own forked
+# image. The rows start at the first reading of the running program.
+#
+# The workload is `cross-memory-did-it-stay.yml`'s, unchanged: four 8 MiB
+# blocks kept, four freed, and 512 arena blocks of 64 KiB of which every
+# other one is freed into holes between live ones.
+name: where the rise in resident size went
+format: text
+
+requests:
+  - label: retained
+    source: mem.heap.retained
+    target: &program
+      launch:
+        - python3
+        - -c
+        - |
+          import ctypes, mmap, resource, sys, time
+
+          libc = ctypes.CDLL(None)
+          libc.malloc.restype = ctypes.c_void_p
+          libc.malloc.argtypes = [ctypes.c_size_t]
+          libc.free.argtypes = [ctypes.c_void_p]
+          # M_MMAP_THRESHOLD. Fixing it also stops glibc raising it the first
+          # time a mapped block is freed, which would move the next ones into
+          # the arena.
+          libc.mallopt(-3, 1 << 20)
+
+          MiB = 1 << 20
+          PAGE = mmap.PAGESIZE
+
+          def faults():
+              return resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+
+          def make(fate, count, size):
+              blocks = [libc.malloc(size) for _ in range(count)]
+              for block in blocks:
+                  before = faults()
+                  ctypes.memset(block, 1, size)
+                  if size >= MiB:
+                      sys.stderr.write('BLOCK %s %d %d %d\n' % (fate, block, size, faults() - before))
+              return blocks
+
+          def whole_pages(blocks, size):
+              return sum(((b + size) // PAGE - (b + PAGE - 1) // PAGE) * PAGE for b in blocks)
+
+          time.sleep(0.3)
+          kept = make('kept', 4, 8 * MiB)
+          time.sleep(0.3)
+          returned = make('returned', 4, 8 * MiB)
+          time.sleep(0.3)
+          for block in returned:
+              libc.free(block)
+          time.sleep(0.3)
+          held = make('held', 512, 64 << 10)
+          time.sleep(0.3)
+          freed = held[::2]
+          sys.stderr.write('ARENA %d %d %d\n' % (len(freed), len(freed) * (64 << 10), whole_pages(freed, 64 << 10)))
+          for block in freed:
+              libc.free(block)
+          time.sleep(0.4)
+    mode: poll@100ms
+    # Raw carries `live`, `rss` and `freed_span` beside the retained bytes;
+    # the timeline carries the retained bytes alone.
+    emit: [timeline, raw]
+    keys: [task]
+
+decompose:
+  - id: where-the-memory-went
+    whole: {from: mem.heap.retained, value: rss, reading: level, filter: "live > 0"}
+    parts:
+      - {state: live, from: mem.heap.retained, value: live, reading: level, filter: "live > 0"}
+      - {state: retained, from: mem.heap.retained, value: bytes, reading: level, filter: "live > 0"}

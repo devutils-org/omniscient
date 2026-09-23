@@ -15,6 +15,7 @@
 //! is root-only, `unprivileged_bpf_disabled` is the default, and there is no
 //! lesser answer to fall back to. Every other test here runs anywhere.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command};
@@ -104,6 +105,8 @@ fn eq_rule() -> Rule {
         closes: None,
         waker: None,
         depth: None,
+        value: None,
+        reading: None,
         window: None,
         capacity: 1000,
         top: 10,
@@ -226,6 +229,8 @@ fn wakeup_rule() -> Rule {
         closes: None,
         waker: Some("waker_tid".to_owned()),
         depth: None,
+        value: None,
+        reading: None,
         window: None,
         capacity: 1000,
         top: 10,
@@ -475,5 +480,592 @@ joins:
             "`{}` ends at a task no wakeup named",
             attribution.key
         );
+    }
+}
+
+// -- the eighth wave: TEMPORAL, chains, refusals, and the decomposition -----
+//
+// Every workload below reports its own state on standard error -- what it
+// wrote and when, what the kernel says it did, which task released it -- and
+// the tool reads none of that. What the engine says is held to it.
+
+const MIB: f64 = (1u64 << 20) as f64;
+
+/// What `mem.rss` can move by without the program doing anything: khugepaged
+/// collapsing a range into one huge page, the caveat the catalog writes on the
+/// source. The memory crossing uses the same bound.
+const HUGE_PAGE: f64 = 2.0 * MIB;
+
+/// What the interpreter allocates, frees and faults on its own between two
+/// readings: measured by the memory crossing at under 25 KiB, and sixteen
+/// pages here so that a slower interpreter is not mistaken for a wrong tool.
+const INTERPRETER: f64 = 16.0 * 4096.0;
+
+fn has(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// One run of a shipped session as JSON: the document, and standard error,
+/// where the workload reports itself.
+struct Session {
+    document: serde_json::Value,
+    stderr: String,
+}
+
+/// Runs `examples/<file>`, or says loudly why this machine cannot and returns
+/// nothing. A shipped session the tool refuses is a failure, not a skip.
+fn session(file: &str, would_have_checked: &str) -> Option<Session> {
+    let output = Command::new(BINARY)
+        .args(["-f", &format!("examples/{file}"), "--format", "json"])
+        .output()
+        .expect("omn should run");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        if machine_cannot_serve(&stderr) || machine_cannot_serve(&stdout) {
+            eprintln!(
+                "SKIPPED: {file} needs what this machine does not grant ({}). It would have \
+                 checked {would_have_checked}",
+                stderr.lines().next().unwrap_or_default()
+            );
+            return None;
+        }
+        panic!("{file} did not run cleanly:\n{stdout}{stderr}");
+    }
+    let document = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("{file} is not one json document ({error}):\n{stdout}"));
+    Some(Session { document, stderr })
+}
+
+impl Session {
+    fn join(&self, rule: &str) -> &serde_json::Value {
+        self.document["joins"]
+            .as_array()
+            .and_then(|joins| joins.iter().find(|join| join["rule"] == rule))
+            .unwrap_or_else(|| panic!("no join `{rule}` in {}", self.document))
+    }
+
+    fn decomposition(&self, id: &str) -> &serde_json::Value {
+        self.document["decompositions"]
+            .as_array()
+            .and_then(|all| all.iter().find(|one| one["id"] == id))
+            .unwrap_or_else(|| panic!("no decomposition `{id}` in {}", self.document))
+    }
+
+    fn result(&self, label: &str) -> &serde_json::Value {
+        self.document["results"]
+            .as_array()
+            .and_then(|all| all.iter().find(|one| one["label"] == label))
+            .unwrap_or_else(|| panic!("no request labelled `{label}`"))
+    }
+
+    /// The fields of every line of standard error that starts with `prefix`.
+    fn reported(&self, prefix: &str) -> Vec<Vec<String>> {
+        self.stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .map(|rest| rest.split_whitespace().map(str::to_owned).collect())
+            .collect()
+    }
+
+    /// `name=value` pairs from the workload's `omn-truth` line.
+    fn truth(&self, name: &str) -> f64 {
+        self.reported("omn-truth ")
+            .first()
+            .and_then(|fields| {
+                fields.iter().find_map(|pair| {
+                    let (key, value) = pair.split_once('=')?;
+                    (key == name).then(|| value.parse().ok()).flatten()
+                })
+            })
+            .unwrap_or_else(|| panic!("the workload reported no `{name}`:\n{}", self.stderr))
+    }
+}
+
+fn number(value: &serde_json::Value) -> f64 {
+    value.as_f64().unwrap_or(0.0)
+}
+
+/// The rows of a decomposition's table for one key, by state.
+fn rows(table: &serde_json::Value) -> BTreeMap<&str, &serde_json::Value> {
+    table["rows"]
+        .as_array()
+        .expect("a table has rows")
+        .iter()
+        .map(|row| (row["state"].as_str().unwrap_or_default(), row))
+        .collect()
+}
+
+/// `between` against a program that says what it wrote, and when.
+///
+/// Three phases each open large blocks and write a known number of bytes
+/// inside one interval, and the resident size's change across that interval --
+/// with whatever a phase that straddled a reading left in the next one -- is
+/// held to what the program wrote, to a huge page. That is the arithmetic.
+///
+/// The fourth phase is the point, and it is the test that TEMPORAL is not a
+/// synonym for KEY. The program allocates one 1 MiB block and never writes it,
+/// and in the same instant maps and writes 16 MiB the allocation tracker cannot
+/// see. `between` credits the interval's 16 MiB to the one block that opened
+/// in it -- sixteen times more than the block can hold -- because that is what
+/// crediting by the clock does, and the correlation says TEMPORAL. The same
+/// streams joined by `eq` on the task say KEY for the association and TEMPORAL
+/// for which state each reading landed on.
+#[test]
+fn between_credits_what_moved_together_and_says_temporal_even_when_it_is_wrong() {
+    if !has("python3") {
+        eprintln!("SKIPPED: this machine has no python3 to launch the workload");
+        return;
+    }
+    let Some(run) = session(
+        "join-between-residency.yml",
+        "that each phase's written bytes are credited to the blocks that opened with it, and \
+         that a decoy's unrelated 16 MiB is credited to an unwritten block at TEMPORAL",
+    ) else {
+        return;
+    };
+
+    let residency = run.join("residency");
+    assert_eq!(residency["match_kind"], "between");
+    assert_eq!(residency["evidence"], "TEMPORAL", "{residency}");
+    assert!(residency.get("within_key").is_none(), "{residency}");
+
+    let by_task = run.join("by-task");
+    assert_eq!(by_task["evidence"], "KEY", "the two sides do share a task");
+    assert_eq!(
+        by_task["within_key"], "TEMPORAL",
+        "every allocator call replaced the state before it, so which one a reading landed on \
+         was the clock's choice: {by_task}"
+    );
+
+    // The resident size readings, to find the one after an interval.
+    let readings: Vec<(u64, f64)> = run.result("resident")["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+        .map(|event| {
+            let bytes = event["attrs"]
+                .as_array()
+                .and_then(|attrs| attrs.iter().find(|attr| attr["name"] == "bytes"))
+                .map(|attr| number(&attr["value"]))
+                .unwrap_or(0.0);
+            (event["ts_ns"].as_u64().unwrap_or(0), bytes)
+        })
+        .collect();
+    let after = |closed_ns: u64| -> f64 {
+        let position = readings.iter().position(|(ts, _)| *ts == closed_ns);
+        match position {
+            Some(at) if at + 1 < readings.len() => readings[at + 1].1 - readings[at].1,
+            _ => 0.0,
+        }
+    };
+    let lossy = number(&run.result("allocations")["losses"]["dropped"]) > 0.0;
+
+    let intervals = residency["top"].as_array().expect("intervals");
+    for phase in run.reported("PHASE ") {
+        let (name, at, written, blocks) = (
+            phase[0].as_str(),
+            phase[1].parse::<u64>().expect("an instant"),
+            phase[2].parse::<f64>().expect("bytes"),
+            phase[3].parse::<u64>().expect("a count"),
+        );
+        if blocks == 0 {
+            // The freed phase: a free carries no size, so this session has no
+            // `closes` and the change is credited to nothing. It is counted
+            // among the readings that moved with nothing around them.
+            continue;
+        }
+        // The interval the phase's allocations fell in: the one reaching past
+        // the instant the phase began, and starting before its writes ended.
+        let interval = intervals
+            .iter()
+            .find(|interval| {
+                interval["closed_ns"].as_u64().unwrap_or(0) >= at
+                    && interval["opened_ns"].as_u64().unwrap_or(u64::MAX) <= at + 20_000_000
+            })
+            .unwrap_or_else(|| panic!("no credited interval holds the {name} phase: {residency}"));
+        let change = &interval["change"];
+        if !lossy {
+            assert_eq!(
+                change["opened"].as_u64(),
+                Some(blocks),
+                "the {name} phase allocated {blocks} large blocks: {interval}"
+            );
+        }
+        let delta = number(&change["delta"]);
+        let spill = after(interval["closed_ns"].as_u64().unwrap_or(0));
+        assert!(
+            delta >= -INTERPRETER,
+            "the {name} phase only added memory, and its interval moved by {delta}"
+        );
+        assert!(
+            (delta + spill - written).abs() <= HUGE_PAGE + INTERPRETER,
+            "the {name} phase wrote {written} bytes; its interval moved by {delta} and the \
+             reading after it by {spill}"
+        );
+        if name == "decoy" {
+            assert!(
+                delta + spill > 8.0 * MIB,
+                "the unwritten 1 MiB block was credited with {} MiB: more than it can hold, \
+                 which is what TEMPORAL evidence allows and KEY would not",
+                (delta + spill) / MIB
+            );
+        }
+    }
+    assert_eq!(
+        run.reported("PHASE ").len(),
+        4,
+        "the workload reports four phases:\n{}",
+        run.stderr
+    );
+}
+
+/// The memory crossing's decomposition, said by the tool: the rise in the
+/// resident size split into live and retained bytes, with a residue the
+/// program predicts most of.
+#[test]
+fn the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_program_predicts() {
+    if !has("python3") {
+        eprintln!("SKIPPED: this machine has no python3 to launch the workload");
+        return;
+    }
+    let Some(run) = session(
+        "join-decompose-memory.yml",
+        "that live and retained bytes are what the program holds and frees, and that the \
+         residue is the freed bytes on pages shared with live blocks",
+    ) else {
+        return;
+    };
+    let arena = &run.reported("ARENA ")[0];
+    let (freed, whole_pages) = (
+        arena[1].parse::<f64>().expect("bytes"),
+        arena[2].parse::<f64>().expect("bytes"),
+    );
+
+    let decomposition = run.decomposition("where-the-memory-went");
+    assert_eq!(decomposition["unit"], "bytes");
+    let table = &decomposition["tables"][0];
+    let rows = rows(table);
+    for row in rows.values() {
+        assert_eq!(row["kind"], "polled", "{row}");
+        assert_eq!(row["evidence"], "KEY", "{row}");
+    }
+
+    let live = number(&rows["live"]["amount"]);
+    let retained = number(&rows["retained"]["amount"]);
+    let residue = number(&table["residue"]);
+    // Four kept 8 MiB mappings, and the 512 arena blocks less those freed.
+    let held = 4.0 * 8.0 * MIB + 512.0 * 65536.0 - freed;
+    assert!(
+        (live - held).abs() <= INTERPRETER,
+        "the program ends holding {held} bytes it asked for; the live row says {live}"
+    );
+    assert!(
+        (retained - whole_pages).abs() <= INTERPRETER,
+        "the freed blocks cover {whole_pages} bytes of whole pages; the retained row says \
+         {retained}"
+    );
+    let predicted = freed - whole_pages;
+    assert!(
+        residue >= -INTERPRETER,
+        "a residue of {residue} means more was accounted for than is resident"
+    );
+    assert!(
+        residue <= predicted + HUGE_PAGE,
+        "a residue of {residue} is more than the {predicted} the program predicts plus a huge \
+         page: something resident is in neither row"
+    );
+    assert!(
+        table.get("residue_resolution").is_none(),
+        "a level of bytes has no resolution in bytes, and the table must not invent one"
+    );
+}
+
+/// One task's wall clock through the tool's own decomposition, each row held
+/// to the kernel's accounting of the same task, and the wakeup join beside it
+/// ranked by chain.
+#[test]
+fn a_half_blocked_task_decomposes_as_the_kernel_says_and_its_releaser_heads_the_chains() {
+    const ROUND_TRIPS: f64 = 600.0;
+    let Some(run) = session(
+        "join-decompose-compute.yml",
+        "each row of one task's decomposition against /proc/self/schedstat, and that the \
+         responder that released it 600 times is one chain at the top of the wakeup table",
+    ) else {
+        return;
+    };
+    let task = run.truth("tid") as u64;
+    let (wall, on_cpu, runq) = (
+        run.truth("wall_ns"),
+        run.truth("oncpu_ns"),
+        run.truth("runq_ns"),
+    );
+    let slices = run.truth("slices");
+
+    let decomposition = run.decomposition("where-the-time-went");
+    assert_eq!(decomposition["unit"], "ns");
+    let table = &decomposition["tables"][0];
+    assert_eq!(
+        table["key"],
+        format!("task:{task}"),
+        "the heaviest table is the task the workload says it is"
+    );
+    let rows = rows(table);
+
+    // On a cpu: a sample count times a period, with a count's resolution.
+    let period = 1e9 / 997.0;
+    let sampled = &rows["on-cpu"];
+    assert_eq!(sampled["kind"], "sampled");
+    assert!(
+        (number(&sampled["resolution"]) - period).abs() < 1.0,
+        "{sampled}"
+    );
+    let sampled_ns = number(&sampled["amount"]);
+    assert!(
+        (sampled_ns - on_cpu).abs() <= 0.05 * sampled_ns + 3.0 * period,
+        "the sampled row says {sampled_ns} ns on cpu and the kernel says {on_cpu}"
+    );
+
+    // Waiting for a cpu: every wait, summed. 5 us per wait is the per-wait
+    // difference the compute crossing measured between the tracer and
+    // `run_delay` on an idle cpu (finding 7).
+    let runnable = &rows["runnable"];
+    assert_eq!(runnable["kind"], "traced");
+    assert_eq!(number(&runnable["resolution"]), 0.0);
+    let runnable_ns = number(&runnable["amount"]);
+    assert!(
+        (runnable_ns - runq).abs() <= 5_000.0 * 2.0 * slices,
+        "the runnable row says {runnable_ns} ns and the kernel's run_delay is {runq}"
+    );
+
+    // Blocked: every block, summed. It holds the task's whole blocked time in
+    // its clock, plus the queue wait after each wakeup (which the runnable row
+    // also holds), plus the shell's blocks outside the clock -- so the part
+    // of the clock that was neither on a cpu nor queued is a lower bound.
+    let blocked_ns = number(&rows["blocked"]["amount"]);
+    let slack = 0.05 * sampled_ns + 3.0 * period;
+    assert!(
+        blocked_ns >= wall - on_cpu - runq - slack,
+        "the task's own clock has {} ns neither on a cpu nor queued, and the blocked row says \
+         {blocked_ns}",
+        wall - on_cpu - runq
+    );
+
+    // The parts bracket the task's clock: at least the clock, and within the
+    // window by no more than the double count the runnable row bounds.
+    let parts = number(&table["parts"]);
+    let window = number(&table["whole"]["amount"]);
+    assert_eq!(table["whole"]["kind"], "window");
+    assert!(
+        parts >= wall - slack,
+        "the parts add to {parts} ns, less than the task's own clock of {wall}"
+    );
+    assert!(
+        parts <= window + runnable_ns + slack,
+        "the parts add to {parts} ns, more than the {window} ns window plus what the runnable \
+         row can have counted twice"
+    );
+    eprintln!(
+        "task:{task}: on cpu {:.1} ms (kernel {:.1}), runnable {:.2} ms (kernel {:.2}), blocked \
+         {:.1} ms; parts {:.1} ms against a clock of {:.1} and a window of {:.1}: residue {:+.1} ms",
+        sampled_ns / 1e6,
+        on_cpu / 1e6,
+        runnable_ns / 1e6,
+        runq / 1e6,
+        blocked_ns / 1e6,
+        parts / 1e6,
+        wall / 1e6,
+        window / 1e6,
+        number(&table["residue"]) / 1e6
+    );
+
+    // The chain that released the task once per round trip is one row, at
+    // the top, naming the responder.
+    let join = run.join("what-released-each-run");
+    assert_eq!(join["evidence"], "WAKEUP");
+    let top = &join["top"][0];
+    let chain = top["key"].as_str().unwrap_or_default();
+    let responder = run.truth("responder") as u64;
+    assert!(
+        chain.ends_with(&format!("task:{responder} -> task:{task}")),
+        "the responder releases the driver every round trip, and the top chain is `{chain}`: \
+         {join}"
+    );
+    let wakeups = number(&top["wakeups"]);
+    assert!(
+        (wakeups - ROUND_TRIPS).abs() <= 3.0,
+        "the responder released the driver {ROUND_TRIPS} times and its chain folds {wakeups}"
+    );
+    assert!(
+        number(&join["top"][1]["wakeups"]) < ROUND_TRIPS / 10.0,
+        "no other chain comes near: {join}"
+    );
+}
+
+/// Writes a session into a scratch file and validates it, returning the exit
+/// code and everything said. Validation needs no machine: these refusals are
+/// about what a request means.
+fn validate(name: &str, session: &str) -> (Option<i32>, String) {
+    let directory = std::env::temp_dir().join(format!("omn-join-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let path = directory.join("session.yml");
+    std::fs::write(&path, session).expect("the session file");
+    let output = Command::new(BINARY)
+        .args(["validate", "-f", path.to_str().expect("a utf-8 path")])
+        .output()
+        .expect("omn should run");
+    let _ = std::fs::remove_dir_all(&directory);
+    (
+        output.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+const LAUNCH: &str = "{launch: [/bin/sh, -c, 'sleep 0.1']}";
+
+/// A wakeup join onto a drained total matched, attributed, and said WAKEUP:
+/// the compute crossing's finding 5. It is refused before the run now, with
+/// the source to use instead.
+#[test]
+fn a_wakeup_join_onto_a_drained_total_is_refused_before_anything_is_attached() {
+    let (code, said) = validate(
+        "drained",
+        &format!(
+            "requests:\n\
+             \x20 - {{source: sched.wakeup, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+             \x20 - {{source: sched.offcpu, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+             joins:\n\
+             \x20 - {{id: released, from: sched.wakeup, to: sched.offcpu, via: task, \
+             match: wakeup, waker: waker_tid}}\n"
+        ),
+    );
+    assert_eq!(code, Some(2), "{said}");
+    assert!(said.contains("drained"), "{said}");
+    assert!(said.contains("sched.switches"), "{said}");
+}
+
+/// `between` onto a traced source has no reading before an event to differ
+/// from, and onto a poll it has to be told what a reading is.
+#[test]
+fn between_is_refused_onto_what_is_not_a_reading_and_onto_an_unstated_poll() {
+    let traced = format!(
+        "requests:\n\
+         \x20 - {{source: mem.heap.alloc, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+         \x20 - {{source: mem.faults, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+         joins:\n\
+         \x20 - {{id: moved, from: mem.heap.alloc, to: mem.faults, via: task, match: between, \
+         value: count}}\n"
+    );
+    let (code, said) = validate("between-traced", &traced);
+    assert_eq!(code, Some(2), "{said}");
+    assert!(said.contains("no reading before it"), "{said}");
+
+    let unstated = format!(
+        "requests:\n\
+         \x20 - {{source: mem.heap.alloc, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+         \x20 - {{source: mem.rss, target: {LAUNCH}, mode: poll@100ms, emit: [raw]}}\n\
+         joins:\n\
+         \x20 - {{id: moved, from: mem.heap.alloc, to: mem.rss, via: task, match: between, \
+         value: bytes}}\n"
+    );
+    let (code, said) = validate("between-unstated", &unstated);
+    assert_eq!(code, Some(2), "{said}");
+    assert!(said.contains("reading: level"), "{said}");
+
+    let (code, said) = validate(
+        "between-stated",
+        &unstated.replace("value: bytes}", "value: bytes, reading: level}"),
+    );
+    assert_eq!(code, Some(0), "a stated level is a valid rule: {said}");
+}
+
+/// A decomposition whose parts are not what the session collects is refused
+/// before the run, by name.
+#[test]
+fn a_decomposition_that_cannot_mean_anything_is_refused_before_the_run() {
+    let (code, said) = validate(
+        "decompose-missing",
+        &format!(
+            "requests:\n\
+             \x20 - {{source: sched.offcpu, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+             decompose:\n\
+             \x20 - id: where\n\
+             \x20   whole: window\n\
+             \x20   parts:\n\
+             \x20     - {{state: on-cpu, from: cpu.profile, value: samples}}\n\
+             \x20     - {{state: blocked, from: sched.offcpu, value: total_ns}}\n"
+        ),
+    );
+    assert_eq!(code, Some(2), "{said}");
+    assert!(said.contains("does not collect"), "{said}");
+
+    let (code, said) = validate(
+        "decompose-other-target",
+        &format!(
+            "requests:\n\
+             \x20 - {{source: sched.offcpu, target: {LAUNCH}, mode: trace, emit: [raw]}}\n\
+             \x20 - {{source: sched.runqlat, target: {{pid: [1]}}, mode: trace, emit: [raw]}}\n\
+             decompose:\n\
+             \x20 - id: where\n\
+             \x20   whole: window\n\
+             \x20   parts:\n\
+             \x20     - {{state: blocked, from: sched.offcpu, value: total_ns}}\n\
+             \x20     - {{state: runnable, from: sched.runqlat, value: total_ns}}\n"
+        ),
+    );
+    assert_eq!(code, Some(2), "{said}");
+    assert!(said.contains("different program"), "{said}");
+}
+
+/// `format.rs` claims which formats carry a join and a decomposition; the
+/// encoders are held to the claim in both directions.
+#[test]
+fn the_formats_that_claim_to_carry_correlations_carry_them_and_the_others_refuse() {
+    use omn::format::OutputFormat;
+    let decomposition: omn::join::DecompositionOutput = serde_json::from_value(serde_json::json!({
+        "id": "where-the-time-went", "by": "task", "unit": "ns", "keys_seen": 1,
+        "tables": [{
+            "key": "task:7",
+            "whole": {"state": "whole", "source": "the run's window", "value": "observed_ns",
+                      "kind": "window", "amount": 10.0, "readings": 0},
+            "rows": [{"state": "blocked", "source": "sched.offcpu", "value": "total_ns",
+                      "kind": "traced", "evidence": "KEY", "amount": 7.0, "resolution": 0.0,
+                      "readings": 2}],
+            "parts": 7.0, "residue": 3.0, "residue_resolution": 0.0
+        }]
+    }))
+    .expect("a decomposition");
+    let correlation = join::apply(
+        &Rule {
+            match_kind: MatchKind::Eq,
+            ..eq_rule()
+        },
+        &[],
+    )
+    .expect("an empty join");
+
+    for format in OutputFormat::ALL {
+        let decomposed = omn::encode::decomposition(format, &decomposition);
+        let joined = omn::encode::correlation(format, &correlation);
+        if format.carries_correlations() {
+            let text = decomposed.unwrap_or_else(|error| panic!("{format}: {error}"));
+            assert!(text.contains("where-the-time-went"), "{format}: {text}");
+            let text = joined.unwrap_or_else(|error| panic!("{format}: {error}"));
+            assert!(text.contains("handles-of-a-thread"), "{format}: {text}");
+        } else {
+            assert!(
+                decomposed.is_err() && joined.is_err(),
+                "`{format}` claims it cannot carry correlations and encoded one"
+            );
+        }
     }
 }

@@ -1156,7 +1156,11 @@ fn no_completion_is_credited_to_a_request_that_had_already_finished() {
         );
     }
     assert_eq!(scoped["evidence"], "KEY");
-    assert_eq!(bare["evidence"], "KEY");
+    // Defect 3 of `docs/scenarios/cross-io.md`, fixed by the eighth wave's
+    // stream J: a bare equality on the recycled pointer compares the address
+    // alone, which establishes two events at one address around the same
+    // time, and is rated for exactly that (`docs/families/join.md`).
+    assert_eq!(bare["evidence"], "TEMPORAL");
 
     if bare_credited <= credited {
         eprintln!(

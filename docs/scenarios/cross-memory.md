@@ -341,7 +341,9 @@ recorded, and requested under "Needs from another stream" in
 
 ### D1 — a join on `task` credits each reading to one allocation by recency, and says only `KEY`
 
-Pinned by `d1_a_join_on_task_credits_each_reading_to_the_latest_allocation_and_says_only_key`.
+Pinned by `d1_a_join_on_task_credits_each_reading_to_the_latest_allocation_and_says_temporal_within_it`,
+which asserts the fix since the eighth wave: the correlation carries
+`within_key: TEMPORAL` beside `evidence: KEY` (`docs/families/join.md`).
 
 The only rule that validates between an allocation and a resident size, other
 than D2's, is `eq` on `task`, since both carry it:

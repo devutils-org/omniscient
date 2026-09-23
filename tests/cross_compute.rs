@@ -1001,21 +1001,49 @@ fn a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone() {
     }
 }
 
-/// A wakeup join onto a drained total attributes drains, not blocks.
+/// A wakeup join onto a drained total is refused, and the reason is measured.
 ///
-/// This pins the defect `cross-compute-drained-wakeup.yml` exists to show, in
-/// the one form that does not depend on timing: the join's unit is the event,
-/// and one `sched.offcpu` event stands for many blocks. When the engine learns
-/// to weigh a drained event, or refuses the rule, this test fails, and the
-/// document says what to change it to.
+/// This pinned finding 5 while the engine accepted the rule: eleven drained
+/// events standing for six hundred blocks, reported as `11 of 11 attributed`
+/// at WAKEUP. The eighth wave's stream J made it a refusal before the run
+/// (`docs/families/join.md`), so the test now asks for the rule the session
+/// keeps as a comment and requires the refusal, and still runs the session to
+/// measure what the refusal rests on: each event holds many blocks.
 #[test]
-fn a_wakeup_join_onto_drained_totals_counts_drains_rather_than_blocks() {
+fn a_wakeup_join_onto_drained_totals_is_refused_because_each_event_holds_many_blocks() {
     let _alone = one_at_a_time();
+    let text =
+        std::fs::read_to_string("examples/cross-compute-drained-wakeup.yml").expect("the session");
+    let rule: String = text
+        .lines()
+        .skip_while(|line| !line.starts_with("# joins:"))
+        .take_while(|line| line.starts_with('#'))
+        .map(|line| line.strip_prefix("# ").unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rule.contains("to: sched.offcpu"),
+        "the session keeps the refused rule as a comment: {rule}"
+    );
+    let directory = std::env::temp_dir().join(format!("omn-drained-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let path = directory.join("drained.yml");
+    std::fs::write(&path, format!("{text}\n{rule}\n")).expect("the session with its join");
+    let output = Command::new(BINARY)
+        .args(["validate", "-f", path.to_str().expect("a utf-8 path")])
+        .output()
+        .expect("omn should run");
+    let _ = std::fs::remove_dir_all(&directory);
+    let said = spoken(&output);
+    assert_eq!(output.status.code(), Some(2), "{said}");
+    assert!(said.contains("drained"), "{said}");
+    assert!(said.contains("sched.switches"), "{said}");
+
     let Some(run) = run(
         "cross-compute-drained-wakeup.yml",
         &[],
-        "that the wakeup join onto sched.offcpu attributes drained totals, each standing for \
-         many blocks",
+        "that each drained sched.offcpu event stands for many blocks, which is why a wakeup \
+         join onto it is refused",
     ) else {
         return;
     };
@@ -1028,22 +1056,9 @@ fn a_wakeup_join_onto_drained_totals_counts_drains_rather_than_blocks() {
         blocks.abs_diff(voluntary) <= voluntary / 100 + 3,
         "the blocks are the kernel's voluntary switches: {blocks} against {voluntary}"
     );
-
-    let join = run
-        .joins
-        .iter()
-        .find(|join| join["rule"] == "what-released-the-block")
-        .expect("the session declares the join");
-    let attributed =
-        join["matched"].as_u64().unwrap_or(0) + join["unmatched"].as_u64().unwrap_or(0);
-    eprintln!(
-        "{drained} drained events stand for {blocks} blocks, and the join accounted for \
-         {attributed} of something at evidence {}",
-        join["evidence"]
-    );
-    assert_eq!(
-        attributed, drained,
-        "the join counts the events it was given, which are drains"
+    assert!(
+        run.joins.is_empty(),
+        "the session no longer declares the refused join"
     );
     assert!(
         blocks >= 10 * drained,
