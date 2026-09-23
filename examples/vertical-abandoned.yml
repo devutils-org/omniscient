@@ -1,0 +1,33 @@
+# A request that never ends is counted and named, not dropped.
+#
+#   omn -f examples/vertical-abandoned.yml
+#
+# The loss path of `net.request`. The server from
+# `examples/vertical-one-request.yml` serves two requests on one thread, and
+# the first is abandoned: it is declared at `request__start` and the program
+# never fires `request__done` for it. A request with no end has no total, so it
+# can be in no event -- and it must not therefore be in no output either. The
+# run says how many were born and how many ended, names the one that never did
+# and the thread it was in, and says that the second birth on that thread
+# replaced a request still live.
+#
+# The second request is an ordinary 5 ms lock wait, and it must come through
+# whole: an abandoned request on a thread does not leak into the next one,
+# because the next birth resets the thread's storage.
+#
+# Build the server first; see `examples/vertical-one-request.yml`.
+name: a request that never ends
+format: text
+
+requests:
+  - label: requests
+    source: net.request
+    target:
+      launch:
+        - target/omn-vertical/server
+        - target/omn-vertical/abandoned
+        - "-1:0"
+        - "5:0"
+    mode: trace
+    emit: [raw, summary]
+    keys: [req]

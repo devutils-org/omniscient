@@ -22,6 +22,15 @@
 //! layer has. The catalog's caveat says so, and a run with a process target
 //! repeats it in its own output rather than leaving a reader to wonder why a
 //! program that wrote a gigabyte produced four events.
+//!
+//! **A request submitted while serving a request carries `req:<id>`.** The
+//! program that sees the submitting task current -- the issue, or the insert
+//! for `io.queue` -- reads the id the request's birth wrote into that task's
+//! storage (`src/bpf/request.rs`), and the event carries it as a key. Nothing
+//! here infers it from the file, the descriptor or the timing: it is the value
+//! the task held, which is why a decomposition read per `req` can call the
+//! block row IDENTITY. A write that leaves through writeback carries none, for
+//! the same reason it carries no submitter.
 
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
@@ -41,7 +50,7 @@ use crate::request::{Mode, Target};
 /// ten milliseconds is cheap and what it cannot absorb is counted.
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 
-/// The ring the programs write into. Each record is 96 bytes plus an 8-byte
+/// The ring the programs write into. Each record is 104 bytes plus an 8-byte
 /// header, so this holds about two and a half thousand requests between drains.
 const RING_BYTES: usize = 256 * 1024;
 
@@ -213,6 +222,11 @@ pub struct BlockCollector {
     predicate: Option<FilterExpr>,
     filtered_out: u64,
     filtered_in: u64,
+    /// Events that carried a request identity.
+    carried_request: u64,
+    /// Why no event can carry one, when the kernel gave the programs no
+    /// task-storage map to read it from.
+    no_request_identity: Option<String>,
 }
 
 impl BlockCollector {
@@ -246,6 +260,8 @@ impl BlockCollector {
             predicate,
             filtered_out: 0,
             filtered_in: 0,
+            carried_request: 0,
+            no_request_identity: None,
         }
     }
 
@@ -315,6 +331,9 @@ impl BlockCollector {
                 continue;
             }
             self.events += 1;
+            if record.req != 0 {
+                self.carried_request += 1;
+            }
             events.push(event);
         }
     }
@@ -399,7 +418,14 @@ impl BlockCollector {
                 // The submitting thread, captured where it was still the
                 // current one.
                 KeyValue::task(record.tid as i32),
-            ],
+            ]
+            .into_iter()
+            // The request that thread was serving, read from its own storage
+            // at the same moment. Absent, not zero, when it was serving none.
+            .chain((record.req != 0).then(|| KeyValue::Req {
+                id: crate::bpf::request_key(record.req),
+            }))
+            .collect(),
             attrs,
             collector_id: self.id.clone(),
             seq,
@@ -510,11 +536,9 @@ impl Collector for BlockCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(BlockProgram::load(
-            self.measure.stage(),
-            self.submitter,
-            RING_BYTES,
-        )?);
+        let program = BlockProgram::load(self.measure.stage(), self.submitter, RING_BYTES)?;
+        self.no_request_identity = program.no_request_identity.clone();
+        self.program = Some(program);
         self.names = super::device_names();
         self.opened_ns = monotonic_ns();
         Ok(())
@@ -661,6 +685,22 @@ impl Collector for BlockCollector {
             ));
         }
 
+        if let Some(reason) = &self.no_request_identity {
+            notes.push(format!(
+                "no event carries `req`: the request identity is read from the submitting task's \
+                 storage, and this kernel gave the programs no task-storage map ({reason})"
+            ));
+        } else if self.carried_request > 0 {
+            notes.push(format!(
+                "{} of the {} requests were submitted by a task serving a request and carry \
+                 `req:<id>`, read from that task's own storage at the {} -- a propagated \
+                 identity, not an inference from the file or the timing",
+                self.carried_request,
+                self.events,
+                self.measure.stage().opens_at().unwrap_or("issue"),
+            ));
+        }
+
         if self.filtered_out > 0 || self.filtered_in > 0 {
             notes.push(format!(
                 "the filter kept {} requests and removed {}; it ran here, over the drained \
@@ -682,7 +722,7 @@ mod tests {
         // Built through the decoder rather than by naming fields, because the
         // fields are private to the layer that writes them: this is the same
         // bytes the ring carries.
-        let mut bytes = [0u8; 96];
+        let mut bytes = [0u8; 104];
         bytes[0..8].copy_from_slice(&1_000_000u64.to_ne_bytes()); // ts_ns
         bytes[8..16].copy_from_slice(&0xffff_0000u64.to_ne_bytes()); // rq
         bytes[16..24].copy_from_slice(&900_000u64.to_ne_bytes()); // open_ts
@@ -768,6 +808,28 @@ mod tests {
             }
         );
         assert_eq!(key.to_string(), "blk:0xffff0000@900000");
+    }
+
+    /// A request submitted while its task served a request carries that
+    /// request's id as a `req` key, spelled the way `net.request` spells it;
+    /// one submitted while serving none carries no `req` key at all rather
+    /// than a zero that every such request would share.
+    #[test]
+    fn a_request_identity_is_a_key_when_the_task_carried_one_and_absent_otherwise() {
+        let bare = collector(Measure::Latency).event(&record(), 0);
+        assert_eq!(bare.key(crate::request::KeyKind::Req), None);
+
+        let mut bytes = [0u8; 104];
+        bytes[40..44].copy_from_slice(&((259u32 << 20) | 6).to_ne_bytes());
+        bytes[96..104].copy_from_slice(&0xa3f1u64.to_ne_bytes());
+        let tagged = BlockEvent::from_bytes(&bytes).expect("a full record");
+        let event = collector(Measure::Latency).event(&tagged, 0);
+        assert_eq!(
+            event
+                .key(crate::request::KeyKind::Req)
+                .map(ToString::to_string),
+            Some("req:a3f1".to_owned())
+        );
     }
 
     /// The device is the first key and therefore the series. A latency

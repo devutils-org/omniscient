@@ -1,0 +1,97 @@
+# One request's latency, decomposed boundary by boundary, by the tool.
+#
+#   omn -f examples/vertical-one-request.yml
+#
+# ROADMAP.md phase 4, the milestone it calls the real one. A real TCP server on
+# loopback serves three requests, each with delays injected where the test
+# chose them:
+#
+#   req:a001   40 ms waiting for a lock another thread sleeps under
+#   req:a002   64 pages read with O_DIRECT from a file dropped from the cache
+#   req:a003   both: 20 ms on the lock, then 32 pages
+#
+# The server declares each request with two USDT probes, `request__start(id)`
+# and `request__done(id)`. The birth writes the id into the serving thread's
+# own task storage, and every program that later runs in that thread reads it
+# back -- `sched_switch`, to add the request's time up by state, and the block
+# layer's issue, to put `req:<id>` on the block requests it submits. That last
+# read is what ties the request's block I/O to it by IDENTITY: nothing joins a
+# block request to a file, a descriptor or a task. It carries the id the thread
+# held.
+#
+# Two tables, both read per request.
+#
+# `one-request` is where the request's life went, and its whole is that life,
+# birth to end:
+#
+#   cpu_on       `net.request` oncpu_ns   on a cpu while carrying the id
+#   sched_wait   `net.request` runq_ns    runnable, waiting for a cpu
+#   lock_wait    `net.request` sleep_ns   asleep interruptibly: the lock here,
+#                                         and `holder_tid` names who released it
+#   block_io     `net.request` disk_ns    asleep uninterruptibly: the reads
+#
+# The four tile the life exactly, so its residue is zero by construction and
+# says nothing; what says something is which row each injected delay lands in.
+#
+# `block-io` opens the last row. Its whole is that same uninterruptible wait,
+# and its one part is the device's time for every block request carrying this
+# request's id -- `io.latency`, whose `req` key is the id read out of the
+# serving thread's storage at the issue. The residue is what the device did
+# not do: the submission, and the completion's trip back to the reader, which
+# on btrfs goes through a kworker that verifies the data's checksums. On a
+# quiet machine it is a few percent; under load it was 2 ms of 10, and the
+# first version of this session, which put the device's time in the first
+# table's `block_io`, missed the roadmap's 10 % by exactly that.
+#
+# Ground truth is not this table. It is what the server and its client print
+# on their own clocks, prefixed `vertical:` -- the lock wait, the read time, the
+# latency the client measured -- and `tests/vertical.rs` holds each row to it.
+#
+# The server is built from `tests/vertical.rs` on first run; by hand:
+#
+#   sed -n '/BEGIN SERVER/,/END SERVER/p' tests/vertical.rs > server.c
+#   mkdir -p target/omn-vertical && cc -O0 -pthread -o target/omn-vertical/server server.c
+#
+# It needs systemtap's <sys/sdt.h>, a filesystem that takes O_DIRECT under
+# `target/`, and CAP_BPF and CAP_PERFMON on the binary -- `make` grants them.
+name: one request, decomposed boundary by boundary
+format: text
+
+requests:
+  - label: requests
+    source: net.request
+    target: &server
+      launch:
+        - target/omn-vertical/server
+        - target/omn-vertical/data
+        - "40:0"
+        - "0:64"
+        - "20:32"
+    mode: trace
+    emit: [raw, summary]
+    keys: [req]
+
+  - label: block
+    source: io.latency
+    target: *server
+    mode: trace
+    emit: [raw, summary]
+    keys: [req]
+
+decompose:
+  - id: one-request
+    by: req
+    whole: {from: net.request, value: total_ns}
+    parts:
+      - {state: cpu_on, from: net.request, value: oncpu_ns}
+      - {state: sched_wait, from: net.request, value: runq_ns}
+      - {state: lock_wait, from: net.request, value: sleep_ns}
+      - {state: block_io, from: net.request, value: disk_ns}
+    top: 3
+
+  - id: block-io
+    by: req
+    whole: {from: net.request, value: disk_ns}
+    parts:
+      - {state: device, from: io.latency, value: latency_ns}
+    top: 3

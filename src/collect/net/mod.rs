@@ -16,6 +16,7 @@ mod netlink;
 mod packet;
 mod procfs;
 mod qdisc;
+mod request;
 mod retransmit;
 mod socket;
 mod softirq;
@@ -89,6 +90,14 @@ pub fn factories() -> Vec<Factory> {
         Factory::new("net.socket", "bpf:fentry", |resolved| {
             Ok(Box::new(socket::Prepare {
                 mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // A request the server declared, followed in the task serving it.
+        Factory::new("net.request", "bpf:usdt", |resolved| {
+            Ok(Box::new(request::Prepare {
+                mode: resolved.request.mode,
+                target: resolved.request.target.clone(),
                 filter: resolved.request.filter.clone(),
             }))
         }),

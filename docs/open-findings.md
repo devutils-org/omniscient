@@ -5855,3 +5855,92 @@ assert!((sum - expected).abs() <= 2.0 * f64::EPSILON * sum.abs().max(1.0));
 ```
 
 or asserting the summary's own `sum` field, if it carries one, exactly.
+
+---
+
+## Needs from another stream — the ninth wave, stream V (the vertical case)
+
+Stream V's deliverable is `docs/scenarios/vertical.md`; these are what it needs
+from files it does not own, each with the signature wanted.
+
+### To whoever owns `src/join.rs`: a row read per `req` is IDENTITY
+
+`Readout::row` writes `evidence: Some(Evidence::Key)` on every row of every
+decomposition. `evidence(rule)` already rates a join on `req` IDENTITY -- the
+downstream event carries what the upstream one put there -- and a
+decomposition read `by: req` is read by that same propagated key, so its rows
+print under-rated: every row of `examples/vertical-one-request.yml` says KEY.
+Wanted, the same rule in both places:
+
+```rust
+// in Readout, carried from `decompose`
+by: KeyKind,
+// in Readout::row
+evidence: Some(if self.by == KeyKind::Req { Evidence::Identity } else { Evidence::Key }),
+```
+
+### To whoever owns `src/join.rs`: a key the whole carries is a table
+
+`decompose` builds its tables from the keys the *parts'* events carry, and
+never from the whole's. `examples/vertical-one-request.yml`'s `block-io` table
+has as its whole a request's uninterruptible wait and as its part the device
+time of the block requests carrying the request's id; a request that waited
+uninterruptibly and whose id no block request carries -- a page lock, a
+metadata read in a kworker -- gets no table at all, where the right answer is
+a table whose whole is its wait and whose residue is all of it. Wanted:
+`per_key` extended with `whole_readout.keys()` when the whole is `Measured`.
+`tests/vertical.rs` asserts today's absence, and will need the one `None` arm
+changed when this lands.
+
+### To whoever owns `src/join.rs`: seconded, an event without the key is unattributed
+
+Stream T's need above (`missing_key` refuses a rule at the first `to` event
+without the key) has a second producer. `net.request -> io.latency` on `req`
+is refused at the first block request submitted outside a request -- the
+server's own file creation, in this session -- which is every block request
+that is not a request's. Wanted as T wrote it: counted as unattributed, with
+its own count in the join's report.
+
+### To whoever owns `src/join.rs`: a row that names who released it
+
+The roadmap's tree prints `lock_wait ... WAKEUP -> holder tid=8821` and
+`block_io ... IDENTITY -> 3 rq, dev 259:0`. The events carry both --
+`net.request`'s `holder_tid`, and one `io.latency` event per request with its
+`dev` -- and a row has no way to say either. Wanted, on `Part`:
+
+```rust
+/// An attribute whose value the row names beside its amount: the most
+/// frequent one among the row's events for the key, with how many carried it.
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub names: Option<String>,
+```
+
+and `Row::named: Option<(String, u64)>`, rendered after the share.
+
+### To whoever owns `src/bpf/usdt.rs`: the uprobe-multi load and link are in `syscall.rs` now
+
+`syscall::prog_load_for(prog_type, expected_attach_type, insns, name, license)`
+and `syscall::link_uprobe_multi(prog_fd, path, offset, pid)` landed in this
+wave, as stream U asked. `usdt.rs`'s `load_for_multi` and `link_multi` are
+copies of them and can go; the semaphore offset is the one argument
+`link_uprobe_multi` does not take yet, and `usdt.rs` needs it.
+
+### To whoever owns `src/bpf/insn.rs`: three comparisons, one addition, four helpers
+
+`src/bpf/request.rs` declares locally, as `fentry.rs` and `usdt.rs` already do
+for some of the same: `add64_reg`, `jgt_reg`, `jge_reg`, `jne_reg` (all
+`BPF_X`, unsigned), and the helper ids `PROBE_READ_USER = 112`,
+`TASK_STORAGE_GET = 156`, `TASK_STORAGE_DELETE = 157`,
+`GET_CURRENT_TASK_BTF = 158`. Three files now carry some of these; one copy in
+`insn.rs` would be the one a test can hold.
+
+### To the coordinator: two registration lines, and the indexes
+
+A new file under `src/bpf/` and a new collector under `src/collect/net/` cannot
+exist without a line in their module's registry, and neither registry is on
+stream V's list: `src/bpf/mod.rs` gained `mod request;` and its `pub use`, and
+`src/collect/net/mod.rs` gained `mod request;` and the `net.request` factory.
+No other stream of the ninth wave owns either file. Two sessions were added,
+`examples/vertical-one-request.yml` and `examples/vertical-abandoned.yml`;
+their rows for `examples/README.md` and `GUIDE.md` are at the end of
+`docs/scenarios/vertical.md`.
