@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and forty-one sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and forty-five sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and forty-one
+make demo-all           # the tour and then all one hundred and forty-five
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -246,6 +246,8 @@ Each is `omn -f examples/<file>`. The whole family is
 | `io-request-halves.yml` | Where did a block request spend its time -- queueing, or on the device? |
 | `io-ring-overflow.yml` | Driving the block tracer until it loses events, on purpose. |
 | `io-writeback-rounds.yml` | The half of a write nobody is waiting for. |
+| `io-cold-then-warm.yml` | One file read cold and then warm: every page missed once, and the second read served from the cache. |
+| `io-readahead-patterns.yml` | Readahead in front of a sequential reader, and not in front of a random one. |
 
 ## net
 
@@ -353,6 +355,17 @@ Each is `omn -f examples/<file>`. The whole family is
 | `runtime-usdt-threads.yml` | A probe follows the process, not the thread that started it. |
 | `runtime-usdt-flood.yml` | More hits than the ring holds, and every one of them accounted for. |
 | `runtime-usdt-absent.yml` | A runtime built without its probes is refused, and says what it does carry. |
+
+## vertical
+
+`ROADMAP.md` phase 4: one request followed from where it entered to where it
+touched the disk, by the id it carried. A real server on loopback, delays
+injected where the test chose them, and each landing in its own row.
+
+| Session | The question it answers |
+|---|---|
+| `vertical-one-request.yml` | Where did one request's latency go, boundary by boundary, against injected delays? |
+| `vertical-abandoned.yml` | Is a request the server never ended counted and named, or dropped? |
 
 ## join
 

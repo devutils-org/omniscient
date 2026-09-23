@@ -120,22 +120,36 @@ fn a_valid_request_with_no_collector_names_the_ones_that_exist() {
                 .all(|backend| !omn::collect::implements(&entry.id.to_string(), &backend.id))
                 && entry.modes.iter().any(|mode| mode.as_str() == "trace")
                 && entry.emits.iter().any(|emit| emit.as_str() == "raw")
-                && entry.target_support(omn::request::TargetKind::System)
+                && (entry.target_support(omn::request::TargetKind::System)
                     != omn::catalog::TargetSupport::No
+                    || entry.target_support(omn::request::TargetKind::Pid)
+                        != omn::catalog::TargetSupport::No)
         })
-        .map(|entry| entry.id.to_string())
-        .expect("this build does not collect every source in the catalog");
+        .map(|entry| {
+            // The whole machine where the source takes it, and this test's own
+            // process otherwise: the breadth of the ninth wave left only
+            // sources that take a process among the ones with no collector.
+            let target = if entry.target_support(omn::request::TargetKind::System)
+                != omn::catalog::TargetSupport::No
+            {
+                vec!["--system".to_owned()]
+            } else {
+                vec!["--pid".to_owned(), std::process::id().to_string()]
+            };
+            (entry.id.to_string(), target)
+        });
+    let Some((uncollected, target)) = uncollected else {
+        // The day every source that takes a trace and a raw emit is collected,
+        // there is nothing left to refuse this way, and that is the goal
+        // rather than a failure.
+        eprintln!("skipped: every source that could be asked this way has a collector");
+        return;
+    };
 
-    let output = run(&[
-        &uncollected,
-        "--system",
-        "-m",
-        "trace",
-        "-e",
-        "raw",
-        "-d",
-        "1s",
-    ]);
+    let mut args = vec![uncollected.as_str()];
+    args.extend(target.iter().map(String::as_str));
+    args.extend(["-m", "trace", "-e", "raw", "-d", "1s"]);
+    let output = run(&args);
     let code = output.status.code();
     if code == Some(EXIT_UNAVAILABLE) {
         // This machine cannot serve it either, which is a different answer and
