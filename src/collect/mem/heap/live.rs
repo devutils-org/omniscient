@@ -111,6 +111,10 @@ impl Collector for LiveCollector {
         Some(super::DRAIN_INTERVAL)
     }
 
+    fn notes(&self) -> Vec<String> {
+        self.stream.notes()
+    }
+
     fn losses(&self) -> Losses {
         self.stream.losses()
     }

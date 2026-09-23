@@ -1,4 +1,5 @@
-# The one `sched` source this build describes and cannot measure.
+# The one `sched` backend this build describes and a user can still reach
+# without a collector.
 #
 #   omn -f examples/sched-not-implemented.yml ; echo $?   # 3
 #
@@ -8,24 +9,18 @@
 # exit 3 for a machine limit goes looking for a kernel option that would not
 # have helped.
 #
-# This file used to list three. The sixth wave left one: `sched.lock`,
-# `sched.futex`, `sched.irq` and `sched.numa_balance` now collect through raw
-# tracepoints, and what is left is the source whose two backends are the two
-# mechanisms this layer still does not have.
+# This file used to name a whole source. The sixth wave left one, `sched.mutex`,
+# and the ninth gave it its first backend: the `LD_PRELOAD` shim that already
+# interposed `malloc` now interposes `pthread_mutex_lock` too, and
+# examples/sched-mutex-known-hold.yml is that measurement. What is left is the
+# fallback, pinned here because the resolver would never reach it on a machine
+# that can preload:
 #
-#   preload      the `LD_PRELOAD` shim would have to interpose
-#                `pthread_mutex_lock`, which it does not: the shim knows the
-#                allocator and nothing else.
 #   bpf:uprobe   a uprobe on `pthread_mutex_lock` inside the target's own
 #                libc, which needs the symbol resolved in that mapping. The
-#                attach kind exists in `src/bpf/attach.rs`; nothing calls it.
-#
-# `sched.futex` measures the same waits one layer down and does collect --
-# every contended `pthread_mutex_lock` ends in a `futex` syscall, and
-# examples/sched-futex-known-wait.yml is that measurement. What it cannot say is
-# which *mutex object* in the program was contended, only which futex word:
-# those are the same address for an ordinary glibc mutex, and are not for a
-# lock implementation that keeps its word elsewhere.
+#                attach kind exists in `src/bpf/attach.rs`; nothing calls it
+#                for this source. It is the one that could serve a process
+#                already running, which a preloaded shim never can.
 name: described, not built
 requests:
   - label: pthread-mutex-contention
@@ -33,3 +28,4 @@ requests:
     target: {launch: ["/bin/true"]}
     mode: trace
     emit: [hist]
+    backend: "force:bpf:uprobe"

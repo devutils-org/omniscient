@@ -5,7 +5,7 @@
 //! address. The interval join in `examples/allocation-cost.yml` is what this
 //! source exists for; on its own it is an allocation log.
 
-use super::{Stream, OP_ALLOC};
+use super::{state::LiveSet, Stream, OP_ALLOC};
 use crate::collect::task::Comms;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -16,6 +16,10 @@ pub struct AllocCollector {
     /// By tid: the shim reports the thread that allocated, and a thread pool
     /// that names its workers is exactly the case `comm` is filtered on.
     comms: Comms,
+    /// What is live, so that a free can say how big the allocation it ends
+    /// was: the shim writes no size on a free, and a join that closes only on
+    /// large frees needs one.
+    live: LiveSet,
 }
 
 impl AllocCollector {
@@ -24,17 +28,28 @@ impl AllocCollector {
             id: CollectorId::new("mem.heap.alloc/preload"),
             stream,
             comms: Comms::new(),
+            live: LiveSet::default(),
         }
     }
 
     fn events(&mut self, seq: u64) -> Vec<Event> {
         let records = self.stream.drain();
         let comms = &mut self.comms;
+        let live = &mut self.live;
         let mut index = seq;
         records
             .into_iter()
             .map(|record| {
                 let allocated = record.op == OP_ALLOC;
+                // `bytes` stays what was allocated, zero on a free, because it
+                // is the value every sum and mean of this source is taken over;
+                // the size a free gave back rides beside it.
+                let freed = if allocated {
+                    live.allocated(record.ptr, record.size);
+                    None
+                } else {
+                    Some(live.freed(record.ptr).map(|(start, end)| end - start))
+                };
                 let event = Event {
                     ts_ns: record.ts_ns,
                     ts_err_ns: 0,
@@ -55,6 +70,14 @@ impl AllocCollector {
                             Attr::text("op", if allocated { "alloc" } else { "free" }),
                             Attr::uint("ptr", record.ptr),
                         ];
+                        match freed {
+                            Some(Some(size)) => attrs.push(Attr::uint("freed_bytes", size)),
+                            // A free of something allocated before the shim was
+                            // reporting, or whose record was lost: the size is
+                            // unknown, and saying so beats a zero.
+                            Some(None) => attrs.push(Attr::uint("freed_untracked", 1)),
+                            None => {}
+                        }
                         if let Some(comm) = comms.get(record.tid as i32) {
                             attrs.push(Attr::text("comm", comm));
                         }
@@ -93,6 +116,10 @@ impl Collector for AllocCollector {
 
     fn tick(&self) -> Option<std::time::Duration> {
         Some(super::DRAIN_INTERVAL)
+    }
+
+    fn notes(&self) -> Vec<String> {
+        self.stream.notes()
     }
 
     fn losses(&self) -> Losses {
@@ -144,5 +171,37 @@ mod tests {
         );
         assert_eq!(events[0].attr("op").unwrap().to_string(), "free");
         assert_eq!(events[0].attr("bytes").unwrap().as_f64(), Some(0.0));
+        assert!(
+            events[0].attr("freed_bytes").is_none(),
+            "no allocation of 0x1000 was seen, so its size is not known"
+        );
+        assert_eq!(
+            events[0].attr("freed_untracked").unwrap().as_f64(),
+            Some(1.0)
+        );
+    }
+
+    /// A free says how big the allocation it ends was, so a join can close
+    /// only on the large ones; `bytes`, the source's value, stays zero.
+    #[test]
+    fn a_free_carries_the_size_its_allocation_was_made_with() {
+        let (writer, stream) = piped();
+        write(writer, &record(OP_ALLOC, 0x1000, 8 << 20));
+        write(writer, &record(OP_ALLOC, 0x9000_0000, 24));
+        write(writer, &record(super::super::OP_FREE, 0x1000, 0));
+        let mut collector = AllocCollector::new(stream);
+
+        let events = collector.events(0);
+        let free = &events[2];
+        assert_eq!(free.attr("op").unwrap().to_string(), "free");
+        assert_eq!(
+            free.attr("freed_bytes").unwrap().as_f64(),
+            Some((8u64 << 20) as f64)
+        );
+        assert_eq!(free.attr("bytes").unwrap().as_f64(), Some(0.0));
+        assert!(
+            events[0].attr("freed_bytes").is_none(),
+            "an allocation frees nothing"
+        );
     }
 }

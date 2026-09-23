@@ -1,0 +1,31 @@
+# A program that drives the GPU where the shim cannot see it.
+#
+#   omn -f examples/gpu-api-unreachable.yml
+#
+# tests/gpu_workload.py launches a kernel and keeps the device busy for 200 ms
+# -- `gpu.engine_busy` sees it -- but it reaches the driver through Python's
+# ctypes, which is `dlopen` and `dlsym` on the library's own handle. A lookup on
+# a handle searches that library and its dependencies, never the preloaded one,
+# so every call goes around the shim.
+#
+# That is the shape of most real programs: the CUDA runtime fetches every
+# driver entry point with `cuGetProcAddress`, and most Vulkan engines fetch
+# theirs with `vkGetDeviceProcAddr`. So the answer here is not a measurement,
+# and the run has to say so rather than report an idle GPU:
+#
+#   0 events
+#   degraded: no GPU API call was reported for pid ...: the shim sees only
+#   calls bound through the dynamic linker, so a program that reaches the
+#   driver through `dlopen` and `dlsym` (Python's ctypes), `cuGetProcAddress`
+#   ... reports nothing here whatever it submitted
+name: GPU calls the shim cannot see
+format: text
+
+requests:
+  - label: ctypes
+    source: gpu.api
+    target:
+      launch: [python3, tests/gpu_workload.py, kernel, "200"]
+    mode: trace
+    emit: [summary]
+    keys: [task]

@@ -174,14 +174,27 @@
     - {id: "preload", requires: ["dynamic-linking"], cost: low}
   modes: [trace]
   emits: [hist, topk, raw, summary]
-  targets: {pid: native, launch: native}
-  keys: [gpu, task, req]
-  filter_fields: [api, comm]
+  targets: {launch: native}
+  # The thread is what the shim knows. The device a call went to is its
+  # context's, and asking the driver inside every call would cost more than
+  # the call, so no event carries a `gpu` key and the entry does not claim one.
+  keys: [task]
+  filter_fields: [api, family, result, comm]
   determinism: low
   caveats:
     - "This is the host's view: how long the submitting thread spent inside the
        call. An asynchronous launch returns long before the GPU runs anything,
        so this is not GPU time and cannot be read as such."
+    - "Only calls bound through the dynamic linker are seen: a program linked
+       with `-lcuda` or `-lvulkan`. A program that fetched its own function
+       pointers -- `dlopen` and `dlsym` (Python's ctypes), `cuGetProcAddress`
+       (the CUDA runtime, for every driver call it makes), `vkGetDeviceProcAddr`
+       (most Vulkan engines) -- reports nothing, and the run says so rather than
+       reporting an idle GPU."
+    - "The entry points interposed are the CUDA driver's launch, copy,
+       synchronize and allocation calls and Vulkan's submit, present and wait
+       calls; `api` names them without their ABI suffix. OpenGL is not among
+       them."
 
 - id: gpu.counters
   family: gpu

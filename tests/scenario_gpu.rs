@@ -1432,14 +1432,14 @@ fn a_request_that_cannot_mean_anything_is_rejected_and_names_what_cannot() {
 /// different answer, with a different exit code, and it names the backend that
 /// is missing rather than the hardware.
 ///
-/// Three of this family's nine sources are in that state, and two of them --
-/// `gpu.kernel` and `gpu.counters` -- would be *available* here: the vendor
-/// libraries load. Nothing about the machine is wrong; the code is not written.
+/// Two of this family's nine sources are in that state since the ninth wave
+/// gave `gpu.api` a collector, and both -- `gpu.kernel` and `gpu.counters` --
+/// would be *available* here: the vendor libraries load. Nothing about the
+/// machine is wrong; the code is not written.
 #[test]
 fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
     for (source, mode, emit, backend) in [
         ("gpu.kernel", "trace", "summary", "vendor:cupti"),
-        ("gpu.api", "trace", "summary", "preload"),
         ("gpu.counters", "snapshot", "summary", "vendor:ncu"),
     ] {
         let output = omn(&[source, "--mode", mode, "--emit", emit, "--", "true"]);
@@ -1864,5 +1864,525 @@ fn what_this_machine_cannot_check_about_gpu_job_is_named_with_its_numbers() {
         !complaint.contains("CAP_BPF"),
         "the eBPF capabilities are not what is missing here, and a refusal that names them \
          sends the reader to a setcap that will not help:\n{complaint}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The ninth wave: `gpu.api`, through the preload shim
+//
+// One C program calls the CUDA driver API or Vulkan through the dynamic
+// linker a number of times its command line chose, and times every call
+// itself. The shim is inside the call the program timed, so each of the
+// tool's durations is nested in the program's: the counts are asserted equal,
+// and each total is asserted no larger than the program's.
+//
+// This machine's proprietary NVIDIA driver makes both reachable headless --
+// which the brief did not expect -- so neither is skipped here. Where a
+// machine has no driver, no loader or no compiler, each test skips with what
+// the build or the fixture said.
+// ---------------------------------------------------------------------------
+
+/// Launches and synchronizes in `examples/gpu-api-cuda.yml`.
+const CUDA_LAUNCHES: u64 = 20;
+
+/// Submissions in `examples/gpu-api-vulkan.yml`.
+const VULKAN_SUBMITS: u64 = 100;
+
+const GPU_FIXTURE_SOURCE: &str = r#"
+/* BEGIN FIXTURE -- omn's GPU API fixture. It calls the CUDA driver API and
+ * Vulkan through the dynamic linker, the way a program linked with `-lcuda`
+ * and `-lvulkan` does, a number of times the command line chose, and times
+ * every call itself with the clock the tool uses. It reports on stderr,
+ * because stdout is where `omn` writes.
+ *
+ *   gpu cuda <launches> <spin iterations>   a kernel launched and waited for, each time
+ *   gpu vulkan <submits>                    an empty submission and a fence wait, each time
+ *
+ * The CUDA prototypes are declared here rather than taken from `cuda.h`, so
+ * the fixture needs the driver and not the toolkit. The Vulkan ones come from
+ * the loader's headers. */
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static unsigned long long now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (unsigned long long)t.tv_sec * 1000000000ull + (unsigned long long)t.tv_nsec;
+}
+
+struct tally { const char *api; long calls; unsigned long long total_ns, max_ns; };
+
+static void count(struct tally *tally, unsigned long long began) {
+    unsigned long long spent = now_ns() - began;
+    tally->calls++;
+    tally->total_ns += spent;
+    if (spent > tally->max_ns)
+        tally->max_ns = spent;
+}
+
+static void say(const struct tally *tally) {
+    fprintf(stderr, "fixture: api=%s calls=%ld total_ns=%llu max_ns=%llu\n", tally->api,
+            tally->calls, tally->total_ns, tally->max_ns);
+}
+
+#ifdef WITH_CUDA
+typedef int CUresult;
+typedef int CUdevice;
+typedef void *CUcontext;
+typedef void *CUmodule;
+typedef void *CUfunction;
+typedef unsigned long long CUdeviceptr;
+CUresult cuInit(unsigned);
+CUresult cuDeviceGet(CUdevice *, int);
+CUresult cuCtxCreate_v2(CUcontext *, unsigned, CUdevice);
+CUresult cuCtxDestroy_v2(CUcontext);
+CUresult cuModuleLoadData(CUmodule *, const void *);
+CUresult cuModuleGetFunction(CUfunction *, CUmodule, const char *);
+CUresult cuMemAlloc_v2(CUdeviceptr *, size_t);
+CUresult cuMemFree_v2(CUdeviceptr);
+CUresult cuMemcpyDtoH_v2(void *, CUdeviceptr, size_t);
+CUresult cuLaunchKernel(CUfunction, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+                        unsigned, void *, void **, void **);
+CUresult cuCtxSynchronize(void);
+
+/* The spin kernel of tests/gpu_workload.py: slow on purpose, and storing its
+ * accumulator so the compiler cannot delete the loop. */
+static const char SPIN_PTX[] =
+    ".version 6.0\n.target sm_50\n.address_size 64\n"
+    ".visible .entry spin(.param .u64 p_out, .param .u64 p_iters)\n{\n"
+    "  .reg .u64 %rd<8>;\n  .reg .pred %p1;\n"
+    "  ld.param.u64 %rd1, [p_out];\n  ld.param.u64 %rd2, [p_iters];\n"
+    "  mov.u64 %rd3, 0;\n  mov.u64 %rd4, 0;\n"
+    "LOOP:\n  add.u64 %rd4, %rd4, %rd3;\n  add.u64 %rd3, %rd3, 1;\n"
+    "  setp.lt.u64 %p1, %rd3, %rd2;\n  @%p1 bra LOOP;\n"
+    "  st.global.u64 [%rd1], %rd4;\n  ret;\n}\n";
+
+static int check(const char *what, CUresult code) {
+    if (code != 0) {
+        fprintf(stderr, "fixture: unavailable=%s code=%d\n", what, code);
+        exit(3);
+    }
+    return 0;
+}
+
+static int cuda(long launches, unsigned long long iterations) {
+    CUdevice device;
+    CUcontext context;
+    CUmodule module;
+    CUfunction spin;
+    CUdeviceptr out;
+    check("cuInit", cuInit(0));
+    check("cuDeviceGet", cuDeviceGet(&device, 0));
+    check("cuCtxCreate", cuCtxCreate_v2(&context, 0, device));
+    check("cuModuleLoadData", cuModuleLoadData(&module, SPIN_PTX));
+    check("cuModuleGetFunction", cuModuleGetFunction(&spin, module, "spin"));
+
+    struct tally alloc = {"cuMemAlloc", 0, 0, 0}, launch = {"cuLaunchKernel", 0, 0, 0},
+                 sync = {"cuCtxSynchronize", 0, 0, 0}, copy = {"cuMemcpyDtoH", 0, 0, 0},
+                 release = {"cuMemFree", 0, 0, 0};
+    unsigned long long began = now_ns();
+    check("cuMemAlloc", cuMemAlloc_v2(&out, sizeof(unsigned long long)));
+    count(&alloc, began);
+    void *params[] = {&out, &iterations};
+    for (long i = 0; i < launches; i++) {
+        began = now_ns();
+        check("cuLaunchKernel", cuLaunchKernel(spin, 1, 1, 1, 32, 1, 1, 0, NULL, params, NULL));
+        count(&launch, began);
+        began = now_ns();
+        check("cuCtxSynchronize", cuCtxSynchronize());
+        count(&sync, began);
+    }
+    unsigned long long result = 0;
+    began = now_ns();
+    check("cuMemcpyDtoH", cuMemcpyDtoH_v2(&result, out, sizeof result));
+    count(&copy, began);
+    began = now_ns();
+    check("cuMemFree", cuMemFree_v2(out));
+    count(&release, began);
+    cuCtxDestroy_v2(context);
+    say(&alloc);
+    say(&launch);
+    say(&sync);
+    say(&copy);
+    say(&release);
+    return 0;
+}
+#endif
+
+#ifdef WITH_VULKAN
+#include <vulkan/vulkan.h>
+
+static void vk_check(const char *what, VkResult code) {
+    if (code != VK_SUCCESS) {
+        fprintf(stderr, "fixture: unavailable=%s code=%d\n", what, (int)code);
+        exit(3);
+    }
+}
+
+static int vulkan(long submits) {
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                             .apiVersion = VK_API_VERSION_1_1};
+    VkInstanceCreateInfo instance_info = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                                          .pApplicationInfo = &app};
+    VkInstance instance;
+    vk_check("vkCreateInstance", vkCreateInstance(&instance_info, NULL, &instance));
+    uint32_t devices = 1;
+    VkPhysicalDevice physical;
+    VkResult listed = vkEnumeratePhysicalDevices(instance, &devices, &physical);
+    if ((listed != VK_SUCCESS && listed != VK_INCOMPLETE) || devices == 0) {
+        fprintf(stderr, "fixture: unavailable=vkEnumeratePhysicalDevices code=%d\n", (int)listed);
+        return 3;
+    }
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(physical, &properties);
+    fprintf(stderr, "fixture: device=%s\n", properties.deviceName);
+
+    uint32_t families = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, NULL);
+    VkQueueFamilyProperties family_properties[16];
+    if (families > 16)
+        families = 16;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, family_properties);
+    uint32_t family = 0;
+    while (family < families && !(family_properties[family].queueFlags & VK_QUEUE_COMPUTE_BIT))
+        family++;
+    if (family == families) {
+        fprintf(stderr, "fixture: unavailable=compute-queue code=0\n");
+        return 3;
+    }
+    float priority = 1.0f;
+    VkDeviceQueueCreateInfo queue_info = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                          .queueFamilyIndex = family,
+                                          .queueCount = 1,
+                                          .pQueuePriorities = &priority};
+    VkDeviceCreateInfo device_info = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                      .queueCreateInfoCount = 1,
+                                      .pQueueCreateInfos = &queue_info};
+    VkDevice device;
+    vk_check("vkCreateDevice", vkCreateDevice(physical, &device_info, NULL, &device));
+    VkQueue queue;
+    vkGetDeviceQueue(device, family, 0, &queue);
+    VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence;
+    vk_check("vkCreateFence", vkCreateFence(device, &fence_info, NULL, &fence));
+
+    struct tally submit = {"vkQueueSubmit", 0, 0, 0}, wait = {"vkWaitForFences", 0, 0, 0},
+                 idle = {"vkQueueWaitIdle", 0, 0, 0};
+    for (long i = 0; i < submits; i++) {
+        /* An empty submission still goes to the queue and signals the fence:
+         * what is timed is the host's side of submitting, which is what the
+         * source measures. */
+        unsigned long long began = now_ns();
+        vk_check("vkQueueSubmit", vkQueueSubmit(queue, 0, NULL, fence));
+        count(&submit, began);
+        began = now_ns();
+        vk_check("vkWaitForFences", vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+        count(&wait, began);
+        vk_check("vkResetFences", vkResetFences(device, 1, &fence));
+    }
+    unsigned long long began = now_ns();
+    vk_check("vkQueueWaitIdle", vkQueueWaitIdle(queue));
+    count(&idle, began);
+    vkDestroyFence(device, fence, NULL);
+    vkDestroyDevice(device, NULL);
+    vkDestroyInstance(instance, NULL);
+    say(&submit);
+    say(&wait);
+    say(&idle);
+    return 0;
+}
+#endif
+
+int main(int argc, char **argv) {
+#ifdef WITH_CUDA
+    if (argc == 4 && strcmp(argv[1], "cuda") == 0)
+        return cuda(atol(argv[2]), strtoull(argv[3], NULL, 10));
+#endif
+#ifdef WITH_VULKAN
+    if (argc == 3 && strcmp(argv[1], "vulkan") == 0)
+        return vulkan(atol(argv[2]));
+#endif
+    fprintf(stderr, "usage: %s cuda <launches> <spin iterations> | vulkan <submits>\n", argv[0]);
+    return 2;
+}
+/* END FIXTURE */
+"#;
+
+/// Builds one flavour of the fixture once per test process, or says why it
+/// cannot: `cuda` against `libcuda.so.1`, `vulkan` against the loader.
+fn gpu_fixture(flavour: &'static str) -> Result<std::path::PathBuf, String> {
+    static CUDA: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
+    static VULKAN: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
+    let (cell, define, library) = match flavour {
+        "cuda" => (&CUDA, "-DWITH_CUDA", "-l:libcuda.so.1"),
+        _ => (&VULKAN, "-DWITH_VULKAN", "-lvulkan"),
+    };
+    cell.get_or_init(|| {
+        let dir = std::path::Path::new(ROOT).join("target/omn-shim-fixture");
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        let path = dir.join(format!("gpu-{flavour}"));
+        // Written and built under names of this process's own, and renamed:
+        // the two flavours of one test process never race on one file, and a
+        // half-written binary is never at the path the examples launch.
+        let source = dir.join(format!("gpu-{flavour}.{}.c", std::process::id()));
+        let partial = dir.join(format!("gpu-{flavour}.{}", std::process::id()));
+        std::fs::write(&source, GPU_FIXTURE_SOURCE).map_err(|error| error.to_string())?;
+        let built = Command::new("cc")
+            .args(["-O1", define, "-o"])
+            .arg(&partial)
+            .arg(&source)
+            .arg(library)
+            .output();
+        let _ = std::fs::remove_file(&source);
+        let built = built
+            .map_err(|error| format!("no C compiler (`cc`) to build the fixture with: {error}"))?;
+        if !built.status.success() {
+            return Err(format!(
+                "the {flavour} fixture did not build, most likely because this machine has no \
+                 {library} to link against:\n{}",
+                String::from_utf8_lossy(&built.stderr)
+            ));
+        }
+        std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+        Ok(path)
+    })
+    .clone()
+}
+
+/// Every `fixture: key=value` line the fixture printed on stderr.
+fn gpu_fixture_said(output: &Output) -> Vec<std::collections::BTreeMap<String, String>> {
+    stderr(output)
+        .lines()
+        .filter_map(|line| line.strip_prefix("fixture: "))
+        .map(|line| {
+            line.split_whitespace()
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+/// The fixture's own count and total for one entry point.
+fn fixture_calls(said: &[std::collections::BTreeMap<String, String>], api: &str) -> (u64, u64) {
+    let line = said
+        .iter()
+        .find(|line| line.get("api").map(String::as_str) == Some(api))
+        .unwrap_or_else(|| panic!("the fixture never reported `{api}`: {said:?}"));
+    (
+        line["calls"].parse().expect("a count"),
+        line["total_ns"].parse().expect("a total"),
+    )
+}
+
+/// Runs a session whose fixture may find no usable device, and returns it --
+/// unless the fixture said this machine could not serve it, in which case the
+/// caller is told what the fixture was refused.
+fn gpu_api_session(file: &str) -> Result<(Output, Value), String> {
+    let output = omn(&["-f", &format!("examples/{file}"), "--format", "json"]);
+    let said = gpu_fixture_said(&output);
+    if let Some(refused) = said.iter().find(|line| line.contains_key("unavailable")) {
+        return Err(format!(
+            "the fixture could not use this machine's GPU: `{}` returned {}",
+            refused["unavailable"], refused["code"]
+        ));
+    }
+    assert!(
+        output.status.success(),
+        "{file} failed: {}",
+        stderr(&output)
+    );
+    let run: Value = serde_json::from_str(&stdout(&output)).expect("a json document");
+    Ok((output, run))
+}
+
+/// Every `raw` event of the first result.
+fn raw_api_events(run: &Value) -> Vec<Value> {
+    run["results"][0]["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| output["events"].as_array().expect("events").clone())
+        .collect()
+}
+
+fn event_attr(event: &Value, name: &str) -> Value {
+    event["attrs"]
+        .as_array()
+        .expect("attributes")
+        .iter()
+        .find(|attr| attr["name"] == name)
+        .map(|attr| attr["value"].clone())
+        .unwrap_or_else(|| panic!("an event without `{name}`: {event}"))
+}
+
+/// Every call the run reported, as (entry point, latency) pairs.
+fn api_calls(run: &Value) -> Vec<(String, u64)> {
+    raw_api_events(run)
+        .iter()
+        .map(|event| {
+            (
+                event_attr(event, "api")
+                    .as_str()
+                    .expect("a name")
+                    .to_owned(),
+                event_attr(event, "latency_ns")
+                    .as_u64()
+                    .expect("a duration"),
+            )
+        })
+        .collect()
+}
+
+/// Asserts one entry point against the fixture -- the count exactly, the total
+/// nested inside the fixture's own -- and returns the tool's count and total.
+fn matches_the_fixture(
+    calls: &[(String, u64)],
+    said: &[std::collections::BTreeMap<String, String>],
+    api: &str,
+) -> (u64, u64) {
+    let durations: Vec<u64> = calls
+        .iter()
+        .filter(|(name, _)| name == api)
+        .map(|(_, ns)| *ns)
+        .collect();
+    let (count, total) = (durations.len() as u64, durations.iter().sum::<u64>());
+    let (expected, program_total) = fixture_calls(said, api);
+    assert_eq!(
+        count, expected,
+        "the program called {api} {expected} times and the run reports {count}"
+    );
+    assert!(
+        total <= program_total,
+        "the shim times inside the call the program timed, so {api}'s {total} ns cannot exceed \
+         the program's {program_total} ns"
+    );
+    (count, total)
+}
+
+/// The CUDA driver API, called through the dynamic linker a known number of
+/// times.
+///
+/// Ground truth is the program's own count of each call, which must match
+/// exactly, and its own timing of each call, which must enclose the tool's.
+/// And the separation that is this source's reason to exist: a launch returns
+/// once the work is queued, and the kernel's time is paid by the synchronize
+/// that waits for it.
+#[test]
+fn every_cuda_call_the_program_made_is_one_event_nested_in_its_own_timing() {
+    if let Err(reason) = gpu_fixture("cuda") {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let (output, run) = match gpu_api_session("gpu-api-cuda.yml") {
+        Ok(ran) => ran,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let said = gpu_fixture_said(&output);
+    let calls = api_calls(&run);
+    let (launches, launched_ns) = matches_the_fixture(&calls, &said, "cuLaunchKernel");
+    let (syncs, synced_ns) = matches_the_fixture(&calls, &said, "cuCtxSynchronize");
+    for api in ["cuMemAlloc", "cuMemcpyDtoH", "cuMemFree"] {
+        matches_the_fixture(&calls, &said, api);
+    }
+    assert_eq!((launches, syncs), (CUDA_LAUNCHES, CUDA_LAUNCHES));
+    assert_eq!(
+        calls.len() as u64,
+        2 * CUDA_LAUNCHES + 3,
+        "the program made {} calls into interposed entry points and nothing else, and the run \
+         reports {}: the driver calling its own exported symbols would look like this",
+        2 * CUDA_LAUNCHES + 3,
+        calls.len()
+    );
+    let (mean_launch, mean_sync) = (launched_ns / launches, synced_ns / syncs);
+    eprintln!("cuLaunchKernel {mean_launch} ns on average, cuCtxSynchronize {mean_sync} ns");
+    assert!(
+        mean_sync > mean_launch.saturating_mul(10),
+        "a launch is queued and returns, and the synchronize waits for the kernel; the run \
+         reports {mean_launch} ns against {mean_sync} ns, which is not that"
+    );
+}
+
+/// Vulkan, through the loader's exported entry points, headless.
+#[test]
+fn every_vulkan_submission_and_wait_is_one_event_nested_in_its_own_timing() {
+    if let Err(reason) = gpu_fixture("vulkan") {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let (output, run) = match gpu_api_session("gpu-api-vulkan.yml") {
+        Ok(ran) => ran,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let said = gpu_fixture_said(&output);
+    let calls = api_calls(&run);
+    let (submits, _) = matches_the_fixture(&calls, &said, "vkQueueSubmit");
+    let (waits, _) = matches_the_fixture(&calls, &said, "vkWaitForFences");
+    let (idles, _) = matches_the_fixture(&calls, &said, "vkQueueWaitIdle");
+    assert_eq!((submits, waits, idles), (VULKAN_SUBMITS, VULKAN_SUBMITS, 1));
+    assert_eq!(calls.len() as u64, 2 * VULKAN_SUBMITS + 1, "{calls:?}");
+    assert!(
+        raw_api_events(&run)
+            .iter()
+            .all(|event| event_attr(event, "family") == "vulkan"),
+        "every call here is a Vulkan call"
+    );
+}
+
+/// A program that drives the GPU through `ctypes` goes around the shim, and
+/// the run says so by name rather than reporting an idle GPU.
+///
+/// The workload is the one every other scenario in this file uses, and
+/// `gpu.engine_busy` sees its kernel: the device was busy, and this source
+/// cannot see why. That is the most common shape of a real program, not an
+/// edge case.
+#[test]
+fn a_program_that_fetched_its_own_driver_pointers_is_told_why_it_reported_nothing() {
+    if let Err(reason) = workload() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let output = omn(&["-f", "examples/gpu-api-unreachable.yml", "--format", "json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: Value = serde_json::from_str(&stdout(&output)).expect("a json document");
+    assert_eq!(
+        run["results"][0]["events_seen"].as_u64(),
+        Some(0),
+        "ctypes looks symbols up on the library's own handle, which never reaches a preloaded \
+         one; a run that saw calls is reaching the shim some other way"
+    );
+    let everything = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        everything.contains("cuGetProcAddress") && everything.contains("ctypes"),
+        "an empty result must say which ways around the shim there are:\n{everything}"
+    );
+}
+
+/// `gpu.api` on a process already running is refused by the catalog, which
+/// declares only a launch: a preloaded library is given at exec.
+#[test]
+fn gpu_api_on_a_running_process_is_rejected_for_its_target() {
+    let output = omn(&[
+        "gpu.api",
+        "--mode",
+        "trace",
+        "--emit",
+        "summary",
+        "--pid",
+        &std::process::id().to_string(),
+        "-d",
+        "50ms",
+    ]);
+    let complaint = stderr(&output);
+    assert_eq!(code(&output), EXIT_REJECTED, "{complaint}");
+    assert!(
+        complaint.contains("pid") && complaint.contains("launch"),
+        "the refusal must name the target it refused and the one it accepts: {complaint}"
     );
 }

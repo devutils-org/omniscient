@@ -199,6 +199,10 @@ impl Collector for RetainedCollector {
         Some(super::DRAIN_INTERVAL)
     }
 
+    fn notes(&self) -> Vec<String> {
+        self.stream.notes()
+    }
+
     fn losses(&self) -> Losses {
         let mut losses = self.stream.losses();
         losses.dropped += self.losses.dropped;

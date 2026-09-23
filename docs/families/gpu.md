@@ -32,6 +32,7 @@ and turns "is the driver installed" into an ordinary probe answer.
 | `gpu.temp` | `vendor:nvml` | °C | device |
 | `gpu.engine_busy` | `vendor:nvml` | ratio | device |
 | `gpu.mem` | `vendor:nvml` | bytes held by the target process | process |
+| `gpu.api` | `preload` | time inside one host API call, ns | the calling thread |
 
 Every event carries the device index, its UUID, the device name, the driver
 version and a `scope` attribute, so a result file can be read without the
@@ -335,3 +336,140 @@ to compare a pid against. Attributing a job to a process needs the submission
 path — `drm_sched_job_arm`, or the driver's own ioctl — which this build does
 not attach to. The refusal says that, and is marked as this build's gap rather
 than as a request that cannot mean anything.
+
+# `gpu.api`, through the preload shim
+
+The host's side of GPU submission: how long the calling thread spent inside
+each call into the CUDA driver API or Vulkan. The ninth wave wrote it on the
+`LD_PRELOAD` shim the heap and mutex sources share; the shim's half is
+`shim/src/gpu.rs` and the reader's `src/collect/gpu/api.rs`.
+
+The brief expected this to be unreachable on a headless machine with the
+proprietary NVIDIA driver, and allowed for a collector exercised elsewhere, the
+way `gpu.job` is. **It is reachable, both halves of it.** The CUDA driver
+launches kernels headless, and Vulkan needs no display either: an instance,
+the first physical device, a compute queue and a fence are enough to submit
+and wait. Both are measured here and neither scenario skips on this machine.
+
+## What an event is
+
+One per call into an interposed entry point, stamped when the call was
+entered, carrying `latency_ns` (the value), `api` (the entry point without the
+`_v2` ABI suffix `cuda.h` binds, so `api == 'cuMemcpyHtoD'` means what it
+says), `family` (`cuda` or `vulkan`), `result` (the return code, sign-extended:
+Vulkan's positive codes are statuses, not failures), and `tid`, `pid`, `comm`.
+
+Interposed: `cuLaunchKernel`, `cuMemcpyHtoD`, `cuMemcpyDtoH`, their `Async`
+forms, `cuCtxSynchronize`, `cuStreamSynchronize`, `cuEventSynchronize`,
+`cuMemAlloc`, `cuMemFree`; `vkQueueSubmit`, `vkQueueSubmit2`,
+`vkQueueWaitIdle`, `vkDeviceWaitIdle`, `vkWaitForFences`, `vkQueuePresentKHR`.
+Not OpenGL: GL's work is submitted inside the driver at points no entry point
+names, and `glFinish` alone would be a source of one call.
+
+The catalog entry changed in two ways to stop promising what no event carries.
+`keys` was `[gpu, task, req]` and is `[task]`: the device a call went to is its
+context's, and asking the driver inside every call would cost more than the
+call. `targets` was `{pid, launch}` and is `{launch}`: a preloaded library is
+given at exec, and the only backend is the preload.
+
+## Which programs it can see -- the thing to know first
+
+`LD_PRELOAD` wins the dynamic linker's **global** lookup. So the shim sees a
+call bound through the program's own relocations -- a C program linked with
+`-lcuda` or `-lvulkan` -- and nothing else. It does not see a call through a
+pointer the program fetched for itself:
+
+| How the program reaches the API | Seen |
+|---|---|
+| linked with `-lcuda` / `-lvulkan`, calling the exported symbols | **yes** |
+| `dlopen` + `dlsym(handle, ...)` -- Python's `ctypes`, most language bindings | no: a lookup on a handle searches that library and its dependencies, never the preload |
+| the CUDA **runtime** (`cudart`, so PyTorch, CuPy, anything `nvcc` builds by default) | no: it fetches every driver entry point with `cuGetProcAddress` |
+| `vkGetDeviceProcAddr` -- most Vulkan engines, for speed | no |
+
+That second half is most real GPU programs. Measured, with the workload every
+other scenario in this family uses (`tests/gpu_workload.py`, ctypes):
+
+```
+gpu.api  0 events over 586.76ms, stopped because the launched program exited
+  degraded: no GPU API call was reported for pid ...: the shim sees only calls
+  bound through the dynamic linker, so a program that reaches the driver through
+  `dlopen` and `dlsym` (Python's ctypes), `cuGetProcAddress` (the CUDA runtime
+  does, for every driver call) or `vkGetDeviceProcAddr` reports nothing here
+  whatever it submitted
+```
+
+while `gpu.engine_busy` sees its kernel. That sentence is the scenario:
+`examples/gpu-api-unreachable.yml` asserts zero events *and* the note, because
+a silent zero here reads as an idle GPU. (It was silent the first time it ran:
+see "Found here, belongs elsewhere" in `docs/families/sched.md` -- a loss reason
+beside clean counters is never rendered.)
+
+What would reach the rest is interposing the pointer-fetching calls themselves
+-- `cuGetProcAddress`, `vkGetDeviceProcAddr`, and ultimately `dlsym` -- and
+handing back wrappers. It is possible and it is how vendor tracers work; it is
+also the point where a shim stops being a few forwarding functions and starts
+being a second loader, and it was not attempted here.
+
+## Ground truth
+
+The fixture is a C program in `tests/scenario_gpu.rs`, built twice by the test:
+`gpu-cuda` against `libcuda.so.1` -- with the few prototypes it needs declared
+in the fixture, so the driver is enough and the toolkit is not needed -- and
+`gpu-vulkan` against the loader. Its command line chooses how many calls it
+makes, and it times every call itself with `CLOCK_MONOTONIC`. The shim is
+inside the call the program timed, so for each entry point the tool's total is
+nested in the program's.
+
+`examples/gpu-api-cuda.yml`: a word of device memory, 20 launches of a spin
+kernel each followed by `cuCtxSynchronize`, a copy back and a free -- 43 calls.
+
+```
+gpu.api  43 events, no loss
+cuLaunchKernel 3951 ns on average, cuCtxSynchronize 1887477 ns
+```
+
+Asserted: every entry point's count equals the program's, exactly, and
+**nothing else was reported** -- 43 events for 43 calls, which is also the
+check that the driver does not call its own exported symbols internally, where
+the shim would have counted them twice. Every total is at most the program's
+own. And the separation this source exists for: a launch is queued and returns
+in microseconds, and the kernel's two milliseconds are paid by the synchronize
+that waits for it; the scenario requires a factor of ten and the run shows
+nearly five hundred.
+
+`examples/gpu-api-vulkan.yml`: 100 empty submissions, a fence wait after each,
+and a queue wait at the end -- 201 calls, 201 events, each count exact and
+every event `family: vulkan`. The fixture prints the device it found
+(`NVIDIA GeForce RTX 2080 Ti`); on a machine with no Vulkan device or no
+compute queue it prints `unavailable=` with the call that refused, and the
+scenario skips with that.
+
+## What is not measured, and why
+
+- **Per entry point, the summary cannot split.** `api` is an attribute and not
+  a correlation key, so `summary`, `hist` and `topk` group by thread. A
+  breakdown by call is `--filter "api == 'cuCtxSynchronize'"`, one call at a
+  time, or `raw`. This is the same gap as "`topk` ranks a series, not an
+  attribute" in `STATE.md`, and needs surface syntax nobody owns.
+- **Which device.** No `gpu` key, for the reason above.
+- **A program with no driver behind the shim** gets the API's own "not
+  initialized" code (`CUDA_ERROR_NOT_INITIALIZED`,
+  `VK_ERROR_INITIALIZATION_FAILED`) from the wrapper rather than a jump to
+  address zero. That changes one behaviour: a program that probes for
+  `cuLaunchKernel` in the global scope with `dlsym(RTLD_DEFAULT, ...)` finds
+  it, where without the shim it would not. `cuInit` is not interposed, so a
+  program that probes for that -- the usual one -- is unaffected.
+- **Cost.** One `write(2)` per call, the same mechanism as `sched.mutex`,
+  whose section measures it at about 415 ns per record in a release build.
+  Against a `cuLaunchKernel` of four microseconds that is a tenth of what is
+  being measured, and it is inside the interval the program itself would see.
+
+## Index rows for the coordinator
+
+For `examples/README.md` and `GUIDE.md`, `gpu` table:
+
+```
+| `gpu-api-cuda.yml` | How long the host spends inside the CUDA driver API, call by call. |
+| `gpu-api-vulkan.yml` | How long the host spends submitting to a Vulkan queue and waiting for it. |
+| `gpu-api-unreachable.yml` | A program that drives the GPU where the shim cannot see it, and says so. |
+```

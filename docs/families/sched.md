@@ -22,216 +22,17 @@ The family that also owns the eBPF layer: see `docs/bpf-layer.md`.
 | `sched.futex` | `bpf:raw_tp` | implemented in the sixth wave: userspace lock waits, filtered to the waiting operations in the program |
 | `sched.irq` | `bpf:raw_tp` | implemented in the sixth wave: hard interrupt handlers, paired per cpu. **The hard half only** |
 | `sched.numa_balance` | `bpf:raw_tp` | implemented in the sixth wave; cannot fire on a machine with one NUMA node, which this one is |
-| `sched.mutex` | `preload`, `bpf:uprobe` | declared, not written: the only `sched` source left without a collector |
+| `sched.mutex` | `preload` | implemented in the ninth wave: every pthread mutex acquisition, its wait and its hold, through the shim that interposes `malloc` |
+| `sched.mutex` | `bpf:uprobe` | declared, not written |
 
-**Nine of the family's ten sources collect.** What is left is `sched.mutex`,
-whose two backends are the two mechanisms this layer still does not have — a
-shim that interposes `pthread_mutex_lock`, and a uprobe on a symbol resolved
-inside the target's own libc. `sched.futex` measures the same waits one layer
-down and does collect: every contended `pthread_mutex_lock` ends in a `futex`
-syscall. What it cannot say is which *mutex object* in the program was
-contended, only which futex word — the same address for an ordinary glibc
-mutex, and not for a lock implementation that keeps its word elsewhere.
-
-## Why `sched_waking` and not `sched_wakeup`
-
-Both fire for the same wakeup. Only the first one runs in the waker's context.
-
-`sched_waking` is raised by `try_to_wake_up` on the cpu of the task doing the
-waking, so `bpf_get_current_pid_tgid()` inside it is the waker.
-`sched_wakeup` can be raised on the woken task's cpu after an inter-processor
-interrupt, where the current task is whatever happened to be running there. A
-waker read from `sched_wakeup` is therefore wrong precisely on cross-cpu
-wakeups — which are the interesting ones, because a cross-cpu wakeup is what a
-thread pool, a lock handoff and an I/O completion all look like.
-
-This is recorded because the catalog originally required both tracepoints, and
-the choice between them looks arbitrary until it is written down.
-
-## What a wakeup is not
-
-`sched.wakeup` reports one event per wakeup and its unit is `count`, not `ns`.
-The catalog said `ns`, and that was wrong in a way worth naming: a wakeup has
-no duration. The nanoseconds this family is about appear only when a wakeup is
-paired with what the woken task did next —
-
-- wakeup → on cpu is the run queue wait, which is `sched.runqlat`;
-- blocked → wakeup is the blocked time, which is `sched.offcpu`.
-
-Reporting a wakeup stream in nanoseconds would have invited exactly the
-reading the tool exists to prevent: a number that looks like a latency and is a
-timestamp.
-
-## Ground truth
-
-- **`sched.switches`** is checked against `/proc/thread-self/status`, which
-  counts the same switches from the other side of the kernel. The first version
-  of that test read `/proc/self/status` and compared against a constant zero:
-  `self` is the thread group leader, which in a test binary is asleep while
-  another thread does the work, and a perf event follows the task that opened
-  it. A ground-truth test that reads the wrong task is worse than none.
-- **`sched.wakeup`** is checked against an injected, known count: a program that
-  blocks *n* times is woken at least *n* times, because a timer expiring is a
-  wakeup and there is no other way back onto the cpu.
-
-Both floors, never equalities. The kernel is free to add wakeups — a signal, a
-page fault on a cold binary, a preemption — and a test that demanded an exact
-count would be asserting that nothing else happens on the machine.
-
-## What the first privileged run measured
-
-The program loads, the verifier accepts it, it attaches to `sched_waking`, and
-the events are the causal chain they claim to be. Running
-`omn sched.wakeup --emit raw -- /bin/sh -c 'for i in 1 2 3 4 5; do sleep 0.02; done'`
-produced, in order: one wakeup of the launched process by `omn` itself -- the
-launch gate being released, before the `exec`, so the woken task is still named
-`omn` -- then five wakeups of the shell, each by a different `sleep` child
-exiting. Five blocks, five wakers, named.
-
-And one thing worth knowing before trusting a waker.
-
-**A waker is the task that was running when the wakeup was issued, which is not
-always the task that caused it.** A wakeup issued from interrupt or softirq
-context is credited to whatever was interrupted, because that is what `current`
-is there. Measured, with a process that does nothing at all:
-
-```
-$ omn sched.wakeup --emit raw -- /bin/sleep 0.3
-  wakee kworker/1:2   waker 772820   (the sleeping process)
-  wakee rcu_preempt   waker 772820
-  wakee tailscaled    waker 772820
-  wakee sleep         waker 0        (the idle task: a timer expiry)
-```
-
-A process asleep for 300 ms wakes nobody. Those three are the timer and network
-softirqs running on its cpu, in its context. A waker of pid 0 is the idle task,
-which is what a timer expiry looks like from here.
-
-This is not a bug in the collector and not something `sched_wakeup` would fix --
-it is what the kernel knows at that point. It is stated as a caveat on the
-source, so it reaches the user beside their own numbers rather than living here.
-Telling the two apart needs the interrupt state at the time of the wakeup, which
-on x86 is a per-cpu `preempt_count` rather than a field of `task_struct`, so it
-needs `bpf_this_cpu_ptr` and a ksym lookup the layer does not have yet. Until
-then the waker is evidence, not proof.
-
-## Off cpu is blocked, not preempted
-
-`sched_switch` fires whenever a task leaves the cpu, and there are two reasons
-it can: it was waiting for something, or the scheduler took the cpu away. Only
-the first is blocked time. The second is run queue wait and belongs to
-`sched.runqlat`, whose whole subject it is.
-
-They are told apart by `prev_state`, the fourth argument of the tracepoint,
-which is zero exactly when the task was still runnable. The program drops that
-case in the kernel rather than carrying it to userspace to be filtered there,
-because on a busy machine preemptions outnumber blocks and carrying them is
-most of the cost.
-
-The state is then kept rather than reduced to a boolean, and it reaches the
-user as a word:
-
-| `state` | what it was | why it is worth separating |
-|---|---|---|
-| `sleeping` | `TASK_INTERRUPTIBLE` | waiting for something to happen: a timer, a pipe, a socket |
-| `uninterruptible` | `TASK_UNINTERRUPTIBLE` | usually waiting on a device, and usually the answer |
-| `idle` | `TASK_UNINTERRUPTIBLE \| TASK_NOLOAD` | an idle kernel worker, which the load average deliberately ignores |
-| `stopped`, `traced` | `__TASK_STOPPED`, `__TASK_TRACED` | stopped by a signal or by a debugger, which is not the program's own waiting |
-
-Lumping the third into the second is how a machine doing nothing comes to look
-like a machine in trouble, so `state_bits` carries the kernel's own value
-beside the name and a state this build does not recognise reads as `other`
-rather than as one it does.
-
-Two edges the numbers cannot show on their own, both stated as caveats on the
-source so they travel with the measurement:
-
-- **A task still blocked when the run ends is in no total**, because its block
-  has no end yet. A program that spends its life waiting would otherwise report
-  almost nothing, so the count of them is reported with the run.
-- **A task that leaves the cpu to die is dropped in the kernel.** `TASK_DEAD`
-  never comes back, and without that filter every short-lived child of an
-  observed program would sit in the in-flight map until the run ended.
-
-## What an aggregating collector changes
-
-`sched.offcpu` is the first source whose events are not one per thing that
-happened. The kernel counts, userspace drains, and each event is a total over
-the interval between two drains rather than one block.
-
-That has two consequences worth stating rather than discovering:
-
-- **The window is on the event.** `window_ns` says which interval the total
-  covers. A number aggregated over an interval that does not say which interval
-  cannot be compared with another.
-- **A distribution does not survive it.** `hist` is declared on this source and
-  a map holding a total and a count cannot produce one. The fix is in the key,
-  not in the emit: add a log2 bucket to it and the histogram falls out of the
-  map. That is written up under *Needs from the shared layer* below, because
-  the bucket layout has to be the one the emit expects.
-
-## What the first privileged off-cpu run measured
-
-Every number below is off this machine, with `CAP_BPF` and `CAP_PERFMON` on the
-binary.
-
-**A known delay comes back to five decimal places.** `omn sched.offcpu --emit
-raw -- /usr/bin/sleep 0.4` reports `total_ns=400053520` in one block: 400.05 ms
-against 400 ms asked for, which is the scheduler's own timer slack and not
-error in the measurement.
-
-**A known number of device waits comes back to within one.** 128 MiB read with
-`O_DIRECT` in 64 KiB blocks is 2048 reads that cannot be served from the page
-cache, and the run reports `blocks=2047`, `state=uninterruptible`,
-`state_bits=2` -- `TASK_UNINTERRUPTIBLE` exactly, with no other bit set. One
-read did not have to wait.
-
-**A program that only spins reports nothing.** Which is the assertion that
-preemption is not being counted, and the one that would fail loudly if the
-`prev_state` test were dropped.
-
-**Machine-wide, 400 ms produced 177 entries** across every task on the machine
-that blocked, including `omn`'s own tick sleep, and the thread-level split is
-real: `tailscaled` appears as tid 1051 under pid 965, an `io-reader` thread as
-tid 87458 under pid 87420.
-
-Two things the states showed that a table of constants would not have:
-
-- **`TASK_FREEZABLE` is set more often than not.** An ordinary `nanosleep`
-  reports `state_bits=8193`, which is `TASK_INTERRUPTIBLE | TASK_FREEZABLE`,
-  and a killable device wait reports `258`, which is `TASK_UNINTERRUPTIBLE |
-  TASK_WAKEKILL`. Any reading of the state has to be a mask test; comparing it
-  to `1` or `2` would classify almost nothing.
-- **`idle` is common and would have been alarming.** Kernel workers sit in
-  `TASK_UNINTERRUPTIBLE | TASK_NOLOAD` (`1026`), which the load average
-  deliberately ignores. Reported as `uninterruptible` it would make an idle
-  machine look like one stuck on a disk.
-
-And one trap found while writing the test for the second measurement, which is
-this project's recurring lesson in a new costume: **a file of zeros is not a
-file to read.** The first version wrote 32 MiB of zeros and expected 512 device
-reads; btrfs compressed them away and the run reported 133 waits. The collector
-was right and the premise was wrong. The test now writes bytes from an
-xorshift, and syncs them, so there is something on the device to wait for.
-
-## Traps
-
-- A switch count is a symptom. A *voluntary* switch is a task blocking on
-  something; an *involuntary* one is the scheduler taking the cpu away. They
-  call for opposite responses, and `pmu:sw` counts both as one. Only the eBPF
-  backend, reading `prev_state` at `sched_switch`, can tell them apart — which
-  is why `bpf:tp` is ahead of `pmu:sw` in the chain even though `pmu:sw` is free
-  and always available.
-- `PERF_COUNT_SW_CONTEXT_SWITCHES` counts switches *out*. Ten blocking waits are
-  ten events, not twenty.
-- The perf event does not follow children: `inherit` cannot be combined with a
-  per-task ring buffer (`src/perf.rs` states this). Observing a shell that
-  forks measures the shell.
-- `sched.offcpu` is expensive on switch-heavy workloads unless it aggregates in
-  the kernel, which is why it does: the program counts nanoseconds per
-  `(task, state)` in a hash map and userspace drains a few entries per tick
-  instead of reading a few million events. With stacks it will count per
-  `(task, state, stack)` instead, and the stacks are what is still missing.
+**All ten of the family's sources collect** since the ninth wave. The last,
+`sched.mutex`, went through the preload shim, and the section at the end of
+this file is its record. `sched.futex` measures the contended half of the same
+waits one layer down: every contended `pthread_mutex_lock` ends in a `futex`
+syscall. What it cannot see is the uncontended majority, which never reaches
+the kernel, or which *mutex object* was contended when a lock keeps its futex
+word elsewhere; `sched.mutex` sees both, and cannot see a lock that is not a
+pthread mutex at all.
 
 ## What this family carries, and what it does not
 
@@ -480,3 +281,223 @@ family collector cannot avoid.
 - `src/capabilities.rs`: the `bpf` and `raw_tracepoint:<name>` probe classes,
   which are G4 and belong to the layer this thread owns. Both delegate to
   `src/bpf/`; no probing logic was added to `capabilities.rs` itself.
+
+# `sched.mutex` — the ninth wave, through the preload shim
+
+The source the sixth wave left as "described, not built" is built, through the
+mechanism the brief pointed at: the `LD_PRELOAD` shim that interposed `malloc`
+now also interposes `pthread_mutex_lock`, `pthread_mutex_trylock`,
+`pthread_mutex_unlock`, `pthread_cond_wait` and `pthread_cond_timedwait`. The
+shim's half is `shim/src/mutex.rs`, the reader's `src/collect/sched/mutex.rs`,
+and the pipe they share with the heap sources is
+`src/collect/mem/heap/mod.rs`. The `bpf:uprobe` fallback is still vocabulary;
+`examples/sched-not-implemented.yml` pins it and exits 3.
+
+## What an event is
+
+One per acquisition, stamped when the thread **asked** for the mutex, carrying:
+
+| Attribute | Meaning |
+|---|---|
+| `wait_ns` | the value: from the call to `pthread_mutex_lock` until it returned with the mutex |
+| `hold_ns` | from then until the release -- absent, not zero, when the hold was never timed |
+| `addr` | the mutex, as an address in the program |
+| `how` | `lock` or `trylock` (a successful trylock waited zero by construction) |
+| `released_by` | `unlock`, `cond_wait` (the hold ended where a condition wait began), or `unseen` |
+| `tid`, `pid`, `comm` | who |
+
+The shim writes the record when the mutex is **released**, which is the first
+moment both halves are known, and it writes it *after* the real unlock has
+returned: a record written inside the critical section would lengthen every
+hold by one `write(2)` and make every waiter pay for the measurement. What a
+thread holds is a stack of eight in thread-local storage -- touched on every
+lock and unlock, so it must not allocate -- and a thread nesting deeper has
+its extra acquisitions reported at once with `released_by: unseen`.
+
+## What each of the three lock sources sees
+
+| | `sched.mutex` | `sched.futex` | `sched.lock` |
+|---|---|---|---|
+| where | in the call, in user space | the `futex` syscall | the kernel's own lock primitives |
+| an uncontended pthread mutex | **yes**, at ~25 ns | no: it never reaches the kernel | no |
+| a contended pthread mutex | yes, by mutex address | yes, by futex word | no |
+| a condition variable, a semaphore | only the hold that led into the wait | yes | no |
+| Rust `std::sync::Mutex`, Go, anything waiting on a futex directly | **no** | yes | no |
+| glibc's internal locks (stdio, malloc) | no: they do not go through the exported symbol | yes when contended | no |
+| a process already running | no: a preloaded library is given at exec | yes | yes |
+
+The two measured facts that make the table more than a claim:
+`examples/sched-mutex-uncontended.yml` has 1000 acquisitions and `sched.mutex`
+reports all 1000, each waited for in under 100 ns; the same program under
+`sched.futex` has no futex call to time. And a Rust program is invisible here
+and says so -- the note the run prints names `sched.futex` as the source that
+does see it.
+
+## Ground truth
+
+The fixture is a C program in `tests/scenario_sched.rs`, built by the test
+into `target/omn-shim-fixture/mutex`. Its command line chooses the threads,
+the acquisitions per thread and the hold; it holds by spinning rather than
+sleeping, so the hold is the one it was given and not what the timer slack made
+of it; and it times its own waits and holds with `CLOCK_MONOTONIC` and prints
+the totals. Because the shim is inside the call the program timed, the tool's
+interval is **nested** in the program's: its wait can only be shorter and its
+hold only longer. That turns a second reference into two inequalities that hold
+on any machine, loaded or not.
+
+`examples/sched-mutex-known-hold.yml`, two threads × 500 acquisitions × 200 us,
+on the development machine:
+
+```
+fixture: acquisitions=1000 wait_ns=101434977 hold_ns=200218553 min_hold_ns=200023
+sched.mutex  1000 events over 202.72ms, no loss
+  task:900540  n=500  min 20.00ns  mean 202.09us  max 101.03ms
+  task:900541  n=500  min 20.00ns  mean 428.73ns  max 201.43us
+```
+
+What is asserted, and why each is safe on a shared machine:
+
+- **exactly 1000 events, all on the fixture's one mutex** -- a count, not a
+  rate, so load cannot move it;
+- **every hold at least 200 us** -- the fixture spins until it is, and the
+  tool's hold encloses the program's;
+- **the tool's total wait is at most the program's, and its total hold at least
+  the program's and within 10 % of it** -- the nesting, both ways.
+- **not** a floor on the waits, and the reason is the most interesting
+  number in the section. The argument for one looks sound: the threads start
+  behind a barrier, so whichever finishes last was waiting through every hold
+  of the other, 500 × 200 us = 100 ms at least. On an idle machine it held,
+  101 ms. Inside the full suite the same run measured **54 ms, and the
+  fixture's own clock said 55 ms**. A thread that is runnable with no cpu to
+  run on -- before its first lock, or between an unlock and the next -- is
+  neither waiting nor holding, and on a machine running two other streams'
+  suites that is where the other 46 ms went. The tool and the program agreed;
+  the expectation was about the scheduler, and the assertion came out.
+
+**A glibc mutex is not fair**, which is the other reason an even split is not
+asserted either. The thread that releases can take the mutex again before the
+one it woke gets a cpu, so on the idle run one thread ran its 500 acquisitions
+nearly back to back while the other waited once, for 101 ms, and then ran its
+500 uncontended. A test asserting "each thread waits about half the time"
+would be asserting a scheduling policy glibc does not have.
+
+`examples/sched-mutex-uncontended.yml` is the same program with one thread and
+the same thousand 200 us holds. The holds are the same; the waits vanish (26 ns
+on average), and the scenario asserts the contended run waited at least a
+hundred times longer. That is the separation `sched.futex` cannot make.
+
+## The loss path, exactly
+
+`examples/sched-mutex-loss.yml`: eight threads, each with a mutex of its own,
+200 000 acquisitions each with no hold, so nothing slows the program but the
+program. The pipe holds a megabyte, about 26 000 records of 40 bytes, and is
+drained every 10 ms, so most records cannot be kept:
+
+```
+fixture: acquisitions=1600000
+sched.mutex  189141 events, LOSS: 1410859 dropped
+```
+
+189 141 + 1 410 859 = 1 600 000, exactly. The shim drops rather than blocking
+the program, counts what it drops **per class** -- a lost mutex record is not a
+lost allocation, and the heap sources reading the same pipe are not charged for
+it -- and flushes the count at exit. So the property is an equality whatever
+the machine's speed, and the scenario asserts it; on a machine fast enough to
+drain everything it still holds, and the test says the path was not exercised.
+
+## One pipe, two classes
+
+`examples/sched-mutex-with-heap.yml` asks for `sched.mutex` and `mem.heap.live`
+on one launch. Since the eighth wave a launch has one shim stream; since this
+one the stream carries classes. Each preload collector subscribes to a class,
+the program is told the union in `OMN_SHIM_REPORT` (`3` here: heap and mutex),
+and a hook whose class was not asked for calls straight through and writes
+nothing -- a heap-only run does not pay for lock records, and a mutex-only run
+does not fill the pipe with allocations. Each reader skips the others' records
+without counting them as undecoded, and the scenario asserts both readers
+finish with zero undecoded and zero dropped.
+
+The descriptor variable is `OMN_SHIM_FD` now. It was `OMN_HEAP_FD`, which
+stopped being true the moment the pipe carried a lock.
+
+## What the shim costs here, measured
+
+Two million uncontended acquisitions of a private mutex by one thread, wall
+clock, three runs each, release build of the shim:
+
+| | ms | per acquisition |
+|---|---|---|
+| bare | 179–184 | -- |
+| preloaded, mutex class not asked for | 186–192 | +3.5 ns |
+| preloaded and reporting, to `/dev/null` | 1007–1033 | **+415 ns** |
+
+The 132 ns the brief quotes is the heap's figure from wave two, and it is not
+this hook's. Almost all of the 415 ns is the one `write(2)` per record: the
+hooks themselves are two clock reads and a thread-local stack. That is still
+under the 740 ns a uprobe costs, but not by the margin the brief's reasoning
+assumed, and on a program taking a lock per request it is not free. What
+would change it is batching records in a per-thread buffer and writing them in
+chunks, which trades a write per record for records that can be lost at thread
+exit and arrive out of order -- a decision rather than a fix, left open.
+
+`make` builds the shim in debug, where the same row is +760 ns: a measurement of
+lock overhead should use `make release`.
+
+## What is not measured, and why
+
+- **Uncontended acquisitions are reported at the same price as contended
+  ones.** A filter `wait_ns > 1000` runs after reading, not in the shim; the
+  shim cannot know at unlock time what the reader will keep, and a threshold
+  pushed into it would need a variable the request model has no way to send.
+- **The reacquisition inside `pthread_cond_wait` is not an event.** Its wait
+  for the mutex and its wait for the condition happen inside one call and
+  cannot be separated from outside it. The hold that led into the wait is
+  reported, ending there (`released_by: cond_wait`).
+- **`pthread_mutex_timedlock` and `pthread_cond_clockwait` are not
+  interposed.** A program using them has those acquisitions missing, and their
+  unlock finds nothing on the stack and reports nothing, which is a count
+  short rather than a wrong number.
+- **A failed `pthread_mutex_trylock`** is a sign of contention and not a wait,
+  and is not reported.
+- **No stacks.** The catalog declares `stack` for this source because the
+  uprobe backend could take one; the shim refuses it by name, exit 3, pointing
+  at `sched.futex`, whose stacks show where a contended mutex blocked.
+- **No process already running.** Refused, exit 3, with the reason. The route
+  to one is in `docs/open-findings.md` under stream A's USDT requests: glibc on
+  this machine publishes `libc:mutex_entry`, `mutex_acquired` and
+  `mutex_release`, and a `bpf:usdt` backend on them would reach a running
+  process with no preload. That is the backend worth adding before the uprobe.
+
+## Found here, belongs elsewhere
+
+Filed under "Needs from another stream — the ninth wave, stream S" in
+`docs/open-findings.md`:
+
+- **A loss reason beside clean counters is never rendered.** The heap stream's
+  "no allocation was reported for pid ...: statically linked, own allocator"
+  sentence was recorded as a loss reason from the start and never once
+  printed, because `encode.rs` prints reasons only when a counter is non-zero.
+  Found by running `gpu.api` on a program the shim cannot see and getting a
+  silent zero. Fixed on this side by moving the sentence to
+  `Collector::notes()`, which every preload collector now implements.
+- **`dynamic-linking` has no probe**, so every preload source reports its one
+  requirement "unverified" on every run.
+- **The `hist` warning names a kernel the backend does not have.** "`trace`
+  with `hist` aggregates in userspace unless a budget lets the resolver move
+  the histogram into the kernel" is printed for a preload backend, where there
+  is no kernel side to move anything to.
+
+## Index rows for the coordinator
+
+For `examples/README.md` and `GUIDE.md`, `sched` table:
+
+```
+| `sched-mutex-known-hold.yml` | Two threads, one pthread mutex, a known number of acquisitions held for a known time. |
+| `sched-mutex-uncontended.yml` | The same program with one thread: the same holds, and waits of nothing. |
+| `sched-mutex-with-heap.yml` | Lock waits and allocations of one program, through one shim. |
+| `sched-mutex-loss.yml` | Mutex records produced faster than the pipe drains, and every one accounted for. |
+```
+
+`examples/sched-not-implemented.yml` is rewritten, not added: it now pins
+`sched.mutex`'s `bpf:uprobe`, the one `sched` backend left without a
+collector. Its row may want the same words.

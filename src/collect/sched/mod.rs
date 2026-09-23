@@ -11,11 +11,16 @@
 //! than streaming, because a switch-heavy workload produces more events than
 //! the measurement is worth. `sched.switches` goes through `perf_event_open`,
 //! needs no privileges, and can only say that a switch happened.
+//!
+//! `sched.mutex` is the one that is not in the kernel at all: the preload shim
+//! the heap sources use, pointed at `pthread_mutex_lock`, so it sees the
+//! uncontended acquisitions that never reach a futex.
 
 mod futex;
 mod irq;
 mod lock;
 mod migrations;
+mod mutex;
 mod numa_balance;
 mod offcpu;
 mod runqlat;
@@ -82,6 +87,9 @@ pub fn factories() -> Vec<Factory> {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))
+        }),
+        Factory::new("sched.mutex", "preload", |resolved| {
+            mutex::prepare(&resolved.request.emit)
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
             Ok(Box::new(switches::Prepare(resolved.request.mode)))

@@ -1,0 +1,38 @@
+# How long the host spends inside the CUDA driver API, call by call.
+#
+#   omn -f examples/gpu-api-cuda.yml
+#
+#   The fixture is built by `cargo test --test scenario_gpu`, from the C source
+#   in that file, against the driver alone -- the prototypes are declared in
+#   the fixture, so no toolkit is needed. To build it by hand:
+#
+#     mkdir -p target/omn-shim-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE -- omn.s GPU API/,/^\/\* END FIXTURE/p' tests/scenario_gpu.rs \
+#       | cc -O1 -DWITH_CUDA -x c -o target/omn-shim-fixture/gpu-cuda - -l:libcuda.so.1
+#
+# The fixture is linked with the driver, so its calls are bound by the dynamic
+# linker and the preloaded shim sees every one. It allocates a word of device
+# memory, launches a spin kernel 20 times and waits for each with
+# `cuCtxSynchronize`, copies the word back and frees it: 43 calls, and it times
+# each one itself and prints the totals.
+#
+# The separation is the point of the source. `cuLaunchKernel` returns once the
+# launch is queued, in microseconds; the kernel's two milliseconds are paid by
+# the synchronize that waits for it. Filter on one call to see it alone:
+#
+#   omn -f examples/gpu-api-cuda.yml --filter "api == 'cuCtxSynchronize'"
+#
+# What the run reports, on the development machine (an RTX 2080 Ti):
+#
+#   43 events; cuLaunchKernel ~4 us each, cuCtxSynchronize ~2 ms each
+name: CUDA calls, from the host's side
+format: text
+
+requests:
+  - label: cuda
+    source: gpu.api
+    target:
+      launch: [target/omn-shim-fixture/gpu-cuda, cuda, "20", "200000"]
+    mode: trace
+    emit: [hist, topk:5, raw, summary]
+    keys: [task]
