@@ -275,6 +275,21 @@ into NIC, kernel and application segments.
 
 ---
 
+### A skipped run was a loss nothing counted
+
+A raw tracepoint runs its program behind a per-cpu guard, and an event that
+arrives while the program is still running on that cpu -- from an interrupt, a
+packet's softirq being the obvious one here -- is not seen by it. The kernel
+counts that in the program's `recursion_misses` and nowhere else. It was found
+on the block layer, where it cost a known workload 2 to 23 requests per run with
+nothing reported (`docs/families/io.md`, "The block layer's one-percent
+tolerance was hiding a loss"), and the five raw-tracepoint sources here have the
+same shape: `net.drops`, `net.tcp.lifetime`, `net.qdisc`, `net.tcp.retransmit`
+and `net.softirq` now read it and count it as dropped. It is the machine's
+count, since each program runs on every event and filters after, so it is an
+upper bound on a target's share, and the reason says so. No `net` scenario has
+been seen to produce it; none of them was built to, and none asserts it is zero.
+
 ## The two sources over fentry
 
 The eighth wave's: `net.tcp.connect` and `net.socket`, on the attach kind this

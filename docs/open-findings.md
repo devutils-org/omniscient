@@ -5207,15 +5207,50 @@ now counted there; each applies to these two as they stand.
    Measured: 55192 counted and 44807 dropped for 100000 reads, one gone without
    a trace. `fentry::HistogramProgram` keeps two maps and a generation word and
    drains only the one out of use for a whole interval; the same would serve.
-2. **The kernel skipping a run of a preempted program.** Raw tracepoints and
-   trampolines both guard each program with a per-cpu counter, and on a
-   preemptible kernel a run preempted halfway makes the next hit on that cpu
-   skip it, counted only in `bpf_prog_info.recursion_misses`. Not observed on
-   this machine, but read by every fentry source; the same read would serve.
+2. **The kernel skipping a run of a program already running on that cpu.**
+   Raw tracepoints and trampolines both guard each program with a per-cpu
+   counter, and a run that finds it taken is skipped whole, counted only in
+   `bpf_prog_info.recursion_misses`. For a trampoline that is preemption; for a
+   raw tracepoint, whose probes run with preemption off, it is an interrupt
+   re-entering the program on its own cpu. **Observed on the raw-tracepoint
+   side**: `io.size`'s block programs skipped 766 and 1237 runs in one run
+   each of `tests/scenario_io.rs`, and a thread's 4096 direct reads were short
+   by 2 to 23 requests in six runs out of six, with nothing counted. Not
+   observed on the trampoline side. `fentry::skipped(programs)` reads it for
+   any set of program descriptors; see the next entry.
 3. **(fentry only) the kernel skipping the exit half of a call in flight** when
    any tracer attaches to or detaches from the same function. Not these two's
    problem -- a raw tracepoint has no trampoline -- and written here so that
    nobody reaches for fexit expecting otherwise.
+
+### To whoever owns a raw-tracepoint program: the kernel's skips are a loss nothing counts
+
+Every raw-tracepoint program runs behind a per-cpu guard, and a request, packet
+or switch that arrives while the program is still running on that cpu -- from
+an interrupt, since probes run with preemption off -- is not seen by it at all.
+Its drop counters and its ring cannot say so; the kernel counts it in
+`bpf_prog_info.recursion_misses` and nowhere else. Measured on the block layer
+(the entry above): hundreds per run under a loaded device, and a scenario that
+had passed with a one-percent tolerance for waves was hiding it.
+
+Stream T now reads it for every raw-tracepoint program it owns -- the block and
+writeback programs and the five `net` ones -- and counts it in
+`Losses::dropped` with a reason. The files outside this stream that load a
+`BPF_PROG_TYPE_RAW_TRACEPOINT` program and do not read it: `runqlat.rs`,
+`offcpu.rs`, `wakeup.rs`, `migrate.rs`, the `sched_*.rs` programs,
+`proc_syscall.rs`, `proc_events.rs`, `mem_alloc.rs`, `mem_program.rs` and
+`mem_stall.rs`. Wanted in each: keep the program descriptor rather than `_`, and
+
+```rust
+pub fn skipped(&self) -> u64 {
+    crate::bpf::attach::fentry::skipped([&self.program /* , every program */])
+}
+```
+
+read by the collector beside its drop counters. The count is the machine's, not
+the target's -- the program runs on every event and filters after -- so it is an
+upper bound on the target's share, and the reason should say that. Once
+`fentry.rs` moves under `bpf/mod.rs` (above) the path is `crate::bpf::fentry`.
 
 ### To whoever owns `src/join.rs`: an event without the rule's key is unattributable, not a malformed rule
 
