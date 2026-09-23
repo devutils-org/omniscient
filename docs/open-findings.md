@@ -5704,3 +5704,38 @@ read, and the text one is what a person reads. Two oversteps are declared rather
 than hidden — adding a field to an enum variant breaks every destructuring of
 it, so four patterns in `src/encode.rs` gained a `..` and two fixtures gained a
 `short: None`.
+
+---
+
+## 46. What the eighth wave's merge exposed: the file without the test is where it landed
+
+The fentry stream owns `src/bpf/net*.rs`; the coordinator added a field to every
+bucketed row while it worked, `net_softirq.rs` included. The merge combined both
+and the result was:
+
+```
+a network source must measure the network vectors and no others: {"vector 1760": 30}
+```
+
+A softirq vector only goes up to nine. The row value had grown from sixteen
+bytes to twenty-four and the region was never moved, so it ran from `-48` into
+the row key at `-32` — the program wrote its timestamp over the vector number,
+and the drain read back a vector that was really half a nanosecond count.
+
+**It is not the merge's fault and it is not fentry's.** The same change was made
+to eight programs. Five of them have a stack-region test and a byte-coverage
+test, and those five *refused it at once*: `row value overlaps row key`, by name,
+in `sched_lock`, `sched_futex`, `sched_irq` and `runqlat`, twice in the space of
+five minutes. Three of them — `net_softirq`, `net_qdisc` and `proc_syscall` —
+had neither test, and that is where the defect survived to be found by another
+stream's scenario two merges later.
+
+`net_qdisc` and `proc_syscall` turned out to be clean, checked by hand and then
+by the tests they now have. All three have both tests as of this finding, so the
+set of programs keeping a row and the set with a layout test are the same set.
+
+**The lesson is not "write more tests".** It is that this particular test pays
+for itself on a schedule nobody chooses: it costs twenty lines once, and it
+catches a class of defect whose symptom is *a plausible number in the wrong
+field* — which is the one failure this project treats as worse than a crash,
+because nothing downstream can tell it from a measurement.

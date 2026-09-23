@@ -63,7 +63,7 @@ const UNPAIRED_EXITS: u32 = 1;
 const COUNTER_SLOTS: u32 = 2;
 
 /// Where each map's key and value live on the program's stack.
-const ROW_VALUE: i16 = -48;
+const ROW_VALUE: i16 = -56;
 const ROW_KEY: i16 = -32;
 const AT_KEY: i16 = -20;
 const DROP_KEY: i16 = -16;
@@ -571,5 +571,63 @@ mod tests {
             panic!("an empty vector list must be refused");
         };
         assert!(error.contains("timer and block time"), "{error}");
+    }
+
+    /// The stack regions this program writes must not overlap, and must stay
+    /// inside the frame.
+    ///
+    /// They are addressed by offset arithmetic, and two that overlap produce a
+    /// key built partly out of a value -- which hashes to a bucket nobody looks
+    /// in, so the numbers are simply short, or comes back as a field with a
+    /// plausible-looking number in it that was never written there.
+    ///
+    /// This file had no such test until the eighth wave, and that is exactly
+    /// where the defect landed: a field added to the row value grew it into the
+    /// row key, and what caught it was another stream's scenario reporting
+    /// `vector 1760` for a softirq vector that only goes up to nine. Every
+    /// program that keeps a row now has this test.
+    #[test]
+    fn the_stack_regions_do_not_overlap_and_stay_inside_the_frame() {
+        let regions = [
+            (ROW_VALUE, ROW_VALUE_BYTES as i16, "row value"),
+            (ROW_KEY, ROW_KEY_BYTES as i16, "row key"),
+            (AT_KEY, 4, "at key"),
+            (DROP_KEY, 4, "drop key"),
+        ];
+        for (at, size, name) in regions {
+            assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
+            for (other_at, other_size, other) in regions {
+                if name == other {
+                    continue;
+                }
+                assert!(
+                    at + size <= other_at || other_at + other_size <= at,
+                    "`{name}` overlaps `{other}`"
+                );
+            }
+        }
+    }
+
+    /// Every byte of the row value is written by the program before the value
+    /// is handed to a helper. A byte nobody wrote is whatever the stack held.
+    #[test]
+    fn every_byte_of_the_row_value_is_accounted_for() {
+        let fields = [(VALUE_COUNT, 8), (VALUE_TOTAL_NS, 8), (VALUE_FIRST_NS, 8)];
+        let mut covered = [false; ROW_VALUE_BYTES];
+        for (at, size) in fields {
+            for byte in at..at + size {
+                let byte = byte as usize;
+                assert!(
+                    byte < ROW_VALUE_BYTES,
+                    "the row value is written past its end"
+                );
+                assert!(!covered[byte], "the row value writes byte {byte} twice");
+                covered[byte] = true;
+            }
+        }
+        assert!(
+            covered.iter().all(|byte| *byte),
+            "the row value has a byte the program never writes"
+        );
     }
 }
