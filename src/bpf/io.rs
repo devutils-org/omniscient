@@ -54,6 +54,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use super::btf::Btf;
 use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
+use super::request::read_request_id;
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
@@ -173,12 +174,16 @@ pub const NO_OPEN: u32 = 2;
 // ---- the entry the open tracepoint writes and the close one reads ----
 
 const ENTRY_KEY_BYTES: usize = 8;
-const ENTRY_VALUE_BYTES: usize = 32;
+const ENTRY_VALUE_BYTES: usize = 40;
 
 const VAL_OPEN_TS: i16 = 0;
 const VAL_TID: i16 = 8;
 const VAL_TGID: i16 = 12;
 const VAL_COMM: i16 = 16;
+/// The request the submitting task was serving, read from its task storage at
+/// the open, because at a completion the current task is whatever the
+/// interrupt interrupted.
+const VAL_REQ: i16 = 32;
 
 // ---- the record the close tracepoint publishes ----
 
@@ -233,11 +238,17 @@ pub struct BlockEvent {
     pub flags: u32,
     pad: u32,
     comm: [u8; 16],
+    /// The request the submitting task was serving, as the id its birth wrote
+    /// into the task's storage; zero when it was serving none, or when this
+    /// kernel could not give the programs a task-storage map. See
+    /// `src/bpf/request.rs`: this field is what makes a block request's
+    /// attribution to a request IDENTITY rather than an inference.
+    pub req: u64,
 }
 
 /// The size of the record the program writes. Stated once, used by the program
 /// and checked against the struct.
-const RECORD_BYTES: usize = 96;
+const RECORD_BYTES: usize = 104;
 
 impl BlockEvent {
     /// The submitting thread's name, as the kernel held it at the open.
@@ -289,6 +300,7 @@ impl BlockEvent {
         let word = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().ok().unwrap());
         let mut comm = [0u8; 16];
         comm.copy_from_slice(&bytes[80..96]);
+        let req = long(96);
         Some(Self {
             ts_ns: long(0),
             rq: long(8),
@@ -306,12 +318,13 @@ impl BlockEvent {
             flags: word(72),
             pad: 0,
             comm,
+            req,
         })
     }
 }
 
 /// Stack offsets of the record, negative from the frame pointer.
-const EVENT: i16 = -96;
+const EVENT: i16 = -104;
 const EV_TS: i16 = EVENT;
 const EV_RQ: i16 = EVENT + 8;
 const EV_OPEN_TS: i16 = EVENT + 16;
@@ -327,6 +340,7 @@ const EV_CPU: i16 = EVENT + 64;
 const EV_DONE_BYTES: i16 = EVENT + 68;
 const EV_FLAGS: i16 = EVENT + 72;
 const EV_COMM: i16 = EVENT + 80;
+const EV_REQ: i16 = EVENT + 96;
 
 /// Everything below the record, on the close program's stack.
 const LOOKUP_KEY: i16 = EVENT - 8;
@@ -334,9 +348,9 @@ const PART: i16 = EVENT - 16;
 const CLOSE_DROP_KEY: i16 = EVENT - 24;
 
 /// The open program's stack: the entry it builds, its key, and a drop slot.
-const ENTRY_VALUE: i16 = -32;
-const ENTRY_KEY: i16 = -40;
-const OPEN_DROP_KEY: i16 = -48;
+const ENTRY_VALUE: i16 = -40;
+const ENTRY_KEY: i16 = -48;
+const OPEN_DROP_KEY: i16 = -56;
 
 /// `bpf_probe_read_kernel` is GPL-only, and every field read out of a
 /// `struct request` comes through it.
@@ -389,6 +403,7 @@ fn open_instructions(
     submitter: Submitter,
     inflight_fd: i32,
     counters_fd: i32,
+    storage_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
     let tracepoint = stage
         .opens_at()
@@ -427,6 +442,15 @@ fn open_instructions(
     program.push(Insn::mov64_imm(2, 16));
     program.push(Insn::call(helper::GET_CURRENT_COMM));
 
+    // The request, from the same task at the same moment. Zero when there is
+    // no map to read, so the entry never carries stack left over.
+    match storage_fd {
+        Some(fd) => read_request_id(&mut program, fd, ENTRY_VALUE + VAL_REQ, "open_req"),
+        None => {
+            program.push(Insn::st_imm(BPF_DW, R10, ENTRY_VALUE + VAL_REQ, 0));
+        }
+    }
+
     program.push(Insn::stx(BPF_DW, R10, ENTRY_KEY, 7));
     program.extend(Insn::load_map_fd(1, inflight_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -463,6 +487,7 @@ fn close_instructions(
     inflight_fd: i32,
     ring_fd: i32,
     counters_fd: i32,
+    storage_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
     let tracepoint = stage.closes_at();
     let expected: &[&str] = if tracepoint == "block_rq_complete" {
@@ -575,6 +600,8 @@ fn close_instructions(
         program.push(Insn::stx(BPF_DW, R10, EV_COMM, 1));
         program.push(Insn::ldx(BPF_DW, 1, 0, VAL_COMM + 8));
         program.push(Insn::stx(BPF_DW, R10, EV_COMM + 8, 1));
+        program.push(Insn::ldx(BPF_DW, 1, 0, VAL_REQ));
+        program.push(Insn::stx(BPF_DW, R10, EV_REQ, 1));
 
         // The interval, through r1 because nothing between here and the next
         // call reads it.
@@ -597,6 +624,9 @@ fn close_instructions(
         program.push(Insn::add64_imm(1, EV_COMM as i32));
         program.push(Insn::mov64_imm(2, 16));
         program.push(Insn::call(helper::GET_CURRENT_COMM));
+        if let Some(fd) = storage_fd {
+            read_request_id(&mut program, fd, EV_REQ, "close_req");
+        }
 
         // The record's own tid and tgid sit where an entry's would, so the
         // comparison is the same one the open program makes.
@@ -640,6 +670,9 @@ fn close_instructions(
             program.push(Insn::add64_imm(1, EV_COMM as i32));
             program.push(Insn::mov64_imm(2, 16));
             program.push(Insn::call(helper::GET_CURRENT_COMM));
+            if let Some(fd) = storage_fd {
+                read_request_id(&mut program, fd, EV_REQ, "direct_req");
+            }
             if let Some((slot, wanted)) = submitter.comparison(EV_TID - VAL_TID) {
                 program.push(Insn::ldx(BPF_W, 1, R10, slot));
                 program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
@@ -674,6 +707,10 @@ pub struct BlockProgram {
     _open_link: Option<OwnedFd>,
     close_program: OwnedFd,
     _close_link: OwnedFd,
+    /// Why the programs read no request identity, when they do not: this
+    /// kernel would not give them a task-storage map. The measurement is the
+    /// same; only `req` is missing from every event, and the run says so.
+    pub no_request_identity: Option<String>,
 }
 
 impl BlockProgram {
@@ -705,6 +742,14 @@ impl BlockProgram {
         };
         let inflight_fd = inflight.as_ref().map_or(-1, Hash::as_raw_fd);
 
+        // The request identity is read wherever the submitting task is the
+        // current one. A kernel that cannot make the map still gets the
+        // measurement, without the identity, and the collector says which.
+        let (storage_fd, no_request_identity) = match super::request::storage() {
+            Ok(storage) => (Some(storage.as_raw_fd()), None),
+            Err(reason) => (None, Some(reason)),
+        };
+
         let close = close_instructions(
             btf,
             stage,
@@ -712,6 +757,7 @@ impl BlockProgram {
             inflight_fd,
             ring_map.as_raw_fd(),
             counters.as_raw_fd(),
+            storage_fd,
         )?;
         let close_program = load(&close, "omn_blk_close")?;
 
@@ -724,8 +770,14 @@ impl BlockProgram {
         // wrote, because the lookup that fails is the only path to it.
         let (open_program, open_link) = match stage.opens_at() {
             Some(tracepoint) => {
-                let open =
-                    open_instructions(btf, stage, submitter, inflight_fd, counters.as_raw_fd())?;
+                let open = open_instructions(
+                    btf,
+                    stage,
+                    submitter,
+                    inflight_fd,
+                    counters.as_raw_fd(),
+                    storage_fd,
+                )?;
                 let program = load(&open, "omn_blk_open")?;
                 let link = syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(
                     |error| format!("cannot attach to the `{tracepoint}` tracepoint: {error}"),
@@ -750,6 +802,7 @@ impl BlockProgram {
             _open_link: open_link,
             close_program,
             _close_link: close_link,
+            no_request_identity,
         })
     }
 
@@ -878,6 +931,7 @@ mod tests {
             ),
             (EV_FLAGS, offset_of!(BlockEvent, flags), "flags"),
             (EV_COMM, offset_of!(BlockEvent, comm), "comm"),
+            (EV_REQ, offset_of!(BlockEvent, req), "req"),
         ] {
             assert_eq!(
                 (stack - EVENT) as usize,
@@ -924,11 +978,14 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for stage in [Stage::Queue, Stage::Latency, Stage::Size] {
-            let mut programs = vec![close_instructions(btf, stage, Submitter::Any, 3, 4, 5)
-                .unwrap_or_else(|reason| panic!("{stage:?} close: {reason}"))];
+            let mut programs =
+                vec![
+                    close_instructions(btf, stage, Submitter::Any, 3, 4, 5, Some(6))
+                        .unwrap_or_else(|reason| panic!("{stage:?} close: {reason}")),
+                ];
             if stage.opens_at().is_some() {
                 programs.push(
-                    open_instructions(btf, stage, Submitter::Any, 3, 5)
+                    open_instructions(btf, stage, Submitter::Any, 3, 5, Some(6))
                         .unwrap_or_else(|reason| panic!("{stage:?} open: {reason}")),
                 );
             }
@@ -954,8 +1011,8 @@ mod tests {
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
         for stage in [Stage::Queue, Stage::Latency, Stage::Size] {
-            let program =
-                close_instructions(btf, stage, Submitter::Any, 3, 4, 5).expect("a program");
+            let program = close_instructions(btf, stage, Submitter::Any, 3, 4, 5, Some(6))
+                .expect("a program");
             let output_at = program
                 .iter()
                 .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -976,8 +1033,8 @@ mod tests {
     #[test]
     fn the_whole_record_is_cleared_before_any_of_it_is_filled() {
         let Some(btf) = kernel_btf() else { return };
-        let program =
-            close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5).expect("a program");
+        let program = close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5, Some(6))
+            .expect("a program");
         let cleared: Vec<i16> = program
             .iter()
             .take_while(|insn| insn.code != 0x85 || insn.imm != helper::GET_SMP_PROCESSOR_ID)
@@ -1000,14 +1057,15 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide =
-            open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5).expect("a program");
+        let machine_wide = open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5, Some(6))
+            .expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered = open_instructions(btf, Stage::Latency, Submitter::Process(4242), 3, 5)
-            .expect("a program");
+        let filtered =
+            open_instructions(btf, Stage::Latency, Submitter::Process(4242), 3, 5, Some(6))
+                .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
@@ -1044,8 +1102,16 @@ mod tests {
     fn the_unpaired_stage_filters_in_its_only_program() {
         let Some(btf) = kernel_btf() else { return };
         assert_eq!(Stage::Size.opens_at(), None);
-        let filtered = close_instructions(btf, Stage::Size, Submitter::Process(4242), -1, 4, 5)
-            .expect("a program");
+        let filtered = close_instructions(
+            btf,
+            Stage::Size,
+            Submitter::Process(4242),
+            -1,
+            4,
+            5,
+            Some(6),
+        )
+        .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
@@ -1061,13 +1127,16 @@ mod tests {
         // `r1 -= r9`, the one subtraction in any of these programs.
         let subtracts = |program: &[Insn]| program.iter().any(|insn| insn.code == 0x1f);
         assert!(subtracts(
-            &close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5).expect("a program")
+            &close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5, Some(6))
+                .expect("a program")
         ));
         assert!(subtracts(
-            &close_instructions(btf, Stage::Queue, Submitter::Any, 3, 4, 5).expect("a program")
+            &close_instructions(btf, Stage::Queue, Submitter::Any, 3, 4, 5, Some(6))
+                .expect("a program")
         ));
         assert!(!subtracts(
-            &close_instructions(btf, Stage::Size, Submitter::Any, -1, 4, 5).expect("a program")
+            &close_instructions(btf, Stage::Size, Submitter::Any, -1, 4, 5, Some(6))
+                .expect("a program")
         ));
     }
 
@@ -1082,6 +1151,38 @@ mod tests {
         assert_eq!(Stage::Latency.closes_at(), "block_rq_complete");
         assert_eq!(Stage::Size.opens_at(), None);
         assert_eq!(Stage::Size.closes_at(), "block_rq_issue");
+    }
+
+    /// The request identity is read only where the submitting task is the
+    /// current one. At `block_rq_complete` the current task is whatever the
+    /// interrupt landed on, and a read of *its* storage would credit the
+    /// device's time to a request that task happened to be serving -- a
+    /// propagated key, and the wrong one, which is worse than none.
+    #[test]
+    fn the_request_is_read_where_the_submitter_is_current_and_nowhere_else() {
+        use crate::bpf::request::GET_CURRENT_TASK_BTF;
+        let Some(btf) = kernel_btf() else { return };
+        let reads = |program: &[Insn]| helpers_called(program).contains(&GET_CURRENT_TASK_BTF);
+
+        let issue = open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5, Some(6)).unwrap();
+        assert!(reads(&issue), "the issue runs in the submitter's context");
+        let complete =
+            close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5, Some(6)).unwrap();
+        assert!(
+            !reads(&complete),
+            "the completion runs in whoever's context it interrupted"
+        );
+
+        // Where the issue itself closes, it reads it directly.
+        let size = close_instructions(btf, Stage::Size, Submitter::Any, -1, 4, 5, Some(6)).unwrap();
+        assert!(reads(&size));
+
+        // No map, no read, and the entry's slot is still written.
+        let bare = open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5, None).unwrap();
+        assert!(!reads(&bare));
+        assert!(bare
+            .iter()
+            .any(|insn| insn.code == 0x7a && insn.off == ENTRY_VALUE + VAL_REQ && insn.imm == 0));
     }
 
     /// The prototypes are checked against the running kernel rather than

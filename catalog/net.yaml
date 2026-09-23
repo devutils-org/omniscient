@@ -362,3 +362,45 @@
     - "These are counters, so a run reports the increment between two reads and
        its first read is a baseline that produces nothing."
 
+
+- id: net.request
+  family: net
+  summary: "One request's life, from the server's own birth to its end, by state"
+  unit: ns
+  backends:
+    # The server declares where a request starts and ends, with two USDT
+    # probes, `request__start(id)` and `request__done(id)`, any provider. The
+    # birth writes the id into the serving task's own storage
+    # (`bpf_task_storage`), and every program that later runs in that task
+    # reads it back: `sched_switch` to add up the request's time by state, the
+    # block layer's issue to put `req:<id>` on the requests it submits. See
+    # `src/bpf/request.rs`, and `docs/scenarios/vertical.md` for why the birth
+    # is declared rather than derived from the connection.
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf", "raw_tracepoint:sched_switch", "raw_tracepoint:sched_waking"], cost: low}
+  modes: [trace]
+  emits: [raw, summary, hist, topk]
+  targets: {pid: native, launch: native}
+  keys: [req, task]
+  filter_fields: [comm, tid, holder_tid]
+  determinism: medium
+  caveats:
+    - "The program has to declare its requests: `request__start(id)` where one
+       begins and `request__done(id)` where it ends, in the executable itself,
+       with the id as the first argument. A program that declares none is
+       refused with the probes it does carry. Nothing is guessed from the
+       connection: a keep-alive connection is not one request, and a request is
+       not over at its first send."
+    - "A request is followed in the task that declared it. A server that hands
+       a request to another thread must declare it again there, with the same
+       id; the time between the two declarations is in neither."
+    - "The four states tile the request's life exactly -- on a cpu, runnable,
+       asleep interruptibly, asleep uninterruptibly -- so their sum is the
+       request's total by construction, and is not evidence of anything. What
+       is evidence is which state a known delay lands in, and the block
+       requests that carry the request's id in `io.latency`."
+    - "`sleep_ns` is the interruptible sleep of the serving task: a lock, a
+       timer, a socket. `holder_tid` is the task whose wakeup ended the longest
+       such sleep, which for a lock is the thread that released it. `disk_ns`
+       is uninterruptible sleep, usually a disk, and on btrfs the completion
+       reaches the reader through a kworker, so it is the device's time plus
+       that hop."

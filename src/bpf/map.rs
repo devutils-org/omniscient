@@ -30,7 +30,8 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
 use super::syscall::{
-    self, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_STACK_TRACE,
+    self, TypedMap, BPF_F_NO_PREALLOC, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_ARRAY,
+    BPF_MAP_TYPE_STACK_TRACE, BPF_MAP_TYPE_TASK_STORAGE,
 };
 
 /// A map this layer could not create, said in a way a reader can act on.
@@ -281,6 +282,143 @@ impl StackTraces {
     }
 }
 
+/// A `BPF_MAP_TYPE_TASK_STORAGE`: one value per task, kept in the task itself.
+///
+/// This is the one map in the layer that is not keyed by anything a program
+/// computes. A program asks for *the current task's* slot, and the kernel hands
+/// back the value that lives in that `task_struct` -- so whatever one program
+/// wrote there while a thread was doing something is readable by any other
+/// program that later runs in the same thread, on any hook, with no key to
+/// agree on. That is what carries a request's identity from where it enters to
+/// where it touches the disk: a read is submitted in the reader's context, so
+/// the block layer's issue finds the id the request's birth wrote.
+///
+/// Two things the kernel insists on and nothing else in this layer needs:
+///
+/// - **A BTF description of the key and the value.** The value lives inside
+///   the task, and `bpf_local_storage_map_alloc_check` refuses a map it is not
+///   told the type of. The key must be a 32-bit int -- from userspace it is a
+///   pidfd -- and the value is described as an array of `int` of the right
+///   size, which is all the check reads. [`btf_blob`] builds exactly that.
+/// - **No preallocation, and no capacity.** An entry exists when a program
+///   creates one for a task and goes when the task does, so `max_entries` is
+///   zero and `BPF_F_NO_PREALLOC` is required.
+///
+/// An entry dies with its task. A thread that exits mid-request leaves no
+/// stale identity for a recycled tid to inherit, which a hash keyed by tid
+/// would.
+pub struct TaskStorage {
+    fd: OwnedFd,
+    /// The BTF object the map was described with. The map holds its own
+    /// reference; this one is kept so the description outlives nothing it
+    /// describes.
+    _btf: OwnedFd,
+}
+
+/// The BTF type ids [`btf_blob`] assigns.
+const BTF_INT_ID: u32 = 1;
+const BTF_VALUE_ID: u32 = 2;
+
+/// The smallest BTF that describes a local-storage map: `int` for the key, and
+/// an array of `int` as long as the value for the value.
+///
+/// Laid out as `include/uapi/linux/btf.h` gives it: a 24-byte header, the type
+/// section, then the string section, whose first byte must be the empty
+/// string. The value's element type does not matter to the kernel -- it checks
+/// the size and looks for special fields, which an array of `int` has none of
+/// -- so no struct is described and no member name is owed.
+fn btf_blob(value_bytes: usize) -> Vec<u8> {
+    const MAGIC: u16 = 0xeb9f;
+    const KIND_INT: u32 = 1;
+    const KIND_ARRAY: u32 = 3;
+    const INT_SIGNED: u32 = 1;
+
+    let strings: &[u8] = b"\0int\0";
+    let int_name = 1u32;
+
+    let mut types: Vec<u8> = Vec::new();
+    let word = |types: &mut Vec<u8>, value: u32| types.extend_from_slice(&value.to_le_bytes());
+    // [1] int: name, info (kind in bits 24..28), size, then the encoding word:
+    // signed, at bit offset zero, thirty-two bits wide.
+    word(&mut types, int_name);
+    word(&mut types, KIND_INT << 24);
+    word(&mut types, 4);
+    word(&mut types, (INT_SIGNED << 24) | 32);
+    // [2] int[value_bytes / 4]: no name, the array kind, a zero size field,
+    // then element type, index type, element count.
+    word(&mut types, 0);
+    word(&mut types, KIND_ARRAY << 24);
+    word(&mut types, 0);
+    word(&mut types, BTF_INT_ID);
+    word(&mut types, BTF_INT_ID);
+    word(&mut types, (value_bytes / 4) as u32);
+
+    let mut blob = Vec::with_capacity(24 + types.len() + strings.len());
+    blob.extend_from_slice(&MAGIC.to_le_bytes());
+    blob.push(1); // version
+    blob.push(0); // flags
+    blob.extend_from_slice(&24u32.to_le_bytes()); // hdr_len
+    blob.extend_from_slice(&0u32.to_le_bytes()); // type_off
+    blob.extend_from_slice(&(types.len() as u32).to_le_bytes()); // type_len
+    blob.extend_from_slice(&(types.len() as u32).to_le_bytes()); // str_off
+    blob.extend_from_slice(&(strings.len() as u32).to_le_bytes()); // str_len
+    blob.extend_from_slice(&types);
+    blob.extend_from_slice(strings);
+    blob
+}
+
+impl TaskStorage {
+    /// `value_bytes` must be a multiple of four, which every value this layer
+    /// lays out is: the kernel is told the value is an array of `int`.
+    pub fn create(value_bytes: usize, name: &str) -> io::Result<Self> {
+        assert!(
+            value_bytes > 0 && value_bytes % 4 == 0,
+            "a task-storage value is described as an array of int"
+        );
+        let btf = syscall::btf_load(&btf_blob(value_bytes)).map_err(|refused| {
+            if refused.verifier_log.is_empty() {
+                refused.error
+            } else {
+                io::Error::new(
+                    refused.error.kind(),
+                    format!(
+                        "{}; the kernel said: {}",
+                        refused.error, refused.verifier_log
+                    ),
+                )
+            }
+        })?;
+        let fd = syscall::map_create_typed(&TypedMap {
+            map_type: BPF_MAP_TYPE_TASK_STORAGE,
+            key_size: 4,
+            value_size: value_bytes as u32,
+            max_entries: 0,
+            map_flags: BPF_F_NO_PREALLOC,
+            btf_fd: btf.as_raw_fd(),
+            btf_key_type_id: BTF_INT_ID,
+            btf_value_type_id: BTF_VALUE_ID,
+            name,
+        })?;
+        Ok(Self { fd, _btf: btf })
+    }
+
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
+    /// One task's value, read from userspace: the key is a pidfd for the
+    /// task, which is how the kernel lets a process name a task it may not
+    /// share an address space with. `None` when the task holds no entry.
+    ///
+    /// Nothing in the build reads a task's value from userspace -- the
+    /// programs publish what they account -- so this is here for the test
+    /// that the map answers the way the kernel documents.
+    #[cfg(test)]
+    pub fn lookup(&self, pidfd: RawFd, value_bytes: usize) -> io::Result<Option<Vec<u8>>> {
+        syscall::map_lookup(self.fd.as_raw_fd(), &pidfd.to_ne_bytes(), value_bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +517,63 @@ mod tests {
                     "a refusal must carry the kernel's errno, not a message invented here"
                 );
                 eprintln!("skipped: this machine does not let this process create a map: {error}");
+            }
+        }
+    }
+
+    /// The BTF handed to the kernel is checked byte by byte on the other side,
+    /// and a field one word out of place is a refused map with a log line as
+    /// its only diagnosis. The layout is `include/uapi/linux/btf.h`'s.
+    #[test]
+    fn the_task_storage_btf_is_laid_out_as_the_kernel_reads_it() {
+        let blob = btf_blob(64);
+        let word = |at: usize| u32::from_le_bytes(blob[at..at + 4].try_into().unwrap());
+        assert_eq!(u16::from_le_bytes([blob[0], blob[1]]), 0xeb9f);
+        assert_eq!((blob[2], blob[3]), (1, 0), "version one, no flags");
+        assert_eq!(word(4), 24, "the header is 24 bytes");
+        let (type_off, type_len, str_off, str_len) = (word(8), word(12), word(16), word(20));
+        assert_eq!(type_off, 0);
+        assert_eq!(type_len, 40, "an int of four words and an array of six");
+        assert_eq!(str_off, type_len, "the strings follow the types");
+        let strings = &blob[24 + str_off as usize..][..str_len as usize];
+        assert_eq!(
+            strings[0], 0,
+            "the string section starts with the empty string"
+        );
+        let types = 24 + type_off as usize;
+        // The key: `int`, four bytes, signed, thirty-two bits.
+        assert_eq!(&strings[word(types) as usize..][..4], b"int\0");
+        assert_eq!(word(types + 4) >> 24, 1, "an INT");
+        assert_eq!(word(types + 8), 4);
+        assert_eq!(word(types + 12) & 0xff, 32);
+        // The value: an array of that int, as long as the value.
+        assert_eq!(word(types + 20) >> 24, 3, "an ARRAY");
+        assert_eq!(word(types + 28), BTF_INT_ID, "of int");
+        assert_eq!(word(types + 36), 16, "sixty-four bytes of int");
+        assert_eq!(blob.len(), 24 + 40 + str_len as usize);
+    }
+
+    /// Created, or refused with the kernel's own errno. Not created by an
+    /// in-process test on a normal machine: the test binary carries no
+    /// capabilities, and `tests/vertical.rs` is where the map is exercised.
+    #[test]
+    fn a_task_storage_map_is_created_or_the_kernel_says_why() {
+        match TaskStorage::create(64, "omn_test_task") {
+            Ok(storage) => {
+                let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
+                assert!(pidfd >= 0, "pidfd_open: {}", io::Error::last_os_error());
+                assert_eq!(
+                    storage
+                        .lookup(pidfd as RawFd, 64)
+                        .expect("a lookup by pidfd"),
+                    None,
+                    "no program has written into this task"
+                );
+                unsafe { libc::close(pidfd as RawFd) };
+            }
+            Err(error) => {
+                assert!(error.raw_os_error().is_some(), "{error}");
+                eprintln!("skipped: this process may not create a task-storage map: {error}");
             }
         }
     }

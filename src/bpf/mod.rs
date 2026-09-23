@@ -46,6 +46,7 @@ mod net_softirq;
 mod offcpu;
 mod proc_events;
 mod proc_syscall;
+mod request;
 mod ring;
 mod runqlat;
 // The sixth wave's `sched` programs. `sched_common` holds what they share; the
@@ -81,6 +82,7 @@ pub use net_softirq::{SoftIrq, SoftIrqDrain, SoftIrqProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
 pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};
+pub use request::{request_key, RequestCounts, RequestProgram, RequestRecord, ID_MISMATCH};
 pub use runqlat::{RunqLat, RunqLatProgram};
 pub use sched_drm::{GpuJob, GpuJobDrops, GpuJobProgram};
 pub use sched_futex::{FutexDrops, FutexProgram, FutexWait, Whose as FutexWhose};

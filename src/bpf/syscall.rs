@@ -22,13 +22,24 @@ const BPF_MAP_UPDATE_ELEM: i32 = 2;
 const BPF_MAP_GET_NEXT_KEY: i32 = 4;
 const BPF_PROG_LOAD: i32 = 5;
 const BPF_RAW_TRACEPOINT_OPEN: i32 = 17;
+const BPF_BTF_LOAD: i32 = 18;
 const BPF_MAP_LOOKUP_AND_DELETE_ELEM: i32 = 21;
+const BPF_LINK_CREATE: i32 = 28;
+
+/// `bpf_attach_type::BPF_TRACE_UPROBE_MULTI`, Linux 6.6.
+pub const BPF_TRACE_UPROBE_MULTI: u32 = 48;
 
 /// Map types, same header.
 pub const BPF_MAP_TYPE_HASH: u32 = 1;
 pub const BPF_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
 pub const BPF_MAP_TYPE_STACK_TRACE: u32 = 7;
 pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+pub const BPF_MAP_TYPE_TASK_STORAGE: u32 = 29;
+
+/// `BPF_F_NO_PREALLOC`, which a local-storage map is refused without: its
+/// entries live in the object they belong to, so there is nothing to allocate
+/// up front.
+pub const BPF_F_NO_PREALLOC: u32 = 1;
 
 /// Program types.
 ///
@@ -61,6 +72,16 @@ struct MapCreateAttr {
     btf_value_type_id: u32,
     btf_vmlinux_value_type_id: u32,
     map_extra: u64,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct BtfLoadAttr {
+    btf: u64,
+    btf_log_buf: u64,
+    btf_size: u32,
+    btf_log_size: u32,
+    btf_log_level: u32,
 }
 
 #[repr(C)]
@@ -141,6 +162,82 @@ pub fn map_create(
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
+/// A map whose key and value the kernel is told the types of.
+///
+/// Most maps here are byte strings to the kernel. A local-storage map is not
+/// allowed to be: `bpf_local_storage_map_alloc_check` refuses one without a
+/// BTF key and value, because the kernel lays the value out inside the object
+/// it belongs to and wants to know what it is holding.
+pub struct TypedMap<'a> {
+    pub map_type: u32,
+    pub key_size: u32,
+    pub value_size: u32,
+    pub max_entries: u32,
+    pub map_flags: u32,
+    pub btf_fd: RawFd,
+    pub btf_key_type_id: u32,
+    pub btf_value_type_id: u32,
+    pub name: &'a str,
+}
+
+pub fn map_create_typed(map: &TypedMap<'_>) -> io::Result<OwnedFd> {
+    let mut attr = MapCreateAttr {
+        map_type: map.map_type,
+        key_size: map.key_size,
+        value_size: map.value_size,
+        max_entries: map.max_entries,
+        map_flags: map.map_flags,
+        map_name: kernel_name(map.name),
+        btf_fd: map.btf_fd as u32,
+        btf_key_type_id: map.btf_key_type_id,
+        btf_value_type_id: map.btf_value_type_id,
+        ..Default::default()
+    };
+    let fd = unsafe {
+        bpf(
+            BPF_MAP_CREATE,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<MapCreateAttr>() as u32,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// Hands the kernel a BTF blob this process built, keeping its log.
+///
+/// The blob describes the types of one map's key and value and nothing else;
+/// the kernel checks it as strictly as it checks its own, and its complaint is
+/// the only diagnosis there is, so it travels with the error.
+pub fn btf_load(blob: &[u8]) -> Result<OwnedFd, LoadError> {
+    let mut log = vec![0u8; LOG_BYTES];
+    let mut attr = BtfLoadAttr {
+        btf: blob.as_ptr() as u64,
+        btf_log_buf: log.as_mut_ptr() as u64,
+        btf_size: blob.len() as u32,
+        btf_log_size: log.len() as u32,
+        btf_log_level: 1,
+    };
+    let fd = unsafe {
+        bpf(
+            BPF_BTF_LOAD,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<BtfLoadAttr>() as u32,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        let end = log.iter().position(|byte| *byte == 0).unwrap_or(log.len());
+        return Err(LoadError {
+            error,
+            verifier_log: String::from_utf8_lossy(&log[..end]).trim().to_owned(),
+        });
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
 /// Why a program did not load.
 ///
 /// The verifier's log is the whole diagnosis, so it travels with the error
@@ -184,6 +281,19 @@ pub fn prog_load(
     name: &str,
     license: &str,
 ) -> Result<OwnedFd, LoadError> {
+    prog_load_for(prog_type, 0, instructions, name, license)
+}
+
+/// Loads a program declared for one attach type, which some attachments check
+/// at load time rather than at the attach: a uprobe-multi link refuses a
+/// program that was not loaded for it.
+pub fn prog_load_for(
+    prog_type: u32,
+    expected_attach_type: u32,
+    instructions: &[crate::bpf::insn::Insn],
+    name: &str,
+    license: &str,
+) -> Result<OwnedFd, LoadError> {
     let license = CString::new(license).expect("a license has no interior NUL");
     let mut log = vec![0u8; LOG_BYTES];
     let mut attr = ProgLoadAttr {
@@ -198,6 +308,7 @@ pub fn prog_load(
         log_size: log.len() as u32,
         log_buf: log.as_mut_ptr() as u64,
         prog_name: kernel_name(name),
+        expected_attach_type,
         ..Default::default()
     };
     let fd = unsafe {
@@ -237,6 +348,64 @@ pub fn raw_tracepoint_open(name: &str, prog_fd: RawFd) -> io::Result<OwnedFd> {
             std::mem::size_of::<RawTracepointOpenAttr>() as u32,
         )
     };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct UprobeMultiAttr {
+    prog_fd: u32,
+    target_fd: u32,
+    attach_type: u32,
+    flags: u32,
+    path: u64,
+    offsets: u64,
+    ref_ctr_offsets: u64,
+    cookies: u64,
+    cnt: u32,
+    multi_flags: u32,
+    pid: u32,
+    pad: u32,
+}
+
+/// Links a program loaded for `BPF_TRACE_UPROBE_MULTI` to one offset of a
+/// file, for one process and every thread in it.
+///
+/// This is the uprobe route that needs only `CAP_BPF` and `CAP_PERFMON`: the
+/// `uprobe` PMU behind `attach::uprobe` asks for `CAP_SYS_ADMIN`, which this
+/// project does not request. `usdt.rs` carries its own copy of this for the
+/// same reason, written before this file had one; the request to fold them is
+/// in `docs/open-findings.md`. No semaphore is handed over: a probe guarded by
+/// one would never fire, and the caller refuses those rather than using this.
+pub fn link_uprobe_multi(
+    prog_fd: RawFd,
+    path: &std::path::Path,
+    offset: u64,
+    pid: i32,
+) -> io::Result<OwnedFd> {
+    let path = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::other("a path has no interior NUL"))?;
+    let offsets = [offset];
+    let mut attr = UprobeMultiAttr {
+        prog_fd: prog_fd as u32,
+        attach_type: BPF_TRACE_UPROBE_MULTI,
+        path: path.as_ptr() as u64,
+        offsets: offsets.as_ptr() as u64,
+        cnt: 1,
+        pid: pid as u32,
+        ..Default::default()
+    };
+    let fd = unsafe {
+        bpf(
+            BPF_LINK_CREATE,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<UprobeMultiAttr>() as u32,
+        )
+    };
+    drop(path);
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -466,6 +635,9 @@ mod tests {
         assert_eq!(offset_of!(MapCreateAttr, numa_node), 24);
         assert_eq!(offset_of!(MapCreateAttr, map_name), 28);
         assert_eq!(offset_of!(MapCreateAttr, map_ifindex), 44);
+        assert_eq!(offset_of!(MapCreateAttr, btf_fd), 48);
+        assert_eq!(offset_of!(MapCreateAttr, btf_key_type_id), 52);
+        assert_eq!(offset_of!(MapCreateAttr, btf_value_type_id), 56);
         assert_eq!(offset_of!(MapCreateAttr, map_extra), 64);
         assert_eq!(size_of::<MapCreateAttr>(), 72);
 
@@ -482,9 +654,24 @@ mod tests {
         assert_eq!(offset_of!(ProgLoadAttr, expected_attach_type), 68);
         assert_eq!(size_of::<ProgLoadAttr>(), 72);
 
+        assert_eq!(offset_of!(BtfLoadAttr, btf), 0);
+        assert_eq!(offset_of!(BtfLoadAttr, btf_log_buf), 8);
+        assert_eq!(offset_of!(BtfLoadAttr, btf_size), 16);
+        assert_eq!(offset_of!(BtfLoadAttr, btf_log_size), 20);
+        assert_eq!(offset_of!(BtfLoadAttr, btf_log_level), 24);
+
         assert_eq!(offset_of!(RawTracepointOpenAttr, name), 0);
         assert_eq!(offset_of!(RawTracepointOpenAttr, prog_fd), 8);
         assert_eq!(size_of::<RawTracepointOpenAttr>(), 16);
+
+        assert_eq!(offset_of!(UprobeMultiAttr, attach_type), 8);
+        assert_eq!(offset_of!(UprobeMultiAttr, path), 16);
+        assert_eq!(offset_of!(UprobeMultiAttr, offsets), 24);
+        assert_eq!(offset_of!(UprobeMultiAttr, ref_ctr_offsets), 32);
+        assert_eq!(offset_of!(UprobeMultiAttr, cookies), 40);
+        assert_eq!(offset_of!(UprobeMultiAttr, cnt), 48);
+        assert_eq!(offset_of!(UprobeMultiAttr, multi_flags), 52);
+        assert_eq!(offset_of!(UprobeMultiAttr, pid), 56);
 
         assert_eq!(offset_of!(MapElemAttr, map_fd), 0);
         assert_eq!(offset_of!(MapElemAttr, key), 8);
