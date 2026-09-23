@@ -435,3 +435,12 @@ Written out with signatures under the eighth wave's stream J heading in
   under-load flake `docs/open-findings.md` already names, in
   `src/collect/mod.rs`, which stream R owns. It passed three times out of three
   alone, at a load average of 6.
+- **Re-run after a reboot** (load average 12, other streams building): fmt and
+  clippy clean; `--no-fail-fast` showed five failures besides the index test.
+  Three pass alone, every time: `off_cpu_contains_the_queue_wait_that_runqlat_also_counts`
+  and the two `scenario_net` tests, which are under-load flakes like the one
+  above. The fourth, `aggregation::two_emits_of_one_request_describe_the_same_events`,
+  fails every run **on `main` as well**, with the same numbers: it compares
+  `mean * count` to a sum with `assert_eq!` on `f64`, and they are one ulp
+  apart (`216167983.0` against `216167983.00000003`). It is filed under stream
+  J's heading in `docs/open-findings.md` for whoever owns `tests/aggregation.rs`.

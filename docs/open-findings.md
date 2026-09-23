@@ -5235,3 +5235,20 @@ which no match produced until now. Three things produce it since this wave:
 states. `docs/families/join.md` has the fields `between` and `decompose:` take,
 what each refuses, and the definition the engine applies: a correlation whose
 only ground is the clock.
+
+### To whoever owns `tests/aggregation.rs`: a float compared exactly
+
+`two_emits_of_one_request_describe_the_same_events` asserts
+`histogram.sum == summary.mean * summary.count` with `assert_eq!` on two
+`f64`s. On this machine (Python 3.14.7, whose interpreter allocations are part
+of the events) it fails every run, on `main` as on `feat/join-engine`, by one
+ulp: `216167983.0` against `216167983.00000003`. The property holds and the
+comparison does not: a mean times a count is not exact in floating point. The
+bound is the rounding of one division and one product, so something like
+
+```rust
+let expected = mean * count;
+assert!((sum - expected).abs() <= 2.0 * f64::EPSILON * sum.abs().max(1.0));
+```
+
+or asserting the summary's own `sum` field, if it carries one, exactly.
