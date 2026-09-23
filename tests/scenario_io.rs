@@ -578,11 +578,12 @@ fn something_this_source_does(source: &str) -> (&'static str, &'static str) {
 /// The sources of this family that have a collector in this build.
 ///
 /// Five through `/proc/diskstats` and PSI, four through the block layer's own
-/// raw tracepoints, and three through fentry. The two mechanisms answer different questions and the
+/// raw tracepoints, three through fentry, and two through the page cache's
+/// own raw tracepoints. The two mechanisms answer different questions and the
 /// sweep covers both: a combination the catalog offers and the build cannot
 /// serve is a promise broken in the one place nobody looks, and that is as
 /// true of an eBPF backend as of a file.
-fn collected_sources() -> [&'static str; 12] {
+fn collected_sources() -> [&'static str; 14] {
     [
         "io.bytes",
         "io.iops",
@@ -597,6 +598,9 @@ fn collected_sources() -> [&'static str; 12] {
         "io.syscall",
         "io.fs",
         "io.fsync",
+        // The ninth wave's two, over the page cache's raw tracepoints.
+        "io.pagecache",
+        "io.readahead",
     ]
 }
 
@@ -3824,4 +3828,654 @@ fn a_call_whose_exit_the_kernel_skipped_is_counted_as_lost() {
             _ => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The page cache: `io.pagecache` and `io.readahead`
+//
+// One program pair on the two tracepoints either side of a read --
+// `mm_filemap_get_pages`, what a read looked up, and
+// `mm_filemap_add_to_page_cache`, what the cache had to fill -- read two ways.
+// `src/bpf/io_pagecache.rs` has why those two.
+//
+// Ground truth here is the page cache's own state, reported by the workload
+// through `mincore(2)`: which pages of the file are resident before a read and
+// after it. That is the kernel's answer through a different door -- a syscall
+// on a mapping, not a tracepoint -- and nothing the tool computed. A cold read
+// must fill exactly the pages that were not resident, a warm one exactly none,
+// and once readahead has settled, what became resident is exactly what was
+// filled.
+//
+// The four classes:
+//
+// - **ground truth**: a file read cold and then warm; the first 4 MiB of a
+//   cold 64 MiB file read sequentially against 256 random pages of another;
+//   pages a write appends, which are created rather than missed;
+// - **the capability sweep**: both are in `collected_sources` above;
+// - **the loss path**: more distinct `(task, file)` rows in one drain than the
+//   map holds;
+// - **the refusal**: a mode neither can mean, a cgroup target, and a binary
+//   without the capabilities.
+//
+// Every file is on the build directory's filesystem. A tmpfs has no page cache
+// lookups of this kind -- shmem reads do not pass `filemap_get_pages` -- and a
+// scenario about the page cache run on one measures nothing.
+
+/// `mincore(2)` from Python, for the workloads below: how many pages of a file
+/// the page cache holds right now. Mapping a file and asking touches no page,
+/// so the question does not change the answer.
+const RESIDENT: &str = r#"
+import ctypes, mmap, os
+_libc = ctypes.CDLL(None, use_errno=True)
+_libc.mmap.restype = ctypes.c_void_p
+_libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
+                       ctypes.c_int, ctypes.c_long]
+_libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
+_libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+def resident(fd):
+    size = os.fstat(fd).st_size
+    pages = (size + 4095) // 4096
+    addr = _libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_SHARED, fd, 0)
+    assert addr is not None and addr != ctypes.c_void_p(-1).value, ctypes.get_errno()
+    vec = ctypes.create_string_buffer(pages)
+    assert _libc.mincore(addr, size, vec) == 0, ctypes.get_errno()
+    _libc.munmap(addr, size)
+    return sum(byte & 1 for byte in vec.raw)
+"#;
+
+/// A file read whole in 1 MiB reads, cold or warm, with the page cache's own
+/// account of it before the read.
+const READ_WHOLE: &str = r#"
+import json, os, sys
+path, phase, account = sys.argv[1], sys.argv[2], sys.argv[3]
+fd = os.open(path, os.O_RDONLY)
+if phase == "cold":
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+before = resident(fd)
+read = 0
+while True:
+    chunk = os.read(fd, 1 << 20)
+    if not chunk:
+        break
+    read += len(chunk)
+st = os.fstat(fd)
+json.dump({"ino": st.st_ino, "pages": (st.st_size + 4095) // 4096, "read": read,
+           "resident_before": before, "resident_after": resident(fd)}, open(account, "w"))
+"#;
+
+/// A file written and synced, so that `POSIX_FADV_DONTNEED` can drop every
+/// page of it: a dirty page is not dropped, and a read of it is not cold.
+fn synced_file(name: &str, bytes: usize) -> PathBuf {
+    use std::io::Write;
+    let path = scratch(name);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the scratch directory");
+    let mut file = std::fs::File::create(&path).expect("a file to write");
+    file.write_all(&incompressible(bytes))
+        .expect("the whole file");
+    file.sync_all().expect("the file on the device");
+    path
+}
+
+fn attr_i64(event: &BTreeMap<String, serde_json::Value>, name: &str) -> i64 {
+    event
+        .get(name)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_else(|| panic!("an event carries `{name}`: {event:?}"))
+}
+
+/// The page counts of every event on one file, summed:
+/// `(lookups, lookup calls, filled, created, value)`, the value being the
+/// source's own -- `misses` or `ahead`.
+fn page_counts(
+    result: &serde_json::Value,
+    file: (u64, u64),
+    value: &str,
+) -> (u64, u64, u64, u64, i64) {
+    let mut sums = (0, 0, 0, 0, 0);
+    for (raw, event) in raw_with_keys(result) {
+        if file_key(&raw) != Some(file) {
+            continue;
+        }
+        sums.0 += attr_u64(&event, "lookups");
+        sums.1 += attr_u64(&event, "lookup_calls");
+        sums.2 += attr_u64(&event, "filled");
+        sums.3 += attr_u64(&event, "created");
+        sums.4 += attr_i64(&event, value);
+    }
+    sums
+}
+
+/// How far short a cold read's lookups may be: the first folio batch of each
+/// of its four reads, at most. `PAGEVEC_SIZE` is 31 folios, and the shortfalls
+/// measured here were 1, 48, 88 and 96 pages on reads of 256.
+const FIRST_BATCHES: u64 = 4 * 256 / 2;
+
+/// A 4 MiB file read cold and then warm, in 1 MiB reads.
+///
+/// The reference is `mincore(2)` before each read: a read of the whole file
+/// must fill exactly the pages that were not resident -- all 1024 cold, none
+/// warm -- and look up every page of the file once. Warm, exactly; cold, a
+/// read's first batch may go unseen, because `filemap_get_pages` returns
+/// without its tracepoint when the batch's last folio is still locked under
+/// readahead, so the cold count is a floor and never over. The reads are
+/// 1 MiB on purpose: `filemap_read` asks for a read's remaining range once per
+/// batch of folios, so a 1 MiB read reports its tail five or six times, and a
+/// collector that summed those ranges counted 3168 pages for this file. The
+/// EOF read at the end asks for nothing the file has and must add nothing.
+#[test]
+fn a_file_read_cold_fills_every_page_and_read_warm_fills_none() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = synced_file("pagecache-cold-warm.bin", 4 << 20);
+    let workload = script("pagecache-cold-warm.py", &format!("{RESIDENT}{READ_WHOLE}"));
+    let (dev, _) = mounted_device(&path);
+    let mut filled_by_phase = Vec::new();
+    for phase in ["cold", "warm"] {
+        let account_path = scratch(&format!("pagecache-{phase}.json"));
+        let output = run_on_launch(
+            &format!("pagecache-{phase}"),
+            &[("cache", "io.pagecache", "count", "raw")],
+            &[
+                "python3",
+                workload.to_str().expect("a path"),
+                path.to_str().expect("a path"),
+                phase,
+                account_path.to_str().expect("a path"),
+            ],
+        );
+        assert!(output.status.success(), "{phase}: {}", stderr(&output));
+        let did = account(&account_path);
+        let pages = did["pages"].as_u64().expect("pages");
+        let before = did["resident_before"].as_u64().expect("resident pages");
+        assert_eq!(
+            did["read"].as_u64(),
+            Some(4 << 20),
+            "the workload read the file"
+        );
+        assert_eq!(pages, 1024);
+        let file = (dev, did["ino"].as_u64().expect("an inode"));
+        let document = json(&output);
+        let (lookups, calls, filled, created, misses) =
+            page_counts(result(&document, "cache"), file, "misses");
+        let lost = losses(result(&document, "cache"));
+        if phase == "warm" {
+            assert_eq!(
+                lookups, pages,
+                "warm: a whole read of the file looks up each of its {pages} pages once, and \
+                 {lookups} were counted in {calls} lookups; the run lost {lost}"
+            );
+            assert_eq!(
+                calls, 4,
+                "warm: four 1 MiB reads, and the one at EOF asks for nothing"
+            );
+        } else {
+            // Cold, a read's first batch can go unseen: `filemap_get_pages`
+            // returns early, without its tracepoint, when the batch's last
+            // folio is still locked under readahead. What must never happen is
+            // a page counted twice.
+            assert!(
+                lookups <= pages && lookups + FIRST_BATCHES >= pages,
+                "cold: {lookups} of the file's {pages} pages were counted as looked up, in \
+                 {calls} lookups; a cold count may be short by the first batch of each read, \
+                 and is never over; the run lost {lost}"
+            );
+            if lookups < pages {
+                eprintln!(
+                    "note: the cold read's lookups were {} pages short, the first batch of a read \
+                     that met a folio still under readahead",
+                    pages - lookups
+                );
+            }
+        }
+        assert_eq!(
+            filled,
+            pages - before,
+            "{phase}: mincore said {before} of {pages} pages were resident before the read, so \
+             the read had to fill {}; the tool counted {filled}",
+            pages - before
+        );
+        assert_eq!(misses as u64, filled, "{phase}: the value is the fill");
+        assert_eq!(created, 0, "{phase}: a read creates no page");
+        filled_by_phase.push((phase, before, filled));
+    }
+    let (_, cold_before, cold) = filled_by_phase[0];
+    let (_, warm_before, warm) = filled_by_phase[1];
+    if cold_before > 0 || warm_before < 1024 {
+        eprintln!(
+            "note: the cold read began with {cold_before} pages resident and the warm one with \
+             {warm_before}; the counts matched mincore either way, but the separation below is \
+             between a read that was not fully cold and one that was not fully warm"
+        );
+    }
+    assert!(
+        cold > warm,
+        "a cold read must fill more than a warm one: {cold} against {warm}"
+    );
+}
+
+/// The first 4 MiB of a cold 64 MiB file, read sequentially, and 256 random
+/// pages of another, both in one run.
+///
+/// Readahead reads ahead of a sequential reader and not of a random one, so the
+/// first must fill more than it looked up and the second what it looked up. The
+/// reference is again `mincore(2)`, half a second after the reads so that the
+/// last readahead has landed: what became resident is what was filled, and
+/// what was looked up is what the workload read. The separation is asserted
+/// rather than a size: how far the kernel reads ahead depends on its window,
+/// which grows, and on the device.
+///
+/// Trace mode on purpose, and the workload's own `CLOCK_MONOTONIC` around each
+/// phase: every row is stamped where its first event happened (finding 44), so
+/// each file's events must fall inside the phase that read it -- one clock
+/// domain, checked against the program's own reading of it.
+#[test]
+fn a_sequential_read_is_read_ahead_of_and_a_random_one_is_not() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    const SEQUENTIAL_THEN_RANDOM: &str = r#"
+import json, os, random, sys, time
+sequential, scattered, account = sys.argv[1], sys.argv[2], sys.argv[3]
+now = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+phases = {}
+for path, how in ((sequential, "sequential"), (scattered, "random")):
+    fd = os.open(path, os.O_RDONLY)
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    before = resident(fd)
+    pages = os.fstat(fd).st_size // 4096
+    begin = now()
+    if how == "sequential":
+        asked = 1024
+        for i in range(asked // 16):
+            assert len(os.pread(fd, 65536, i * 65536)) == 65536
+    else:
+        asked = 256
+        for page in random.Random(7).sample(range(pages), asked):
+            assert len(os.pread(fd, 4096, page * 4096)) == 4096
+    end = now()
+    time.sleep(0.5)
+    phases[how] = {"ino": os.fstat(fd).st_ino, "asked": asked, "begin": begin, "end": end,
+                   "resident_before": before, "resident_after": resident(fd)}
+    os.close(fd)
+json.dump(phases, open(account, "w"))
+"#;
+    let sequential = synced_file("readahead-sequential.bin", 64 << 20);
+    let scattered = synced_file("readahead-random.bin", 64 << 20);
+    let account_path = scratch("readahead.json");
+    let workload = script(
+        "readahead.py",
+        &format!("{RESIDENT}{SEQUENTIAL_THEN_RANDOM}"),
+    );
+    let output = run_on_launch(
+        "readahead",
+        &[("ahead", "io.readahead", "trace", "raw, rate")],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            sequential.to_str().expect("a path"),
+            scattered.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let document = json(&output);
+    let run = result(&document, "ahead");
+    let (dev, _) = mounted_device(&sequential);
+    let mut ahead_of = BTreeMap::new();
+    for how in ["sequential", "random"] {
+        let phase = &did[how];
+        let file = (dev, phase["ino"].as_u64().expect("an inode"));
+        let asked = phase["asked"].as_u64().expect("pages asked");
+        let became = phase["resident_after"].as_u64().expect("resident")
+            - phase["resident_before"].as_u64().expect("resident");
+        let (lookups, _, filled, created, ahead) = page_counts(run, file, "ahead");
+        if how == "random" {
+            // A single-page read is a batch of one folio, which the kernel's
+            // early return cannot shorten: exact.
+            assert_eq!(
+                lookups, asked,
+                "random: the workload read {asked} pages and {lookups} lookups were counted"
+            );
+        } else {
+            assert!(
+                lookups <= asked && lookups * 2 >= asked,
+                "sequential: the workload read {asked} pages and {lookups} lookups were \
+                 counted; cold, a read's first batch may go unseen, and none may be counted twice"
+            );
+        }
+        assert_eq!(
+            filled, became,
+            "{how}: mincore says {became} pages became resident, and the tool counted {filled} \
+             filled"
+        );
+        assert_eq!(created, 0, "{how}: a read creates no page");
+        assert_eq!(
+            ahead,
+            filled as i64 - lookups as i64,
+            "{how}: ahead is the fill minus the lookup"
+        );
+
+        // Each file's rows were stamped inside the phase that read it.
+        let (begin, end) = (
+            phase["begin"].as_u64().expect("a start"),
+            phase["end"].as_u64().expect("an end"),
+        );
+        for (raw, _) in raw_with_keys(run) {
+            if file_key(&raw) != Some(file) {
+                continue;
+            }
+            let ts = raw["ts_ns"].as_u64().expect("a timestamp");
+            assert!(
+                (begin..=end).contains(&ts),
+                "{how}: a row stamped at {ts} is outside the phase that read the file, \
+                 [{begin}, {end}] by the workload's own CLOCK_MONOTONIC"
+            );
+        }
+        ahead_of.insert(how, ahead);
+    }
+    let (sequential, random) = (ahead_of["sequential"], ahead_of["random"]);
+    assert!(
+        sequential > 0,
+        "a sequential read of a cold file must be read ahead of: {sequential} pages ahead"
+    );
+    assert!(
+        random * 8 <= sequential,
+        "random reads are read ahead of by next to nothing -- two random pages may sit side by \
+         side -- and a sequential reader by a window: {random} against {sequential}"
+    );
+}
+
+/// Pages a write appends enter the cache and are created, never missed.
+///
+/// A megabyte in sixteen writes to a new file: 256 pages must be created and
+/// none filled or looked up. Before the program told the two apart, every
+/// write of a new file was a miss, and a workload that only writes read as a
+/// cache that never hits.
+#[test]
+fn a_page_a_write_appends_is_created_and_never_a_miss() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    const APPEND: &str = r#"
+import json, os, sys
+path, account = sys.argv[1], sys.argv[2]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+block = os.urandom(65536)
+for _ in range(16):
+    assert os.write(fd, block) == len(block)
+json.dump({"ino": os.fstat(fd).st_ino, "pages": 256}, open(account, "w"))
+"#;
+    let path = scratch("pagecache-append.bin");
+    let _ = std::fs::remove_file(&path);
+    let account_path = scratch("pagecache-append.json");
+    let workload = script("pagecache-append.py", APPEND);
+    let output = run_on_launch(
+        "pagecache-append",
+        &[("cache", "io.pagecache", "count", "raw")],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            path.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let (dev, _) = mounted_device(&path);
+    let file = (dev, did["ino"].as_u64().expect("an inode"));
+    let document = json(&output);
+    let (lookups, _, filled, created, misses) =
+        page_counts(result(&document, "cache"), file, "misses");
+    assert_eq!(created, 256, "a megabyte appended is 256 pages created");
+    assert_eq!(
+        (filled, misses, lookups),
+        (0, 0, 0),
+        "and nothing missed or looked up"
+    );
+}
+
+/// A hundred threads each reading a thousand one-byte files once is a hundred
+/// thousand distinct `(task, file)` rows, several times what the map holds in
+/// one drain, and every lookup that found no row is counted as lost.
+///
+/// The property that closes against a number, as for the fentry histograms:
+/// every read is either in a row or in the drop count, and no read is in a row
+/// twice. Where this machine cannot make the rows fast enough to fill one
+/// drain's worth, nothing is dropped and the loss path was not created: that
+/// is a skip with the numbers, and never a pass.
+#[test]
+fn more_page_cache_rows_than_the_map_holds_are_counted_as_lost() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let directory = scratch("pagecache-many-rows");
+    let account_path = scratch("pagecache-many-rows.json");
+    let workload = script("pagecache-many-rows.py", MANY_ROWS);
+    let output = run_on_launch(
+        "pagecache-many-rows",
+        &[("cache", "io.pagecache", "trace", "raw")],
+        &[
+            "python3",
+            workload.to_str().expect("a path"),
+            directory.to_str().expect("a path"),
+            account_path.to_str().expect("a path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    let reads = did["reads"].as_u64().expect("reads");
+    let inos: std::collections::BTreeSet<u64> = did["inos"]
+        .as_array()
+        .expect("inos")
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    let document = json(&output);
+    let run = result(&document, "cache");
+    let counted: u64 = raw_with_keys(run)
+        .iter()
+        .filter(|(_, event)| inos.contains(&attr_u64(event, "ino")))
+        .map(|(_, event)| attr_u64(event, "lookup_calls"))
+        .sum();
+    let dropped = losses(run)["dropped"].as_u64().expect("a drop count");
+    if dropped == 0 {
+        eprintln!(
+            "skipped: {counted} of {reads} reads were counted and none dropped, so this machine \
+             did not fill a drain's worth of rows -- the map holds 16384 per 100 ms -- and the \
+             loss path was not created"
+        );
+        assert_eq!(
+            counted, reads,
+            "with nothing dropped, every read is in a row"
+        );
+        return;
+    }
+    assert!(
+        counted + dropped >= reads,
+        "{counted} counted and {dropped} dropped, for {reads} reads the program made: lookups \
+         were lost without being counted"
+    );
+    assert!(
+        counted <= reads,
+        "{counted} counted for {reads} reads: a lookup was counted twice"
+    );
+    let reasons = losses(run)["reasons"].to_string();
+    assert!(
+        reasons.contains("lower bound"),
+        "a lossy run must say its totals are a floor: {reasons}"
+    );
+}
+
+/// Both refuse what they cannot serve, with the reason and the exit code that
+/// belongs to it: a `poll` cannot mean anything for a count of instants (2); a
+/// cgroup target is the build's gap for `io.pagecache`, which declares it (3),
+/// and a request that cannot mean anything for `io.readahead`, which does not
+/// (2); and a binary without the capabilities is this machine's gap (1).
+#[test]
+fn the_page_cache_sources_refuse_with_the_reason_that_is_actually_missing() {
+    for source in ["io.pagecache", "io.readahead"] {
+        let polled = run(&[
+            source,
+            "--system",
+            "-m",
+            "poll@100ms",
+            "-e",
+            "summary",
+            "-d",
+            "200ms",
+        ]);
+        assert_eq!(
+            polled.status.code(),
+            Some(EXIT_REJECTED),
+            "{source}: {}",
+            stderr(&polled)
+        );
+    }
+    let cgroup = |source| {
+        run(&[
+            source,
+            "--cgroup",
+            "/sys/fs/cgroup",
+            "-m",
+            "count",
+            "-e",
+            "summary",
+            "-d",
+            "100ms",
+        ])
+    };
+    let declared = cgroup("io.pagecache");
+    if declared.status.code() == Some(EXIT_NO_BACKEND) {
+        eprintln!(
+            "skipped the cgroup refusal of io.pagecache: {}",
+            stderr(&declared)
+        );
+    } else {
+        assert_eq!(
+            declared.status.code(),
+            Some(EXIT_NOT_IMPLEMENTED),
+            "{}",
+            stderr(&declared)
+        );
+        assert!(
+            stderr(&declared).contains("bpf_get_current_cgroup_id"),
+            "the refusal should name what would serve it: {}",
+            stderr(&declared)
+        );
+    }
+    let undeclared = cgroup("io.readahead");
+    assert_eq!(
+        undeclared.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&undeclared)
+    );
+
+    let bare = scratch("omn-without-capabilities-pagecache");
+    std::fs::create_dir_all(bare.parent().expect("a parent")).expect("the scratch directory");
+    std::fs::copy(BINARY, &bare).expect("a copy of the binary");
+    for source in ["io.pagecache", "io.readahead"] {
+        let output = Command::new(&bare)
+            .args([
+                source, "--system", "-m", "count", "-e", "summary", "-d", "100ms",
+            ])
+            .output()
+            .expect("the copy runs");
+        let complaint = stderr(&output);
+        if output.status.success() {
+            eprintln!("skipped the capability refusal of {source}: the copy collected");
+            continue;
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_NO_BACKEND),
+            "{source}: {complaint}"
+        );
+        assert!(
+            complaint.contains("CAP_BPF") && complaint.contains("setcap"),
+            "{source}: a binary without the capabilities must be told which and how: {complaint}"
+        );
+    }
+}
+
+/// A cold read of sixteen 1 MiB reads may go unseen for the first batch of
+/// each, which bounds how far above its exact value the session's total can be.
+const FIRST_BATCHES_OF_SIXTEEN: f64 = 16.0 * 128.0;
+
+/// The two page cache sessions say what their own headers predict.
+///
+/// `io-cold-then-warm.yml` reads a 4096-page file twice, so its heaviest
+/// `io.pagecache` series is that file with exactly 4096 misses, and the same
+/// file's `io.readahead` warm window is exactly -4096: the whole file found and
+/// none of it filled. `io-readahead-patterns.yml`
+/// cannot be held to a size -- the readahead window is the machine's -- but the
+/// sequential file must come out ahead, which no random reader and no
+/// interpreter reading its own modules does. Both write their files into the
+/// directory they are run from, which here is on the build directory's
+/// filesystem rather than a tmpfs.
+#[test]
+fn the_page_cache_sessions_say_what_their_headers_predict() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let here = scratch("pagecache-sessions");
+    std::fs::create_dir_all(&here).expect("a directory to run the sessions from");
+    let in_scratch = |name: &str| {
+        Command::new(BINARY)
+            .args(["-f", &session(name), "--format", "json"])
+            .current_dir(&here)
+            .output()
+            .expect("omn should run")
+    };
+
+    let output = in_scratch("io-cold-then-warm.yml");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let heaviest = &output_of(result(&document, "cache"), "topk")["series"][0];
+    assert_eq!(
+        number(&heaviest["total"]),
+        4096.0,
+        "a 4096-page file read cold and then warm is 4096 misses: {heaviest}"
+    );
+    let file = heaviest["key"].as_str().expect("a series key");
+    let ahead = series(output_of(result(&document, "ahead"), "rate"), file)
+        .unwrap_or_else(|| panic!("io.readahead has a series for {file}"));
+    // The warm read's window is exact: every page was there, and the reader was
+    // served 4096 pages it did not fill. The cold window may be a little
+    // positive rather than zero, because a cold read's first batch can go
+    // unseen by the lookup tracepoint, and never negative.
+    let windows = series(output_of(result(&document, "ahead"), "summary"), file)
+        .unwrap_or_else(|| panic!("io.readahead summarises {file}"));
+    assert_eq!(
+        number(&windows["min"]),
+        -4096.0,
+        "the warm read looked up 4096 pages and filled none: {windows}"
+    );
+    let total = number(&ahead["total"]);
+    assert!(
+        (-4096.0..=-4096.0 + FIRST_BATCHES_OF_SIXTEEN).contains(&total),
+        "two whole reads of 4096 pages, one filling them, is -4096 and at most a cold read's \
+         first batches above it: {ahead}, per window {windows}"
+    );
+
+    let output = in_scratch("io-readahead-patterns.yml");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let rates = output_of(result(&document, "ahead"), "rate")["series"]
+        .as_array()
+        .expect("rate series")
+        .iter()
+        .map(|series| number(&series["total"]))
+        .fold(f64::MIN, f64::max);
+    assert!(
+        rates > 0.0,
+        "the sequential file must come out ahead of its reads: the largest total was {rates}"
+    );
 }

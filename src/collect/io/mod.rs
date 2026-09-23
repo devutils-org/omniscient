@@ -23,6 +23,7 @@ mod block;
 mod diskstats;
 mod fsync;
 pub(super) mod histogram;
+mod pagecache;
 mod pressure;
 pub(super) mod vfs;
 mod writeback;
@@ -132,6 +133,23 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("io.fsync", "bpf:fentry", |resolved| {
             Ok(Box::new(fsync::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // The page cache, from the two tracepoints on either side of a read:
+        // what it looked up and what the cache had to fill. One program pair,
+        // read two ways.
+        Factory::new("io.pagecache", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(pagecache::Prepare {
+                reading: pagecache::Reading::Misses,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("io.readahead", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(pagecache::Prepare {
+                reading: pagecache::Reading::Ahead,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))

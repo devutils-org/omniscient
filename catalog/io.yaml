@@ -252,35 +252,71 @@
 
 - id: io.pagecache
   family: io
-  summary: "Page cache hits and misses"
+  summary: "Page cache misses, against the pages reads looked up"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: med}
-    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med, equivalent: true}
+    # Both sides of a read: `mm_filemap_get_pages` is what it looked up and
+    # `mm_filemap_add_to_page_cache` what the cache had to fill. The fill alone
+    # is a miss count with nothing to be a share of. Counted in the kernel per
+    # task and file; `docs/families/io.md` has why these two and not the fault
+    # tracepoints.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: med}
+    - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, summary, raw]
-  targets: {system: native, pid: bpf_only, cgroup: bpf_only}
-  keys: [task, file]
-  filter_fields: [comm, dev, ino]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, cgroup: bpf_only}
+  keys: [file, task]
+  filter_fields: [comm, dev, ino, fs]
   determinism: low
   caveats:
     - "A cold run and a warm run differ by an order of magnitude. Mixing them
        produces a bimodal distribution that then gets mistaken for noise."
+    - "A miss is a page the cache had to fill, on demand or read ahead. A page
+       read ahead is a miss when it is filled, and the lookup that later finds
+       it is not one: over a whole file the two agree, inside a window they
+       need not."
+    - "A page a write appends is counted as `created`, not as a miss. A
+       whole-page overwrite of a page that was not cached is a fill with no
+       read behind it, and is a miss here."
+    - "Reads through read(2), pread(2), readv(2) and sendfile(2). A page a
+       fault on a mapping brings in is a miss with no lookup: faults do not
+       pass through filemap_get_pages. tmpfs and shmem have no page cache
+       lookups of this kind at all."
+    - "Counted where the fill happened, which for readahead is the reader."
+    - "Warm, `lookups` is exact. Cold it is a floor: filemap_get_pages returns
+       without its tracepoint when the last folio of a batch is still locked
+       under readahead, so the first batch of such a read is looked up unseen.
+       Measured here, 1 to 96 pages of a 256-page read, and never over."
 
 - id: io.readahead
   family: io
-  summary: "Readahead effectiveness (pages read ahead vs pages used)"
+  summary: "Readahead: pages filled ahead of what reads looked up"
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: low, equivalent: true}
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"], cost: low, equivalent: true}
   modes: [trace, count]
-  emits: [rate, summary, hist]
-  targets: {system: native, pid: bpf_only}
-  keys: [task, file]
-  filter_fields: [comm, dev, ino]
+  # No `hist`: the value is a signed difference, and a log2 bucket has no
+  # place for a negative number.
+  emits: [rate, summary, raw]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, launch: bpf_only}
+  keys: [file, task]
+  filter_fields: [comm, dev, ino, fs]
   determinism: low
+  caveats:
+    - "`ahead` is pages filled minus pages looked up, per task and file.
+       Positive is the cache filled in front of the reader, zero is a random
+       reader or a whole file read to its end, and negative is a reader served
+       from pages that were already cached."
+    - "A difference of two counts, so it adds up: the sum over a run's windows
+       is the run's. A ratio of the same two counts would not."
+    - "It says how far readahead ran ahead, not whether what it read was used
+       before it was evicted. A page read ahead and never read is ahead until
+       the run ends."
+    - "On a cold sequential read the lookups are a floor, so `ahead` can be a
+       few pages high: the first batch of a read whose last folio is still
+       under readahead is looked up without the tracepoint firing."
 
 - id: io.writeback
   family: io
