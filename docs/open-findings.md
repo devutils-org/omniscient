@@ -5466,10 +5466,19 @@ already says how wide. Carrying the span as a clock error would have overloaded
 one field with two meanings, which is the conflation this project refuses
 everywhere else.
 
-**The same defect is in every other bucketed source**, and `sched.runqlat` is
-the one that matters next: it is an input to thread state analysis, and a
-decomposition that opens a state on it inherits exactly this. `sched.lock`,
-`sched.futex`, `sched.irq`, `net.qdisc`, `net.softirq` and `proc.syscall` are
-the rest. The mechanism is eight instructions and one field per row; what makes
-it worth doing once per source rather than in a shared layer is that each keeps
-its own value layout.
+**`sched.runqlat` has it too now**, for the reason that made it next: it is an
+input to thread state analysis, and a decomposition that opens a state on it
+inherits exactly this. Measured on a one-second machine-wide run: **586 events
+carrying 584 distinct instants**, where stamping at the drain gives about ten
+however busy the machine is. `a_bucketed_source_does_not_stamp_every_row_of_a_window_with_one_instant`
+asserts that shape rather than a threshold.
+
+Its own layout test caught two mistakes in the five minutes it took: the new
+field's offset collided with `comm`, and the value region then overlapped the
+key on the program's stack. Both would have produced plausible numbers.
+
+**What is left**: `sched.lock`, `sched.futex`, `sched.irq`, `net.qdisc`,
+`net.softirq` and `proc.syscall`. The mechanism is four instructions and one
+field per row -- `now - duration` where the row is created -- and what makes it
+worth doing once per source rather than in a shared layer is that each keeps its
+own value layout.

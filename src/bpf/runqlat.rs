@@ -79,7 +79,7 @@ const DROP_ROWS: u32 = 1;
 /// descriptors all come from the same place. Every byte of a key is written
 /// before the key is used: the kernel hashes all of it, and a byte nobody wrote
 /// puts two identical waits in two buckets.
-const ROW_VALUE: i16 = -112;
+const ROW_VALUE: i16 = -120;
 const ROW_KEY: i16 = -80;
 const QUEUED_VALUE: i16 = -56;
 const QUEUED_KEY: i16 = -48;
@@ -112,8 +112,19 @@ const VALUE_COUNT: i16 = 0;
 /// more atomic add and makes the mean exact.
 const VALUE_TOTAL_NS: i16 = 8;
 const VALUE_COMM: i16 = 16;
+/// When the first wait of this row's window *began*: the wakeup that opened it.
+///
+/// A bucketed source emits one event per row per window, and stamping that
+/// event at the drain puts it at the window's end -- which is a problem for a
+/// join that *opens* on this source, since everything in the same window as the
+/// first wait then falls outside the state. Finding 44 has the argument and
+/// `mem.reclaim` was the first source to carry it.
+///
+/// Written once, where the row is created, which is the first wait of that key
+/// in that window: the rows map is drained and emptied every window.
+const VALUE_FIRST_NS: i16 = 32;
 const COMM_BYTES: usize = 16;
-const ROW_VALUE_BYTES: usize = 32;
+const ROW_VALUE_BYTES: usize = 40;
 
 /// The queued map: thread id to the moment it joined a run queue.
 const QUEUED_KEY_BYTES: usize = 4;
@@ -140,6 +151,10 @@ pub struct RunqLat {
     pub count: u64,
     /// Their exact total, which the bucket bounds cannot give back.
     pub total_ns: u64,
+    /// When the first wait of this row's window began, which is what the event
+    /// is timestamped with. Zero means unknown, and is read as "fall back to
+    /// the drain" rather than as the beginning of time.
+    pub first_ns: u64,
     pub comm: String,
 }
 
@@ -182,6 +197,7 @@ impl RunqLat {
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            first_ns: long(value, VALUE_FIRST_NS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
         })
     }
@@ -425,6 +441,12 @@ fn switch_instructions(
     program.label("first_wait");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    // When this wait began: now, less how long it lasted. r8 is the reading
+    // taken at the top of the program and r9 is the wait, so the wakeup is
+    // recovered rather than carried through a second map field.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
     // The name is read once, when the row is created, rather than on every
     // wait: it does not change, and this is the hot path.
     read_field(
@@ -639,6 +661,7 @@ mod tests {
                 bucket,
                 count: 1,
                 total_ns: 0,
+                first_ns: 0,
                 comm: String::new(),
             };
             let low = row.bucket_low_ns();
@@ -828,6 +851,7 @@ mod tests {
         let value = [
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
+            (VALUE_FIRST_NS, 8),
             (VALUE_COMM, COMM_BYTES as i16),
         ];
         for (fields, bytes, what) in [

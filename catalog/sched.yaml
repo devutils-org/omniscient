@@ -90,6 +90,12 @@
   filter_fields: [comm, pid, state, queued_ns, blocked_ns]
   determinism: low
   caveats:
+    - "An event is one bucket of one window, and it is stamped at the moment the
+       window's first wait began rather than at the drain that read it. A join
+       that *opens* on this source would otherwise open at the window's close,
+       and everything that happened in the same window as the first wait would
+       fall outside the state. `window_ns` beside the value says how wide the
+       window was."
     - "Expensive on switch-heavy workloads, which is why the totals are kept in
        the kernel keyed by (task, state, stack-id) rather than streamed as one
        event per switch. The stack is walked once per distinct call site: what
