@@ -258,7 +258,13 @@ only shown in the three-states one.
 `src/collect/launch.rs` already holds both ends: the release, and the reap.
 The request is for them in the results.
 
-### 5. A wakeup join onto `sched.offcpu` attributes drains, at WAKEUP
+### 5. A wakeup join onto `sched.offcpu` attributed drains, at WAKEUP — **refused now**
+
+**What closed it**: the eighth wave's join engine refuses the rule at
+validation. The catalog marks `sched.offcpu` and `sched.runqlat` as `drained` --
+each event holds many blocks -- and a wakeup join onto a drained total is
+refused with that reason, before anything is attached, rather than attributing
+drains and calling it `WAKEUP`.
 
 `BRIEF_NEXT.md` names `sched.wakeup -> sched.offcpu` for "what released each
 block". A `sched.offcpu` event is a total drained every 100 ms and stands for as
@@ -291,7 +297,11 @@ points here. The two ways to fix it are in `docs/open-findings.md`; the one
 this project's invariants favour is a refusal, because *an invalid combination
 is refused with the reason, never degraded silently*.
 
-### 6. The wakeup table ranks wakeups, not chains
+### 6. The wakeup table ranked wakeups, not chains — **fixed**
+
+**What closed it**: wakeup attributions are grouped by chain and ranked by
+what they released, which is what a reader deciding where to look next wants.
+`examples/join-decompose-compute.yml` puts the responder at the top.
 
 `heaviest wakeup chains` lists attribution states, and a wakeup join opens one
 state per wakeup. For 1230 wakeups that is 1230 states of one or two events each,

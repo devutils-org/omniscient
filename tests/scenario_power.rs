@@ -25,7 +25,7 @@
 //! these scenarios found.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -1826,8 +1826,9 @@ fn the_three_refusals_are_told_apart_by_what_they_say() {
         );
         return;
     };
-    let cannot_serve = Command::new(&unprivileged)
-        .args([
+    let cannot_serve = spawn_fresh_copy(
+        &unprivileged,
+        &[
             "power.throttle",
             "--system",
             "-m",
@@ -1836,9 +1837,8 @@ fn the_three_refusals_are_told_apart_by_what_they_say() {
             "summary",
             "-d",
             "200ms",
-        ])
-        .output()
-        .expect("the copy should run");
+        ],
+    );
     let _ = std::fs::remove_file(&unprivileged);
 
     if cannot_serve.status.success() {
@@ -1875,6 +1875,38 @@ fn the_three_refusals_are_told_apart_by_what_they_say() {
 /// A copy of the binary, which is the same build without its file
 /// capabilities: `std::fs::copy` carries the contents and the mode and not the
 /// extended attributes, and a relink drops them for the same reason.
+/// Runs a binary that was written a moment ago, through the kernel refusing it
+/// as busy.
+///
+/// `ETXTBSY` -- "text file busy" -- is what `execve` answers for a file that is
+/// open for writing anywhere, and a freshly copied binary is: the copy held a
+/// write descriptor, and any thread of this test process that forks while it
+/// is held gives the child a copy of that descriptor until the child execs. A
+/// suite runs dozens of tests in parallel and every one that spawns a program
+/// forks, so the window is real. This test failed on it twice in one day,
+/// always inside the full suite and never alone -- which is the signature of a
+/// defect in the test's own setup rather than in the tool, and why it is fixed
+/// here rather than tallied with the flakes.
+///
+/// The remedy is the one Cargo and Go both use: the condition clears the moment
+/// the forked child execs, so the spawn is retried briefly. It is retried on
+/// that errno and on nothing else, so a binary that genuinely cannot run still
+/// fails at once.
+fn spawn_fresh_copy(binary: &Path, args: &[&str]) -> std::process::Output {
+    const ETXTBSY: i32 = 26;
+    let mut attempts = 0;
+    loop {
+        match Command::new(binary).args(args).output() {
+            Ok(output) => return output,
+            Err(error) if error.raw_os_error() == Some(ETXTBSY) && attempts < 50 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("the copy should run: {error}"),
+        }
+    }
+}
+
 fn without_capabilities() -> Option<PathBuf> {
     let path = std::env::temp_dir().join(format!("omn-unprivileged-{}", std::process::id()));
     std::fs::copy(BINARY, &path).ok()?;

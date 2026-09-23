@@ -14,11 +14,12 @@ for where the two meet.
 
 The request model, the catalog, the resolver, the validator, the collector
 layer, the emit and encode layers and a join engine all exist and are used by
-every source. Eighty-one sources across nine families collect for real, over
+every source. Eighty-nine sources across nine families collect for real, over
 eight mechanisms: procfs and sysfs, `perf_event_open` counting and sampling,
 netlink, an `LD_PRELOAD` shim, NVML through `dlopen`, `af_packet` with a
 `PACKET_MMAP` ring, and eBPF through raw tracepoints, classic tracepoints,
-kprobes and uprobes. Every emit the catalog declares exists, all nine output
+kprobes, uprobes -- and, since the eighth wave, **fentry** and **USDT**, the two
+attach kinds eight sources had waited on since the fifth. Every emit the catalog declares exists, all nine output
 formats have an encoder, stacks are captured two ways — a `perf_event_open`
 callchain for `cpu.profile` and `bpf_get_stackid` for `sched.offcpu`, which is
 the one that says *where* a task blocked — and a run measures and reports what
@@ -40,36 +41,53 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**1407 tests pass**, of which 244 are scenarios: a workload whose property the
+**1531 tests pass**, of which 269 are scenarios: a workload whose property the
 scenario chose, a session that measures it, and a check against that property.
 Twenty-seven of those are the seventh wave's **crossings** -- a question no
 single family can answer, checked against something the workload itself
 reports.
+
+**And the engine decomposes now.** One task's wall clock, split by the tool
+itself across on a cpu, runnable and blocked, against the program's own life:
+
+```
+    on-cpu       cpu.profile        samples      sampled  KEY    198.60ms   +-1.00ms   55.0 %
+    runnable     sched.runqlat      total_ns     traced   KEY      1.48ms      exact    0.4 %
+    blocked      sched.offcpu       total_ns     traced   KEY    161.68ms      exact   44.8 %
+    parts                                                        361.76ms
+    whole        the program's life gate to reap lifetime -      361.21ms  +-578.30us
+    RESIDUE      whole - parts                                   -550.68us  +-1.58ms
+```
+
+The residue is inside its own resolution. Before the eighth wave the same table
+had to be built by a test out of JSON, with the run's window as its whole and
+the queue wait counted twice, and its residue was +97 ms.
 The fourth wave's 63 defects are recorded in `docs/scenarios/`, 52 closed by the
 fifth wave in `docs/fixes/`.
 
 What is missing is breadth, not skeleton, and there is much less of it than
-there was: nineteen sources have no collector, and **eight of those wait on two
-named mechanisms** rather than on anything unknown.
+there was: **eleven sources have no collector**, and none of them waits on an
+attach kind any more -- they wait on hardware (PEBS, uncore, Intel PT), a vendor
+library (CUPTI), a program type (XDP), or the preload shim pointed elsewhere.
 
 ---
 
 ## What the numbers say
 
 ```
-100 sources: 87 usable here, 9 unverified, 4 out of reach on this machine.
-81 of them have a collector, covering 89 of their 202 backends.
+100 sources: 89 usable here, 7 unverified, 4 out of reach on this machine.
+89 of them have a collector, covering 97 of their 202 backends.
 ```
 
 Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 87 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 81 sources, 89 backends | a collector is written and registered |
+| What can this machine serve? | 89 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this build collect? | 89 sources, 97 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `87` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
+That `89` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
 `make` reapplies the capabilities that every relink drops. Without them the
 whole eBPF and per-cpu perf surface goes, and nothing announces the loss — the
 tool reports fewer sources, which reads like the machine changed rather than
@@ -100,19 +118,19 @@ Per family, sources with a collector:
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
 | `mem` | 20 | 23 | 22 |
+| `net` | 14 | 15 | 12 |
 | `cpu` | 13 | 14 | 12 |
-| `net` | 12 | 15 | 12 |
-| `io` | 9 | 14 | 13 |
+| `io` | 12 | 14 | 14 |
 | `sched` | 9 | 10 | 9 |
 | `gpu` | 6 | 9 | 6 |
 | `proc` | 6 | 6 | 6 |
 | `power` | 5 | 5 | 4 |
-| `runtime` | 1 | 4 | 2 |
+| `runtime` | 4 | 4 | 4 |
 
-**`proc` and `power` are complete**, and `sched`, `net` and `mem` are one, three
-and three short. The gap that used to be the project's whole remaining breadth
-has closed to nineteen sources, and the section below names what each waits
-for.
+**`proc`, `power` and `runtime` are complete**, and `sched`, `net`, `cpu` and
+`io` are one or two short. The gap that used to be the project's whole
+remaining breadth has closed to eleven sources, and the section below names
+what each waits for.
 
 ---
 
@@ -179,13 +197,13 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
-| 4 — the vertical case | **partly, and further than it was**. The seventh wave's crossings decompose two of the paths: one task's wall clock across on-cpu, runnable and blocked, and one read from the block layer to the reader waking up, each line carrying its evidence. What is left is the boundaries above the block layer — `read()` to cache miss, FS to submission — which need `fentry`, and a decomposition that names a *request* rather than a task. |
-| 5 — generalizing the join engine | **done**. All four match kinds — `interval`, `eq`, `scoped_eq`, `wakeup` — are implemented, each reports in its own words, and since the sixth wave each has a producer. `scoped_eq` was the last: `io.queue -> io.latency` joins per request at 99.9 %, keyed on `(pointer, open_ts)` because the kernel recycles a request pointer within milliseconds. |
+| 4 — the vertical case | **partly, and the mechanism is all there now**. The engine decomposes one task's wall clock across on-cpu, runnable and blocked against the program's own life, and the seventh wave's I/O crossing decomposes a read from the block layer up. `fentry` landed in the eighth wave, so the boundaries above the block layer — `read()` to cache miss, FS to submission — have their sources: `io.syscall`, `io.fs`, `io.fsync`. What is left is joining them into one request's budget, and a decomposition that names a *request* rather than a task. |
+| 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. |
 | 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. What is left is the fourth task: **hot attach and detach**, which is also what `DECISIONS.md` defers concurrent requests on, and what phase 10's escalation assumes. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
-| 9 — breadth | in progress; **81 of 100 sources, 89 of 202 backends**. The 19 without a collector are named below, and eight of them sit behind two named attach kinds. |
-| 10 — intelligence layer | **begun, by the crossing rather than by the layer**. TSA — where a thread's wall clock went — is what `examples/cross-compute-where-the-time-went.yml` produces for one task, with the residue printed rather than rounded away. What is not built is the layer above it: the objective as a request parameter, the escalation, the question-oriented modes. |
+| 9 — breadth | in progress; **89 of 100 sources, 97 of 202 backends**. The eleven without a collector are named below, and none of them waits on an attach kind any more. |
+| 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. What is not built is the layer above it: the objective as a request parameter, USE, the escalation, the question-oriented modes. |
 | 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
 
 ---
@@ -215,31 +233,26 @@ brief. What it moved:
   run that lost a tenth of its events marks every count, mean and maximum as a
   lower bound rather than a measurement.
 
-### 2. What is left, and it is eight sources behind two mechanisms
+### 2. What is left: eleven sources, and no attach kind among what they wait on
 
-Nineteen sources have no collector. Eight of them are behind exactly two pieces
-of mechanism, and the rest are behind hardware or a vendor library:
+`fentry` and USDT landed in the eighth wave and took eight sources with them.
+What eleven sources wait on now is hardware, a vendor library, a different
+program type, or a mechanism that already exists pointed somewhere else:
 
 | Waits for | Sources |
 |---|---|
-| **fentry** — `BPF_PROG_TYPE_TRACING` with an `attach_btf_id` | `io.syscall`, `io.fs`, `io.fsync`, `net.tcp.connect`, `net.socket` |
-| **USDT** — `.note.stapsdt` and the semaphore protocol, then a uprobe | `runtime.gc`, `runtime.alloc`, `runtime.custom` |
-| a `Btf::member_offset` that descends anonymous members | `io.pagecache`, `io.readahead` |
+| a collector, and nothing else: the BTF walk into `folio.mapping` landed in the seventh wave | `io.pagecache`, `io.readahead` |
+| the preload shim, pointed at `pthread_mutex_lock` and the GL/Vulkan entry points | `sched.mutex`, `gpu.api` |
 | PEBS or IBS | `mem.latency`, `mem.sharing` |
 | uncore PMUs | `mem.bandwidth` |
-| Intel PT | `cpu.flow` |
-| the preload shim, pointed elsewhere | `sched.mutex`, `gpu.api` |
-| an XDP program | `net.xdp` |
+| Intel PT, and this machine is AMD | `cpu.flow` |
+| an XDP program, the one type here that can drop packets rather than observe them | `net.xdp` |
 | CUPTI, Nsight | `gpu.kernel`, `gpu.counters` |
 
-**fentry is now the single largest thing between this project and the layer
-above the block one**, and `docs/families/io.md` says so from the inside: three
-of the five `io` sources it left are the same missing attach kind.
-
-The third row is closed. `Btf::member_offset` descends anonymous structs and
-unions since the seventh wave, so `folio.mapping`, `skb->protocol`,
-`skc_daddr` and `skc_dport` are reachable; `io.pagecache` and `io.readahead`
-now wait on a collector rather than on mechanism.
+**The first two rows are the cheapest breadth left**, and both are collector work
+on a mechanism that is there: `io.pagecache` and `io.readahead` resolve onto a
+raw tracepoint this machine serves and say so, exit 3, and the shim already
+interposes `malloc`.
 
 ### 2b. The eleven defects the fifth wave left
 
@@ -298,7 +311,7 @@ sources and put the capability advice where the failure actually is.
 
 ## How this parallelizes
 
-Seven waves of parallel agents have run on this project, and each was divided
+Eight waves of parallel agents have run on this project, and each was divided
 differently because the work was shaped differently. What held every time:
 
 - **The unit of ownership has to be a file set nobody else writes.** Wave one
@@ -324,6 +337,18 @@ That is what let a shared-layer stream run beside them rewriting
 conflict. Four merges, four conflicts, every one of them in
 `docs/open-findings.md` — the append seam the brief had named, resolved by
 keeping both sides.
+
+The eighth wave divides **by layer**, because its work was in `src/`
+everywhere: the join engine, the run model, and the two attach kinds. The lock
+went back to a named file list per stream, and it held for code -- four merges,
+no conflict in a single source file. What it did not hold for is what the
+coordinator did beside the streams: a field added to every bucketed row reached
+into `net_softirq.rs`, which the fentry stream owned, and the merge produced a
+softirq "vector 1760". Three programs had no layout test and that is where it
+survived; all of them have one now. The lesson is recorded as finding 46 and it
+is about the coordinator, not the streams: **a change made across every file of
+a kind lands in files other people own**, and the only thing that makes that
+safe is a test in every one of them.
 
 Two seams were named ahead of time rather than discovered, which was the sixth
 wave's lesson: that findings file, and the two session indexes. `examples/README.md`

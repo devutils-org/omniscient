@@ -339,7 +339,15 @@ Four. None is in a file this stream owns, so each is pinned by a test or
 recorded, and requested under "Needs from another stream" in
 `docs/open-findings.md` with the change wanted.
 
-### D1 — a join on `task` credits each reading to one allocation by recency, and says only `KEY`
+### D1 — a join on `task` credited each reading to one allocation by recency, and said only `KEY` — **fixed**
+
+**What closed it**: the eighth wave's join engine. A rule on `task` now reports
+`within_key: TEMPORAL` beside its `KEY`, because *which* state of the key a
+reading went to was decided by recency, which is the clock and not the key. And
+`between` is the match this crossing wanted in the first place: a polled total's
+change credited to the states that moved in the same interval, at `TEMPORAL` by
+construction. `examples/join-between-residency.yml` is this crossing's table
+said by the tool, with a decoy the clock gets wrong.
 
 Pinned by `d1_a_join_on_task_credits_each_reading_to_the_latest_allocation_and_says_temporal_within_it`,
 which asserts the fix since the eighth wave: the correlation carries

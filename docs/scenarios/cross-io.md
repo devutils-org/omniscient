@@ -383,7 +383,11 @@ so the fix has a model beside it.
 with its positive control: the process target must see the thread's wakeups,
 or the test says it proved nothing.
 
-### 3. `eq` on a scoped key is accepted, and reports the same evidence as `scoped_eq`
+### 3. `eq` on a scoped key was accepted at the same evidence as `scoped_eq` — **fixed**
+
+**What closed it**: the bare pointer's join is rated `TEMPORAL` now, as this
+crossing offered. It still runs, because it is still a correlation; what it no
+longer does is claim the evidence of the scoped key it ignores.
 
 ```
 join scoped  io.queue -> io.latency  evidence KEY
@@ -404,7 +408,10 @@ of pointers, a hundred thousand requests.
 `examples/cross-io-stale-pointer.yml` declares it on purpose to show it. Nothing
 else should be able to.
 
-### 4. The wakeup join's "heaviest chains" are not ranked by anything
+### 4. The wakeup join's "heaviest chains" were not ranked by anything — **fixed**
+
+**What closed it**: the same change as the compute crossing's finding 6 --
+chains are grouped and ranked by what they released.
 
 Each wakeup opens its own state, and a completion or a block matches at most the
 one open state of its task, so against `io.latency` every attribution has a
