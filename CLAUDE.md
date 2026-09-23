@@ -46,6 +46,32 @@ them, the change is probably wrong.
 - An invalid combination is refused with the reason, never degraded silently.
 - Losses are counted and surfaced to the user, always.
 
+## How much to test, and when
+
+The full suite takes 5 to 10 minutes and measures the real machine, so running
+it by reflex is what makes a session slow. Run the smallest check that can
+catch what the change could break:
+
+- **While iterating**: only the tests of what changed — the touched module
+  (`cargo test --lib <module>`) and the scenario file of that family
+  (`cargo test --test scenario_<family>`). Not `make check`.
+- **Once per commit**: one `make check`. If it goes red, rerun it with
+  `cargo test --workspace --no-fail-fast` to see every failure in one pass,
+  rather than fixing and restarting from the first one.
+- **A failure already in the flaky tally** (`docs/open-findings.md`,
+  `docs/scenarios/io.md`): rerun that one test alone, **once**. If it passes,
+  move on. Do not rerun the whole suite for it. Only a test that fails
+  *repeatedly* is worth investigating.
+- **A commit that touches only documents, indexes or sessions**: run
+  `cargo test --test cli` (the index and session-validation tests), nothing
+  else.
+- **Keep the full suite for** merges of a stream and changes to a shared layer
+  (`src/bpf/insn.rs`, `btf.rs`, `map.rs`, `emit.rs`, `join.rs`, the catalog
+  loader). Those are where a full run has actually caught defects.
+
+`make` still has to run before any eBPF test, because a relink drops the
+capabilities — but once per build, not once per test.
+
 ## Checks
 
 ```console
