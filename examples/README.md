@@ -1,6 +1,6 @@
 # Examples
 
-A hundred and twenty-nine sessions. Each is the same object a command line builds,
+A hundred and thirty-two sessions. Each is the same object a command line builds,
 written down, so a reader can run it and a test can run it identically.
 
 ```console
@@ -187,6 +187,18 @@ for.
 | `runtime-usdt-threads.yml` | A probe follows the process, not the thread that started it. |
 | `runtime-usdt-flood.yml` | More hits than the ring holds, and every one of them accounted for. |
 | `runtime-usdt-absent.yml` | A runtime built without its probes is refused, and says what it does carry. |
+
+## join
+
+The eighth wave's join engine, each session showing one thing it can say that it
+could not before: a correlation that is `TEMPORAL` by construction and says so,
+and a decomposition that adds up — or prints what does not, as a signed residue.
+
+| Session | The question it answers |
+|---|---|
+| `join-between-residency.yml` | What moved the resident size, asked by key and by the clock — and a decoy the clock gets wrong, at TEMPORAL. |
+| `join-decompose-memory.yml` | The rise in resident size split into live and retained bytes, with a signed residue the program predicts. |
+| `join-decompose-compute.yml` | One task's wall clock split into on-cpu, runnable and blocked, each row's kind and resolution, and its releasers ranked by chain. |
 
 ## cross-family
 

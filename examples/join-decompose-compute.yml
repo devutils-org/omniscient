@@ -12,17 +12,20 @@
 #   runnable   `sched.runqlat`, TRACED: every wait, summed in the kernel; exact
 #   blocked    `sched.offcpu`, TRACED: every block, summed in the kernel; exact
 #
-# The whole is the run's window: from the release to the last drain. It is an
-# upper bound on the task's life, loose by however late that drain was, so the
-# residue is an upper bound too. The launched program's exact lifetime is in no
-# output of this build; `docs/families/join.md` has the request for it.
+# The whole is the program's own life: from the gate that released it to the
+# reap that found it gone. It used to be the run's window -- from the release to
+# the last drain -- which is an upper bound loose by however late that drain
+# was, and the residue inherited the whole of that slack. The lifetime is exact
+# at the gate and bracketed at the exit, and the bracket is in the residue's
+# resolution: a residue smaller than it is not a measurement of anything.
 #
-# THE RESIDUE HAS A KNOWN DOUBLE COUNT IN IT. `sched.offcpu` times a block from
-# leaving the cpu to getting it back, so the run queue wait after each wakeup
-# is inside it -- and inside `sched.runqlat` as well. The decomposition prints
-# what the rows say and does not guess the overlap: when `sched.offcpu` carries
-# the queued part (`queued_ns`, requested of its owner), `blocked` becomes
-# `{value: total_ns, less: queued_ns}` and the overlap leaves the residue.
+# The double count this used to carry is gone. `sched.offcpu` times a block
+# from leaving the cpu to getting it back, so the run queue wait after each
+# wakeup is inside it -- and inside `sched.runqlat` as well. It carries that
+# part as `queued_ns` since the eighth wave, measured from the same tracepoint
+# `sched.runqlat` measures from, so `blocked` takes it out with `less:` and the
+# two rows no longer count the same nanoseconds. Checked against the kernel's
+# own `run_delay` in `tests/cross_compute.rs`: 93.6 ms against 96.5 ms.
 #
 # The join is the one the compute crossing settled on: every switch the task
 # made, credited to the wakeup that began the run it ended. Its table ranks
@@ -124,9 +127,9 @@ joins:
 
 decompose:
   - id: where-the-time-went
-    whole: window
+    whole: lifetime
     parts:
       - {state: on-cpu, from: cpu.profile, value: samples}
       - {state: runnable, from: sched.runqlat, value: total_ns}
-      - {state: blocked, from: sched.offcpu, value: total_ns}
+      - {state: blocked, from: sched.offcpu, value: total_ns, less: queued_ns}
     top: 2

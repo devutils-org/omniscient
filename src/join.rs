@@ -1397,9 +1397,22 @@ pub enum Span {
     /// The run's window, from its start to the last drain. An upper bound on
     /// the life of anything measured in it, and a loose one: it is late by
     /// however late that drain was, which the compute crossing measured at 14
-    /// to 146 ms. The lifetime of a launched program would be the exact whole
-    /// and is in no output of this build.
+    /// to 146 ms.
     Window,
+    /// The launched program's own life, from the gate that released it to the
+    /// reap that found it gone.
+    ///
+    /// The exact whole of a time decomposition, where `window` is only a bound
+    /// on one. It is not exact about the exit, and says by how much: the reap
+    /// learns of the exit when it next asks, so the exit is known to lie in
+    /// `[exited_ns - exited_err_ns, exited_ns]`, and that bracket is the whole's
+    /// resolution. It goes into the residue's resolution with the parts',
+    /// because a residue smaller than the bracket is not a measurement of
+    /// anything.
+    ///
+    /// Refused at validation in a session that launches nothing: there is no
+    /// life to be the whole of.
+    Lifetime,
 }
 
 /// A whole read off a source.
@@ -1476,6 +1489,9 @@ pub enum Kind {
     Counted,
     /// The run's own window: a bound, not a measurement.
     Window,
+    /// A launched program's life, gate to reap: exact at the start and
+    /// bracketed at the end, with the bracket as its resolution.
+    Lifetime,
 }
 
 impl Kind {
@@ -1486,6 +1502,7 @@ impl Kind {
             Kind::Traced => "traced",
             Kind::Counted => "counted",
             Kind::Window => "window",
+            Kind::Lifetime => "lifetime",
         }
     }
 
@@ -1629,6 +1646,24 @@ pub fn check_decomposition(
             )
         }
         Whole::Span(Span::Window) => ((Unit::Ns, "the window".to_owned()), None),
+        Whole::Span(Span::Lifetime) => {
+            let launches = decomposition.parts.iter().any(|part| {
+                requests.iter().any(|request| {
+                    request.source.as_str() == part.from
+                        && matches!(request.target, Target::Launch(_))
+                })
+            });
+            if !launches {
+                return Err(refuse(
+                    "takes `lifetime` as its whole, and no part reads from a program this session \
+                     launches: a lifetime is the life of a launched program, from the gate to the \
+                     reap, and there is none here to be the whole of. `window` is the whole of a \
+                     run that attaches to something already running"
+                        .to_owned(),
+                ));
+            }
+            ((Unit::Ns, "the lifetime".to_owned()), None)
+        }
     };
 
     for part in &decomposition.parts {
@@ -1770,7 +1805,7 @@ pub fn decompose(
             served(&measure.from),
             events,
         )),
-        Whole::Span(Span::Window) => None,
+        Whole::Span(_) => None,
     };
     let window_ns = decomposition
         .parts
@@ -1785,6 +1820,10 @@ pub fn decompose(
         .map(|readout| readout.unit)
         .unwrap_or(Unit::Ns);
 
+    // One life per run, published on every result of it: the run model stamps
+    // it at the gate and the reap, and the emit layer carries it.
+    let lifetime = results.iter().find_map(|result| result.lifetime);
+
     let mut tables: Vec<Breakdown> = per_key
         .keys()
         .map(|key| {
@@ -1794,9 +1833,10 @@ pub fn decompose(
                 .zip(&read_parts)
                 .map(|(part, readout)| readout.row(&part.state, key))
                 .collect();
-            let whole = match &whole_readout {
-                Some(readout) => readout.row("whole", key),
-                None => Row {
+            let whole = match (&whole_readout, &decomposition.whole) {
+                (Some(readout), _) => readout.row("whole", key),
+                (None, Whole::Span(Span::Lifetime)) => lifetime_row(lifetime),
+                (None, _) => Row {
                     state: "whole".to_owned(),
                     source: "the run's window".to_owned(),
                     value: "observed_ns".to_owned(),
@@ -1854,6 +1894,57 @@ pub fn decompose(
         unit,
         tables,
         keys_seen,
+    }
+}
+
+/// The whole of a decomposition whose whole is the launched program's life.
+///
+/// Exact at the start, where this process wrote the gate, and bracketed at the
+/// end, where it learned of the exit by asking: the bracket is the resolution,
+/// and it is what the residue's resolution has to include, because a residue
+/// inside it says nothing. A program this tool killed at the deadline has a
+/// life that ended at the tool's choosing, which the note says, since a
+/// decomposition of a program that did not finish is a decomposition of the
+/// deadline.
+fn lifetime_row(lifetime: Option<crate::collect::Lifetime>) -> Row {
+    let base = Row {
+        state: "whole".to_owned(),
+        source: "the program's life".to_owned(),
+        value: "gate to reap".to_owned(),
+        kind: Kind::Lifetime,
+        evidence: None,
+        amount: None,
+        resolution: None,
+        readings: 0,
+        short: None,
+        missing: None,
+        note: None,
+    };
+    match lifetime {
+        None => Row {
+            missing: Some(
+                "the run carried no lifetime: the program was never released, or the run \
+                 failed before it was reaped"
+                    .to_owned(),
+            ),
+            ..base
+        },
+        Some(life) => Row {
+            amount: Some(life.exited_ns.saturating_sub(life.released_ns) as f64),
+            resolution: Some(life.exited_err_ns as f64),
+            note: Some(if life.terminated {
+                "the program did not finish: this tool ended it at the run's deadline, so its \
+                 life is the deadline's and not its own"
+                    .to_owned()
+            } else {
+                format!(
+                    "exact at the gate; the exit is bracketed to the last {}, which is how long \
+                     before the reap the program was last seen alive",
+                    period_label(life.exited_err_ns as f64)
+                )
+            }),
+            ..base
+        },
     }
 }
 

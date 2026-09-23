@@ -397,15 +397,19 @@ the next crossing's.
   claim, and less honest at this level of evidence: splitting by overlap
   asserts a rate the clock does not know. If the machine crossing still needs
   it once `between` is used, it is a sixth kind with its own test.
-- **`whole: lifetime`.** The exact whole of a time decomposition is the
-  launched program's life, which stream R is putting into the results this
-  wave. Until it lands, `window` is the only span, and says it is a bound.
-  Adding it is one `Span` variant reading the new field.
+- ~~**`whole: lifetime`.**~~ **Landed at the merge**, the one `Span` variant
+  this said it would be, once stream R's lifetime reached the results. It is
+  exact at the gate and bracketed at the exit, and the bracket is in the
+  residue's resolution. On the compute session it took the residue from
+  **+97.29 ms** -- almost all of it the drain arriving late -- to **-0.55 ms
+  against a resolution of 1.58 ms**. Refused at validation in a session that
+  launches nothing.
 - **The `interrupted` row** (compute finding 2) needs the kernel's own on-cpu
   figure as a source; nothing reads `schedstat` today.
-- **The double count in a time decomposition** (compute finding 1) is
-  `sched.offcpu`'s to split (`queued_ns`); once it is, the session's `blocked`
-  row becomes `{value: total_ns, less: queued_ns}` with no engine change.
+- ~~**The double count in a time decomposition**~~ (compute finding 1) —
+  **done, with no engine change**, exactly as this said: `sched.offcpu` carries
+  `queued_ns` since the coordinator's pass in this wave, and the session's
+  `blocked` row is `{value: total_ns, less: queued_ns}`.
 - **A decomposition in `folded`, `speedscope`, `pprof` or `chrome`.** A profile
   has no place for a residue. `carries_correlations` says so, `chrome` names the
   decompositions in its metadata the way it names joins, and the other three

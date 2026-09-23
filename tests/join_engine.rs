@@ -843,10 +843,11 @@ fn a_half_blocked_task_decomposes_as_the_kernel_says_and_its_releaser_heads_the_
         "the runnable row says {runnable_ns} ns and the kernel's run_delay is {runq}"
     );
 
-    // Blocked: every block, summed. It holds the task's whole blocked time in
-    // its clock, plus the queue wait after each wakeup (which the runnable row
-    // also holds), plus the shell's blocks outside the clock -- so the part
-    // of the clock that was neither on a cpu nor queued is a lower bound.
+    // Blocked: every block, summed, less the queue wait after each wakeup,
+    // which `sched.offcpu` carries as `queued_ns` and the runnable row also
+    // holds. It still holds the shell's blocks outside the task's own clock, so
+    // the part of the clock that was neither on a cpu nor queued is a lower
+    // bound on it.
     let blocked_ns = number(&rows["blocked"]["amount"]);
     let slack = 0.05 * sampled_ns + 3.0 * period;
     assert!(
@@ -856,23 +857,29 @@ fn a_half_blocked_task_decomposes_as_the_kernel_says_and_its_releaser_heads_the_
         wall - on_cpu - runq
     );
 
-    // The parts bracket the task's clock: at least the clock, and within the
-    // window by no more than the double count the runnable row bounds.
+    // The parts bracket the task's clock from below, and account for the
+    // program's life from above. This used to be a bound against the run's
+    // window plus the double count the runnable row could hold; both are gone.
+    // The whole is the program's life, gate to reap, and the queue wait is out
+    // of the blocked row -- so the parts are held to the whole by the residue's
+    // own resolution, which carries the exit bracket, and the one sample the
+    // profile can land on either side of the exit.
     let parts = number(&table["parts"]);
     let window = number(&table["whole"]["amount"]);
-    assert_eq!(table["whole"]["kind"], "window");
+    assert_eq!(table["whole"]["kind"], "lifetime");
     assert!(
         parts >= wall - slack,
         "the parts add to {parts} ns, less than the task's own clock of {wall}"
     );
+    let resolution = number(&table["residue_resolution"]);
     assert!(
-        parts <= window + runnable_ns + slack,
-        "the parts add to {parts} ns, more than the {window} ns window plus what the runnable \
-         row can have counted twice"
+        (window - parts).abs() <= resolution + slack,
+        "the parts add to {parts} ns against a life of {window} ns, which is further apart than \
+         the {resolution} ns the residue can be trusted to"
     );
     eprintln!(
         "task:{task}: on cpu {:.1} ms (kernel {:.1}), runnable {:.2} ms (kernel {:.2}), blocked \
-         {:.1} ms; parts {:.1} ms against a clock of {:.1} and a window of {:.1}: residue {:+.1} ms",
+         {:.1} ms; parts {:.1} ms against a clock of {:.1} and a life of {:.1}: residue {:+.1} ms",
         sampled_ns / 1e6,
         on_cpu / 1e6,
         runnable_ns / 1e6,
@@ -1068,4 +1075,115 @@ fn the_formats_that_claim_to_carry_correlations_carry_them_and_the_others_refuse
             );
         }
     }
+}
+
+// ------------------------------------------------ the lifetime as the whole
+
+/// Runs a session given as text, the way a person would write one.
+fn written_session(text: &str, extra: &[&str]) -> std::process::Output {
+    let mut child = Command::new(BINARY)
+        .args(["-f", "-"])
+        .args(extra)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn starts");
+    child
+        .stdin
+        .take()
+        .expect("a stdin")
+        .write_all(text.as_bytes())
+        .expect("the session is written");
+    child.wait_with_output().expect("omn finishes")
+}
+
+/// A lifetime is the life of a launched program, and a session that launches
+/// nothing has none to be the whole of. Refused at validation, with what to use
+/// instead, rather than decomposed against a whole that does not exist.
+#[test]
+fn a_lifetime_whole_is_refused_where_nothing_was_launched() {
+    const SESSION: &str = "\
+name: a machine-wide decomposition cannot have a program's life as its whole
+requests:
+  - source: sched.runqlat
+    target: system
+    mode: trace
+    emit: [summary]
+decompose:
+  - id: nothing-launched
+    whole: lifetime
+    parts:
+      - {state: runnable, from: sched.runqlat, value: total_ns}
+";
+    let output = written_session(SESSION, &["--input-format", "yaml", "--no-resolve"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("lifetime") && said.contains("launches"),
+        "the refusal says why a lifetime needs a launched program: {said}"
+    );
+    assert!(said.contains("window"), "and what to use instead: {said}");
+}
+
+/// The whole of a time decomposition is the program's life, and the residue
+/// is then small enough to be about something.
+///
+/// Measured when this landed, on the compute session: with the run's window as
+/// the whole the residue was +97 ms, almost all of it the drain arriving late;
+/// with the lifetime it is -0.55 ms against a resolution of 1.58 ms. What is
+/// asserted is that relationship -- the residue lies inside its own resolution
+/// plus the one sample's error the on-cpu row always carries -- and that the
+/// whole's bracket is counted in that resolution, not how long anything took.
+#[test]
+fn a_program_s_life_is_a_whole_its_three_states_account_for() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let output = Command::new(BINARY)
+        .args([
+            "-f",
+            "examples/join-decompose-compute.yml",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("omn runs");
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    if machine_cannot_serve(&said) || said.contains("CAP_BPF") {
+        eprintln!("skipped: this machine cannot serve the three sources: {said}");
+        return;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let Some(start) = text.find('{') else {
+        panic!("no json document: {said}");
+    };
+    let document: serde_json::Value =
+        serde_json::from_str(&text[start..]).unwrap_or_else(|error| panic!("{error}: {said}"));
+
+    let table = &document["decompositions"][0]["tables"][0];
+    let whole = &table["whole"];
+    assert_eq!(whole["kind"], "lifetime", "{table}");
+    let bracket = whole["resolution"]
+        .as_f64()
+        .expect("the exit bracket is the whole's resolution");
+    let residue = table["residue"].as_f64().expect("a residue");
+    let resolution = table["residue_resolution"]
+        .as_f64()
+        .expect("the residue says how far it can be trusted");
+
+    assert!(
+        resolution >= bracket,
+        "the residue's resolution {resolution} has to include the whole's own bracket {bracket}"
+    );
+    // One period of slack beyond the stated resolution, for the one sample the
+    // profile can land on either side of the exit. Nothing here is calibrated
+    // to a machine: the residue is compared with the tool's own uncertainty.
+    let period = 1_003_000.0;
+    assert!(
+        residue.abs() <= resolution + period,
+        "the three states should account for the program's life to within their own \
+         resolution: residue {residue} ns against {resolution} ns\n{table}"
+    );
 }

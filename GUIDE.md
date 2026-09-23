@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and twenty-nine sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and thirty-two sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and twenty-nine
+make demo-all           # the tour and then all one hundred and thirty-two
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -344,6 +344,18 @@ Each is `omn -f examples/<file>`. The whole family is
 | `runtime-usdt-threads.yml` | A probe follows the process, not the thread that started it. |
 | `runtime-usdt-flood.yml` | More hits than the ring holds, and every one of them accounted for. |
 | `runtime-usdt-absent.yml` | A runtime built without its probes is refused, and says what it does carry. |
+
+## join
+
+The eighth wave's join engine, each session showing one thing it can say that it
+could not before: a correlation that is `TEMPORAL` by construction and says so,
+and a decomposition that adds up — or prints what does not, as a signed residue.
+
+| Session | The question it answers |
+|---|---|
+| `join-between-residency.yml` | What moved the resident size, asked by key and by the clock — and a decoy the clock gets wrong, at TEMPORAL. |
+| `join-decompose-memory.yml` | The rise in resident size split into live and retained bytes, with a signed residue the program predicts. |
+| `join-decompose-compute.yml` | One task's wall clock split into on-cpu, runnable and blocked, each row's kind and resolution, and its releasers ranked by chain. |
 
 ## cross-family
 
