@@ -84,7 +84,18 @@ const VALUE_COUNT: i16 = 0;
 /// the bucket is a factor of two wide and a total built from its bounds would
 /// inherit that. One more atomic add, and the mean becomes exact.
 const VALUE_TOTAL_NS: i16 = 8;
-const ROW_VALUE_BYTES: usize = 16;
+/// When the first run of this row's window *began*.
+///
+/// A bucketed source emits one event per row per window, and stamping that
+/// event at the drain puts it at the window's end -- so a join that *opens* on
+/// this source opens after everything that happened in the same window as the
+/// first run. Finding 44 has the argument; `mem.reclaim` and
+/// `sched.runqlat` carried it first.
+///
+/// Written once, where the row is created, which is that key's first run of
+/// the window: the rows map is drained and emptied every window.
+const VALUE_FIRST_NS: i16 = 16;
+const ROW_VALUE_BYTES: usize = 24;
 
 /// One `(cpu, vector, bucket)` row's handlers over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +109,9 @@ pub struct SoftIrq {
     pub count: u64,
     /// Their exact total, which the bucket bounds cannot give back.
     pub total_ns: u64,
+    /// When the first of this row's window began, which is what the event is
+    /// timestamped with. Zero means unknown, and falls back to the drain.
+    pub first_ns: u64,
 }
 
 impl SoftIrq {
@@ -121,6 +135,7 @@ impl SoftIrq {
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            first_ns: long(value, VALUE_FIRST_NS as usize),
         })
     }
 }
@@ -246,6 +261,12 @@ fn exit_instructions(
     program.label("first");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    // When this one began: now, less how long it lasted. r8 is the reading
+    // taken at the top of the program and r9 is the duration, so the beginning
+    // is recovered rather than carried through a second map field.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
     program.extend(Insn::load_map_fd(1, rows_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -443,6 +464,7 @@ mod tests {
                 bucket: 11,
                 count: 42,
                 total_ns: 55_000,
+                first_ns: 0,
             }
         );
         assert_eq!(row.bucket_low_ns(), 1024, "bucket 11 starts at 2^10");

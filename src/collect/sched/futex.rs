@@ -164,7 +164,16 @@ impl FutexCollector {
 
         for (index, row) in rows.into_iter().enumerate() {
             let event = Event {
-                ts_ns: closed_ns,
+                // Stamped where the row's window began rather than at the
+                // drain that read it, which is finding 44: a join that opens on
+                // a bucketed source would otherwise open at the window's close.
+                // A zero is the kernel having recorded no beginning, and falls
+                // back to the drain rather than to the beginning of time.
+                ts_ns: if row.first_ns == 0 {
+                    closed_ns
+                } else {
+                    row.first_ns
+                },
                 ts_err_ns: 0,
                 kind: "sched.futex".to_owned(),
                 // The waiting thread is the series. The futex address is an
@@ -422,6 +431,7 @@ mod tests {
             stack: None,
             count: 4,
             total_ns: 3_000_000,
+            first_ns: 0,
             comm: "worker".to_owned(),
         }
     }

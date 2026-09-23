@@ -107,7 +107,7 @@ const DROP_BACKWARDS: u32 = 5;
 const COUNTER_SLOTS: u32 = 6;
 
 /// Where each map's key and value live on the program's stack.
-const ROW_VALUE: i16 = -128;
+const ROW_VALUE: i16 = -136;
 const ROW_KEY: i16 = -96;
 const WAIT_VALUE: i16 = -64;
 const WAIT_KEY: i16 = -40;
@@ -135,7 +135,18 @@ const VALUE_COUNT: i16 = 0;
 const VALUE_TOTAL_NS: i16 = 8;
 const VALUE_COMM: i16 = 16;
 const COMM_BYTES: usize = 16;
-const ROW_VALUE_BYTES: usize = 32;
+/// When the first wait of this row's window *began*.
+///
+/// A bucketed source emits one event per row per window, and stamping that
+/// event at the drain puts it at the window's end -- so a join that *opens* on
+/// this source opens after everything that happened in the same window as the
+/// first wait. Finding 44 has the argument; `mem.reclaim` and
+/// `sched.runqlat` carried it first.
+///
+/// Written once, where the row is created, which is that key's first wait of
+/// the window: the rows map is drained and emptied every window.
+const VALUE_FIRST_NS: i16 = 32;
+const ROW_VALUE_BYTES: usize = 40;
 
 /// The in-flight map: thread id to the wait it is inside.
 const WAIT_KEY_BYTES: usize = 4;
@@ -183,6 +194,9 @@ pub struct FutexWait {
     pub stack: Option<u32>,
     pub count: u64,
     pub total_ns: u64,
+    /// When the first of this row's window began, which is what the event is
+    /// timestamped with. Zero means unknown, and falls back to the drain.
+    pub first_ns: u64,
     pub comm: String,
 }
 
@@ -222,6 +236,7 @@ impl FutexWait {
             stack: (stack >= 0).then_some(stack as u32),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            first_ns: long(value, VALUE_FIRST_NS as usize),
             comm: text_of(&value[VALUE_COMM as usize..VALUE_COMM as usize + COMM_BYTES]),
         })
     }
@@ -453,6 +468,12 @@ fn exit_instructions(
     program.label("first_wait");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    // When this one began: now, less how long it lasted. r8 is the reading
+    // taken at the top of the program and r9 is the duration, so the beginning
+    // is recovered rather than carried through a second map field.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
     program.push(Insn::mov64_reg(1, R10));
     program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_COMM) as i32));
     program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
@@ -794,6 +815,7 @@ mod tests {
         let row_value = [
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
+            (VALUE_FIRST_NS, 8),
             (VALUE_COMM, COMM_BYTES as i16),
         ];
         let wait_value = [
@@ -864,6 +886,7 @@ mod tests {
             stack: None,
             count: 1,
             total_ns: 1,
+            first_ns: 0,
             comm: String::new(),
         };
         assert_eq!(row(FUTEX_WAIT as u32).command_name(), "wait");

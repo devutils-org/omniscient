@@ -107,6 +107,19 @@ impl QdiscCollector {
         }
     }
 
+    /// When a row happened, as far as an aggregated source can say: the moment
+    /// its window's first one began, or the drain that read it when the kernel
+    /// recorded no beginning -- which falls back to the drain rather than to
+    /// the beginning of time. Finding 44: a join that opens on a bucketed
+    /// source would otherwise open at every window's close.
+    fn stamp(first_ns: u64, closed_ns: u64) -> u64 {
+        if first_ns == 0 {
+            closed_ns
+        } else {
+            first_ns
+        }
+    }
+
     fn event(&self, row: &QdiscWait, window_ns: u64, ts_ns: u64, seq: u64) -> Event {
         // The interface is the series. A packet's wait belongs to the link it
         // was waiting to leave by, and a name the kernel no longer knows is
@@ -157,7 +170,12 @@ impl QdiscCollector {
 
         let mut index = 0;
         for row in drained.rows {
-            let candidate = self.event(&row, window_ns, closed_ns, seq + index);
+            let candidate = self.event(
+                &row,
+                window_ns,
+                Self::stamp(row.first_ns, closed_ns),
+                seq + index,
+            );
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &candidate) {
                     self.filtered_out += row.count;
@@ -329,6 +347,7 @@ mod tests {
             bucket: 26,
             count: 5,
             total_ns: 250_000_000,
+            first_ns: 0,
             ifname: "dummy0".to_owned(),
         }
     }

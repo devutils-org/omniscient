@@ -89,7 +89,18 @@ const VALUE_TOTAL_NS: i16 = 8;
 /// network namespace that assigned it.
 const VALUE_IFNAME: i16 = 16;
 const IFNAME_BYTES: usize = 16;
-const ROW_VALUE_BYTES: usize = 32;
+/// When the first wait of this row's window *began*.
+///
+/// A bucketed source emits one event per row per window, and stamping that
+/// event at the drain puts it at the window's end -- so a join that *opens* on
+/// this source opens after everything that happened in the same window as the
+/// first wait. Finding 44 has the argument; `mem.reclaim` and
+/// `sched.runqlat` carried it first.
+///
+/// Written once, where the row is created, which is that key's first wait of
+/// the window: the rows map is drained and emptied every window.
+const VALUE_FIRST_NS: i16 = 32;
+const ROW_VALUE_BYTES: usize = 40;
 
 const QUEUED_KEY_BYTES: usize = 8;
 const QUEUED_VALUE_BYTES: usize = 8;
@@ -107,6 +118,9 @@ pub struct QdiscWait {
     pub count: u64,
     /// The exact total of the waits in this bucket.
     pub total_ns: u64,
+    /// When the first of this row's window began, which is what the event is
+    /// timestamped with. Zero means unknown, and falls back to the drain.
+    pub first_ns: u64,
     pub ifname: String,
 }
 
@@ -135,6 +149,7 @@ impl QdiscWait {
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            first_ns: long(value, VALUE_FIRST_NS as usize),
             ifname: String::from_utf8_lossy(&name[..end]).into_owned(),
         })
     }
@@ -270,6 +285,12 @@ fn dequeue_instructions(
     program.label("first");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    // When this one began: now, less how long it lasted. r8 is the reading
+    // taken at the top of the program and r9 is the duration, so the beginning
+    // is recovered rather than carried through a second map field.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
     program.extend(Insn::load_map_fd(1, rows_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));

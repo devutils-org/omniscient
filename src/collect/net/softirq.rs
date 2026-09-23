@@ -216,6 +216,19 @@ impl SoftIrqCollector {
             .collect()
     }
 
+    /// When a row happened, as far as an aggregated source can say: the moment
+    /// its window's first one began, or the drain that read it when the kernel
+    /// recorded no beginning -- which falls back to the drain rather than to
+    /// the beginning of time. Finding 44: a join that opens on a bucketed
+    /// source would otherwise open at every window's close.
+    fn stamp(first_ns: u64, closed_ns: u64) -> u64 {
+        if first_ns == 0 {
+            closed_ns
+        } else {
+            first_ns
+        }
+    }
+
     fn event(&self, row: &SoftIrq, window_ns: u64, ts_ns: u64, seq: u64) -> Event {
         Event {
             ts_ns,
@@ -269,7 +282,8 @@ impl SoftIrqCollector {
                 }
             }
             if let Some(predicate) = &self.predicate {
-                let candidate = self.event(&row, window_ns, closed_ns, seq);
+                let candidate =
+                    self.event(&row, window_ns, Self::stamp(row.first_ns, closed_ns), seq);
                 if !crate::filter::matches(predicate, &candidate) {
                     self.filtered_out += row.count;
                     continue;
@@ -291,7 +305,12 @@ impl SoftIrqCollector {
                     .or_insert(row);
                 continue;
             }
-            events.push(self.event(&row, window_ns, closed_ns, seq + index));
+            events.push(self.event(
+                &row,
+                window_ns,
+                Self::stamp(row.first_ns, closed_ns),
+                seq + index,
+            ));
             index += 1;
         }
     }
@@ -389,7 +408,12 @@ impl Collector for SoftIrqCollector {
             let seq = u64::MAX / 2;
             let counted = std::mem::take(&mut self.counted);
             for (index, row) in counted.into_values().enumerate() {
-                trailing.push(self.event(&row, window_ns, closed_ns, seq + index as u64));
+                trailing.push(self.event(
+                    &row,
+                    window_ns,
+                    Self::stamp(row.first_ns, closed_ns),
+                    seq + index as u64,
+                ));
             }
         }
         trailing
@@ -487,6 +511,7 @@ mod tests {
             bucket: 11,
             count: 42,
             total_ns: 55_000,
+            first_ns: 0,
         }
     }
 

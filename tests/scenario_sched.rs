@@ -2392,59 +2392,52 @@ fn a_block_whose_wakeup_was_not_seen_says_so_rather_than_reporting_no_wait() {
 
 /// A bucketed source stamps each row where it happened, not where it was read.
 ///
-/// `sched.runqlat` builds its histogram in the kernel and emits one event per
+/// These sources build their histograms in the kernel and emit one event per
 /// row per drain. Stamped at the drain, every event of a window carried one
-/// instant — the window's *end* — and a join that opened on this source opened
-/// there, so everything that happened in the same window as the first wait fell
-/// outside the state it was meant to open. That is finding 44, met first in
-/// `mem.reclaim` by the seventh wave's machine crossing.
+/// instant — the window's *end* — and a join that opened on such a source
+/// opened there, so everything that happened in the same window as the first
+/// episode fell outside the state it was meant to open. That is finding 44,
+/// met first in `mem.reclaim` by the seventh wave's machine crossing and fixed
+/// across every bucketed source in the eighth.
 ///
 /// What is asserted is the shape and not a threshold: with a drain every
 /// hundred milliseconds over a second, stamping at the drain gives about ten
-/// distinct timestamps however busy the machine is, and stamping at each row's
-/// first wait gives about as many as there are rows.
+/// distinct instants however busy the machine is, and stamping at each row's
+/// own beginning gives about as many as there are rows. A source this machine
+/// gives too few rows to tell the two apart skips with its own count.
 #[test]
 fn a_bucketed_source_does_not_stamp_every_row_of_a_window_with_one_instant() {
-    let output = omn(&[
-        "sched.runqlat",
-        "--system",
-        "-m",
-        "trace",
-        "-e",
-        "raw",
-        "-d",
-        "1s",
-        "--format",
-        "json",
-    ]);
-    if unprivileged(&spoken(&output)) {
-        eprintln!("skipped: this machine does not grant CAP_BPF and CAP_PERFMON");
-        return;
-    }
-    assert_eq!(exit_code(&output), 0, "{}", spoken(&output));
-    let results = results(&output);
-    let result = &results[0];
+    for source in ["sched.runqlat", "sched.lock", "sched.irq"] {
+        let output = omn(&[
+            source, "--system", "-m", "trace", "-e", "raw", "-d", "1s", "--format", "json",
+        ]);
+        if unprivileged(&spoken(&output)) {
+            eprintln!("skipped: this machine does not grant CAP_BPF and CAP_PERFMON");
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{source}: {}", spoken(&output));
+        let results = results(&output);
+        let result = &results[0];
 
-    let stamps: Vec<u64> = outputs(result, "raw")
-        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
-        .filter_map(|event| event["ts_ns"].as_u64())
-        .collect();
-    if stamps.len() < 40 {
-        eprintln!(
-            "skipped: {} events is too few to tell one instant per window from one per row",
-            stamps.len()
+        let stamps: Vec<u64> = outputs(result, "raw")
+            .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+            .filter_map(|event| event["ts_ns"].as_u64())
+            .collect();
+        if stamps.len() < 40 {
+            eprintln!(
+                "skipped {source}: {} events is too few to tell one instant per window from one \
+                 per row",
+                stamps.len()
+            );
+            continue;
+        }
+        let distinct: std::collections::BTreeSet<u64> = stamps.iter().copied().collect();
+        assert!(
+            distinct.len() > stamps.len() / 4,
+            "{source}: {} events carry only {} distinct instants, which is one per drain rather \
+             than one per row",
+            stamps.len(),
+            distinct.len()
         );
-        return;
     }
-    let distinct: std::collections::BTreeSet<u64> = stamps.iter().copied().collect();
-    // A run of one second drains about ten times. Ten distinct instants for
-    // hundreds of rows is the old behaviour; anything well past that is each
-    // row carrying its own first wait.
-    assert!(
-        distinct.len() > stamps.len() / 4,
-        "{} events carry only {} distinct instants, which is one per drain rather than one per \
-         row",
-        stamps.len(),
-        distinct.len()
-    );
 }

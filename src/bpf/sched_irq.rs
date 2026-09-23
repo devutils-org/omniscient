@@ -61,7 +61,7 @@ const DROP_UNOPENED: u32 = 3;
 const COUNTER_SLOTS: u32 = 4;
 
 /// Where the maps' keys and values live on the program's stack.
-const ROW_VALUE: i16 = -96;
+const ROW_VALUE: i16 = -104;
 const ROW_KEY: i16 = -40;
 const DROP_KEY: i16 = -24;
 /// The one slot of the in-flight array, which is per cpu.
@@ -83,7 +83,18 @@ const VALUE_TOTAL_NS: i16 = 8;
 /// a machine's private business and a device name is not.
 const VALUE_NAME: i16 = 16;
 const NAME_BYTES: usize = 40;
-const ROW_VALUE_BYTES: usize = 56;
+/// When the first run of this row's window *began*.
+///
+/// A bucketed source emits one event per row per window, and stamping that
+/// event at the drain puts it at the window's end -- so a join that *opens* on
+/// this source opens after everything that happened in the same window as the
+/// first run. Finding 44 has the argument; `mem.reclaim` and
+/// `sched.runqlat` carried it first.
+///
+/// Written once, where the row is created, which is that key's first run of
+/// the window: the rows map is drained and emptied every window.
+const VALUE_FIRST_NS: i16 = 56;
+const ROW_VALUE_BYTES: usize = 64;
 
 /// The in-flight array holds one `u64` per cpu, at index zero.
 const IN_FLIGHT_SLOT: i32 = 0;
@@ -108,6 +119,9 @@ pub struct IrqRun {
     pub bucket: u32,
     pub count: u64,
     pub total_ns: u64,
+    /// When the first of this row's window began, which is what the event is
+    /// timestamped with. Zero means unknown, and falls back to the drain.
+    pub first_ns: u64,
     /// The handler's name, as `/proc/interrupts` shows it.
     pub name: String,
 }
@@ -131,6 +145,7 @@ impl IrqRun {
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            first_ns: long(value, VALUE_FIRST_NS as usize),
             name: text_of(&value[VALUE_NAME as usize..VALUE_NAME as usize + NAME_BYTES]),
         })
     }
@@ -251,6 +266,12 @@ fn exit_instructions(
     program.label("first_run");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 9));
+    // When this one began: now, less how long it lasted. r8 is the reading
+    // taken at the top of the program and r9 is the duration, so the beginning
+    // is recovered rather than carried through a second map field.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
     // The name field is cleared before it is filled. `bpf_probe_read_kernel_str`
     // stops at the terminator and leaves the rest of the span as it found it,
     // and what it found is this program's own stack -- which would then travel
@@ -530,6 +551,7 @@ mod tests {
         let value = [
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
+            (VALUE_FIRST_NS, 8),
             (VALUE_NAME, NAME_BYTES as i16),
         ];
         for (fields, bytes, what) in [

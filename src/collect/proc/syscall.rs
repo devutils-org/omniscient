@@ -226,7 +226,16 @@ impl SyscallCollector {
         let counting = self.mode == Mode::Count;
         for (index, row) in rows.into_iter().enumerate() {
             let event = Event {
-                ts_ns: closed_ns,
+                // Stamped where the row's window began rather than at the
+                // drain that read it, which is finding 44: a join that opens on
+                // a bucketed source would otherwise open at the window's close.
+                // A zero is the kernel having recorded no beginning, and falls
+                // back to the drain rather than to the beginning of time.
+                ts_ns: if row.first_ns == 0 {
+                    closed_ns
+                } else {
+                    row.first_ns
+                },
                 ts_err_ns: 0,
                 kind: "proc.syscall".to_owned(),
                 // The calling task is the series: this is its latency, not the
@@ -279,11 +288,21 @@ impl SyscallCollector {
                 bucket: *bucket,
                 count: total.calls,
                 total_ns: total.total_ns,
+                first_ns: 0,
                 comm: total.comm.clone(),
             };
             self.rows += 1;
             events.push(Event {
-                ts_ns: closed_ns,
+                // Stamped where the row's window began rather than at the
+                // drain that read it, which is finding 44: a join that opens on
+                // a bucketed source would otherwise open at the window's close.
+                // A zero is the kernel having recorded no beginning, and falls
+                // back to the drain rather than to the beginning of time.
+                ts_ns: if row.first_ns == 0 {
+                    closed_ns
+                } else {
+                    row.first_ns
+                },
                 ts_err_ns: 0,
                 kind: "proc.syscall".to_owned(),
                 keys: vec![KeyValue::task(row.tid as i32)],
@@ -479,6 +498,7 @@ mod tests {
             bucket: 11,
             count: 42,
             total_ns: 55_000,
+            first_ns: 0,
             comm: "sh".to_owned(),
         }
     }

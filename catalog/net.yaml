@@ -217,6 +217,13 @@
   keys: [iface]
   filter_fields: [iface]
   determinism: low
+  caveats:
+    - "An event is one bucket of one window, and it is stamped at the moment the
+       window's first one began rather than at the drain that read it. A join
+       that *opens* on this source would otherwise open at the window's close,
+       and everything that happened in the same window as the first would fall
+       outside the state. `window_ns` beside the value says how wide the window
+       was."
 
 - id: net.softirq
   family: net
@@ -231,6 +238,13 @@
   keys: [cpu]
   filter_fields: [cpu, vec]
   determinism: low
+  caveats:
+    - "An event is one bucket of one window, and it is stamped at the moment the
+       window's first one began rather than at the drain that read it. A join
+       that *opens* on this source would otherwise open at the window's close,
+       and everything that happened in the same window as the first would fall
+       outside the state. `window_ns` beside the value says how wide the window
+       was."
 
 - id: net.hwts
   family: net

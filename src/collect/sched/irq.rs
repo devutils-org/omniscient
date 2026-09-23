@@ -130,7 +130,16 @@ impl IrqCollector {
 
     fn event(&self, row: &IrqRun, closed_ns: u64, window_ns: u64, seq: u64) -> Event {
         Event {
-            ts_ns: closed_ns,
+            // Stamped where the row's window began rather than at the
+            // drain that read it, which is finding 44: a join that opens on
+            // a bucketed source would otherwise open at the window's close.
+            // A zero is the kernel having recorded no beginning, and falls
+            // back to the drain rather than to the beginning of time.
+            ts_ns: if row.first_ns == 0 {
+                closed_ns
+            } else {
+                row.first_ns
+            },
             ts_err_ns: 0,
             kind: "sched.irq".to_owned(),
             // The cpu is the series. An interrupt handler belongs to no task,
@@ -370,6 +379,7 @@ mod tests {
             bucket: 13,
             count: 24,
             total_ns: 96_000,
+            first_ns: 0,
             name: "nvme0q3".to_owned(),
         }
     }

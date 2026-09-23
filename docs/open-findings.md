@@ -5477,11 +5477,28 @@ Its own layout test caught two mistakes in the five minutes it took: the new
 field's offset collided with `comm`, and the value region then overlapped the
 key on the program's stack. Both would have produced plausible numbers.
 
-**What is left**: `sched.lock`, `sched.futex`, `sched.irq`, `net.qdisc`,
-`net.softirq` and `proc.syscall`. The mechanism is four instructions and one
-field per row -- `now - duration` where the row is created -- and what makes it
-worth doing once per source rather than in a shared layer is that each keeps its
-own value layout.
+**And then all six of the rest**: `sched.lock`, `sched.futex`, `sched.irq`,
+`net.qdisc`, `net.softirq` and `proc.syscall`. Every bucketed source in the
+build now stamps where its window began. Measured over one second each:
+
+| Source | Events | Distinct instants |
+|---|---|---|
+| `sched.runqlat` | 586 | 584 |
+| `proc.syscall` | 2202 | 2202 |
+| `sched.lock` | 174 | 174 |
+| `sched.irq` | 53 | 53 |
+| `sched.futex` | 97 | 97 |
+| `net.softirq` | 33 | 33 |
+
+Stamping at the drain gives about ten, however busy the machine is. `net.qdisc`
+produced no rows on an idle loopback and is the one of the seven not measured
+here; its path is the same four instructions.
+
+The mechanism is four instructions and one field per row -- `now - duration`
+where the row is created -- and what made it worth doing once per source rather
+than in a shared layer is that each keeps its own value layout: three of the six
+needed their value region moved down the program's stack to make room, and their
+own layout tests said so before the kernel did.
 ## Needs from another stream — stream T (fentry, and the five sources behind it)
 
 What the eighth wave's fentry stream needed from files it did not own, and
