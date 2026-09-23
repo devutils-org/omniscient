@@ -109,6 +109,8 @@ pub struct SoftIrqCollector {
     /// `count` is the single measurement of one window.
     mode: Mode,
     program: Option<SoftIrqProgram>,
+    /// Runs of the programs the kernel skipped, as last read.
+    skipped: u64,
     losses: Losses,
     notes: Vec<String>,
     /// The program's counters are cumulative, so what is new is the difference.
@@ -159,6 +161,7 @@ impl SoftIrqCollector {
             losses: Losses::default(),
             notes: Vec::new(),
             dropped: 0,
+            skipped: 0,
             unpaired: 0,
             window_opened_ns: 0,
             run_opened_ns: 0,
@@ -326,6 +329,16 @@ impl SoftIrqCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of these programs because one was already running on \
+                 its cpu, so a handler went unseen; the count is the machine's, and an upper bound \
+                 on this target's",
+            );
+            self.skipped = skipped;
+        }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;

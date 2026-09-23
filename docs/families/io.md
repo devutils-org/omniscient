@@ -734,9 +734,70 @@ each program with a per-cpu counter, and on a preemptible kernel -- this one is
 `CONFIG_PREEMPT=y` -- a run preempted halfway makes the next hit of the same
 program on that cpu skip it, counted only in `bpf_prog_info.recursion_misses`.
 Every program's count is read, at the offset the kernel's own BTF gives the
-field. **It was not observed here**: zero in three runs of the hundred-thread
-workload. It is read anyway, because it is the one loss of this attach kind
-that nothing else could see.
+field. **It was not observed on the fentry side**: zero in three runs of the
+hundred-thread workload. It is read anyway, because it is the one loss of this
+attach kind that nothing else could see -- and on the raw-tracepoint side, where
+nothing read it, it turned out to be happening in every run of the suite; see
+the next section.
+
+## The block layer's one-percent tolerance was hiding a loss
+
+`a_known_number_of_direct_reads_is_found_one_for_one` and
+`the_tracer_and_the_kernels_own_counter_see_the_same_requests` are the block
+layer's sharpest ground truth, from the seventh wave, and they flapped in this
+wave's suite: short of 4096 by up to 90 %, with zero losses reported. Both pass
+alone. Three different things were under that one symptom, and only the last is
+a defect in the tool.
+
+**1. The workload started before the tracer.** Both spawned `omn` beside the
+test, slept 500 ms, and read. On a machine where thirty scenarios start at once
+the attach took longer: the first request arrived 90 to 219 ms *after* the
+workload's first read, timed on `CLOCK_MONOTONIC` on both sides. Fixed by
+launching the workload -- `omn` attaches before it execs the program, and the
+window is the program's lifetime, with no edge for a request to fall off. The
+reads are made on a worker thread and the events are held to that thread's id,
+so attributing to the process rather than the thread still fails; `--tid` on the
+test's own thread was the old way of saying that.
+
+**2. `O_DIRECT` is not "one read, one request" on btrfs.** With the edges gone
+and the machine idle the count was 4095, every run. The partition's own
+completed-read counter was the referee and agreed with the tracer: 4096 requests,
+one of them a 16 KiB request flagged `RA` at the sector of the file's first page,
+issued first. The program's first direct read fell back to a buffered one and
+came through readahead. Separately, fifty direct reads of a page that *was*
+resident produced 49 requests, and the counter moved by 49: btrfs answered one
+from memory. The workload now evicts the file with `POSIX_FADV_DONTNEED` and
+reports how much was still resident through `mincore` (the scenario skips, with
+the number, if any was); and a readahead is accepted as the one other shape a
+read may arrive in. Every request on the thread is a read, and no sector
+appears twice.
+
+**3. The kernel skipped the program, and nothing counted it.** With both of
+those fixed, the scenarios were exact alone and still short by 2 to 23 inside
+the suite -- six runs out of six -- with the missing pages scattered through the
+run and the surrounding requests spaced as if the missing read had happened. A
+system-wide trace of the same workload under the same load was exact, and so was
+the launch under load or beside a loop attaching and detaching a second block
+tracer; what the suite adds is thirty tracers at once. `recursion_misses` on the
+two block programs said what it was: **766 and 1237 skipped runs** in one run
+each. A raw tracepoint's probes run with preemption off, so the guard is found
+taken only when an interrupt on that cpu issues or completes a request while the
+program is still running, and that request's run is skipped whole.
+`BlockProgram::skipped` now reads it and `io.latency`, `io.queue` and `io.size`
+count it as dropped; so do `io.writeback` and the five `net` raw-tracepoint
+sources. The count is the machine's -- the programs run on every request and
+filter after -- so it bounds a target's share rather than equalling it, and the
+reason says so.
+
+**What the scenarios assert now.** Above 4096 is double counting, always. Below
+it, the run must have reported at least the difference as lost; with nothing
+reported, the count must be exact, and alone it is. Inside the suite the bound
+is loose: a few hundred machine-wide skips against a shortfall of a few dozen
+at most, so a collector that silently lost fewer than that many of this
+thread's requests would pass there. It would not pass alone. Tightening it
+needs a skip count per target, which the kernel does not keep. The
+raw-tracepoint programs in the fourteen other files that load one do not read
+the count yet; that is filed for their owners.
 
 ## What was measured
 

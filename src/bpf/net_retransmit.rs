@@ -191,7 +191,7 @@ pub struct RetransmitProgram {
     ring: RingBuffer,
     drops: Counters,
     has_error: bool,
-    _program: OwnedFd,
+    program: OwnedFd,
     _link: OwnedFd,
 }
 
@@ -220,7 +220,7 @@ impl RetransmitProgram {
             ring,
             drops,
             has_error,
-            _program: program,
+            program,
             _link: link,
         })
     }
@@ -240,6 +240,12 @@ impl RetransmitProgram {
                 Some(again) => handle(again),
                 None => *undecoded += 1,
             });
+    }
+
+    /// Runs of these programs the kernel skipped because one was already
+    /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program])
     }
 
     /// Retransmissions the program could not publish because the ring was full.
