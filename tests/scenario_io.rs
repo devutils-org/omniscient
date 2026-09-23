@@ -2030,11 +2030,6 @@ const PAGE: usize = 4096;
 /// process, so a process filter catches every other scenario's I/O as well. A
 /// thread filter catches exactly the reads the next few lines issue, which is
 /// what turns "at least this much" into "exactly this many".
-fn this_thread() -> i32 {
-    // Safety: `gettid` takes nothing and returns this thread's id.
-    unsafe { libc::syscall(libc::SYS_gettid) as i32 }
-}
-
 /// Issues `count` reads of one page each, straight to the device.
 ///
 /// `O_DIRECT` is the whole guarantee. The page cache is bypassed, so every read
@@ -2063,6 +2058,117 @@ fn direct_reads(path: &Path, count: usize) -> std::io::Result<usize> {
         issued += 1;
     }
     Ok(issued)
+}
+
+/// `direct_reads`, in a program `omn` launches, and on a thread of its own.
+///
+/// Launched rather than run in this process, because the window is then the
+/// program's lifetime: `omn` attaches before it execs the program, and the
+/// last read has completed before the program exits. A tracer spawned beside
+/// the test and given a head start has neither edge. Under the rest of this
+/// binary it attached as late as 220 ms into a workload it had been given
+/// 500 ms to be ready for, and the scenario read that as 3 % to 90 % of the
+/// requests missing with no loss reported -- which is what a silent loss looks
+/// like, and was not one.
+///
+/// The reads are made on a worker thread, and the account names it, so that a
+/// request attributed to the process rather than the thread still shows: it
+/// would carry the main thread's id, which is the process's.
+///
+/// And the file is evicted from the page cache first, and the program says how
+/// much of it was still resident when it started reading. `O_DIRECT` is not a
+/// promise that every read reaches the device: on btrfs, fifty direct reads of
+/// one page that was resident produced 49 requests, and the partition's own
+/// completed-read counter moved by 49 as well. The tracer was right and "one
+/// read, one request" was not, for the one read btrfs answered from memory.
+const DIRECT_READS: &str = r#"
+import ctypes, json, mmap, os, sys, threading
+path, count, account = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+done = {}
+def resident(fd, size):
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
+                          ctypes.c_int, ctypes.c_long]
+    address = libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_SHARED, fd, 0)
+    pages = (size + mmap.PAGESIZE - 1) // mmap.PAGESIZE
+    vector = (ctypes.c_ubyte * pages)()
+    if libc.mincore(ctypes.c_void_p(address), ctypes.c_size_t(size), vector) != 0:
+        return None
+    libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(size))
+    return sum(vector[page] & 1 for page in range(pages))
+def reads():
+    done["tid"] = threading.get_native_id()
+    cached = os.open(path, os.O_RDONLY)
+    os.posix_fadvise(cached, 0, 0, os.POSIX_FADV_DONTNEED)
+    done["resident"] = resident(cached, count * mmap.PAGESIZE)
+    os.close(cached)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+    except OSError as error:
+        done["refused"] = str(error)
+        return
+    page = mmap.mmap(-1, mmap.PAGESIZE)
+    issued = 0
+    try:
+        for index in range(count):
+            if os.preadv(fd, [page], index * mmap.PAGESIZE) != mmap.PAGESIZE:
+                break
+            issued += 1
+    except OSError as error:
+        done["refused"] = str(error)
+    done["issued"] = issued
+worker = threading.Thread(target=reads)
+worker.start()
+worker.join()
+done["pid"] = os.getpid()
+json.dump(done, open(account, "w"))
+"#;
+
+/// Launches `DIRECT_READS` under `io.size` and returns the run and the
+/// program's account, or why the property cannot be created here.
+fn launched_direct_reads(name: &str, reads: usize) -> Result<(Output, serde_json::Value), String> {
+    let path = direct_read_file(&format!("{name}.bin"), reads);
+    let workload = script(&format!("{name}.py"), DIRECT_READS);
+    let account_path = scratch(&format!("{name}.json"));
+    let _ = std::fs::remove_file(&account_path);
+    let output = run(&[
+        "io.size",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload.to_str().expect("a path"),
+        path.to_str().expect("a path"),
+        &reads.to_string(),
+        account_path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    if let Some(error) = did["refused"].as_str() {
+        // A filesystem that refuses `O_DIRECT` cannot produce the property
+        // these scenarios measure, and saying so beats asserting something
+        // else about it.
+        return Err(format!(
+            "{} refuses O_DIRECT ({error}), so a read of it is not one block request",
+            path.display()
+        ));
+    }
+    match did["resident"].as_u64() {
+        Some(0) => {}
+        resident => {
+            return Err(format!(
+                "{resident:?} of {reads} pages of {} were still in the page cache after it was \
+                 evicted, and a direct read of a resident page can be answered without a request",
+                path.display()
+            ))
+        }
+    }
+    Ok((output, did))
 }
 
 /// A file of incompressible bytes, on the device, large enough for `pages`
@@ -2126,8 +2232,8 @@ fn losses(result: &serde_json::Value) -> &serde_json::Value {
 /// after the block layer decremented it would report zero; one reporting
 /// sectors would be out by 512; one counting completions rather than issues
 /// would differ on every partially completed request; one that attributed to
-/// the process rather than the thread would catch every other test in this
-/// binary.
+/// the process rather than the thread would put every request on the
+/// program's main thread, which made none of them.
 #[test]
 fn a_known_number_of_direct_reads_is_found_one_for_one() {
     if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
@@ -2140,97 +2246,107 @@ fn a_known_number_of_direct_reads_is_found_one_for_one() {
     }
 
     const READS: usize = 4096;
-    let path = direct_read_file("io-direct-reads.bin", READS);
-    let tid = this_thread().to_string();
-
-    let child = Command::new(BINARY)
-        .args([
-            "io.size", "--tid", &tid, "-m", "trace", "-e", "raw", "-d", "5s", "--format", "json",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("omn should run");
-    std::thread::sleep(Duration::from_millis(500));
-
-    let issued = match direct_reads(&path, READS) {
-        Ok(issued) => issued,
-        Err(error) => {
-            // A filesystem that refuses `O_DIRECT` cannot produce the property
-            // this scenario measures, and saying so beats asserting something
-            // else about it.
-            let _ = child.wait_with_output();
-            eprintln!(
-                "skipped: {} refuses O_DIRECT ({error}), so a read of it is not one block request",
-                path.display()
-            );
+    let (output, did) = match launched_direct_reads("io-direct-reads", READS) {
+        Ok(run) => run,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
             return;
         }
     };
-    assert_eq!(issued, READS);
-    // The last request has to be issued, completed and drained before the
-    // window closes, and the drain is on a ten-millisecond tick.
-    std::thread::sleep(Duration::from_millis(500));
-
-    let output = child.wait_with_output().expect("omn should finish");
-    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        did["issued"].as_u64(),
+        Some(READS as u64),
+        "the program's account: {did}"
+    );
+    let worker = did["tid"].as_u64().expect("the reading thread");
     let document = json(&output);
     let result = result(&document, "io.size");
-    let events = raw_events(result);
-
-    // Every request this thread issued was one page. Not "mostly": the read was
-    // one page at a page-aligned offset with the cache out of the way, and
-    // anything else in this series would be a request the workload did not
-    // make.
-    let sizes: std::collections::BTreeSet<u64> = events
+    // The program is the whole target, and the interpreter loading itself from
+    // a cold cache is requests too; they are its main thread's, and not the
+    // ones counted here.
+    let on_worker: Vec<_> = raw_events(result)
+        .into_iter()
+        .filter(|attrs| attrs["tid"].as_u64() == Some(worker))
+        .collect();
+    // Nor is every read a one-page request, even evicted and direct. On
+    // btrfs the program's first `O_DIRECT` read fell back to a buffered one,
+    // on every run measured: it arrived as a 16 KiB request flagged `RA`, at
+    // the sector of the file's first page, issued before any other -- the
+    // readahead window around the page that was asked for. The partition's
+    // completed-read counter moved by exactly the reads issued, so that request
+    // is the read, and a readahead is the only other shape one may take. A
+    // collector reporting sectors, or `__data_len` after the block layer
+    // consumed it, turns every request into a size that is not a page, which
+    // the count below catches.
+    let (events, other): (Vec<_>, Vec<_>) = on_worker
+        .into_iter()
+        .partition(|attrs| attrs["bytes"].as_u64() == Some(PAGE as u64));
+    for attrs in &other {
+        let rwbs = attrs["rwbs"].as_str().unwrap_or_default();
+        assert!(
+            rwbs.contains('A'),
+            "a request of {} bytes on the reading thread that is not a readahead: `{rwbs}`",
+            attrs["bytes"]
+        );
+    }
+    // And one per page: a request counted twice would repeat a sector.
+    let sectors: std::collections::BTreeSet<u64> = events
         .iter()
-        .filter_map(|attrs| attrs.get("bytes")?.as_u64())
+        .chain(&other)
+        .filter_map(|attrs| attrs["sector"].as_u64())
         .collect();
     assert_eq!(
-        sizes,
-        [PAGE as u64].into_iter().collect(),
-        "this thread issued {READS} one-page reads and the tracer saw other sizes: {sizes:?}"
+        sectors.len(),
+        events.len() + other.len(),
+        "a sector was requested twice"
     );
 
-    // One request per read. The upper bound is exact: a read cannot produce two
-    // requests, so anything above `READS` is double counting.
+    // One request per read. The window is the program's lifetime, so it has no
+    // edge for a request to fall off: every read was issued after the attach
+    // and completed before the exit. Above `READS` is double counting, always.
+    let found = events.len() + other.len();
     assert!(
-        events.len() <= READS,
-        "{} requests for {READS} reads: something is counted twice",
-        events.len()
+        found <= READS,
+        "{found} requests for {READS} reads on thread {worker}: something is counted twice"
     );
-    // The lower bound carries the window's own edge -- a request issued in the
-    // last moments of the run is published after the final drain -- and it is a
-    // fraction of a percent rather than a calibrated threshold. Every mistake
-    // this scenario exists to catch is out by a *factor*: a collector reporting
-    // sectors is out by 512, one counting completions differs on every
-    // partially completed request, one reading `__data_len` too late reports
-    // zero. None of them lands within one percent of the truth.
+    // Below it is a loss, and it has to be one the run reported. The block
+    // programs are skipped by the kernel when an interrupt re-enters one on its
+    // own cpu, and under the rest of this binary that is every run: 2 to 23 of
+    // these reads, counted in `recursion_misses`. The count is the machine's
+    // -- it cannot say whose request a skipped run was -- so it bounds this
+    // thread's shortfall rather than equalling it. With nothing reported, the
+    // count must be exact.
+    let dropped = losses(result)["dropped"].as_u64().expect("a drop count") as usize;
     assert!(
-        100 * events.len() >= 99 * READS,
-        "{READS} one-page reads produced {} requests, and the run reported losing none of them: \
-         {}",
+        found + dropped >= READS,
+        "{READS} one-page reads on thread {worker} produced {} one-page requests and {} \
+         readaheads on it, and the run reported losing only {dropped}: {}",
         events.len(),
+        other.len(),
         losses(result)
     );
-    assert_eq!(
-        losses(result)["dropped"].as_u64(),
-        Some(0),
-        "a shortfall the tool knew about is a different scenario: {}",
-        losses(result)
-    );
+    if dropped > 0 && found < READS {
+        eprintln!(
+            "note: {} of {READS} reads missing, within the {dropped} runs the kernel reported \
+             skipping; exactness was not creatable in this run",
+            READS - found
+        );
+    }
 
     // Reads, and attributed to the thread that made them. `rwbs` is the
     // kernel's own letters, so `R` is the first of them for any read.
-    for attrs in &events {
+    for attrs in events.iter().chain(&other) {
         let rwbs = attrs["rwbs"].as_str().unwrap_or_default();
         assert!(rwbs.starts_with('R'), "a read reported as `{rwbs}`");
-        assert_eq!(
-            attrs["tid"].as_u64(),
-            Some(this_thread() as u64),
-            "a request attributed to a thread that issued none"
-        );
     }
+    // And they are the thread's, not the process's: attributed by the process,
+    // every one would carry the main thread's id and the filter above would
+    // have kept none of them.
+    assert_ne!(
+        did["pid"].as_u64(),
+        Some(worker),
+        "the reads ran on a thread of their own"
+    );
 }
 
 /// The eBPF request count and the kernel's own operation count agree.
@@ -2241,7 +2357,7 @@ fn a_known_number_of_direct_reads_is_found_one_for_one() {
 /// was issued, and for the same window those are the same requests counted
 /// twice by two mechanisms that share no code.
 ///
-/// The check is one-sided on purpose. `io.size` is filtered to one thread and
+/// The check is one-sided on purpose. `io.size` is filtered to one program and
 /// the kernel's counter is not, so the counter is the ceiling: the machine's
 /// own background I/O is in it and cannot be in the other. What the comparison
 /// catches is the failure that matters -- a tracer reporting more requests than
@@ -2266,29 +2382,23 @@ fn the_tracer_and_the_kernels_own_counter_see_the_same_requests() {
     };
 
     const READS: usize = 4096;
-    let path = direct_read_file("io-agreement.bin", READS);
-    let tid = this_thread().to_string();
-
+    // Written before the counters are read, so that writing it is not in them.
+    direct_read_file("io-agreement.bin", READS);
     let before = counters_of(&device);
-    let child = Command::new(BINARY)
-        .args([
-            "io.size", "--tid", &tid, "-m", "trace", "-e", "raw", "-d", "5s", "--format", "json",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("omn should run");
-    std::thread::sleep(Duration::from_millis(500));
-    if direct_reads(&path, READS).is_err() {
-        let _ = child.wait_with_output();
-        eprintln!("skipped: this filesystem refuses O_DIRECT");
-        return;
-    }
-    std::thread::sleep(Duration::from_millis(500));
-    let output = child.wait_with_output().expect("omn should finish");
+    let run = launched_direct_reads("io-agreement", READS);
     let kernel = counters_of(&device).since(&before);
-
-    assert!(output.status.success(), "{}", stderr(&output));
+    let (output, did) = match run {
+        Ok(run) => run,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    assert_eq!(
+        did["issued"].as_u64(),
+        Some(READS as u64),
+        "the program's account: {did}"
+    );
     let document = json(&output);
     let result = result(&document, "io.size");
     let events = raw_events(result);
@@ -2310,14 +2420,17 @@ fn the_tracer_and_the_kernels_own_counter_see_the_same_requests() {
          contains it",
         kernel.bytes()
     );
-    // And the other side: the reads were issued, so they are in both accounts.
-    // The one percent is the window's edge rather than a calibrated threshold
-    // -- see `a_known_number_of_direct_reads_is_found_one_for_one`.
+    // And the other side: the reads were issued, so they are in both accounts,
+    // and the window has no edge to lose them at. A read the kernel skipped the
+    // program for is counted as dropped, and was one page -- see
+    // `a_known_number_of_direct_reads_is_found_one_for_one`.
+    let dropped = losses(result)["dropped"].as_u64().expect("a drop count");
     assert!(
-        100 * traced_bytes >= 99 * (READS * PAGE) as u64,
-        "{} bytes traced for the {} the workload read",
+        traced_bytes + dropped * PAGE as u64 >= (READS * PAGE) as u64,
+        "{} bytes traced for the {} the workload read, and {dropped} requests reported lost: {}",
         traced_bytes,
-        READS * PAGE
+        READS * PAGE,
+        losses(result)
     );
 }
 

@@ -280,9 +280,9 @@ pub struct SoftIrqProgram {
     rows: Hash,
     counters: Counters,
     _at: OwnedFd,
-    _entry_program: OwnedFd,
+    entry_program: OwnedFd,
     _entry_link: OwnedFd,
-    _exit_program: OwnedFd,
+    exit_program: OwnedFd,
     _exit_link: OwnedFd,
 }
 
@@ -356,9 +356,9 @@ impl SoftIrqProgram {
             rows,
             counters,
             _at: at,
-            _entry_program: entry_program,
+            entry_program,
             _entry_link: entry_link,
-            _exit_program: exit_program,
+            exit_program,
             _exit_link: exit_link,
         })
     }
@@ -388,6 +388,12 @@ impl SoftIrqProgram {
             }
         }
         Ok(result)
+    }
+
+    /// Runs of these programs the kernel skipped because one was already
+    /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.entry_program, &self.exit_program])
     }
 
     /// Handler runs the histogram could not hold, which are lost.

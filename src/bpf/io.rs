@@ -670,9 +670,9 @@ pub struct BlockProgram {
     ring: RingBuffer,
     counters: Counters,
     inflight: Option<Hash>,
-    _open_program: Option<OwnedFd>,
+    open_program: Option<OwnedFd>,
     _open_link: Option<OwnedFd>,
-    _close_program: OwnedFd,
+    close_program: OwnedFd,
     _close_link: OwnedFd,
 }
 
@@ -746,9 +746,9 @@ impl BlockProgram {
             ring,
             counters,
             inflight,
-            _open_program: open_program,
+            open_program,
             _open_link: open_link,
-            _close_program: close_program,
+            close_program,
             _close_link: close_link,
         })
     }
@@ -769,6 +769,31 @@ impl BlockProgram {
         (
             self.counters.read(DROP_INFLIGHT),
             self.counters.read(DROP_RING),
+        )
+    }
+
+    /// Runs of these programs the kernel skipped, and counted only for itself.
+    ///
+    /// A raw tracepoint runs its program behind a per-cpu guard. Probes run
+    /// with preemption off, so the guard is found taken only when the program
+    /// is re-entered on its own cpu: an interrupt arriving while it runs issues
+    /// or completes another request, and that request's run is skipped whole.
+    /// Neither the drop counters nor the ring can say so, because the program
+    /// never ran. The kernel counts it in the program's `recursion_misses`, and
+    /// this is that count, for both halves.
+    ///
+    /// **Measured, not theoretical.** Under the rest of `tests/scenario_io.rs`
+    /// the count reached 766 and 1237 in one run each, and a launched program
+    /// making 4096 direct reads was short by 2 to 23 requests in every one of
+    /// six runs, with nothing reported lost before this was read. It is a count
+    /// of the machine's requests, not the target's: the program runs on every
+    /// request and filters afterwards, so a skipped run cannot say whose it
+    /// was, and this is an upper bound on the target's share.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped(
+            self.open_program
+                .iter()
+                .chain(std::iter::once(&self.close_program)),
         )
     }
 

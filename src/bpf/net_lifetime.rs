@@ -366,7 +366,7 @@ pub struct TcpLifetimeProgram {
     ring: RingBuffer,
     open: Hash,
     drops: Counters,
-    _program: OwnedFd,
+    program: OwnedFd,
     _link: OwnedFd,
 }
 
@@ -402,7 +402,7 @@ impl TcpLifetimeProgram {
             ring,
             open,
             drops,
-            _program: program,
+            program,
             _link: link,
         })
     }
@@ -424,6 +424,12 @@ impl TcpLifetimeProgram {
     /// is a fact about the window rather than a loss.
     pub fn still_open(&self) -> usize {
         self.open.len().unwrap_or(0)
+    }
+
+    /// Runs of these programs the kernel skipped because one was already
+    /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program])
     }
 
     /// What the program could not record, as `(connections the map had no room

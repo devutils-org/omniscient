@@ -597,7 +597,11 @@ struct InfoAttr {
 /// Reads `recursion_misses` out of a program's `bpf_prog_info`, at the offset
 /// the running kernel's own BTF gives it: the structure grows at its end with
 /// every release, and the kernel copies no more than the length it is told.
-fn recursion_misses(program: &OwnedFd) -> Result<u64, String> {
+///
+/// Not only a trampoline's: a raw tracepoint guards each program with the same
+/// per-cpu counter and counts the same skips here, which is why the block
+/// layer's programs read it too.
+pub fn recursion_misses(program: &OwnedFd) -> Result<u64, String> {
     static OFFSET: OnceLock<Result<usize, String>> = OnceLock::new();
     let offset = OFFSET
         .get_or_init(|| {
@@ -632,6 +636,16 @@ fn recursion_misses(program: &OwnedFd) -> Result<u64, String> {
     Ok(u64::from_ne_bytes(
         info[offset..offset + 8].try_into().expect("8"),
     ))
+}
+
+/// Every run the kernel skipped across a set of programs, of any attach kind:
+/// a raw tracepoint's programs sit behind the same per-cpu guard and are
+/// counted in the same field.
+pub fn skipped<'a>(programs: impl IntoIterator<Item = &'a OwnedFd>) -> u64 {
+    programs
+        .into_iter()
+        .map(|program| recursion_misses(program).unwrap_or(0))
+        .sum()
 }
 
 /// Every run the kernel skipped across a set of links.

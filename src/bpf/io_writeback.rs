@@ -296,9 +296,9 @@ pub struct WritebackProgram {
     ring: RingBuffer,
     counters: Counters,
     open: Hash,
-    _start_program: OwnedFd,
+    start_program: OwnedFd,
     _start_link: OwnedFd,
-    _written_program: OwnedFd,
+    written_program: OwnedFd,
     _written_link: OwnedFd,
 }
 
@@ -346,9 +346,9 @@ impl WritebackProgram {
             ring,
             counters,
             open,
-            _start_program: start_program,
+            start_program,
             _start_link: start_link,
-            _written_program: written_program,
+            written_program,
             _written_link: written_link,
         })
     }
@@ -358,6 +358,12 @@ impl WritebackProgram {
             Some(record) => handle(record),
             None => *undecoded += 1,
         });
+    }
+
+    /// Runs of these programs the kernel skipped because one was already
+    /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.start_program, &self.written_program])
     }
 
     /// Rounds the map could not hold, and records the ring could not hold.

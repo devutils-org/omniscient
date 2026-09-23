@@ -183,6 +183,7 @@ pub struct BlockCollector {
     /// The programs' counters are cumulative, so what is new is the difference.
     dropped_inflight: u64,
     dropped_ring: u64,
+    skipped: u64,
     /// Requests seen closing that this run never saw open. Not a loss.
     unpaired: u64,
     /// `io.queue` only: requests the block layer issued directly, without ever
@@ -230,6 +231,7 @@ impl BlockCollector {
             losses: Losses::default(),
             dropped_inflight: 0,
             dropped_ring: 0,
+            skipped: 0,
             unpaired: 0,
             direct: 0,
             predating: 0,
@@ -423,6 +425,16 @@ impl BlockCollector {
             self.losses
                 .note("the block ring was full: requests completed faster than they were drained");
             self.dropped_ring = ring;
+        }
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of these programs because an interrupt re-entered one \
+                 on its own cpu, so a request went unseen; the count is the machine's, and an \
+                 upper bound on this target's",
+            );
+            self.skipped = skipped;
         }
         self.unpaired = program.unpaired();
     }

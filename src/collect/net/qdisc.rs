@@ -72,6 +72,8 @@ pub struct QdiscCollector {
     /// The interface a `--iface` target named, compared inside the program.
     iface: Option<(u32, String)>,
     program: Option<QdiscProgram>,
+    /// Runs of the programs the kernel skipped, as last read.
+    skipped: u64,
     losses: Losses,
     /// The programs' counters are cumulative, so what is new is the difference.
     dropped_queued: u64,
@@ -96,6 +98,7 @@ impl QdiscCollector {
             losses: Losses::default(),
             dropped_queued: 0,
             dropped_rows: 0,
+            skipped: 0,
             unpaired: 0,
             still_queued: 0,
             window_opened_ns: 0,
@@ -176,6 +179,16 @@ impl QdiscCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of these programs because one was already running on \
+                 its cpu, so a packet went unseen; the count is the machine's, and an upper bound \
+                 on this target's",
+            );
+            self.skipped = skipped;
+        }
         let (queued, rows) = program.dropped();
         if queued > self.dropped_queued {
             self.losses.dropped += queued - self.dropped_queued;

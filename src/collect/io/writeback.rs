@@ -76,6 +76,8 @@ pub struct WritebackCollector {
     id: CollectorId,
     mode: Mode,
     program: Option<WritebackProgram>,
+    /// Runs of the programs the kernel skipped, as last read.
+    skipped: u64,
     losses: Losses,
     dropped_open: u64,
     dropped_ring: u64,
@@ -103,6 +105,7 @@ impl WritebackCollector {
             losses: Losses::default(),
             dropped_open: 0,
             dropped_ring: 0,
+            skipped: 0,
             unpaired: 0,
             still_running: 0,
             names: BTreeMap::new(),
@@ -206,6 +209,16 @@ impl WritebackCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of these programs because one was already running on \
+                 its cpu, so a writeback round went unseen; the count is the machine's, and an upper bound \
+                 on this target's",
+            );
+            self.skipped = skipped;
+        }
         let (open, ring) = program.dropped();
         if open > self.dropped_open {
             self.losses.dropped += open - self.dropped_open;

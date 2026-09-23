@@ -94,6 +94,8 @@ pub struct RetransmitCollector {
     /// measurement of one window, totalled per series.
     mode: Mode,
     program: Option<RetransmitProgram>,
+    /// Runs of the programs the kernel skipped, as last read.
+    skipped: u64,
     losses: Losses,
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,
@@ -122,6 +124,7 @@ impl RetransmitCollector {
             program: None,
             losses: Losses::default(),
             dropped: 0,
+            skipped: 0,
             counted: BTreeMap::new(),
             seen: 0,
             without_cookie: 0,
@@ -199,6 +202,16 @@ impl RetransmitCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of these programs because one was already running on \
+                 its cpu, so a retransmission went unseen; the count is the machine's, and an upper bound \
+                 on this target's",
+            );
+            self.skipped = skipped;
+        }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;

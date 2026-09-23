@@ -298,9 +298,9 @@ pub struct QdiscProgram {
     rows: Hash,
     queued: Hash,
     counters: Counters,
-    _enqueue_program: OwnedFd,
+    enqueue_program: OwnedFd,
     _enqueue_link: OwnedFd,
-    _dequeue_program: OwnedFd,
+    dequeue_program: OwnedFd,
     _dequeue_link: OwnedFd,
 }
 
@@ -361,9 +361,9 @@ impl QdiscProgram {
             rows,
             queued,
             counters,
-            _enqueue_program: enqueue_program,
+            enqueue_program,
             _enqueue_link: enqueue_link,
-            _dequeue_program: dequeue_program,
+            dequeue_program,
             _dequeue_link: dequeue_link,
         })
     }
@@ -393,6 +393,12 @@ impl QdiscProgram {
     /// Their wait is real and is in no bucket, because it has no end yet.
     pub fn still_queued(&self) -> usize {
         self.queued.len().unwrap_or(0)
+    }
+
+    /// Runs of these programs the kernel skipped because one was already
+    /// running on that cpu; see `BlockProgram::skipped`, where it was measured.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.enqueue_program, &self.dequeue_program])
     }
 
     /// What the programs could not record, as `(packets the map had no room
