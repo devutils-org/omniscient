@@ -233,8 +233,21 @@ impl StallCollector {
                     continue;
                 }
             }
+            // Stamped at the moment the window's first episode began, rather
+            // than at the drain that read the row. A bucketed source emits one
+            // event per row per window, and a join that *opens* on it used to
+            // open at the close -- so everything that happened in the same
+            // window as the first episode fell outside the state it was meant
+            // to open. The seventh wave's machine crossing worked around that
+            // by sleeping 300 ms between writing and reading.
+            //
+            // `ts_err_ns` stays zero, and that is deliberate: the instant is
+            // exact and taken in this domain, which is what that field is
+            // about. What is wide is the *window*, and `window_ns` beside the
+            // value already says how wide.
+            let ts_ns = stamp(row.first_ns, closed_ns);
             let event = Event {
-                ts_ns: closed_ns,
+                ts_ns,
                 ts_err_ns: 0,
                 kind: source_of(stall).to_owned(),
                 keys: keys_of(stall, &row),
@@ -506,6 +519,19 @@ impl Collector for StallCollector {
     }
 }
 
+/// When an aggregated row happened, as far as this source can say.
+///
+/// The first episode of the window if the kernel recorded one, and the drain
+/// that read the row otherwise. A zero `first_ns` means unknown -- no row this
+/// build creates leaves it unset -- and is read as unknown rather than as the
+/// beginning of time, which would put every such event before the run started.
+fn stamp(first_ns: u64, closed_ns: u64) -> u64 {
+    match first_ns {
+        0 => closed_ns,
+        first => first,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +547,7 @@ mod tests {
             count: 6,
             total_ns: 9_000_000,
             yielded: 512,
+            first_ns: 0,
             comm: "hog".to_owned(),
         }
     }
@@ -662,5 +689,30 @@ mod tests {
         let notes = collector.notes().join(" ");
         assert!(notes.contains("1 thread was still inside"), "{notes}");
         assert_eq!(collector.losses().dropped, 0);
+    }
+
+    /// An aggregated row is stamped where it happened, not where it was read.
+    ///
+    /// A bucketed source emits one event per row per window, and a join that
+    /// *opens* on it opened at the close before this: everything in the same
+    /// window as the first episode fell outside the state it was meant to
+    /// open. The seventh wave's machine crossing worked around it by sleeping
+    /// 300 ms between writing and reading, and said so in the session.
+    #[test]
+    fn a_row_is_stamped_at_its_first_episode_rather_than_at_the_drain() {
+        let closed = 1_000_000_000;
+        let first = closed - 80_000_000;
+        assert_eq!(stamp(first, closed), first);
+        assert!(
+            stamp(first, closed) < closed,
+            "the whole point is that it is earlier than the drain"
+        );
+    }
+
+    /// And a row whose first episode the kernel did not record falls back to
+    /// the drain, rather than to zero -- which would place it before the run.
+    #[test]
+    fn a_row_with_no_recorded_beginning_falls_back_to_the_drain() {
+        assert_eq!(stamp(0, 1_000_000_000), 1_000_000_000);
     }
 }

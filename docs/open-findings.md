@@ -5439,3 +5439,37 @@ The rule this suggests, and it is not a new one: **a red suite on this machine
 is checked against this list before it is believed**. What is worth watching is
 whether the same test starts failing repeatedly, which is a defect, rather than
 a different one each time, which is the machine.
+
+---
+
+## 44. A bucketed source stamps the window's first episode, not the drain
+
+The seventh wave's machine crossing filed this and worked around it: a source
+that builds its histogram in the kernel emits one event per row per window, and
+that event was timestamped at the drain that read it — the window's *end*. A
+join that **opens** on such a source therefore opened at the close, and
+everything that happened in the same window as the first episode fell outside
+the state it was meant to open. The crossing's workload sleeps 300 ms between
+writing and reading for that reason, and its `KEY` assertion counts only the
+reads issued after reading back began.
+
+`mem.reclaim`'s kernel-side row now records when the window's first episode
+*began* — recovered as `now - duration` at the moment the row is created, which
+is the first completed episode of that key in that window, since the rows map is
+drained and emptied every window — and the event is stamped there.
+
+**`ts_err_ns` stays zero, and that is the part worth arguing.** The field means
+*how far off `ts_ns` may be*, and it is non-zero when a timestamp was converted
+from a device's own clock. The instant here is exact and taken in this domain;
+what is wide is the window the row aggregates, and `window_ns` beside the value
+already says how wide. Carrying the span as a clock error would have overloaded
+one field with two meanings, which is the conflation this project refuses
+everywhere else.
+
+**The same defect is in every other bucketed source**, and `sched.runqlat` is
+the one that matters next: it is an input to thread state analysis, and a
+decomposition that opens a state on it inherits exactly this. `sched.lock`,
+`sched.futex`, `sched.irq`, `net.qdisc`, `net.softirq` and `proc.syscall` are
+the rest. The mechanism is eight instructions and one field per row; what makes
+it worth doing once per source rather than in a shared layer is that each keeps
+its own value layout.

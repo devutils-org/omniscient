@@ -88,7 +88,22 @@ const VALUE_TOTAL_NS: i16 = 8;
 /// and freed a hundred megabytes.
 const VALUE_YIELD: i16 = 16;
 const VALUE_COMM: i16 = 24;
-const ROW_VALUE_BYTES: usize = 40;
+/// When the first episode of this row's window *began*, on the same
+/// `CLOCK_MONOTONIC` everything else here uses.
+///
+/// A bucketed source emits one event per row per window, and the natural
+/// timestamp for it is the drain that read it -- the window's end. That is
+/// where the seventh wave's machine crossing found it, and it is a problem for
+/// exactly one thing: a join that *opens* on this source opens at the close, so
+/// everything that happened in the same window as the first episode falls
+/// outside the state. That crossing worked around it by sleeping 300 ms between
+/// writing and reading, and said so in the session.
+///
+/// Written once, when the row is created, which is the first completed episode
+/// of that key in that window: the rows map is drained and emptied every
+/// window, so a row that exists is a row this window opened.
+const VALUE_FIRST_NS: i16 = 40;
+const ROW_VALUE_BYTES: usize = 48;
 
 /// The in-flight map: thread id to the moment it entered.
 const START_KEY_BYTES: usize = 4;
@@ -273,6 +288,11 @@ pub struct StallRow {
     /// What the episodes yielded, where the `end` tracepoint says: pages
     /// reclaimed, for direct reclaim.
     pub yielded: u64,
+    /// When the first episode of this row began, which is what the event is
+    /// timestamped with. Zero on a kernel-side row this build did not create --
+    /// there are none today, and it is read as "unknown, fall back to the
+    /// drain" rather than as the beginning of time.
+    pub first_ns: u64,
     pub comm: String,
 }
 
@@ -297,6 +317,7 @@ impl StallRow {
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             yielded: long(value, VALUE_YIELD as usize),
+            first_ns: long(value, VALUE_FIRST_NS as usize),
             comm: comm(value, VALUE_COMM as usize),
         })
     }
@@ -427,6 +448,12 @@ fn end_instructions(
     program.label("first");
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_COUNT, 1));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_TOTAL_NS, 7));
+    // When this episode began: now, less how long it lasted. r8 is the reading
+    // taken at the top of the program and r7 is the duration, so the beginning
+    // is recovered rather than stored a second time in the in-flight map.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 7));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
     if stall.yields().is_some() {
         program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_YIELD, 9));
     } else {
@@ -804,6 +831,7 @@ mod tests {
         let value = [
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
+            (VALUE_FIRST_NS, 8),
             (VALUE_YIELD, 8),
             (VALUE_COMM, COMM_BYTES as i16),
         ];

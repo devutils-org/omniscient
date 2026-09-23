@@ -311,7 +311,7 @@ container's thrashing at a fraction of its size.** The cgroup's own pressure
 is the right number, and a session cannot read it beside a system-wide device
 count. See the first request below.
 
-**`mem.reclaim` stamps a window when it closes, so a join on it opens late.**
+**`mem.reclaim` stamped a window when it closed, so a join on it opened late — fixed.**
 The source builds its histogram in the kernel and emits one event per bucket
 per 100 ms window, timestamped at the window's end. A join state opens there
 and not at the first stall, so reads issued in the same window as the first
@@ -320,6 +320,16 @@ for this reason, and the KEY assertion counts only reads issued after reading
 back began. The session's comments say so. This is a property of an aggregated
 source used as the opening side of a join, and any crossing that opens on
 `mem.reclaim`, `sched.runqlat` or any other bucketed source will meet it.
+
+**What closed it**, in the eighth wave's coordinator pass: the kernel-side row
+now records when its window's first episode *began*, and the event is stamped
+there instead of at the drain. `ts_err_ns` stays zero on purpose — the instant
+is exact and taken in this domain, which is what that field is for; what is wide
+is the window, and `window_ns` beside the value already says how wide. The
+workaround stays in the session because it costs nothing and the crossing's
+numbers were measured with it, but a join opening on `mem.reclaim` no longer
+needs it. `sched.runqlat` and the other bucketed sources still stamp at the
+drain, and that is the same defect waiting in four more places.
 
 **`io.writeback` did not reconcile with the writes it should have seen.** In
 one run, `io.writeback` reported 667 pages (2.6 MiB) of flusher progress while
@@ -397,10 +407,9 @@ The second one needs three things, and skips by name without any of them:
    reports what the kernel publishes. It is a trap for anyone who reads the
    system-wide value as a container's. It is recorded in the session and
    above.
-4. **`mem.reclaim` stamps its windows at the close**, so a join opening on it
-   misses the first window's worth of matches. This is documented rather than
-   fixed; the fix would be an event timestamp at the window's first episode,
-   in `src/collect/mem/`.
+4. ~~**`mem.reclaim` stamps its windows at the close**~~ — **fixed**. The row
+   records its window's first episode and the event is stamped there. The same
+   defect is still in every other bucketed source, `sched.runqlat` first.
 5. **`io.writeback` reported 2.6 MiB of flusher progress beside 90 MiB of
    kworker writes.** It is unexplained, filed for `io`, and kept out of the
    session.
