@@ -1803,6 +1803,7 @@ mod tests {
             stopped_because: "the requested duration elapsed".into(),
             losses: Losses::default(),
             filtered: None,
+            lifetime: None,
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
             stacks: BTreeMap::new(),

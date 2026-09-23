@@ -707,3 +707,79 @@ fn two_heap_sources_on_one_launch_share_the_shim_and_each_sees_all_of_it() {
         ALLOCATED / 2.0
     );
 }
+
+/// The lifetime reaches the results document, and not only the collection.
+///
+/// It is the *whole* a decomposition's parts are parts of: a residue is a
+/// statement about a total, and a total nobody carries cannot be checked. The
+/// run model stamps it; this asserts that it survives the emit layer into the
+/// four structured formats, where a reader and the next layer can find it.
+///
+/// The bracket travels with it on purpose. `exited_err_ns` is how long before
+/// `exited_ns` the program was last seen alive, and a reader given only the
+/// length would over-trust a residue smaller than the bracket.
+#[test]
+fn the_lifetime_reaches_the_results_document_with_its_bracket() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let output = run(&[
+        "mem.rss",
+        "--mode",
+        "poll@50ms",
+        "--emit",
+        "raw",
+        "--duration",
+        "2s",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        "import time; time.sleep(0.3)",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let document: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(document) => document,
+        Err(error) => {
+            // The launched program shares this stdout, so a run that printed
+            // something is not this test's business to parse.
+            eprintln!("skipped: the run did not produce one json document ({error})");
+            return;
+        }
+    };
+    let result = &document["results"][0];
+    let lifetime = &result["lifetime"];
+    assert!(
+        !lifetime.is_null(),
+        "a run that launched a program must carry when it ran: {text}"
+    );
+
+    let released = lifetime["released_ns"].as_u64().expect("a gate moment");
+    let exited = lifetime["exited_ns"].as_u64().expect("an exit moment");
+    let bracket = lifetime["exited_err_ns"]
+        .as_u64()
+        .expect("the exit's own uncertainty, which is what makes it honest");
+    assert!(
+        exited > released,
+        "the program cannot have exited before the gate opened: {lifetime}"
+    );
+    // The program sleeps 300 ms, and the whole is bounded below by that and
+    // above by the run's own duration. Not a calibrated threshold: a machine
+    // that takes a second to start python is still inside it.
+    let lived = exited - released;
+    assert!(
+        lived >= 300_000_000,
+        "the program slept 300 ms and the run says it lived {lived} ns"
+    );
+    assert!(
+        bracket > 0,
+        "an exit this tool learned about by asking is never exact, and saying so is the point: \
+         {lifetime}"
+    );
+    assert!(
+        bracket < lived,
+        "the bracket cannot be wider than the life it brackets: {lifetime}"
+    );
+}

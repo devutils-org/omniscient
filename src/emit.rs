@@ -99,6 +99,18 @@ pub struct Results {
     /// could not push it down. Absent when the request carried no filter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filtered: Option<Filtered>,
+    /// When the run's launched program ran, from the gate to its exit. Absent
+    /// when nothing was launched.
+    ///
+    /// It is the *whole* a decomposition's parts are parts of, which is why it
+    /// belongs beside the numbers rather than in the resolved file: a residue
+    /// is a statement about a total, and a total nobody carries cannot be
+    /// checked. The exit is bracketed rather than exact -- `exited_err_ns` is
+    /// how long before `exited_ns` the program was last seen alive -- and both
+    /// travel, because a reader given only the first would over-trust a
+    /// residue smaller than the bracket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<crate::collect::Lifetime>,
     /// Requirements that were assumed rather than checked, carried from the
     /// resolver so they are visible next to the numbers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -734,6 +746,7 @@ pub fn aggregate(
         stopped_because: collection.stopped_because,
         losses: collection.losses,
         filtered: collection.filtered,
+        lifetime: collection.lifetime,
         unverified: resolved.unverified.clone(),
         degradations,
         stacks,

@@ -5388,3 +5388,54 @@ Neither is in a file stream U touched. Each failed once in `cargo test
 
 - `collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
 - `cross_compute::a_half_blocked_task_decomposes_into_what_the_kernel_says_it_did`
+
+---
+
+## 43. The lifetime reaches the document, and the two halves it was split across
+
+The run model stream stamped a launched program's lifetime onto every
+`Collection` and filed the other half as a request, because `src/emit.rs` has no
+owner in the eighth wave and `src/encode.rs` is stream J's. The coordinator
+landed the first half: `Results` carries `lifetime`, so the four structured
+formats carry it with no encoder change at all, and
+`the_lifetime_reaches_the_results_document_with_its_bracket` holds them to it.
+
+```json
+"lifetime": {"released_ns": 327678333759, "exited_ns": 327992275000, "exited_err_ns": 13361200}
+```
+
+**The bracket travels with the length, and that is the part worth keeping.**
+`exited_ns` is when the wait found the program gone and `exited_err_ns` is how
+long before that it was last seen alive, so the exit happened somewhere in
+between and nothing here can say where. A reader given only the length would
+over-trust a residue smaller than the bracket — 313.9 ms of life above, bracketed
+to 13.4 ms — which is exactly the arithmetic a decomposition is about to do with
+it.
+
+**What is left is one line in the text encoder**, which belongs to whoever owns
+`src/encode.rs`: the four structured formats are the ones a decomposition and a
+model read, and the text one is the one a person reads. Until it lands, a person
+running with the default format cannot see the whole that the residue is a
+residue of.
+
+### The tally, for the eighth wave, counted rather than rounded
+
+Four `make check` runs here while two sibling streams ran their own suites, at a
+load average between 9 and 11 on 24 cores. Four failures, **each a different
+test**, and every one of them passed in isolation immediately afterwards:
+
+- `collect::mem::wss::tests::a_process_that_holds_much_and_touches_little_reports_the_little`
+- `tests/scenario_mem.rs::compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where_it_did_not`
+  — this one was **not** the machine and is fixed: it treated a kcompactd wake
+  as proof that compaction ran. The others are.
+- `tests/scenario_gpu.rs::a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power`,
+  with `nvidia-smi` reporting the device at 100 % utilisation and 178 MiB held
+  by somebody else at the moment it ran.
+- `tests/scenario_mem.rs::both_huge_page_backends_read_the_same_promotion_counter`
+
+Plus the `io` pair `docs/scenarios/io.md` already names, which failed again.
+
+The rule this suggests, and it is not a new one: **a red suite on this machine
+is checked against this list before it is believed**. What is worth watching is
+whether the same test starts failing repeatedly, which is a defect, rather than
+a different one each time, which is the machine.
