@@ -204,11 +204,11 @@ them into perceived bugs.
 
 `STATE.md` has the measured numbers, where each roadmap phase stands, and what
 remains in the order it is worth doing. In short: the skeleton is finished and
-89 of 100 sources collect for real, over eight mechanisms: procfs and sysfs,
+96 of 101 sources collect for real, over eight mechanisms: procfs and sysfs,
 `perf_event_open` counting and sampling, netlink, an `LD_PRELOAD` shim, NVML
 through `dlopen`, `af_packet` with a `PACKET_MMAP` ring, and eBPF through raw
 tracepoints, classic tracepoints, kprobes and uprobes. All four join match kinds
-have a producer. 1531 tests pass, of which 269 are scenarios: a workload whose
+have a producer. 1620 tests pass, of which 299 are scenarios: a workload whose
 property the scenario chose, a session that measures it, and a check against
 that property. They found 63 defects, none worked around, and `docs/scenarios/`
 records every one.

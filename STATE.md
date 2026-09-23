@@ -14,7 +14,7 @@ for where the two meet.
 
 The request model, the catalog, the resolver, the validator, the collector
 layer, the emit and encode layers and a join engine all exist and are used by
-every source. Eighty-nine sources across nine families collect for real, over
+every source. Ninety-six sources across nine families collect for real, over
 eight mechanisms: procfs and sysfs, `perf_event_open` counting and sampling,
 netlink, an `LD_PRELOAD` shim, NVML through `dlopen`, `af_packet` with a
 `PACKET_MMAP` ring, and eBPF through raw tracepoints, classic tracepoints,
@@ -41,7 +41,7 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**1531 tests pass**, of which 269 are scenarios: a workload whose property the
+**1620 tests pass**, of which 299 are scenarios: a workload whose property the
 scenario chose, a session that measures it, and a check against that property.
 Twenty-seven of those are the seventh wave's **crossings** -- a question no
 single family can answer, checked against something the workload itself
@@ -65,29 +65,43 @@ the queue wait counted twice, and its residue was +97 ms.
 The fourth wave's 63 defects are recorded in `docs/scenarios/`, 52 closed by the
 fifth wave in `docs/fixes/`.
 
-What is missing is breadth, not skeleton, and there is much less of it than
-there was: **eleven sources have no collector**, and none of them waits on an
-attach kind any more -- they wait on hardware (PEBS, uncore, Intel PT), a vendor
-library (CUPTI), a program type (XDP), or the preload shim pointed elsewhere.
+**And the vertical case runs** -- `ROADMAP.md` phase 4, the milestone it calls
+the real one. A real server on loopback serves requests with delays the test
+injected, declares each through USDT, carries its id in the serving thread's
+task storage, and the block layer reads it back at issue. Each injected delay
+lands in its own row, at `IDENTITY`, with the lock's holder named:
+
+```
+  req:a001   lock_wait  40.06ms  IDENTITY  99.9 %  -> holder_tid=1175602
+  req:a002   device      8.90ms  IDENTITY  97.8 %  -> dev=nvme0n1p6
+```
+
+and the rows sum to the latency the client measured on its own clock within
+**+0.11 % to +0.42 %**, against the roadmap's 10 %.
+
+What is missing is breadth, not skeleton, and very little of it is left: **five
+sources have no collector**, and each waits on something this machine does not
+have or this project has not chosen -- Intel PT on an AMD part, an uncore PMU, an
+XDP program, and NVIDIA's CUPTI.
 
 ---
 
 ## What the numbers say
 
 ```
-100 sources: 89 usable here, 7 unverified, 4 out of reach on this machine.
-89 of them have a collector, covering 97 of their 202 backends.
+101 sources: 90 usable here, 7 unverified, 4 out of reach on this machine.
+96 of them have a collector, covering 104 of their 203 backends.
 ```
 
 Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 89 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 89 sources, 97 backends | a collector is written and registered |
+| What can this machine serve? | 90 | probed now: the file is readable, the event opens, the tracepoint is there |
+| What can this build collect? | 96 sources, 104 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `89` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
+That `90` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
 `make` reapplies the capabilities that every relink drops. Without them the
 whole eBPF and per-cpu perf surface goes, and nothing announces the loss — the
 tool reports fewer sources, which reads like the machine changed rather than
@@ -117,20 +131,19 @@ Per family, sources with a collector:
 
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
-| `mem` | 20 | 23 | 22 |
-| `net` | 14 | 15 | 12 |
+| `mem` | 22 | 23 | 22 |
+| `net` | 15 | 16 | 13 |
+| `io` | 14 | 14 | 14 |
 | `cpu` | 13 | 14 | 12 |
-| `io` | 12 | 14 | 14 |
-| `sched` | 9 | 10 | 9 |
-| `gpu` | 6 | 9 | 6 |
+| `sched` | 10 | 10 | 9 |
+| `gpu` | 7 | 9 | 6 |
 | `proc` | 6 | 6 | 6 |
 | `power` | 5 | 5 | 4 |
 | `runtime` | 4 | 4 | 4 |
 
-**`proc`, `power` and `runtime` are complete**, and `sched`, `net`, `cpu` and
-`io` are one or two short. The gap that used to be the project's whole
-remaining breadth has closed to eleven sources, and the section below names
-what each waits for.
+**`io`, `sched`, `proc`, `power` and `runtime` are complete**, `net` gained
+`net.request` for the vertical case, and the rest are one or two short. The
+section below names what the last five wait for.
 
 ---
 
@@ -197,12 +210,12 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
-| 4 — the vertical case | **partly, and the mechanism is all there now**. The engine decomposes one task's wall clock across on-cpu, runnable and blocked against the program's own life, and the seventh wave's I/O crossing decomposes a read from the block layer up. `fentry` landed in the eighth wave, so the boundaries above the block layer — `read()` to cache miss, FS to submission — have their sources: `io.syscall`, `io.fs`, `io.fsync`. What is left is joining them into one request's budget, and a decomposition that names a *request* rather than a task. |
+| 4 — the vertical case | **done, except the two injections that need root.** One request decomposed boundary by boundary on a real server, every row at `IDENTITY`, the lock's holder and the block device named, and the rows summing to the client's own latency within +0.11 % to +0.42 % against the 10 % asked. `tc netem` and `dm-delay` need root, which is also why the tree's `net_rx` and `net_tx` rows are not decomposed yet. |
 | 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. |
 | 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. What is left is the fourth task: **hot attach and detach**, which is also what `DECISIONS.md` defers concurrent requests on, and what phase 10's escalation assumes. The run-model line it was waiting on is settled: it lives inside a session, and needs no daemon. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
-| 9 — breadth | in progress; **89 of 100 sources, 97 of 202 backends**. The eleven without a collector are named below, and none of them waits on an attach kind any more. |
+| 9 — breadth | nearly done; **96 of 101 sources, 104 of 203 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
 | 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. What is not built is the layer above it: the objective as a request parameter, USE, the escalation, the question-oriented modes. |
 | 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
 
@@ -233,26 +246,22 @@ brief. What it moved:
   run that lost a tenth of its events marks every count, mean and maximum as a
   lower bound rather than a measurement.
 
-### 2. What is left: eleven sources, and no attach kind among what they wait on
+### 2. What is left: five sources, and none of them is this machine's to serve
 
-`fentry` and USDT landed in the eighth wave and took eight sources with them.
-What eleven sources wait on now is hardware, a vendor library, a different
-program type, or a mechanism that already exists pointed somewhere else:
+The ninth wave took six of the eleven -- the page cache, the preload shim
+pointed at `pthread_mutex_lock` and the GL/CUDA entry points, and AMD IBS -- and
+what the last five wait on is not a collector nobody has written:
 
 | Waits for | Sources |
 |---|---|
-| a collector, and nothing else: the BTF walk into `folio.mapping` landed in the seventh wave | `io.pagecache`, `io.readahead` |
-| the preload shim, pointed at `pthread_mutex_lock` and the GL/Vulkan entry points | `sched.mutex`, `gpu.api` |
-| PEBS or IBS | `mem.latency`, `mem.sharing` |
 | uncore PMUs | `mem.bandwidth` |
 | Intel PT, and this machine is AMD | `cpu.flow` |
 | an XDP program, the one type here that can drop packets rather than observe them | `net.xdp` |
 | CUPTI, Nsight | `gpu.kernel`, `gpu.counters` |
 
-**The first two rows are the cheapest breadth left**, and both are collector work
-on a mechanism that is there: `io.pagecache` and `io.readahead` resolve onto a
-raw tracepoint this machine serves and say so, exit 3, and the shim already
-interposes `malloc`.
+**Breadth is no longer where the project's remaining work is.** What is left is
+depth: the vertical case's two network rows, hot attach, the self-benchmark,
+and the layer above the engine.
 
 ### 2b. The eleven defects the fifth wave left
 

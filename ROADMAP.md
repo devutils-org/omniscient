@@ -197,12 +197,19 @@ req:a3f1   total 412 ms
 
 ### Exit criteria
 
-- [ ] The latency budget decomposes on a real server, not a mock.
-- [ ] Every line carries its evidence level.
-- [ ] The sum of the segments ≈ the client-side measured latency (gap < 10 %).
-- [ ] **Ground truth**: a synthetic server with known injected delays (`tc netem`,
+- [x] The latency budget decomposes on a real server, not a mock. *A TCP
+      server on loopback, `examples/vertical-one-request.yml`, ninth wave.*
+- [x] Every line carries its evidence level. *`IDENTITY` for every row read by
+      the request id the serving thread carried.*
+- [x] The sum of the segments ≈ the client-side measured latency (gap < 10 %).
+      *+0.11 % to +0.42 % over six runs, one of them under load; positive every
+      time, as it has to be — the loopback and the parse are the client's.*
+- [~] **Ground truth**: a synthetic server with known injected delays (`tc netem`,
       `dm-delay`, `usleep` under a lock) is decomposed correctly. Without that
       test, nothing proves the correlation is right rather than merely plausible.
+      *`usleep` under a lock and a cold read, each landing in its own row. `tc
+      netem` and `dm-delay` need root, and are the two injections left — which
+      is also why the tree's `net_rx` and `net_tx` rows are not decomposed yet.*
 
 ---
 

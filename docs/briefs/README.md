@@ -21,7 +21,7 @@ table below says which.
 | 6 | `wave-6-collectors.md` | family, plus one layer stream | 22 of 24 sources; `scoped_eq` got its first producer; finding 37 closed |
 | 7 | `wave-7-crossings.md` | question, not family: four crossings plus a shared-layer stream | four crossings, 27 scenarios, no file under `src/` touched by any of them; the sixth wave's twenty requests landed once |
 | 8 | `wave-8-engine.md` | layer: the join engine, the run model, and the two attach kinds left | 89 sources from 81, `between` and a decomposition whose residue sits inside its own resolution; one cross-file change that three programs without a layout test could not refuse |
-| 9 | `wave-9-vertical.md` | the milestone plus breadth: the vertical case, and three streams on six sources nothing blocks | dispatched |
+| 9 | `wave-9-vertical.md` | the milestone plus breadth: the vertical case, and three streams on six sources nothing blocks | phase 4 done within what needs no root; 96 of 101 sources; the first wave held to a testing rule, and the first merge green on its first run |
 
 The four scenario classes are in `wave-4-scenarios.md` and explained for a
 reader in `GUIDE.md`. They are: the capability sweep, the backend comparison,
