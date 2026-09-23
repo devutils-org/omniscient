@@ -1,0 +1,78 @@
+# Two processes on one cache line, then on two.
+#
+#   omn -f examples/mem-false-sharing.yml
+#
+# False sharing is two cores writing different bytes of one line: the line has
+# one owner at a time, so each write takes it from the other core, and the
+# program slows down with nothing in its source to show why. The signal it
+# leaves is HITM -- an access answered by another core's cache holding the line
+# modified -- and IBS reports it per access, with the address.
+#
+# The workload maps a shared page at a fixed address, forks two children, pins
+# them to two cores of different core complexes, and has each increment one
+# byte of the page for a second and a half:
+#
+#   - at 40 TiB the two bytes are 8 apart: one line, fought over;
+#   - at 41 TiB they are 128 apart: two lines, each with one writer.
+#
+# Processes rather than threads because Python's threads take turns on one
+# lock, and two writers that never run at once never fight over anything. The
+# page is MAP_SHARED so that both children write the same physical line; the
+# events opened on the launched program are inherited by both.
+#
+# Each page has its own request, so that the second can say it *sampled* the
+# two-line pass and found no HITM, rather than having no samples to show: its
+# note counts the loads the filter kept beside the HITM among them. The first
+# names the line and the two tasks behind it.
+name: two processes on one cache line, and on two
+format: json
+
+requests:
+  - label: one line
+    source: mem.sharing
+    target: &fight
+      launch:
+        - python3
+        - -c
+        - |
+          import ctypes, os, sys, time
+          libc = ctypes.CDLL(None, use_errno=True)
+          libc.mmap.restype = ctypes.c_void_p
+          libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, ctypes.c_long]
+          TiB = 1 << 40
+          def shared(at):
+              # PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE
+              if libc.mmap(at, 4096, 3, 0x01 | 0x20 | 0x100000, -1, 0) != at:
+                  sys.exit("cannot map a shared page at %#x" % at)
+              return memoryview((ctypes.c_uint8 * 4096).from_address(at)).cast('B')
+          cpus = sorted(os.sched_getaffinity(0))
+          if len(cpus) < 4:
+              sys.exit("two cores that share no L1 need at least four cpus, and there are %d" % len(cpus))
+          pair = (cpus[0], cpus[len(cpus) // 2 - 1])
+          def fight(page, offsets, seconds):
+              children = []
+              for cpu, offset in zip(pair, offsets):
+                  pid = os.fork()
+                  if pid == 0:
+                      os.sched_setaffinity(0, {cpu})
+                      end = time.monotonic() + seconds
+                      while time.monotonic() < end:
+                          for _ in range(5000):
+                              page[offset] = (page[offset] + 1) & 255
+                      os._exit(0)
+                  children.append(pid)
+              for pid in children:
+                  os.waitpid(pid, 0)
+          fight(shared(40 * TiB), (0, 8), 1.5)
+          fight(shared(41 * TiB), (0, 128), 1.5)
+    mode: sample@19999hz
+    emit: [raw, topk]
+    filter: "addr >= 40TiB && addr < 41TiB"
+
+  - label: two lines
+    source: mem.sharing
+    target: *fight
+    mode: sample@19999hz
+    emit: [raw, topk]
+    filter: "addr >= 41TiB && addr < 42TiB"
