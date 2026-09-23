@@ -1,0 +1,30 @@
+# Mutex records produced faster than the pipe drains, on purpose.
+#
+#   omn -f examples/sched-mutex-loss.yml
+#
+# Eight threads, each with a mutex of its own, taking it 200000 times with no
+# hold: 1.6 million acquisitions in a few hundred milliseconds, uncontended, so
+# nothing slows the program down but the program. The pipe holds a megabyte --
+# about 26000 records -- and is drained every 10 ms, so most of them cannot be
+# kept.
+#
+# The shim never blocks the program for the measurement's sake: a record that
+# does not fit is dropped and counted, and the count rides out with the next
+# record that does, or at exit. So the property is exact rather than a rate:
+#
+#   events kept + records dropped == 1 600 000
+#
+# What the run reports, on the development machine:
+#
+#   189141 events, LOSS: 1410859 dropped -- 1600000 exactly
+name: more mutex records than the pipe can carry
+format: text
+
+requests:
+  - label: storm
+    source: sched.mutex
+    target:
+      launch: [target/omn-shim-fixture/mutex, "8", "200000", "0", private]
+    mode: trace
+    emit: [summary]
+    keys: [task]

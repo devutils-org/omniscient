@@ -1,10 +1,20 @@
-//! The heap shim: what `LD_PRELOAD` sees.
+//! The preload shim: what `LD_PRELOAD` sees.
 //!
-//! This library replaces `malloc` and friends in the observed program and
-//! reports every allocation and free to `omn` through a pipe. It is preferred
-//! over a uprobe on `malloc` for one reason: a uprobe costs one to two
-//! microseconds per call, which on an allocation-heavy program is not an
-//! observation but a different program. A shim costs tens of nanoseconds.
+//! This library replaces entry points in the observed program and reports each
+//! call to `omn` through one pipe. It started with `malloc` and friends; since
+//! the ninth wave it also interposes `pthread_mutex_lock` and its neighbours
+//! (`mutex.rs`, for `sched.mutex`) and the host side of the CUDA driver and
+//! Vulkan submission paths (`gpu.rs`, for `gpu.api`). It is preferred over a
+//! uprobe for one reason: a uprobe costs one to two microseconds per call,
+//! which on an allocation- or lock-heavy program is not an observation but a
+//! different program. A shim costs tens of nanoseconds.
+//!
+//! **One pipe, several classes.** A launch carries one shim stream however
+//! many preload sources read it, so what the program is asked to report is a
+//! set of classes, named in `OMN_SHIM_REPORT`: a hook whose class was not
+//! asked for calls straight through and writes nothing. A heap-only run does
+//! not pay for mutex records, and a mutex-only run does not fill the pipe with
+//! allocations.
 //!
 //! Three rules govern everything here, and breaking any one of them corrupts
 //! the program being measured rather than merely the measurement.
@@ -24,15 +34,39 @@
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+
+mod gpu;
+mod mutex;
 
 /// Environment variable naming the file descriptor to report on.
-const FD_VARIABLE: &[u8] = b"OMN_HEAP_FD\0";
+const FD_VARIABLE: &[u8] = b"OMN_SHIM_FD\0";
+
+/// Environment variable naming the classes to report, as a decimal bit set of
+/// the `CLASS_*` values. Absent means the heap alone, which is what the shim
+/// reported before it knew anything else.
+const CLASSES_VARIABLE: &[u8] = b"OMN_SHIM_REPORT\0";
+
+/// What a hook belongs to, and therefore whether it reports at all.
+const CLASS_HEAP: u8 = 1;
+const CLASS_MUTEX: u8 = 2;
+const CLASS_GPU: u8 = 4;
+const CLASSES: [u8; 3] = [CLASS_HEAP, CLASS_MUTEX, CLASS_GPU];
 
 const OP_ALLOC: u8 = 1;
 const OP_FREE: u8 = 2;
-/// Records the shim had to throw away, so the loss is in the data.
+/// Records the shim had to throw away, so the loss is in the data. `ptr`
+/// carries the class they belonged to and `size` how many there were: a mutex
+/// record lost is not an allocation lost, and the reader of each class counts
+/// only its own.
 const OP_DROPPED: u8 = 3;
+/// One acquisition of a pthread mutex, reported when it is released: `ptr` is
+/// the mutex, `size` the wait in nanoseconds and `extra` the hold.
+const OP_MUTEX: u8 = 4;
+/// One call into a GPU API entry point: `ptr` is the entry point's index in
+/// `gpu::ENTRY_POINTS`, `size` the time spent inside it and `extra` what it
+/// returned, sign-extended.
+const OP_GPU_CALL: u8 = 5;
 
 /// One reported event. Fixed size and native endian: both sides are the same
 /// build on the same machine, and a length prefix would cost a branch in the
@@ -43,16 +77,25 @@ struct Record {
     ts_ns: u64,
     ptr: u64,
     size: u64,
+    extra: u64,
     tid: u32,
     op: u8,
-    padding: [u8; 3],
+    /// Per operation; `mutex::FLAG_*` for a mutex record, zero otherwise.
+    flags: u8,
+    padding: [u8; 2],
 }
 
 const RECORD_SIZE: usize = std::mem::size_of::<Record>();
 
 static REPORT_FD: AtomicI32 = AtomicI32::new(-1);
+static REPORTED_CLASSES: AtomicU8 = AtomicU8::new(0);
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
-static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Records dropped and not yet reported, one counter per class.
+static DROPPED: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+fn dropped_slot(class: u8) -> &'static AtomicU64 {
+    &DROPPED[class.trailing_zeros() as usize]
+}
 
 static REAL_MALLOC: AtomicUsize = AtomicUsize::new(0);
 static REAL_CALLOC: AtomicUsize = AtomicUsize::new(0);
@@ -134,17 +177,16 @@ fn resolve(slot: &AtomicUsize, name: &[u8]) -> usize {
     address
 }
 
-fn configure() {
-    if CONFIGURED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    // `getenv` does not allocate, which `std::env::var` does not promise.
-    // SAFETY: `FD_VARIABLE` is NUL-terminated.
-    let value = unsafe { libc::getenv(FD_VARIABLE.as_ptr().cast::<c_char>()) };
+/// Reads a decimal number from the environment without allocating.
+///
+/// `getenv` does not allocate, which `std::env::var` does not promise.
+fn decimal_variable(name: &[u8]) -> Option<i32> {
+    // SAFETY: `name` is NUL-terminated.
+    let value = unsafe { libc::getenv(name.as_ptr().cast::<c_char>()) };
     if value.is_null() {
-        return;
+        return None;
     }
-    let mut fd: i32 = 0;
+    let mut number: i32 = 0;
     let mut index = 0isize;
     loop {
         // SAFETY: walking a NUL-terminated string from the environment.
@@ -152,12 +194,53 @@ fn configure() {
         if !byte.is_ascii_digit() {
             break;
         }
-        fd = fd.saturating_mul(10).saturating_add((byte - b'0') as i32);
+        number = number
+            .saturating_mul(10)
+            .saturating_add((byte - b'0') as i32);
         index += 1;
     }
-    if index > 0 {
+    (index > 0).then_some(number)
+}
+
+fn configure() {
+    // A load first: this runs on every hooked call, and a read-modify-write on
+    // one shared line from every thread of a lock-heavy program is a
+    // contention of its own.
+    if CONFIGURED.load(Ordering::Relaxed) || CONFIGURED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let classes = decimal_variable(CLASSES_VARIABLE).map_or(CLASS_HEAP, |bits| bits as u8);
+    REPORTED_CLASSES.store(classes, Ordering::Relaxed);
+    if let Some(fd) = decimal_variable(FD_VARIABLE) {
         REPORT_FD.store(fd, Ordering::Relaxed);
     }
+}
+
+/// Configured before `main`, while the program has one thread.
+///
+/// Configuring lazily on the first hooked call is still there, for the calls
+/// other constructors make before this one runs; but a lazy configuration
+/// raced by two threads lets the loser see an unset descriptor and skip a
+/// record, and running it here is what makes that window empty in practice.
+extern "C" fn configure_at_load() {
+    configure();
+}
+
+#[used]
+#[link_section = ".init_array"]
+static CONFIGURE_AT_LOAD: extern "C" fn() = configure_at_load;
+
+/// Whether a hook of `class` should report, which is also whether it should
+/// spend anything at all on timing.
+fn reporting(class: u8) -> bool {
+    configure();
+    REPORTED_CLASSES.load(Ordering::Relaxed) & class != 0 && REPORT_FD.load(Ordering::Relaxed) >= 0
+}
+
+/// Whether this thread is already inside a hook, whose own calls are not the
+/// program's and must not be timed or reported.
+fn in_hook() -> bool {
+    IN_HOOK.with(Cell::get)
 }
 
 fn monotonic_ns() -> u64 {
@@ -175,30 +258,64 @@ fn thread_id() -> u32 {
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
+/// Writes one allocator record, when the heap was asked for.
+fn report_heap(op: u8, ptr: *mut c_void, size: u64) {
+    if !reporting(CLASS_HEAP) {
+        return;
+    }
+    report(
+        CLASS_HEAP,
+        Record {
+            ts_ns: monotonic_ns(),
+            ptr: ptr as u64,
+            size,
+            extra: 0,
+            tid: thread_id(),
+            op,
+            flags: 0,
+            padding: [0; 2],
+        },
+    );
+}
+
+fn dropped_record(class: u8, count: u64) -> Record {
+    Record {
+        ts_ns: monotonic_ns(),
+        ptr: u64::from(class),
+        size: count,
+        extra: 0,
+        tid: thread_id(),
+        op: OP_DROPPED,
+        flags: 0,
+        padding: [0; 2],
+    }
+}
+
 /// Writes one record, dropping it rather than blocking the program.
-fn report(op: u8, ptr: *mut c_void, size: u64) {
+fn report(class: u8, record: Record) {
     configure();
     let fd = REPORT_FD.load(Ordering::Relaxed);
     if fd < 0 {
         return;
     }
+    let slot = dropped_slot(class);
 
     // A drop that is never reported is a drop nobody can account for, so the
     // backlog rides along with the next record that gets through.
-    let dropped = DROPPED.swap(0, Ordering::Relaxed);
-    if dropped > 0 && !write_record(fd, OP_DROPPED, std::ptr::null_mut(), dropped) {
+    let dropped = slot.swap(0, Ordering::Relaxed);
+    if dropped > 0 && !write_record(fd, &dropped_record(class, dropped)) {
         // The pipe is full, so the record this call was for is not going to
         // fit either: it goes back with the backlog rather than leaving
         // through the `return` uncounted. Counting the backlog alone is how
         // the counter came to report seven drops for thirty-one thousand lost
         // records -- one per burst, because the first record of a burst
         // incremented it and every record behind it fell out here.
-        DROPPED.fetch_add(dropped + 1, Ordering::Relaxed);
+        slot.fetch_add(dropped + 1, Ordering::Relaxed);
         return;
     }
 
-    if !write_record(fd, op, ptr, size) {
-        DROPPED.fetch_add(1, Ordering::Relaxed);
+    if !write_record(fd, &record) {
+        slot.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -227,39 +344,41 @@ extern "C" fn flush_at_exit() {
     if fd < 0 {
         return;
     }
-    let dropped = DROPPED.swap(0, Ordering::Relaxed);
-    if dropped == 0 {
-        return;
-    }
-    for _ in 0..FLUSH_ATTEMPTS {
-        if write_record(fd, OP_DROPPED, std::ptr::null_mut(), dropped) {
-            return;
+    let mut attempts = 0;
+    for class in CLASSES {
+        let slot = dropped_slot(class);
+        let dropped = slot.swap(0, Ordering::Relaxed);
+        if dropped == 0 {
+            continue;
         }
-        // SAFETY: sleeping for a millisecond takes no memory and cannot fail
-        // in a way that matters here.
-        unsafe { libc::usleep(1_000) };
+        loop {
+            if write_record(fd, &dropped_record(class, dropped)) {
+                break;
+            }
+            attempts += 1;
+            if attempts >= FLUSH_ATTEMPTS {
+                // Put it back rather than pretend: nothing else will read it,
+                // but a counter that silently zeroes itself is how this
+                // started.
+                slot.fetch_add(dropped, Ordering::Relaxed);
+                return;
+            }
+            // SAFETY: sleeping for a millisecond takes no memory and cannot
+            // fail in a way that matters here.
+            unsafe { libc::usleep(1_000) };
+        }
     }
-    // Put it back rather than pretend: nothing else will read it, but a
-    // counter that silently zeroes itself is how this started.
-    DROPPED.fetch_add(dropped, Ordering::Relaxed);
 }
 
 #[used]
 #[link_section = ".fini_array"]
 static FLUSH_AT_EXIT: extern "C" fn() = flush_at_exit;
 
-fn write_record(fd: i32, op: u8, ptr: *mut c_void, size: u64) -> bool {
-    let record = Record {
-        ts_ns: monotonic_ns(),
-        ptr: ptr as u64,
-        size,
-        tid: thread_id(),
-        op,
-        padding: [0; 3],
-    };
+fn write_record(fd: i32, record: &Record) -> bool {
     // SAFETY: writing `RECORD_SIZE` bytes from a struct of exactly that size.
     // A write this small is atomic on a pipe, so records never interleave.
-    let written = unsafe { libc::write(fd, (&raw const record).cast::<c_void>(), RECORD_SIZE) };
+    let written =
+        unsafe { libc::write(fd, (record as *const Record).cast::<c_void>(), RECORD_SIZE) };
     written == RECORD_SIZE as isize
 }
 
@@ -288,7 +407,7 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
     let real: extern "C" fn(usize) -> *mut c_void = std::mem::transmute(real);
     let pointer = real(size);
     if !pointer.is_null() {
-        guarded(|| report(OP_ALLOC, pointer, size as u64));
+        guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
     }
     pointer
 }
@@ -306,7 +425,7 @@ pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
     let real: extern "C" fn(usize, usize) -> *mut c_void = std::mem::transmute(real);
     let pointer = real(count, size);
     if !pointer.is_null() {
-        guarded(|| report(OP_ALLOC, pointer, count.saturating_mul(size) as u64));
+        guarded(|| report_heap(OP_ALLOC, pointer, count.saturating_mul(size) as u64));
     }
     pointer
 }
@@ -329,10 +448,10 @@ pub unsafe extern "C" fn realloc(pointer: *mut c_void, size: usize) -> *mut c_vo
     // keeps the live set correct without the reader needing a special case.
     guarded(|| {
         if !pointer.is_null() {
-            report(OP_FREE, pointer, 0);
+            report_heap(OP_FREE, pointer, 0);
         }
         if !fresh.is_null() {
-            report(OP_ALLOC, fresh, size as u64);
+            report_heap(OP_ALLOC, fresh, size as u64);
         }
     });
     fresh
@@ -354,7 +473,7 @@ pub unsafe extern "C" fn free(pointer: *mut c_void) {
     if real == 0 {
         return;
     }
-    guarded(|| report(OP_FREE, pointer, 0));
+    guarded(|| report_heap(OP_FREE, pointer, 0));
     let real: extern "C" fn(*mut c_void) = std::mem::transmute(real);
     real(pointer);
 }
@@ -375,7 +494,7 @@ pub unsafe extern "C" fn posix_memalign(
     let result = real(out, alignment, size);
     if result == 0 && !out.is_null() {
         let pointer = *out;
-        guarded(|| report(OP_ALLOC, pointer, size as u64));
+        guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
     }
     result
 }
@@ -385,25 +504,44 @@ mod tests {
     use super::*;
 
     /// The record layout is an agreement between this library and the reader in
-    /// `src/collect/mem/heap.rs`, and nothing in the type system holds the two
-    /// together: the reader decodes by offset from a byte stream. If they ever
-    /// disagree, every allocation is misparsed and the numbers stay plausible,
+    /// `src/collect/mem/heap/mod.rs`, and nothing in the type system holds the
+    /// two together: the reader decodes by offset from a byte stream. If they
+    /// ever disagree, every record is misparsed and the numbers stay plausible,
     /// which is the worst way for it to break. So both sides assert the layout.
     #[test]
     fn the_record_layout_matches_what_the_reader_decodes() {
-        assert_eq!(RECORD_SIZE, 32, "the reader hardcodes 32 bytes per record");
+        assert_eq!(RECORD_SIZE, 40, "the reader hardcodes 40 bytes per record");
         assert_eq!(std::mem::offset_of!(Record, ts_ns), 0);
         assert_eq!(std::mem::offset_of!(Record, ptr), 8);
         assert_eq!(std::mem::offset_of!(Record, size), 16);
-        assert_eq!(std::mem::offset_of!(Record, tid), 24);
-        assert_eq!(std::mem::offset_of!(Record, op), 28);
+        assert_eq!(std::mem::offset_of!(Record, extra), 24);
+        assert_eq!(std::mem::offset_of!(Record, tid), 32);
+        assert_eq!(std::mem::offset_of!(Record, op), 36);
+        assert_eq!(std::mem::offset_of!(Record, flags), 37);
     }
 
     #[test]
     fn the_operation_codes_are_the_ones_the_reader_expects() {
         // Named here and in the reader; a silent renumbering would turn every
         // allocation into a free.
-        assert_eq!((OP_ALLOC, OP_FREE, OP_DROPPED), (1, 2, 3));
+        assert_eq!(
+            (OP_ALLOC, OP_FREE, OP_DROPPED, OP_MUTEX, OP_GPU_CALL),
+            (1, 2, 3, 4, 5)
+        );
+        assert_eq!((CLASS_HEAP, CLASS_MUTEX, CLASS_GPU), (1, 2, 4));
+    }
+
+    /// Each class counts its own drops, so a burst of lock records the pipe
+    /// could not hold is not charged to the heap sources reading beside it.
+    #[test]
+    fn every_class_has_a_drop_counter_of_its_own() {
+        let slots: Vec<*const AtomicU64> = CLASSES
+            .iter()
+            .map(|&class| dropped_slot(class) as *const AtomicU64)
+            .collect();
+        assert_ne!(slots[0], slots[1]);
+        assert_ne!(slots[1], slots[2]);
+        assert_ne!(slots[0], slots[2]);
     }
 
     /// The bump region exists to serve the dynamic loader before `dlsym` has

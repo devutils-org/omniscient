@@ -222,6 +222,25 @@ fn the_examples_still_say_what_these_tests_assert() {
             "sched-futex-known-wait.yml",
             format!("HOLD = {}", FUTEX_HOLD_MS as f64 / 1000.0),
         ),
+        (
+            "sched-mutex-known-hold.yml",
+            format!("\"{MUTEX_THREADS}\", \"{MUTEX_PER_THREAD}\", \"{MUTEX_HOLD_US}\""),
+        ),
+        (
+            "sched-mutex-uncontended.yml",
+            format!(
+                "\"1\", \"{}\", \"{MUTEX_HOLD_US}\"",
+                MUTEX_THREADS * MUTEX_PER_THREAD
+            ),
+        ),
+        (
+            "sched-mutex-with-heap.yml",
+            format!("\"2\", \"{}\"", MUTEX_WITH_HEAP / 2),
+        ),
+        (
+            "sched-mutex-loss.yml",
+            format!("\"{STORM_THREADS}\", \"{STORM_PER_THREAD}\", \"0\", private"),
+        ),
     ];
     for (file, number) in expected {
         let path = format!("examples/{file}");
@@ -268,6 +287,10 @@ fn every_session_this_family_ships_is_understood() {
         ("sched-forced-backends.yml", 0),
         ("sched-half-blocked.yml", 0),
         ("sched-migrations.yml", 0),
+        ("sched-mutex-known-hold.yml", 0),
+        ("sched-mutex-loss.yml", 0),
+        ("sched-mutex-uncontended.yml", 0),
+        ("sched-mutex-with-heap.yml", 0),
         ("sched-not-implemented.yml", 0),
         ("sched-round-trips.yml", 0),
         ("sched-sweep.yml", 0),
@@ -1195,8 +1218,8 @@ fn a_source_with_no_collector_is_refused_with_its_own_exit_code() {
         "`no collector` has an exit code of its own:\n{text}"
     );
     assert!(
-        text.contains("no collector is written for `sched.mutex`"),
-        "the refusal must name the source:\n{text}"
+        text.contains("no collector is written for `sched.mutex` on backend `bpf:uprobe`"),
+        "the refusal must name the source and the backend pinned:\n{text}"
     );
     assert!(
         text.contains("The request itself is valid"),
@@ -2440,4 +2463,445 @@ fn a_bucketed_source_does_not_stamp_every_row_of_a_window_with_one_instant() {
             distinct.len()
         );
     }
+}
+
+// ===========================================================================
+// The ninth wave: `sched.mutex`, through the preload shim
+//
+// The shim that interposed `malloc` interposes `pthread_mutex_lock` now, and
+// every scenario here runs one C program whose property the command line
+// chose: how many threads, how many acquisitions, how long each hold. The
+// program also times its own waits and holds with the clock the tool uses and
+// prints them, which gives each run a second reference the tool's interval is
+// nested inside: the shim is *in* the call the program timed, so the tool's
+// wait can only be shorter than the program's, and its hold only longer.
+// ===========================================================================
+
+/// Threads, acquisitions per thread and hold of
+/// `examples/sched-mutex-known-hold.yml`.
+const MUTEX_THREADS: u64 = 2;
+const MUTEX_PER_THREAD: u64 = 500;
+const MUTEX_HOLD_US: u64 = 200;
+
+/// Acquisitions in `examples/sched-mutex-with-heap.yml`, over two threads.
+const MUTEX_WITH_HEAP: u64 = 600;
+
+/// Threads and acquisitions per thread of `examples/sched-mutex-loss.yml`.
+const STORM_THREADS: u64 = 8;
+const STORM_PER_THREAD: u64 = 200_000;
+
+const MUTEX_FIXTURE_SOURCE: &str = r#"
+/* BEGIN FIXTURE -- omn's mutex fixture. Threads contend one pthread mutex a
+ * number of times the command line chose, holding it for a time the command
+ * line chose, and the program times its own waits and holds with the clock
+ * the tool uses. It reports on stderr, because stdout is where `omn` writes.
+ *
+ *   mutex <threads> <acquisitions per thread> <hold us> [shared|private]
+ *
+ * `shared`, the default, has every thread take one mutex. `private` gives each
+ * thread its own, so nothing is contended and the only limit on the rate is
+ * the program itself -- which is what the loss scenario needs. */
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static pthread_mutex_t shared_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_barrier_t start;
+static long per_thread;
+static unsigned long long hold_ns;
+
+static unsigned long long now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (unsigned long long)t.tv_sec * 1000000000ull + (unsigned long long)t.tv_nsec;
+}
+
+struct tally { pthread_mutex_t *lock; unsigned long long wait_ns, hold_ns, min_hold_ns; long taken; };
+
+static void *worker(void *argument) {
+    struct tally *tally = argument;
+    pthread_mutex_t *lock = tally->lock;
+    tally->min_hold_ns = ~0ull;
+    /* Every thread starts together, so the contention is the workload's and
+     * not an accident of how long thread creation took. */
+    pthread_barrier_wait(&start);
+    for (long i = 0; i < per_thread; i++) {
+        unsigned long long asked = now_ns();
+        pthread_mutex_lock(lock);
+        unsigned long long acquired = now_ns();
+        /* A spin rather than a sleep: a sleep's timer slack would make the
+         * hold whatever the kernel chose, and this is the number the tool is
+         * checked against. */
+        while (now_ns() - acquired < hold_ns) {
+        }
+        unsigned long long released = now_ns();
+        pthread_mutex_unlock(lock);
+        tally->wait_ns += acquired - asked;
+        tally->hold_ns += released - acquired;
+        if (released - acquired < tally->min_hold_ns)
+            tally->min_hold_ns = released - acquired;
+        tally->taken++;
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 4 && argc != 5) {
+        fprintf(stderr, "usage: %s <threads> <acquisitions per thread> <hold us> [shared|private]\n",
+                argv[0]);
+        return 2;
+    }
+    int threads = atoi(argv[1]);
+    per_thread = atol(argv[2]);
+    hold_ns = strtoull(argv[3], NULL, 10) * 1000ull;
+    if (threads < 1 || threads > 64 || per_thread < 1) {
+        fprintf(stderr, "threads must be 1 to 64 and acquisitions at least 1\n");
+        return 2;
+    }
+    int private = argc == 5 && strcmp(argv[4], "private") == 0;
+    pthread_t ids[64];
+    struct tally tallies[64];
+    static pthread_mutex_t own[64];
+    memset(tallies, 0, sizeof tallies);
+    for (int t = 0; t < threads; t++) {
+        pthread_mutex_init(&own[t], NULL);
+        tallies[t].lock = private ? &own[t] : &shared_lock;
+    }
+    pthread_barrier_init(&start, NULL, (unsigned)threads);
+    for (int t = 0; t < threads; t++)
+        pthread_create(&ids[t], NULL, worker, &tallies[t]);
+    unsigned long long wait = 0, hold = 0, min_hold = ~0ull;
+    long taken = 0;
+    for (int t = 0; t < threads; t++) {
+        pthread_join(ids[t], NULL);
+        wait += tallies[t].wait_ns;
+        hold += tallies[t].hold_ns;
+        taken += tallies[t].taken;
+        if (tallies[t].min_hold_ns < min_hold)
+            min_hold = tallies[t].min_hold_ns;
+    }
+    fprintf(stderr, "fixture: mutex=%llu private=%d threads=%d acquisitions=%ld wait_ns=%llu hold_ns=%llu min_hold_ns=%llu\n",
+            (unsigned long long)(unsigned long)&shared_lock, private, threads, taken, wait, hold, min_hold);
+    return 0;
+}
+/* END FIXTURE */
+"#;
+
+/// Where the fixture is built. The examples launch it by this path, relative
+/// to the repository root, so it is not `CARGO_TARGET_TMPDIR`.
+fn mutex_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/omn-shim-fixture/mutex")
+}
+
+/// Builds the fixture once per test process, or says why it cannot.
+fn mutex_fixture() -> Result<PathBuf, String> {
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let path = mutex_fixture_path();
+            let dir = path.parent().expect("a directory");
+            std::fs::create_dir_all(dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            let source = dir.join("mutex.c");
+            std::fs::write(&source, MUTEX_FIXTURE_SOURCE).map_err(|error| error.to_string())?;
+            // Built beside and renamed, so a half-written binary is never at
+            // the path the examples launch.
+            let partial = dir.join(format!("mutex.{}", std::process::id()));
+            let built = Command::new("cc")
+                .args(["-O1", "-pthread", "-o"])
+                .arg(&partial)
+                .arg(&source)
+                .output()
+                .map_err(|error| {
+                    format!("no C compiler (`cc`) to build the fixture with: {error}")
+                })?;
+            if !built.status.success() {
+                return Err(format!(
+                    "the mutex fixture did not build:\n{}",
+                    String::from_utf8_lossy(&built.stderr)
+                ));
+            }
+            std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+            Ok(path)
+        })
+        .clone()
+}
+
+macro_rules! needs_mutex_fixture {
+    () => {
+        if let Err(reason) = mutex_fixture() {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+}
+
+/// The `fixture: key=value ...` line the fixture printed on stderr, which the
+/// launched program shares with the tool.
+fn fixture_said(output: &Output) -> std::collections::BTreeMap<String, u64> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("fixture: "))
+        .next_back()
+        .unwrap_or_else(|| panic!("the fixture printed nothing:\n{stderr}"))
+        .split_whitespace()
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.parse().expect("a number")))
+        .collect()
+}
+
+/// One unsigned attribute of every raw event.
+fn raw_uints(result: &Value, name: &str) -> Vec<u64> {
+    raw_events(result)
+        .iter()
+        .map(|event| {
+            event
+                .get(name)
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| panic!("an event without `{name}`: {event:?}"))
+        })
+        .collect()
+}
+
+/// Two threads, one mutex, 500 acquisitions each held 200 us.
+///
+/// Two things are known independently of the tool, and each is checked:
+///
+/// - **the count**, exactly: a thousand acquisitions of one mutex, and no
+///   other mutex in the program;
+/// - **every hold at least 200 us**, because the fixture spins until it is.
+///
+/// And against the program's own clock, both ways: the tool's total wait is at
+/// most the program's, and its total hold is at least the program's and not
+/// much more. That the waits are *long* is the next test's separation, against
+/// the same program with one thread.
+///
+/// What is deliberately not asserted is a floor on the waits. The argument for
+/// one looks sound -- the threads start together, so whichever finishes last
+/// was waiting through every hold of the other, 100 ms at least -- and it held
+/// on an idle machine, where one thread waited once for 101 ms. Inside the
+/// full suite it did not: 54 ms, and the fixture's own clock said 55 ms. A
+/// thread that is runnable with no cpu to run on, before its first lock or
+/// between an unlock and the next, is neither waiting nor holding, and on a
+/// loaded machine that is where the other 46 ms went. The tool and the
+/// program agreed; the expectation was about the scheduler.
+#[test]
+fn every_acquisition_of_a_contended_mutex_is_one_event_with_its_wait_and_hold() {
+    needs_mutex_fixture!();
+    let output = session("sched-mutex-known-hold.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let said = fixture_said(&output);
+    let results = results(&output);
+    let result = labelled(&results, "contended");
+    let acquisitions = MUTEX_THREADS * MUTEX_PER_THREAD;
+    let hold_ns = MUTEX_HOLD_US * 1_000;
+
+    assert_eq!(
+        said["acquisitions"], acquisitions,
+        "the fixture did its part"
+    );
+    assert_eq!(
+        dropped(result),
+        0,
+        "a thousand records fit the pipe:\n{text}"
+    );
+    let addresses = raw_uints(result, "addr");
+    assert_eq!(
+        addresses.len() as u64,
+        acquisitions,
+        "the program took its mutex {acquisitions} times and the run reports {} acquisitions",
+        addresses.len()
+    );
+    assert!(
+        addresses.iter().all(|&address| address == said["mutex"]),
+        "the program has one mutex, at {:#x}, and the run reports others: {:?}",
+        said["mutex"],
+        addresses
+            .iter()
+            .filter(|&&address| address != said["mutex"])
+            .take(5)
+            .collect::<Vec<_>>()
+    );
+
+    let holds = raw_uints(result, "hold_ns");
+    let shortest = *holds.iter().min().expect("a hold");
+    assert!(
+        shortest >= hold_ns,
+        "every hold is at least {hold_ns} ns by construction, and one is reported as {shortest} ns"
+    );
+    let waits = raw_uints(result, "wait_ns");
+    let (waited, held): (u64, u64) = (waits.iter().sum(), holds.iter().sum());
+    eprintln!(
+        "{acquisitions} acquisitions: the tool saw {waited} ns waiting and {held} ns holding; \
+         the program timed {} ns and {} ns",
+        said["wait_ns"], said["hold_ns"]
+    );
+
+    assert!(
+        waited <= said["wait_ns"],
+        "the shim times inside the call the program timed, so its wait ({waited} ns) cannot \
+         exceed the program's ({} ns)",
+        said["wait_ns"]
+    );
+    assert!(
+        held >= said["hold_ns"] && held <= said["hold_ns"] + said["hold_ns"] / 10,
+        "the shim's holds enclose the program's by a few instructions each: {held} ns against \
+         the program's {} ns",
+        said["hold_ns"]
+    );
+}
+
+/// The same thousand holds of 200 us with one thread: the holds are the same,
+/// the waits vanish.
+///
+/// This is the separation `sched.futex` cannot make, because an uncontended
+/// mutex makes no syscall: the futex source sees nothing for this program, and
+/// this one sees every acquisition with a wait of tens of nanoseconds.
+#[test]
+fn a_mutex_nobody_else_wants_is_held_as_long_and_waited_for_not_at_all() {
+    needs_mutex_fixture!();
+    let alone = session("sched-mutex-uncontended.yml", &["--format", "json"]);
+    assert_eq!(exit_code(&alone), 0, "{}", spoken(&alone));
+    let contended = session("sched-mutex-known-hold.yml", &["--format", "json"]);
+    assert_eq!(exit_code(&contended), 0, "{}", spoken(&contended));
+
+    let alone_said = fixture_said(&alone);
+    let alone_results = results(&alone);
+    let alone_result = labelled(&alone_results, "alone");
+    let contended_results = results(&contended);
+    let contended_result = labelled(&contended_results, "contended");
+
+    let acquisitions = MUTEX_THREADS * MUTEX_PER_THREAD;
+    let alone_holds = raw_uints(alone_result, "hold_ns");
+    assert_eq!(alone_holds.len() as u64, acquisitions);
+    assert!(alone_holds
+        .iter()
+        .all(|&hold| hold >= MUTEX_HOLD_US * 1_000));
+
+    let alone_waited: u64 = raw_uints(alone_result, "wait_ns").iter().sum();
+    let contended_waited: u64 = raw_uints(contended_result, "wait_ns").iter().sum();
+    eprintln!(
+        "{acquisitions} acquisitions of a 200 us hold: {alone_waited} ns of waiting alone, \
+         {contended_waited} ns with a second thread"
+    );
+    assert!(
+        alone_waited <= alone_said["wait_ns"],
+        "nested inside the program's own timing: {alone_waited} ns against {} ns",
+        alone_said["wait_ns"]
+    );
+    assert!(
+        alone_waited.saturating_mul(100) < contended_waited,
+        "one thread alone waits for nothing and two wait for each other's holds; the run \
+         reports {alone_waited} ns against {contended_waited} ns, which is not a separation"
+    );
+}
+
+/// A mutex source and a heap source on one launch read one pipe, and neither
+/// decodes the other's records as its own.
+#[test]
+fn locks_and_allocations_of_one_program_are_read_from_one_pipe() {
+    needs_mutex_fixture!();
+    let output = session("sched-mutex-with-heap.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    assert_eq!(exit_code(&output), 0, "{text}");
+    assert!(
+        !text.contains("disagree"),
+        "two preload sources of one launch must share the program's environment:\n{text}"
+    );
+    let results = results(&output);
+    let locks = labelled(&results, "locks");
+    let heap = labelled(&results, "heap");
+    assert_eq!(
+        events_seen(locks),
+        MUTEX_WITH_HEAP,
+        "the program took its mutex {MUTEX_WITH_HEAP} times:\n{text}"
+    );
+    for (label, result) in [("locks", locks), ("heap", heap)] {
+        assert_eq!(
+            result["losses"]["undecoded"].as_u64(),
+            Some(0),
+            "`{label}` failed to decode a record another source on the pipe wrote:\n{text}"
+        );
+        assert_eq!(dropped(result), 0, "`{label}` lost records:\n{text}");
+    }
+    assert!(
+        events_seen(heap) > 0,
+        "the fixture allocates its thread stacks' bookkeeping, and the heap source saw none:\n{text}"
+    );
+}
+
+/// More records than the pipe can hold, and every one of them accounted for.
+///
+/// The shim drops rather than blocking the program, and counts what it drops;
+/// so however much is lost, kept plus dropped is exactly what the program did.
+#[test]
+fn a_mutex_storm_the_pipe_cannot_carry_is_counted_to_the_last_record() {
+    needs_mutex_fixture!();
+    let output = session("sched-mutex-loss.yml", &["--format", "json"]);
+    let text = spoken(&output);
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let said = fixture_said(&output);
+    let results = results(&output);
+    let result = labelled(&results, "storm");
+    let expected = STORM_THREADS * STORM_PER_THREAD;
+    assert_eq!(said["acquisitions"], expected, "the fixture did its part");
+    let (kept, lost) = (events_seen(result), dropped(result));
+    eprintln!("{expected} acquisitions: {kept} kept, {lost} dropped and counted");
+    if lost == 0 {
+        eprintln!(
+            "note: the pipe kept up with {expected} acquisitions on this machine, so the loss \
+             path was not exercised this run; the count still has to be exact"
+        );
+    }
+    assert_eq!(
+        kept + lost,
+        expected,
+        "kept and dropped must add up to what the program did: {kept} + {lost} against \
+         {expected}\n{text}"
+    );
+}
+
+/// The two requests the preload backend cannot serve, each refused with the
+/// reason rather than answered with nothing.
+#[test]
+fn a_mutex_request_the_shim_cannot_serve_is_refused_by_name() {
+    // A process already running: a preloaded library is given at exec.
+    let running = omn(&[
+        "sched.mutex",
+        "--mode",
+        "trace",
+        "--emit",
+        "summary",
+        "--pid",
+        &std::process::id().to_string(),
+        "-d",
+        "50ms",
+    ]);
+    let text = spoken(&running);
+    assert_eq!(exit_code(&running), 3, "{text}");
+    assert!(
+        text.contains("at exec"),
+        "the refusal must say why:\n{text}"
+    );
+
+    // Stacks, which the uprobe backend could take and the shim cannot.
+    let stacks = omn(&[
+        "sched.mutex",
+        "--mode",
+        "trace",
+        "--emit",
+        "stack",
+        "--",
+        "/bin/true",
+    ]);
+    let text = spoken(&stacks);
+    assert_eq!(exit_code(&stacks), 3, "{text}");
+    assert!(
+        text.contains("carries no stacks") && text.contains("sched.futex"),
+        "the refusal must say what does carry them:\n{text}"
+    );
 }

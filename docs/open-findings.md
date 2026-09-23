@@ -5855,3 +5855,93 @@ assert!((sum - expected).abs() <= 2.0 * f64::EPSILON * sum.abs().max(1.0));
 ```
 
 or asserting the summary's own `sum` field, if it carries one, exactly.
+
+## Needs from another stream — the ninth wave, stream S (the shim, pointed elsewhere)
+
+None blocking: `sched.mutex` and `gpu.api` both collect, with their
+scenarios, and `docs/families/sched.md` and `docs/families/gpu.md` are the
+record. Each item is a place the shim's sources are limited by a file this
+stream does not own, or an answer to a request earlier waves addressed to it.
+
+### To whoever owns `src/encode.rs`: a loss reason beside clean counters is never printed
+
+`Losses::note` records a reason, and the text encoder prints the reasons only
+when a counter is non-zero (`encode.rs`, the "no loss: every read succeeded"
+branch). The heap stream's "no allocation was reported for pid ...: statically
+linked, own allocator, never calls malloc" was a reason from the first wave
+and has never once been printed. Found when `gpu.api` on a ctypes program
+returned a silent zero. Worked around on this side -- the sentence is
+`Collector::notes()` now, for all five preload collectors -- but any other
+collector that notes an explanation without losing anything has the same
+invisible sentence. Either print `reasons` whatever the counters say, or make
+`note` on clean counters a debug assertion so the next one is found in a test.
+
+### To whoever owns `src/capabilities.rs`: a probe for `dynamic-linking`
+
+Every preload source -- `mem.heap.*`, `sched.mutex`, `gpu.api` -- requires
+`dynamic-linking`, and nothing answers it, so every run of any of them prints
+"unverified requirement". Whether the *target* is dynamically linked cannot be
+known before it exists; whether this *build* can preload anything can:
+
+```rust
+"dynamic-linking" => match crate::collect::mem::heap::find_shim() {
+    Ok(_) => Probe::Available,
+    Err(reason) => Probe::Missing(reason),   // names the path and `make`
+},
+```
+
+That also turns a `cargo build` without `--workspace` -- the silent failure
+`CLAUDE.md` warns about -- into a `no` in `omn list` instead of a `?`.
+
+### To whoever owns `src/resolve.rs`: the `hist` warning names a kernel a preload backend does not have
+
+"`trace` with `hist` aggregates in userspace unless a budget lets the resolver
+move the histogram into the kernel; consider --budget" is printed for
+`sched.mutex` and `gpu.api`, whose only implemented backend is `preload`. No
+budget moves anything there. The warning wants the same guard the pushdown
+credit already has: only for a backend whose id begins with `bpf`.
+
+### To stream B, for `catalog/mem.yaml`: three filter fields on `mem.heap.alloc`
+
+Answering stream J's "a free that carries its size" (the eighth wave, above):
+**done, under another name.** A free now carries `freed_bytes`, the size its
+allocation was made with, or `freed_untracked: 1` when the allocation was never
+seen. `bytes` stays zero on a free, because it is the source's value and every
+sum and mean of `mem.heap.alloc` is taken over it; a free counted at its size
+would double every total. So the predicate is
+
+```
+closes: "op == 'free' && freed_bytes >= 1048576"
+```
+
+`closes:` does not appear to be checked against `filter_fields`, but `--filter`
+is, and `mem.heap.alloc` declares `[bytes, comm]`. Wanted:
+
+```yaml
+  filter_fields: [bytes, comm, op, freed_bytes, freed_untracked]
+```
+
+### To stream A's successor on `src/bpf/usdt.rs`: glibc's mutex probes, acknowledged
+
+The seventh-wave note "To `sched`, for `sched.mutex`: glibc publishes the
+mutex" is right, and it is the backend worth adding before the uprobe: it
+reaches a process already running, which a preload never can. Not done in this
+wave, which was the shim's. The catalog line would be this stream's; what it
+needs from `usdt.rs` is to attach a library's probes (`libc:mutex_entry`,
+`mutex_acquired`, `mutex_release`) in a pid that is already running, with one
+program per site as it does today, and hand back `(tid, mutex, ts)` per hit.
+
+### To the coordinator
+
+- **Seven sessions** to add to `examples/README.md` and `GUIDE.md`; the rows
+  are at the end of `docs/families/sched.md` (four) and `docs/families/gpu.md`
+  (three). `examples/sched-not-implemented.yml` was rewritten, not added.
+- **`OMN_HEAP_FD` is `OMN_SHIM_FD`**, and a new `OMN_SHIM_REPORT` names the
+  classes. `docs/families/mem.md`, `docs/families/runner.md` and
+  `docs/scenarios/cross-memory.md` mention the old name as history, which is
+  still true of when they were written; nothing tests either name.
+- **The shim record is 40 bytes**, not 32, with an `extra` field and a `flags`
+  byte. Both sides assert the layout, as before.
+- `STATE.md`'s "132 ns per event" for the shim is the heap's wave-two figure.
+  For a mutex record it is about 415 ns in a release build, nearly all of it
+  the one `write(2)` per record; `docs/families/sched.md` has the table.

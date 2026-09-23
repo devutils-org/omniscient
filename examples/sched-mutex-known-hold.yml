@@ -1,0 +1,50 @@
+# Two threads, one pthread mutex, a known number of acquisitions held for a
+# known time.
+#
+#   omn -f examples/sched-mutex-known-hold.yml
+#
+#   The fixture is built by `cargo test --test scenario_sched`, from the C
+#   source in that file. To build it by hand:
+#
+#     mkdir -p target/omn-shim-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE -- omn.s mutex/,/^\/\* END FIXTURE/p' tests/scenario_sched.rs \
+#       | cc -O1 -pthread -x c -o target/omn-shim-fixture/mutex -
+#
+# Each thread takes the mutex 500 times and holds it for 200 us, spinning
+# rather than sleeping so the hold is the one the command line chose and not
+# whatever the timer slack made of it. The threads start together behind a
+# barrier. So, whatever the machine is doing:
+#
+#   - exactly 1000 acquisitions of one mutex;
+#   - every hold at least 200 us.
+#
+# On an idle machine the thread that finishes last waits through every hold of
+# the other, so the waits add up to about 500 x 200 us = 100 ms. That is not a
+# floor on a loaded one: a thread that is runnable with no cpu is neither
+# waiting nor holding, and inside the full test suite the same run measured
+# 54 ms -- with the fixture's own clock saying 55 ms.
+#
+# The fixture also times each wait and hold itself, with the same clock, and
+# prints the totals on stderr. The shim's interval is nested inside the
+# program's -- it is in the call the program timed -- so the tool's wait can
+# only be shorter than the program's and its hold only longer.
+#
+# What the run reports, on the development machine:
+#
+#   1000 events; one thread waited once, for 101 ms, and 499 times for ~25 ns
+#
+# A glibc mutex is not fair. The thread that releases it can take it again
+# before the one it woke gets the cpu, so one thread ran its 500 acquisitions
+# almost back to back while the other slept through all of them. That is not a
+# defect of the measurement; it is the measurement.
+name: a mutex held for a known time
+format: text
+
+requests:
+  - label: contended
+    source: sched.mutex
+    target:
+      launch: [target/omn-shim-fixture/mutex, "2", "500", "200"]
+    mode: trace
+    emit: [hist, topk:5, raw, summary]
+    keys: [task]

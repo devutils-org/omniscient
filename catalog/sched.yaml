@@ -229,11 +229,28 @@
     - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:pthread_mutex_lock"], cost: high,
        degraded: "~1-2 us per call: serializes what it measures on hot locks"}
   modes: [trace]
+  # `stack` is the uprobe's: the shim refuses it by name, because walking a
+  # stack inside every lock would cost more than the lock.
   emits: [hist, topk, stack, raw, summary]
   targets: {pid: native, tid: native, launch: native}
   keys: [task]
-  filter_fields: [comm, addr]
+  filter_fields: [comm, addr, how, released_by]
   determinism: low
+  caveats:
+    - "One event per acquisition, stamped when the thread asked for the mutex:
+       `wait_ns` is the time until it had it, `hold_ns` the time until it let go.
+       An uncontended acquisition is here too, with a wait of tens of
+       nanoseconds -- it never reaches the kernel, which is why `sched.futex`
+       cannot see it."
+    - "Only pthread mutexes, taken through the exported symbol. Glibc's own
+       internal locks, Rust's and Go's locks, and anything else that waits on a
+       futex directly are invisible here and visible to `sched.futex`."
+    - "A condition wait ends the hold it began in, and the reacquisition inside
+       `pthread_cond_wait` is not an event: its wait for the mutex and its wait
+       for the condition cannot be told apart. A failed `pthread_mutex_trylock`
+       is not a wait and is not reported."
+    - "A preloaded shim reaches a program only at exec, so the preload backend
+       needs a program the tool launches."
 
 - id: sched.irq
   family: sched

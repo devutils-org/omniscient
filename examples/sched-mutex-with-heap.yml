@@ -1,0 +1,32 @@
+# Lock waits and allocations of one program, through one shim.
+#
+#   omn -f examples/sched-mutex-with-heap.yml
+#
+# `sched.mutex` and `mem.heap.live` are both served by the preloaded shim, and
+# a program has one environment: before the eighth wave two preload sources on
+# one launch disagreed about the descriptor to write to and the run was
+# refused. Since then they read one pipe; since the ninth they read one pipe
+# carrying two classes of record, and the program is told to report both
+# (`OMN_SHIM_REPORT=3`) and nothing else.
+#
+# What is checked: the run is accepted, the mutex source counts exactly the
+# 600 acquisitions the fixture made, and the heap source sees the fixture's
+# allocations -- its thread stacks' bookkeeping, a handful -- without a single
+# mutex record decoded as an allocation.
+name: locks and allocations of one program
+format: text
+
+requests:
+  - label: locks
+    source: sched.mutex
+    target: &fixture
+      launch: [target/omn-shim-fixture/mutex, "2", "300", "100"]
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: heap
+    source: mem.heap.live
+    target: *fixture
+    mode: poll@50ms
+    emit: [summary]

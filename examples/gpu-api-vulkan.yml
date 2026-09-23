@@ -1,0 +1,36 @@
+# How long the host spends submitting to a Vulkan queue and waiting for it.
+#
+#   omn -f examples/gpu-api-vulkan.yml
+#
+#   The fixture is built by `cargo test --test scenario_gpu`, from the C source
+#   in that file, against the Vulkan loader. To build it by hand:
+#
+#     mkdir -p target/omn-shim-fixture
+#     sed -n '/^\/\* BEGIN FIXTURE -- omn.s GPU API/,/^\/\* END FIXTURE/p' tests/scenario_gpu.rs \
+#       | cc -O1 -DWITH_VULKAN -x c -o target/omn-shim-fixture/gpu-vulkan - -lvulkan
+#
+# Headless: an instance, the first device, a compute queue and a fence, and no
+# window or surface -- which is why this runs on a machine with no display.
+# The fixture submits an empty batch 100 times, waits on the fence after each,
+# and waits for the queue once at the end: 201 calls, each timed by the
+# fixture itself.
+#
+# The fixture calls the loader's exported entry points, which is what the shim
+# interposes. An engine that fetches its device functions with
+# `vkGetDeviceProcAddr` goes around the loader and around the shim, and would
+# report nothing here.
+#
+# What the run reports, on the development machine:
+#
+#   201 events; vkQueueSubmit ~2 us, vkWaitForFences ~20 us
+name: Vulkan calls, from the host's side
+format: text
+
+requests:
+  - label: vulkan
+    source: gpu.api
+    target:
+      launch: [target/omn-shim-fixture/gpu-vulkan, vulkan, "100"]
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]

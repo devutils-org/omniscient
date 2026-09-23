@@ -7,6 +7,7 @@
 //! opened at runtime. That is the whole of the difference, and it is why this
 //! directory has a `vendor` layer no other family needs.
 
+mod api;
 mod device;
 #[cfg(test)]
 mod fixture;
@@ -35,6 +36,9 @@ pub fn factories() -> Vec<Factory> {
                 filter: resolved.request.filter.clone(),
             }))
         }),
+        // The host side of submission, through the preload shim the heap and
+        // mutex sources share; `api.rs` says which programs it can see.
+        Factory::new("gpu.api", "preload", |_| api::prepare()),
         Factory::new("gpu.freq", "vendor:nvml", |resolved| {
             Ok(Box::new(Prepare::new(Metric::Freq, resolved.request.mode)))
         }),

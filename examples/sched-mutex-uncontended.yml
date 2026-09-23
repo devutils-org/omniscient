@@ -1,0 +1,29 @@
+# The same program as examples/sched-mutex-known-hold.yml, with one thread.
+#
+#   omn -f examples/sched-mutex-uncontended.yml
+#
+# Same mutex, same 200 us hold, 1000 acquisitions: the only difference is that
+# nobody else wants the mutex. So the holds are the same and the waits are
+# nothing -- an uncontended `pthread_mutex_lock` is one atomic exchange in the
+# program's own memory and never reaches the kernel.
+#
+# That is what this source sees and `sched.futex` does not: a futex source is
+# empty for this program, because there is no futex call to time. The two
+# sessions together are the separation the scenario asserts: 1000 holds of
+# 200 us in both, and waits of at least 100 ms in one against a few
+# microseconds in all in the other.
+#
+# What the run reports, on the development machine:
+#
+#   1000 events, every wait under 100 ns, mean 26 ns
+name: a mutex nobody else wants
+format: text
+
+requests:
+  - label: alone
+    source: sched.mutex
+    target:
+      launch: [target/omn-shim-fixture/mutex, "1", "1000", "200"]
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
