@@ -117,6 +117,51 @@ answer from each.
 
 ---
 
+## Settled in the ninth wave: the run model
+
+The line that stood longest in the open section, and the one every collector
+written since was assuming an answer to.
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Usage target | **A session.** Hot attach lives inside one; the flight recorder is a *mode* of one; there is no resident daemon. | The open line bundled three things and only one of them needs a daemon. |
+
+**Hot attach does not need a daemon.** The open line said a daemon "must support
+hot attach and detach, which phase 6 already assumes", and that is where the
+decision was stuck. But phase 6's exit criterion is *a collector can be added
+and removed mid-session*, and phase 10's escalation is *enable that layer's
+detailed collectors and turn off the rest* -- both inside one run. So hot attach
+is a runner task, dispatchable now, and it is what the concurrent-requests
+deferral and the escalation were both waiting for.
+
+**The flight recorder needs a run with no fixed end, not a process with no
+end.** A session whose duration is *until a predicate fires*, whose buffers are
+the bounded rings and maps it already has, and whose output is one document per
+trigger keeps every invariant this project holds: one document covers one
+window -- the span the retention held when the trigger fired -- eviction is
+counted and surfaced as a loss the way the join engine's expiry already is, and
+there is one clock. What it adds is a trigger and a retention bound, not a new
+kind of program.
+
+**A daemon is a second product.** A process lifecycle, an IPC surface, and a
+privilege boundary other than the binary's own file capabilities -- which this
+file settled on as the one privilege shape, and which finding 40 declined to
+double for exactly this reason. None of the three is measurement, and each would
+be paid for by every collector.
+
+**What it commits to, and what it rules out.** Phase 6's fourth task -- hot
+attach and detach inside a session -- is the next piece of run-model work, and a
+flight-recorder mode (`duration: until <predicate>`, a retention bound, one
+document per trigger) follows it. A resident agent is ruled out for this tool.
+The cost the open line named -- *every collector written in the meantime
+assumes the window* -- stops being a cost: the window stays the unit, and a
+triggered snapshot has one too.
+
+Reversible, like every line here, at the price the preamble names: paid across
+every collector written since.
+
+---
+
 ## Open
 
 These do not block the request surface, which is machine-independent by
@@ -124,32 +169,7 @@ construction. They block the resolver, which is the next milestone.
 
 | Decision | Options | What it costs to decide either way |
 |---|---|---|
-| Usage target | One-off session · continuous daemon · **daemon with a flight recorder** | A session can buffer and aggregate at the end. A daemon must aggregate online, bound every map, and support hot attach and detach, which phase 6 already assumes. Deciding "daemon" now is cheaper than retrofitting it. |
-
 | Dynamic binary instrumentation | Never · a `dbi:` backend, mutually exclusive with every other | The catalog already has a slot for it and the boundaries already exclude it, and those two cannot both be right. See below. |
-
-The third option is new, and it is the same decision seen from the side that
-makes it concrete. A **flight recorder** is a bounded circular buffer kept
-permanently, with a snapshot written out when something the run is watching for
-happens -- a latency over a threshold, a loss, an exit code. It is what catches
-a p99.9 that cannot be reproduced, which is the class of problem this tool is
-least able to serve today: a run is one window, opened by hand, and the
-interesting moment has to happen inside it.
-
-It is listed here rather than in the roadmap because it is not a feature to
-schedule, it is the run model. "A run is one window and one document" is written
-into `run_all`, into the resolved file, into every emit and into how losses are
-reported. A flight recorder means a run with no end, a buffer that evicts, and
-an output triggered by a predicate over the events rather than by a duration --
-which is *exactly* the "aggregate online, bound every map" column above, plus a
-trigger. So deciding "daemon" and deciding "flight recorder" are one decision
-with two names, and the cost of leaving it open is the same cost, already
-stated: every collector written in the meantime assumes the window.
-
-What the project already has that would serve it: `Losses` counts and surfaces
-eviction, the join engine's open-state has a bounded capacity with expiry and
-overflow counted, and `--budget` measures a run against the target. What it does
-not have is a run that does not end.
 
 ### Dynamic binary instrumentation, and the contradiction already in the tree
 
