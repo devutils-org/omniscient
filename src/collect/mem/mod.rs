@@ -5,6 +5,7 @@ mod cadence;
 mod cgroup;
 mod footprint;
 pub mod heap;
+mod ibs;
 mod numa;
 mod page_faults;
 mod pressure;
@@ -135,6 +136,27 @@ pub fn factories() -> Vec<Factory> {
         Factory::new("mem.wss", "fs:proc:clear_refs", |resolved| {
             Ok(Box::new(wss::Prepare::new(resolved.request.mode)?))
         }),
+        // One unit, two questions: which loads waited and for how long, and
+        // which lines two cores took from each other. `ibs.rs` says what each
+        // keeps of the ops the unit tags.
+        Factory::new("mem.latency", "pmu:ibs", |resolved| {
+            Ok(Box::new(ibs::Prepare {
+                question: ibs::Question::Latency,
+                mode: resolved.request.mode,
+                keys: resolved.request.keys.clone(),
+                callchain: ibs_callchain(resolved)?,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("mem.sharing", "pmu:ibs", |resolved| {
+            Ok(Box::new(ibs::Prepare {
+                question: ibs::Question::Sharing,
+                mode: resolved.request.mode,
+                keys: resolved.request.keys.clone(),
+                callchain: ibs_callchain(resolved)?,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
         // The four that go through the kernel rather than through a file. Each
         // carries the request's own keys and predicate, because the resolver
         // credits a `bpf` backend with filtering in the kernel and then leaves
@@ -170,4 +192,19 @@ pub fn factories() -> Vec<Factory> {
             }))
         }),
     ]
+}
+
+/// Stacks cost a word per frame on every tagged op, so they are taken only
+/// when the request asks for them: `--emit stack`, or a `--stack` mode.
+fn ibs_callchain(
+    resolved: &crate::resolve::ResolvedRequest,
+) -> Result<crate::perf::Callchain, String> {
+    let request = &resolved.request;
+    match request.stack {
+        Some(mode) => crate::stack::callchain_for(mode),
+        None if request.emit.contains(&crate::request::Emit::Stack) => {
+            Ok(crate::perf::Callchain::FramePointers)
+        }
+        None => Ok(crate::perf::Callchain::Off),
+    }
 }

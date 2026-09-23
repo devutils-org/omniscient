@@ -4,36 +4,36 @@
 #   omn validate -f examples/mem-refused-not-built.yml  # says it is valid
 #   omn -f examples/mem-refused-not-built.yml           # refuses, exit 3
 #
-# Memory access latency is sampled by the hardware: the cpu records the address
-# and the cost of a load, not merely the instruction pointer that issued it.
-# Intel calls the mechanism PEBS and AMD calls it IBS, so `mem.latency` names
-# both, one of them exists on every x86 machine this tool targets, and neither
-# has a collector. It is vocabulary here rather than a measurement -- it
-# resolves, it validates, every axis of it is checked, and nothing collects it.
+# Allocations can be watched three ways, and the catalog names all three for
+# `mem.heap.alloc`: a preloaded shim, a USDT probe in the allocator, and a
+# uprobe on `malloc` itself. Only the shim is written. The uprobe is attached
+# through eBPF, which this build does for thirty other sources and which this
+# machine serves -- so pinning it asks for something the machine could do and
+# nobody has written.
 #
 # The code is 3 and not 1, and the difference is the difference between "your
 # machine cannot do this" and "we have not written it". Reading the wrong one of
 # those two answers sends a reader to look at their kernel config for an
 # afternoon over a mechanism nobody has written.
 #
-# This session used to ask for `mem.reclaim`, and it is worth knowing why it
-# stopped, twice. First the `tracepoint:` probe became honest: `mem.reclaim`
-# declared only `bpf:tp`, the classic tracepoint attach, which reads a numeric
-# event id out of tracefs -- and tracefs is mounted and unreadable at uid 1000
-# here and on a stock machine. So this machine genuinely could not serve it and
-# the answer became exit 1. Finding 9's catalog pass then put a `bpf:raw_tp`
-# ahead of the classic one, which needs nothing but BTF and a name, and it went
-# back to exit 3. The sixth wave then wrote the collector, so today it exits 0
-# and measures direct reclaim -- `examples/mem-reclaim-squeeze.yml` is that
-# session. `mem.latency` is an illustration that will last: no backend for
-# either PEBS or IBS is written, and neither is close to being.
-name: memory access latency, which nothing here collects
+# The session has asked for three different things, and why it stopped each time
+# is the history of this answer. First `mem.reclaim`: the `tracepoint:` probe
+# became honest, the machine could not serve it, and the answer became exit 1;
+# a raw tracepoint put it back at exit 3, and then the sixth wave wrote the
+# collector. Then `mem.latency`, "an illustration that will last" because PEBS
+# and IBS were written for nobody -- until the ninth wave wrote IBS, and it now
+# exits 0 and measures load latency (`examples/mem-load-latency.yml`). A source
+# stops being an illustration of this answer the day someone writes it, which is
+# the point of the answer, so the session now pins one backend of a source that
+# has a collector for another: that illustration lasts as long as the uprobe is
+# unwritten, and says so the day it is not.
+name: an allocation uprobe, which nothing here collects
 format: text
-duration: 1s
 
 requests:
-  - label: latency
-    source: mem.latency
-    target: system
-    mode: sample
-    emit: [hist]
+  - label: allocations by uprobe
+    source: mem.heap.alloc
+    backend: force:bpf:uprobe
+    target: {launch: ["/bin/sh", "-c", "sleep 0.05"]}
+    mode: trace
+    emit: [summary]

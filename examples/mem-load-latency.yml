@@ -1,0 +1,81 @@
+# Two walks whose latency is decided by their size, sampled by the hardware.
+#
+#   omn -f examples/mem-load-latency.yml
+#
+# A pointer chase is the one access pattern no prefetcher can help: every load
+# reads the address of the next, in an order shuffled once, so each load waits
+# for whichever level holds its line. The workload builds two chains, one
+# pointer per sixty-four-byte line, and walks each for a second and a half:
+#
+#   - 4 KiB at 32 TiB, sixty-four lines. It fits in L1d a dozen times over, so
+#     after the first lap every load is an L1 hit.
+#   - 64 MiB at 48 TiB, a million lines. That is four times the L3 a core of
+#     this machine can use (16 MiB per core complex), so most loads wait on
+#     memory.
+#
+# The addresses are fixed -- `mmap` with MAP_FIXED_NOREPLACE, through ctypes --
+# so that each request can select its own walk with a filter written here
+# rather than read off the program at run time. `32TiB` is 0x2000_0000_0000:
+# the filter grammar has size suffixes and no hexadecimal.
+#
+# What comes back is the answer the hardware can give, and on AMD family 17h it
+# is lopsided on purpose. IBS times a load only when it misses L1d. So the
+# small walk produces *no events*: its loads are sampled, counted by the level
+# that answered, and reported in a note -- "N of N sampled loads the filter
+# kept carry no latency ... by level: l1 N" -- and none of them is bucketed,
+# because a zero there would be a latency nobody measured. The large walk's
+# loads are events, most of them at `level: ram`, a few hundred cycles each.
+#
+# Two requests over one launch share the one IBS unit per core, so the kernel
+# time-shares it and each request sees about half of what it asked for. The
+# sample rate is high because the unit tags ops, not loads, and the interpreter
+# spends several hundred ops on each step of a walk; eight chained loads per
+# statement is what brings the walk's own share up to a measurable fraction.
+name: a walk that fits in L1 and one that waits on memory
+format: json
+
+requests:
+  - label: small walk
+    source: mem.latency
+    target: &chase
+      launch:
+        - python3
+        - -c
+        - |
+          import ctypes, random, sys, time
+          libc = ctypes.CDLL(None, use_errno=True)
+          libc.mmap.restype = ctypes.c_void_p
+          libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, ctypes.c_long]
+          TiB = 1 << 40
+          def chain(at, size):
+              # PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE
+              if libc.mmap(at, size, 3, 0x22 | 0x100000, -1, 0) != at:
+                  sys.exit("cannot map %d bytes at %#x" % (size, at))
+              lines = size // 64
+              slots = memoryview((ctypes.c_uint64 * (size // 8)).from_address(at)).cast('B').cast('Q')
+              order = list(range(lines))
+              random.Random(1).shuffle(order)
+              for k in range(lines):
+                  slots[order[k] * 8] = order[(k + 1) % lines] * 8
+              return slots
+          def walk(s, seconds):
+              i = 0
+              end = time.monotonic() + seconds
+              while time.monotonic() < end:
+                  for _ in range(2500):
+                      i = s[s[s[s[s[s[s[s[i]]]]]]]]
+          small = chain(32 * TiB, 4096)
+          large = chain(48 * TiB, 64 << 20)
+          walk(small, 1.5)
+          walk(large, 1.5)
+    mode: sample@19999hz
+    emit: [raw, hist]
+    filter: "addr >= 32TiB && addr < 33TiB"
+
+  - label: large walk
+    source: mem.latency
+    target: *chase
+    mode: sample@19999hz
+    emit: [raw, hist]
+    filter: "addr >= 48TiB && addr < 49TiB"

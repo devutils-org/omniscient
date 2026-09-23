@@ -327,6 +327,184 @@ means — but it is not the kernel-side filtering the resolver credits a `bpf`
 backend with. The run says which it was, in the same words `sched.runqlat` uses
 for its predicate.
 
+### Memory by IBS: the ninth wave's two sources
+
+`mem.latency` and `mem.sharing` were the last two sources of this family with no
+collector, and both now collect through AMD's instruction-based sampling on
+this machine's Zen 2 (family 17h). `src/collect/mem/ibs.rs` is the collector for
+both; `src/perf.rs` gained what it needed. What follows is what the hardware
+taught, in the order it cost time.
+
+#### The kernel decodes the unit, so the collector reads no AMD registers
+
+IBS tags one micro-op every so often and, when it retires, writes down what
+happened to it: the linear address it touched, which level answered, whether
+the line came from another core's cache in modified state, and for some loads
+the cycles until the data arrived. Since 6.1 the kernel's IBS driver decodes
+those registers into the same `PERF_SAMPLE_DATA_SRC` and
+`PERF_SAMPLE_WEIGHT_STRUCT` words that Intel's PEBS fills, which is what
+`perf mem` reads on AMD. So the collector asks for those two words, the data
+address and the cpu, and decodes `perf_mem_data_src` -- vendor-neutral -- rather
+than `IbsOpData3`. What is AMD-specific is three things read from sysfs, never
+assumed: the unit's dynamic type (`ibs_op/type`, 11 here), the `cnt_ctl` bit
+(`config:19`) and the `swfilt` bit (`config2:0`). `perf::IbsOp::probe` reads
+them; a bit written from memory of a datasheet is the error that opens and
+measures something else.
+
+`cnt_ctl` makes the unit count *dispatched ops* between two tags rather than
+cycles. With cycles, the op tagged is whatever is dispatched when the counter
+runs out, and a core stalled on a miss dispatches nothing -- so the ops around
+a long stall are under-represented in exactly the measurement meant to find
+them. `swfilt` is what lets the kernel drop kernel-mode samples at all: without
+it the unit refuses every `exclude_*` bit with `EINVAL`. The run says which of
+the two it had.
+
+#### An L1 hit carries no latency, and that changes what the source is
+
+Measured with `perf` before a line was written, on a shuffled walk over 64 MiB:
+
+| Level that answered | Sampled loads | With a latency | Median |
+|---|---|---|---|
+| RAM | 2723 | 2723 | 309 cycles |
+| L1 | 715 | **0** | -- |
+| peer (L3, or a sibling core) | 226 | 226 | 36 cycles |
+| L2 | 9 | 9 | 9 cycles |
+
+Family 17h times a load only when it misses L1d (`IbsDcMissLat`). An L1 hit
+comes back with a weight of zero, and zero there is not "fast", it is "not
+measured". A histogram that bucketed it would put every load the hardware did
+not time at the fast end of the distribution. So `mem.latency` keeps the loads
+that carry a latency, and counts the others by the level that answered them in
+a note that travels with the numbers:
+
+```
+degraded: 443 of 1966 sampled loads carry no latency and are in no bucket: this cpu
+  times a load only when it misses L1d, so the distribution is of the loads that
+  missed; sampled loads by level: l1 443, l2 18, peer 191, ram 1314
+```
+
+This is also why the catalog's `pmu:ibs` backend for `mem.latency` no longer
+declares `equivalent: true`. PEBS with a low latency threshold times L1 hits;
+IBS here does not, and a fallback that loses something says what it loses.
+`mem.sharing` keeps `equivalent: true`: HITM is reported alike by both.
+
+What comes back when the loads *are* timed is the machine's hierarchy, without
+being told it -- `omn mem.latency -m sample@4999hz -e hist -- ./walk` on a 64
+MiB chase:
+
+```
+  [8, 16)          12    L2
+  [16, 32)         35
+  [32, 64)        143    L3
+  [128, 256)        6
+  [256, 512)     1264    DRAM
+  [512, 1024)      39
+```
+
+The value is core cycles and the output says `count`, because the catalog has
+no cycle unit; see "Needs from another stream" below.
+
+#### The kernel throttles a period long before it looks short
+
+A period of 4096 dispatched ops sounds sparse and is not: at four billion ops a
+second it is a million interrupts a second, against a
+`perf_event_max_sample_rate` of 100 000. A period of 1024 produced *fewer*
+samples than 4096, which is what throttling looks like from outside. The
+collector therefore asks for a frequency (`sample@<hz>`, the catalog's only
+mode) and lets the kernel find the period. Two consequences, both measured:
+
+- Re-enabling an event restarts the kernel's adjustment of period to frequency.
+  The first version of the unit test enabled and disabled the event thirty-two
+  times per walk and got eight samples; enabled once for 400 ms, the same walk
+  gave fifty.
+- At the ceiling the kernel throttles, and the run counts it: 148 throttles on a
+  two-second walk at 100 kHz, surfaced as `throttled` and marking every count as
+  a lower bound. Above the ceiling the open is refused by naming the sysctl.
+
+#### Following threads is one event per cpu per thread, and one ring per cpu
+
+The kernel refuses a ring to an inherited event over every cpu at once, and
+accepts one for an inherited event pinned to a cpu. So a launched program --
+one thread at the gate -- is followed by one inherited event per cpu, each with
+its own ring, and everything it starts is sampled. A process that is already
+running is harder: `inherit` follows what a task starts after the event exists,
+so every thread it has *now* needs an event of its own. Those are opened per
+thread per cpu and redirected into that cpu's ring with
+`PERF_EVENT_IOC_SET_OUTPUT`, which the kernel allows between events on the same
+cpu and refuses across two. A three-threaded process attached with `--pid` is 72
+events and 24 rings here, and its two workers both appear.
+
+`perf::SampleSpec` is the new shape: a type, `config`/`config2`, a period or a
+frequency, kernel exclusion, `inherit`, a callchain, and the memory fields. The
+old software openers are one point in it, and the decoder now walks the sample
+in `sample_type` order, because the position of `DATA_SRC` depends on whether a
+callchain came before it.
+
+#### Two requests over one launch share one unit
+
+There is one IBS op unit per core. Two requests in one session -- a latency
+request per walk, say -- open two events on it, and the kernel time-shares
+them: each sees about half of what it asked for. The sessions do this on
+purpose, because it is what lets each request carry its own filter, and they
+ask for 19 999 Hz to make up for it.
+
+#### A count of what was not emitted is only worth reading over what was asked about
+
+The first run of the load-latency session reported the small walk's L1 hits
+correctly and uselessly: the interpreter makes hundreds of loads per step of a
+walk, nearly all L1 hits, and the note counted every one. The collector now
+counts over the accesses the request's filter keeps -- it carries the predicate,
+builds the event for every memory access, and tallies only those that match --
+so `filter: "addr >= 32TiB && addr < 33TiB"` makes the note a statement about
+the walk. The runner still applies the filter to the emitted events, and the
+two agree by construction.
+
+The workloads put their memory at fixed addresses (`mmap` with
+`MAP_FIXED_NOREPLACE`, through ctypes) for the same reason: a filter can then be
+written in the session rather than read off the program at run time. `32TiB` is
+`0x2000_0000_0000`; the filter grammar has size suffixes and no hexadecimal.
+
+#### An interpreter is a poor host for a pointer chase, and still good enough
+
+In a debug build of this crate one op in about a hundred is the chain's own load;
+in CPython through ctypes it was one in a thousand, eleven samples per walk.
+`memoryview(...).cast('Q')` and eight chained loads per statement
+(`i = s[s[s[s[s[s[s[s[i]]]]]]]]`) brought it to forty. The separation is total
+at forty -- the scenario's small walk measured 44 of 47 loads in L1 and the
+large walk 40 of 40 timed -- and the tests skip loudly, with the counts, below
+fifteen.
+
+#### HITM from a single task is real, and it is not sharing
+
+The single-threaded 64 MiB walk took 174 HITM samples. Nothing else wrote those
+lines: the thread migrated, and the lines it had written were left modified in
+the cache of the core it left. So a HITM is not by itself two tasks, and
+`mem.sharing` names in its notes the lines that more than one task was answered
+modified on, which is the claim the source exists to make. Two C threads on one
+line: 779 HITM samples, every one on the buffer's first line, from both tasks;
+on two lines, zero -- and the program itself confirms it independently, taking
+1.15 s against 0.34 s for the same work.
+
+#### `peer` is how this cpu reports L3
+
+The kernel reports a family 17h L3 hit as `LVLNUM_ANY_CACHE` with no remote bit,
+which is also how it reports a hit in a sibling core's cache: the unit's data
+source field does not tell them apart. The collector calls it `peer` rather than
+`l3`, and the catalog says why. The unit test that walks 256 MiB in its own
+thread was seen answered mostly by `peer` on one run and by RAM on another, so it
+asserts only that the walk missed L1 and was timed; which level beyond that is
+the machine's business.
+
+#### The exit-3 illustration moved
+
+`examples/mem-refused-not-built.yml` asked for `mem.latency` because "PEBS and
+IBS were written for nobody", and `docs/scenarios/mem.md` calls it "the
+illustration that will last". It lasted until this wave. The session now pins
+`mem.heap.alloc` to `bpf:uprobe`: a backend this machine serves, of a source
+that has a collector for another, and nothing written for it.
+`the_three_refusals_are_told_apart` pins the same thing instead of
+`mem.sharing --system`.
+
 ## Needs from the shared layer
 
 ### `src/bpf/insn.rs`: two helper numbers and the log2 bucket
@@ -433,14 +611,95 @@ sources of this family, and every source of `power`, plus most of `net`.
 
 ## What is still blocked, and on what
 
-Twenty of this family's twenty-three sources now collect, and the three that do
-not are blocked on mechanism rather than on effort. What is left, and why:
+Twenty-two of this family's twenty-three sources now collect, and the one that
+does not -- `mem.bandwidth` -- is blocked on hardware rather than on effort. What is left, and why:
 
 | Sources | Blocked on |
 |---|---|
 | `cache_l1`, `cache_llc`, `cache_tlb` | rows in `cpu/counters.rs`'s `SPECS` using `PERF_TYPE_HW_CACHE`. They are named `mem.*` and they belong to whoever owns the counters table; the mechanism decides. |
 | `bandwidth` | uncore PMUs: a different sysfs layout and a different privilege story. Package-scoped, so `--pid` must be refused rather than degraded. |
-| `latency`, `sharing` | PEBS load-latency and IBS: `perf_event_open` sampling with a data-source payload nothing in this build decodes yet. |
-| `numa` through `pmu` | the same PEBS data-source information. The `fs:proc` fallback is written and says plainly that it measures placement rather than accesses. |
+| `latency`, `sharing` through `pmu:pebs` | an Intel machine. The IBS backend is written and measured; the PEBS one would be the same collector with `cpu/mem-loads,ldlat=N/` as its spec, and this machine cannot run it. |
+| `numa` through `pmu` | PEBS. IBS carries the same data-source word and a physical address, so a `pmu:ibs` backend for `mem.numa` is the IBS collector keyed by node; it is not declared, and adding it is a catalog line and a key. The `fs:proc` fallback is written and says plainly that it measures placement rather than accesses. |
 | `wss` through `page_idle` and DAMON | `CAP_SYS_ADMIN`, twice over for `page_idle` (see above), and a DAMON probe class nothing answers. The `fs:proc:clear_refs` backend serves an unprivileged user today. |
 | `heap.alloc` by call site | stack capture, which exists now; wiring the shim's frames through it has not been done. |
+
+## Needs from another stream — stream B (memory by IBS)
+
+The same requests are appended to `docs/open-findings.md` under this stream's
+heading.
+
+### To whoever owns `src/catalog.rs`: a cycle unit
+
+`mem.latency`'s value is core cycles, and the only honest unit the catalog has
+for it is `count`, so the text output prints `min 8 count  mean 316 count`.
+Nanoseconds would be a conversion through a clock that moves with load and
+temperature, which is a number the hardware did not measure.
+
+```rust
+pub enum Unit { /* ... */ Cycles }   // as_str: "cycles"
+```
+
+and `unit: cycles` on `mem.latency` in `catalog/mem.yaml`, which this stream
+will change the day the variant exists.
+
+### To whoever owns `src/emit.rs`: a value the hardware did not measure
+
+An L1 hit on family 17h is a sampled load with a level and no latency. Today an
+event without its value attribute is an error (`EmitError::NotNumeric`) in every
+emit, so the collector cannot emit it and counts it in a note instead. What
+would let it travel as an event: an event whose value attribute is *absent* is
+counted as `unmeasured` by `hist`, `summary` and `topk` -- beside `unbucketable`
+in `SeriesHist`, and as a count in the other two -- rather than refused, and
+`raw` carries it as it is. Then `topk --key mem` could rank the lines a walk
+touched including the ones L1 answered, and the level split would be in the
+output rather than in a sentence.
+
+### To the coordinator
+
+- **Index rows**, for `examples/README.md` and `GUIDE.md`:
+
+  ```
+  | `mem-false-sharing.yml` | Two processes on one cache line, then on two. |
+  | `mem-load-latency.yml` | Two walks whose latency is decided by their size, sampled by the hardware. |
+  ```
+
+  `tests/cli.rs::the_session_indexes_hold_exactly_the_sessions_on_disk` is red
+  on this branch for exactly these two, and for nothing else.
+- **`mem-refused-not-built.yml` changed what it asks for** (see above). Its one-line
+  description in both indexes still holds.
+- **`docs/scenarios/mem.md` is stale in three places** and is not this stream's
+  file: line 249 (`mem.latency` as the exit-3 example), lines 307-323 (the
+  exit-3 paragraph and "the illustration that will last"), and lines 420-423
+  ("`mem.latency`, `mem.sharing` ... need PEBS ... vocabulary"). The first two
+  are now `mem.heap.alloc` on `bpf:uprobe`; the third is `mem.numa`'s `pmu`
+  backend alone. The two new scenarios belong under a heading there: the
+  sections above are written so that they can be moved as they are.
+- **`STATE.md`**: `mem.latency` and `mem.sharing` leave the "PEBS or IBS" row of
+  what is left, and the table of what works end to end gains a line --
+  `mem.latency`, `mem.sharing` | `perf_event_open`, AMD IBS op sampling | a
+  pointer chase over 4 KiB against one over 64 MiB, and two processes on one
+  line against two. `mem` goes to 22 of 23 with a collector.
+- **`CATALOG.md` line 160** lists "AMD IBS" for `mem.latency` beside PEBS as if
+  the two were one; the catalog now says what IBS loses on family 17h.
+- **A flake that failed twice**: `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`,
+  already in the eighth wave's tally, failed in this stream's run of the file
+  and again alone (`fs:sys` 389 fully-mapped huge pages against 325-326 from
+  `/proc/meminfo`). It reads THP counters and nothing this stream touched; it is
+  recorded here rather than rerun, because a test that fails repeatedly is the
+  one worth someone's time.
+
+### Tests this stream added
+
+| Test | Checks against |
+|---|---|
+| `perf::tests::an_ibs_sample_says_which_level_answered_the_load` | a 4 KiB and a 256 MiB pointer chase in the test's own thread: L1 and untimed against beyond L1 and timed |
+| `perf::tests::a_memory_sample_is_read_in_the_layout_its_fields_give_it` | a synthetic record with and without a callchain before `DATA_SRC` |
+| `perf::tests::a_data_source_names_the_level_that_answered` | the `perf_mem_data_src` values the kernel's IBS decoder writes |
+| `perf::tests::a_format_term_is_a_word_and_a_bit` | the `format` files' grammar |
+| `collect::mem::ibs::tests::*` (3) | key order, a child with four known threads followed on every cpu, an offline cpu refused |
+| `scenario_mem::a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory` | `examples/mem-load-latency.yml`: 64 lines against a million, at fixed addresses |
+| `scenario_mem::two_processes_on_one_line_take_it_from_each_other_and_on_two_lines_do_not` | `examples/mem-false-sharing.yml`: 8 bytes apart against 128 |
+| `scenario_mem::a_rate_the_kernel_will_not_sustain_is_refused_or_counted_as_a_loss` | the kernel's own `perf_event_max_sample_rate`, above it and at it |
+| `scenario_mem::every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code` | the catalog's modes and emits for both, all served |
+| `scenario_mem::a_stack_of_every_process_is_refused_by_the_build_and_the_rest_is_served` | exit 3 for a machine-wide stack, exit 0 without it |
+

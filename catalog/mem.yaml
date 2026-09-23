@@ -274,13 +274,27 @@
   unit: count
   backends:
     - {id: "pmu:pebs", requires: ["pmu:pebs:mem-loads"], cost: med}
-    - {id: "pmu:ibs", requires: ["pmu:ibs_op"], cost: med, equivalent: true}
+    - {id: "pmu:ibs", requires: ["pmu:ibs_op"], cost: med,
+       degraded: "AMD family 17h times a load only when it misses L1d, so L1 hits are
+         counted by level and are in no bucket; PEBS with a low latency threshold
+         times them too"}
   modes: [sample]
   emits: [hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
   keys: [task, mem, cpu]
-  filter_fields: [comm, cpu, addr]
+  filter_fields: [comm, cpu, addr, level]
   determinism: low
+  caveats:
+    - "The value is core cycles from the miss to the data, not nanoseconds: the
+       clock a core runs at moves with load and temperature, and the cycle count
+       is what the hardware measured. Compare two runs in cycles or not at all."
+    - "Each event is one tagged op, and the unit tags one op in every so many,
+       not one load: most of what it tags is arithmetic and branches, so a
+       distribution needs a rate far above what a profile would ask for, and a
+       workload whose loads are a small share of its ops yields few of them."
+    - "`level` says which level answered. On AMD family 17h an L3 hit and a hit
+       in a sibling core's cache are reported alike, as `peer`, because the
+       unit does not tell them apart."
 
 - id: mem.sharing
   family: mem
@@ -293,8 +307,18 @@
   emits: [topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
   keys: [task, mem, cpu]
-  filter_fields: [comm, cpu, addr]
+  filter_fields: [comm, cpu, addr, level]
   determinism: low
+  caveats:
+    - "HITM is an access answered by another core's cache holding the line
+       modified. False sharing leaves it, and so does true sharing: two cores
+       writing the same counter look the same as two writing neighbouring ones.
+       The addresses on the events tell them apart; the count cannot."
+    - "A HITM taken by one task alone is a line it shares with something this
+       run does not follow -- or its own line, left dirty on a core it migrated
+       away from. The run names the lines more than one task fought over."
+    - "The series is the cache line by default, because the line is what two
+       cores fight over; `--key task` ranks the tasks instead."
 
 - id: mem.bandwidth
   family: mem

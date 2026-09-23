@@ -5945,3 +5945,34 @@ program per site as it does today, and hand back `(tid, mutex, ts)` per hit.
 - `STATE.md`'s "132 ns per event" for the shim is the heap's wave-two figure.
   For a mutex record it is about 415 ns in a release build, nearly all of it
   the one `write(2)` per record; `docs/families/sched.md` has the table.
+---
+
+## Needs from another stream — the ninth wave, stream B (memory by IBS)
+
+`mem.latency` and `mem.sharing` collect through AMD IBS; `docs/families/mem.md`
+has the measurements. Two requests outside this stream's files.
+
+### To whoever owns `src/catalog.rs`: a cycle unit
+
+`mem.latency`'s value is core cycles from the miss to the data. The catalog has
+no unit for it, so the entry says `count` and the text output prints
+`mean 316 count`. Converting to nanoseconds would go through a clock that moves
+with load and temperature, which is a number the hardware did not measure.
+
+```rust
+pub enum Unit { /* ... */ Cycles }   // as_str: "cycles"
+```
+
+Stream B changes `unit:` on `mem.latency` the day the variant exists.
+
+### To whoever owns `src/emit.rs`: an event whose value was not measured
+
+On AMD family 17h an L1 hit is a sampled load with a level and no latency: the
+unit times only loads that miss L1d. An event without its value attribute is
+`EmitError::NotNumeric` in every emit, so `mem.latency` cannot emit those loads
+and counts them by level in a note instead. Wanted: an event whose value
+attribute is absent is counted as `unmeasured` by `hist` (beside `unbucketable`
+in `SeriesHist`), `summary` and `topk`, rather than failing the emit, and `raw`
+carries it unchanged. The level split would then be in the output rather than in
+a sentence, and `topk --key mem` could rank the lines a walk touched including
+the ones L1 answered.

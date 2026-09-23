@@ -33,6 +33,286 @@ pub enum Scope {
     Process(i32),
     /// Every process, on one cpu. Needs privileges on most machines.
     Cpu(u32),
+    /// One task, only while it runs on one cpu.
+    ///
+    /// This is the shape that can follow a program's threads. The kernel
+    /// refuses a ring for an inherited event on every cpu at once, and accepts
+    /// one for an inherited event pinned to a cpu: so a task and everything it
+    /// starts is sampled by one such event per cpu, each with its own ring.
+    TaskOnCpu { pid: i32, cpu: u32 },
+    /// Every task of a cgroup v2 directory, while it runs on one cpu.
+    ///
+    /// `fd` is the directory, opened by the caller and held until the event is
+    /// open; the kernel resolves it to the cgroup at `perf_event_open` and does
+    /// not need it afterwards.
+    CgroupOnCpu { fd: RawFd, cpu: u32 },
+}
+
+impl Scope {
+    /// The `pid` and `cpu` arguments of `perf_event_open`, and its flags.
+    fn arguments(self) -> (i32, i32, u64) {
+        let flags = sys::bindings::PERF_FLAG_FD_CLOEXEC as u64;
+        match self {
+            Scope::Process(pid) => (pid, -1, flags),
+            Scope::Cpu(cpu) => (-1, cpu as i32, flags),
+            Scope::TaskOnCpu { pid, cpu } => (pid, cpu as i32, flags),
+            Scope::CgroupOnCpu { fd, cpu } => (
+                fd,
+                cpu as i32,
+                flags | sys::bindings::PERF_FLAG_PID_CGROUP as u64,
+            ),
+        }
+    }
+
+    /// The cpu a per-cpu scope is pinned to.
+    pub fn cpu(self) -> Option<u32> {
+        match self {
+            Scope::Process(_) => None,
+            Scope::Cpu(cpu) | Scope::TaskOnCpu { cpu, .. } | Scope::CgroupOnCpu { cpu, .. } => {
+                Some(cpu)
+            }
+        }
+    }
+}
+
+/// How often a sampling event fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rate {
+    /// Once every so many occurrences of whatever the event counts.
+    Period(u64),
+    /// About this many times a second; the kernel adjusts the period to get
+    /// there, and the adjustment is its own and not visible from here.
+    Hz(u64),
+}
+
+/// What a sampling event counts, and what each of its samples carries.
+///
+/// The software events a fault sampler or a cpu-clock profile open are one
+/// point in this space; a hardware unit with a type number the kernel assigned
+/// at boot, such as AMD's IBS, is another. Everything that decides the record
+/// layout is here, because the decoder reads it back from the same place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleSpec {
+    /// `perf_event_attr.type`: `PERF_TYPE_SOFTWARE`, or a dynamic unit's type
+    /// read from its `type` file under [`PMU_DEVICES`].
+    pub kind: u32,
+    pub config: u64,
+    /// `config2`, which some units use for filters that are not events.
+    pub config2: u64,
+    pub rate: Rate,
+    /// Samples taken in kernel mode are not delivered.
+    pub exclude_kernel: bool,
+    /// Tasks the target starts afterwards are sampled too. Only accepted by the
+    /// kernel with a ring for a [`Scope::TaskOnCpu`] event.
+    pub inherit: bool,
+    pub callchain: Callchain,
+    /// Each sample carries the cpu it was taken on, the access's data source
+    /// and its weights: see [`MemoryAccess`].
+    pub memory: bool,
+}
+
+impl SampleSpec {
+    /// A software event, the shape every sampler here had before IBS.
+    pub fn software(config: u64, period: u64, callchain: Callchain) -> Self {
+        Self {
+            kind: sys::bindings::PERF_TYPE_SOFTWARE,
+            config,
+            config2: 0,
+            rate: Rate::Period(period),
+            exclude_kernel: false,
+            inherit: false,
+            callchain,
+            memory: false,
+        }
+    }
+
+    /// The sample fields this spec asks for, which is also the layout the
+    /// decoder reads: the kernel writes them in the order of their bits.
+    fn sample_type(&self) -> u64 {
+        let mut sample_type = SAMPLE_TYPE;
+        if self.callchain == Callchain::FramePointers {
+            sample_type |= sys::bindings::PERF_SAMPLE_CALLCHAIN as u64;
+        }
+        if self.memory {
+            sample_type |= (sys::bindings::PERF_SAMPLE_CPU
+                | sys::bindings::PERF_SAMPLE_WEIGHT_STRUCT
+                | sys::bindings::PERF_SAMPLE_DATA_SRC) as u64;
+        }
+        sample_type
+    }
+}
+
+/// What the hardware said about one memory access it sampled.
+///
+/// The kernel decodes the unit's own registers into these two words, so a
+/// collector reads the same fields from IBS on AMD as from PEBS on Intel. What
+/// each vendor fills in differs, and [`MemoryAccess::latency_cycles`] is the
+/// field where that matters most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryAccess {
+    pub source: DataSource,
+    /// Cycles from the load's issue until its data arrived, when the hardware
+    /// measured it; zero when it did not.
+    ///
+    /// Zero is not "fast". AMD family 17h counts this only for a load that
+    /// missed the L1 data cache, so every L1 hit carries zero, and a histogram
+    /// that bucketed those zeros would be a histogram of what the hardware did
+    /// not measure.
+    pub latency_cycles: u32,
+    /// The second weight: on IBS, cycles from the op's tagging to its
+    /// retirement, which covers more than the memory access.
+    pub retire_cycles: u16,
+}
+
+impl MemoryAccess {
+    fn from_words(weight: u64, data_src: u64) -> Self {
+        Self {
+            source: DataSource(data_src),
+            // `perf_sample_weight`: var1_dw in the low half, var2_w above it.
+            latency_cycles: (weight & 0xffff_ffff) as u32,
+            retire_cycles: ((weight >> 32) & 0xffff) as u16,
+        }
+    }
+}
+
+/// `perf_mem_data_src`, the kernel's vendor-neutral description of where an
+/// access went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataSource(pub u64);
+
+/// What kind of operation the sampled op was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemOp {
+    Load,
+    Store,
+    Prefetch,
+    Exec,
+    /// Not a memory operation, or one the hardware did not describe: most of
+    /// the ops an IBS op sample tags are arithmetic and branches.
+    None,
+}
+
+/// Which level of the hierarchy answered the access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemLevel {
+    L1,
+    /// The miss buffer: the line was already on its way for an earlier miss.
+    Lfb,
+    L2,
+    L3,
+    /// A cache of this node that is not this core's own. On AMD family 17h
+    /// this is how an L3 hit and a hit in a sibling core's cache are both
+    /// reported, because the unit's data-source field does not tell them apart.
+    Peer,
+    Ram,
+    /// A cache on another node.
+    RemoteCache,
+    /// Memory on another node.
+    RemoteRam,
+    Io,
+    /// The hardware reported nothing usable.
+    Unknown,
+}
+
+impl MemLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemLevel::L1 => "l1",
+            MemLevel::Lfb => "lfb",
+            MemLevel::L2 => "l2",
+            MemLevel::L3 => "l3",
+            MemLevel::Peer => "peer",
+            MemLevel::Ram => "ram",
+            MemLevel::RemoteCache => "remote_cache",
+            MemLevel::RemoteRam => "remote_ram",
+            MemLevel::Io => "io",
+            MemLevel::Unknown => "unknown",
+        }
+    }
+}
+
+impl DataSource {
+    fn field(self, shift: u32, bits: u32) -> u64 {
+        (self.0 >> shift) & ((1u64 << bits) - 1)
+    }
+
+    pub fn op(self) -> MemOp {
+        use sys::bindings as b;
+        let op = self.field(b::PERF_MEM_OP_SHIFT, 5) as u32;
+        if op & b::PERF_MEM_OP_LOAD != 0 {
+            MemOp::Load
+        } else if op & b::PERF_MEM_OP_STORE != 0 {
+            MemOp::Store
+        } else if op & b::PERF_MEM_OP_PFETCH != 0 {
+            MemOp::Prefetch
+        } else if op & b::PERF_MEM_OP_EXEC != 0 {
+            MemOp::Exec
+        } else {
+            MemOp::None
+        }
+    }
+
+    fn remote(self) -> bool {
+        use sys::bindings as b;
+        self.field(b::PERF_MEM_REMOTE_SHIFT, 1) as u32 & b::PERF_MEM_REMOTE_REMOTE != 0
+    }
+
+    /// The level, read from the numbered field the kernel fills since 4.14 and
+    /// from the older bit mask when the numbered one says nothing.
+    pub fn level(self) -> MemLevel {
+        use sys::bindings as b;
+        let remote = self.remote();
+        match self.field(b::PERF_MEM_LVLNUM_SHIFT, 4) as u32 {
+            b::PERF_MEM_LVLNUM_L1 => return MemLevel::L1,
+            b::PERF_MEM_LVLNUM_LFB => return MemLevel::Lfb,
+            b::PERF_MEM_LVLNUM_L2 => return MemLevel::L2,
+            b::PERF_MEM_LVLNUM_L3 if remote => return MemLevel::RemoteCache,
+            b::PERF_MEM_LVLNUM_L3 => return MemLevel::L3,
+            b::PERF_MEM_LVLNUM_ANY_CACHE if remote => return MemLevel::RemoteCache,
+            b::PERF_MEM_LVLNUM_ANY_CACHE => return MemLevel::Peer,
+            b::PERF_MEM_LVLNUM_RAM if remote => return MemLevel::RemoteRam,
+            b::PERF_MEM_LVLNUM_RAM => return MemLevel::Ram,
+            b::PERF_MEM_LVLNUM_IO => return MemLevel::Io,
+            _ => {}
+        }
+        let mask = self.field(b::PERF_MEM_LVL_SHIFT, 14) as u32;
+        if mask & b::PERF_MEM_LVL_HIT == 0 {
+            return MemLevel::Unknown;
+        }
+        if mask & b::PERF_MEM_LVL_L1 != 0 {
+            MemLevel::L1
+        } else if mask & b::PERF_MEM_LVL_LFB != 0 {
+            MemLevel::Lfb
+        } else if mask & b::PERF_MEM_LVL_L2 != 0 {
+            MemLevel::L2
+        } else if mask & b::PERF_MEM_LVL_L3 != 0 {
+            MemLevel::L3
+        } else if mask & b::PERF_MEM_LVL_LOC_RAM != 0 {
+            MemLevel::Ram
+        } else if mask & (b::PERF_MEM_LVL_REM_RAM1 | b::PERF_MEM_LVL_REM_RAM2) != 0 {
+            MemLevel::RemoteRam
+        } else if mask & (b::PERF_MEM_LVL_REM_CCE1 | b::PERF_MEM_LVL_REM_CCE2) != 0 {
+            MemLevel::RemoteCache
+        } else if mask & b::PERF_MEM_LVL_IO != 0 {
+            MemLevel::Io
+        } else {
+            MemLevel::Unknown
+        }
+    }
+
+    /// The line was modified in the cache that answered: another core had
+    /// written it, and this access had to take it away. This is the signal
+    /// false sharing leaves, and the one a miss count cannot show.
+    pub fn hitm(self) -> bool {
+        use sys::bindings as b;
+        self.field(b::PERF_MEM_SNOOP_SHIFT, 5) as u32 & b::PERF_MEM_SNOOP_HITM != 0
+    }
+
+    /// The access missed the first-level data TLB.
+    pub fn tlb_miss(self) -> bool {
+        use sys::bindings as b;
+        self.field(b::PERF_MEM_TLB_SHIFT, 7) as u32 & b::PERF_MEM_TLB_MISS != 0
+    }
 }
 
 /// One record read out of the ring.
@@ -83,6 +363,11 @@ pub struct Sample {
     /// `Some(empty)`: the second means the unwinder was asked and came back
     /// with nothing. [`crate::stack`] is what turns this into frames.
     pub callchain: Option<Vec<u64>>,
+    /// The cpu the sample was taken on, when the event asked for it.
+    pub cpu: Option<u32>,
+    /// Where the sampled access went and how long it waited, when the event
+    /// asked for it. See [`SampleSpec::memory`].
+    pub access: Option<MemoryAccess>,
 }
 
 /// Which privilege level the sampled instruction was running at.
@@ -134,6 +419,7 @@ const SAMPLE_TYPE: u64 = (sys::bindings::PERF_SAMPLE_IP
 
 /// The fixed fields above, counted in eight-byte words: `ip`, `pid`+`tid`,
 /// `time`, `addr`. The callchain's length follows them.
+#[cfg(test)]
 const FIXED_FIELDS: usize = 4;
 
 /// What the kernel will let a callchain be, in frames.
@@ -158,7 +444,7 @@ fn is_ring_too_large(error: &io::Error) -> bool {
         && (text.contains("Operation not permitted") || text.contains("Cannot allocate memory"))
 }
 
-/// A software event sampled into a ring buffer.
+/// A sampled event and the ring buffer its samples arrive in.
 pub struct SampledEvent {
     fd: RawFd,
     base: *mut u8,
@@ -171,6 +457,11 @@ pub struct SampledEvent {
     /// a decoder that reads a callchain the kernel was never asked to write
     /// reads whatever follows the record instead.
     callchain: Callchain,
+    sample_type: u64,
+    /// Further events on the same cpu whose samples the kernel writes into this
+    /// event's ring rather than into rings of their own. See
+    /// [`SampledEvent::follow`].
+    followers: Vec<RawFd>,
 }
 
 // The mapping belongs to this struct alone and is only read through `&mut self`.
@@ -206,9 +497,18 @@ impl SampledEvent {
         ring_pages: usize,
         callchain: Callchain,
     ) -> io::Result<Self> {
+        Self::open(
+            &SampleSpec::software(config, period, callchain),
+            scope,
+            ring_pages,
+        )
+    }
+
+    /// Opens any sampled event, shrinking the ring until the machine allows it.
+    pub fn open(spec: &SampleSpec, scope: Scope, ring_pages: usize) -> io::Result<Self> {
         let mut pages = ring_pages.next_power_of_two();
         loop {
-            match Self::open_with_ring(config, period, scope, pages, callchain) {
+            match Self::open_with_ring(spec, scope, pages) {
                 Ok(event) => return Ok(event),
                 Err(error) if pages > MIN_RING_PAGES && is_ring_too_large(&error) => {
                     pages /= 2;
@@ -216,6 +516,38 @@ impl SampledEvent {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Opens a second event on this event's cpu and sends its samples into
+    /// this event's ring.
+    ///
+    /// Two threads of a running process are two events on every cpu, and a
+    /// ring per event per cpu would be a ring per thread per cpu. The kernel
+    /// lets events on one cpu share a ring (`PERF_EVENT_IOC_SET_OUTPUT`), and
+    /// refuses to let events on two different cpus share one, which is why this
+    /// asks for the scope's cpu to be this event's.
+    ///
+    /// The follower must ask for the same sample fields: the ring has one
+    /// layout, and it is this event's.
+    pub fn follow(&mut self, spec: &SampleSpec, scope: Scope) -> io::Result<()> {
+        if spec.sample_type() != self.sample_type {
+            return Err(io::Error::other(
+                "an event that shares a ring must ask for the same sample fields",
+            ));
+        }
+        let fd = open_fd(spec, scope)?;
+        // SAFETY: both descriptors are perf events this process opened.
+        let result = unsafe { sys::ioctls::SET_OUTPUT(fd, self.fd) };
+        if result < 0 {
+            let error = io::Error::other(format!(
+                "redirecting a sampled event into a shared ring: {}",
+                io::Error::last_os_error()
+            ));
+            unsafe { libc::close(fd) };
+            return Err(error);
+        }
+        self.followers.push(fd);
+        Ok(())
     }
 
     /// Whether this machine will hand this user a callchain with a sample.
@@ -254,68 +586,12 @@ impl SampledEvent {
         "the target task only: threads it starts afterwards are not sampled"
     }
 
-    fn open_with_ring(
-        config: u64,
-        period: u64,
-        scope: Scope,
-        ring_pages: usize,
-        callchain: Callchain,
-    ) -> io::Result<Self> {
+    fn open_with_ring(spec: &SampleSpec, scope: Scope, ring_pages: usize) -> io::Result<Self> {
         assert!(
             ring_pages.is_power_of_two(),
             "the ring must be a power of two pages"
         );
-
-        let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
-        attr.type_ = sys::bindings::PERF_TYPE_SOFTWARE;
-        attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
-        attr.config = config;
-        attr.__bindgen_anon_1.sample_period = period;
-        attr.sample_type = SAMPLE_TYPE;
-        if callchain == Callchain::FramePointers {
-            attr.sample_type |= sys::bindings::PERF_SAMPLE_CALLCHAIN as u64;
-            // Both halves are asked for. A kernel chain without a user chain
-            // says a task is in `read`, and never which of its own functions
-            // called it; a user chain without a kernel one cannot tell work
-            // from waiting. `crate::stack` keeps them apart afterwards.
-            attr.sample_max_stack = max_stack_depth();
-        }
-        attr.__bindgen_anon_2.wakeup_events = 1;
-        // Start stopped: the caller decides when the window opens, which is how
-        // a launched program can be sampled from its first instruction.
-        attr.set_disabled(1);
-        // One clock domain for the whole tool. Without this the samples would
-        // be on the kernel's default clock and every join against them would be
-        // off by an amount nobody would notice.
-        attr.set_use_clockid(1);
-        attr.clockid = libc::CLOCK_MONOTONIC;
-        // `inherit` is deliberately left off. The kernel refuses to map a ring
-        // buffer for an inherited per-task event (`perf_mmap` returns EINVAL
-        // when `cpu == -1 && attr.inherit`), because each inheriting task would
-        // need a buffer of its own. Following every thread means per-cpu events,
-        // which need privileges most machines do not grant. So this samples the
-        // task it was given, and `sampled_threads` below states the limit rather
-        // than leaving it to be discovered in a missing number.
-
-        let (pid, cpu) = match scope {
-            Scope::Process(pid) => (pid, -1),
-            Scope::Cpu(cpu) => (-1, cpu as i32),
-        };
-        let fd = unsafe {
-            sys::perf_event_open(
-                &mut attr,
-                pid,
-                cpu,
-                -1,
-                sys::bindings::PERF_FLAG_FD_CLOEXEC as u64,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::other(format!(
-                "perf_event_open: {}",
-                io::Error::last_os_error()
-            )));
-        }
+        let fd = open_fd(spec, scope)?;
 
         let page = page_size();
         let map_len = (ring_pages + 1) * page;
@@ -345,16 +621,25 @@ impl SampledEvent {
             data_size: (ring_pages * page) as u64,
             lost: 0,
             undecoded: 0,
-            callchain,
+            callchain: spec.callchain,
+            sample_type: spec.sample_type(),
+            followers: Vec::new(),
         })
     }
 
+    /// Enables this event and every event that follows it into its ring.
     pub fn enable(&self) -> io::Result<()> {
-        self.ioctl(unsafe { sys::ioctls::ENABLE(self.fd, 0) })
+        for fd in std::iter::once(self.fd).chain(self.followers.iter().copied()) {
+            self.ioctl(unsafe { sys::ioctls::ENABLE(fd, 0) })?;
+        }
+        Ok(())
     }
 
     pub fn disable(&self) -> io::Result<()> {
-        self.ioctl(unsafe { sys::ioctls::DISABLE(self.fd, 0) })
+        for fd in std::iter::once(self.fd).chain(self.followers.iter().copied()) {
+            self.ioctl(unsafe { sys::ioctls::DISABLE(fd, 0) })?;
+        }
+        Ok(())
     }
 
     fn ioctl(&self, result: i32) -> io::Result<()> {
@@ -438,29 +723,13 @@ impl SampledEvent {
 
     fn decode(&self, kind: u32, misc: u16, offset: u64, size: u64) -> Record {
         let body = self.copy_out(offset, size as usize);
-        let field = |index: usize| -> u64 {
-            let start = 8 + index * 8;
-            body.get(start..start + 8)
-                .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("8 bytes")))
-                .unwrap_or(0)
-        };
         match kind {
             sys::bindings::PERF_RECORD_SAMPLE => {
-                let tid_field = field(1);
-                Record::Sample(Sample {
-                    ip: field(0),
-                    pid: (tid_field & 0xffff_ffff) as u32,
-                    tid: (tid_field >> 32) as u32,
-                    time_ns: field(2),
-                    addr: field(3),
-                    cpu_mode: CpuMode::from_misc(misc),
-                    callchain: match self.callchain {
-                        Callchain::Off => None,
-                        Callchain::FramePointers => Some(callchain_of(&body)),
-                    },
-                })
+                Record::Sample(decode_sample(&body, misc, self.sample_type))
             }
-            sys::bindings::PERF_RECORD_LOST => Record::Lost { count: field(1) },
+            sys::bindings::PERF_RECORD_LOST => Record::Lost {
+                count: word_at(&body, 1).unwrap_or(0),
+            },
             sys::bindings::PERF_RECORD_THROTTLE => Record::Throttle { throttled: true },
             sys::bindings::PERF_RECORD_UNTHROTTLE => Record::Throttle { throttled: false },
             other => Record::Other { kind: other },
@@ -468,37 +737,161 @@ impl SampledEvent {
     }
 }
 
+/// The eight-byte word at `index` after the record header.
+fn word_at(body: &[u8], index: usize) -> Option<u64> {
+    let start = 8 + index * 8;
+    body.get(start..start + 8)
+        .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("8 bytes")))
+}
+
+/// Reads a sample record in the layout its event's `sample_type` gave it.
+///
+/// The kernel writes the fields in the order of their bits and skips the ones
+/// that were not asked for, so the position of `DATA_SRC` depends on whether a
+/// callchain came before it. Walking the bits in that order is the only
+/// reading that stays right when a field is added. A field the record is too
+/// short to hold reads as zero rather than as the next record's bytes.
+fn decode_sample(body: &[u8], misc: u16, sample_type: u64) -> Sample {
+    use sys::bindings as b;
+    let asked = |bit: u32| sample_type & bit as u64 != 0;
+    let mut index = 0;
+    let mut next = || {
+        let word = word_at(body, index).unwrap_or(0);
+        index += 1;
+        word
+    };
+    let ip = if asked(b::PERF_SAMPLE_IP) { next() } else { 0 };
+    let tid_field = if asked(b::PERF_SAMPLE_TID) { next() } else { 0 };
+    let time_ns = if asked(b::PERF_SAMPLE_TIME) {
+        next()
+    } else {
+        0
+    };
+    let addr = if asked(b::PERF_SAMPLE_ADDR) {
+        next()
+    } else {
+        0
+    };
+    // `cpu` then a reserved half-word, in one word.
+    let cpu = asked(b::PERF_SAMPLE_CPU).then(|| (next() & 0xffff_ffff) as u32);
+    let callchain = asked(b::PERF_SAMPLE_CALLCHAIN).then(|| {
+        let chain = callchain_of(body, index);
+        index += 1 + chain.len();
+        chain
+    });
+    let weight = asked(b::PERF_SAMPLE_WEIGHT_STRUCT).then(|| {
+        let word = word_at(body, index).unwrap_or(0);
+        index += 1;
+        word
+    });
+    let data_src = asked(b::PERF_SAMPLE_DATA_SRC).then(|| {
+        let word = word_at(body, index).unwrap_or(0);
+        index += 1;
+        word
+    });
+    Sample {
+        ip,
+        pid: (tid_field & 0xffff_ffff) as u32,
+        tid: (tid_field >> 32) as u32,
+        time_ns,
+        addr,
+        cpu_mode: CpuMode::from_misc(misc),
+        callchain,
+        cpu,
+        access: match (weight, data_src) {
+            (Some(weight), Some(data_src)) => Some(MemoryAccess::from_words(weight, data_src)),
+            _ => None,
+        },
+    }
+}
+
 impl Drop for SampledEvent {
     fn drop(&mut self) {
         unsafe {
+            // Followers first: each writes into this event's ring.
+            for fd in &self.followers {
+                libc::close(*fd);
+            }
             libc::munmap(self.base as *mut libc::c_void, self.map_len);
             libc::close(self.fd);
         }
     }
 }
 
+/// Opens the event a spec describes, without a ring.
+fn open_fd(spec: &SampleSpec, scope: Scope) -> io::Result<RawFd> {
+    let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = spec.kind;
+    attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attr.config = spec.config;
+    attr.__bindgen_anon_4.config2 = spec.config2;
+    match spec.rate {
+        Rate::Period(period) => attr.__bindgen_anon_1.sample_period = period,
+        Rate::Hz(hz) => {
+            attr.set_freq(1);
+            attr.__bindgen_anon_1.sample_freq = hz;
+        }
+    }
+    attr.sample_type = spec.sample_type();
+    if spec.callchain == Callchain::FramePointers {
+        // Both halves are asked for. A kernel chain without a user chain
+        // says a task is in `read`, and never which of its own functions
+        // called it; a user chain without a kernel one cannot tell work
+        // from waiting. `crate::stack` keeps them apart afterwards.
+        attr.sample_max_stack = max_stack_depth();
+    }
+    if spec.exclude_kernel {
+        attr.set_exclude_kernel(1);
+        attr.set_exclude_hv(1);
+    }
+    attr.__bindgen_anon_2.wakeup_events = 1;
+    // Start stopped: the caller decides when the window opens, which is how
+    // a launched program can be sampled from its first instruction.
+    attr.set_disabled(1);
+    // One clock domain for the whole tool. Without this the samples would
+    // be on the kernel's default clock and every join against them would be
+    // off by an amount nobody would notice.
+    attr.set_use_clockid(1);
+    attr.clockid = libc::CLOCK_MONOTONIC;
+    // `inherit` is off unless the spec asks for it, and the kernel only accepts
+    // it here for an event pinned to a cpu: it refuses to map a ring buffer for
+    // an inherited per-task event on every cpu (`perf_mmap` returns EINVAL when
+    // `cpu == -1 && attr.inherit`), because each inheriting task would need a
+    // buffer of its own. So a software sampler over `Scope::Process` samples the
+    // task it was given, and `sampled_threads` states the limit rather than
+    // leaving it to be discovered in a missing number.
+    if spec.inherit {
+        attr.set_inherit(1);
+    }
+
+    let (pid, cpu, flags) = scope.arguments();
+    let fd = unsafe { sys::perf_event_open(&mut attr, pid, cpu, -1, flags) };
+    if fd < 0 {
+        return Err(io::Error::other(format!(
+            "perf_event_open: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(fd)
+}
+
 /// The callchain of a sample record whose event asked for one.
 ///
-/// It follows the fixed fields as a count and then that many addresses. The
-/// count is the kernel's, but the bound checked here is the record's own
-/// length: a decoder that trusted the count would walk off the end of a
-/// truncated record and hand back whatever the ring held next as frames.
+/// It is a count at word `at` and then that many addresses. The count is the
+/// kernel's, but the bound checked here is the record's own length: a decoder
+/// that trusted the count would walk off the end of a truncated record and hand
+/// back whatever the ring held next as frames.
 ///
 /// Split out as a free function because, like the seam, it is a piece of this
 /// module whose correctness does not need a kernel to check.
-fn callchain_of(body: &[u8]) -> Vec<u64> {
-    let word = |index: usize| -> Option<u64> {
-        let start = 8 + index * 8;
-        body.get(start..start + 8)
-            .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("8 bytes")))
-    };
-    let Some(count) = word(FIXED_FIELDS) else {
+fn callchain_of(body: &[u8], at: usize) -> Vec<u64> {
+    let Some(count) = word_at(body, at) else {
         return Vec::new();
     };
-    let available = body.len().saturating_sub(8 + (FIXED_FIELDS + 1) * 8) / 8;
+    let available = body.len().saturating_sub(8 + (at + 1) * 8) / 8;
     let depth = (count as usize).min(available);
     (0..depth)
-        .filter_map(|index| word(FIXED_FIELDS + 1 + index))
+        .filter_map(|index| word_at(body, at + 1 + index))
         .collect()
 }
 
@@ -652,6 +1045,120 @@ pub fn sysfs_event(pmu: &str, event: &str) -> Option<(u32, u64)> {
         }
     }
     Some((kind, config))
+}
+
+/// Which word of the attribute a `format` term lives in, and at which bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatBit {
+    Config(u32),
+    Config2(u32),
+}
+
+/// Reads a one-bit term of a unit's `format` directory, as `config:19`.
+///
+/// The layout of a unit's configuration is the kernel's to describe, and it
+/// describes it here; a bit written into a config from memory of a datasheet
+/// is the kind of error that makes an open succeed and measure something else.
+/// A term that spans several bits is not a flag, and is not answered.
+pub fn format_bit(pmu: &str, term: &str) -> Option<FormatBit> {
+    parse_format_bit(&read_trimmed(&format!(
+        "{PMU_DEVICES}/{pmu}/format/{term}"
+    ))?)
+}
+
+fn parse_format_bit(text: &str) -> Option<FormatBit> {
+    let (word, bit) = text.trim().split_once(':')?;
+    if bit.contains('-') || bit.contains(',') {
+        return None;
+    }
+    let bit: u32 = bit.parse().ok()?;
+    if bit >= 64 {
+        return None;
+    }
+    match word {
+        "config" => Some(FormatBit::Config(bit)),
+        "config2" => Some(FormatBit::Config2(bit)),
+        _ => None,
+    }
+}
+
+/// AMD's instruction-based sampling of ops, as this machine publishes it.
+///
+/// The unit tags one micro-op every so often and follows it to retirement, so
+/// what comes back is not a counter overflowing at some instruction nearby but
+/// the op itself: the address it loaded from, which level answered, and how
+/// many cycles the answer took. That is the one thing a counting PMU cannot
+/// say, and the reason `mem.latency` and `mem.sharing` go through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IbsOp {
+    /// The type number the kernel assigned this unit at boot.
+    pub kind: u32,
+    /// `cnt_ctl`: count dispatched ops rather than cycles between two tags.
+    pub count_ops: Option<FormatBit>,
+    /// `swfilt`: let the kernel discard samples by privilege level. Without it
+    /// the unit refuses any `exclude_*` bit outright.
+    pub swfilt: Option<FormatBit>,
+}
+
+impl IbsOp {
+    pub const PMU: &'static str = "ibs_op";
+
+    /// The unit, when the machine has one.
+    pub fn probe() -> Option<Self> {
+        let kind = read_trimmed(&format!("{PMU_DEVICES}/{}/type", Self::PMU))?
+            .parse()
+            .ok()?;
+        Some(Self {
+            kind,
+            count_ops: format_bit(Self::PMU, "cnt_ctl"),
+            swfilt: format_bit(Self::PMU, "swfilt"),
+        })
+    }
+
+    /// Whether this unit can leave the kernel's own accesses out.
+    pub fn can_exclude_kernel(&self) -> bool {
+        self.swfilt.is_some()
+    }
+
+    /// A sampling event over this unit.
+    ///
+    /// Ops rather than cycles are counted between two tags whenever the unit
+    /// allows it. Counting cycles tags whatever op is dispatched when the
+    /// counter runs out, and a core stalled on a miss dispatches nothing, so
+    /// the ops around a long stall are under-represented in exactly the
+    /// measurement meant to find them. Counting ops tags one op in every so
+    /// many, whatever they cost.
+    pub fn spec(&self, rate: Rate, exclude_kernel: bool, inherit: bool) -> SampleSpec {
+        let mut config = 0u64;
+        let mut config2 = 0u64;
+        let mut set = |bit: FormatBit| match bit {
+            FormatBit::Config(bit) => config |= 1 << bit,
+            FormatBit::Config2(bit) => config2 |= 1 << bit,
+        };
+        if let Some(bit) = self.count_ops {
+            set(bit);
+        }
+        let exclude_kernel = exclude_kernel && self.can_exclude_kernel();
+        if exclude_kernel {
+            set(self.swfilt.expect("checked above"));
+        }
+        SampleSpec {
+            kind: self.kind,
+            config,
+            config2,
+            rate,
+            exclude_kernel,
+            inherit,
+            callchain: Callchain::Off,
+            memory: true,
+        }
+    }
+
+    /// Whether `count_ops` was honoured, for the record that travels with the
+    /// numbers.
+    pub fn counts_ops(&self) -> bool {
+        self.count_ops.is_some()
+    }
 }
 
 /// What one tick of a unit's counter is worth, and in what.
@@ -819,10 +1326,7 @@ impl CounterGroup {
             if group.fds.is_empty() {
                 attr.set_disabled(1);
             }
-            let (pid, cpu) = match scope {
-                Scope::Process(pid) => (pid, -1),
-                Scope::Cpu(cpu) => (-1, cpu as i32),
-            };
+            let (pid, cpu, flags) = scope.arguments();
             // A counting event needs no ring buffer, which is what makes
             // `inherit` usable here: the count follows the threads and children
             // the target starts, and a program whose work happens in a thread
@@ -834,19 +1338,11 @@ impl CounterGroup {
             // a task: there is nothing to inherit into. A package counter --
             // RAPL, the uncore -- is exactly that, and setting the bit made
             // every one of them fail with EINVAL.
-            if matches!(scope, Scope::Process(_)) {
+            if matches!(scope, Scope::Process(_) | Scope::TaskOnCpu { .. }) {
                 attr.set_inherit(1);
             }
             let leader = group.fds.first().copied().unwrap_or(-1);
-            let fd = unsafe {
-                sys::perf_event_open(
-                    &mut attr,
-                    pid,
-                    cpu,
-                    leader,
-                    sys::bindings::PERF_FLAG_FD_CLOEXEC as u64,
-                )
-            };
+            let fd = unsafe { sys::perf_event_open(&mut attr, pid, cpu, leader, flags) };
             if fd < 0 {
                 let errno = io::Error::last_os_error();
                 return Err(io::Error::from_raw_os_error(
@@ -1132,6 +1628,10 @@ mod tests {
 
     const PAGE_FAULTS: u64 = sys::bindings::PERF_COUNT_SW_PAGE_FAULTS as u64;
 
+    fn callchain_of_fixed(body: &[u8]) -> Vec<u64> {
+        callchain_of(body, FIXED_FIELDS)
+    }
+
     #[test]
     fn a_record_that_straddles_the_seam_is_read_whole() {
         // Sixteen bytes of ring, numbered so any misread is visible.
@@ -1164,14 +1664,14 @@ mod tests {
         };
 
         assert_eq!(
-            callchain_of(&record(3, &[0xa, 0xb, 0xc])),
+            callchain_of_fixed(&record(3, &[0xa, 0xb, 0xc])),
             vec![0xa, 0xb, 0xc]
         );
         // A count larger than the record can hold yields what the record holds.
-        assert_eq!(callchain_of(&record(99, &[0xa, 0xb])), vec![0xa, 0xb]);
-        assert_eq!(callchain_of(&record(0, &[])), Vec::<u64>::new());
+        assert_eq!(callchain_of_fixed(&record(99, &[0xa, 0xb])), vec![0xa, 0xb]);
+        assert_eq!(callchain_of_fixed(&record(0, &[])), Vec::<u64>::new());
         // A record too short to even hold the count is not a callchain.
-        assert_eq!(callchain_of(&[0u8; 16]), Vec::<u64>::new());
+        assert_eq!(callchain_of_fixed(&[0u8; 16]), Vec::<u64>::new());
     }
 
     /// The header says which mode the sampled instruction was in, and it is the
@@ -1758,6 +2258,242 @@ mod tests {
             after - time < 5_000_000_000,
             "sample clock and CLOCK_MONOTONIC are {}ns apart, so they are different clocks",
             after - time
+        );
+    }
+
+    /// The position of every field after the callchain depends on the
+    /// callchain's length, so the layout is decoded field by field from the
+    /// event's own `sample_type`. A decoder with fixed offsets reads the data
+    /// source out of a frame.
+    #[test]
+    fn a_memory_sample_is_read_in_the_layout_its_fields_give_it() {
+        use sys::bindings as b;
+        let data_src = (u64::from(b::PERF_MEM_OP_LOAD) << b::PERF_MEM_OP_SHIFT)
+            | (u64::from(b::PERF_MEM_LVLNUM_RAM) << b::PERF_MEM_LVLNUM_SHIFT);
+        let weight = 309u64 | (512u64 << 32);
+        let record = |frames: &[u64]| {
+            let mut body = vec![0u8; 8];
+            let mut words = vec![0x401000u64, (7u64 << 32) | 6, 1_000, 0xdead_0040, 5];
+            words.push(frames.len() as u64);
+            words.extend_from_slice(frames);
+            words.extend_from_slice(&[weight, data_src]);
+            for word in words {
+                body.extend_from_slice(&word.to_ne_bytes());
+            }
+            body
+        };
+        let spec = SampleSpec {
+            callchain: Callchain::FramePointers,
+            memory: true,
+            ..SampleSpec::software(0, 1, Callchain::Off)
+        };
+        for frames in [&[][..], &[0xa, 0xb, 0xc][..]] {
+            let sample = decode_sample(&record(frames), 0, spec.sample_type());
+            assert_eq!((sample.pid, sample.tid), (6, 7));
+            assert_eq!(sample.addr, 0xdead_0040);
+            assert_eq!(sample.cpu, Some(5));
+            assert_eq!(sample.callchain.as_deref(), Some(frames));
+            let access = sample.access.expect("the record carries an access");
+            assert_eq!(access.latency_cycles, 309);
+            assert_eq!(access.retire_cycles, 512);
+            assert_eq!(access.source.op(), MemOp::Load);
+            assert_eq!(access.source.level(), MemLevel::Ram);
+        }
+
+        // Without the memory fields, nothing is read past the fixed four.
+        let plain = decode_sample(&record(&[]), 0, SAMPLE_TYPE);
+        assert_eq!((plain.cpu, plain.access), (None, None));
+    }
+
+    /// Each value here is one the kernel's IBS decoder writes on AMD family
+    /// 17h, taken apart the way `perf mem report` takes it apart.
+    #[test]
+    fn a_data_source_names_the_level_that_answered() {
+        use sys::bindings as b;
+        let source = |op: u32, lvlnum: u32, remote: bool, snoop: u32| {
+            DataSource(
+                (u64::from(op) << b::PERF_MEM_OP_SHIFT)
+                    | (u64::from(lvlnum) << b::PERF_MEM_LVLNUM_SHIFT)
+                    | (u64::from(remote) << b::PERF_MEM_REMOTE_SHIFT)
+                    | (u64::from(snoop) << b::PERF_MEM_SNOOP_SHIFT),
+            )
+        };
+        let l1 = source(b::PERF_MEM_OP_LOAD, b::PERF_MEM_LVLNUM_L1, false, 0);
+        assert_eq!(
+            (l1.op(), l1.level(), l1.hitm()),
+            (MemOp::Load, MemLevel::L1, false)
+        );
+        let peer = source(
+            b::PERF_MEM_OP_LOAD,
+            b::PERF_MEM_LVLNUM_ANY_CACHE,
+            false,
+            b::PERF_MEM_SNOOP_HITM,
+        );
+        assert_eq!((peer.level(), peer.hitm()), (MemLevel::Peer, true));
+        let far = source(b::PERF_MEM_OP_LOAD, b::PERF_MEM_LVLNUM_RAM, true, 0);
+        assert_eq!(far.level(), MemLevel::RemoteRam);
+        // An op the unit did not describe is not a load that hit somewhere.
+        let none = source(b::PERF_MEM_OP_NA, b::PERF_MEM_LVLNUM_NA, false, 0);
+        assert_eq!((none.op(), none.level()), (MemOp::None, MemLevel::Unknown));
+        // The older mask, for a kernel that fills only that.
+        let old = DataSource(
+            u64::from(b::PERF_MEM_LVL_HIT | b::PERF_MEM_LVL_L2) << b::PERF_MEM_LVL_SHIFT,
+        );
+        assert_eq!(old.level(), MemLevel::L2);
+        let missed = DataSource(
+            u64::from(b::PERF_MEM_LVL_MISS | b::PERF_MEM_LVL_L1) << b::PERF_MEM_LVL_SHIFT,
+        );
+        assert_eq!(missed.level(), MemLevel::Unknown);
+    }
+
+    #[test]
+    fn a_format_term_is_a_word_and_a_bit() {
+        assert_eq!(parse_format_bit("config:19"), Some(FormatBit::Config(19)));
+        assert_eq!(parse_format_bit("config2:0\n"), Some(FormatBit::Config2(0)));
+        // A field, not a flag: setting its first bit would be a guess.
+        assert_eq!(parse_format_bit("config:0-7"), None);
+        assert_eq!(parse_format_bit("config1:3"), None);
+        assert_eq!(parse_format_bit("config:64"), None);
+    }
+
+    /// A shuffled chain of pointers, one per cache line, so that every load
+    /// depends on the one before it and no prefetcher can guess the next line.
+    fn chain(bytes: usize) -> Vec<usize> {
+        let slots = bytes / 64;
+        let mut chain = vec![0usize; slots * 8];
+        let mut order: Vec<usize> = (0..slots).collect();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for index in (1..slots).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            order.swap(index, (state % (index as u64 + 1)) as usize);
+        }
+        for window in 0..slots {
+            chain[order[window] * 8] = order[(window + 1) % slots] * 8;
+        }
+        chain
+    }
+
+    fn chase(chain: &[usize], steps: u64) {
+        let mut at = 0usize;
+        for _ in 0..steps {
+            at = unsafe { std::ptr::read_volatile(chain.as_ptr().add(at)) };
+        }
+        std::hint::black_box(at);
+    }
+
+    /// The loads this thread made inside `range`, by the level that answered.
+    fn levels_of(event: &mut SampledEvent, range: (u64, u64)) -> Vec<(MemLevel, u32)> {
+        let mut seen = Vec::new();
+        event.drain(|record| {
+            if let Record::Sample(sample) = record {
+                let Some(access) = sample.access else { return };
+                if access.source.op() == MemOp::Load && (range.0..range.1).contains(&sample.addr) {
+                    seen.push((access.source.level(), access.latency_cycles));
+                }
+            }
+        });
+        seen
+    }
+
+    /// Ground truth that needs no reference counter: a chain that fits in L1
+    /// and one four times larger than this machine's whole L3, walked by the
+    /// same code in the same thread. Which level answers is decided by the
+    /// working set, not by the tool, so the hardware has to say L1 for most of
+    /// one and memory for most of the other -- and a latency only for the
+    /// second, since family 17h measures one only for a load that missed.
+    ///
+    /// Asserted as a separation, not a threshold: other tests share this
+    /// machine's caches, and a quiet machine and a loaded one differ in how
+    /// far apart the two walks land, not in which side each lands on.
+    #[test]
+    fn an_ibs_sample_says_which_level_answered_the_load() {
+        let Some(ibs) = IbsOp::probe() else {
+            eprintln!("skipped: this machine publishes no `ibs_op` unit (not AMD, or too old)");
+            return;
+        };
+        let tid = unsafe { libc::gettid() };
+        let spec = ibs.spec(Rate::Hz(20_000), true, false);
+        let mut event = match SampledEvent::open(&spec, Scope::Process(tid), 64) {
+            Ok(event) => event,
+            Err(error) => {
+                eprintln!("skipped: IBS op sampling of this thread was refused: {error}");
+                return;
+            }
+        };
+
+        // Built before the window opens: building a chain is itself a quarter
+        // of a million stores, and they would fill the ring before the walk
+        // began.
+        let mut walk = |bytes: usize| {
+            let chain = chain(bytes);
+            let base = chain.as_ptr() as u64;
+            let range = (base, base + (chain.len() * 8) as u64);
+            let mut loads = Vec::new();
+            // Enabled once, for a fixed time, and drained while it runs, the
+            // way a collector drains on its tick. Re-enabling restarts the
+            // kernel's adjustment of the period to the frequency, and in a
+            // debug build only about one op in a hundred is the chain's own
+            // load -- the rest is the loop around it.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+            event.enable().expect("enable");
+            while std::time::Instant::now() < deadline {
+                chase(&chain, 20_000);
+                loads.extend(levels_of(&mut event, range));
+            }
+            event.disable().expect("disable");
+            loads.extend(levels_of(&mut event, range));
+            loads
+        };
+        let small = walk(4096);
+        let large = walk(256 << 20);
+        assert_eq!(
+            event.lost(),
+            0,
+            "the ring overflowed, so the shares below are of a subset"
+        );
+
+        let share = |loads: &[(MemLevel, u32)], keep: fn(MemLevel) -> bool| {
+            loads.iter().filter(|(at, _)| keep(*at)).count() as f64 / loads.len().max(1) as f64
+        };
+        let in_l1 = |level: MemLevel| level == MemLevel::L1;
+        let beyond_l1 = |level: MemLevel| !matches!(level, MemLevel::L1 | MemLevel::Unknown);
+        let measured = |loads: &[(MemLevel, u32)]| {
+            loads.iter().filter(|(_, latency)| *latency > 0).count() as f64
+                / loads.len().max(1) as f64
+        };
+        eprintln!(
+            "4 KiB: {} loads, {:.2} in L1, {:.2} with a latency; 256 MiB: {} loads, {:.2} beyond \
+             L1, {:.2} with a latency",
+            small.len(),
+            share(&small, in_l1),
+            measured(&small),
+            large.len(),
+            share(&large, beyond_l1),
+            measured(&large),
+        );
+        assert!(
+            small.len() >= 20 && large.len() >= 20,
+            "too few samples to say anything"
+        );
+        // Which level beyond L1 is not asserted: this thread's walk has been
+        // seen answered by memory and by L3 in two runs on a loaded machine,
+        // and the level a miss lands in is the machine's business. That it
+        // missed is the working set's.
+        assert!(
+            share(&small, in_l1) > 0.5,
+            "a 4 KiB chain is answered by L1, and the hardware said so for only {:.2} of it",
+            share(&small, in_l1)
+        );
+        assert!(
+            share(&large, beyond_l1) > 0.5,
+            "a 256 MiB chain misses L1, and the hardware said so for only {:.2} of it",
+            share(&large, beyond_l1)
+        );
+        assert!(
+            measured(&large) > measured(&small) + 0.4,
+            "a load that misses carries a latency and one that hits does not"
         );
     }
 }

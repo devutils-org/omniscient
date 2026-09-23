@@ -1782,7 +1782,7 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
     assert_eq!(code(&output), EXIT_NO_COLLECTOR, "{}", stderr(&output));
     let message = stderr(&output);
     assert!(
-        message.contains("mem.latency") && message.contains("pmu:"),
+        message.contains("mem.heap.alloc") && message.contains("bpf:uprobe"),
         "the refusal has to name the source and the backend that is missing: {message}"
     );
     assert!(
@@ -1797,8 +1797,8 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
     assert_eq!(
         code(&validated),
         0,
-        "`omn validate` checks the request against the catalog, where `mem.latency` is a source \
-         like any other: {}",
+        "`omn validate` checks the request against the catalog, where a pinned backend is a \
+         backend like any other: {}",
         stderr(&validated)
     );
 }
@@ -1812,19 +1812,23 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
 #[test]
 fn the_three_refusals_are_told_apart() {
     let rejected = run(&["mem.bandwidth", "--pid", "1", "-m", "count", "-e", "rate"]);
-    // `mem.sharing` rather than one of the tracefs-bound sources: the three
-    // refusals can only be told apart where the machine is not itself a fourth
-    // answer, and its PEBS-or-IBS chain is served by every x86 cpu and written
-    // for none.
+    // A pinned uprobe rather than a source with no collector at all: the
+    // three refusals can only be told apart where the machine is not itself a
+    // fourth answer, and this family's last two sources nothing collected --
+    // `mem.latency` and `mem.sharing` -- are collected through IBS since the
+    // ninth wave. The uprobe is eBPF, which this machine serves.
     let not_built = run(&[
-        "mem.sharing",
-        "--system",
+        "mem.heap.alloc",
+        "--backend",
+        "force:bpf:uprobe",
         "-m",
-        "sample",
+        "trace",
         "-e",
-        "topk",
-        "-d",
-        "1s",
+        "summary",
+        "--",
+        "/bin/sh",
+        "-c",
+        "sleep 0.05",
     ]);
 
     assert_eq!(code(&rejected), EXIT_REJECTED, "{}", stderr(&rejected));
@@ -2832,4 +2836,401 @@ fn compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where
          `mem.compaction` saw none of it",
         moved.join(", ")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Memory by IBS: `mem.latency` and `mem.sharing`
+// ---------------------------------------------------------------------------
+
+/// Where the two workloads put their memory, as their sessions write it.
+const TIB: u64 = 1 << 40;
+
+fn has_ibs() -> bool {
+    std::path::Path::new("/sys/bus/event_source/devices/ibs_op/type").exists()
+}
+
+/// A result's raw events as attributes by name, with the task key lifted
+/// beside them as `tid`.
+fn ibs_events(result: &serde_json::Value) -> Vec<BTreeMap<String, serde_json::Value>> {
+    output_of(result, "raw")["events"]
+        .as_array()
+        .expect("a raw output carries events")
+        .iter()
+        .map(|event| {
+            let mut fields: BTreeMap<String, serde_json::Value> = event["attrs"]
+                .as_array()
+                .expect("a raw event carries attributes")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().unwrap().to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect();
+            if let Some(task) = event["keys"]
+                .as_array()
+                .and_then(|keys| keys.iter().find_map(|key| key["task"]["tid"].as_u64()))
+            {
+                fields.insert("tid".to_owned(), task.into());
+            }
+            fields
+        })
+        .collect()
+}
+
+fn degradation(result: &serde_json::Value, needle: &str) -> Option<String> {
+    result["degradations"]
+        .as_array()?
+        .iter()
+        .filter_map(|note| note.as_str())
+        .find(|note| note.contains(needle))
+        .map(str::to_owned)
+}
+
+/// The whole number just before `marker` in `text`.
+fn number_before(text: &str, marker: &str) -> Option<u64> {
+    let head = &text[..text.find(marker)?];
+    head.trim_end().rsplit(' ').next()?.parse().ok()
+}
+
+/// What the collector counted over the accesses the request's filter kept:
+/// loads, timed loads, and accesses answered in HITM.
+fn ibs_tally(result: &serde_json::Value) -> (u64, u64, u64) {
+    let note = degradation(result, "IBS tagged")
+        .unwrap_or_else(|| panic!("an IBS run says what it tagged: {result}"));
+    let loads = number_before(&note, "were loads").expect("the loads the filter kept");
+    let timed = number_before(&note, "of them timed").expect("the timed loads");
+    let hitm = number_before(&note, "were answered by a line").expect("the HITM count");
+    (loads, timed, hitm)
+}
+
+/// The sampled loads by the level that answered them, timed or not, from the
+/// note that carries them: on family 17h an L1 hit is never an event, so this
+/// is the only place it is counted.
+fn loads_by_level(result: &serde_json::Value) -> BTreeMap<String, u64> {
+    let Some(note) = degradation(result, "sampled loads by level:") else {
+        return BTreeMap::new();
+    };
+    note.rsplit("sampled loads by level:")
+        .next()
+        .unwrap()
+        .split(',')
+        .filter_map(|pair| {
+            let (level, count) = pair.trim().split_once(' ')?;
+            Some((level.to_owned(), count.parse().ok()?))
+        })
+        .collect()
+}
+
+/// A walk that fits in L1 and one that waits on memory, told apart by the
+/// hardware.
+///
+/// The working set decides which level answers, and the workload chose both:
+/// sixty-four lines, and a million. So every sampled load of the small walk has
+/// to be an L1 hit, and on this cpu an L1 hit carries no latency and is no
+/// event -- the collector counts it by level instead, over the loads the filter
+/// kept. The large walk's loads have to miss, be timed, and be answered mostly
+/// by memory, and a load from memory is at least tens of nanoseconds on any
+/// machine, which at any clock above one gigahertz is fifty cycles.
+///
+/// Asserted as a separation: the two walks run in one program, back to back,
+/// and share whatever else the machine is doing.
+#[test]
+fn a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    if !has_ibs() {
+        eprintln!(
+            "skipped: this machine has no `ibs_op` unit, and the pebs backend is not written"
+        );
+        return;
+    }
+    let output = run_example("mem-load-latency.yml");
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let session = json(&output);
+    let small = result(&session, "small walk");
+    let large = result(&session, "large walk");
+
+    let (small_loads, small_timed, _) = ibs_tally(small);
+    let (large_loads, large_timed, _) = ibs_tally(large);
+    if small_loads < 15 || large_loads < 15 {
+        eprintln!(
+            "skipped: the unit tagged {small_loads} of the small walk's loads and {large_loads} \
+             of the large one's, too few to say which level answered; a loaded machine \
+             time-shares the unit between every request that opened it"
+        );
+        return;
+    }
+
+    // The small walk: sampled, answered by L1, and so almost never timed.
+    let levels = loads_by_level(small);
+    let in_l1 = levels.get("l1").copied().unwrap_or(0);
+    eprintln!(
+        "small walk: {small_loads} loads, {small_timed} timed, by level {levels:?}; \
+         large walk: {large_loads} loads, {large_timed} timed"
+    );
+    assert!(
+        in_l1 * 2 > small_loads,
+        "a 4 KiB chain is answered by L1, and only {in_l1} of its {small_loads} sampled loads were"
+    );
+    assert!(
+        small_timed * 4 < small_loads,
+        "an L1 hit carries no latency on this cpu, and {small_timed} of {small_loads} of the \
+         small walk's loads did"
+    );
+
+    // The large walk: timed, and waiting on memory.
+    let events = ibs_events(large);
+    assert_eq!(
+        events.len() as u64,
+        large_timed,
+        "every timed load is an event"
+    );
+    assert!(
+        large_timed * 2 > large_loads,
+        "a 64 MiB chain misses L1, and only {large_timed} of its {large_loads} sampled loads were \
+         timed"
+    );
+    let range = 48 * TIB..49 * TIB;
+    let mut from_memory = Vec::new();
+    for event in &events {
+        let addr = event["addr"].as_u64().unwrap();
+        assert!(
+            range.contains(&addr),
+            "the filter kept {addr:#x}, outside the large walk"
+        );
+        if matches!(event["level"].as_str(), Some("ram" | "remote_ram")) {
+            from_memory.push(event["latency_cycles"].as_u64().unwrap());
+        }
+    }
+    assert!(
+        from_memory.len() * 2 > events.len(),
+        "a million-line chain four times this core's L3 waits on memory, and only {} of its {} \
+         timed loads came from there",
+        from_memory.len(),
+        events.len()
+    );
+    from_memory.sort_unstable();
+    let median = from_memory[from_memory.len() / 2];
+    assert!(
+        median >= 50,
+        "a load from memory takes tens of nanoseconds, which is at least fifty cycles at any \
+         clock above a gigahertz, and the median here is {median}"
+    );
+}
+
+/// Two processes on one line take it from each other; on two lines they do not.
+///
+/// The workload chose the only thing that differs: the distance between two
+/// bytes each child increments, 8 on one page and 128 on the other -- 128 and
+/// not 64 so that the two lines are not a pair the adjacent-line prefetcher
+/// fetches together. So the one-line page must be answered in HITM, to both
+/// tasks, on the one line; and the two-line page must be sampled and answered
+/// in HITM hardly at all.
+#[test]
+fn two_processes_on_one_line_take_it_from_each_other_and_on_two_lines_do_not() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    if !has_ibs() {
+        eprintln!(
+            "skipped: this machine has no `ibs_op` unit, and the pebs backend is not written"
+        );
+        return;
+    }
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    if cpus < 4 {
+        eprintln!(
+            "skipped: two cores that share no L1 need four cpus, and this machine has {cpus}"
+        );
+        return;
+    }
+    let output = run_example("mem-false-sharing.yml");
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let session = json(&output);
+    let one = result(&session, "one line");
+    let two = result(&session, "two lines");
+
+    let (_, _, one_hitm) = ibs_tally(one);
+    let (two_loads, _, two_hitm) = ibs_tally(two);
+    eprintln!("one line: {one_hitm} HITM; two lines: {two_hitm} HITM over {two_loads} loads");
+    if one_hitm < 5 || two_loads < 15 {
+        eprintln!(
+            "skipped: the unit saw {one_hitm} HITM on the shared line and {two_loads} loads on \
+             the other page, too few to tell the two apart"
+        );
+        return;
+    }
+
+    let events = ibs_events(one);
+    let lines: BTreeSet<u64> = events.iter().map(|e| e["line"].as_u64().unwrap()).collect();
+    assert_eq!(
+        lines,
+        BTreeSet::from([40 * TIB]),
+        "both children write the first line of the page at 40 TiB, and nothing else there"
+    );
+    let tasks: BTreeSet<u64> = events.iter().map(|e| e["tid"].as_u64().unwrap()).collect();
+    assert!(
+        tasks.len() >= 2,
+        "a line two processes fight over is taken by both, and HITM came from {tasks:?}"
+    );
+    assert!(
+        degradation(one, "answered modified to more than one task").is_some(),
+        "the run names the line more than one task fought over: {one}"
+    );
+
+    assert!(
+        two_hitm * 4 < one_hitm,
+        "two writers on two lines take nothing from each other, and the second page was answered \
+         in HITM {two_hitm} times against {one_hitm} for the shared line"
+    );
+    assert_eq!(
+        ibs_events(two).len() as u64,
+        two_hitm,
+        "every HITM is an event"
+    );
+}
+
+/// A rate at the kernel's ceiling is throttled, and a run that was says so.
+///
+/// `kernel.perf_event_max_sample_rate` is what decides this, and the kernel
+/// lowers it on its own when sampling costs too much, so the ceiling is read
+/// here rather than assumed. Above it the open is refused, by name; at it the
+/// kernel throttles the unit and the run has to count that as a loss and mark
+/// what it reports as a lower bound.
+#[test]
+fn a_rate_the_kernel_will_not_sustain_is_refused_or_counted_as_a_loss() {
+    if !has_ibs() {
+        eprintln!(
+            "skipped: this machine has no `ibs_op` unit, and the pebs backend is not written"
+        );
+        return;
+    }
+    let ceiling: u64 = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .expect("the kernel publishes its sampling ceiling");
+
+    let above = format!("sample@{}hz", ceiling * 2);
+    let refused = run(&[
+        "mem.latency",
+        "-m",
+        &above,
+        "-e",
+        "hist",
+        "--",
+        "/bin/sh",
+        "-c",
+        "sleep 0.05",
+    ]);
+    assert_ne!(
+        code(&refused),
+        0,
+        "{above} is above the ceiling and was accepted"
+    );
+    assert!(
+        stderr(&refused).contains("perf_event_max_sample_rate"),
+        "a rate above the ceiling is refused by naming the ceiling: {}",
+        stderr(&refused)
+    );
+
+    let at = format!("sample@{ceiling}hz");
+    let throttled = run(&[
+        "mem.latency",
+        "-m",
+        &at,
+        "-e",
+        "hist",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        "i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done",
+    ]);
+    assert!(throttled.status.success(), "{}", stderr(&throttled));
+    let session = json(&throttled);
+    let run_result = &session["results"][0];
+    let lost = losses(run_result, "throttled") + losses(run_result, "dropped");
+    if lost == 0 {
+        eprintln!(
+            "skipped: the kernel sustained {ceiling} samples a second on this run without \
+             throttling or dropping, so there was no loss to report"
+        );
+        return;
+    }
+    let hist = output_of(run_result, "hist");
+    assert!(
+        hist.to_string().contains("short"),
+        "a throttled run marks its distribution as a lower bound: {hist}"
+    );
+}
+
+/// Every mode and emit the two IBS sources declare is served here.
+#[test]
+fn every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code() {
+    if !has_ibs() {
+        eprintln!("skipped: this machine has no `ibs_op` unit, so there is nothing to serve these");
+        return;
+    }
+    let walked = sweep(&["mem.latency", "mem.sharing"]);
+    assert_modes_and_emits_are_coherent(&walked);
+    assert_machine_blame_is_exactly(&walked, &[]);
+    for combination in &walked {
+        assert_eq!(combination.exit, 0, "{combination:?}");
+    }
+}
+
+/// A stack is symbolized through one process's mappings, so a machine-wide
+/// request for one is this build's gap and says so; the same request without
+/// the stack is served.
+#[test]
+fn a_stack_of_every_process_is_refused_by_the_build_and_the_rest_is_served() {
+    if !has_ibs() {
+        eprintln!("skipped: this machine has no `ibs_op` unit");
+        return;
+    }
+    let stacked = run(&[
+        "mem.latency",
+        "--system",
+        "-m",
+        "sample@999hz",
+        "-e",
+        "stack",
+        "-d",
+        "100ms",
+    ]);
+    assert_eq!(code(&stacked), EXIT_NO_COLLECTOR, "{}", stderr(&stacked));
+    assert!(
+        stderr(&stacked).contains("mappings"),
+        "the refusal says what is missing: {}",
+        stderr(&stacked)
+    );
+    let ranked = run(&[
+        "mem.latency",
+        "--system",
+        "-m",
+        "sample@999hz",
+        "-e",
+        "topk",
+        "-d",
+        "100ms",
+    ]);
+    if let Some(reason) = unavailable(&ranked) {
+        eprintln!("skipped the machine-wide half: {reason}");
+        return;
+    }
+    assert!(ranked.status.success(), "{}", stderr(&ranked));
 }
