@@ -167,7 +167,7 @@
   summary: "Task migrations between cores"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -181,7 +181,7 @@
   summary: "Kernel lock contention"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin", "raw_tracepoint:contention_end", "kernel>=6.1"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin", "raw_tracepoint:contention_end", "kernel>=6.1"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med, equivalent: true}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "older kernels: futex and uprobe fallback, partial coverage"}
@@ -204,7 +204,7 @@
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
@@ -257,7 +257,7 @@
   summary: "Time spent in hard interrupt handlers"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry", "raw_tracepoint:irq_handler_exit", "kernel>=5.8"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry", "raw_tracepoint:irq_handler_exit", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -278,7 +278,7 @@
   summary: "Automatic NUMA balancing decisions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]

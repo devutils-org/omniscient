@@ -1,6 +1,6 @@
 # Examples
 
-A hundred and thirty-two sessions. Each is the same object a command line builds,
+A hundred and forty-one sessions. Each is the same object a command line builds,
 written down, so a reader can run it and a test can run it identically.
 
 ```console
@@ -68,6 +68,8 @@ for.
 | `mem-kernel-storm.yml` | The loss path: a kernel-side histogram driven past what it can hold. |
 | `mem-kernel-sweep.yml` | Every shape the four kernel-side `mem` sources can produce, over one window. |
 | `mem-reclaim-squeeze.yml` | Direct reclaim: the kernel doing the allocator's work inside the allocating thread. |
+| `mem-load-latency.yml` | Two walks whose latency is decided by their size, sampled by the hardware. |
+| `mem-false-sharing.yml` | Two processes on one cache line, then on two. |
 
 ## io
 
@@ -130,6 +132,10 @@ for.
 | `sched-lock-shared-file.yml` | What does sharing one file cost, in kernel lock contention? |
 | `sched-numa-balance.yml` | The balancer giving up on a task, on a machine that has two places to put it. |
 | `sched-sweep-machine.yml` | Every axis the catalog offers this family's machine-wide sources. |
+| `sched-mutex-known-hold.yml` | Two threads, one pthread mutex, a known number of acquisitions held for a known time. |
+| `sched-mutex-uncontended.yml` | The same program with one thread: the same holds, and waits of nothing. |
+| `sched-mutex-with-heap.yml` | Lock waits and allocations of one program, through one shim. |
+| `sched-mutex-loss.yml` | Mutex records produced faster than the pipe drains, and every one accounted for. |
 
 ## power
 
@@ -154,6 +160,9 @@ for.
 | `gpu-poll-too-fast.yml` | A poll asked to run faster than the driver can answer. |
 | `gpu-vram-of-a-process.yml` | Zero video memory held, reported as zero. |
 | `gpu-vram-step.yml` | Video memory a program asked for, checked to the byte. |
+| `gpu-api-cuda.yml` | How long the host spends inside the CUDA driver API, call by call. |
+| `gpu-api-vulkan.yml` | How long the host spends submitting to a Vulkan queue and waiting for it. |
+| `gpu-api-unreachable.yml` | A program that drives the GPU where the shim cannot see it, and says so. |
 
 ## proc
 

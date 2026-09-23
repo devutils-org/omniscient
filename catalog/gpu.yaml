@@ -18,6 +18,7 @@
       requires: ["tracepoint:gpu_scheduler:drm_run_job", "tracepoint:gpu_scheduler:drm_sched_process_job", "bpf"]
       join: {key: "gpu:fence_ctx+seqno", match: eq, ttl: 30s}
       cost: low
+      drained: true
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
   targets: {system: native, pid: bpf_only}

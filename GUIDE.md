@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and thirty-two sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and forty-one sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and thirty-two
+make demo-all           # the tour and then all one hundred and forty-one
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -225,6 +225,8 @@ Each is `omn -f examples/<file>`. The whole family is
 | `mem-kernel-storm.yml` | The loss path: a kernel-side histogram driven past what it can hold. |
 | `mem-kernel-sweep.yml` | Every shape the four kernel-side `mem` sources can produce, over one window. |
 | `mem-reclaim-squeeze.yml` | Direct reclaim: the kernel doing the allocator's work inside the allocating thread. |
+| `mem-load-latency.yml` | Two walks whose latency is decided by their size, sampled by the hardware. |
+| `mem-false-sharing.yml` | Two processes on one cache line, then on two. |
 
 ## io
 
@@ -287,6 +289,10 @@ Each is `omn -f examples/<file>`. The whole family is
 | `sched-lock-shared-file.yml` | What does sharing one file cost, in kernel lock contention? |
 | `sched-numa-balance.yml` | The balancer giving up on a task, on a machine that has two places to put it. |
 | `sched-sweep-machine.yml` | Every axis the catalog offers this family's machine-wide sources. |
+| `sched-mutex-known-hold.yml` | Two threads, one pthread mutex, a known number of acquisitions held for a known time. |
+| `sched-mutex-uncontended.yml` | The same program with one thread: the same holds, and waits of nothing. |
+| `sched-mutex-with-heap.yml` | Lock waits and allocations of one program, through one shim. |
+| `sched-mutex-loss.yml` | Mutex records produced faster than the pipe drains, and every one accounted for. |
 
 ## power
 
@@ -311,6 +317,9 @@ Each is `omn -f examples/<file>`. The whole family is
 | `gpu-poll-too-fast.yml` | A poll asked to run faster than the driver can answer. |
 | `gpu-vram-of-a-process.yml` | Zero video memory held, reported as zero. |
 | `gpu-vram-step.yml` | Video memory a program asked for, checked to the byte. |
+| `gpu-api-cuda.yml` | How long the host spends inside the CUDA driver API, call by call. |
+| `gpu-api-vulkan.yml` | How long the host spends submitting to a Vulkan queue and waiting for it. |
+| `gpu-api-unreachable.yml` | A program that drives the GPU where the shim cannot see it, and says so. |
 
 ## proc
 

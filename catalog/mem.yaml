@@ -115,7 +115,7 @@
   summary: "Kernel page allocations and frees"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_page_alloc", "raw_tracepoint:mm_page_free", "kernel>=5.8"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_page_alloc", "raw_tracepoint:mm_page_free", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:mm_page_alloc", "tracepoint:kmem:mm_page_free", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -129,7 +129,7 @@
   summary: "Kernel slab allocations"
   unit: bytes
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc", "raw_tracepoint:kfree", "kernel>=5.8"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc", "raw_tracepoint:kfree", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -398,7 +398,7 @@
   summary: "Direct reclaim"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin", "raw_tracepoint:mm_vmscan_direct_reclaim_end", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin", "raw_tracepoint:mm_vmscan_direct_reclaim_end", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_begin", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -412,7 +412,7 @@
   summary: "Memory compaction"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin", "raw_tracepoint:mm_compaction_end", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin", "raw_tracepoint:mm_compaction_end", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "tracepoint:compaction:mm_compaction_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]

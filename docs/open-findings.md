@@ -5441,6 +5441,11 @@ test**, and every one of them passed in isolation immediately afterwards:
 
 Plus the `io` pair `docs/scenarios/io.md` already names, which failed again.
 
+The ninth wave added one while streams V and P were both driving the disk:
+`tests/cross_io.rs::the_crossing_sessions_run_and_say_what_they_found`, which
+passed alone at once. `both_huge_page_backends_read_the_same_promotion_counter`
+failed again on the same merge, its second time on this list.
+
 The rule this suggests, and it is not a new one: **a red suite on this machine
 is checked against this list before it is believed**. What is worth watching is
 whether the same test starts failing repeatedly, which is a defect, rather than
