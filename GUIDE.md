@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and twenty-five sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and twenty-nine sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and twenty-five
+make demo-all           # the tour and then all one hundred and twenty-nine
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -236,6 +236,8 @@ Each is `omn -f examples/<file>`. The whole family is
 | `io-per-process.yml` | Which of these bytes were mine? -- and why this build says it cannot tell. |
 | `io-pressure.yml` | Is the disk the bottleneck, or is it merely busy? |
 | `io-substituted-counters.yml` | Counters that lie, and what the tool does about it. |
+| `io-syncs.yml` | What does a sync cost, and which ones waited for the device? |
+| `io-three-layers.yml` | One program's reads, measured at three layers at once. |
 | `io-device-latency.yml` | Which device was slow, and how slow -- as a distribution, never as a mean. |
 | `io-known-requests.yml` | How many requests, and how big? -- checked against a number chosen in advance. |
 | `io-my-own-reads.yml` | What did *this program* make the device do? |
@@ -257,6 +259,8 @@ Each is `omn -f examples/<file>`. The whole family is
 | `net-not-built.yml` | Valid, and not built. Exit 3, which is not exit 1. |
 | `net-snapshot.yml` | The `snapshot` leg of the sweep: one read, now. |
 | `net-two-mechanisms.yml` | Two roads to the same traffic, and they have to meet. |
+| `net-fentry-sweep.yml` | Does every axis the two fentry `net` sources declare actually work? |
+| `net-handshake-to-close.yml` | From the SYN to the FIN: one connection, joined across two sources by its cookie. |
 | `net-bpf-sweep.yml` | Does every axis the five eBPF `net` sources declare actually work? |
 | `net-closed-port.yml` | Why did the machine throw that packet away? |
 | `net-connection-life.yml` | How long did that connection live, and what crossed it? |

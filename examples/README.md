@@ -1,6 +1,6 @@
 # Examples
 
-A hundred and twenty-five sessions. Each is the same object a command line builds,
+A hundred and twenty-nine sessions. Each is the same object a command line builds,
 written down, so a reader can run it and a test can run it identically.
 
 ```console
@@ -79,6 +79,8 @@ for.
 | `io-per-process.yml` | Which of these bytes were mine? -- and why this build says it cannot tell. |
 | `io-pressure.yml` | Is the disk the bottleneck, or is it merely busy? |
 | `io-substituted-counters.yml` | Counters that lie, and what the tool does about it. |
+| `io-syncs.yml` | What does a sync cost, and which ones waited for the device? |
+| `io-three-layers.yml` | One program's reads, measured at three layers at once. |
 | `io-device-latency.yml` | Which device was slow, and how slow -- as a distribution, never as a mean. |
 | `io-known-requests.yml` | How many requests, and how big? -- checked against a number chosen in advance. |
 | `io-my-own-reads.yml` | What did *this program* make the device do? |
@@ -100,6 +102,8 @@ for.
 | `net-not-built.yml` | Valid, and not built. Exit 3, which is not exit 1. |
 | `net-snapshot.yml` | The `snapshot` leg of the sweep: one read, now. |
 | `net-two-mechanisms.yml` | Two roads to the same traffic, and they have to meet. |
+| `net-fentry-sweep.yml` | Does every axis the two fentry `net` sources declare actually work? |
+| `net-handshake-to-close.yml` | From the SYN to the FIN: one connection, joined across two sources by its cookie. |
 | `net-bpf-sweep.yml` | Does every axis the five eBPF `net` sources declare actually work? |
 | `net-closed-port.yml` | Why did the machine throw that packet away? |
 | `net-connection-life.yml` | How long did that connection live, and what crossed it? |
