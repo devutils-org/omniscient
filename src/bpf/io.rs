@@ -1160,7 +1160,7 @@ mod tests {
     /// propagated key, and the wrong one, which is worse than none.
     #[test]
     fn the_request_is_read_where_the_submitter_is_current_and_nowhere_else() {
-        use crate::bpf::request::GET_CURRENT_TASK_BTF;
+        use crate::bpf::insn::helper::GET_CURRENT_TASK_BTF;
         let Some(btf) = kernel_btf() else { return };
         let reads = |program: &[Insn]| helpers_called(program).contains(&GET_CURRENT_TASK_BTF);
 

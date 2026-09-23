@@ -35,6 +35,9 @@ const BPF_ALU64: u8 = 0x07;
 
 /// Operand widths.
 pub const BPF_W: u8 = 0x00;
+/// The half-word width: a typed load has to be exactly the member's width, and
+/// `family`, `dport` and `i_mode` are two bytes.
+pub const BPF_H: u8 = 0x08;
 pub const BPF_DW: u8 = 0x18;
 
 /// Addressing modes.
@@ -51,6 +54,7 @@ const BPF_X: u8 = 0x08;
 const BPF_ADD: u8 = 0x00;
 const BPF_SUB: u8 = 0x10;
 const BPF_AND: u8 = 0x50;
+const BPF_LSH: u8 = 0x60;
 const BPF_RSH: u8 = 0x70;
 const BPF_MOV: u8 = 0xb0;
 
@@ -59,6 +63,8 @@ const BPF_MOV: u8 = 0xb0;
 /// never filled in reads as an unconditional jump rather than as nonsense.
 const BPF_JA: u8 = 0x00;
 const BPF_JEQ: u8 = 0x10;
+const BPF_JGT: u8 = 0x20;
+const BPF_JGE: u8 = 0x30;
 const BPF_JSET: u8 = 0x40;
 const BPF_JNE: u8 = 0x50;
 const BPF_JSGE: u8 = 0x70;
@@ -87,6 +93,12 @@ pub mod helper {
     /// short-lived task is somebody else.
     pub const GET_CURRENT_COMM: i32 = 16;
     pub const GET_STACKID: i32 = 27;
+    /// `bpf_get_socket_cookie`. For a tracing program it takes a
+    /// `struct sock *` and generates the cookie if nothing has yet, which is
+    /// what makes it a key rather than a zero.
+    pub const GET_SOCKET_COOKIE: i32 = 46;
+    /// `bpf_probe_read_user`, for an argument a probe left in user memory.
+    pub const PROBE_READ_USER: i32 = 112;
     pub const PROBE_READ_KERNEL: i32 = 113;
     /// `bpf_probe_read_kernel_str(dst, size, unsafe_ptr)`.
     ///
@@ -97,6 +109,13 @@ pub mod helper {
     /// carries this program's own stack contents to userspace.
     pub const PROBE_READ_KERNEL_STR: i32 = 115;
     pub const RINGBUF_OUTPUT: i32 = 130;
+    /// `bpf_task_storage_get(map, task, value, flags)`.
+    pub const TASK_STORAGE_GET: i32 = 156;
+    /// `bpf_task_storage_delete(map, task)`.
+    pub const TASK_STORAGE_DELETE: i32 = 157;
+    /// `bpf_get_current_task_btf()`: the current task as a pointer whose type
+    /// the verifier knows, which is what the storage helpers take.
+    pub const GET_CURRENT_TASK_BTF: i32 = 158;
 }
 
 /// The frame pointer. Read-only, and the only way to address the stack.
@@ -125,6 +144,16 @@ impl Insn {
     /// `dst += imm`
     pub fn add64_imm(dst: u8, imm: i32) -> Self {
         Self::new(BPF_ALU64 | BPF_ADD | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst += src`
+    pub fn add64_reg(dst: u8, src: u8) -> Self {
+        Self::new(BPF_ALU64 | BPF_ADD | BPF_X, dst, src, 0, 0)
+    }
+
+    /// `dst <<= imm`
+    pub fn lsh64_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU64 | BPF_LSH | BPF_K, dst, 0, 0, imm)
     }
 
     /// `dst -= src`
@@ -196,6 +225,22 @@ impl Insn {
     }
 
     /// `if dst != imm goto off`
+    /// `if dst > src goto +off`, unsigned: every operand these programs
+    /// compare is a timestamp, a duration or an address.
+    pub fn jgt_reg(dst: u8, src: u8, off: i16) -> Self {
+        Self::new(BPF_JMP | BPF_JGT | BPF_X, dst, src, off, 0)
+    }
+
+    /// `if dst >= src goto +off`, unsigned.
+    pub fn jge_reg(dst: u8, src: u8, off: i16) -> Self {
+        Self::new(BPF_JMP | BPF_JGE | BPF_X, dst, src, off, 0)
+    }
+
+    /// `if dst != src goto +off`
+    pub fn jne_reg(dst: u8, src: u8, off: i16) -> Self {
+        Self::new(BPF_JMP | BPF_JNE | BPF_X, dst, src, off, 0)
+    }
+
     pub fn jne_imm(dst: u8, imm: i32, off: i16) -> Self {
         Self::new(BPF_JMP | BPF_JNE | BPF_K, dst, 0, off, imm)
     }
@@ -807,5 +852,30 @@ mod tests {
         assert_eq!(masked.code, BPF_ALU64 | BPF_AND | BPF_K);
         assert_eq!(masked.regs & 0xf, 6);
         assert_eq!(masked.imm, !3);
+    }
+
+    /// The register forms three files had been writing by hand, checked
+    /// against `include/uapi/linux/bpf_common.h` rather than against each
+    /// other. A wrong opcode here is not refused by the verifier: `jgt` read as
+    /// `jge` is a comparison that is off by one exactly at the boundary, which
+    /// is where a duration and a deadline meet.
+    #[test]
+    // The zeros are the point: `BPF_ADD` and `BPF_K` are zero, and an encoding
+    // written as class | op | source reads against the header only when all
+    // three parts are spelled out.
+    #[allow(clippy::identity_op)]
+    fn the_register_forms_are_the_kernels_encodings() {
+        // class | op | source, as `bpf_common.h` spells them.
+        assert_eq!(Insn::add64_reg(1, 2).code, 0x07 | 0x00 | 0x08);
+        assert_eq!(Insn::lsh64_imm(1, 3).code, 0x07 | 0x60 | 0x00);
+        assert_eq!(Insn::jgt_reg(1, 2, 0).code, 0x05 | 0x20 | 0x08);
+        assert_eq!(Insn::jge_reg(1, 2, 0).code, 0x05 | 0x30 | 0x08);
+        assert_eq!(Insn::jne_reg(1, 2, 0).code, 0x05 | 0x50 | 0x08);
+        // dst in the low nibble, src in the high one.
+        let jump = Insn::jgt_reg(3, 9, -4);
+        assert_eq!(jump.regs & 0xf, 3);
+        assert_eq!(jump.regs >> 4, 9);
+        assert_eq!(jump.off, -4);
+        assert_eq!(BPF_H, 0x08, "the half-word width");
     }
 }

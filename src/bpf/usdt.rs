@@ -36,11 +36,10 @@
 //! rather than parsed as if it were x86.
 
 use std::collections::BTreeSet;
-use std::ffi::CString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use super::attach::{self, PerfAttachment, Scope};
@@ -740,12 +739,10 @@ mod local {
 
     const BPF_ALU64_K: u8 = 0x07;
     const BPF_OR: u8 = 0x40;
-    const BPF_LSH: u8 = 0x60;
     const BPF_ARSH: u8 = 0xc0;
-    const BPF_RSH: u8 = 0x70;
 
     /// `bpf_probe_read_user(dst, size, unsafe_ptr)`, number 112.
-    pub const PROBE_READ_USER: i32 = 112;
+    pub use crate::bpf::insn::helper::PROBE_READ_USER;
 
     fn alu64_imm(operation: u8, dst: u8, imm: i32) -> Insn {
         Insn {
@@ -756,12 +753,15 @@ mod local {
         }
     }
 
+    // The two shifts `insn.rs` carries, delegated rather than written a second
+    // time. `arsh`, `or` and the wide load below have this file as their only
+    // caller and stay beside it.
     pub fn lsh64_imm(dst: u8, imm: i32) -> Insn {
-        alu64_imm(BPF_LSH, dst, imm)
+        Insn::lsh64_imm(dst, imm)
     }
 
     pub fn rsh64_imm(dst: u8, imm: i32) -> Insn {
-        alu64_imm(BPF_RSH, dst, imm)
+        Insn::rsh64_imm(dst, imm)
     }
 
     pub fn arsh64_imm(dst: u8, imm: i32) -> Insn {
@@ -1063,92 +1063,27 @@ fn instructions(
 // that is mapped after the link exists. That last part is what makes a guarded
 // probe in a launched program observable from its first instruction.
 
-/// `BPF_PROG_LOAD` and `BPF_LINK_CREATE`, as `bpf_cmd` numbers them.
-const BPF_PROG_LOAD: libc::c_long = 5;
-const BPF_LINK_CREATE: libc::c_long = 28;
 /// `bpf_attach_type::BPF_TRACE_UPROBE_MULTI`.
 const BPF_TRACE_UPROBE_MULTI: u32 = 48;
 const LICENSE: &str = "GPL";
 
-/// `union bpf_attr` for `BPF_PROG_LOAD`, up to `expected_attach_type`, which
-/// is the field `syscall::prog_load` does not set.
-#[repr(C)]
-#[derive(Default)]
-struct ProgLoadAttr {
-    prog_type: u32,
-    insn_cnt: u32,
-    insns: u64,
-    license: u64,
-    log_level: u32,
-    log_size: u32,
-    log_buf: u64,
-    kern_version: u32,
-    prog_flags: u32,
-    prog_name: [u8; 16],
-    prog_ifindex: u32,
-    expected_attach_type: u32,
-}
-
-/// `union bpf_attr` for `BPF_LINK_CREATE` of a uprobe-multi link.
-#[repr(C)]
-#[derive(Default)]
-struct UprobeMultiAttr {
-    prog_fd: u32,
-    target_fd: u32,
-    attach_type: u32,
-    flags: u32,
-    path: u64,
-    offsets: u64,
-    ref_ctr_offsets: u64,
-    cookies: u64,
-    cnt: u32,
-    multi_flags: u32,
-    pid: u32,
-    pad: u32,
-}
-
-fn bpf(command: libc::c_long, attr: *mut libc::c_void, size: usize) -> io::Result<OwnedFd> {
-    // SAFETY: `attr` points at a `#[repr(C)]` struct of `size` bytes that
-    // outlives the call, and every pointer inside it does too.
-    let fd = unsafe { libc::syscall(libc::SYS_bpf, command, attr, size as u32) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the kernel just returned this descriptor to this process.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
-}
-
-/// Loads a `BPF_PROG_TYPE_KPROBE` program declared for a uprobe-multi link.
+/// Loads a `BPF_PROG_TYPE_KPROBE` program declared for a uprobe-multi link:
+/// `syscall::prog_load_for`, with this file's refusal wording on top.
 fn load_for_multi(instructions: &[Insn]) -> Result<OwnedFd, String> {
-    let license = CString::new(LICENSE).expect("no interior NUL");
-    let mut log = vec![0u8; 64 * 1024];
-    let mut name = [0u8; 16];
-    name[..8].copy_from_slice(b"omn_usdt");
-    let mut attr = ProgLoadAttr {
-        prog_type: syscall::BPF_PROG_TYPE_KPROBE,
-        insn_cnt: instructions.len() as u32,
-        insns: instructions.as_ptr() as u64,
-        license: license.as_ptr() as u64,
-        log_level: 1,
-        log_size: log.len() as u32,
-        log_buf: log.as_mut_ptr() as u64,
-        prog_name: name,
-        expected_attach_type: BPF_TRACE_UPROBE_MULTI,
-        ..Default::default()
-    };
-    bpf(
-        BPF_PROG_LOAD,
-        &mut attr as *mut _ as *mut libc::c_void,
-        std::mem::size_of::<ProgLoadAttr>(),
+    syscall::prog_load_for(
+        syscall::BPF_PROG_TYPE_KPROBE,
+        BPF_TRACE_UPROBE_MULTI,
+        instructions,
+        "omn_usdt",
+        LICENSE,
     )
     .map_err(|error| {
-        if matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) {
+        if error.is_permission() {
             return super::permission_advice("loading a USDT program");
         }
-        let end = log.iter().position(|byte| *byte == 0).unwrap_or(log.len());
         format!(
-            "the kernel refused the USDT program ({error}); the verifier said:\n{}",
-            String::from_utf8_lossy(&log[..end]).trim()
+            "the kernel refused the USDT program ({}); the verifier said:\n{}",
+            error.error, error.verifier_log
         )
     })
 }
@@ -1156,28 +1091,12 @@ fn load_for_multi(instructions: &[Insn]) -> Result<OwnedFd, String> {
 /// Links a loaded program to one offset of a file, for one process, with the
 /// site's semaphore handed to the kernel to maintain.
 fn link_multi(program: &OwnedFd, site: &Site, pid: i32) -> io::Result<OwnedFd> {
-    let path = CString::new(site.object.as_os_str().as_encoded_bytes())
-        .map_err(|_| io::Error::other("a path has no interior NUL"))?;
-    let offsets = [site.offset];
-    let ref_ctr_offsets = [site.semaphore.map_or(0, |semaphore| semaphore.offset)];
-    let mut attr = UprobeMultiAttr {
-        prog_fd: program.as_raw_fd() as u32,
-        attach_type: BPF_TRACE_UPROBE_MULTI,
-        path: path.as_ptr() as u64,
-        offsets: offsets.as_ptr() as u64,
-        ref_ctr_offsets: if site.semaphore.is_some() {
-            ref_ctr_offsets.as_ptr() as u64
-        } else {
-            0
-        },
-        cnt: 1,
-        pid: pid as u32,
-        ..Default::default()
-    };
-    bpf(
-        BPF_LINK_CREATE,
-        &mut attr as *mut _ as *mut libc::c_void,
-        std::mem::size_of::<UprobeMultiAttr>(),
+    syscall::link_uprobe_multi(
+        program.as_raw_fd(),
+        &site.object,
+        site.offset,
+        site.semaphore.map(|semaphore| semaphore.offset),
+        pid,
     )
 }
 

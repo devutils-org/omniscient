@@ -376,24 +376,34 @@ struct UprobeMultiAttr {
 ///
 /// This is the uprobe route that needs only `CAP_BPF` and `CAP_PERFMON`: the
 /// `uprobe` PMU behind `attach::uprobe` asks for `CAP_SYS_ADMIN`, which this
-/// project does not request. `usdt.rs` carries its own copy of this for the
-/// same reason, written before this file had one; the request to fold them is
-/// in `docs/open-findings.md`. No semaphore is handed over: a probe guarded by
-/// one would never fire, and the caller refuses those rather than using this.
+/// project does not request.
+///
+/// `semaphore` is the USDT semaphore's file offset, when the probe site has
+/// one. The kernel then increments it while the link exists, which is what
+/// makes a guarded probe fire at all: a program checks the semaphore before
+/// evaluating a probe's arguments, and a probe nobody is watching costs it
+/// nothing. `None` for a site with no semaphore.
 pub fn link_uprobe_multi(
     prog_fd: RawFd,
     path: &std::path::Path,
     offset: u64,
+    semaphore: Option<u64>,
     pid: i32,
 ) -> io::Result<OwnedFd> {
     let path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::other("a path has no interior NUL"))?;
     let offsets = [offset];
+    let ref_ctr_offsets = [semaphore.unwrap_or(0)];
     let mut attr = UprobeMultiAttr {
         prog_fd: prog_fd as u32,
         attach_type: BPF_TRACE_UPROBE_MULTI,
         path: path.as_ptr() as u64,
         offsets: offsets.as_ptr() as u64,
+        ref_ctr_offsets: if semaphore.is_some() {
+            ref_ctr_offsets.as_ptr() as u64
+        } else {
+            0
+        },
         cnt: 1,
         pid: pid as u32,
         ..Default::default()

@@ -68,45 +68,11 @@ const BPF_TRACE_FEXIT: u32 = 25;
 const BPF_PROG_LOAD: i32 = 5;
 const BPF_RAW_TRACEPOINT_OPEN: i32 = 17;
 
-/// The half-word operand width. `insn.rs` names the two widest; a typed
-/// load has to be exactly the member's width, so the narrow one is needed
-/// here and nowhere else yet.
-pub(crate) const BPF_H: u8 = 0x08;
-
-/// `dst += src`, `dst <<= imm` and `if dst >= src goto`, which `insn.rs` does
-/// not have. The encodings are `include/uapi/linux/bpf_common.h`'s.
-pub(crate) fn add64_reg(dst: u8, src: u8) -> Insn {
-    // `BPF_ALU64 | BPF_ADD | BPF_X`, where `BPF_ADD` is zero.
-    Insn {
-        code: 0x07 | 0x08,
-        regs: (dst & 0xf) | ((src & 0xf) << 4),
-        off: 0,
-        imm: 0,
-    }
-}
-
-pub(crate) fn lsh64_imm(dst: u8, imm: i32) -> Insn {
-    Insn {
-        code: 0x07 | 0x60,
-        regs: dst & 0xf,
-        off: 0,
-        imm,
-    }
-}
-
-pub(crate) fn jge_reg(dst: u8, src: u8) -> Insn {
-    Insn {
-        code: 0x05 | 0x30 | 0x08,
-        regs: (dst & 0xf) | ((src & 0xf) << 4),
-        off: 0,
-        imm: 0,
-    }
-}
-
-/// Where `bpf_get_socket_cookie` sits in `bpf_func_id`. For a tracing program
-/// it takes a `struct sock *` and generates the cookie if nothing has yet,
-/// which is what makes it a key rather than a zero.
-pub(crate) const GET_SOCKET_COOKIE: i32 = 46;
+// The half-word width, the socket cookie helper and the register encodings
+// this family needed first live in `insn.rs` now, beside the others: three
+// files had declared some of the same, and one copy is the one a test holds.
+pub(crate) use crate::bpf::insn::helper::GET_SOCKET_COOKIE;
+pub(crate) use crate::bpf::insn::BPF_H;
 
 /// How much verifier log to keep, as in `syscall.rs`.
 const LOG_BYTES: usize = 64 * 1024;

@@ -40,8 +40,8 @@
 //! cardinality, and present so a `dport` predicate has something to match.
 
 use crate::bpf::attach::fentry::{
-    self, add64_reg, lsh64_imm, HistogramProgram, HistogramSpec, Narrowing, Timed, BPF_H, FILL_AUX,
-    FILL_OBJECT, GET_SOCKET_COOKIE,
+    self, HistogramProgram, HistogramSpec, Narrowing, Timed, BPF_H, FILL_AUX, FILL_OBJECT,
+    GET_SOCKET_COOKIE,
 };
 use crate::bpf::btf::Btf;
 use crate::bpf::insn::{Insn, Program, BPF_DW, BPF_W, R10};
@@ -105,9 +105,9 @@ fn socket_identity(program: &mut Program, at: &Offsets) {
     // `(family << 16) | dport`, the port as the kernel holds it -- network
     // order -- so the collector turns it round once, in one place.
     program.push(Insn::ldx(BPF_H, 1, 7, at.family as i16));
-    program.push(lsh64_imm(1, 16));
+    program.push(Insn::lsh64_imm(1, 16));
     program.push(Insn::ldx(BPF_H, 2, 7, at.dport as i16));
-    program.push(add64_reg(1, 2));
+    program.push(Insn::add64_reg(1, 2));
     program.push(Insn::stx(BPF_W, R10, FILL_AUX, 1));
     program.label("fill_done");
 }

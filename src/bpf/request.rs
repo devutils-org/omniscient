@@ -73,59 +73,14 @@ use super::usdt::{Operand, Site};
 
 // ------------------------------------------------------------- helpers
 
-/// `bpf_task_storage_get(map, task, value, flags)`, `bpf_func_id` 156.
-pub const TASK_STORAGE_GET: i32 = 156;
-/// `bpf_task_storage_delete(map, task)`, 157.
-pub const TASK_STORAGE_DELETE: i32 = 157;
-/// `bpf_get_current_task_btf()`, 158: the current task as a pointer the
-/// verifier knows the type of, which is what the storage helpers take.
-pub const GET_CURRENT_TASK_BTF: i32 = 158;
 /// `BPF_LOCAL_STORAGE_GET_F_CREATE`.
 const F_CREATE: i32 = 1;
-/// `bpf_probe_read_user`, 112, for an argument the probe left in memory.
-const PROBE_READ_USER: i32 = 112;
 
-/// Register-to-register operations `insn.rs` does not encode, in
-/// `include/uapi/linux/bpf_common.h`'s encoding. The comparisons are unsigned:
-/// every operand here is a timestamp or a duration.
-fn add64_reg(dst: u8, src: u8) -> Insn {
-    Insn {
-        code: 0x07 | 0x08,
-        regs: (dst & 0xf) | ((src & 0xf) << 4),
-        off: 0,
-        imm: 0,
-    }
-}
-
-/// `if dst > src goto`
-fn jgt_reg(dst: u8, src: u8) -> Insn {
-    Insn {
-        code: 0x05 | 0x20 | 0x08,
-        regs: (dst & 0xf) | ((src & 0xf) << 4),
-        off: 0,
-        imm: 0,
-    }
-}
-
-/// `if dst >= src goto`
-fn jge_reg(dst: u8, src: u8) -> Insn {
-    Insn {
-        code: 0x05 | 0x30 | 0x08,
-        regs: (dst & 0xf) | ((src & 0xf) << 4),
-        off: 0,
-        imm: 0,
-    }
-}
-
-/// `if dst != src goto`
-fn jne_reg(dst: u8, src: u8) -> Insn {
-    Insn {
-        code: 0x05 | 0x50 | 0x08,
-        regs: (dst & 0xf) | ((src & 0xf) << 4),
-        off: 0,
-        imm: 0,
-    }
-}
+// The helper ids and register encodings this program needs are in `insn.rs`,
+// where `fentry.rs` and `usdt.rs` had also been declaring some of them.
+use super::insn::helper::{
+    GET_CURRENT_TASK_BTF, PROBE_READ_USER, TASK_STORAGE_DELETE, TASK_STORAGE_GET,
+};
 
 // --------------------------------------------------- the storage value
 
@@ -401,7 +356,7 @@ fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(),
 /// `field += r<reg>`, on the storage value in `r7`.
 fn accumulate(program: &mut Program, field: i16, reg: u8) {
     program.push(Insn::ldx(BPF_DW, 1, 7, field));
-    program.push(add64_reg(1, reg));
+    program.push(Insn::add64_reg(1, reg));
     program.push(Insn::stx(BPF_DW, 7, field, 1));
 }
 
@@ -441,7 +396,7 @@ fn settle(program: &mut Program, maps: Maps) {
     program.push(Insn::ldx(BPF_DW, 3, R10, TIN));
     // A switch-in before the switch-out: this cpu switched without the
     // program running, so where the stretch ended is not known.
-    program.jump_to("anomalous", jgt_reg(2, 3));
+    program.jump_to("anomalous", Insn::jgt_reg(2, 3, 0));
     // r8 = the whole stretch off the cpu.
     program.push(Insn::mov64_reg(8, 3));
     program.push(Insn::sub64_reg(8, 2));
@@ -471,9 +426,9 @@ fn settle(program: &mut Program, maps: Maps) {
     // then counted asleep, which is the state it was in when last seen.
     program.jump_to("split", Insn::jeq_imm(9, 0, 0));
     program.push(Insn::ldx(BPF_DW, 2, 7, S_OFF_SINCE));
-    program.jump_to("split", jgt_reg(2, 9));
+    program.jump_to("split", Insn::jgt_reg(2, 9, 0));
     program.push(Insn::ldx(BPF_DW, 3, R10, TIN));
-    program.jump_to("split", jgt_reg(9, 3));
+    program.jump_to("split", Insn::jgt_reg(9, 3, 0));
     // Runnable from the wakeup to the switch-in, asleep before it.
     program.push(Insn::sub64_reg(3, 9));
     accumulate(program, S_RUNQ, 3);
@@ -488,7 +443,7 @@ fn settle(program: &mut Program, maps: Maps) {
     );
     accumulate(program, S_SLEEP, 8);
     program.push(Insn::ldx(BPF_DW, 1, 7, S_HOLDER_NS));
-    program.jump_to("cleared", jge_reg(1, 8));
+    program.jump_to("cleared", Insn::jge_reg(1, 8, 0));
     program.push(Insn::stx(BPF_DW, 7, S_HOLDER_NS, 8));
     program.push(Insn::ldx(BPF_W, 1, R10, WAKER));
     program.push(Insn::stx(BPF_W, 7, S_HOLDER_TID, 1));
@@ -720,7 +675,7 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
     program.push(Insn::stx(BPF_DW, R10, REC + R_DECLARED, 1));
     program.push(Insn::ldx(BPF_DW, 2, 7, S_ID));
     program.jump_to("same_id", Insn::jeq_imm(1, 0, 0));
-    program.jump_to("mismatch", jne_reg(1, 2));
+    program.jump_to("mismatch", Insn::jne_reg(1, 2, 0));
     program.jump_to("same_id", Insn::ja());
     program.label("mismatch");
     program.push(Insn::st_imm(BPF_W, R10, REC + R_FLAGS, ID_MISMATCH as i32));
@@ -929,19 +884,24 @@ impl RequestProgram {
                     &instructions,
                     name,
                 )?;
-                let link =
-                    syscall::link_uprobe_multi(program.as_raw_fd(), &site.object, site.offset, pid)
-                        .map_err(|error| match error.raw_os_error() {
-                            Some(libc::EPERM) | Some(libc::EACCES) => super::permission_advice(
-                                &format!("attaching to `{}`", site.qualified()),
-                            ),
-                            _ => format!(
+                let link = syscall::link_uprobe_multi(
+                    program.as_raw_fd(),
+                    &site.object,
+                    site.offset,
+                    None,
+                    pid,
+                )
+                .map_err(|error| match error.raw_os_error() {
+                    Some(libc::EPERM) | Some(libc::EACCES) => {
+                        super::permission_advice(&format!("attaching to `{}`", site.qualified()))
+                    }
+                    _ => format!(
                         "`{}` in {}: the kernel refused to link the program to {:#x}: {error}",
                         site.qualified(),
                         site.object.display(),
                         site.offset
                     ),
-                        })?;
+                })?;
                 links.push(link);
                 programs.push(program);
             }

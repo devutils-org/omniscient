@@ -85,7 +85,7 @@ decompose:
     parts:
       - {state: cpu_on, from: net.request, value: oncpu_ns}
       - {state: sched_wait, from: net.request, value: runq_ns}
-      - {state: lock_wait, from: net.request, value: sleep_ns}
+      - {state: lock_wait, from: net.request, value: sleep_ns, names: holder_tid}
       - {state: block_io, from: net.request, value: disk_ns}
     top: 3
 
@@ -93,5 +93,5 @@ decompose:
     by: req
     whole: {from: net.request, value: disk_ns}
     parts:
-      - {state: device, from: io.latency, value: latency_ns}
+      - {state: device, from: io.latency, value: latency_ns, names: dev}
     top: 3

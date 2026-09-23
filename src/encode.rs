@@ -170,6 +170,17 @@ fn correlation_text(correlation: &Correlation) -> String {
         correlation.unmatched,
         unmatched_reason(correlation.match_kind)
     );
+    // Outside the share above on purpose: an event with no value for the key
+    // could never have matched, and folding it into the denominator would
+    // make a rule look worse at the thing it does than it is.
+    if correlation.keyless > 0 {
+        let _ = writeln!(
+            out,
+            "  {} more `{}` events carried no value for the key at all, so no state could hold \
+             them; counted apart, not refused",
+            correlation.keyless, correlation.to
+        );
+    }
 
     let states = &correlation.states;
     let _ = writeln!(
@@ -525,9 +536,23 @@ fn breakdown_text(unit: Unit, table: &Breakdown, out: &mut String) {
                     .map_or("not read".to_owned(), |parts| amount_in(unit, parts))
             );
         }
+        // What the row names, after its share, as the roadmap's tree prints
+        // `-> holder tid=8821`. How many events agreed is said only when they
+        // did not all agree: a name that is only the most frequent answer
+        // reads differently from one every event gave.
+        let named = row.named.as_ref().map_or(String::new(), |named| {
+            if named.events == named.of {
+                format!("  -> {}={}", named.attr, named.value)
+            } else {
+                format!(
+                    "  -> {}={} ({} of {})",
+                    named.attr, named.value, named.events, named.of
+                )
+            }
+        });
         let _ = writeln!(
             out,
-            "    {:<12} {:<18} {:<12} {:<8} {:<9} {:>14} {:>12} {:>7}",
+            "    {:<12} {:<18} {:<12} {:<8} {:<9} {:>14} {:>12} {:>7}{named}",
             row.state,
             row.source,
             row.value,
@@ -2300,6 +2325,7 @@ mod tests {
                 evidence: crate::join::Evidence::Key,
                 matched: 12,
                 unmatched: 3,
+                keyless: 0,
                 states: crate::join::StateStats {
                     opened: 4,
                     closed: 3,
@@ -2895,6 +2921,7 @@ mod tests {
             evidence: crate::join::Evidence::Key,
             matched: 3,
             unmatched: 1,
+            keyless: 0,
             states: StateStats {
                 opened: 2,
                 closed: 1,
@@ -3047,6 +3074,7 @@ mod tests {
             short: None,
             missing: None,
             note: None,
+            named: None,
         }
     }
 

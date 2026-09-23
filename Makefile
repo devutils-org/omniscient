@@ -22,7 +22,7 @@ BINARY     = target/$(PROFILE)/omn
 CAPS       = cap_bpf,cap_perfmon+ep
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
-.PHONY: all build release caps test check demo demo-all man fmt clippy clean
+.PHONY: vertical-server all build release caps test check demo demo-all man fmt clippy clean
 
 all: build
 
@@ -32,6 +32,23 @@ all: build
 build:
 	cargo build --workspace $(CARGOFLAGS)
 	@$(MAKE) --no-print-directory caps PROFILE=$(PROFILE)
+	@$(MAKE) --no-print-directory vertical-server
+
+# The vertical case's synthetic server, which `examples/vertical-*.yml` launch
+# by this path. Built here so the sessions run after `make` alone, and built by
+# `tests/vertical.rs` from the same source, so the two cannot drift. Never
+# fatal: a machine without a C compiler or without <sys/sdt.h> loses these two
+# sessions, says so, and keeps everything else.
+VERTICAL_SERVER = target/omn-vertical/server
+vertical-server:
+	@mkdir -p $(dir $(VERTICAL_SERVER))
+	@if cc -O0 -pthread -o $(VERTICAL_SERVER).partial examples/vertical/server.c 2>/dev/null; then \
+	    mv $(VERTICAL_SERVER).partial $(VERTICAL_SERVER); \
+	else \
+	    rm -f $(VERTICAL_SERVER).partial; \
+	    echo "note: the vertical-case server did not build (no cc, or no <sys/sdt.h>);"; \
+	    echo "      examples/vertical-*.yml will say so when they are run."; \
+	fi
 
 release:
 	@$(MAKE) --no-print-directory build PROFILE=release

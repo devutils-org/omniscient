@@ -40,9 +40,7 @@
 
 use std::os::fd::AsRawFd;
 
-use crate::bpf::attach::fentry::{
-    self, add64_reg, jge_reg, lsh64_imm, Function, Link, Narrowing, Side, BPF_H, SKIP,
-};
+use crate::bpf::attach::fentry::{self, Function, Link, Narrowing, Side, BPF_H, SKIP};
 use crate::bpf::btf::Btf;
 use crate::bpf::insn::{
     self, count_drop, helper, read_field, read_narrow, read_pointer, Insn, Program, BPF_DW, BPF_W,
@@ -359,12 +357,12 @@ fn descriptor_identity(program: &mut Program, function: &Function, at: &Offsets)
     read_narrow(program, SCRATCH, 4, 7, at.fdt_max_fds);
     program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
     program.push(Insn::ldx(BPF_W, 2, R10, EVENT + R_FD));
-    program.jump_to("unnamed", jge_reg(2, 1));
+    program.jump_to("unnamed", Insn::jge_reg(2, 1, 0));
     read_pointer(program, SCRATCH, 7, 7, at.fdt_fd);
     program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
     program.push(Insn::ldx(BPF_W, 2, R10, EVENT + R_FD));
-    program.push(lsh64_imm(2, 3));
-    program.push(add64_reg(7, 2));
+    program.push(Insn::lsh64_imm(2, 3));
+    program.push(Insn::add64_reg(7, 2));
     read_pointer(program, SCRATCH, 7, 7, 0);
     program.jump_to("unnamed", Insn::jeq_imm(7, 0, 0));
     read_pointer(program, SCRATCH, 7, 7, at.f_inode);

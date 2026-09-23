@@ -302,6 +302,15 @@ pub struct Correlation {
     /// outside every tracked allocation is a real thing, and hiding it would
     /// make the attributed share look like the whole.
     pub unmatched: u64,
+    /// Downstream events that carried no value for the key at all, and so were
+    /// outside every state by construction: a block request issued outside
+    /// any request, a switch of a task no rule tracks. Counted apart from
+    /// `unmatched`, which is an event that had the key and found no state.
+    /// Refusing the whole rule at the first one, which is what this used to
+    /// do, made every real session refuse, because every real session has
+    /// them.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub keyless: u64,
     pub states: StateStats,
     /// The heaviest attributions, most matched first.
     pub top: Vec<Attribution>,
@@ -713,6 +722,7 @@ pub fn apply(rule: &Rule, events: &[Event]) -> Result<Correlation, JoinError> {
 /// An address inside a range: the match that attributes a page fault to the
 /// allocation that owns the page.
 fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+    let mut keyless = 0u64;
     let mut states: States<u64> = States::new(rule);
     let (mut matched, mut unmatched) = (0u64, 0u64);
 
@@ -745,7 +755,11 @@ fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 
         if event.kind == rule.to {
             let Some(KeyValue::Mem { base: address, .. }) = event.key(rule.via) else {
-                return Err(missing_key(rule, event));
+                // A downstream event without the key is outside every state by
+                // construction -- a block request issued outside any request --
+                // and is counted apart rather than refusing the whole rule.
+                keyless += 1;
+                continue;
             };
             // The state whose range contains this address: the last one that
             // starts at or before it, if it is long enough to reach it.
@@ -766,7 +780,10 @@ fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
-    Ok(assemble(rule, matched, unmatched, states))
+    Ok(with_keyless(
+        assemble(rule, matched, unmatched, states),
+        keyless,
+    ))
 }
 
 /// Equal keys, optionally within one life of a recycled identity.
@@ -778,6 +795,7 @@ fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 /// scope of the request it belongs to, so under `scoped_eq` it does not match
 /// and is counted; under `eq` it lands on a stranger.
 fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+    let mut keyless = 0u64;
     let scoped = rule.match_kind == MatchKind::ScopedEq;
     let mut states: States<String> = States::new(rule);
     let (mut matched, mut unmatched) = (0u64, 0u64);
@@ -816,7 +834,11 @@ fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 
         if event.kind == rule.to {
             let Some(key) = event.key(rule.via) else {
-                return Err(missing_key(rule, event));
+                // A downstream event without the key is outside every state by
+                // construction -- a block request issued outside any request --
+                // and is counted apart rather than refusing the whole rule.
+                keyless += 1;
+                continue;
             };
             let fits = |state: &OpenState| match (&state.extent, scoped) {
                 (Extent::Scope(open_ts), true) => *open_ts == scope(key),
@@ -832,7 +854,10 @@ fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
-    Ok(assemble(rule, matched, unmatched, states))
+    Ok(with_keyless(
+        assemble(rule, matched, unmatched, states),
+        keyless,
+    ))
 }
 
 /// Who released this task, and what it did once released.
@@ -845,6 +870,7 @@ fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 /// do with it, and a waker of zero is the idle task rather than a task at all.
 /// The evidence level says so, and the chain names what it found.
 fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+    let mut keyless = 0u64;
     let Some(attr) = rule.waker.as_deref() else {
         return Err(JoinError::NoWakerAttribute {
             id: rule.id.clone(),
@@ -897,7 +923,11 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
                 });
             }
             let Some(KeyValue::Task { tid }) = event.key(rule.via) else {
-                return Err(missing_key(rule, event));
+                // A downstream event without the key is outside every state by
+                // construction -- a block request issued outside any request --
+                // and is counted apart rather than refusing the whole rule.
+                keyless += 1;
+                continue;
             };
             match states.open.get_mut(tid) {
                 Some(state) => {
@@ -909,7 +939,10 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
-    Ok(assemble(rule, matched, unmatched, states))
+    Ok(with_keyless(
+        assemble(rule, matched, unmatched, states),
+        keyless,
+    ))
 }
 
 /// Two things moving in the same interval: a polled total's change, credited
@@ -931,6 +964,7 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 /// between four states that opened in it would be inventing a precision the
 /// evidence does not have.
 fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+    let mut keyless = 0u64;
     let Some(attr) = rule.value.as_deref() else {
         return Err(JoinError::NoValueAttribute {
             id: rule.id.clone(),
@@ -979,7 +1013,11 @@ fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 
         if event.kind == rule.to {
             let Some(key) = event.key(rule.via) else {
-                return Err(missing_key(rule, event));
+                // A downstream event without the key is outside every state by
+                // construction -- a block request issued outside any request --
+                // and is counted apart rather than refusing the whole rule.
+                keyless += 1;
+                continue;
             };
             let key = key.to_string();
             let value = event
@@ -1047,6 +1085,7 @@ fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
     }
 
     let mut correlation = assemble_with(rule, matched, unmatched, states, intervals);
+    correlation.keyless = keyless;
     correlation.readings = Some(readings);
     Ok(correlation)
 }
@@ -1206,6 +1245,7 @@ fn assemble_with<K: Ord + Clone>(
         within_key,
         matched,
         unmatched,
+        keyless: 0,
         states: stats,
         top: finished,
         total_attributed,
@@ -1314,6 +1354,15 @@ fn waker_of(rule: &Rule, event: &Event, attr: &str) -> Result<i32, JoinError> {
 
 /// A rule whose side carries no usable key is a rule that does not fit its
 /// sources: a mistake in the session, not a runtime hiccup.
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn with_keyless(mut correlation: Correlation, keyless: u64) -> Correlation {
+    correlation.keyless = keyless;
+    correlation
+}
+
 fn missing_key(rule: &Rule, event: &Event) -> JoinError {
     JoinError::MissingKey {
         id: rule.id.clone(),
@@ -1455,6 +1504,14 @@ pub struct Part {
     /// reading of this tool's own forked image, which `live > 0` leaves out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<FilterExpr>,
+    /// An attribute whose value the row names beside its amount: who released
+    /// a wait (`holder_tid`), which device a request went to (`dev`). The most
+    /// frequent value among the row's events for the key, with how many of
+    /// them carried it -- because "the lock was released by 8821" and "by 8821
+    /// three times of four" are different claims, and a row that names one
+    /// should not read as the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<String>,
 }
 
 impl Part {
@@ -1585,6 +1642,44 @@ pub struct Row {
     /// How the amount was obtained, when that is more than a sum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// What the part asked the row to name, and how firmly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named: Option<Named>,
+}
+
+/// The value a row names, and how many of its events agreed on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Named {
+    pub attr: String,
+    pub value: String,
+    /// Events that carried this value.
+    pub events: u64,
+    /// Events that carried the attribute at all. `events < of` is a row whose
+    /// events disagreed, and the name is only the most frequent answer.
+    pub of: u64,
+}
+
+/// The most frequent value of `attr` among `events`, ties broken by the value
+/// so the answer does not depend on the order events arrived in.
+fn most_frequent(events: &[&Event], attr: &str) -> Option<Named> {
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for event in events {
+        if let Some(value) = event.attr(attr) {
+            *counts.entry(value.to_string()).or_default() += 1;
+        }
+    }
+    let of = counts.values().sum();
+    counts
+        .into_iter()
+        .max_by(|(left_value, left), (right_value, right)| {
+            left.cmp(right).then_with(|| right_value.cmp(left_value))
+        })
+        .map(|(value, events)| Named {
+            attr: attr.to_owned(),
+            value,
+            events,
+            of,
+        })
 }
 
 /// Whether a decomposition can be computed from what a session collects.
@@ -1807,6 +1902,13 @@ pub fn decompose(
         )),
         Whole::Span(_) => None,
     };
+    // A key the whole carries and no part does is still a table: a request
+    // that waited on the disk and whose id no block request carries -- a page
+    // lock, a metadata read in a kworker -- has a whole and no parts, and the
+    // answer for it is a residue that is all of it, not silence.
+    if let Some(readout) = &whole_readout {
+        per_key.extend(readout.keys().map(|key| (key, ())));
+    }
     let window_ns = decomposition
         .parts
         .iter()
@@ -1831,7 +1933,18 @@ pub fn decompose(
                 .parts
                 .iter()
                 .zip(&read_parts)
-                .map(|(part, readout)| readout.row(&part.state, key))
+                .map(|(part, readout)| {
+                    let mut row = readout.row(&part.state, key);
+                    // A row that measured nothing had nothing released and went
+                    // nowhere, and naming a value for it -- a holder of `0`, a
+                    // device nobody was sent to -- would read as a finding.
+                    let measured = row.amount.is_some_and(|amount| amount != 0.0);
+                    if let (Some(attr), true) = (&part.names, measured) {
+                        let events = readout.events.get(key).map(Vec::as_slice).unwrap_or(&[]);
+                        row.named = most_frequent(events, attr);
+                    }
+                    row
+                })
                 .collect();
             let whole = match (&whole_readout, &decomposition.whole) {
                 (Some(readout), _) => readout.row("whole", key),
@@ -1852,6 +1965,7 @@ pub fn decompose(
                          what is decomposed may end well before it"
                             .to_owned(),
                     ),
+                    named: None,
                 },
             };
             let parts: Option<f64> = rows.iter().map(|row| row.amount).sum();
@@ -1919,6 +2033,7 @@ fn lifetime_row(lifetime: Option<crate::collect::Lifetime>) -> Row {
         short: None,
         missing: None,
         note: None,
+        named: None,
     };
     match lifetime {
         None => Row {
@@ -1967,6 +2082,12 @@ struct Readout<'a> {
     carried: bool,
     short: Option<Shortfall>,
     collected: bool,
+    /// The key the rows are read by. A request identity is propagated -- the
+    /// event carries what the request's birth put there -- so a row read by it
+    /// is IDENTITY, the same rating `evidence` gives a join on `req`. Every
+    /// other key is shared by two sides without being carried from one to the
+    /// other, which is KEY.
+    by: KeyKind,
 }
 
 impl<'a> Readout<'a> {
@@ -2037,6 +2158,7 @@ impl<'a> Readout<'a> {
             carried,
             short,
             collected: served.is_some(),
+            by,
         }
     }
 
@@ -2115,13 +2237,18 @@ impl<'a> Readout<'a> {
             source: self.source.to_owned(),
             value: self.value.to_owned(),
             kind: self.kind,
-            evidence: Some(Evidence::Key),
+            evidence: Some(if self.by == KeyKind::Req {
+                Evidence::Identity
+            } else {
+                Evidence::Key
+            }),
             amount,
             resolution,
             readings: events.len() as u64,
             short: self.short.clone(),
             missing,
             note,
+            named: None,
         }
     }
 }
@@ -2423,15 +2550,42 @@ mod tests {
     /// it fails by name rather than reporting that nothing correlated.
     #[test]
     fn a_rule_that_does_not_fit_its_sources_fails_by_name() {
-        let mut unkeyed = fault(20, 0x1500);
+        // The upstream side carrying no key is the rule not fitting its source:
+        // nothing it opens could ever be found again. That stays a refusal.
+        let mut unkeyed = allocation(10, 0x1000, 0x1000, "alloc");
         unkeyed.keys.clear();
-        let events = vec![allocation(10, 0x1000, 0x1000, "alloc"), unkeyed];
+        let events = vec![unkeyed, fault(20, 0x1500)];
         let error = apply(&rule(), &events).unwrap_err();
         assert!(
             matches!(error, JoinError::MissingKey { ref via, .. } if *via == KeyKind::Mem),
             "{error}"
         );
-        assert!(error.to_string().contains("mem.faults"), "{error}");
+        assert!(error.to_string().contains("mem.heap.alloc"), "{error}");
+    }
+
+    /// A downstream event carrying no key is outside every state by
+    /// construction, and is counted apart rather than refusing the rule.
+    ///
+    /// Streams T and V both met the refusal from the other side: a block
+    /// request issued outside any request carries no `req`, and every real
+    /// session has some. Refusing the whole rule at the first one meant a
+    /// correct join could never be run on a real machine.
+    #[test]
+    fn a_downstream_event_without_the_key_is_counted_apart_not_refused() {
+        let mut unkeyed = fault(20, 0x1500);
+        unkeyed.keys.clear();
+        let events = vec![
+            allocation(10, 0x1000, 0x1000, "alloc"),
+            unkeyed,
+            fault(30, 0x1500),
+        ];
+        let correlation = apply(&rule(), &events).expect("the rule still runs");
+        assert_eq!(correlation.keyless, 1, "the unkeyed fault is counted");
+        assert_eq!(correlation.matched, 1, "and the keyed one still matches");
+        assert_eq!(
+            correlation.unmatched, 0,
+            "an event that had no key is not one that found no state"
+        );
     }
 
     /// An interval match needs something to be inside, and only one key is a
