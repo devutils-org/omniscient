@@ -370,6 +370,7 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
             Output::Stack {
                 stacks,
                 unattributed,
+                ..
             } => {
                 for stack in stacks {
                     let line = serde_json::json!({
@@ -586,6 +587,7 @@ fn text(results: &Results) -> String {
             Output::Stack {
                 stacks,
                 unattributed,
+                ..
             } => {
                 let _ = writeln!(out, "  stack");
                 for stack in stacks {
@@ -699,6 +701,7 @@ fn why_no_profile(output: &RunOutput) -> String {
             if let Output::Stack {
                 stacks,
                 unattributed: missing,
+                ..
             } = out
             {
                 asked = true;
@@ -1111,6 +1114,7 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
                 Output::Stack {
                     stacks,
                     unattributed,
+                    ..
                 } => Some((results, stacks.as_slice(), *unattributed)),
                 _ => None,
             })
@@ -2006,6 +2010,7 @@ mod tests {
         results.source = "cpu.profile".into();
         results.unit = Unit::Ns;
         results.outputs = vec![Output::Stack {
+            short: None,
             stacks: vec![
                 StackCount {
                     stack: 1,
@@ -2074,11 +2079,13 @@ mod tests {
             k: 2,
             series: vec![
                 SeriesTotal {
+                    short: None,
                     key: "task:2".into(),
                     events: 1,
                     total: 300.0,
                 },
                 SeriesTotal {
+                    short: None,
                     key: "task:3".into(),
                     events: 2,
                     total: 100.0,
@@ -2254,6 +2261,7 @@ mod tests {
     fn a_profile_of_events_that_carried_no_stack_says_which_of_the_two_happened() {
         let mut empty = profile();
         empty.outputs = vec![Output::Stack {
+            short: None,
             stacks: Vec::new(),
             unattributed: 5057,
         }];
@@ -2367,6 +2375,7 @@ mod tests {
     fn a_pprof_of_events_that_carried_no_stack_says_which_of_the_two_happened() {
         let mut empty = profile();
         empty.outputs = vec![Output::Stack {
+            short: None,
             stacks: Vec::new(),
             unattributed: 91,
         }];

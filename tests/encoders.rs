@@ -516,6 +516,7 @@ fn a_profile_larger_than_one_gzip_block_comes_back_whole() {
     }
     results.events_seen = stacks.len();
     results.outputs = vec![omn::emit::Output::Stack {
+        short: None,
         stacks,
         unattributed: 0,
     }];
@@ -550,6 +551,7 @@ fn a_unit_pprof_does_not_know_is_written_under_its_own_name_and_said_so() {
         unit: omn::catalog::Unit::Joules,
         backend: "pmu:rapl".into(),
         outputs: vec![omn::emit::Output::Stack {
+            short: None,
             stacks: vec![omn::emit::StackCount {
                 stack: 1,
                 events: 4,

@@ -279,8 +279,14 @@ sources and put the capability advice where the failure actually is.
 
 - **`Unit::Watts` does not exist**, which is part of why `gpu.power` reports an
   energy counter.
-- **The GPU is not in the environment capture**, and two runs are comparable
-  only if they were taken on the same device under the same driver.
+- ~~**The GPU is not in the environment capture**~~ — it is, and has been since
+  `f5ae1c6`. The resolved file carries every card the kernel describes, by PCI
+  ids, driver and driver version, read from sysfs in 47 µs rather than from
+  NVML: `{"card": "card1", "pci_id": "0x10de:0x1e07", "driver": "nvidia",
+  "driver_version": "615.71.09"}`. What it deliberately does not carry is in
+  `not_captured` beside it, vendor library versions included. This line stayed
+  in two documents after the thing it describes was done, which is its own small
+  lesson about where a claim lives.
 - **`net.capture` needs `CAP_NET_RAW`**, which the build does not grant. That is
   a decision rather than an omission: the capability lets the binary read every
   frame on the machine, and the scenario wave deliberately left it to be made

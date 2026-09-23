@@ -185,8 +185,14 @@ convention rests on — 48 µs of a 100 ms tick. The one-line change to
   event as `enabled_ns`.
 - **`Unit::Watts` does not exist**, which is part of why `gpu.power` reports the
   energy counter rather than an instantaneous draw.
-- **The GPU is not in the environment capture**, and two runs are comparable
-  only if they were taken on the same device under the same driver. Not free:
+- ~~**The GPU is not in the environment capture**~~ — it is, and has been since
+  `f5ae1c6`. The resolved file carries every card the kernel describes, by PCI
+  ids, driver and driver version, read from sysfs in 47 µs rather than from
+  NVML: `{"card": "card1", "pci_id": "0x10de:0x1e07", "driver": "nvidia",
+  "driver_version": "615.71.09"}`. What it deliberately does not carry is in
+  `not_captured` beside it, vendor library versions included. This line stayed
+  in two documents after the thing it describes was done, which is its own small
+  lesson about where a claim lives. Not free:
   `nvmlInit` costs 3.3–4.9 ms and `Capabilities::detect` runs on every command,
   including those that measure nothing. (Done, and not through NVML:
   `Environment::gpus` reads `/sys/class/drm/cardN` for the PCI ids, the bound
@@ -5622,3 +5628,44 @@ three it is not. Not blocking: `trace` serves both.
   load. `CATALOG.md` may want the class named too.
 - `STATE.md`'s table of what waits for fentry: `io.syscall`, `io.fs`,
   `io.fsync`, `net.tcp.connect` and `net.socket` collect through it.
+
+---
+
+## 45. The mark reaches `rate`, `topk` and `stack`
+
+Finding 37 scoped itself to `hist`, `summary` and percentiles because three
+documents had agreed that scope, and stream F wrote the argument for widening it
+on its way out rather than widening it unilaterally. This is that widening,
+taken by the coordinator because `src/emit.rs` has no owner in the eighth wave.
+
+A rate, a ranking's totals and a profile's weights are understated by exactly
+the records the ring never delivered, and understated in the one direction:
+what a ring drops is what arrived at the busiest moment. So all three carry
+`Shortfall` now, in the four structured formats, with a clean run gaining
+nothing — the negative matters as much as the positive, or the mark becomes
+noise and readers learn to ignore it.
+
+**Where each sits, and why it is not folded into what was already there.**
+Stream F's open question was how the mark should read next to `Rest` and
+`unattributed`, and the answer is that neither is the same fact:
+
+- **`Rest`** is what a `topk` left out *and measured* — the four hundred and
+  ninety devices below the top ten, whose total is known. The mark is what
+  nothing measured at all. A reader choosing what to look at next is making the
+  same decision a percentile is read for, and a ranking whose totals are lower
+  bounds can be a ranking in the wrong order.
+- **`unattributed`** counts events that arrived carrying no stack identity. The
+  mark counts records that never arrived. One says the profile is missing its
+  labels and the other says it is missing its samples, and a reader given one
+  number for both could not tell which profile they were holding.
+
+`stack` carries it once per table rather than once per stack, because a ring
+drops without regard to which stack the record would have joined — the same
+reason the distributions carry the run-wide fraction on every series.
+
+**What is left is the text encoder**, which belongs to whoever owns
+`src/encode.rs`: the structured formats are what a decomposition and a model
+read, and the text one is what a person reads. Two oversteps are declared rather
+than hidden — adding a field to an enum variant breaks every destructuring of
+it, so four patterns in `src/encode.rs` gained a `..` and two fixtures gained a
+`short: None`.

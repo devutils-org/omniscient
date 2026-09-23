@@ -227,6 +227,19 @@ pub enum Output {
         /// from a tenth of its samples is not a profile, and nothing else here
         /// would say so.
         unattributed: usize,
+        /// What the run did not see, when it lost anything.
+        ///
+        /// Beside `unattributed` and not folded into it, because the two are
+        /// different facts: `unattributed` counts events that arrived carrying
+        /// no stack, and this counts records that never arrived. One says the
+        /// profile is missing its labels and the other says it is missing its
+        /// samples, and a reader given one number for both could not tell which
+        /// profile they were holding.
+        ///
+        /// Once per table rather than once per stack: a ring drops without
+        /// regard to which stack the record would have joined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        short: Option<Shortfall>,
     },
 }
 
@@ -263,6 +276,14 @@ pub struct SeriesRate {
     /// exist.
     pub per_second: Option<f64>,
     pub window_ns: u64,
+    /// What the run did not see, when it lost anything.
+    ///
+    /// A rate from a lossy run is a **lower bound**, and it is biased the one
+    /// way: the records a ring drops are the ones from the busiest moment, so
+    /// the rate is understated exactly where it is highest. Finding 37 scoped
+    /// itself to distributions; this is the same statement about a quotient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<Shortfall>,
 }
 
 /// Values over time for one key.
@@ -461,6 +482,15 @@ pub struct SeriesTotal {
     pub key: SeriesKey,
     pub events: usize,
     pub total: f64,
+    /// What the run did not see, when it lost anything.
+    ///
+    /// Deliberately not folded into [`Rest`], which is a different fact:
+    /// `Rest` is what the ranking *left out and measured*, and this is what
+    /// nothing measured at all. A reader deciding what to look at next is
+    /// making the same decision a percentile is read for, and a ranking whose
+    /// totals are lower bounds can be a ranking in the wrong order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<Shortfall>,
 }
 
 /// What a `topk` left out.
@@ -697,7 +727,12 @@ pub fn aggregate(
                 series: summary(&collection.events, value_attr, short.as_ref())?,
             },
             Emit::Rate => Output::Rate {
-                series: rate(&collection.events, collection.observed_ns, value_attr)?,
+                series: rate(
+                    &collection.events,
+                    collection.observed_ns,
+                    value_attr,
+                    short.as_ref(),
+                )?,
             },
             Emit::Hist(scale) => {
                 let layout = BucketLayout::from(*scale);
@@ -706,8 +741,8 @@ pub fn aggregate(
                     series: hist(&collection.events, value_attr, layout, short.as_ref())?,
                 }
             }
-            Emit::TopK(k) => topk(&collection.events, value_attr, *k)?,
-            Emit::Stack => stack(&collection.events, value_attr)?,
+            Emit::TopK(k) => topk(&collection.events, value_attr, *k, short.as_ref())?,
+            Emit::Stack => stack(&collection.events, value_attr, short.as_ref())?,
         });
     }
 
@@ -786,7 +821,12 @@ fn timeline(events: &[Event], first_ts_ns: u64, attr: &str) -> Result<Vec<Series
     Ok(series)
 }
 
-fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>, EmitError> {
+fn rate(
+    events: &[Event],
+    window_ns: u64,
+    attr: &str,
+    short: Option<&Shortfall>,
+) -> Result<Vec<SeriesRate>, EmitError> {
     let seconds = (window_ns > 0).then(|| window_ns as f64 / 1e9);
     let mut rates = Vec::new();
     for (key, events) in grouped(events) {
@@ -797,6 +837,7 @@ fn rate(events: &[Event], window_ns: u64, attr: &str) -> Result<Vec<SeriesRate>,
             .iter()
             .sum();
         rates.push(SeriesRate {
+            short: short.cloned(),
             key,
             events: events.len(),
             total,
@@ -941,7 +982,12 @@ fn buckets(counts: &BTreeMap<u64, usize>, layout: BucketLayout) -> Vec<Bucket> {
     rendered
 }
 
-fn topk(events: &[Event], attr: &str, k: u32) -> Result<Output, EmitError> {
+fn topk(
+    events: &[Event],
+    attr: &str,
+    k: u32,
+    short: Option<&Shortfall>,
+) -> Result<Output, EmitError> {
     let mut totals = Vec::new();
     for (key, events) in grouped(events) {
         let mut total = 0.0;
@@ -949,6 +995,7 @@ fn topk(events: &[Event], attr: &str, k: u32) -> Result<Output, EmitError> {
             total += value_of(event, attr)? * weight_of(event);
         }
         totals.push(SeriesTotal {
+            short: short.cloned(),
             key,
             events: events.len(),
             total,
@@ -982,7 +1029,7 @@ fn topk(events: &[Event], attr: &str, k: u32) -> Result<Output, EmitError> {
 /// A deep stack is a long string; the same stack seen ten thousand times is one
 /// `u64` compared ten thousand times, and the frames are looked up once in
 /// [`Results::stacks`].
-fn stack(events: &[Event], attr: &str) -> Result<Output, EmitError> {
+fn stack(events: &[Event], attr: &str, short: Option<&Shortfall>) -> Result<Output, EmitError> {
     let mut by_stack: BTreeMap<u64, (usize, f64)> = BTreeMap::new();
     let mut unattributed = 0;
     for event in events {
@@ -1012,6 +1059,7 @@ fn stack(events: &[Event], attr: &str) -> Result<Output, EmitError> {
     });
 
     Ok(Output::Stack {
+        short: short.cloned(),
         stacks,
         unattributed,
     })
@@ -1210,12 +1258,13 @@ mod tests {
         assert_eq!(summaries[0].min, 8.0, "the extremes need no weight");
         assert_eq!(summaries[0].max, 64.0);
 
-        let Output::TopK { series, .. } = topk(&events, "bytes", 1).expect("a ranking") else {
+        let Output::TopK { series, .. } = topk(&events, "bytes", 1, None).expect("a ranking")
+        else {
             panic!("topk returns a TopK");
         };
         assert_eq!(series[0].total, weighted_sum);
 
-        let rates = rate(&events, 1_000_000_000, "bytes").expect("a rate");
+        let rates = rate(&events, 1_000_000_000, "bytes", None).expect("a rate");
         assert_eq!(rates[0].total, weighted_sum);
     }
 
@@ -1522,6 +1571,72 @@ mod tests {
         }
     }
 
+    /// The three emits finding 37 scoped itself away from are short the same
+    /// way, and say so the same way.
+    ///
+    /// A rate, a ranking's totals and a profile's weights are all understated
+    /// by exactly the records the ring never delivered, and all understated in
+    /// the one direction: what a ring drops is what arrived at the busiest
+    /// moment. Stream F marked the distributions and left these three with the
+    /// argument written down rather than widening a scope three documents had
+    /// agreed; this is that widening.
+    #[test]
+    fn a_rate_a_ranking_and_a_profile_are_short_the_same_way_a_distribution_is() {
+        let short = Shortfall::of(&lost(10, 0), 90, false).expect("a dropped run is short");
+        let events = vec![event(0, 1, 10), event(0, 2, 30), event(1, 1, 20)];
+
+        let rates = rate(&events, 1_000_000_000, "bytes", Some(&short)).unwrap();
+        assert_eq!(rates.len(), 2);
+        for series in &rates {
+            assert_eq!(series.short.as_ref(), Some(&short), "{}", series.key);
+        }
+
+        let Output::TopK { series, rest, .. } = topk(&events, "bytes", 10, Some(&short)).unwrap()
+        else {
+            panic!("topk produces a ranking");
+        };
+        for total in &series {
+            assert_eq!(total.short.as_ref(), Some(&short), "{}", total.key);
+        }
+        // `Rest` is what the ranking left out *and measured*; the mark is what
+        // nothing measured at all. They must not be folded together.
+        assert_eq!(rest.series, 0, "nothing was left out of a top ten of two");
+
+        let mut stacked = events.clone();
+        stacked[0].attrs.push(Attr::uint(STACK_ID_ATTR, 7));
+        let Output::Stack {
+            short: marked,
+            unattributed,
+            ..
+        } = stack(&stacked, "bytes", Some(&short)).unwrap()
+        else {
+            panic!("stack produces a stack");
+        };
+        assert_eq!(marked.as_ref(), Some(&short));
+        // And `unattributed` stays its own number: events that arrived without
+        // a stack and records that never arrived are different facts.
+        assert_eq!(unattributed, 2);
+    }
+
+    /// A clean run gains nothing, or the mark becomes noise and readers learn
+    /// to ignore it. The negative matters as much as the positive.
+    #[test]
+    fn a_clean_run_carries_no_mark_on_any_of_the_three() {
+        let events = vec![event(0, 1, 10), event(0, 2, 30)];
+        assert!(rate(&events, 1_000_000_000, "bytes", None)
+            .unwrap()
+            .iter()
+            .all(|series| series.short.is_none()));
+        let Output::TopK { series, .. } = topk(&events, "bytes", 10, None).unwrap() else {
+            panic!("topk produces a ranking");
+        };
+        assert!(series.iter().all(|total| total.short.is_none()));
+        let Output::Stack { short, .. } = stack(&events, "bytes", None).unwrap() else {
+            panic!("stack produces a stack");
+        };
+        assert!(short.is_none());
+    }
+
     #[test]
     fn a_timeline_is_relative_to_the_first_event() {
         let events = vec![event(1_000, 7, 10), event(2_000, 7, 20)];
@@ -1550,7 +1665,7 @@ mod tests {
     #[test]
     fn a_rate_over_no_window_does_not_produce_infinity() {
         let events = vec![event(0, 1, 10), event(0, 1, 20)];
-        let rates = rate(&events, 0, "bytes").unwrap();
+        let rates = rate(&events, 0, "bytes", None).unwrap();
         assert_eq!(rates[0].total, 30.0, "the total is still true");
         assert_eq!(
             rates[0].per_second, None,
@@ -1558,7 +1673,7 @@ mod tests {
         );
 
         // A window that exists, however short, does have one.
-        let measured = rate(&events, 1_000_000, "bytes").unwrap();
+        let measured = rate(&events, 1_000_000, "bytes", None).unwrap();
         assert_eq!(measured[0].per_second, Some(30_000.0));
     }
 
@@ -1717,7 +1832,7 @@ mod tests {
             event(0, 3, 50),
             event(0, 4, 1),
         ];
-        let Output::TopK { series, rest, .. } = topk(&events, "bytes", 2).unwrap() else {
+        let Output::TopK { series, rest, .. } = topk(&events, "bytes", 2, None).unwrap() else {
             panic!("topk produces a topk");
         };
         assert_eq!(series[0].key, "task:2");
@@ -1736,7 +1851,7 @@ mod tests {
     #[test]
     fn a_tie_is_broken_by_key_rather_than_by_arrival() {
         let events = vec![event(0, 9, 5), event(0, 2, 5)];
-        let Output::TopK { series, .. } = topk(&events, "bytes", 10).unwrap() else {
+        let Output::TopK { series, .. } = topk(&events, "bytes", 10, None).unwrap() else {
             panic!("topk produces a topk");
         };
         assert_eq!(
@@ -1767,7 +1882,8 @@ mod tests {
         let Output::Stack {
             stacks,
             unattributed,
-        } = stack(&events, "bytes").unwrap()
+            ..
+        } = stack(&events, "bytes", None).unwrap()
         else {
             panic!("stack produces a stack");
         };
@@ -1786,7 +1902,7 @@ mod tests {
     #[test]
     fn events_without_a_stack_are_counted_rather_than_silently_absent() {
         let events = vec![sampled(1, 7, Some("main"), 10), event(0, 1, 10)];
-        let Output::Stack { unattributed, .. } = stack(&events, "bytes").unwrap() else {
+        let Output::Stack { unattributed, .. } = stack(&events, "bytes", None).unwrap() else {
             panic!("stack produces a stack");
         };
         assert_eq!(unattributed, 1);
