@@ -242,6 +242,14 @@ Integers take size suffixes
 and duration suffixes
 .RB ( 5ms ).
 .IP
+.BR =~
+is a substring test rather than a regular expression:
+.RB ` "comm =~ 'python'" '
+keeps
+.BR python3 .
+A pattern that can only be a regex \(em a character class, a group, an escape,
+or an anchor \(em is refused rather than matched literally.
+.IP
 The resolver pushes a predicate into the kernel where the backend allows it and
 evaluates it here otherwise, and says which it did. A userspace filter is paid
 for in full before it removes anything, and what it removed is reported beside

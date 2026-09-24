@@ -27,7 +27,7 @@ CAPS       = cap_bpf,cap_perfmon$(if $(CAPTURE),$(comma)cap_net_raw,)+ep
 CAPCHECK   = $(if $(CAPTURE),cap_net_raw,cap_bpf)
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
-.PHONY: vertical-server all build release caps test check demo demo-all man fmt clippy clean
+.PHONY: vertical-server triage-fixture all build release caps test check demo demo-all man fmt clippy clean
 
 all: build
 
@@ -38,6 +38,7 @@ build:
 	cargo build --workspace $(CARGOFLAGS)
 	@$(MAKE) --no-print-directory caps PROFILE=$(PROFILE)
 	@$(MAKE) --no-print-directory vertical-server
+	@$(MAKE) --no-print-directory triage-fixture
 
 # The vertical case's synthetic server, which `examples/vertical-*.yml` launch
 # by this path. Built here so the sessions run after `make` alone, and built by
@@ -53,6 +54,21 @@ vertical-server:
 	    rm -f $(VERTICAL_SERVER).partial; \
 	    echo "note: the vertical-case server did not build (no cc, or no <sys/sdt.h>);"; \
 	    echo "      examples/vertical-*.yml will say so when they are run."; \
+	fi
+
+# The workload `examples/triage-*.yml` launch, built by `tests/triage.rs` from
+# the same source and with the same flags: frame pointers in leaf functions
+# too, because `omn diff` names a function by its leaf frame. Never fatal, like
+# the server above.
+TRIAGE_FIXTURE = target/omn-triage-fixture/workload
+triage-fixture:
+	@mkdir -p $(dir $(TRIAGE_FIXTURE))
+	@if cc -O1 -g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fno-inline -pthread \
+	      -o $(TRIAGE_FIXTURE).partial src/triage/workload.c 2>/dev/null; then \
+	    mv $(TRIAGE_FIXTURE).partial $(TRIAGE_FIXTURE); \
+	else \
+	    rm -f $(TRIAGE_FIXTURE).partial; \
+	    echo "note: the triage fixture did not build (no cc); examples/triage-*.yml need it"; \
 	fi
 
 release:

@@ -919,18 +919,14 @@ fn defect_2_the_match_operator_is_a_substring_test_and_says_so() {
          name the operator that is one:\n{anchored}"
     );
 
-    // What is left of this defect: the manual still lists `=~` among the
-    // operators without saying what it does, and `man/omn.1` is nobody's file
-    // in this wave. `docs/open-findings.md`, "Needs from another stream".
+    // And the manual says it, which closed the rest of this defect in the
+    // tenth wave: the operator's line is followed by what it does.
     let manual = std::fs::read_to_string(root().join("man/omn.1")).expect("the manual page");
-    let described = manual.lines().any(|line| {
-        line.contains("=~") && (line.contains("substring") || line.contains("contains"))
-    });
-    assert!(
-        !described,
-        "THE REST OF DEFECT 2 IS FIXED: the manual now says what `=~` does. Drop this \
-         assertion and the remaining half of defect 2 in docs/scenarios/runtime.md."
-    );
+    let lines: Vec<&str> = manual.lines().collect();
+    let described = lines
+        .windows(2)
+        .any(|pair| pair[0].trim() == ".BR =~" && pair[1].contains("substring"));
+    assert!(described, "the manual must say that `=~` is a substring test");
 }
 
 // ---------------------------------------------------------------------------

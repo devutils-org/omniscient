@@ -238,7 +238,7 @@ together.
 | | State |
 |---|---|
 | 1 — `topk` ranks processes, not methods | open; the fix is in `src/request.rs`, which no stream owns |
-| 2 — `=~` is a substring test and nothing says so | **fixed** in `src/filter.rs`, except one line of manual |
+| 2 — `=~` is a substring test and nothing says so | **fixed** in `src/filter.rs`, and the manual says so since the tenth wave |
 
 ### 1. `topk` ranks processes, not the methods that were compiled
 
@@ -282,7 +282,8 @@ misleading.
 
 ### 2. `=~` is a substring test, and nothing says so — **fixed**
 
-Fixed in `src/filter.rs` by the fifth wave, except for one line of manual. The
+Fixed in `src/filter.rs` by the fifth wave; the line of manual landed at the
+tenth wave's merge, with the assertion that had waited for it turned around. The
 reproduction below is the run as it was; what it does now is at the end.
 
 The filter grammar's `=~` is `str::contains`. The manual listed it among the

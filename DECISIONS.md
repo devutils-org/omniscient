@@ -36,7 +36,7 @@ that looked like details turned out to be decisions.
 | Equivalent is not degraded | A non-first backend either states what it degrades or declares `equivalent: true` | The NVML path for a GPU and the netlink path for a counter lose nothing; forcing a degradation note onto them would be noise, and leaving the field empty would be a lie. |
 | The value attribute is named by the collector | Not inferred from the unit | A source may carry several numbers. Guessing which one is the measurement is the kind of shortcut that silently aggregates the wrong column. |
 | A dead target ends the run, it is not a lost read | ENOENT and ESRCH both mean gone | Counting the last read of an exiting process as a loss made every clean run look lossy, which would have taught everyone to ignore the loss line. |
-| One request per run, for now | A session with several is refused | Running them in sequence would measure several different moments and present them as one. Concurrent attach is the honest fix, and it lands with hot attach. |
+| One workload per run | A session runs any number of requests in one window -- one workload beside any number of machine targets, each request with its own window inside the run since the tenth wave's hot attach. Two *workloads* are refused. | Running requests in sequence would measure several moments and present them as one, which is why they share a window. Two workloads are still refused because hot attach does not answer the three questions that have two answers each: whose exit ends the run, which program a launch means, and what an overhead is a percentage of. |
 | `--no-resolve` | Writing a session down does not require this machine to be able to serve it | A session authored on a laptop for a server must not be blocked by the laptop's tracefs permissions. |
 
 ---
@@ -227,6 +227,18 @@ order of what it would cost:
 Someone who wants what Valgrind or DynamoRIO measures should run Valgrind or
 DynamoRIO; this tool's thesis is the real machine. Reversible, like every line
 here, by writing the import -- which touches no collector.
+
+---
+
+## Settled in the tenth wave: triage asks for its objective
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A triage request without an objective | **Refused with the list, never defaulted.** | "What is this limited by" has no answer until someone says *for what*: median latency, the tail, throughput and energy do not name the same culprit. A layer that picked one silently would report a confident wrong suspect, which is the failure this project is built against, one level up. |
+| A method asked an objective it does not answer | **Refused, naming the method that does.** `omn latency` answers latency and tail; `omn saturate` answers throughput, tail and energy. | A method that answered anyway would be answering a different question under the one asked. |
+| `cost` as an objective | **Not one.** | Nothing here measures a price, and an objective nothing measures would be a label on a guess. |
+
+Enforced by `src/triage/objective.rs` and its tests, not by this file.
 
 ---
 
