@@ -1,0 +1,55 @@
+# The reasons a test may skip on the CI's cell: a hosted runner with a
+# distribution kernel, no file capabilities and no GPU. One extended regular
+# expression per line, matched against a skip line's text by
+# .github/scripts/skip-gate.sh. Everything here is a privilege or a device the
+# cell does not have; a workload the runner lacks is not here, because the
+# workflow installs it.
+#
+# Adding a line is a claim about the cell. Say which, above the line.
+
+# The capabilities the cell goes without, by name.
+CAP_BPF|CAP_PERFMON|CAP_SYS_ADMIN|CAP_NET_RAW
+# Unprivileged perf and bpf, as the tests word the kernel's refusal.
+refuses unprivileged perf
+will not (sample|count|open|report|read)
+would not sample
+refuses to sample another process
+(cannot|may not|does not let this process) create a (bpf |task-storage )?map
+unprivileged_bpf_disabled
+# tracefs, which is root's alone on a distribution kernel.
+tracefs
+# Hardware a cloud VM does not expose: an NVIDIA GPU, AMD IBS or Intel PEBS,
+# RAPL, sensors, cpufreq, and hardware counters at all under some hypervisors.
+nvidia|NVML|NVIDIA|GPU
+ibs_op|pebs|PEBS
+RAPL
+temperature sensor
+cpufreq
+hardware counter|PMU|performance unit
+# Sources this cell cannot serve. "no viable backend on this machine" is the
+# resolver's own classification -- "the request is valid; it is this machine
+# that cannot serve it" -- and the probes' reasons follow it on lines that a
+# parallel suite's output interleaves with others, so the gate cannot always
+# read them. The sweep of this cell (tests/portability.rs) is what checks that
+# each of those reasons is a real one.
+cannot serve
+has no viable backend on this machine
+needs what this machine does not grant
+no backend of `[a-z_.]+` is usable here
+serves neither backend
+# Files the kernel keeps for root: powercap's energy counters.
+root-only|readable only by root
+# A cgroup controller the runner's service manager did not delegate to it.
+is not delegated to
+# Counters a cpu does not have: top-down's issue slots (Intel from Icelake, AMD
+# from Zen 4), a cache event the cpu does not publish.
+this cpu (publishes no|has no) (slots|issue-slot)
+does not open on this machine
+# The machine's state at that moment, which the test cannot create and says so
+# with its numbers: a shared runner's caches, its I/O stall, its huge pages.
+# These are the "skip loudly with the numbers" scenarios; each wording is named
+# so a new kind of state skip still stops the job.
+caches were not this thread's
+was already stalled on I/O
+AnonHugePages moved from [0-9]+ to [0-9]+ huge pages
+has no partially mapped huge pages right now
