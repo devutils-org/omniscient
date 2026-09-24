@@ -453,18 +453,10 @@ fn every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_
     assert_modes_and_emits_are_coherent(&walked);
     // The nine cache combinations are gone: their refusal is raised by the
     // factory, before anything is opened, so it is now read as this build's gap
-    // and exits 3. The three `mem.faults` ones remain, and the reason they do
-    // is worth knowing -- `mem.faults` refuses in `Collector::start`, against a
-    // target that already exists, where an unmarked refusal is a failure of the
-    // run. `docs/fixes/runner.md` has the one-line change that moves them.
-    assert_machine_blame_is_exactly(
-        &walked,
-        &[
-            "mem.faults count rate",
-            "mem.faults count raw",
-            "mem.faults count summary",
-        ],
-    );
+    // and exits 3. The three `mem.faults count` ones went in the eleventh wave:
+    // the catalog declared the mode and the collector refused it after the
+    // launch, and it is served now, by the kernel's page-fault counter.
+    assert_machine_blame_is_exactly(&walked, &[]);
 }
 
 #[test]
@@ -3233,4 +3225,236 @@ fn a_stack_of_every_process_is_refused_by_the_build_and_the_rest_is_served() {
         return;
     }
     assert!(ranked.status.success(), "{}", stderr(&ranked));
+}
+
+// ---------------------------------------------------------------------------
+// The silent degradations (the eleventh wave, stream S)
+// ---------------------------------------------------------------------------
+//
+// Each of these was a request the tool accepted and then answered with a
+// different question, saying nothing. Every one fails against the build that
+// had the defect, and `docs/fixes/silent.md` has the command that found it.
+
+/// A number the workload printed about itself on standard error, as
+/// `NAME=value`.
+fn printed(output: &Output, name: &str) -> f64 {
+    stderr(output)
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}=")).map(str::to_owned))
+        .unwrap_or_else(|| panic!("the workload did not print {name}: {}", stderr(output)))
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("{name} is not a number ({error})"))
+}
+
+/// A backend pinned with `--backend force:` whose requirements probe missing
+/// is refused before anything is launched, with the probes' reasons.
+///
+/// It used to be accepted -- `--dump-resolved` printed a resolved file with the
+/// two `missing` probes in it -- and the run then launched the target and
+/// failed at attach with "perf_event_open ... refused (No such file or
+/// directory)", which is finding 15's shape reached through the pin instead of
+/// the probe. Ground truth is the machine's own answer: `omn list` probes the
+/// same requirements, and this scenario only runs where it says they are
+/// missing.
+#[test]
+fn a_pinned_backend_this_machine_cannot_serve_is_refused_before_the_launch() {
+    let listed = run(&["list", "mem.cache_llc", "--format", "json"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let listing = stdout(&listed);
+    if !listing.contains("LLC-loads") || !listing.contains("missing") {
+        eprintln!(
+            "skipped: this cpu publishes the last-level cache descriptors `pmu` needs, so a \
+             pin on it measures and there is no refusal to check here: {listing}"
+        );
+        return;
+    }
+
+    let resolved = run(&[
+        "mem.cache_llc",
+        "--backend",
+        "force:pmu",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "--dump-resolved",
+        "--",
+        "true",
+    ]);
+    assert_eq!(
+        code(&resolved),
+        EXIT_NO_VIABLE_BACKEND,
+        "a pin past two missing probes is this machine's gap, before anything runs: {}{}",
+        stdout(&resolved),
+        stderr(&resolved)
+    );
+    assert!(
+        stdout(&resolved).trim().is_empty(),
+        "no resolved file is printed for a request the machine cannot serve: {}",
+        stdout(&resolved)
+    );
+
+    let marker = std::env::temp_dir().join(format!("omn-pinned-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let script = format!("touch {}", marker.display());
+    let output = run(&[
+        "mem.cache_llc",
+        "--backend",
+        "force:pmu",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
+    let ran = marker.exists();
+    let _ = std::fs::remove_file(&marker);
+    let message = stderr(&output);
+    assert_eq!(code(&output), EXIT_NO_VIABLE_BACKEND, "{message}");
+    assert!(
+        message.contains("pinned") && message.contains("LLC-loads"),
+        "the refusal names the pin and the probe that is missing: {message}"
+    );
+    assert!(
+        !message.contains("cannot start collecting"),
+        "the refusal came from the attach, after the launch, rather than from the resolver: \
+         {message}"
+    );
+    assert!(!ran, "the program ran although the request was refused");
+}
+
+/// `mem.faults -m count` counts, and the count is the kernel's own.
+///
+/// The catalog declared `count`, the validator accepted it, and the collector
+/// refused it after the launch -- "`count` mode does not sample page faults".
+/// A `PERF_COUNT_SW_PAGE_FAULTS` counting event is the cheapest thing the
+/// source could do, and is what serves it now. Ground truth is `getrusage`:
+/// the program asks the kernel how many faults it took. Both gaps are in one
+/// direction -- the faults between the fork and the launch gate are the
+/// program's in `getrusage` and before the counter, and the ones after its own
+/// read are the counter's alone and a handful -- so the counter may be a little
+/// below the program's number and not above it by more than those.
+#[test]
+fn a_counted_run_of_page_faults_is_the_kernels_own_count() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = "import mmap, resource, sys\n\
+                   m = mmap.mmap(-1, 64 * 1024 * 1024)\n\
+                   m.madvise(mmap.MADV_NOHUGEPAGE)\n\
+                   for offset in range(0, len(m), 4096):\n    m[offset] = 65\n\
+                   usage = resource.getrusage(resource.RUSAGE_SELF)\n\
+                   sys.stderr.write('FAULTS=%d\\n' % (usage.ru_minflt + usage.ru_majflt))\n";
+    let output = run(&[
+        "mem.faults",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        program,
+    ]);
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let kernels_own = printed(&output, "FAULTS");
+    assert!(
+        kernels_own > 16_384.0,
+        "sixty-four megabytes of small pages is sixteen thousand faults, and the program took \
+         {kernels_own}"
+    );
+    let document = json(&output);
+    let counted = document["results"][0]["outputs"][0]["series"][0]["last"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("a counted value: {document}"));
+    let difference = (kernels_own - counted) / kernels_own;
+    assert!(
+        (-0.01..0.05).contains(&difference),
+        "the kernel counted {kernels_own} faults for this program and the run counted \
+         {counted}: {:.2} % apart",
+        difference * 100.0
+    );
+}
+
+/// The faults a worker thread takes are in a traced run, attributed to it.
+///
+/// A sampling event was not inherited, so `mem.faults` followed the task it
+/// was opened on: a program that faulted its memory in from a worker read as a
+/// program that faulted almost nothing, and said only that a sampling event is
+/// not inherited. Ground truth is the worker's own `getrusage(RUSAGE_THREAD)`,
+/// which counts that thread's faults and nobody else's, and the thread's id,
+/// which the worker prints beside it.
+#[test]
+fn the_faults_a_worker_thread_takes_are_traced_to_that_thread() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = "import mmap, resource, sys, threading\n\
+                   def touch():\n    \
+                       m = mmap.mmap(-1, 64 * 1024 * 1024)\n    \
+                       m.madvise(mmap.MADV_NOHUGEPAGE)\n    \
+                       for offset in range(0, len(m), 4096):\n        m[offset] = 65\n    \
+                       usage = resource.getrusage(resource.RUSAGE_THREAD)\n    \
+                       sys.stderr.write('WORKER=%d\\nWORKER_FAULTS=%d\\n' % \
+                       (threading.get_native_id(), usage.ru_minflt + usage.ru_majflt))\n\
+                   worker = threading.Thread(target=touch)\n\
+                   worker.start()\n\
+                   worker.join()\n";
+    let output = run(&[
+        "mem.faults",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        program,
+    ]);
+    if let Some(reason) = unavailable(&output) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let worker = printed(&output, "WORKER");
+    let its_own = printed(&output, "WORKER_FAULTS");
+    assert!(
+        its_own > 16_384.0,
+        "sixty-four megabytes of small pages is sixteen thousand faults, and the worker took \
+         {its_own}"
+    );
+    let document = json(&output);
+    let result = &document["results"][0];
+    let traced = result["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events")
+        .iter()
+        .filter(|event| event["keys"][0]["task"]["tid"].as_f64() == Some(worker))
+        .count() as f64;
+    let dropped = result["losses"]["dropped"].as_f64().unwrap_or(0.0);
+    // What the worker took is either traced to it or counted as lost. It
+    // faults a few more times after its own read -- formatting and writing the
+    // line that carries it -- so the trace may exceed its number by those and
+    // not by more: the resolution of the reference is its own tail.
+    const AFTER_ITS_OWN_READ: f64 = 64.0;
+    assert!(
+        traced + dropped >= its_own && traced <= its_own + AFTER_ITS_OWN_READ,
+        "the worker counted {its_own} faults of its own and the run traced {traced} to thread \
+         {worker}, with {dropped} lost: {}",
+        result["degradations"]
+    );
 }

@@ -1890,3 +1890,163 @@ fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
         stderr(&output)
     );
 }
+
+// ---------------------------------------------------------------------------
+// The silent degradations (the eleventh wave, stream S)
+// ---------------------------------------------------------------------------
+//
+// Each of these was a request the tool accepted and then answered with a
+// different question, saying nothing. Every one fails against the build that
+// had the defect, and `docs/fixes/silent.md` has the command that found it.
+
+/// Runs `omn` with these arguments in the background, for a machine-wide
+/// source the test drives a workload under.
+fn omn_in_background(args: &[&str]) -> Child {
+    Command::new(BINARY)
+        .current_dir(root())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should start")
+}
+
+/// `syscall == 110` counts the getppid calls a program made, and not zero.
+///
+/// The number was pushed into the program correctly -- only getppid was timed
+/// -- and then a second, userspace pass compared 110 with the event's
+/// `syscall`, which is the name, and dropped every row the kernel had kept:
+/// "the predicate removed 2000 calls here and kept 0", on a workload that made
+/// two thousand. Ground truth is the workload's own loop, and `getppid` is the
+/// one call glibc does not cache and a Python start-up does not make.
+#[test]
+fn a_syscall_filter_by_number_counts_the_calls_the_program_made() {
+    needs_python!();
+    const CALLS: u64 = 2000;
+    let getppid = if cfg!(target_arch = "x86_64") {
+        "110"
+    } else if cfg!(target_arch = "aarch64") {
+        "173"
+    } else {
+        eprintln!("skipped: this scenario knows getppid's number on x86_64 and aarch64 only");
+        return;
+    };
+    let filter = format!("syscall == {getppid}");
+    let program = format!(
+        "import os, sys\nfor _ in range({CALLS}):\n    os.getppid()\nsys.stderr.write('CALLS {CALLS}\\n')\n"
+    );
+    let output = omn(&[
+        "proc.syscall",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--filter",
+        &filter,
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &program,
+    ]);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(reported(&output, "CALLS "), CALLS);
+    let doc = document(&output);
+    let result = &doc["results"][0];
+    let rows = events(result);
+    let counted: f64 = rows.iter().filter_map(|row| attr_f64(row, "count")).sum();
+    assert_eq!(
+        counted as u64, CALLS,
+        "the program called getppid {CALLS} times and `{filter}` counted {counted}; \
+         degradations {}, losses {}",
+        result["degradations"], result["losses"]
+    );
+    for row in &rows {
+        assert_eq!(
+            attr_f64(row, "nr"),
+            getppid.parse().ok(),
+            "a syscall other than the one filtered on is in the output"
+        );
+    }
+}
+
+/// The machine-wide `proc` sources apply the filter they accept.
+///
+/// `proc.exec --filter 'filename == "/nonexistent/path"'` reported every exec
+/// on the machine and said nothing about the filter, and so did the same
+/// predicate on `proc.exit` and `proc.signals`: the resolver credits a `bpf`
+/// backend with filtering in the program, the runner then leaves its events
+/// alone, and none of the three collectors applied it. A filter accepted and
+/// not applied is the one outcome the invariants rule out.
+///
+/// Ground truth is a shell under a name nothing else on the machine has, run a
+/// number of times this test chose, among execs of `/bin/true` that every one
+/// of the three filters must remove. Three observers, one workload.
+#[test]
+fn a_filter_on_the_machine_wide_proc_sources_keeps_only_what_it_names() {
+    const RUNS: usize = 4;
+    let Some(shell) = UniqueShell::new() else {
+        eprintln!("skipped: this machine has no /bin/sh to copy");
+        return;
+    };
+    let path = shell.as_str();
+    let name = shell.name();
+    let observe = |source: &str, filter: String| {
+        omn_in_background(&[
+            source, "--system", "-d", "3s", "--mode", "trace", "--emit", "raw", "--filter",
+            &filter, "--format", "json",
+        ])
+    };
+    let execs = observe("proc.exec", format!("filename == '{path}'"));
+    let exits = observe("proc.exit", format!("comm == '{name}' && group_dead == 1"));
+    let signals = observe("proc.signals", format!("comm == '{name}' && sig == 10"));
+    std::thread::sleep(ATTACH_MARGIN);
+    for _ in 0..RUNS {
+        assert!(shell.run("exit 0").success());
+        assert!(shell.run("kill -USR1 $$").code().is_none());
+        // What every filter has to remove.
+        assert!(Command::new("/bin/true").status().expect("true").success());
+    }
+
+    for (child, what, expected) in [
+        (execs, "exec", 2 * RUNS),
+        (exits, "exit", 2 * RUNS),
+        (signals, "signal", RUNS),
+    ] {
+        let output = finish(child);
+        if skipped_without_bpf(&output) {
+            return;
+        }
+        assert!(output.status.success(), "{what}: {}", stderr(&output));
+        let doc = document(&output);
+        let result = &doc["results"][0];
+        let events = events(result);
+        for event in &events {
+            assert_eq!(
+                attr_text(event, "comm").as_deref(),
+                Some(name.as_str()),
+                "a `{what}` the filter does not name is in the output: {event}"
+            );
+        }
+        let clean = result["losses"]["dropped"] == 0;
+        if clean {
+            assert_eq!(
+                events.len(),
+                expected,
+                "this test made {expected} `{what}` events the filter names and {} came back",
+                events.len()
+            );
+        } else {
+            assert!(events.len() <= expected, "{what}: {}", result["losses"]);
+        }
+        let said = result["degradations"].to_string();
+        assert!(
+            said.contains("applied here"),
+            "a `{what}` run that filtered has to say where the predicate ran: {said}"
+        );
+    }
+}

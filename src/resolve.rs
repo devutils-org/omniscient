@@ -212,8 +212,41 @@ pub fn resolve(
             .position(|candidate| candidate.id == backend.id)
             .unwrap_or(0)
             + 1;
+        // A pin skips the walk, not the checks. A pinned backend that cannot
+        // serve the target, or whose requirements probe missing, would be
+        // accepted here, launch the target, and fail at attach -- finding 15's
+        // shape reached through the pin instead of the probe. It is refused
+        // now, before anything runs, with the probes' own reasons. A
+        // requirement no probe covers is still accepted, as it is on the walk,
+        // and the resolved file lists it as unverified.
+        //
+        // A pinned backend this build has no collector for is left to the
+        // runner, which refuses it before the launch as the build's gap: that
+        // answer holds on every machine, and a machine that lacks the probes
+        // as well would otherwise turn "nothing collects this" into "this
+        // machine cannot", which sends a reader after privileges for a
+        // collector nobody wrote.
+        let refuse = |reasons: Vec<String>| ResolveError::NoViableBackend {
+            source_id: request.source.to_string(),
+            rejections: vec![format!(
+                "  {} (pinned with --backend force:, so no other backend was considered): {}",
+                backend.id,
+                reasons.join("; ")
+            )],
+        };
+        if let Some(reason) = cannot_serve_target(entry, backend, request.target.kind()) {
+            return Err(refuse(vec![reason]));
+        }
         check_filter_fields(entry, backend, request)?;
         let requirements = probe_all(capabilities, backend, pid);
+        let missing: Vec<String> = requirements
+            .iter()
+            .filter(|requirement| requirement.probe.is_missing())
+            .map(|requirement| format!("{}: {}", requirement.needs, requirement.probe))
+            .collect();
+        if !missing.is_empty() && crate::collect::implements(request.source.as_str(), &backend.id) {
+            return Err(refuse(missing));
+        }
         return Ok(build(
             entry,
             request,
@@ -654,6 +687,98 @@ mod tests {
             "{:?}",
             resolved.degradations
         );
+    }
+
+    /// A pin skips the walk and not the probes. `--backend force:pmu` on a
+    /// cpu that does not publish the events used to be accepted, launch the
+    /// target and fail at attach; it is refused here, before anything runs,
+    /// as the machine's gap and with the probe's own reason.
+    #[test]
+    fn a_pinned_backend_whose_requirements_probe_missing_is_refused_before_the_launch() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"mem.rss".parse().unwrap())
+            .expect("mem.rss is in the catalog")
+            .clone();
+        // A requirement no kernel meets, on the backend the pin names: the
+        // probe that answers it is the real one, reading this machine.
+        entry.backends[1].requires.push("kernel>=999.0".to_owned());
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("mem.rss", Target::Pid(vec![std::process::id() as i32]));
+        request.backend = Some("force:fs:proc:statm".parse().unwrap());
+
+        match resolve(&catalog, &capabilities, &request) {
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                let text = rejections.join("\n");
+                assert!(text.contains("fs:proc:statm"), "{text}");
+                assert!(text.contains("pinned"), "{text}");
+                assert!(text.contains("kernel>=999.0"), "{text}");
+                assert!(text.contains("older than"), "the probe's reason: {text}");
+            }
+            other => panic!("a pin past a missing requirement must be refused, got {other:?}"),
+        }
+    }
+
+    /// A pinned backend nothing in this build collects is the build's gap on
+    /// every machine, so its probes do not turn it into the machine's: the
+    /// resolver accepts it, and the runner refuses it before the launch with
+    /// "no collector is written".
+    #[test]
+    fn a_pinned_backend_this_build_lacks_is_left_to_the_build_answer_whatever_it_probes() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"proc.exec".parse().unwrap())
+            .expect("proc.exec is in the catalog")
+            .clone();
+        let classic = entry
+            .backends
+            .iter_mut()
+            .find(|backend| backend.id == "bpf:tp")
+            .expect("proc.exec has a classic tracepoint backend");
+        classic.requires.push("kernel>=999.0".to_owned());
+        assert!(
+            !crate::collect::implements("proc.exec", "bpf:tp"),
+            "this test needs a backend with no collector"
+        );
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("proc.exec", Target::System);
+        request.mode = Mode::Trace;
+        request.emit = vec!["summary".parse().unwrap()];
+        request.backend = Some("force:bpf:tp".parse().unwrap());
+        let resolved = resolve(&catalog, &capabilities, &request)
+            .expect("an unwritten pinned backend is the runner's refusal, not the resolver's");
+        assert!(resolved.backend.pinned);
+    }
+
+    /// And a pinned backend that cannot attribute to the target is refused for
+    /// the reason the walk would have given, rather than answering a question
+    /// about something else.
+    #[test]
+    fn a_pinned_backend_that_cannot_serve_the_target_is_refused_with_the_reason() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("io.latency", Target::Pid(vec![1]));
+        request.mode = Mode::Trace;
+        request.emit = vec!["hist".parse().unwrap()];
+        let fs = catalog
+            .get(&"io.latency".parse().unwrap())
+            .unwrap()
+            .backends
+            .iter()
+            .find(|backend| backend.id.starts_with("fs:"))
+            .expect("io.latency has a procfs backend")
+            .id
+            .clone();
+        request.backend = Some(format!("force:{fs}").parse().unwrap());
+        match resolve(&catalog, &capabilities, &request) {
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                let text = rejections.join("\n");
+                assert!(text.contains("cannot attribute per pid"), "{text}");
+            }
+            other => panic!("a pin that cannot serve a pid must be refused, got {other:?}"),
+        }
     }
 
     #[test]

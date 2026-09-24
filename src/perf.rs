@@ -1430,6 +1430,526 @@ impl Drop for CounterGroup {
     }
 }
 
+/// The threads a process has right now, from `/proc/<pid>/task`, or the pid
+/// alone when that cannot be listed.
+///
+/// A launched program at its gate has one thread, so this is `[pid]` there and
+/// the answer only matters for a process that is already running -- which is
+/// every target of a late attach. A pid whose directory cannot be read is
+/// answered with itself rather than an error: `perf_event_open` on it is what
+/// decides whether it can be followed, and says why when it cannot.
+pub fn threads_of(pid: i32) -> Vec<i32> {
+    let listed = std::fs::read_dir(format!("/proc/{pid}/task")).map(|entries| {
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+            .collect::<Vec<i32>>()
+    });
+    match listed {
+        Ok(mut tids) if pid > 0 && !tids.is_empty() => {
+            tids.sort_unstable();
+            tids
+        }
+        _ => vec![pid],
+    }
+}
+
+/// Whether an open failed because the task had exited in between.
+///
+/// A thread that left between the listing and the open has nothing left to
+/// count or sample, and skipping it is right; every other refusal is the run's.
+fn is_gone(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH) || error.to_string().contains("No such process")
+}
+
+/// Threads of `pid` that exist now and are not in `opened`.
+///
+/// Asked once every event is open. `inherit` follows what a task starts *after*
+/// its event exists, so a thread started between the listing and the moment
+/// its creator's event was opened is followed by nothing; one started after
+/// that moment is followed by its creator's. From here the two cannot be told
+/// apart, and opening an event on every such thread would count the second
+/// kind twice -- so they are counted, and the caller says how many.
+fn started_while_opening(pid: i32, opened: &[i32]) -> usize {
+    if opened.len() == 1 && opened[0] == pid {
+        // Nothing was listed beyond the target itself, so nothing can have
+        // been missed between a listing and an open.
+        return 0;
+    }
+    threads_of(pid)
+        .into_iter()
+        .filter(|tid| !opened.contains(tid))
+        .count()
+}
+
+/// Counters over every thread a process has, each following what it starts.
+///
+/// A per-task counter follows a process by inheritance, and inheritance is
+/// from the open: opened at the launch gate, on a program with one thread, it
+/// follows every thread the program will ever start; opened on a program that
+/// already runs a second thread, it counts the thread it was opened on and
+/// nothing else. That second case measured 106,206 instructions for a phase
+/// that retired two thousand million, with no loss and no note. So a group is
+/// opened on each entry of `/proc/<pid>/task`, each inheriting, and the
+/// readings are their sum.
+///
+/// At the gate this is exactly one group, and nothing changes.
+pub struct ThreadCounters {
+    groups: Vec<CounterGroup>,
+    tids: Vec<i32>,
+    kernel_excluded: bool,
+    unlisted: usize,
+}
+
+impl ThreadCounters {
+    /// Opens the counters on every thread `pid` has now.
+    ///
+    /// Kernel mode is dropped for all of them or none: a sum of a count with
+    /// kernel mode and one without is neither measurement.
+    pub fn open(counters: &[Counter], pid: i32) -> io::Result<Self> {
+        let mut opened = Self::open_tasks(counters, &threads_of(pid))?;
+        opened.unlisted = started_while_opening(pid, &opened.tids);
+        Ok(opened)
+    }
+
+    /// Opens the counters on one task, and what it starts: the `--tid` shape,
+    /// where the other threads of its process are not what was asked about.
+    pub fn open_task(counters: &[Counter], tid: i32) -> io::Result<Self> {
+        Self::open_tasks(counters, &[tid])
+    }
+
+    fn open_tasks(counters: &[Counter], tasks: &[i32]) -> io::Result<Self> {
+        let mut groups = Vec::new();
+        let mut tids = Vec::new();
+        let mut kernel_excluded = None;
+        let mut first_error = None;
+        for &tid in tasks {
+            let opened = match kernel_excluded {
+                None => CounterGroup::open(counters, Scope::Process(tid)),
+                Some(excluded) => CounterGroup::open_with(counters, Scope::Process(tid), excluded),
+            };
+            match opened {
+                Ok(group) => {
+                    kernel_excluded.get_or_insert(group.kernel_excluded());
+                    groups.push(group);
+                    tids.push(tid);
+                }
+                Err(error) if is_gone(&error) => {
+                    first_error.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if groups.is_empty() {
+            return Err(first_error.unwrap_or_else(|| io::Error::from_raw_os_error(libc::ESRCH)));
+        }
+        Ok(Self {
+            groups,
+            tids,
+            kernel_excluded: kernel_excluded.unwrap_or(false),
+            unlisted: 0,
+        })
+    }
+
+    pub fn kernel_excluded(&self) -> bool {
+        self.kernel_excluded
+    }
+
+    /// The threads a counter was opened on.
+    pub fn threads(&self) -> &[i32] {
+        &self.tids
+    }
+
+    /// Threads that appeared while the counters were being opened, each
+    /// counted only if its creator's counter was already open. See
+    /// [`started_while_opening`].
+    pub fn unlisted(&self) -> usize {
+        self.unlisted
+    }
+
+    pub fn enable(&self) -> io::Result<()> {
+        self.groups.iter().try_for_each(CounterGroup::enable)
+    }
+
+    /// Stops every group, then reads them, and adds the readings up.
+    ///
+    /// Every group is stopped before any is read, so the sum is of one window
+    /// to within the few microseconds the stops take, rather than to within
+    /// the reads as well.
+    pub fn read_final(&self) -> io::Result<Vec<Reading>> {
+        for group in &self.groups {
+            group.disable()?;
+        }
+        let mut total: Option<Vec<Reading>> = None;
+        for group in &self.groups {
+            let readings = group.read()?;
+            total = Some(match total {
+                None => readings,
+                Some(sum) => add_readings(&sum, &readings),
+            });
+        }
+        Ok(total.unwrap_or_default())
+    }
+}
+
+/// Two groups' readings of the same counters, added.
+///
+/// The times add as well, which is the kernel's own convention for an
+/// inherited counter: the reading of one that followed a thread into its
+/// children carries their enabled and running times summed with its own. Each
+/// value was scaled over its own window before being added, so a group that
+/// was multiplexed and one that was not are each right before they are summed.
+fn add_readings(left: &[Reading], right: &[Reading]) -> Vec<Reading> {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| Reading {
+            name: a.name,
+            raw: a.raw + b.raw,
+            value: a.value + b.value,
+            enabled_ns: a.enabled_ns + b.enabled_ns,
+            running_ns: a.running_ns + b.running_ns,
+        })
+        .collect()
+}
+
+/// A sampled event over tasks and everything they go on to start.
+///
+/// The kernel refuses to map a ring for an inherited event over every cpu at
+/// once (`perf_mmap` returns EINVAL for `cpu == -1 && inherit`), because each
+/// inheriting task would need a buffer of its own, and it accepts one for an
+/// inherited event pinned to a cpu. So each task is sampled by one inherited
+/// event per cpu, and the events of one cpu share that cpu's ring
+/// ([`SampledEvent::follow`]): a ring per cpu, not a ring per task per cpu.
+///
+/// Each task listed is opened, not only the first, because `inherit` follows
+/// what a task starts after its event exists: a program already running a
+/// thread pool is followed whole only if every thread of the pool has an event
+/// of its own.
+pub struct ThreadSampler {
+    rings: Vec<SampledEvent>,
+    tids: Vec<i32>,
+    unlisted: usize,
+}
+
+impl ThreadSampler {
+    /// Opens `spec`, inherited, on every thread `pid` has now, on every online
+    /// cpu, with a ring of `ring_pages` per cpu.
+    pub fn open_process(spec: &SampleSpec, pid: i32, ring_pages: usize) -> io::Result<Self> {
+        let cpus = online_cpus()?;
+        let mut sampler = Self::open(spec, &threads_of(pid), &cpus, ring_pages)?;
+        sampler.unlisted = started_while_opening(pid, &sampler.tids);
+        Ok(sampler)
+    }
+
+    /// Opens `spec`, inherited, on each of `tasks` on each of `cpus`.
+    pub fn open(
+        spec: &SampleSpec,
+        tasks: &[i32],
+        cpus: &[u32],
+        ring_pages: usize,
+    ) -> io::Result<Self> {
+        let spec = SampleSpec {
+            inherit: true,
+            ..*spec
+        };
+        let mut rings = Vec::with_capacity(cpus.len());
+        let mut followed = std::collections::BTreeSet::new();
+        let mut first_error = None;
+        for &cpu in cpus {
+            let mut ring: Option<SampledEvent> = None;
+            for &pid in tasks {
+                let scope = Scope::TaskOnCpu { pid, cpu };
+                let opened = match ring.as_mut() {
+                    None => SampledEvent::open(&spec, scope, ring_pages).map(|event| {
+                        ring = Some(event);
+                    }),
+                    Some(ring) => ring.follow(&spec, scope),
+                };
+                match opened {
+                    Ok(()) => {
+                        followed.insert(pid);
+                    }
+                    Err(error) if is_gone(&error) => {
+                        first_error.get_or_insert(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            rings.extend(ring);
+        }
+        if rings.is_empty() {
+            return Err(first_error.unwrap_or_else(|| {
+                io::Error::other("there was no task and no cpu to open a sampled event on")
+            }));
+        }
+        Ok(Self {
+            rings,
+            tids: followed.into_iter().collect(),
+            unlisted: 0,
+        })
+    }
+
+    /// The threads an event was opened on.
+    pub fn threads(&self) -> &[i32] {
+        &self.tids
+    }
+
+    /// Threads that appeared while the events were being opened. See
+    /// [`started_while_opening`].
+    pub fn unlisted(&self) -> usize {
+        self.unlisted
+    }
+
+    /// The cpus a ring was mapped on.
+    pub fn cpus(&self) -> usize {
+        self.rings.len()
+    }
+
+    pub fn callchain(&self) -> Callchain {
+        self.rings
+            .first()
+            .map_or(Callchain::Off, SampledEvent::callchain)
+    }
+
+    pub fn enable(&self) -> io::Result<()> {
+        self.rings.iter().try_for_each(SampledEvent::enable)
+    }
+
+    pub fn disable(&self) -> io::Result<()> {
+        self.rings.iter().try_for_each(SampledEvent::disable)
+    }
+
+    pub fn lost(&self) -> u64 {
+        self.rings.iter().map(SampledEvent::lost).sum()
+    }
+
+    pub fn undecoded(&self) -> u64 {
+        self.rings.iter().map(SampledEvent::undecoded).sum()
+    }
+
+    /// Reads every ring, handing over the samples in time order.
+    ///
+    /// Each ring is in order and the rings are per cpu, so a thread that
+    /// migrated has its samples in two of them; the stream a collector builds
+    /// events from is sorted by time, which is what every other source's is.
+    /// The records that are not samples -- a loss, a throttle -- come first,
+    /// since they carry no time of their own.
+    pub fn drain(&mut self, mut handle: impl FnMut(Record)) {
+        let mut samples = Vec::new();
+        for ring in &mut self.rings {
+            ring.drain(|record| match record {
+                Record::Sample(sample) => samples.push(sample),
+                other => handle(other),
+            });
+        }
+        samples.sort_by_key(|sample| sample.time_ns);
+        for sample in samples {
+            handle(Record::Sample(sample));
+        }
+    }
+}
+
+/// A task found by [`TaskSampler::discover`]: its process, and itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Found {
+    pub tgid: i32,
+    pub tid: i32,
+}
+
+/// The processes `root` has started and not yet reaped, and root itself, each
+/// with its threads.
+///
+/// Read from `/proc/<pid>/task/<tid>/children`, which lists the children each
+/// thread forked. A kernel built without it answers with the root's threads
+/// alone, which is what the caller then follows.
+fn tasks_under(root: i32) -> Vec<Found> {
+    let mut found = Vec::new();
+    let mut processes = vec![root];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(tgid) = processes.pop() {
+        if !seen.insert(tgid) {
+            continue;
+        }
+        for tid in threads_of(tgid) {
+            found.push(Found { tgid, tid });
+            let children = std::fs::read_to_string(format!("/proc/{tgid}/task/{tid}/children"))
+                .unwrap_or_default();
+            processes.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse::<i32>().ok()),
+            );
+        }
+    }
+    found
+}
+
+/// A sampled event per task, each on every cpu and carrying its own period
+/// across them, with the tasks a target starts found as it starts them.
+///
+/// The other way to follow a program, [`ThreadSampler`], inherits: complete
+/// from each task's first instruction, but an inherited event can only be
+/// mapped pinned to a cpu, so a task is sampled by one event per cpu, and each
+/// of those keeps the part of a period it had counted when the task left that
+/// cpu. A task that ran on twelve cpus loses up to twelve periods of samples
+/// rather than one -- measured at five to nine milliseconds on a 400 ms program
+/// at 997 Hz, against a decomposition that states one period as the on-cpu
+/// row's resolution. Where the samples are a quantity of time, that is an
+/// over-statement of precision, so this shape keeps each task's period whole:
+/// one event per task, `cpu == -1`, not inherited, a ring each.
+///
+/// What it gives up is the start of a task it did not have at the open: a
+/// thread or a process the target starts is found by the next
+/// [`TaskSampler::discover`], and what it did before then is not sampled. The
+/// caller is handed each task it finds, to read what it had already done --
+/// `/proc/<pid>/task/<tid>/schedstat` holds that exactly -- and to say so.
+pub struct TaskSampler {
+    spec: SampleSpec,
+    root: i32,
+    follows: bool,
+    ring_pages: usize,
+    rings: std::collections::BTreeMap<i32, SampledEvent>,
+    enabled: bool,
+    at_open: usize,
+    /// What the rings of tasks that have exited could not decode, kept when
+    /// their rings are released.
+    retired_undecoded: u64,
+}
+
+impl TaskSampler {
+    /// Opens `spec` on `pid` and, when `follows`, on every task under it now.
+    pub fn open(spec: &SampleSpec, pid: i32, follows: bool, ring_pages: usize) -> io::Result<Self> {
+        let mut sampler = Self {
+            spec: SampleSpec {
+                inherit: false,
+                ..*spec
+            },
+            root: pid,
+            follows,
+            ring_pages,
+            rings: std::collections::BTreeMap::new(),
+            enabled: false,
+            at_open: 0,
+            retired_undecoded: 0,
+        };
+        let tasks = if follows {
+            tasks_under(pid)
+        } else {
+            vec![Found {
+                tgid: pid,
+                tid: pid,
+            }]
+        };
+        let mut first_error = None;
+        for task in tasks {
+            match SampledEvent::open(&sampler.spec, Scope::Process(task.tid), ring_pages) {
+                Ok(event) => {
+                    sampler.rings.insert(task.tid, event);
+                }
+                Err(error) if is_gone(&error) => {
+                    first_error.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if sampler.rings.is_empty() {
+            return Err(first_error.unwrap_or_else(|| io::Error::from_raw_os_error(libc::ESRCH)));
+        }
+        sampler.at_open = sampler.rings.len();
+        Ok(sampler)
+    }
+
+    /// Opens an event on every task under the root that has none yet, and
+    /// returns them. A task that exited before its event could be opened is
+    /// passed over: it has nothing left to sample.
+    pub fn discover(&mut self) -> Vec<Found> {
+        if !self.follows {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for task in tasks_under(self.root) {
+            if self.rings.contains_key(&task.tid) {
+                continue;
+            }
+            let Ok(event) =
+                SampledEvent::open(&self.spec, Scope::Process(task.tid), self.ring_pages)
+            else {
+                continue;
+            };
+            if self.enabled && event.enable().is_err() {
+                continue;
+            }
+            self.rings.insert(task.tid, event);
+            found.push(task);
+        }
+        found
+    }
+
+    /// The tasks an event was opened on at the open.
+    pub fn at_open(&self) -> usize {
+        self.at_open
+    }
+
+    pub fn callchain(&self) -> Callchain {
+        self.rings
+            .values()
+            .next()
+            .map_or(Callchain::Off, SampledEvent::callchain)
+    }
+
+    pub fn enable(&mut self) -> io::Result<()> {
+        self.rings.values().try_for_each(SampledEvent::enable)?;
+        self.enabled = true;
+        Ok(())
+    }
+
+    pub fn disable(&mut self) -> io::Result<()> {
+        self.enabled = false;
+        // A task that has exited refuses nothing here: its event is still
+        // open and is simply not running.
+        self.rings.values().try_for_each(SampledEvent::disable)
+    }
+
+    pub fn undecoded(&self) -> u64 {
+        self.retired_undecoded
+            + self
+                .rings
+                .values()
+                .map(SampledEvent::undecoded)
+                .sum::<u64>()
+    }
+
+    /// Reads every ring, handing over the samples in time order and the
+    /// records that are not samples first. See [`ThreadSampler::drain`].
+    ///
+    /// A task that has exited has written its last sample before it left, so
+    /// once its ring is drained it is released: a shell that runs a thousand
+    /// short programs does not hold a thousand rings to the end of the run.
+    pub fn drain(&mut self, mut handle: impl FnMut(Record)) {
+        let mut samples = Vec::new();
+        let mut exited = Vec::new();
+        for (tid, ring) in &mut self.rings {
+            let gone = !std::path::Path::new(&format!("/proc/{tid}")).exists();
+            ring.drain(|record| match record {
+                Record::Sample(sample) => samples.push(sample),
+                other => handle(other),
+            });
+            if gone {
+                exited.push(*tid);
+            }
+        }
+        for tid in exited {
+            if let Some(ring) = self.rings.remove(&tid) {
+                self.retired_undecoded += ring.undecoded();
+            }
+        }
+        samples.sort_by_key(|sample| sample.time_ns);
+        for sample in samples {
+            handle(Record::Sample(sample));
+        }
+    }
+}
+
 /// Where the kernel lists the cpus it currently has.
 pub const ONLINE_CPUS: &str = "/sys/devices/system/cpu/online";
 
@@ -2079,8 +2599,10 @@ mod tests {
         let after = group.read().expect("read")[0].value;
 
         assert_eq!(
-            inside, after,
-            "{} instructions were retired while the group was disabled and {} of them              were counted anyway",
+            inside,
+            after,
+            "{} instructions were retired while the group was disabled and {} of them \
+             were counted anyway",
             after - inside,
             after - inside
         );
@@ -2494,6 +3016,193 @@ mod tests {
         assert!(
             measured(&large) > measured(&small) + 0.4,
             "a load that misses carries a latency and one that hits does not"
+        );
+    }
+}
+
+#[cfg(test)]
+mod following_tests {
+    use super::*;
+
+    fn reading(name: &'static str, raw: u64, enabled_ns: u64, running_ns: u64) -> Reading {
+        Reading {
+            name,
+            raw,
+            value: scaled(raw, enabled_ns, running_ns),
+            enabled_ns,
+            running_ns,
+        }
+    }
+
+    /// Each group is scaled over its own window before the sum, so a thread
+    /// that was multiplexed and one that was not are each right.
+    #[test]
+    fn readings_of_two_threads_add_value_by_value_and_time_by_time() {
+        let whole = [reading("instructions", 100, 10, 10)];
+        let halved = [reading("instructions", 50, 10, 5)];
+        let sum = add_readings(&whole, &halved);
+        assert_eq!(sum[0].raw, 150);
+        assert_eq!(sum[0].value, 200, "100 counted, and 50 over half a window");
+        assert_eq!((sum[0].enabled_ns, sum[0].running_ns), (20, 15));
+        assert!(sum[0].was_multiplexed());
+    }
+
+    /// The listing a late attach opens one event per entry of, with the
+    /// calling thread and a thread started before the listing in it.
+    #[test]
+    fn the_threads_of_this_process_include_one_started_before_the_listing() {
+        let (tid_sender, tid) = std::sync::mpsc::channel();
+        let (stop, parked) = std::sync::mpsc::channel::<()>();
+        let helper = std::thread::spawn(move || {
+            // SAFETY: a read-only query of this thread's own id.
+            tid_sender.send(unsafe { libc::gettid() }).unwrap();
+            let _ = parked.recv();
+        });
+        let helper_tid = tid.recv().unwrap();
+        let listed = threads_of(std::process::id() as i32);
+        drop(stop);
+        helper.join().unwrap();
+        assert!(listed.contains(&helper_tid), "{listed:?}");
+        // SAFETY: as above.
+        assert!(listed.contains(&unsafe { libc::gettid() }), "{listed:?}");
+        // The calling task, and a pid with no directory, answer themselves.
+        assert_eq!(threads_of(0), vec![0]);
+        assert_eq!(threads_of(i32::MAX), vec![i32::MAX]);
+    }
+
+    /// A thread started after the open is found by `discover`, and sampled
+    /// from then on for the cpu it burns; the one that opened is sampled with
+    /// its period whole, which is why this shape exists beside the inherited
+    /// one.
+    #[test]
+    fn a_task_sampler_finds_a_thread_started_after_the_open_and_samples_it() {
+        const HZ: u64 = 1000;
+        const BURN_NS: u64 = 200_000_000;
+        let spec = SampleSpec::software(
+            sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
+            1_000_000_000 / HZ,
+            Callchain::Off,
+        );
+        let mut sampler = match TaskSampler::open(&spec, std::process::id() as i32, true, 8) {
+            Ok(sampler) => sampler,
+            Err(error) => {
+                eprintln!("skipped: this machine refuses unprivileged perf sampling: {error}");
+                return;
+            }
+        };
+        sampler.enable().unwrap();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let (tid_sender, tid) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // SAFETY: a read-only query of this thread's own id.
+            tid_sender.send(unsafe { libc::gettid() }).unwrap();
+            wait.recv().unwrap();
+            let clock = || {
+                let mut now = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: `now` is a valid timespec for the kernel to write.
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+                now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+            };
+            let until = clock() + BURN_NS;
+            while clock() < until {
+                std::hint::spin_loop();
+            }
+        });
+        let worker_tid = tid.recv().unwrap();
+        let found = sampler.discover();
+        assert!(
+            found.iter().any(|task| task.tid == worker_tid),
+            "the worker was started after the open and not found: {found:?}"
+        );
+        go.send(()).unwrap();
+        worker.join().unwrap();
+        sampler.disable().unwrap();
+        let mut samples = 0u64;
+        sampler.drain(|record| {
+            if matches!(record, Record::Sample(ref sample) if sample.tid == worker_tid as u32) {
+                samples += 1;
+            }
+        });
+        let expected = BURN_NS * HZ / 1_000_000_000;
+        assert!(
+            samples.abs_diff(expected) <= expected * 3 / 10 + 1,
+            "a thread that burned {} ms of its own cpu at {HZ} Hz was sampled {samples} times, \
+             where about {expected} were due",
+            BURN_NS / 1_000_000
+        );
+    }
+
+    /// Ground truth: a thread that exists before the events are opened burns a
+    /// chosen amount of its own cpu, and a cpu-clock sampler over the process
+    /// takes about one sample per period of it. Opened on the process alone,
+    /// the event followed the main thread -- which libtest parks -- and took
+    /// none.
+    #[test]
+    fn a_sampler_opened_on_a_running_process_samples_a_thread_it_already_had() {
+        const HZ: u64 = 1000;
+        const BURN_NS: u64 = 200_000_000;
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let (tid_sender, tid) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // SAFETY: a read-only query of this thread's own id.
+            tid_sender.send(unsafe { libc::gettid() }).unwrap();
+            wait.recv().unwrap();
+            let clock = || {
+                let mut now = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: `now` is a valid timespec for the kernel to write.
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+                now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+            };
+            let until = clock() + BURN_NS;
+            while clock() < until {
+                std::hint::spin_loop();
+            }
+        });
+        let worker_tid = tid.recv().unwrap() as u32;
+
+        let spec = SampleSpec::software(
+            sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
+            1_000_000_000 / HZ,
+            Callchain::Off,
+        );
+        let mut sampler = match ThreadSampler::open_process(&spec, std::process::id() as i32, 8) {
+            Ok(sampler) => sampler,
+            Err(error) => {
+                eprintln!("skipped: this machine refuses unprivileged perf sampling: {error}");
+                drop(go);
+                let _ = worker.join();
+                return;
+            }
+        };
+        assert!(
+            sampler.threads().contains(&(worker_tid as i32)),
+            "{:?}",
+            sampler.threads()
+        );
+        sampler.enable().unwrap();
+        go.send(()).unwrap();
+        worker.join().unwrap();
+        sampler.disable().unwrap();
+
+        let mut samples = 0u64;
+        let mut lost = 0u64;
+        sampler.drain(|record| match record {
+            Record::Sample(sample) if sample.tid == worker_tid => samples += 1,
+            Record::Lost { count } => lost += count,
+            _ => {}
+        });
+        let expected = BURN_NS * HZ / 1_000_000_000;
+        assert!(
+            samples + lost >= expected * 7 / 10 && samples <= expected * 13 / 10 + 1,
+            "a thread that burned {} ms of its own cpu at {HZ} Hz was sampled {samples} times, \
+             {lost} lost, where about {expected} were due",
+            BURN_NS / 1_000_000
         );
     }
 }

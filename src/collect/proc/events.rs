@@ -29,6 +29,7 @@ use std::time::Duration as StdDuration;
 use crate::bpf::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
+use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
 
 /// How often each ring is drained.
@@ -99,6 +100,61 @@ impl Streaming {
     }
 }
 
+/// The request's predicate, applied to each record as it is drained.
+///
+/// The resolver credits every `bpf` backend with evaluating predicates in the
+/// program and the runner then leaves its events alone, so a collector that
+/// does not apply the filter itself applies it nowhere -- which is what these
+/// three did: `proc.exec --filter 'filename == "/nonexistent"'` reported every
+/// exec on the machine and said nothing. None of the three programs can narrow
+/// on a string or on the fields a predicate names, so the whole predicate runs
+/// here, and the run says so and counts what it removed.
+struct Predicate {
+    expression: Option<FilterExpr>,
+    kept: u64,
+    removed: u64,
+}
+
+impl Predicate {
+    fn new(expression: Option<FilterExpr>) -> Self {
+        Self {
+            expression,
+            kept: 0,
+            removed: 0,
+        }
+    }
+
+    /// Whether there is a predicate at all.
+    fn is_set(&self) -> bool {
+        self.expression.is_some()
+    }
+
+    /// Whether the event is one the request asked for, counting the answer.
+    fn keeps(&mut self, event: &Event) -> bool {
+        let Some(expression) = &self.expression else {
+            return true;
+        };
+        if crate::filter::matches(expression, event) {
+            self.kept += 1;
+            true
+        } else {
+            self.removed += 1;
+            false
+        }
+    }
+
+    /// Where the predicate ran and what it did, in the run's own output.
+    fn note(&self, what: &str) -> Option<String> {
+        let expression = self.expression.as_ref()?;
+        Some(format!(
+            "the predicate `{expression}` was applied here, over the drained records, not in the \
+             program: every {what} on the machine was published and paid for, and it removed {} \
+             and kept {}",
+            self.removed, self.kept,
+        ))
+    }
+}
+
 /// The one target these two sources have, checked by name.
 ///
 /// `proc.exec` and `proc.exit` are machine-wide by construction: an exec is the
@@ -136,13 +192,16 @@ fn trace_only(mode: Mode, source: &str, what: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------------- proc.exec
 
-pub struct PrepareExec(pub Mode);
+pub struct PrepareExec {
+    pub mode: Mode,
+    pub filter: Option<FilterExpr>,
+}
 
 impl Prepared for PrepareExec {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        trace_only(self.0, "proc.exec", "an exec")?;
+        trace_only(self.mode, "proc.exec", "an exec")?;
         machine_wide_only(target, "proc.exec")?;
-        Ok(Box::new(ExecCollector::new()))
+        Ok(Box::new(ExecCollector::new(self.filter)))
     }
 }
 
@@ -154,15 +213,17 @@ pub struct ExecCollector {
     truncated: u64,
     /// Execs whose path could not be read out of the kernel at all.
     unnamed: u64,
+    predicate: Predicate,
 }
 
 impl ExecCollector {
-    pub fn new() -> Self {
+    pub fn new(filter: Option<FilterExpr>) -> Self {
         Self {
             inner: Streaming::new("proc.exec/bpf:raw_tp"),
             program: None,
             truncated: 0,
             unnamed: 0,
+            predicate: Predicate::new(filter),
         }
     }
 
@@ -175,6 +236,7 @@ impl ExecCollector {
         let mut undecoded = 0;
         let mut truncated = 0;
         let mut unnamed = 0;
+        let predicate = &mut self.predicate;
         program.drain(
             |exec: Exec| {
                 if exec.filename_truncated() {
@@ -184,7 +246,7 @@ impl ExecCollector {
                 if filename.is_empty() {
                     unnamed += 1;
                 }
-                events.push(Event {
+                let event = Event {
                     ts_ns: exec.ts_ns,
                     ts_err_ns: 0,
                     kind: "proc.exec".to_owned(),
@@ -192,8 +254,11 @@ impl ExecCollector {
                     attrs: exec_attributes(&exec, &filename),
                     collector_id: id.clone(),
                     seq: index,
-                });
-                index += 1;
+                };
+                if predicate.keeps(&event) {
+                    events.push(event);
+                    index += 1;
+                }
             },
             &mut undecoded,
         );
@@ -205,7 +270,7 @@ impl ExecCollector {
 
 impl Default for ExecCollector {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -303,19 +368,23 @@ impl Collector for ExecCollector {
                 },
             ));
         }
+        notes.extend(self.predicate.note("exec"));
         notes
     }
 }
 
 // ---------------------------------------------------------------- proc.exit
 
-pub struct PrepareExit(pub Mode);
+pub struct PrepareExit {
+    pub mode: Mode,
+    pub filter: Option<FilterExpr>,
+}
 
 impl Prepared for PrepareExit {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        trace_only(self.0, "proc.exit", "an exit")?;
+        trace_only(self.mode, "proc.exit", "an exit")?;
         machine_wide_only(target, "proc.exit")?;
-        Ok(Box::new(ExitCollector::new()))
+        Ok(Box::new(ExitCollector::new(self.filter)))
     }
 }
 
@@ -326,15 +395,17 @@ pub struct ExitCollector {
     /// and only one of them is what a reader counting programs means.
     threads: u64,
     processes: u64,
+    predicate: Predicate,
 }
 
 impl ExitCollector {
-    pub fn new() -> Self {
+    pub fn new(filter: Option<FilterExpr>) -> Self {
         Self {
             inner: Streaming::new("proc.exit/bpf:raw_tp"),
             program: None,
             threads: 0,
             processes: 0,
+            predicate: Predicate::new(filter),
         }
     }
 
@@ -347,13 +418,10 @@ impl ExitCollector {
         let mut undecoded = 0;
         let mut threads = 0;
         let mut processes = 0;
+        let predicate = &mut self.predicate;
         program.drain(
             |exit: Exit| {
-                threads += 1;
-                if exit.group_dead != 0 {
-                    processes += 1;
-                }
-                events.push(Event {
+                let event = Event {
                     ts_ns: exit.ts_ns,
                     ts_err_ns: 0,
                     kind: "proc.exit".to_owned(),
@@ -361,7 +429,15 @@ impl ExitCollector {
                     attrs: exit_attributes(&exit),
                     collector_id: id.clone(),
                     seq: index,
-                });
+                };
+                if !predicate.keeps(&event) {
+                    return;
+                }
+                threads += 1;
+                if exit.group_dead != 0 {
+                    processes += 1;
+                }
+                events.push(event);
                 index += 1;
             },
             &mut undecoded,
@@ -374,7 +450,7 @@ impl ExitCollector {
 
 impl Default for ExitCollector {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -457,10 +533,11 @@ impl Collector for ExitCollector {
     }
 
     fn notes(&self) -> Vec<String> {
+        let mut notes: Vec<String> = self.predicate.note("exit").into_iter().collect();
         if self.threads == 0 {
-            return Vec::new();
+            return notes;
         }
-        vec![format!(
+        notes.push(format!(
             "{} thread{} left, of which {} {} the last of {} process; a count of these events \
              is a count of threads, and `group_dead` is what separates the two",
             self.threads,
@@ -468,17 +545,21 @@ impl Collector for ExitCollector {
             self.processes,
             if self.processes == 1 { "was" } else { "were" },
             if self.processes == 1 { "its" } else { "their" },
-        )]
+        ));
+        notes
     }
 }
 
 // ------------------------------------------------------------- proc.signals
 
-pub struct PrepareSignals(pub Mode);
+pub struct PrepareSignals {
+    pub mode: Mode,
+    pub filter: Option<FilterExpr>,
+}
 
 impl Prepared for PrepareSignals {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        let mode = self.0;
+        let mode = self.mode;
         if !matches!(mode, Mode::Trace | Mode::Count) {
             return Err(format!(
                 "`{mode}` mode cannot observe signals: a signal is an event, and sampling one in \
@@ -506,7 +587,9 @@ impl Prepared for PrepareSignals {
                 ))
             }
         };
-        Ok(Box::new(SignalCollector::new(filter, mode)))
+        Ok(Box::new(
+            SignalCollector::new(filter, mode).with_predicate(self.filter),
+        ))
     }
 }
 
@@ -518,6 +601,7 @@ pub struct SignalCollector {
     program: Option<SignalProgram>,
     /// A counted run's running totals, by `(target tid, signal)`.
     totals: BTreeMap<(u32, i32), Counted>,
+    predicate: Predicate,
 }
 
 /// One `(task, signal)` pair's totals over a counted run.
@@ -538,7 +622,15 @@ impl SignalCollector {
             mode,
             program: None,
             totals: BTreeMap::new(),
+            predicate: Predicate::new(None),
         }
+    }
+
+    /// The request's predicate, applied to every signal before it is counted
+    /// or reported.
+    pub fn with_predicate(mut self, filter: Option<FilterExpr>) -> Self {
+        self.predicate = Predicate::new(filter);
+        self
     }
 
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
@@ -548,10 +640,30 @@ impl SignalCollector {
         let id = self.inner.id.clone();
         let counting = self.mode == Mode::Count;
         let totals = &mut self.totals;
+        let predicate = &mut self.predicate;
         let mut index = seq;
         let mut undecoded = 0;
         program.drain(
             |signal: Signal| {
+                let build = || Event {
+                    ts_ns: signal.ts_ns,
+                    ts_err_ns: 0,
+                    kind: "proc.signals".to_owned(),
+                    keys: vec![KeyValue::task(signal.target_tid as i32)],
+                    attrs: signal_attributes(&signal),
+                    collector_id: id.clone(),
+                    seq: index,
+                };
+                // Built only when something reads it: a counted storm of three
+                // hundred thousand signals drains into a map, and building an
+                // event per signal it never keeps made the drain outrun its
+                // tick.
+                let event = (predicate.is_set() || !counting).then(build);
+                if let Some(event) = &event {
+                    if !predicate.keeps(event) {
+                        return;
+                    }
+                }
                 if counting {
                     let row = totals.entry((signal.target_tid, signal.sig)).or_default();
                     row.tgid = signal.target_tgid;
@@ -561,15 +673,7 @@ impl SignalCollector {
                     row.last_ts_ns = signal.ts_ns;
                     return;
                 }
-                events.push(Event {
-                    ts_ns: signal.ts_ns,
-                    ts_err_ns: 0,
-                    kind: "proc.signals".to_owned(),
-                    keys: vec![KeyValue::task(signal.target_tid as i32)],
-                    attrs: signal_attributes(&signal),
-                    collector_id: id.clone(),
-                    seq: index,
-                });
+                events.extend(event);
                 index += 1;
             },
             &mut undecoded,
@@ -741,6 +845,7 @@ impl Collector for SignalCollector {
                     .to_owned(),
             );
         }
+        notes.extend(self.predicate.note("signal"));
         notes
     }
 }
@@ -875,15 +980,21 @@ mod tests {
     /// something narrower is refused by name rather than quietly widened.
     #[test]
     fn a_narrower_target_than_the_machine_is_refused_by_name() {
-        let Err(error) = Box::new(PrepareExec(Mode::Trace)).attach(&Target::Pid(vec![1])) else {
+        let Err(error) = Box::new(PrepareExec {
+            mode: Mode::Trace,
+            filter: None,
+        })
+        .attach(&Target::Pid(vec![1])) else {
             panic!("`proc.exec` does not watch one process");
         };
         assert!(error.contains("pid"), "{error}");
         assert!(error.contains("--system"), "{error}");
 
-        let Err(error) =
-            Box::new(PrepareExit(Mode::Trace)).attach(&Target::Cgroup("/sys/fs/cgroup".into()))
-        else {
+        let Err(error) = Box::new(PrepareExit {
+            mode: Mode::Trace,
+            filter: None,
+        })
+        .attach(&Target::Cgroup("/sys/fs/cgroup".into())) else {
             panic!("a cgroup cannot be filtered on by this build");
         };
         assert!(error.contains("cgroup"), "{error}");
@@ -895,9 +1006,12 @@ mod tests {
     /// clock, which is a number that reads like a measurement.
     #[test]
     fn a_polled_mode_is_refused_with_the_reason() {
-        let prepared = Box::new(PrepareExec(Mode::Poll {
-            interval: "100ms".parse().expect("an interval"),
-        }));
+        let prepared = Box::new(PrepareExec {
+            mode: Mode::Poll {
+                interval: "100ms".parse().expect("an interval"),
+            },
+            filter: None,
+        });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a polled mode must be refused");
         };
@@ -906,13 +1020,19 @@ mod tests {
 
     #[test]
     fn the_machine_target_filters_on_nothing_and_a_pid_target_filters_on_it() {
-        let collector = Box::new(PrepareSignals(Mode::Trace))
-            .attach(&Target::System)
-            .expect("a machine-wide collector");
+        let collector = Box::new(PrepareSignals {
+            mode: Mode::Trace,
+            filter: None,
+        })
+        .attach(&Target::System)
+        .expect("a machine-wide collector");
         assert_eq!(collector.id().as_str(), "proc.signals/bpf:raw_tp");
-        let collector = Box::new(PrepareSignals(Mode::Trace))
-            .attach(&Target::Pid(vec![4242]))
-            .expect("a per-process collector");
+        let collector = Box::new(PrepareSignals {
+            mode: Mode::Trace,
+            filter: None,
+        })
+        .attach(&Target::Pid(vec![4242]))
+        .expect("a per-process collector");
         assert_eq!(collector.id().as_str(), "proc.signals/bpf:raw_tp");
     }
 
@@ -945,7 +1065,7 @@ mod tests {
     /// executing other things at the same time and only this one is known.
     #[test]
     fn an_exec_this_test_performed_is_reported_with_its_path() {
-        let mut collector = ExecCollector::new();
+        let mut collector = ExecCollector::new(None);
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -971,7 +1091,7 @@ mod tests {
     /// reported leaving with that status.
     #[test]
     fn an_exit_status_this_test_chose_is_the_one_reported() {
-        let mut collector = ExitCollector::new();
+        let mut collector = ExitCollector::new(None);
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -1004,5 +1124,43 @@ mod tests {
                 "the shell was told to exit 7 and the event says otherwise: {event:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+
+    fn exec(filename: &str) -> Event {
+        Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "proc.exec".to_owned(),
+            keys: Vec::new(),
+            attrs: vec![Attr::text("filename", filename), Attr::text("comm", "true")],
+            collector_id: CollectorId::new("test"),
+            seq: 0,
+        }
+    }
+
+    /// A predicate these programs cannot carry is applied here, counted, and
+    /// said -- never accepted and dropped.
+    #[test]
+    fn a_predicate_is_applied_counted_and_said() {
+        let mut predicate = Predicate::new(Some(
+            "filename == '/nonexistent/path'"
+                .parse()
+                .expect("a predicate"),
+        ));
+        assert!(!predicate.keeps(&exec("/bin/true")));
+        assert!(!predicate.keeps(&exec("/usr/bin/env")));
+        assert!(predicate.keeps(&exec("/nonexistent/path")));
+        let note = predicate.note("exec").expect("a filtered run says so");
+        assert!(note.contains("applied here"), "{note}");
+        assert!(note.contains("removed 2 and kept 1"), "{note}");
+
+        let mut none = Predicate::new(None);
+        assert!(none.keeps(&exec("/bin/true")));
+        assert_eq!(none.note("exec"), None);
     }
 }

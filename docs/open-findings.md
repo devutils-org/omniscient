@@ -6915,3 +6915,71 @@ the drained one, passed), `scenario_net::every_segment_the_kernel_resent_is_one_
 (6 late ticks of a 10 ms tick), and `join_engine::the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_program_predicts`
 (118 644 bytes over the interpreter allowance). None of them reads a drained
 program.
+
+## Needs from another stream — the eleventh wave, stream S (the silent degradations)
+
+Stream S's deliverable is `docs/fixes/silent.md`. Three requests it found in
+files it does not own, each the shape it was sent to close: a request accepted
+and answered as a different question.
+
+### To whoever owns `src/collect/sched/` (stream K this wave): three sources apply no filter
+
+```console
+omn sched.offcpu --system -d 300ms -m trace -e summary --filter 'comm == "nosuchcomm"'
+```
+
+reports every task on the machine, and says nothing. `sched.wakeup`,
+`sched.offcpu` and `sched.migrations` declare filter fields, the validator
+accepts a predicate over them, the resolver credits their `bpf` backend with
+applying it in the program, the runner then leaves their events alone -- and
+their factories never hand the collector the filter. `proc.exec`, `proc.exit`
+and `proc.signals` had exactly this and are fixed in
+`src/collect/proc/events.rs` (a `Predicate` applied per drained record,
+counted, and said). Wanted, in `src/collect/sched/mod.rs`:
+
+```rust
+Factory::new("sched.wakeup", "bpf:raw_tp", |resolved| {
+    Ok(Box::new(wakeup::Prepare {
+        mode: resolved.request.mode,
+        filter: resolved.request.filter.clone(),
+    }))
+}),
+```
+
+and the same for `offcpu` and `migrations`, each collector applying it the way
+`runqlat` already does, with the note that says it ran here.
+
+### To whoever owns `src/collect/sched/switches.rs`: a sampling event that follows threads
+
+`sched.switches` opens `SampledEvent::open_software(.., Scope::Process(pid), ..)`,
+which is not inherited, and discloses it ("a sampling event is not inherited").
+`src/perf.rs` has the thing that is now: `ThreadSampler`, one inherited event
+per thread per cpu sharing a ring per cpu, used by `mem.faults`. (`cpu.profile`
+uses `TaskSampler` instead, because an inherited cpu-clock event loses the
+unfinished part of a period on every cpu a task visits; `docs/fixes/silent.md`
+has the measurement. A switch sampled at period one has no unfinished period.)
+The replacement is two lines:
+
+```rust
+let spec = SampleSpec::software(perf::PERF_COUNT_SW_CONTEXT_SWITCHES as u64, 1, Callchain::Off);
+let event = ThreadSampler::open_process(&spec, self.pid, RING_PAGES)?; // per cpu, not total
+```
+
+`drain`, `enable`, `disable`, `undecoded` have `SampledEvent`'s signatures;
+`threads()` and `unlisted()` say what was followed, and `profile.rs`'s notes
+are the wording.
+
+### To whoever owns `src/catalog.rs`: where a predicate actually runs
+
+`resolve::placement` says `"placement": "kernel"` for every backend whose id
+starts with `bpf`, and most `bpf` collectors apply the predicate in userspace
+over what they drained (they say so in the run's degradations; the resolved
+file cannot). Wanted, per backend, what the program carries:
+
+```yaml
+- {id: "bpf:raw_tp", ..., filter_in_program: [syscall]}   # the fields pushed down
+```
+
+and `placement()` then reports `Kernel` for a predicate over those fields
+alone, `Userspace` otherwise -- a change to `src/resolve.rs` once the field
+exists. Stream S did not guess the list from the collectors' code.

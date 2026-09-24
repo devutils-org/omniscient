@@ -36,7 +36,7 @@ use crate::clock::monotonic_ns;
 use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Counter, CounterGroup, PerCpuGroups, Reading, Scope};
+use crate::perf::{Counter, PerCpuGroups, Reading, ThreadCounters};
 use crate::request::{Mode, Target};
 
 const TICK: StdDuration = StdDuration::from_millis(10);
@@ -168,7 +168,11 @@ impl Prepared for Prepare {
                 )
             })?),
         };
-        Ok(Box::new(Topdown::new(scope)))
+        let mut collector = Topdown::new(scope);
+        // A `--tid` target is that task and what it starts; every other target
+        // that names a process is every thread it has.
+        collector.whole_process = !matches!(target, Target::Tid(_));
+        Ok(Box::new(collector))
     }
 }
 
@@ -180,7 +184,9 @@ enum Scoped {
 
 /// Opened groups, of whichever shape the target asked for.
 enum Opened {
-    Task(CounterGroup),
+    /// One group per thread the task had at the open, each inheriting. See
+    /// [`ThreadCounters`].
+    Task(ThreadCounters),
     Cpus(PerCpuGroups),
 }
 
@@ -189,6 +195,8 @@ pub struct Topdown {
     scope: Scoped,
     counters: Vec<Counter>,
     opened: Option<Opened>,
+    /// Whether a task scope follows every thread of the process.
+    whole_process: bool,
     comm: Comm,
     losses: Losses,
     notes: Vec<String>,
@@ -205,6 +213,7 @@ impl Topdown {
             scope,
             counters: Vec::new(),
             opened: None,
+            whole_process: true,
             comm,
             losses: Losses::default(),
             notes: Vec::new(),
@@ -270,14 +279,36 @@ impl Collector for Topdown {
         self.counters = counters()?;
         self.opened = Some(match &self.scope {
             Scoped::Task(pid) => {
-                let group =
-                    CounterGroup::open(&self.counters, Scope::Process(*pid)).map_err(|error| {
-                        format!(
-                            "opening the five top-down counters as one group on pid {pid} was \
-                             refused ({error}); they have to be one group, because four \
-                             fractions of a denominator from another window describe nothing"
-                        )
-                    })?;
+                let opened = if self.whole_process {
+                    ThreadCounters::open(&self.counters, *pid)
+                } else {
+                    ThreadCounters::open_task(&self.counters, *pid)
+                };
+                let group = opened.map_err(|error| {
+                    format!(
+                        "opening the five top-down counters as one group on pid {pid} was \
+                         refused ({error}); they have to be one group, because four \
+                         fractions of a denominator from another window describe nothing"
+                    )
+                })?;
+                // Each thread's group is one window of its own, so the sums
+                // are of slots that were counted together, thread by thread.
+                if group.threads().len() > 1 {
+                    self.notes.push(format!(
+                        "process {pid} was already running {} threads when the counters were \
+                         opened, so a group was opened on each and the slots are their sum",
+                        group.threads().len()
+                    ));
+                }
+                if group.unlisted() > 0 {
+                    self.notes.push(format!(
+                        "{} thread{} of process {pid} appeared while the groups were being \
+                         opened; each is counted if the thread that started it already had its \
+                         group, and not otherwise",
+                        group.unlisted(),
+                        if group.unlisted() == 1 { "" } else { "s" },
+                    ));
+                }
                 group.enable().map_err(|error| error.to_string())?;
                 Opened::Task(group)
             }
