@@ -1,0 +1,109 @@
+# What makes the slow run slow -- one program, run five times.
+#
+# Every run spins 100 ms; the fifth also sleeps 200 ms. `--objective latency`
+# decomposes the median run and names the cpu; `--objective tail` decomposes the
+# slowest against the median and names the 200 ms sleep. One workload, two
+# objectives, two different culprits -- which is why the objective is required.
+#
+# A session holds one run: `omn -f` on this file runs the program once, and it is
+# `omn latency --runs 5` that runs it five times. The counter file is how the
+# program knows which run it is on; delete it to start again.
+#
+#   omn latency --objective tail --runs 5 -- target/omn-triage-fixture/workload tail target/omn-triage-fixture/counter 5 100 200
+#
+name: omn latency --objective tail
+format: text
+requests:
+- source: cpu.profile
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - tail
+    - target/omn-triage-fixture/counter
+    - '5'
+    - '100'
+    - '200'
+  mode: sample@997hz
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: on-cpu
+- source: sched.runqlat
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - tail
+    - target/omn-triage-fixture/counter
+    - '5'
+    - '100'
+    - '200'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: runnable
+- source: sched.offcpu
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - tail
+    - target/omn-triage-fixture/counter
+    - '5'
+    - '100'
+    - '200'
+  mode: trace
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: blocked
+- source: sched.futex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - tail
+    - target/omn-triage-fixture/counter
+    - '5'
+    - '100'
+    - '200'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: futex
+- source: sched.mutex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - tail
+    - target/omn-triage-fixture/counter
+    - '5'
+    - '100'
+    - '200'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: mutex
+decompose:
+- id: where-the-time-went
+  whole: lifetime
+  parts:
+  - state: on-cpu
+    from: cpu.profile
+    value: samples
+  - state: runnable
+    from: sched.runqlat
+    value: total_ns
+  - state: blocked
+    from: sched.offcpu
+    value: total_ns
+    less: queued_ns
+  by: task
+  top: 16

@@ -6134,3 +6134,94 @@ No other stream of the ninth wave owns either file. Two sessions were added,
 `examples/vertical-one-request.yml` and `examples/vertical-abandoned.yml`;
 their rows for `examples/README.md` and `GUIDE.md` are at the end of
 `docs/scenarios/vertical.md`.
+
+## Needs from another stream — the tenth wave, stream T (triage)
+
+None blocking: `omn latency`, `omn saturate` and `omn diff` answer with their
+scenarios, and `docs/triage.md` is the record. Each item is a place the layer
+above the engine worked around a file it does not own, or something the
+coordinator has to land beside the merge.
+
+### To whoever owns `src/join.rs`: a filtered part that matched nothing is a zero, not a missing row
+
+`omn latency` wanted to split the blocked row by task state inside the engine,
+as three parts of one `sched.offcpu` request with `filter: "state ==
+uninterruptible"`, `"state == sleeping"` and the rest. It works, and every part
+the task had no block of comes back `not read` -- "no `sched.offcpu` event
+carried both `total_ns` and `queued_ns`" -- which makes `parts` and `RESIDUE`
+`not read` for every task that did not block in all three states, which is
+every task. The source ran, was clean, and had events for the key; none of them
+passed the filter. That is a measured zero, and the row can say how it knows:
+
+```rust
+// in Readout, per key: the source produced events for this key and the
+// part's filter kept none of them
+Row { amount: Some(0.0), note: Some("no event of this key passed the filter".into()), .. }
+```
+
+The same holds, more weakly, for an unfiltered part of a drained source that
+ran clean from the gate and saw nothing of a key another part did see: a
+cpu-bound task that never blocked has no `sched.offcpu` event, and its blocked
+row is `not read` where it is zero. Whether a source attached before the gate
+may claim that is the join engine's call; the filtered case is not in doubt.
+
+Worked around here: the engine decomposes on-cpu, runnable and blocked, and
+`src/triage/latency.rs` splits the blocked row by state from the same events
+with the same arithmetic, so the states still add up to the row.
+
+### To whoever owns `src/collect/cpu/` or `src/perf.rs`: a profile that follows threads
+
+`cpu.profile` on a launched program samples the task it launched and no thread
+it starts ("a sampling event is not inherited"), so `omn latency` reads the
+main thread's on-cpu time exactly and every other thread's as nothing. The
+answer is about the main thread and says which task it is, so nothing is
+misattributed -- but the other threads are listed with their on-cpu row
+reading zero. `perf_event_attr.inherit = 1` is allowed for a sampling event
+into a per-task ring as long as the group is not read with
+`PERF_FORMAT_GROUP`; whether the ring and the symbolizer then cope with a
+second task is this request.
+
+### To the coordinator: the fixture in `make`
+
+`examples/triage-*.yml` launch `target/omn-triage-fixture/workload`, which
+`tests/triage.rs` builds from `src/triage/workload.c`. So the sessions run after
+`cargo test --test triage` and not after `make` alone, which is the rule the
+vertical-case server already follows. A target like `vertical-server`, same
+shape, never fatal:
+
+```make
+TRIAGE_FIXTURE = target/omn-triage-fixture/workload
+
+triage-fixture:
+	@mkdir -p $(dir $(TRIAGE_FIXTURE))
+	@if cc -O1 -g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fno-inline -pthread \
+	      -o $(TRIAGE_FIXTURE).partial src/triage/workload.c 2>/dev/null; then \
+	    mv $(TRIAGE_FIXTURE).partial $(TRIAGE_FIXTURE); \
+	else \
+	    rm -f $(TRIAGE_FIXTURE).partial; \
+	    echo "note: the triage fixture did not build (no cc); examples/triage-*.yml need it"; \
+	fi
+```
+
+and `@$(MAKE) --no-print-directory triage-fixture` at the end of `build`. The
+flags are the test's: frame pointers in leaf functions too, because
+`omn diff` names a function by its leaf frame.
+
+### To the coordinator: `=~` in the manual, and the assertion that waits for it
+
+`man/omn.1` is stream T's this wave, and the ninth wave's request to say what
+`=~` does in it is ready -- but
+`tests/scenario_runtime.rs::defect_2_the_match_operator_is_a_substring_test_and_says_so`
+asserts the manual is still silent, and that file is not T's. Landing one
+without the other turns the suite red, so both go in one commit at the merge:
+the troff text is in that request above (search "the remaining half of runtime
+2"), and the assertion to drop is the last one of that test.
+
+### To the coordinator: `DECISIONS.md`
+
+Two lines worth recording as settled, both enforced by `src/triage/objective.rs`
+and its tests: a triage request without an objective is refused with the list,
+never defaulted; and a method refuses an objective it does not answer for and
+names the one that does (`omn latency` answers latency and tail, `omn saturate`
+throughput, tail and energy). `cost` is not an objective: nothing here measures
+a price.

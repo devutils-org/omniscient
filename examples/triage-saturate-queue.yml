@@ -1,0 +1,100 @@
+# What does this queue for -- four threads spinning on one cpu.
+#
+# The fixture pins itself to its first allowed cpu and starts four threads that
+# each spin 250 ms. Whenever one runs the other three wait, so the run queue is
+# three deep by construction. `sched.runqlat` hands up every wait, and Little's
+# law turns them into that length: L = ΣW / T, which is also λ x W.
+#
+#   cpu  saturation  2.984 tasks  of its tasks runnable and waiting for a cpu
+#        little      wakeups waiting for a cpu: L = λW = 392.7/s x 7.60ms = 2.984
+#
+# `tests/triage.rs` checks it against one thread on the same cpu: the difference
+# is three, whatever else runs on that cpu.
+#
+#   omn saturate --objective throughput -- target/omn-triage-fixture/workload queue 4 250
+#
+name: omn saturate --objective throughput
+format: text
+requests:
+- source: sched.runqlat
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: trace
+  emit:
+  - hist:log2
+  keys:
+  - task
+  label: cpu-wait
+- source: io.latency
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: trace
+  emit:
+  - hist:log2
+  keys:
+  - task
+  label: disk
+- source: sched.offcpu
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: disk-blocked
+- source: io.inflight
+  target: system
+  mode: poll@10ms
+  emit:
+  - summary
+  label: device-queue
+- source: sched.mutex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: trace
+  emit:
+  - hist:log2
+  keys:
+  - task
+  label: lock
+- source: sched.futex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: trace
+  emit:
+  - hist:log2
+  keys:
+  - task
+  label: futex
+- source: mem.pressure
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: poll@100ms
+  emit:
+  - summary
+  label: memory

@@ -60,10 +60,18 @@ pub enum Command {
     Formats(FormatsArgs),
     /// Check a session file against the catalog without running it.
     Validate(ValidateArgs),
+    /// Why is this slow: where one task's wall clock went, and what dominates.
+    Latency(LatencyArgs),
+    /// What does this queue for: utilization, saturation and errors per resource.
+    Saturate(SaturateArgs),
+    /// Two profiles and a subtraction: which function is the difference.
+    Diff(DiffArgs),
 }
 
 /// The subcommand names, used to tell `omn io.latency` from `omn list`.
-pub const SUBCOMMANDS: [&str; 5] = ["trace", "list", "formats", "validate", "help"];
+pub const SUBCOMMANDS: [&str; 8] = [
+    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "help",
+];
 
 #[derive(Debug, Args)]
 pub struct TraceArgs {
@@ -259,6 +267,105 @@ pub struct ValidateArgs {
     /// Load the catalog from this directory instead of the built-in one.
     #[arg(long, value_name = "DIR")]
     pub catalog: Option<PathBuf>,
+}
+
+/// `omn latency`: thread state analysis, asked as a question.
+///
+/// The objective is required and never defaulted: median latency and the tail
+/// do not name the same culprit, and neither names the one throughput or
+/// energy would.
+#[derive(Debug, Args)]
+pub struct LatencyArgs {
+    /// What the answer is for: latency (the median run) or tail (the slowest run
+    /// against the median). Required.
+    #[arg(long, value_name = "OBJECTIVE")]
+    pub objective: Option<crate::triage::Objective>,
+
+    /// A process already running. Needs --duration.
+    #[arg(long, value_name = "PID", group = "latency_target")]
+    pub pid: Option<i32>,
+
+    /// Program to launch and decompose, after `--`.
+    #[arg(last = true, value_name = "PROGRAM", group = "latency_target")]
+    pub program: Vec<String>,
+
+    /// How many times to run a launched program. The tail needs at least 3.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub runs: u32,
+
+    /// How long to observe: required with --pid, a ceiling on a launched program.
+    #[arg(short = 'd', long, value_name = "DURATION")]
+    pub duration: Option<Duration>,
+
+    /// The on-cpu profile's rate. Its period is the on-cpu row's resolution.
+    #[arg(long, value_name = "HZ", default_value_t = 997)]
+    pub hz: u32,
+
+    /// Output format: text, json or yaml.
+    #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// Print the session this question is asked through, then exit. `omn -f`
+    /// runs it and prints the tables the answer is read from.
+    #[arg(long)]
+    pub dump_session: bool,
+
+    /// Load the catalog from this directory instead of the built-in one.
+    #[arg(long, value_name = "DIR")]
+    pub catalog: Option<PathBuf>,
+}
+
+/// `omn saturate`: the USE method, with Little's law as its arithmetic.
+#[derive(Debug, Args)]
+pub struct SaturateArgs {
+    /// What the answer is for: throughput, latency, tail or energy. Required.
+    #[arg(long, value_name = "OBJECTIVE")]
+    pub objective: Option<crate::triage::Objective>,
+
+    /// A process already running. Needs --duration.
+    #[arg(long, value_name = "PID", group = "saturate_target")]
+    pub pid: Option<i32>,
+
+    /// Program to launch and follow, after `--`.
+    #[arg(last = true, value_name = "PROGRAM", group = "saturate_target")]
+    pub program: Vec<String>,
+
+    /// How long to observe: required with --pid, a ceiling on a launched program.
+    #[arg(short = 'd', long, value_name = "DURATION")]
+    pub duration: Option<Duration>,
+
+    /// Output format: text, json or yaml.
+    #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// Print the session this question is asked through, then exit.
+    #[arg(long)]
+    pub dump_session: bool,
+
+    /// Load the catalog from this directory instead of the built-in one.
+    #[arg(long, value_name = "DIR")]
+    pub catalog: Option<PathBuf>,
+}
+
+/// `omn diff`: a differential profile.
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    /// The profile before: a run's `-o DIR`, its results.json, or a folded file.
+    #[arg(value_name = "BEFORE")]
+    pub before: PathBuf,
+
+    /// The profile after, in any of the same three shapes.
+    #[arg(value_name = "AFTER")]
+    pub after: PathBuf,
+
+    /// Output format: text, json, or folded -- the three-column
+    /// `stack before after` file differential flame graphs are drawn from.
+    #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// How many functions each table lists.
+    #[arg(long, value_name = "N", default_value_t = 12)]
+    pub top: usize,
 }
 
 /// What the CLI decided on the user's behalf, because the catalog left one

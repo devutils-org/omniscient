@@ -54,6 +54,7 @@ pub mod scalar;
 pub mod session;
 pub mod stack;
 pub mod style;
+pub mod triage;
 pub mod validate;
 
 pub use catalog::Catalog;
