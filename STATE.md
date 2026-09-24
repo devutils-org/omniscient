@@ -230,24 +230,26 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 because a plan kept in two documents drifted in both.
 
 The tenth wave -- the network rows, hot attach, the bench and triage -- is
-merged, and `docs/briefs/wave-10-depth.md` keeps its brief. **Next, in order:**
+merged, and `docs/briefs/wave-10-depth.md` keeps its brief. **The eleventh
+wave (`BRIEF.md`) is running** the escalation and the three sets of debts the
+tenth filed: the engine's (a join across a detached source, the window on
+`Results`, rows rated by the key that carried them, a filtered zero), the
+silent degradations the bench found, and the drains that race their programs.
 
-1. **The bench's real measurement**, before anything else is built on the
-   resolver's choices: one command, alone, on a quiet machine (`docs/bench.md`,
-   "The one command"), and its table pasted into that file.
-2. **Hot attach's three edges**, which the escalation would otherwise inherit:
-   the join engine's window for a detached source, the window on `Results`, and
-   a late per-task counter following threads. Filed under "stream H".
-3. **The escalation** -- phase 10, item 3: once triage names a suspect, attach
-   that layer's detailed collectors and detach the rest, holding the budget.
-4. **The flight recorder** -- a session whose duration is *until a predicate
+**Outside any wave, and before or after it rather than during:** the bench's
+real measurement, one command on a quiet machine (`docs/bench.md`, "The one
+command"), with its table pasted into that file. Its variance gate refuses on
+a machine the streams are loading, as it should.
+
+**After the eleventh wave, in order:**
+
+1. **The flight recorder** -- a session whose duration is *until a predicate
    fires*, with a retention bound and one document per trigger, a mode of a
-   session as `DECISIONS.md` settled.
-5. **The four defects the bench found** and the evidence the network rows
-   print, each filed with its signature under the tenth wave's streams.
-6. **Phase 11**, an MCP surface over the resolved file, the results and the
-   catalog, after phase 10 and deliberately not before.
-7. **`dm-delay`**, the one injection left that needs root, on a machine where
+   session as `DECISIONS.md` settled. It is the runner's next piece, and the
+   escalation holds the runner this wave.
+2. **Phase 11**, an MCP surface over the resolved file, the results and the
+   catalog, once phase 10's escalation has landed and not before.
+3. **`dm-delay`**, the one injection left that needs root, on a machine where
    root is available.
 
 Below the milestones, and not scheduled:

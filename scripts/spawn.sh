@@ -1,102 +1,100 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh hotattach
-#   cd ../omniscient-hotattach && claude "$(cat ../omniscient-hotattach.prompt)"
+#   scripts/spawn.sh escalation
+#   cd ../omniscient-escalation && claude "$(cat ../omniscient-escalation.prompt)"
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
 #
-# This wave divides by roadmap task: the last task of phases 4, 6 and 8, and the
-# first of phase 10. The lock is a named file list per stream. The shared layers
-# -- join, emit, encode, render, resolve, validate, catalog, and the eBPF layer
-# in src/bpf/{btf,insn,map,syscall,attach,usdt,mod}.rs -- belong to nobody this
-# wave, and the coordinator is working in them on main while the streams run.
-# The two session indexes, examples/README.md and GUIDE.md, belong to the
-# coordinator and are held to the sessions on disk by a test, so a session
-# added without a row is a red suite rather than a silent gap.
+# This wave is one milestone and three sets of debts: the escalation, and the
+# requests the tenth wave filed against the engine, the silent degradations and
+# the drains. The lock is a named file list per stream. The shared layers not
+# listed below belong to nobody, and the coordinator is working in them on main
+# while the streams run. The two session indexes, examples/README.md and
+# GUIDE.md, belong to the coordinator and are held to the sessions on disk by a
+# test, so a session added without a row is a red suite rather than a gap.
 #
-# The prompt is also written beside the worktree, so the agent can be started
-# in one line:
+# The prompt is written beside the worktree, so the agent starts in one line:
 #
 #   cd ../omniscient-<stream> && claude "$(cat ../omniscient-<stream>.prompt)"
 set -euo pipefail
 
 declare -A OWNS=(
-    [hotattach]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/session.rs src/request.rs tests/runner.rs tests/budget.rs examples/attach-*.yml"
-    [network]="src/bpf/request*.rs src/bpf/net_*.rs src/collect/net/** catalog/net.yaml examples/vertical/** examples/vertical-*.yml examples/net-*.yml tests/vertical.rs tests/scenario_net.rs docs/families/net.md"
-    [bench]="tests/bench_*.rs examples/bench/** examples/bench-*.yml scripts/bench.sh src/capabilities.rs"
-    [triage]="src/triage/** src/cli.rs src/main.rs src/lib.rs tests/triage.rs examples/triage-*.yml man/omn.1"
+    [escalation]="src/triage/** src/cli.rs src/request.rs src/session.rs src/collect/mod.rs src/collect/launch.rs src/collect/task.rs tests/triage.rs tests/runner.rs tests/budget.rs examples/triage-*.yml examples/attach-*.yml man/omn.1"
+    [debts]="src/join.rs src/emit.rs src/encode.rs src/render.rs src/main.rs tests/join_engine.rs tests/aggregation.rs tests/encoders.rs tests/vertical.rs examples/join-*.yml examples/vertical-one-request.yml"
+    [silent]="src/filter.rs src/resolve.rs src/perf.rs src/collect/cpu/** src/collect/proc/** src/collect/mem/page_faults.rs catalog/cpu.yaml catalog/proc.yaml catalog/mem.yaml tests/scenario_cpu.rs tests/scenario_proc.rs tests/scenario_mem.rs tests/family_cpu.rs tests/family_proc.rs examples/cpu-*.yml examples/proc-*.yml"
+    [drains]="src/bpf/map.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/proc_syscall.rs src/bpf/sched_*.rs src/bpf/migrate.rs src/bpf/mem_alloc.rs src/bpf/mem_stall.rs src/collect/sched/** tests/scenario_sched.rs tests/family_sched.rs"
 )
 declare -A TITLE=(
-    [hotattach]="Stream H -- hot attach"
-    [network]="Stream N -- the network rows"
-    [bench]="Stream X -- the bench"
-    [triage]="Stream T -- triage"
+    [escalation]="Stream E -- the escalation"
+    [debts]="Stream J -- the engine's debts"
+    [silent]="Stream S -- the silent degradations"
+    [drains]="Stream K -- drains that lose nothing"
 )
 declare -A LOG=(
-    [hotattach]="docs/scenarios/attach.md"
-    [network]="docs/scenarios/vertical.md"
-    [bench]="docs/bench.md"
-    [triage]="docs/triage.md"
+    [escalation]="docs/triage.md"
+    [debts]="docs/families/join.md"
+    [silent]="docs/fixes/silent.md"
+    [drains]="docs/families/drains.md"
 )
 declare -A SCENARIO=(
-    [hotattach]="tests/runner.rs and tests/budget.rs"
-    [network]="tests/vertical.rs and tests/scenario_net.rs"
-    [bench]="tests/bench_*.rs (the cheap, non-ignored ones)"
-    [triage]="tests/triage.rs"
+    [escalation]="tests/triage.rs, tests/runner.rs and tests/budget.rs"
+    [debts]="tests/join_engine.rs, tests/aggregation.rs, tests/encoders.rs and tests/vertical.rs"
+    [silent]="tests/scenario_cpu.rs, tests/scenario_proc.rs and tests/scenario_mem.rs"
+    [drains]="tests/scenario_sched.rs and tests/family_sched.rs"
 )
 
-HOTATTACH_WORK='ROADMAP.md phase 6, task 4: a collector added and removed mid-session, without
-restarting the run or breaking in-flight joins. DECISIONS.md settled that this
-lives inside a session, with no daemon. The run loop is run_all_within in
-src/collect/mod.rs; today every request shares one window. Build a request whose
-window is its own and inside the run'"'"'s. The surface (a per-request start and
-stop in the session file, then the CLI) is your decision: write it down, and
-keep the dumped request reading back unchanged. Each of these is a scenario:
-every document states its own window; a join across a detached source is not
-counted as a loss (src/join.rs is not yours -- file the field it needs); attach
-costs and first-tick losses are counted; a preload source attached late is
-refused by name before the run. Ground truth: a two-phase program, one source
-attached only for the first phase. The escalation of phase 10 is NOT this wave.'
+ESCALATION_WORK='ROADMAP.md phase 10, item 3: once triage names a suspect, attach that layer'"'"'s
+detailed collectors mid-run, detach the rest, and hold the budget. Triage exists
+(src/triage/) and so does a request window (hot attach); what is missing is a
+window decided during the run from the cheap pass'"'"'s own numbers. The mechanism
+is your decision -- have the runner ask a trait between rounds, the way it asks
+Cheaper, and keep triage out of the collector layer. Scenarios: what it
+escalated to and why, the budget held and measured, a detailed layer this
+machine cannot serve reported with reasons, and joins across the switch kept
+honest. Ground truth: a program cpu-bound for a second then lock-bound for a
+second escalates to the lock layer and its waits match its own clock. Also:
+--window on the command line (stream H'"'"'s filed request). Not the flight
+recorder -- that is the next wave.'
 
-NETWORK_WORK='The two rows of the ROADMAP.md phase 4 tree the tool does not draw yet: net_rx
-and net_tx. docs/scenarios/vertical.md left the design: the connection'"'"'s cookie
-at the request'"'"'s birth and end, bpf_get_socket_cookie on the socket the server
-received on, a second argument on the same two USDT probes. Both rows are KEY by
-the roadmap'"'"'s table, and the ladder must say so. The ground truth needs no
-root: a client that sends half its request, sleeps a known 30 ms and sends the
-rest puts 30 ms in net_rx; a client with a small receive buffer that reads
-slowly puts a known wait in net_tx. The rows must still sum to the client'"'"'s
-latency within 10 %. src/bpf/mod.rs is not yours: a new program file'"'"'s mod line
-goes in your handoff. Also yours: drained: true on catalog/net.yaml.'
+DEBTS_WORK='Four requests the tenth wave filed against src/join.rs and src/emit.rs, under
+"the tenth wave" in docs/open-findings.md, with signatures: apply_within and
+Correlation::outside_window for a join across a detached source (and main.rs
+passing the windows); the window on Results; Part::via so net_rx and net_tx are
+rated KEY rather than IDENTITY (the two vertical lines and the tests/vertical.rs
+assertion that flip with it are yours); a filtered part that matched nothing is
+a zero, not a missing row. Ground truth for the first: the ignored scenario in
+tests/runner.rs (40 matched, 25 outside the window, not 67 matched) -- you do
+not own that file, so your handoff says it is ready and the coordinator
+un-ignores it at the merge.'
 
-BENCH_WORK='ROADMAP.md phase 8: a cost, resolution and loss table for every (source,
-backend) this machine serves, and the resolver'"'"'s choices confirmed or corrected.
-cost.json and --backend force:<id> exist; the harness around them does not.
-Workloads, warmup, >= 20 repetitions round-robin, median and IQR; then the
-backend comparison, the resolution sweep (0.5 to 50 us) and the observer effect.
-The variance gate comes FIRST and will refuse while three other agents build on
-this machine: that refusal is the gate working. Do not produce a table from a
-noisy machine; the real measurement runs once, alone, after the merge, and your
-handoff gives the one command. Bench tests are #[ignore] and run through
-scripts/bench.sh -- never in make check. src/capabilities.rs is yours: the
-prefetcher state goes in the environment capture (captured, not controlled), and
-stream S'"'"'s dynamic-linking probe request is yours to answer.'
+SILENT_WORK='Five places where the tool accepts a request and answers a different question
+without saying so, filed under "the tenth wave, stream X" and "stream H": a
+pushed-down proc.syscall number filter that drops every call; proc.exec
+accepting a filter and applying none; --backend force: walking past missing
+probes to fail at attach; mem.faults declaring count and refusing it; and a
+per-task counter attached late counting one thread (open one per entry of
+/proc/<pid>/task). Check cpu.profile, sched.switches and mem.faults for the
+same, and answer stream T'"'"'s request for a profile that follows threads. Each
+fix makes the answer right or the refusal say why. Ground truth: each filed
+command as a scenario failing on main; for the counter, the ignored test in
+tests/runner.rs, which you do not own -- say in your handoff that it is ready.'
 
-TRIAGE_WORK='ROADMAP.md phase 10, everything but the escalation. The layer sits ABOVE the
-engine and calls it like any other user: src/triage/ builds requests, runs them
-through the library calls main.rs makes, and reads the results. It never edits
-the collector layer, the join engine or the emit layer -- a filed request
-instead. The objective comes first: a triage request that does not name one is
-refused with the list. Then omn latency (TSA as a question, residue and evidence
-carried through), omn saturate (USE, with Little'"'"'s law and every Shortfall
-kept), and differential flame graphs from the existing encoders. Ground truth:
-cpu-bound, I/O-blocked and lock-contended workloads each named correctly for the
-objective asked, and one program run twice with one function'"'"'s cost doubled.
-man/omn.1 is yours this wave, including the pending between/decompose request.'
+DRAINS_WORK='A drained program'"'"'s drain takes a row with lookup-and-delete while the program
+is about to add to it, and the addition lands in a freed element -- measured by
+the eighth wave, still open. fentry::HistogramProgram solves it with two row
+maps and a generation word; put that scheme in src/bpf/map.rs once and move
+runqlat, proc_syscall and every other drained program in your files onto it,
+keeping each program'"'"'s public methods unchanged (stream S owns the proc
+collectors). Ground truth: a known number of events drained on a short tick,
+every one in a row or a counted loss, over several runs. Second task:
+a_blocking_stack_names_the_call_that_blocked failed in two of three full runs
+and passes alone -- find whether it is the machine or the symbolizer racing the
+exit, and fix the tool or make the scenario assert what it can promise. Every
+row program you touch gets a stack-region and a byte-coverage test (finding 46).'
 
 stream="${1:-}"
 if [[ -z "$stream" || -z "${OWNS[$stream]:-}" ]]; then
@@ -116,10 +114,10 @@ else
 fi
 
 case "$stream" in
-    hotattach) WORK="$HOTATTACH_WORK" ;;
-    network) WORK="$NETWORK_WORK" ;;
-    bench) WORK="$BENCH_WORK" ;;
-    triage) WORK="$TRIAGE_WORK" ;;
+    escalation) WORK="$ESCALATION_WORK" ;;
+    debts) WORK="$DEBTS_WORK" ;;
+    silent) WORK="$SILENT_WORK" ;;
+    drains) WORK="$DRAINS_WORK" ;;
 esac
 
 prompt_file="${worktree}.prompt"
@@ -150,7 +148,7 @@ available, which reads like the machine changed rather than the binary.
 ${WORK}
 
 HOW YOU TEST -- this is a rule, not advice, and CLAUDE.md "How much to test,
-and when" is the long version. The full suite is ~1620 tests and 5 to 10
+and when" is the long version. The full suite is ~1750 tests and 5 to 10
 minutes; four agents running it by reflex is what made the eighth wave slow.
 
   - While iterating: ONLY \`cargo test --lib <your module>\` and
@@ -163,6 +161,9 @@ minutes; four agents running it by reflex is what made the eighth wave slow.
   - The session-index test in tests/cli.rs WILL be red for sessions you add.
     Expected: put the rows in your handoff, the coordinator adds them.
   - \`make\` once per build before eBPF tests, not once per test.
+  - Run \`cargo fmt\` BEFORE \`make\`, never after: a format that changes a
+    source makes the next test build relink omn without its capabilities,
+    and every eBPF test then fails as unprivileged.
 
 You are done when your own tests pass, one \`make check\` is clean apart from the
 index rows you listed and known flakes you named, and everything you were given
