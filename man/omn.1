@@ -21,6 +21,22 @@ omn \- one vocabulary for system observability
 .I session
 .br
 .B omn formats
+.br
+.B omn latency
+.B \-\-objective
+.I objective
+.RI [ "\-\-runs N" ]
+.RB [ \-\-pid
+.IR pid " | " "\-\- program [args]" ]
+.br
+.B omn saturate
+.B \-\-objective
+.I objective
+.RB [ \-\-pid
+.IR pid " | " "\-\- program [args]" ]
+.br
+.B omn diff
+.I before after
 .SH DESCRIPTION
 .B omn
 describes a measurement along five axes and refuses the combinations that cannot
@@ -114,6 +130,61 @@ independent, so it answers for a host other than this one.
 .B formats
 The input and output formats, which emits each output format can carry, and
 which encoders exist yet.
+.TP
+.B latency \-\-objective \fIobjective\fR [\fIoptions\fR] \fB\-\-\fR \fIprogram\fR
+Why is this slow. Thread state analysis, asked as a question: one task's wall
+clock decomposed into on a cpu, runnable and blocked, the blocked time split by
+the task state each block recorded, and the state that dominates named with
+what covers it \(em a pthread mutex, a futex, the stack a block began from, the
+hottest function. See
+.BR TRIAGE .
+.IP
+.BI \-\-objective " latency" "\fR|\fP" tail
+is required. \fBlatency\fR decomposes the median run; \fBtail\fR decomposes
+the slowest run against the median and names the state it spent more time in.
+.BI \-\-runs " N"
+runs a launched program \fIN\fR times (default 1; the tail needs 3 or more).
+.BI \-\-pid " PID"
+decomposes a process already running over \fB\-\-duration\fR, which it then
+requires; its whole is the window rather than a lifetime, and it has no tail.
+.BI \-\-hz " HZ"
+is the profile's rate (default 997), whose period is the on-cpu row's
+resolution.
+.TP
+.B saturate \-\-objective \fIobjective\fR [\fIoptions\fR] \fB\-\-\fR \fIprogram\fR
+What does this queue for. The USE method \(em utilization, saturation and
+errors per resource: cpu, disk, lock, memory \(em with Little's law as its
+arithmetic.
+.BI \-\-objective " throughput" "\fR|\fP" tail "\fR|\fP" energy
+is required. See
+.BR TRIAGE .
+.TP
+.B diff \fIbefore after\fR
+Two profiles and a subtraction. Each is a run's output directory (written with
+.B \-o
+and
+.B \-\-format json
+or
+.BR folded ),
+its
+.IR results.json ,
+or a folded file. Names the functions whose own cost moved beyond the noise a
+sample count has, compared in samples at one rate and in time at two.
+.B \-\-format folded
+writes the three-column
+.I "stack before after"
+file differential flame graphs are drawn from;
+.BI \-\-top " N"
+bounds each table.
+.IP
+The three triage commands take
+.B \-\-format
+text, json or yaml, and
+.B \-\-dump\-session
+prints the session the question is asked through and exits: an ordinary
+session, which
+.B omn \-f
+runs to print the tables the answer is read from.
 .SH OPTIONS
 .SS Target
 .TP
@@ -328,6 +399,15 @@ decompose:
 .EE
 .RE
 .PP
+A part reads \fIvalue\fR off each event of its source \(em an attribute, or
+\fBsamples\fR for a sampled source, which is the count times the period \(em
+and may take \fBless:\fR an attribute to subtract, \fBfilter:\fR a predicate
+choosing which events it reads, \fBreading: level\fR|\fBdelta\fR, required for a
+polled source, and \fBnames:\fR an attribute whose most frequent value the row
+names beside its amount, with how many of its events agreed. \fBby:\fR is the
+key each table is read per (\fBtask\fR unless said), and \fBtop:\fR how many
+tables to print.
+.PP
 The whole is \fBwindow\fR (the run, from its start to the last drain: an upper
 bound), \fBlifetime\fR (the launched program, from the gate to the reap: exact
 at the start, bracketed at the exit, and refused where nothing was launched),
@@ -354,20 +434,89 @@ A wakeup chain links them: the only join that crosses a block.
 They overlapped in time. A hypothesis, nothing more. What \fBbetween\fR
 produces, and what \fBwithin_key\fR says of an \fBeq\fR join's choice between
 states.
+.SH TRIAGE
+.BR "omn latency" ", " "omn saturate" " and " "omn diff"
+sit above the engine and call it like any other user: each writes a session,
+runs it through the same calls
+.B omn \-f
+makes, and reads the answer off the results. What they compute themselves \(em
+a share, a Little's-law product, a difference of two profiles \(em is
+arithmetic on numbers the engine reported, with every row's evidence,
+resolution and shortfall carried through. A value marked \fB>=\fR comes from a
+lossy run and is a lower bound: what a stalled machine fails to record is the
+slow part.
+.SS The objective
+"What is this limited by" has no answer until someone says \fIfor what\fR, and a
+triage question without \fB\-\-objective\fR is refused with the list rather
+than defaulted.
+.TP
+.B latency
+How long a typical run takes: the median run, decomposed.
+.TP
+.B tail
+How long the slowest runs take. For \fBomn latency\fR, what the slowest of
+\fB\-\-runs\fR spent that the median did not \(em the maximum of \fIN\fR,
+which is not a percentile below a hundred runs, and says so. For \fBomn
+saturate\fR, the resource whose individual waits have the longest 99th
+percentile, read off each source's histogram and known to its log2 bucket.
+.TP
+.B throughput
+How much work gets done per second: the resource the work queues for. Only
+\fBomn saturate\fR answers it; a wall clock does not.
+.TP
+.B energy
+What burns the energy this machine meters. Only \fBomn saturate\fR answers
+it: the package's energy is credited to the workload by its share of the
+machine's busy cpu time, which is an estimate and is marked \fBTEMPORAL\fR, and
+the disk's and the network's energy are named as unmetered rather than free.
+.PP
+Each method refuses what it cannot answer and names the one that can:
+\fBomn latency \-\-objective throughput\fR points at \fBomn saturate\fR, and
+\fBomn saturate \-\-objective latency\fR at \fBomn latency\fR.
+.SS Verdicts
+\fBomn latency\fR names the largest state only when nothing unread could
+overtake it: not the next state, not a row the run did not supply, not the
+residue and the rows' resolution. Otherwise it says undecided, and why. It
+answers for one task \(em a launched program's main thread, or the process
+asked for \(em and lists the others. A sleeping state is named by the lock
+source that covers more than half of it: \fBsched.mutex\fR (\fIlock\fR), then
+\fBsched.futex\fR (\fIfutex\fR), else \fIsleep\fR with the stack it began
+from; \fIuninterruptible\fR is \fIdisk\fR.
+.PP
+\fBomn saturate\fR reads, per resource, the workload's side: cpus busy with it
+and tasks waiting for a cpu; requests in flight at the device, tasks blocked on
+it, and requests that failed; a mutex's hold time and its waiters; its
+cgroup's memory stall share. Every mean count is Little's \fIL\fR, the arrival
+rate times the mean wait over the window \(em the sum of the waits over
+\fIT\fR, exact over a traced source \(em and printed term by term.
+For throughput it names the longest queue behind something another task holds,
+a cpu or a lock, when one reaches a tenth of a waiter on average; below that,
+nothing is saturated and the workload is limited by its own concurrency, which
+is the answer for a program waiting on one synchronous write at a time.
+.PP
+\fBomn diff\fR compares absolute costs, not shares: when one function doubles,
+every other function's share falls without any of them changing. A function
+is the difference when its own (leaf) cost moved beyond three standard
+deviations of Poisson noise, \fI|b \- a| / sqrt(a + b)\fR; the inclusive table
+shows what carried it. A folded file carries no loss accounting and no rate,
+and the answer says it could not check either.
 .SH EXIT STATUS
 .TP
 .B 0
-The measurement ran.
+The measurement ran, or the question was answered.
 .TP
 .B 1
-Usage, parsing, or a failure while running.
+This run cannot happen here: this machine cannot serve the request, or
+something failed while running. The request itself is valid and will run on a
+machine that has what it needs.
 .TP
 .B 2
-The request was refused: it cannot mean what it asks for, or this machine cannot
-serve it.
+The request was refused: it cannot mean what it asks for. A flag that does not
+parse, an axis a source does not carry, a triage question without an objective
+or with one its method does not answer for, a tail asked of one run.
 .TP
 .B 3
-The request is valid and nothing collects it yet.
+The request is valid and nothing in this build collects it yet.
 .SH ENVIRONMENT
 .TP
 .B OMN_CATALOG_DIR
@@ -404,8 +553,10 @@ sudo setcap cap_bpf,cap_perfmon+ep $(which omn)
 The vocabulary, as data. Adding a source is an entry here, not code.
 .TP
 .I examples/*.yml
-Seventy-nine sessions, one per question worth asking. Each opens with the
-question it answers and what to expect.
+One session per question worth asking. Each opens with the question it answers
+and what to expect.
+.IR examples/triage\-*.yml " are the sessions the triage commands ask through."
+
 .IR GUIDE.md " explains what each one shows and how to run one, a family, or"
 all of them.
 .TP
@@ -450,6 +601,29 @@ omn io.latency \-\-system \-m trace \-e hist \-\-filter "bytes > 4KiB"
 What this machine can serve, and what this build can measure:
 .EX
 omn list
+.EE
+.TP
+Why a program is slow, for its median run:
+.EX
+omn latency \-\-objective latency \-\- ./server \-\-once
+.EE
+.TP
+What makes its slowest run of twenty slow:
+.EX
+omn latency \-\-objective tail \-\-runs 20 \-\- ./server \-\-once
+.EE
+.TP
+What a program queues for, and what it costs in energy:
+.EX
+omn saturate \-\-objective throughput \-\- ./build.sh
+omn saturate \-\-objective energy \-\- ./build.sh
+.EE
+.TP
+Which function a change made slower:
+.EX
+omn cpu.profile \-m sample@997hz \-e stack \-\-stack fp \-\-format json \-o before \-\- ./old
+omn cpu.profile \-m sample@997hz \-e stack \-\-stack fp \-\-format json \-o after \-\- ./new
+omn diff before after
 .EE
 .TP
 Write a session down for a machine other than this one:

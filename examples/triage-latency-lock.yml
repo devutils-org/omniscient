@@ -1,0 +1,100 @@
+# Why is this slow -- asked of a thread that takes a mutex another holds.
+#
+# A helper thread holds a pthread mutex 2 ms at a time; the main thread takes it
+# 150 times. Its wall clock is almost all `blocked: sleeping`, and the sleep is
+# named by what covers more than half of it: the preload shim's
+# pthread_mutex_lock wait (`sched.mutex`), with `sched.futex` beside it as the
+# evidence any lock would leave. The verdict names the lock, and the mutex's
+# address.
+#
+# The program times its own calls to pthread_mutex_lock and prints the sum as
+# `lock_wait_ns`; `tests/triage.rs` holds the shim's figure to it.
+#
+#   omn latency --objective latency -- target/omn-triage-fixture/workload lock 150 2000
+#
+name: omn latency --objective latency
+format: text
+requests:
+- source: cpu.profile
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - lock
+    - '150'
+    - '2000'
+  mode: sample@997hz
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: on-cpu
+- source: sched.runqlat
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - lock
+    - '150'
+    - '2000'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: runnable
+- source: sched.offcpu
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - lock
+    - '150'
+    - '2000'
+  mode: trace
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: blocked
+- source: sched.futex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - lock
+    - '150'
+    - '2000'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: futex
+- source: sched.mutex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - lock
+    - '150'
+    - '2000'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: mutex
+decompose:
+- id: where-the-time-went
+  whole: lifetime
+  parts:
+  - state: on-cpu
+    from: cpu.profile
+    value: samples
+  - state: runnable
+    from: sched.runqlat
+    value: total_ns
+  - state: blocked
+    from: sched.offcpu
+    value: total_ns
+    less: queued_ns
+  by: task
+  top: 16

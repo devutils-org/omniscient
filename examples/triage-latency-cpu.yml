@@ -1,0 +1,99 @@
+# Why is this slow -- asked of a program that spins 300 ms of its own cpu time.
+#
+# `omn latency` writes this session, runs it, and reads the answer off its
+# decomposition: one task's wall clock across on a cpu, runnable and blocked,
+# against the program's life. `omn -f` on this file prints the tables the answer
+# is read from; `omn latency` prints the answer:
+#
+#   for latency, task:N of the run spent most of its time on a cpu, doing its own
+#   work: cpu-bound: on-cpu 302ms (99.6 % of its wall clock); hottest function
+#   `spin_cpu_ms`
+#
+# The workload is the triage fixture, `src/triage/workload.c`, which
+# `tests/triage.rs` builds into target/omn-triage-fixture/. It prints the
+# kernel's accounting of its main thread on stderr, prefixed `omn-truth`; the
+# tool reads none of it.
+#
+#   omn latency --objective latency -- target/omn-triage-fixture/workload cpu 300
+#
+name: omn latency --objective latency
+format: text
+requests:
+- source: cpu.profile
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - cpu
+    - '300'
+  mode: sample@997hz
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: on-cpu
+- source: sched.runqlat
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - cpu
+    - '300'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: runnable
+- source: sched.offcpu
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - cpu
+    - '300'
+  mode: trace
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: blocked
+- source: sched.futex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - cpu
+    - '300'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: futex
+- source: sched.mutex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - cpu
+    - '300'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: mutex
+decompose:
+- id: where-the-time-went
+  whole: lifetime
+  parts:
+  - state: on-cpu
+    from: cpu.profile
+    value: samples
+  - state: runnable
+    from: sched.runqlat
+    value: total_ns
+  - state: blocked
+    from: sched.offcpu
+    value: total_ns
+    less: queued_ns
+  by: task
+  top: 16

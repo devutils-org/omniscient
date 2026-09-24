@@ -1,0 +1,103 @@
+# Why is this slow -- asked of a program that makes 300 synchronous writes.
+#
+# Each write is followed by an fdatasync, and the program blocks in it
+# uninterruptibly: the blocked row, split by the task state `sched.offcpu`
+# records at every switch, is `blocked: uninterruptible`, and the heaviest stack
+# it began from ends in fdatasync. The verdict names the disk.
+#
+# The same program is the one whose answer changes with the objective:
+# `omn saturate --objective throughput` on it names nothing, because one write at
+# a time queues behind nobody -- its throughput is limited by its own
+# concurrency, not by a saturated device.
+#
+# The fixture writes in the directory it is given, here target/, which has to be
+# on a real disk: a tmpfs has nothing to sync.
+#
+#   omn latency --objective latency -- target/omn-triage-fixture/workload io 300 target
+#
+name: omn latency --objective latency
+format: text
+requests:
+- source: cpu.profile
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - io
+    - '300'
+    - target
+  mode: sample@997hz
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: on-cpu
+- source: sched.runqlat
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - io
+    - '300'
+    - target
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: runnable
+- source: sched.offcpu
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - io
+    - '300'
+    - target
+  mode: trace
+  emit:
+  - stack
+  keys:
+  - task
+  stack: fp
+  label: blocked
+- source: sched.futex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - io
+    - '300'
+    - target
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: futex
+- source: sched.mutex
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - io
+    - '300'
+    - target
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: mutex
+decompose:
+- id: where-the-time-went
+  whole: lifetime
+  parts:
+  - state: on-cpu
+    from: cpu.profile
+    value: samples
+  - state: runnable
+    from: sched.runqlat
+    value: total_ns
+  - state: blocked
+    from: sched.offcpu
+    value: total_ns
+    less: queued_ns
+  by: task
+  top: 16
