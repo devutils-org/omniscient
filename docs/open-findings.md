@@ -6671,3 +6671,11 @@ Worth recording as settled, and enforced by `src/collect/mod.rs`'s tests:
 
 One session, `examples/attach-escalate-phases.yml`; its rows are at the end of
 `docs/triage.md`.
+
+### To the coordinator: `tests/scenario_runtime.rs` is not formatted on `main`
+
+Line 926, `assert!(described, "the manual must say that `=~` is a substring
+test");`, is one line where rustfmt wants three, so `cargo fmt --check` -- the
+last step of `make check` -- fails on `main` and on every branch made from it,
+and a stream that runs `cargo fmt` before `make`, as the brief asks, rewrites a
+file it does not own. `cargo fmt` once on `main` closes it.

@@ -567,7 +567,12 @@ expected, three that passed alone on their one rerun.
   Not this stream's; passed alone.
 
 `cargo test --test triage` is 23 tests in about 40 s, `--test runner` 21 and
-`--test budget` 12; `clippy -D warnings` and `fmt --check` are clean.
+`--test budget` 12; `clippy -D warnings` is clean. `cargo fmt --check` is
+clean on every file of this stream and red on one that is not:
+`tests/scenario_runtime.rs:926`, the `=~` assertion, is not formatted on
+`main` either, so `make check`'s last step fails there on any branch. A
+workspace-wide `cargo fmt` rewrites it; this stream's commit had it and took
+it back out. Filed for the coordinator.
 
 ---
 
