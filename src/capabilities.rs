@@ -205,6 +205,18 @@ pub struct Environment {
     /// driver, and neither of those is visible in any other field here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpus: Vec<GpuDevice>,
+    /// The hardware prefetchers, **captured and never controlled**.
+    ///
+    /// Turning them off is a real lever for isolating a memory effect, and it
+    /// is also a modification of the machine under measurement -- boundary 5.
+    /// So the state is read and written here, beside the governor and the THP
+    /// mode, and whoever wants them off turns them off themselves and gets a
+    /// resolved file that says so. Two runs with different settings are not
+    /// comparable, and before this field nothing said why.
+    ///
+    /// Absent only from files written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefetchers: Option<Prefetchers>,
     /// What is deliberately not captured yet, so its absence is not read as
     /// "this machine has none of it".
     pub not_captured: Vec<String>,
@@ -239,6 +251,175 @@ pub struct GpuDevice {
     pub driver_version: Option<String>,
 }
 
+/// What the prefetcher capture found.
+///
+/// Three answers, for the same reason `Probe` has three: a state that could
+/// not be read is not "enabled". On most machines the register is readable
+/// only by root, and the honest capture there is `unreadable`, with why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum Prefetchers {
+    /// Read from the register that controls them, on every online cpu.
+    Read {
+        /// The model-specific register, such as `0x1a4`.
+        register: String,
+        /// Each prefetcher the register controls, by name, and whether it is
+        /// on. Read from the first cpu.
+        enabled: BTreeMap<String, bool>,
+        /// Whether every online cpu agreed with the first. A machine with
+        /// prefetchers off on some cores only is a machine whose runs depend
+        /// on where the scheduler put them.
+        uniform: bool,
+    },
+    /// This cpu has a register this tool knows, and this process may not
+    /// read it.
+    Unreadable { register: String, reason: String },
+    /// No register this tool knows how to read on this cpu.
+    Unknown { reason: String },
+}
+
+/// Where a vendor keeps its prefetcher switches, and what each bit is.
+///
+/// A set bit **disables** its prefetcher in both layouts below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrefetchRegister {
+    msr: u32,
+    bits: &'static [(u32, &'static str)],
+}
+
+/// `MSR_MISC_FEATURE_CONTROL`, as Intel documents it for its Core and Xeon
+/// parts ("Disclosure of hardware prefetcher control on some Intel
+/// processors").
+const INTEL_PREFETCH: PrefetchRegister = PrefetchRegister {
+    msr: 0x1a4,
+    bits: &[
+        (0, "l2_hardware"),
+        (1, "l2_adjacent_line"),
+        (2, "dcu"),
+        (3, "dcu_ip"),
+    ],
+};
+
+/// `PrefetchControl`, as AMD documents it from family 19h (Zen 3) on.
+const AMD_PREFETCH: PrefetchRegister = PrefetchRegister {
+    msr: 0xc000_0108,
+    bits: &[
+        (0, "l1_stream"),
+        (1, "l1_stride"),
+        (2, "l1_region"),
+        (3, "l2_stream"),
+        (5, "l2_up_down"),
+    ],
+};
+
+/// The register for a vendor and family, or why there is none.
+fn prefetch_register(vendor: &str, family: u32) -> Result<PrefetchRegister, String> {
+    match vendor {
+        "GenuineIntel" if family == 6 => Ok(INTEL_PREFETCH),
+        "AuthenticAMD" if family >= 0x19 => Ok(AMD_PREFETCH),
+        "AuthenticAMD" => Err(format!(
+            "AMD family {family:#x} documents no prefetcher-control register (PrefetchControl \
+             starts with family 0x19), so the state of this cpu's prefetchers cannot be read"
+        )),
+        vendor => Err(format!(
+            "no prefetcher-control register is known for `{vendor}` family {family:#x}"
+        )),
+    }
+}
+
+/// Each prefetcher of a register value, and whether it is on.
+fn decode_prefetchers(register: &PrefetchRegister, value: u64) -> BTreeMap<String, bool> {
+    register
+        .bits
+        .iter()
+        .map(|(bit, name)| ((*name).to_owned(), value & (1 << bit) == 0))
+        .collect()
+}
+
+/// The vendor and family of the first cpu, from the first block of
+/// `/proc/cpuinfo` -- which is all that is read, because the whole file is
+/// tens of kilobytes on a large machine and this runs on every command.
+fn cpu_identity(cpuinfo: impl std::io::BufRead) -> Option<(String, u32)> {
+    let (mut vendor, mut family) = (None, None);
+    for line in cpuinfo.lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "vendor_id" => vendor = Some(value.trim().to_owned()),
+            "cpu family" => family = value.trim().parse().ok(),
+            _ => {}
+        }
+    }
+    Some((vendor?, family?))
+}
+
+/// Reads one model-specific register of one cpu.
+fn read_msr(cpu: usize, msr: u32) -> std::io::Result<u64> {
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::File::open(format!("/dev/cpu/{cpu}/msr"))?;
+    let mut bytes = [0u8; 8];
+    file.read_exact_at(&mut bytes, u64::from(msr))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn prefetchers() -> Prefetchers {
+    let identity = std::fs::File::open("/proc/cpuinfo")
+        .ok()
+        .and_then(|file| cpu_identity(std::io::BufReader::new(file)));
+    let Some((vendor, family)) = identity else {
+        return Prefetchers::Unknown {
+            reason: "/proc/cpuinfo names no vendor and family".into(),
+        };
+    };
+    let register = match prefetch_register(&vendor, family) {
+        Ok(register) => register,
+        Err(reason) => return Prefetchers::Unknown { reason },
+    };
+    let name = format!("{:#x}", register.msr);
+    let first = match read_msr(0, register.msr) {
+        Ok(value) => value,
+        Err(error) => {
+            let reason = match error.raw_os_error() {
+                Some(libc::EACCES) | Some(libc::EPERM) => format!(
+                    "/dev/cpu/0/msr is not readable by uid {}: reading a model-specific \
+                     register needs root or CAP_SYS_RAWIO, which this tool does not ask for",
+                    current_uid()
+                ),
+                Some(libc::ENOENT) => {
+                    "/dev/cpu/0/msr does not exist: the `msr` module is not loaded".into()
+                }
+                _ => format!("reading {name} on cpu 0 failed: {error}"),
+            };
+            return Prefetchers::Unreadable {
+                register: name,
+                reason,
+            };
+        }
+    };
+    // Every cpu the msr driver exposes, rather than a count: the numbering
+    // can have holes, and `available_parallelism` is this process's affinity.
+    let cpus: Vec<usize> = std::fs::read_dir("/dev/cpu")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let uniform = cpus
+        .iter()
+        .all(|&cpu| read_msr(cpu, register.msr).map_or(true, |value| value == first));
+    Prefetchers::Read {
+        register: name,
+        enabled: decode_prefetchers(&register, first),
+        uniform,
+    }
+}
+
 /// Everything the resolver knows about this machine.
 #[derive(Debug, Clone)]
 pub struct Capabilities {
@@ -269,6 +450,7 @@ impl Capabilities {
             tracefs: tracefs_access(),
             mitigations: mitigations(),
             gpus: gpus(),
+            prefetchers: Some(prefetchers()),
             not_captured: vec![
                 "microarchitecture".into(),
                 "NUMA topology".into(),
@@ -408,7 +590,12 @@ impl Capabilities {
             return probe_af_packet(requirement);
         }
 
-        if requirement == "preload:shim" {
+        // Whether the *target* is dynamically linked cannot be known before it
+        // exists; whether this *build* can preload anything can, and that is
+        // what every preload source is waiting on. Answering it also turns a
+        // `cargo build` without `--workspace` -- no shim beside the binary --
+        // into a `missing` that names the path, where it used to be a `?`.
+        if requirement == "preload:shim" || requirement == "dynamic-linking" {
             return match crate::collect::find_shim() {
                 Ok(_) => Probe::Available,
                 Err(reason) => Probe::Missing(reason),
@@ -424,6 +611,10 @@ impl Capabilities {
         }
 
         match requirement {
+            // `power.temp` reads every temperature input hwmon publishes, so
+            // the requirement is that one of them can be read. Unanswered, it
+            // read `?` on every run of a source this machine serves.
+            "hwmon" => probe_hwmon(Path::new("/sys/class/hwmon")),
             "tracefs" => match self.environment.tracefs {
                 Access::Readable => Probe::Available,
                 Access::Restricted => Probe::Missing(format!(
@@ -460,6 +651,43 @@ impl Capabilities {
             other => Probe::Unknown(format!("no probe is written for `{other}` yet")),
         }
     }
+}
+
+/// Whether any hwmon chip under `root` publishes a temperature this process
+/// can read, named in the answer either way.
+fn probe_hwmon(root: &Path) -> Probe {
+    let Ok(chips) = std::fs::read_dir(root) else {
+        return Probe::Missing(format!(
+            "{} is absent: this kernel publishes no hardware monitoring",
+            root.display()
+        ));
+    };
+    let mut restricted = None;
+    for chip in chips.flatten() {
+        let Ok(files) = std::fs::read_dir(chip.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("temp") && name.ends_with("_input")) {
+                continue;
+            }
+            match access(&file.path()) {
+                Access::Readable => return Probe::Available,
+                Access::Restricted => restricted = Some(file.path()),
+                Access::Absent => {}
+            }
+        }
+    }
+    Probe::Missing(match restricted {
+        Some(path) => format!(
+            "{} exists but is not readable by uid {}",
+            path.display(),
+            current_uid()
+        ),
+        None => format!("no chip under {} publishes a temperature", root.display()),
+    })
 }
 
 /// Replaces `[pid]` in a procfs path, defaulting to this process.
@@ -1117,6 +1345,125 @@ mod tests {
             !probe.is_available(),
             "an unwritten probe must never read as available"
         );
+    }
+
+    /// Ground truth: a temperature read from sysfs directly, as an integer in
+    /// millidegrees, by this test and not through the probe.
+    #[test]
+    fn hwmon_is_available_exactly_when_a_temperature_can_be_read() {
+        let probe = Capabilities::detect().probe("hwmon", None);
+        assert!(!probe.is_unknown(), "{probe}");
+        let readable = std::fs::read_dir("/sys/class/hwmon")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|chip| {
+                std::fs::read_dir(chip.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
+            .filter(|file| {
+                let name = file.file_name().to_string_lossy().into_owned();
+                name.starts_with("temp") && name.ends_with("_input")
+            })
+            .any(|file| {
+                std::fs::read_to_string(file.path())
+                    .is_ok_and(|text| text.trim().parse::<i64>().is_ok())
+            });
+        assert_eq!(probe.is_available(), readable, "{probe}");
+        let nowhere = probe_hwmon(Path::new("/nonexistent/hwmon"));
+        assert!(nowhere.to_string().contains("absent"), "{nowhere}");
+    }
+
+    /// Every preload source requires `dynamic-linking`, and it read as
+    /// unverified on every run of any of them until it was answered.
+    #[test]
+    fn dynamic_linking_is_answered_by_looking_for_the_shim() {
+        let probe = Capabilities::detect().probe("dynamic-linking", None);
+        assert!(!probe.is_unknown(), "{probe}");
+        if let Probe::Missing(reason) = &probe {
+            assert!(
+                reason.contains("libomn_preload.so") || reason.contains("OMN_PRELOAD_LIB"),
+                "a missing shim must name where it was looked for: {reason}"
+            );
+        }
+    }
+
+    /// Against the vendors' documentation, not against this code: Intel's
+    /// `0x1a4` with bits 0 and 2 set has the L2 hardware prefetcher and the
+    /// DCU streamer off and the other two on; AMD's `PrefetchControl` at zero
+    /// has everything on.
+    #[test]
+    fn a_set_bit_disables_its_prefetcher() {
+        let intel = decode_prefetchers(&INTEL_PREFETCH, 0b0101);
+        assert!(!intel["l2_hardware"]);
+        assert!(intel["l2_adjacent_line"]);
+        assert!(!intel["dcu"]);
+        assert!(intel["dcu_ip"]);
+
+        let amd = decode_prefetchers(&AMD_PREFETCH, 0);
+        assert_eq!(amd.len(), 5);
+        assert!(amd.values().all(|on| *on));
+        assert!(!decode_prefetchers(&AMD_PREFETCH, 1 << 5)["l2_up_down"]);
+    }
+
+    #[test]
+    fn the_register_is_chosen_by_vendor_and_family_and_zen_two_has_none() {
+        assert_eq!(prefetch_register("GenuineIntel", 6), Ok(INTEL_PREFETCH));
+        assert_eq!(prefetch_register("AuthenticAMD", 0x19), Ok(AMD_PREFETCH));
+        assert_eq!(prefetch_register("AuthenticAMD", 0x1a), Ok(AMD_PREFETCH));
+        let zen2 = prefetch_register("AuthenticAMD", 0x17).unwrap_err();
+        assert!(zen2.contains("0x17"), "{zen2}");
+        assert!(prefetch_register("HygonGenuine", 0x18).is_err());
+    }
+
+    #[test]
+    fn the_cpu_identity_is_read_from_the_first_block_only() {
+        let cpuinfo = "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 23\n\n\
+                       processor\t: 1\nvendor_id\t: GenuineIntel\ncpu family\t: 6\n";
+        assert_eq!(
+            cpu_identity(cpuinfo.as_bytes()),
+            Some(("AuthenticAMD".to_owned(), 23))
+        );
+        assert_eq!(cpu_identity("processor\t: 0\n".as_bytes()), None);
+    }
+
+    /// Ground truth: the kernel's own answer to whether the register can be
+    /// read, taken through `faccessat` on the device rather than through the
+    /// capture. A state that could not be read must never come back as a
+    /// reading, and a reading must name the register this cpu has.
+    #[test]
+    fn a_prefetcher_state_that_cannot_be_read_is_never_reported_as_read() {
+        let captured = Capabilities::detect()
+            .environment()
+            .prefetchers
+            .clone()
+            .expect("captured on every detect");
+        let identity = cpu_identity(std::io::BufReader::new(
+            std::fs::File::open("/proc/cpuinfo").unwrap(),
+        ));
+        let known = identity
+            .as_ref()
+            .and_then(|(vendor, family)| prefetch_register(vendor, *family).ok());
+        let readable = access(Path::new("/dev/cpu/0/msr")).is_readable();
+        match (&captured, known, readable) {
+            (Prefetchers::Unknown { .. }, None, _) => {}
+            (Prefetchers::Unreadable { register, .. }, Some(known), false) => {
+                assert_eq!(register, &format!("{:#x}", known.msr))
+            }
+            (
+                Prefetchers::Read {
+                    register, enabled, ..
+                },
+                Some(known),
+                true,
+            ) => {
+                assert_eq!(register, &format!("{:#x}", known.msr));
+                assert_eq!(enabled.len(), known.bits.len());
+            }
+            other => panic!("the capture disagrees with the machine: {other:?}"),
+        }
     }
 
     #[test]

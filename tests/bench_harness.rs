@@ -1,0 +1,478 @@
+//! The bench's harness, and its variance gate.
+//!
+//! The tests that are not `#[ignore]` are cheap and run with the suite: the
+//! statistics on samples whose answer is known, the gate's refusal on a series
+//! whose CV is known, the round-robin order, the verdict and the resolution
+//! logic on synthetic rows, and the workloads counting what they were asked to
+//! do. None of them measures the machine.
+//!
+//! The two that are `#[ignore]` measure it, and run through `scripts/bench.sh`:
+//! the gate on this machine as it is, and the gate on this machine loaded on
+//! purpose, which must refuse. `docs/bench.md` says what each found.
+
+#[path = "../examples/bench/harness.rs"]
+mod harness;
+
+use harness::*;
+
+fn performance() -> Conditions {
+    Conditions {
+        governors: vec!["performance".into()],
+        cpus: 24,
+        ..Conditions::default()
+    }
+}
+
+/// `n` samples around `mean`, alternating `+deviation` and `-deviation`: a
+/// series whose sample standard deviation is known in closed form,
+/// `deviation * sqrt(n / (n - 1))`.
+fn alternating(n: usize, mean: f64, deviation: f64) -> Vec<f64> {
+    (0..n)
+        .map(|i| {
+            if i % 2 == 0 {
+                mean + deviation
+            } else {
+                mean - deviation
+            }
+        })
+        .collect()
+}
+
+fn baseline(name: &str, samples: &[f64]) -> Baseline {
+    Baseline {
+        workload: name.into(),
+        stats: Stats::of(samples).expect("samples"),
+    }
+}
+
+// ------------------------------------------------------------- statistics
+
+/// Against numpy's default quantiles, computed outside this code:
+/// `numpy.percentile([1..10], [25, 50, 75])` is 3.25, 5.5, 7.75, and for
+/// `[7, 15, 36, 39, 40, 41]` it is 20.25, 37.5, 39.75.
+#[test]
+fn quartiles_are_the_ones_numpy_gives() {
+    let one_to_ten: Vec<f64> = (1..=10).map(f64::from).collect();
+    let stats = Stats::of(&one_to_ten).unwrap();
+    assert_eq!((stats.q1, stats.median, stats.q3), (3.25, 5.5, 7.75));
+    assert_eq!(stats.iqr(), 4.5);
+
+    let shuffled = [40.0, 7.0, 39.0, 15.0, 41.0, 36.0];
+    let stats = Stats::of(&shuffled).unwrap();
+    assert_eq!((stats.q1, stats.median, stats.q3), (20.25, 37.5, 39.75));
+    assert_eq!((stats.min, stats.max), (7.0, 41.0));
+}
+
+#[test]
+fn the_coefficient_of_variation_is_the_closed_form_one() {
+    let stats = Stats::of(&alternating(20, 1000.0, 10.0)).unwrap();
+    let expected = 10.0 * (20.0f64 / 19.0).sqrt() / 1000.0;
+    assert!((stats.cv() - expected).abs() < 1e-12, "{}", stats.cv());
+    assert_eq!(stats.median, 1000.0);
+}
+
+#[test]
+fn a_series_of_nothing_has_no_statistics_and_a_zero_mean_no_finite_cv() {
+    assert!(Stats::of(&[]).is_none());
+    assert!(Stats::of(&[1.0, f64::NAN]).is_none());
+    assert!(Stats::of(&[0.0; 20]).unwrap().cv().is_infinite());
+}
+
+// ------------------------------------------------------------------ gate
+
+/// The roadmap's bound, from both sides: 1.03 % refuses, 0.51 % passes.
+#[test]
+fn the_gate_refuses_a_series_over_one_percent_and_passes_one_under() {
+    let noisy = baseline("compute", &alternating(20, 1000.0, 10.0));
+    let quiet = baseline("compute", &alternating(20, 1000.0, 5.0));
+
+    let refusal = judge(&[noisy], &performance()).expect_err("CV 1.03 % must refuse");
+    let text = refusal.to_string();
+    assert!(
+        text.contains("1.03 %"),
+        "the refusal must carry its number:\n{text}"
+    );
+    assert!(text.contains("nothing was measured"), "{text}");
+
+    judge(&[quiet], &performance()).expect("CV 0.51 % must pass");
+}
+
+/// One noisy workload among quiet ones is enough: the table would carry its
+/// rows, and those are the ones that could not resolve a small overhead.
+#[test]
+fn one_noisy_workload_refuses_the_whole_run() {
+    let quiet = baseline("compute", &alternating(20, 1000.0, 1.0));
+    let noisy = baseline("io", &alternating(20, 1000.0, 50.0));
+    let refusal = judge(&[quiet, noisy], &performance()).unwrap_err();
+    assert_eq!(refusal.reasons.len(), 1, "{:?}", refusal.reasons);
+    assert!(refusal.reasons[0].contains("`io`"), "{:?}", refusal.reasons);
+}
+
+#[test]
+fn the_gate_refuses_fewer_than_twenty_repetitions_however_quiet() {
+    let refusal = judge(&[baseline("compute", &[1000.0; 19])], &performance()).unwrap_err();
+    assert!(
+        refusal.reasons[0].contains("at least 20"),
+        "{:?}",
+        refusal.reasons
+    );
+    judge(&[baseline("compute", &[1000.0; 20])], &performance()).expect("twenty identical");
+}
+
+/// The governor is read and never changed: a refusal says what to run.
+#[test]
+fn the_gate_refuses_a_governor_it_will_not_change_and_says_how_to() {
+    let conditions = Conditions {
+        governors: vec!["performance".into(), "powersave".into()],
+        ..performance()
+    };
+    let refusal = judge(&[baseline("compute", &[1000.0; 20])], &conditions).unwrap_err();
+    let text = refusal.to_string();
+    assert!(text.contains("powersave"), "{text}");
+    assert!(
+        text.contains("cpupower frequency-set -g performance"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_gate_refuses_when_nothing_was_measured() {
+    assert!(judge(&[], &performance()).is_err());
+}
+
+// -------------------------------------------------------------- schedule
+
+#[test]
+fn round_robin_runs_every_method_once_per_repetition_and_rotates_who_goes_first() {
+    let (methods, repetitions) = (4, 20);
+    let order = round_robin(methods, repetitions);
+    assert_eq!(order.len(), methods * repetitions);
+
+    for (repetition, round) in order.chunks(methods).enumerate() {
+        let mut seen = round.to_vec();
+        seen.sort();
+        assert_eq!(
+            seen,
+            (0..methods).collect::<Vec<_>>(),
+            "repetition {repetition}"
+        );
+    }
+    // Every method holds every position equally often.
+    for position in 0..methods {
+        let mut counts = vec![0; methods];
+        for round in order.chunks(methods) {
+            counts[round[position]] += 1;
+        }
+        assert!(
+            counts.iter().all(|&count| count == repetitions / methods),
+            "position {position}: {counts:?}"
+        );
+    }
+    assert_eq!(round_robin(1, 3), vec![0, 0, 0]);
+}
+
+// --------------------------------------------------------------- verdict
+
+fn measured(backend: &str, chosen: bool, median: f64, degraded: Option<&str>) -> Measured {
+    let samples: Vec<f64> = (0..20)
+        .map(|i| median * (0.95 + 0.005 * i as f64))
+        .collect();
+    Measured {
+        backend: backend.into(),
+        setting: "poll@100ms, launch".into(),
+        chosen,
+        degraded: degraded.map(str::to_owned),
+        equivalent: false,
+        cost: Stats::of(&samples).unwrap(),
+        losses: 0,
+    }
+}
+
+#[test]
+fn a_cheaper_fallback_that_degrades_does_not_overturn_the_choice() {
+    let rows = [
+        measured("fs:proc:smaps_rollup", true, 400_000.0, None),
+        measured("fs:proc:statm", false, 40_000.0, Some("no PSS")),
+    ];
+    match verdict(&rows) {
+        Verdict::Confirmed(note) => assert!(note.contains("degrades"), "{note}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_clearly_cheaper_equivalent_corrects_the_choice() {
+    let mut cheaper = measured("pmu:generic", false, 40_000.0, None);
+    cheaper.equivalent = true;
+    let rows = [measured("pmu", true, 400_000.0, None), cheaper];
+    assert!(
+        matches!(verdict(&rows), Verdict::Corrected(_)),
+        "{:?}",
+        verdict(&rows)
+    );
+}
+
+#[test]
+fn overlapping_costs_or_more_losses_confirm_the_choice() {
+    let mut close = measured("b", false, 396_000.0, None);
+    close.equivalent = true;
+    assert!(matches!(
+        verdict(&[measured("a", true, 400_000.0, None), close]),
+        Verdict::Confirmed(_)
+    ));
+
+    let mut lossy = measured("b", false, 10_000.0, None);
+    lossy.losses = 3;
+    assert!(matches!(
+        verdict(&[measured("a", true, 400_000.0, None), lossy]),
+        Verdict::Confirmed(_)
+    ));
+    assert_eq!(verdict(&[measured("a", true, 1.0, None)]), Verdict::Alone);
+}
+
+/// A backend measured system-wide is not cheaper than one measured per
+/// launch: they observed different things.
+#[test]
+fn backends_measured_under_different_settings_are_not_compared() {
+    let mut elsewhere = measured("fs:proc", false, 1_000.0, None);
+    elsewhere.setting = "poll@100ms, system".into();
+    elsewhere.equivalent = true;
+    match verdict(&[measured("fs:cgroup", true, 400_000.0, None), elsewhere]) {
+        Verdict::Confirmed(note) => assert!(note.contains("not compared"), "{note}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ------------------------------------------------------------ resolution
+
+fn pairs(own: i64, tool: &[Option<i64>]) -> Vec<Pair> {
+    tool.iter()
+        .map(|tool| Pair {
+            own_gap_ns: own,
+            tool_gap_ns: *tool,
+        })
+        .collect()
+}
+
+#[test]
+fn a_gap_is_resolved_only_when_every_pair_is_seen_apart_and_close_to_its_own_gap() {
+    let exact = Resolved::from_pairs(1000, &pairs(1000, &[Some(1000); 20]));
+    assert!(exact.resolves(), "{exact:?}");
+
+    let missing = Resolved::from_pairs(1000, &pairs(1000, &[Some(1000), None]));
+    assert!(
+        !missing.resolves(),
+        "a pair not seen is not resolved: {missing:?}"
+    );
+
+    // Two events stamped alike: seen, but not told apart.
+    let merged = Resolved::from_pairs(1000, &pairs(1000, &[Some(0); 20]));
+    assert_eq!(merged.distinguished, 0);
+    assert!(!merged.resolves());
+
+    // Apart, but 900 ns off a 1000 ns gap: the order is right, the distance
+    // is not a measurement of it.
+    let far = Resolved::from_pairs(1000, &pairs(1000, &[Some(1900); 20]));
+    assert!(!far.resolves(), "{far:?}");
+}
+
+#[test]
+fn the_effective_resolution_is_the_smallest_gap_above_which_everything_resolves() {
+    let at = |gap: u64, ok: bool| {
+        Resolved::from_pairs(
+            gap,
+            &pairs(gap as i64, &[Some(if ok { gap as i64 } else { 0 }); 10]),
+        )
+    };
+    let sweep = [
+        at(500, false),
+        at(1000, true),
+        at(2000, true),
+        at(5000, true),
+    ];
+    assert_eq!(effective_resolution(&sweep), Some(1000));
+    // A hole above the smallest success: only what is above the hole counts.
+    let holed = [at(500, true), at(1000, false), at(2000, true)];
+    assert_eq!(effective_resolution(&holed), Some(2000));
+    assert_eq!(effective_resolution(&[at(500, false)]), None);
+}
+
+// ------------------------------------------------------------- workloads
+
+/// The workloads are the ground truth the bench checks the tool against, so
+/// they are checked first against the kernel: a thousand getppid calls report
+/// a thousand operations, and the syscall number is the one the kernel's
+/// header gives.
+#[test]
+fn the_workload_counts_what_it_was_asked_to_do() {
+    let run = run_bare(&Workload::new("syscall", &["syscall", "1000"], 1)).expect("a run");
+    assert_eq!(run.get("ops"), Some(1000));
+    assert_eq!(run.get("syscall_nr"), Some(libc::SYS_getppid as u64));
+    assert!(run.elapsed_ns() > 0);
+
+    let threads = run_bare(&Workload::new("contended", &["contended", "3", "500"], 3)).unwrap();
+    assert_eq!(
+        threads.get("counter"),
+        Some(1500),
+        "a mutex that loses increments"
+    );
+}
+
+/// A cold page cache without root: after `POSIX_FADV_DONTNEED`, the file's
+/// pages are counted by `mincore`, a second account from the kernel, before
+/// the read starts.
+#[test]
+fn the_io_workload_reads_from_a_cold_cache_without_root() {
+    let path = bench_dir().join(format!("cold.{}.dat", std::process::id()));
+    std::fs::create_dir_all(bench_dir()).unwrap();
+    let prepare = std::process::Command::new(workload_binary().unwrap())
+        .args(["io-prepare", &path.to_string_lossy(), "4"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(prepare.success());
+    let run = run_bare(&Workload::new("io", &["io", &path.to_string_lossy()], 1)).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(run.get("bytes"), Some(4 << 20));
+    assert_eq!(
+        run.get("pages"),
+        Some((4 << 20) / run.get("page").unwrap_or(4096))
+    );
+    let resident = run.get("resident_before").unwrap();
+    assert!(
+        resident * 10 <= run.get("pages").unwrap(),
+        "{resident} of {} pages still cached after DONTNEED",
+        run.get("pages").unwrap()
+    );
+}
+
+#[test]
+fn the_evictor_overflows_every_cache_the_kernel_describes() {
+    let largest = llc_bytes().expect("this kernel describes its caches");
+    assert!(Evictor::new().bytes() >= 2 * largest);
+}
+
+// ------------------------------------------------------ the gate, for real
+
+/// The first step of every real measurement: the gate on this machine as it
+/// is now. It prints the table either way; it fails with the refusal when the
+/// machine is too noisy, which is the gate working and the reason no table is
+/// produced from it.
+#[test]
+#[ignore = "measures the machine: run through scripts/bench.sh"]
+fn the_gate_on_this_machine() {
+    prepare_io_file().expect("the io file");
+    let (baselines, throttled) =
+        harness::baselines(&reference_workloads(), MIN_REPETITIONS).expect("the baselines");
+    say(format!(
+        "gate, {} repetitions round-robin, LLC evicted before each run:",
+        MIN_REPETITIONS
+    ));
+    eprint!("{}", gate_table(&baselines));
+    for (workload, count) in &throttled {
+        say(format!(
+            "{count} run(s) of `{workload}` throttled and dropped"
+        ));
+    }
+    if let Err(refusal) = judge(&baselines, &Conditions::read()) {
+        panic!("{refusal}");
+    }
+}
+
+/// Ground truth for the gate: noise the test itself injects. One thread per
+/// cpu alternates random bursts of spinning and sleeping, and one more
+/// streams through 64 MiB, so the pinned workload shares its core and its
+/// cache with a load whose timing nothing can predict. The gate must refuse.
+///
+/// This is also what the other streams building on this machine look like to
+/// it, which is why the real measurement is run alone.
+#[test]
+#[ignore = "measures the machine: run through scripts/bench.sh"]
+fn the_gate_refuses_a_machine_loaded_on_purpose() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let mut hogs = Vec::new();
+    for index in 0..cpus {
+        let stop = Arc::clone(&stop);
+        hogs.push(std::thread::spawn(move || {
+            let mut seed = 0x2545f4914f6cdd1du64 ^ (index as u64 + 1);
+            let mut random = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            while !stop.load(Ordering::Relaxed) {
+                let busy = std::time::Duration::from_micros(1000 + random() % 15_000);
+                let started = std::time::Instant::now();
+                while started.elapsed() < busy {
+                    std::hint::spin_loop();
+                }
+                std::thread::sleep(std::time::Duration::from_micros(1000 + random() % 15_000));
+            }
+        }));
+    }
+    {
+        let stop = Arc::clone(&stop);
+        hogs.push(std::thread::spawn(move || {
+            let mut buffer = vec![0u8; 64 << 20];
+            let mut pass = 0u8;
+            while !stop.load(Ordering::Relaxed) {
+                pass = pass.wrapping_add(1);
+                for line in buffer.chunks_mut(64) {
+                    line[0] = pass;
+                }
+            }
+        }));
+    }
+
+    let workloads: Vec<Workload> = reference_workloads()
+        .into_iter()
+        .filter(|w| w.name == "compute" || w.name == "memory")
+        .collect();
+    let result = harness::baselines(&workloads, MIN_REPETITIONS);
+    stop.store(true, Ordering::Relaxed);
+    for hog in hogs {
+        hog.join().unwrap();
+    }
+    let (baselines, _) = result.expect("the baselines");
+    eprint!("{}", gate_table(&baselines));
+    match judge(&baselines, &performance()) {
+        Err(refusal) => say(format!("refused, as it must:\n{refusal}")),
+        Ok(()) => panic!(
+            "the gate passed a machine loaded on purpose with bursts on all {cpus} cpus:\n{}",
+            gate_table(&baselines)
+        ),
+    }
+}
+
+#[test]
+fn pairs_are_matched_by_absolute_time_and_a_merged_or_lost_event_is_not_a_pair() {
+    // Three pairs 2 ms apart, 5 us gaps. The tool saw the first exactly, the
+    // second as one event, and the third with a stray third event inside.
+    let stamps = [
+        1_000_000, 1_005_000, 3_000_000, 3_005_000, 5_000_000, 5_005_000,
+    ];
+    let tool = [
+        1_000_100, 1_005_100, // pair 0
+        3_000_200, // pair 1: one event
+        5_000_100, 5_002_000, 5_005_100, // pair 2: three events
+        9_000_000, // outside every window
+    ];
+    let matched = match_pairs(&stamps, &tool, 1_000, 1_000_000);
+    assert_eq!(matched.len(), 3);
+    assert_eq!(
+        matched[0],
+        Pair {
+            own_gap_ns: 5_000,
+            tool_gap_ns: Some(5_000)
+        }
+    );
+    assert_eq!(matched[1].tool_gap_ns, None);
+    assert_eq!(matched[2].tool_gap_ns, None);
+}
