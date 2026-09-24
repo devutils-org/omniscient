@@ -174,7 +174,9 @@ impl Collector for CaptureCollector {
         let capture = Capture::open(self.ifindex).map_err(|error| match error.raw_os_error() {
             Some(libc::EPERM) | Some(libc::EACCES) => format!(
                 "a packet capture needs CAP_NET_RAW, which this process does not have \
-                     ({error}); this is a privilege to grant, not a kernel to change"
+                     ({error}); this is a privilege to grant, not a kernel to change: `make \
+                     CAPTURE=1` grants it with the other two, and only when asked, because it \
+                     is the one capability here that can send frames as well as read them"
             ),
             Some(libc::ENODEV) => format!(
                 "interface {} went away before the capture could bind to it",

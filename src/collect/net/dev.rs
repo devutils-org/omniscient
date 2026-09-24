@@ -202,11 +202,15 @@ impl Collector for DevCollector {
         Ok(events)
     }
 
+    /// Reads nothing: the runner closes the window (`DECISIONS.md`, "the
+    /// runner closes the window"). Its last round of `sample` calls lands at
+    /// the moment the stop condition is met, so the last interval is already
+    /// measured; a read here covered the few microseconds since, and put a
+    /// zero-delta point at the previous one's offset into every series. `io`
+    /// and `power` stopped reading here for that reason, and this was the
+    /// one counter source left that did.
     fn stop(&mut self) -> Vec<Event> {
-        // Without a final read the last interval of every run is silently
-        // dropped, so a run systematically under-reports by up to one tick.
-        // A counter source has to close its own window.
-        self.sample(u64::MAX / 2).unwrap_or_default()
+        Vec::new()
     }
 
     fn losses(&self) -> Losses {
@@ -224,16 +228,14 @@ mod tests {
             .expect("a system target is readable")
     }
 
+    /// The runner's last round of reads is the closing read. A read at `stop`
+    /// covered the microseconds since it and put a zero-delta point beside
+    /// the previous one, which is what this test used to require.
     #[test]
-    fn the_last_interval_of_a_run_is_measured_rather_than_dropped() {
+    fn stopping_reads_nothing_because_the_runner_closed_the_window() {
         let mut collector = collector(Counted::Bytes);
         collector.sample(0).unwrap();
-        // Whatever moved between the last tick and the stop still belongs to
-        // the run.
-        assert!(
-            !collector.stop().is_empty(),
-            "stopping must close the window with a final read"
-        );
+        assert!(collector.stop().is_empty());
     }
 
     #[test]

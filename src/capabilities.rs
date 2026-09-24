@@ -1048,7 +1048,7 @@ fn probe_af_packet(requirement: &str) -> Probe {
     let error = std::io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::EPERM) | Some(libc::EACCES) => Probe::Missing(format!(
-            "`{requirement}` needs CAP_NET_RAW, which uid {} does not have; this is a privilege to grant, not a kernel to change",
+            "`{requirement}` needs CAP_NET_RAW, which uid {} does not have; this is a privilege to grant, not a kernel to change -- `make CAPTURE=1` grants it, and only when asked, since it can send frames as well as read them",
             current_uid()
         )),
         Some(libc::EAFNOSUPPORT) => {
