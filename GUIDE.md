@@ -377,6 +377,7 @@ counts what happened while it was attached and nothing outside it.
 |---|---|
 | `attach-late-probe.yml` | Does a kernel probe loaded mid-run see what happened after it and nothing before? |
 | `attach-one-phase.yml` | Does a source attached for one phase of a program count that phase and nothing of the other? |
+| `attach-escalate-phases.yml` | Can a run decide which layer to pay for from its own cheap numbers? A program cpu-bound then lock-bound gets the profile, then the futex waits, one layer at a time. |
 
 ## triage
 

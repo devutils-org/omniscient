@@ -242,6 +242,22 @@ Enforced by `src/triage/objective.rs` and its tests, not by this file.
 
 ---
 
+## Settled in the eleventh wave: how a run escalates
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What an escalation may attach | **Only a request the session declared**, held with a window `on <layer>`, validated, resolved and prepared before the launch. The run decides *when*, never *what*. | An escalation can then never reach a backend the resolver did not choose, or a source answering a question nobody asked -- ruled out by construction rather than by a check. |
+| Who decides | **The runner asks a trait between rounds** (`collect::Escalate`: decide, shed, close), after the round's reads, and applies detaches before attaches; `src/triage/` answers. | The collector layer stays ignorant of triage, the way it is of the catalog behind `Cheaper`; and detaching first means a run never pays for two detailed layers at once. |
+| The surface | **A session's `escalate:` block**, not a subcommand. | The session is the record of what was asked, and `-o`, `--budget`, `cost.json` and the resolved file come with `omn -f` for free. |
+| When a layer is escalated to | **The same state of the main thread named in two readings in a row** (200 ms each), a state being named at more than half of a reading and more than any other. | A reading that straddles a phase change must not attach a layer for the phase that just ended. |
+| One window per request | **A layer let go is not attached again.** | A collection has one window; a request that comes and goes is the flight recorder's, which is next. |
+
+`docs/triage.md`, "The escalation", has the measurements: a program cpu-bound
+then lock-bound gets the lock layer 0.4 to 0.5 s after the switch, and its
+waits land within what the program timed itself.
+
+---
+
 ## Open
 
 Nothing is open. The last line, dynamic binary instrumentation, was settled in

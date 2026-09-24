@@ -1575,7 +1575,6 @@ fn a_probe_attached_mid_run_sees_the_second_phase_and_nothing_of_the_first() {
 /// wakeups the run stopped watching is exactly the silent degradation this
 /// scenario exists to catch.
 #[test]
-#[ignore = "waits on join::Correlation::outside_window (docs/open-findings.md, Stream H)"]
 fn a_join_across_a_detached_source_does_not_count_what_fell_after_it_as_a_loss() {
     const FIRST: u64 = 40;
     const SECOND: u64 = 25;
