@@ -367,6 +367,31 @@ injected where the test chose them, and each landing in its own row.
 | `vertical-one-request.yml` | Where did one request's latency go, boundary by boundary, against injected delays? |
 | `vertical-abandoned.yml` | Is a request the server never ended counted and named, or dropped? |
 
+## attach
+
+`ROADMAP.md` phase 6, task 4: a request whose window is its own, attached and
+detached inside a run that keeps going. Each session checks that a source
+counts what happened while it was attached and nothing outside it.
+
+| Session | The question it answers |
+|---|---|
+| `attach-late-probe.yml` | Does a kernel probe loaded mid-run see what happened after it and nothing before? |
+| `attach-one-phase.yml` | Does a source attached for one phase of a program count that phase and nothing of the other? |
+
+## triage
+
+`ROADMAP.md` phase 10: the layer above the engine, which asks it a question
+for an objective and names what dominates. Each is the session `omn latency`
+or `omn saturate` runs, against a workload whose limit the test chose.
+
+| Session | The question it answers |
+|---|---|
+| `triage-latency-cpu.yml` | Why is a cpu-bound program slow? The session `omn latency` asks through: on-cpu dominates, and the hottest function is named. |
+| `triage-latency-io.yml` | Why is a program making synchronous writes slow? Its blocked time is uninterruptible, from fdatasync: the disk. |
+| `triage-latency-lock.yml` | Why is a thread taking a contended mutex slow? Its sleep is covered by pthread_mutex_lock waits, and the mutex is named. |
+| `triage-latency-tail.yml` | What makes the slowest of five runs slow, when the median is cpu-bound? The one run's 200 ms sleep. |
+| `triage-saturate-queue.yml` | What do four threads on one cpu queue for? The cpu, three deep, by Little's law over `sched.runqlat`. |
+
 ## join
 
 The eighth wave's join engine, each session showing one thing it can say that it
