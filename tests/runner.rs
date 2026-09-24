@@ -432,6 +432,7 @@ fn resolved(
         stack: None,
         backend: None,
         label: None,
+        window: None,
     };
     omn::resolve::resolve(&catalog, &capabilities, &request).expect("the request resolves here")
 }
@@ -863,4 +864,868 @@ fn the_reap_carries_the_cpu_the_last_poll_missed() {
         exact / 1e6,
         polled / 1e6
     );
+}
+
+// ---------------------------------------------------------------------------
+// Hot attach: a request whose window is its own and inside the run's.
+//
+// Every scenario below runs one program with two phases whose boundaries the
+// program itself reports, and asks sources attached for part of it what they
+// saw. `docs/scenarios/attach.md` is what these measured.
+// ---------------------------------------------------------------------------
+
+/// The two-phase program, assembled: `nasm -f bin` of the source below, 772
+/// bytes with no loader, no libc and one thread.
+///
+/// ```nasm
+/// ; A single-threaded program in two phases, with nothing else in it.
+/// bits 64
+/// org 0x400000
+///
+/// ehdr:
+///   db 0x7f, "ELF", 2, 1, 1, 0
+///   times 8 db 0
+///   dw 2                ; ET_EXEC
+///   dw 0x3e             ; x86-64
+///   dd 1
+///   dq _start
+///   dq phdr - $$
+///   dq 0
+///   dd 0
+///   dw 64, 56, 1, 0, 0, 0
+/// phdr:
+///   dd 1                ; PT_LOAD
+///   dd 7                ; read, write, execute
+///   dq 0
+///   dq $$, $$
+///   dq filesize, filesize + 4096
+///   dq 0x1000
+///
+/// ; offset 120: the parameters, patched by the test
+/// turns1:     dq 0
+/// sleeps1:    dq 0
+/// pause:      dq 0, 0   ; seconds, nanoseconds
+/// turns2:     dq 0
+/// sleeps2:    dq 0
+/// ; offset 168: the report's path, NUL-terminated
+/// path:       times 256 db 0
+/// ten_ms:     dq 0, 10000000
+/// ; offset 440: what the program reports: tid, then four CLOCK_MONOTONIC stamps
+/// report:     dq 0
+/// stamps:     times 8 dq 0
+///
+/// %macro stamp 1
+///   mov eax, 228
+///   mov edi, 1
+///   lea rsi, [rel stamps + %1 * 16]
+///   syscall
+/// %endmacro
+///
+/// %macro phase 2
+///   mov rcx, [rel %1]
+///   test rcx, rcx
+///   jz %%sleeps
+/// %%turn:
+///   dec rcx
+///   jnz %%turn
+/// %%sleeps:
+///   mov rbx, [rel %2]
+///   test rbx, rbx
+///   jz %%done
+/// %%sleep:
+///   mov eax, 35
+///   lea rdi, [rel ten_ms]
+///   xor esi, esi
+///   syscall
+///   dec rbx
+///   jnz %%sleep
+/// %%done:
+/// %endmacro
+///
+/// _start:
+///   mov eax, 186        ; gettid
+///   syscall
+///   mov [rel report], rax
+///   stamp 0
+///   phase turns1, sleeps1
+///   stamp 1
+///   mov eax, 35
+///   lea rdi, [rel pause]
+///   xor esi, esi
+///   syscall
+///   stamp 2
+///   phase turns2, sleeps2
+///   stamp 3
+///   mov eax, 2          ; open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+///   lea rdi, [rel path]
+///   mov esi, 0x241
+///   mov edx, 0o644
+///   syscall
+///   mov edi, eax
+///   mov eax, 1          ; write(fd, report, 72)
+///   lea rsi, [rel report]
+///   mov edx, 72
+///   syscall
+///   mov eax, 60         ; exit(0)
+///   xor edi, edi
+///   syscall
+///
+/// filesize equ $ - $$
+/// ```
+const PHASES_ELF: [u8; 772] = [
+    0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x3e, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x38, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x80, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xb8, 0xba, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x89, 0x05, 0xaa, 0xff, 0xff, 0xff, 0xb8, 0xe4,
+    0x00, 0x00, 0x00, 0xbf, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x35, 0xa1, 0xff, 0xff, 0xff, 0x0f,
+    0x05, 0x48, 0x8b, 0x0d, 0x50, 0xfe, 0xff, 0xff, 0x48, 0x85, 0xc9, 0x74, 0x05, 0x48, 0xff, 0xc9,
+    0x75, 0xfb, 0x48, 0x8b, 0x1d, 0x47, 0xfe, 0xff, 0xff, 0x48, 0x85, 0xdb, 0x74, 0x15, 0xb8, 0x23,
+    0x00, 0x00, 0x00, 0x48, 0x8d, 0x3d, 0x5e, 0xff, 0xff, 0xff, 0x31, 0xf6, 0x0f, 0x05, 0x48, 0xff,
+    0xcb, 0x75, 0xeb, 0xb8, 0xe4, 0x00, 0x00, 0x00, 0xbf, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x35,
+    0x6c, 0xff, 0xff, 0xff, 0x0f, 0x05, 0xb8, 0x23, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x3d, 0x16, 0xfe,
+    0xff, 0xff, 0x31, 0xf6, 0x0f, 0x05, 0xb8, 0xe4, 0x00, 0x00, 0x00, 0xbf, 0x01, 0x00, 0x00, 0x00,
+    0x48, 0x8d, 0x35, 0x59, 0xff, 0xff, 0xff, 0x0f, 0x05, 0x48, 0x8b, 0x0d, 0x08, 0xfe, 0xff, 0xff,
+    0x48, 0x85, 0xc9, 0x74, 0x05, 0x48, 0xff, 0xc9, 0x75, 0xfb, 0x48, 0x8b, 0x1d, 0xff, 0xfd, 0xff,
+    0xff, 0x48, 0x85, 0xdb, 0x74, 0x15, 0xb8, 0x23, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x3d, 0xf6, 0xfe,
+    0xff, 0xff, 0x31, 0xf6, 0x0f, 0x05, 0x48, 0xff, 0xcb, 0x75, 0xeb, 0xb8, 0xe4, 0x00, 0x00, 0x00,
+    0xbf, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x35, 0x24, 0xff, 0xff, 0xff, 0x0f, 0x05, 0xb8, 0x02,
+    0x00, 0x00, 0x00, 0x48, 0x8d, 0x3d, 0xce, 0xfd, 0xff, 0xff, 0xbe, 0x41, 0x02, 0x00, 0x00, 0xba,
+    0xa4, 0x01, 0x00, 0x00, 0x0f, 0x05, 0x89, 0xc7, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x35,
+    0xc4, 0xfe, 0xff, 0xff, 0xba, 0x48, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xb8, 0x3c, 0x00, 0x00, 0x00,
+    0x31, 0xff, 0x0f, 0x05,
+];
+
+/// Where the parameters are in [`PHASES_ELF`]: first-phase turns and sleeps,
+/// the pause as a timespec, second-phase turns and sleeps.
+const PHASES_PARAMETERS: usize = 120;
+/// Where the report's path goes, NUL-terminated, in 256 bytes.
+const PHASES_PATH: usize = 168;
+
+/// The shape of a two-phase run: a first phase of `turns` turns of a loop that
+/// retires exactly two instructions each and then `sleeps` sleeps of 10 ms, a
+/// pause, and a second phase of the same shape.
+#[derive(Debug, Clone, Copy)]
+struct Shape {
+    first_turns: u64,
+    first_sleeps: u64,
+    pause_ms: u64,
+    second_turns: u64,
+    second_sleeps: u64,
+}
+
+/// Writes the two-phase program with `shape` patched in, and returns the path
+/// to launch and the path it will report to.
+///
+/// The program is written rather than found because it is the ground truth:
+/// its user-mode instruction count is twice its turns and a few dozen more,
+/// which `perf stat -e instructions:u` put at 600,000,158 for 300 million
+/// turns, and it has one thread, so a counter opened on it at any moment
+/// follows all of it.
+fn phases_program(shape: Shape, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let program = scratch(&format!("{name}.elf"));
+    let report = scratch(&format!("{name}.report"));
+    let _ = std::fs::remove_file(&report);
+    let mut image = PHASES_ELF;
+    let parameters = [
+        shape.first_turns,
+        shape.first_sleeps,
+        shape.pause_ms / 1000,
+        shape.pause_ms % 1000 * 1_000_000,
+        shape.second_turns,
+        shape.second_sleeps,
+    ];
+    for (index, value) in parameters.into_iter().enumerate() {
+        let at = PHASES_PARAMETERS + 8 * index;
+        image[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let path = report.as_os_str().as_encoded_bytes();
+    assert!(
+        path.len() < 256,
+        "the report path fits the program's buffer"
+    );
+    image[PHASES_PATH..PHASES_PATH + path.len()].copy_from_slice(path);
+    std::fs::write(&program, image).expect("the program is written");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("the program is made executable");
+    (program, report)
+}
+
+/// What the workload said about itself: the thread that did the work, and
+/// when each phase began and ended on `CLOCK_MONOTONIC`.
+#[derive(Debug)]
+struct Phases {
+    tid: u64,
+    started_ns: u64,
+    first_ended_ns: u64,
+    second_started_ns: u64,
+    ended_ns: u64,
+}
+
+impl Phases {
+    /// The report both workloads write: the tid, then four timespecs.
+    fn read(report: &std::path::Path) -> Phases {
+        let bytes = std::fs::read(report).expect("the workload wrote its report");
+        let word = |index: usize| {
+            u64::from_le_bytes(bytes[8 * index..8 * index + 8].try_into().expect("8 bytes"))
+        };
+        let stamp = |index: usize| word(1 + 2 * index) * 1_000_000_000 + word(2 + 2 * index);
+        Phases {
+            tid: word(0),
+            started_ns: stamp(0),
+            first_ended_ns: stamp(1),
+            second_started_ns: stamp(2),
+            ended_ns: stamp(3),
+        }
+    }
+}
+
+/// A resolved request with a window, on the launched workload.
+fn windowed(
+    source: &str,
+    argv: &[String],
+    mode: Mode,
+    window: Option<&str>,
+    label: &str,
+) -> omn::resolve::ResolvedRequest {
+    let mut resolved = resolved(source, Target::Launch(argv.to_vec()), mode, None);
+    resolved.request.window = window.map(|text| text.parse().expect("a window"));
+    resolved.request.label = Some(label.to_owned());
+    resolved
+}
+
+/// The count a `count` collection ended on.
+fn instructions_in(collection: &Collection) -> f64 {
+    collection
+        .events
+        .iter()
+        .filter_map(|event| event.attr(&collection.value_attr))
+        .filter_map(|value| value.to_string().parse::<f64>().ok())
+        .next_back()
+        .unwrap_or(0.0)
+}
+
+/// Four instruction counters over one two-phase program, in one run: one per
+/// phase, one for the pause between them, one for the whole.
+fn count_the_phases(
+    argv: &[String],
+    windows: [Option<&str>; 4],
+) -> Result<Vec<Collection>, omn::collect::CollectError> {
+    let requests: Vec<_> = ["first", "pause", "second", "whole"]
+        .into_iter()
+        .zip(windows)
+        .map(|(label, window)| windowed("cpu.instructions", argv, Mode::Count, window, label))
+        .collect();
+    collect::run_all(&requests)
+}
+
+/// A source attached for the first phase counts the first phase and nothing
+/// of the second; one attached for the second counts the second; one attached
+/// for the pause counts nothing; and one attached for the whole run counts the
+/// whole.
+///
+/// Ground truth is the loop: a thousand million instructions in the first
+/// phase and two thousand million in the second, by construction, with two
+/// seconds of sleep between them. The windows cut the run at 1.2 s and 1.8 s,
+/// inside the pause, and the program's own report is what says the cuts landed
+/// there: on a machine loaded enough to push a phase across a cut, the
+/// scenario stops and prints the times rather than failing on the scheduler.
+///
+/// The three windows tile the run, so their sum has to be the whole run's
+/// count -- which is the check that a window neither loses what falls at its
+/// edge nor counts it twice.
+#[test]
+fn a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other() {
+    const FIRST: f64 = 1_000_000_000.0;
+    const SECOND: f64 = 2_000_000_000.0;
+    // The program retires 158 user-mode instructions besides its loops, by
+    // `perf stat -e instructions:u`. The counter counts kernel mode as well
+    // where the machine lets it -- the timer ticks that land inside the loop,
+    // +0.17 % when this was written -- so the loop is the floor and the
+    // ceiling is half the one per cent `cpu.instructions` claims.
+    const WITHIN: f64 = 0.005;
+    // Two windows that meet inside the pause share an edge where the program
+    // is asleep: what the tiling may lose or double there is next to nothing.
+    const EDGE: f64 = 10_000.0;
+    let (program, report) = phases_program(
+        Shape {
+            first_turns: 500_000_000,
+            first_sleeps: 0,
+            pause_ms: 2000,
+            second_turns: 1_000_000_000,
+            second_sleeps: 0,
+        },
+        "phases-counted",
+    );
+    let argv = vec![program.display().to_string()];
+    let collections = match count_the_phases(
+        &argv,
+        [
+            Some("..1200ms"),
+            Some("1200ms..1800ms"),
+            Some("1800ms.."),
+            None,
+        ],
+    ) {
+        Ok(collections) => collections,
+        Err(error) if machine_cannot_serve(&error.to_string()) => {
+            eprintln!("skipped: this machine will not count instructions here: {error}");
+            return;
+        }
+        Err(error) => panic!("the run failed: {error}"),
+    };
+    let phases = Phases::read(&report);
+    let _ = std::fs::remove_file(&report);
+    let _ = std::fs::remove_file(&program);
+
+    let [first, pause, second, whole] = &collections[..] else {
+        panic!("four collections");
+    };
+    let at = |ns: u64| ns.saturating_sub(whole.window.run_opened_ns) as f64 / 1e6;
+    eprintln!(
+        "the program ran its first phase from {:.1} to {:.1} ms and its second from {:.1} to \
+         {:.1} ms; the windows were {:.1}..{:.1}, {:.1}..{:.1} and {:.1}..{:.1} ms",
+        at(phases.started_ns),
+        at(phases.first_ended_ns),
+        at(phases.second_started_ns),
+        at(phases.ended_ns),
+        at(first.window.opened_ns),
+        at(first.window.closed_ns),
+        at(pause.window.opened_ns),
+        at(pause.window.closed_ns),
+        at(second.window.opened_ns),
+        at(second.window.closed_ns),
+    );
+    if phases.first_ended_ns >= first.window.closed_ns
+        || phases.second_started_ns <= second.window.opened_ns
+    {
+        eprintln!(
+            "skipped: the machine pushed a phase across a window's edge (first phase ended at \
+             {:.1} ms, first window closed at {:.1} ms; second phase started at {:.1} ms, \
+             second window opened at {:.1} ms), so the separation cannot be checked here",
+            at(phases.first_ended_ns),
+            at(first.window.closed_ns),
+            at(phases.second_started_ns),
+            at(second.window.opened_ns),
+        );
+        return;
+    }
+    let shared: Vec<&String> = collections
+        .iter()
+        .flat_map(|collection| collection.notes.iter())
+        .filter(|note| note.contains("shared the hardware"))
+        .collect();
+    if !shared.is_empty() {
+        eprintln!(
+            "skipped: the counters were time-shared with somebody else's, so each value is an \
+             extrapolation that cannot be checked against a known count: {shared:?}"
+        );
+        return;
+    }
+
+    let [first_n, pause_n, second_n, whole_n] = [first, pause, second, whole].map(instructions_in);
+    eprintln!(
+        "counted {first_n:.0} in the first window, {pause_n:.0} in the pause, {second_n:.0} in \
+         the second, {whole_n:.0} over the whole run"
+    );
+    let near =
+        |counted: f64, expected: f64| (expected..expected * (1.0 + WITHIN)).contains(&counted);
+    assert!(
+        near(first_n, FIRST),
+        "the first phase retires {FIRST:.0} and its window counted {first_n:.0}"
+    );
+    assert!(
+        near(second_n, SECOND),
+        "the second phase retires {SECOND:.0} and its window counted {second_n:.0}: half as \
+         much again would be the first phase counted in it"
+    );
+    assert!(
+        pause_n < EDGE,
+        "the program only sleeps in the pause, and its window counted {pause_n:.0}"
+    );
+    assert!(
+        near(whole_n, FIRST + SECOND),
+        "the whole run retires {:.0} and was counted at {whole_n:.0}",
+        FIRST + SECOND
+    );
+    let tiled = first_n + pause_n + second_n;
+    assert!(
+        (tiled - whole_n).abs() < EDGE,
+        "three windows that tile the run count {tiled:.0} between them and the whole run \
+         counted {whole_n:.0}"
+    );
+
+    // And each collection states its own window: the span it reports is its
+    // own, and shorter than the run it sits in.
+    for collection in [first, pause, second] {
+        assert!(collection.window.attached);
+        assert_eq!(collection.observed_ns, collection.window.span_ns());
+        assert!(collection.observed_ns < whole.observed_ns);
+    }
+    assert!(
+        (550_000_000..900_000_000).contains(&pause.observed_ns),
+        "the pause window asked for 600 ms and watched {} ns",
+        pause.observed_ns
+    );
+    assert!(second.window.attach_ns.is_some() && first.window.attach_ns.is_none());
+    assert!(
+        second
+            .notes
+            .iter()
+            .any(|note| note.contains("attaching") && note.contains("into the run")),
+        "{:?}",
+        second.notes
+    );
+}
+
+/// The variable that turns this test binary into a two-phase workload with
+/// more than one thread: libtest runs the one test it is asked for on a thread
+/// of its own, beside the main thread that waits for it.
+const PHASES_VAR: &str = "OMN_ATTACH_PHASES";
+/// Where that workload writes its report, in the program's format.
+const REPORT_VAR: &str = "OMN_ATTACH_REPORT";
+
+/// The threaded workload, when this binary is launched as one; nothing
+/// otherwise. `turns:pause_ms:turns`, and the same report as the program.
+#[test]
+fn workload_runs_only_when_this_binary_was_launched_as_a_workload() {
+    let Ok(spec) = std::env::var(PHASES_VAR) else {
+        return;
+    };
+    let numbers: Vec<u64> = spec
+        .split(':')
+        .map(|number| number.parse().expect("a workload is three numbers"))
+        .collect();
+    let [first_turns, pause_ms, second_turns] = numbers[..] else {
+        panic!("a workload is `turns:pause_ms:turns`, not `{spec}`");
+    };
+    let now = || {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a timespec this frame owns.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        [ts.tv_sec as u64, ts.tv_nsec as u64]
+    };
+    // SAFETY: gettid takes nothing and cannot fail.
+    let mut report = vec![unsafe { libc::gettid() } as u64];
+    report.extend(now());
+    retire(first_turns);
+    report.extend(now());
+    std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+    report.extend(now());
+    retire(second_turns);
+    report.extend(now());
+    let bytes: Vec<u8> = report.iter().flat_map(|word| word.to_le_bytes()).collect();
+    std::fs::write(std::env::var(REPORT_VAR).expect("a report path"), bytes)
+        .expect("the report is written");
+}
+
+/// The program's loop, in this binary: `turns` turns of two instructions.
+fn retire(turns: u64) {
+    if turns == 0 {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: the loop decrements a register it owns and branches on the flag
+    // that decrement sets.
+    unsafe {
+        std::arch::asm!(
+            "2:",
+            "dec {n}",
+            "jnz 2b",
+            n = inout(reg) turns => _,
+            options(nostack),
+        );
+    }
+}
+
+/// A counter attached late to a program that already runs a second thread
+/// either counts that thread or says it could not.
+///
+/// The workload is this test binary, which does its two phases on the thread
+/// libtest runs the test on -- a thread that exists before the late counter
+/// is opened. A per-task counter follows a process by inheritance, from its
+/// open: attached at the gate it follows every thread the program will start,
+/// and attached late it follows the main thread, which only waits. The second
+/// phase retires two thousand million instructions on the other one.
+///
+/// Measured before this was fixed: 106,206 instructions for the second window,
+/// against 2,000,000,000 retired in it. A number that looks like a quiet phase
+/// is the one thing this must not produce, so the scenario accepts two
+/// answers and nothing else: the count, or a window that was not attached and
+/// says why. It waits on the counter collector declaring what it follows
+/// (`Prepared::follows_only_later_threads`, filed in `docs/open-findings.md`
+/// under Stream H); the runner already acts on the declaration.
+#[test]
+#[ignore = "waits on src/collect/cpu/counters.rs declaring Prepared::follows_only_later_threads \
+            (docs/open-findings.md, Stream H)"]
+fn a_counter_attached_late_counts_the_threads_already_running_or_says_it_cannot() {
+    const SECOND: f64 = 2_000_000_000.0;
+    let report = scratch("phases-threaded.report");
+    let exe = std::env::current_exe().expect("this test binary has a path");
+    let argv = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "{PHASES_VAR}=500000000:2000:1000000000 {REPORT_VAR}=\"$2\" exec \"$1\" --exact \
+             --test-threads 1 workload_runs_only_when_this_binary_was_launched_as_a_workload \
+             >/dev/null 2>&1"
+        ),
+        "sh".to_owned(),
+        exe.to_string_lossy().into_owned(),
+        report.display().to_string(),
+    ];
+    let collections = match count_the_phases(
+        &argv,
+        [
+            Some("..1200ms"),
+            Some("1200ms..1800ms"),
+            Some("1800ms.."),
+            None,
+        ],
+    ) {
+        Ok(collections) => collections,
+        Err(error) if machine_cannot_serve(&error.to_string()) => {
+            eprintln!("skipped: this machine will not count instructions here: {error}");
+            return;
+        }
+        Err(error) => panic!("the run failed: {error}"),
+    };
+    let _ = std::fs::remove_file(&report);
+    let second = &collections[2];
+    let counted = instructions_in(second);
+    eprintln!(
+        "the late window counted {counted:.0} of the {SECOND:.0} the second phase retired; \
+         attached: {}, losses: {:?}",
+        second.window.attached, second.losses
+    );
+    if second.window.attached {
+        assert!(
+            counted >= SECOND,
+            "a late counter counted {counted:.0} of {SECOND:.0} and said nothing about the \
+             thread it could not see"
+        );
+    } else {
+        assert!(
+            second
+                .losses
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("threads")),
+            "a window that was not attached says why: {:?}",
+            second.losses
+        );
+    }
+}
+
+/// The same separation on the eBPF path, through the binary: a probe loaded
+/// into the kernel mid-run, while the program runs.
+///
+/// Ground truth is the program's own sleeps: forty of them in the first phase
+/// and twenty-five in the second, a timer wakeup each, around a 1.5 s pause
+/// whose own wakeup lands in the second window. The late window opens at 1 s,
+/// inside the pause, so it must see the pause's wakeup and the twenty-five and
+/// nothing of the forty; the whole run sees all sixty-six.
+#[test]
+fn a_probe_attached_mid_run_sees_the_second_phase_and_nothing_of_the_first() {
+    const FIRST: usize = 40;
+    const SECOND: usize = 25;
+    let (program, report) = phases_program(
+        Shape {
+            first_turns: 0,
+            first_sleeps: FIRST as u64,
+            pause_ms: 1500,
+            second_turns: 0,
+            second_sleeps: SECOND as u64,
+        },
+        "phases-woken",
+    );
+    let output = run_session(&format!(
+        "format: json\nrequests:\n  \
+         - label: late\n    source: sched.wakeup\n    target: &program {{launch: [{:?}]}}\n    \
+         mode: trace\n    emit: [raw]\n    keys: [task]\n    window: 1s..\n  \
+         - label: whole\n    source: sched.wakeup\n    target: *program\n    \
+         mode: trace\n    emit: [raw]\n    keys: [task]\n",
+        program.display().to_string()
+    ));
+    let message = stderr(&output);
+    let _ = std::fs::remove_file(&program);
+    if !output.status.success() && machine_cannot_serve(&message) {
+        eprintln!(
+            "skipped: `sched.wakeup` needs CAP_BPF on target/debug/omn (`make` grants it): \
+             {message}"
+        );
+        return;
+    }
+    assert!(output.status.success(), "{message}");
+    let phases = Phases::read(&report);
+    let _ = std::fs::remove_file(&report);
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+
+    let woken = |label: &str| -> Vec<u64> {
+        results_labelled(&document, label)["outputs"][0]["events"]
+            .as_array()
+            .expect("raw events")
+            .iter()
+            .filter(|event| {
+                event["attrs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|attr| attr["name"] == "wakee_tid" && attr["value"] == phases.tid)
+            })
+            .filter_map(|event| event["ts_ns"].as_u64())
+            .collect()
+    };
+    let (late, whole) = (woken("late"), woken("whole"));
+    let in_first_phase = |ts: &&u64| **ts <= phases.first_ended_ns;
+    eprintln!(
+        "the program was woken {} times over the run and {} times in the late window, {} of \
+         those in the first phase; the first phase took {} ms and the pause {} ms",
+        whole.len(),
+        late.len(),
+        late.iter().filter(in_first_phase).count(),
+        (phases.first_ended_ns - phases.started_ns) / 1_000_000,
+        (phases.second_started_ns - phases.first_ended_ns) / 1_000_000,
+    );
+    if phases.first_ended_ns - phases.started_ns > 900_000_000 {
+        eprintln!(
+            "skipped: forty 10 ms sleeps took more than 900 ms, so the first phase may reach \
+             the late window's start and the separation cannot be checked here"
+        );
+        return;
+    }
+    assert_eq!(
+        late.iter().filter(in_first_phase).count(),
+        0,
+        "a probe attached at 1 s saw a wakeup of the first phase, which had ended"
+    );
+    // Every wakeup of a program that only sleeps is one of its sleeps ending:
+    // the pause's and the twenty-five in the window, all sixty-six over the
+    // program's life. The whole run has one more before the program's first
+    // instruction, and it is the launch gate releasing the child to `exec`.
+    assert_eq!(late.len(), SECOND + 1, "the late window's wakeups");
+    let in_its_life = whole.iter().filter(|ts| **ts >= phases.started_ns).count();
+    assert_eq!(in_its_life, FIRST + SECOND + 1, "the whole run's wakeups");
+    assert!(
+        whole.len() - in_its_life <= 1,
+        "before the program ran, only the gate wakes it: {} wakeups",
+        whole.len() - in_its_life
+    );
+    let observed = |label: &str| {
+        results_labelled(&document, label)["observed_ns"]
+            .as_u64()
+            .expect("observed_ns")
+    };
+    assert!(
+        observed("whole") - observed("late") >= 950_000_000,
+        "a source attached a second in watched {} ns of a {} ns run",
+        observed("late"),
+        observed("whole")
+    );
+}
+
+/// A join across a source detached mid-run does not count what fell after the
+/// detach as a loss.
+///
+/// Ground truth is the same program: forty sleeps before the pause and
+/// twenty-five after it, each a block the scheduler records and a wakeup that
+/// ends it. `sched.wakeup` is detached at 1 s, inside the pause; the switches
+/// are traced for the whole run. The twenty-five blocks after the detach have
+/// a wakeup the run did not watch for, which is not the same as a wakeup that
+/// did not happen, and the join has to say which it is.
+///
+/// Waits on `src/join.rs`: `Correlation::outside_window`, filed in
+/// `docs/open-findings.md` under Stream H with the signature. Measured before
+/// it lands, the join is worse than lossy: it reports 67 matched and none
+/// unmatched, because the last wakeup it saw before the detach stays open and
+/// every block after the detach is credited to it -- `task:0 (idle) -> task`,
+/// 63 matches, still open at the end. A stale state standing in for the
+/// wakeups the run stopped watching is exactly the silent degradation this
+/// scenario exists to catch.
+#[test]
+#[ignore = "waits on join::Correlation::outside_window (docs/open-findings.md, Stream H)"]
+fn a_join_across_a_detached_source_does_not_count_what_fell_after_it_as_a_loss() {
+    const FIRST: u64 = 40;
+    const SECOND: u64 = 25;
+    let (program, report) = phases_program(
+        Shape {
+            first_turns: 0,
+            first_sleeps: FIRST,
+            pause_ms: 1500,
+            second_turns: 0,
+            second_sleeps: SECOND,
+        },
+        "phases-joined",
+    );
+    let output = run_session(&format!(
+        "format: json\nrequests:\n  \
+         - label: wakeups\n    source: sched.wakeup\n    target: &program {{launch: [{:?}]}}\n    \
+         mode: trace\n    emit: [summary]\n    keys: [task]\n    window: ..1s\n  \
+         - label: switches\n    source: sched.switches\n    target: *program\n    \
+         mode: trace\n    emit: [summary]\n    keys: [task]\n\
+         joins:\n  \
+         - id: released-by\n    from: sched.wakeup\n    to: sched.switches\n    via: task\n    \
+         match: wakeup\n    waker: waker_tid\n    window: 10s\n",
+        program.display().to_string()
+    ));
+    let message = stderr(&output);
+    let _ = std::fs::remove_file(&program);
+    let _ = std::fs::remove_file(&report);
+    if !output.status.success() && machine_cannot_serve(&message) {
+        eprintln!("skipped: the join's sources cannot be served here: {message}");
+        return;
+    }
+    assert!(output.status.success(), "{message}");
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let join = &document["joins"][0];
+    eprintln!("{join}");
+    let outside = join["outside_window"]
+        .as_u64()
+        .expect("the join says how much fell outside a source's window");
+    assert!(
+        outside >= SECOND,
+        "the {SECOND} blocks after the detach fell outside `sched.wakeup`'s window: {join}"
+    );
+    // Neither credited to a wakeup from before the detach, nor counted as
+    // having followed none: the first phase's blocks, the gate's and the
+    // program's start are all that is left to match.
+    let matched = join["matched"].as_u64().unwrap_or(u64::MAX);
+    let unmatched = join["unmatched"].as_u64().unwrap_or(u64::MAX);
+    assert!(
+        matched <= FIRST + 3 && unmatched < SECOND,
+        "what fell after the detach is neither matched nor unmatched: {join}"
+    );
+}
+
+/// A source given to the program at exec cannot be attached late, nor
+/// detached early, and says so by name before anything runs.
+///
+/// Before anything runs is checked, not assumed: the program would create a
+/// file as its first act, and the file must not exist afterwards.
+#[test]
+fn a_preload_source_given_a_window_is_refused_by_name_before_the_run() {
+    for window in ["500ms..", "..500ms"] {
+        let marker = scratch(&format!("preload-refused-{}", window.replace('.', "")));
+        let _ = std::fs::remove_file(&marker);
+        let output = run_session(&format!(
+            "format: json\nrequests:\n  \
+             - label: heap\n    source: mem.heap.alloc\n    \
+             target: {{launch: [/bin/sh, -c, \"touch {}; sleep 1\"]}}\n    \
+             mode: trace\n    emit: [summary]\n    window: \"{window}\"\n",
+            marker.display()
+        ));
+        let message = stderr(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_NOT_IMPLEMENTED),
+            "a backend that attaches to a running process is in the catalog and not in this \
+             build, so this is the build's gap: {message}"
+        );
+        assert!(
+            message.contains("mem.heap.alloc")
+                && message.contains(window)
+                && message.contains("at exec"),
+            "the refusal names the source, the window and why: {message}"
+        );
+        assert!(
+            !marker.exists(),
+            "the program ran although the session was refused"
+        );
+    }
+}
+
+/// A window the run cannot hold, or a mode cannot mean, is refused as a
+/// request that cannot mean anything.
+#[test]
+fn a_window_the_run_cannot_hold_is_refused_with_the_reason() {
+    let refused = |window: &str, mode: &str| {
+        let output = run_session(&format!(
+            "format: json\nduration: 1s\nrequests:\n  \
+             - source: mem.rss\n    target: {{pid: [1]}}\n    mode: {mode}\n    \
+             emit: [summary]\n    window: {window}\n"
+        ));
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_REJECTED),
+            "{}",
+            stderr(&output)
+        );
+        stderr(&output)
+    };
+    assert!(refused("500ms..2s", "poll@50ms").contains("at most 1s"));
+    assert!(refused("100ms..200ms", "snapshot").contains("single read"));
+    assert!(refused("800ms..200ms", "poll@50ms").contains("closes before it opens"));
+}
+
+/// A session with windows dumps to a session that reads back as itself: the
+/// window is part of the request, and the file and the CLI build the same one.
+#[test]
+fn a_session_with_windows_dumps_unchanged() {
+    let session = "name: two phases\nformat: json\nduration: 3s\nrequests:\n  \
+                   - label: first\n    source: mem.rss\n    target: {pid: [1]}\n    \
+                   mode: poll@50ms\n    emit: [summary]\n    window: ..1s\n  \
+                   - label: second\n    source: mem.rss\n    target: {pid: [1]}\n    \
+                   mode: poll@50ms\n    emit: [summary]\n    window: 1500ms..\n";
+    let path = scratch("windows.yml");
+    std::fs::write(&path, session).expect("the session is written");
+    let once = run(&[
+        "-f",
+        path.to_str().unwrap(),
+        "--dump-request",
+        "--no-resolve",
+    ]);
+    assert!(once.status.success(), "{}", stderr(&once));
+    let dumped = String::from_utf8_lossy(&once.stdout).into_owned();
+    assert!(
+        dumped.contains("..1s") && dumped.contains("1500ms.."),
+        "the windows are in the dump: {dumped}"
+    );
+    let again_path = scratch("windows-dumped.yml");
+    std::fs::write(&again_path, &dumped).expect("the dump is written");
+    let twice = run(&[
+        "-f",
+        again_path.to_str().unwrap(),
+        "--dump-request",
+        "--no-resolve",
+    ]);
+    assert!(twice.status.success(), "{}", stderr(&twice));
+    assert_eq!(
+        String::from_utf8_lossy(&twice.stdout),
+        dumped,
+        "a dumped session with windows reads back as itself"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&again_path);
 }

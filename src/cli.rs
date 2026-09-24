@@ -386,6 +386,7 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         stack: args.stack,
         backend: args.backend.clone(),
         label: args.label.clone(),
+        window: None,
     };
 
     Ok((

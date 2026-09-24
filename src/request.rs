@@ -968,6 +968,95 @@ impl fmt::Display for BackendOverride {
 
 serde_as_string!(BackendOverride);
 
+/// When a request is attached and detached, relative to the run.
+///
+/// Written `1s..3s`: attached one second after the launch gate opens, detached
+/// three seconds after it, while every other request of the session keeps
+/// running. Either end may be left open -- `1s..` is attached late and kept to
+/// the end, `..2s` is attached with the rest and detached early -- and a
+/// request with no window at all is watched for the whole run, as every
+/// request was before hot attach.
+///
+/// One string rather than a map, so that it reads the same in the three
+/// session formats and on a command line, and so that a dumped request reads
+/// back as the text that was written: `0s..2s` and `..2s` watch the same span
+/// and are kept apart, because the file is a record of what was asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    /// When the request is attached. `None` is with the rest, before the gate.
+    pub start: Option<Duration>,
+    /// When it is detached. `None` is at the end of the run.
+    pub stop: Option<Duration>,
+}
+
+impl Window {
+    /// When the request is attached, in nanoseconds after the gate.
+    pub fn start_ns(&self) -> u64 {
+        self.start.map_or(0, Duration::as_nanos)
+    }
+
+    /// Whether the request is attached after the others, once the program is
+    /// already running -- which is what a collector given at exec cannot do.
+    pub fn attaches_late(&self) -> bool {
+        self.start_ns() > 0
+    }
+}
+
+impl FromStr for Window {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        let Some((start, stop)) = s.split_once("..") else {
+            return Err(ParseError::new(format!(
+                "`{s}` is not a window: write `<start>..<stop>` relative to the run, for \
+                 instance `1s..3s`, `1s..` or `..2s`"
+            )));
+        };
+        let end = |text: &str| -> Result<Option<Duration>, ParseError> {
+            let text = text.trim();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                text.parse().map(Some)
+            }
+        };
+        let window = Window {
+            start: end(start)?,
+            stop: end(stop)?,
+        };
+        if window.start.is_none() && window.stop.is_none() {
+            return Err(ParseError::new(
+                "the window `..` is the run's own: leave `window` out to watch the whole run",
+            ));
+        }
+        if let (Some(start), Some(stop)) = (window.start, window.stop) {
+            if stop <= start {
+                return Err(ParseError::new(format!(
+                    "the window `{s}` closes before it opens: it is attached at {start} and \
+                     would be detached at {stop}"
+                )));
+            }
+        }
+        Ok(window)
+    }
+}
+
+impl fmt::Display for Window {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(start) = self.start {
+            write!(f, "{start}")?;
+        }
+        f.write_str("..")?;
+        if let Some(stop) = self.stop {
+            write!(f, "{stop}")?;
+        }
+        Ok(())
+    }
+}
+
+serde_as_string!(Window);
+
 /// One measurement request: what the user asked for, before any resolution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -992,6 +1081,10 @@ pub struct Request {
     /// A label, used to name this request's output when a session has several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// When, inside the run, this request is attached and detached. Absent is
+    /// the whole run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Window>,
 }
 
 /// A session: the requests to run together, plus what they share.
@@ -1076,6 +1169,39 @@ mod tests {
         assert!("latency".parse::<SourceId>().is_err());
         assert!("io..latency".parse::<SourceId>().is_err());
         assert!("IO.latency".parse::<SourceId>().is_err());
+    }
+
+    #[test]
+    fn a_window_round_trips_as_it_was_written() {
+        for text in ["1s..3s", "1s..", "..2s", "0ns..2s", "250ms..1500ms"] {
+            let window: Window = text.parse().unwrap();
+            assert_eq!(window.to_string(), text);
+        }
+        let late: Window = "1s..".parse().unwrap();
+        assert!(late.attaches_late() && late.stop.is_none());
+        let early: Window = "..2s".parse().unwrap();
+        assert!(!early.attaches_late());
+        assert_eq!(early.stop.unwrap().as_nanos(), 2_000_000_000);
+    }
+
+    #[test]
+    fn a_window_that_cannot_mean_anything_is_refused_with_the_reason() {
+        let backwards = "3s..1s".parse::<Window>().unwrap_err();
+        assert!(
+            backwards.message().contains("closes before it opens"),
+            "{backwards}"
+        );
+        let empty = "2s..2s".parse::<Window>().unwrap_err();
+        assert!(
+            empty.message().contains("closes before it opens"),
+            "{empty}"
+        );
+        let whole = "..".parse::<Window>().unwrap_err();
+        assert!(whole.message().contains("leave `window` out"), "{whole}");
+        let no_range = "2s".parse::<Window>().unwrap_err();
+        assert!(no_range.message().contains("<start>..<stop>"), "{no_range}");
+        let no_unit = "1..2s".parse::<Window>().unwrap_err();
+        assert!(no_unit.message().contains("no unit"), "{no_unit}");
     }
 
     #[test]

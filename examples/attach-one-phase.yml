@@ -1,0 +1,54 @@
+# One source attached for one phase of a program, beside one watching all of it.
+#
+#   omn -f examples/attach-one-phase.yml
+#
+# A request's `window` is when, inside the run, it is attached and detached:
+# `..1500ms` is attached with the rest and detached at 1.5 s, `1500ms..` is
+# attached at 1.5 s and kept to the end, and a request with no window watches
+# the whole run. The rest of the session keeps running across every attach and
+# detach -- one launch, one clock, one run.
+#
+# The program counts to a hundred thousand, sleeps two seconds, and counts
+# to two hundred thousand. The cut at 1.5 s falls in the sleep, so the first
+# window holds the first loop and the second window the second one: the second
+# count is about twice the first, and the two add up to the whole run's. The
+# pause is its own window, and it has no count at all: a per-task counter is
+# enabled only while its task runs, and a sleeping program did not, so the
+# result says "no count" -- counted as a failed read -- rather than a zero it
+# did not measure.
+#
+# Each result says its own window: `observed` is the span it was attached for,
+# not the run's, and a late attach is named in its notes with what the attach
+# itself took while the program ran. `tests/runner.rs` runs the same shape
+# against a program whose instruction count is known exactly.
+name: one source for one phase
+format: text
+
+requests:
+  - label: first loop
+    source: cpu.instructions
+    target: &program
+      launch: [/bin/sh, -c, 'i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done; sleep 2; i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done']
+    mode: count
+    emit: [summary]
+    window: ..1500ms
+
+  - label: the pause
+    source: cpu.instructions
+    target: *program
+    mode: count
+    emit: [summary]
+    window: 1500ms..2s
+
+  - label: second loop
+    source: cpu.instructions
+    target: *program
+    mode: count
+    emit: [summary]
+    window: 2s..
+
+  - label: the whole run
+    source: cpu.instructions
+    target: *program
+    mode: count
+    emit: [summary]

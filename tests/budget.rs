@@ -571,3 +571,104 @@ fn request(label: &str, backend: &str) -> String {
          backend: \"force:{backend}\"",
     )
 }
+
+/// A request attached for part of the run pays for, and is weighed against,
+/// its own window.
+///
+/// Ground truth is a program that burns one cpu from its first instruction to
+/// the end of the run: over any span, the cpu it spends is at most that span's
+/// wall time, and on a machine that lets it run it is most of it. So the
+/// denominator of a request attached for 250 ms of a 750 ms run is a third of
+/// the whole run's, whatever the machine is doing -- asserted as a separation,
+/// not a ratio. And the attach itself, made while the program ran, is named in
+/// the record rather than left inside a number.
+#[test]
+fn a_request_attached_for_part_of_the_run_is_weighed_over_its_own_window() {
+    let directory = scratch("window");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let session = directory.join("window.yml");
+    let request = |label: &str, window: &str| {
+        format!(
+            "  - label: {label}\n    source: mem.rss\n    \
+             target: {{launch: [\"/bin/sh\", \"-c\", \"{BURN}\"]}}\n    \
+             mode: poll@20ms\n    emit: [summary]\n    duration: 750ms\n{window}"
+        )
+    };
+    std::fs::write(
+        &session,
+        format!(
+            "requests:\n{}\n{}\n",
+            request("whole", ""),
+            request("part", "    window: 250ms..500ms"),
+        ),
+    )
+    .expect("a session file");
+    let output = run(&[
+        "-f",
+        &session.to_string_lossy(),
+        "-o",
+        &directory.to_string_lossy(),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let costs: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.join("cost.json")).expect("cost.json"),
+    )
+    .expect("json");
+    let _ = std::fs::remove_dir_all(&directory);
+    let by = |label: &str| {
+        costs
+            .as_array()
+            .expect("two records")
+            .iter()
+            .find(|cost| cost["label"] == label)
+            .unwrap_or_else(|| panic!("a record for {label}"))
+            .clone()
+    };
+    let (whole, part) = (by("whole"), by("part"));
+    let ns = |cost: &serde_json::Value, field: &str| {
+        cost["overhead"][field]
+            .as_u64()
+            .unwrap_or_else(|| panic!("`{field}` in {cost}"))
+    };
+    eprintln!(
+        "whole: {} ns of wall, the program spent {} ns; part: {} ns of wall, the program spent \
+         {} ns",
+        ns(&whole, "wall_ns"),
+        ns(&whole, "observed_cpu_ns"),
+        ns(&part, "wall_ns"),
+        ns(&part, "observed_cpu_ns"),
+    );
+    assert!(
+        (230_000_000..400_000_000).contains(&ns(&part, "wall_ns")),
+        "a window of 250 ms is weighed over its own wall time: {part}"
+    );
+    assert!(ns(&whole, "wall_ns") >= 750_000_000);
+    // A program cannot spend more cpu than wall time on one thread, and the
+    // window holds a third of the run's.
+    assert!(
+        ns(&part, "observed_cpu_ns") <= ns(&part, "wall_ns") + 10_000_000,
+        "the denominator is the program's cpu over the window, not over the run: {part}"
+    );
+    assert!(
+        ns(&part, "observed_cpu_ns") * 2 < ns(&whole, "observed_cpu_ns"),
+        "the window's denominator is a fraction of the run's: {part} against {whole}"
+    );
+    let notes: Vec<&str> = part["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .filter_map(|note| note.as_str())
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("from 0.25") && note.contains("attaching it took")),
+        "the attach made while the program ran is in the record: {notes:?}"
+    );
+    assert!(
+        part["stopped_because"]
+            .as_str()
+            .is_some_and(|why| why.contains("window closed")),
+        "{part}"
+    );
+}
