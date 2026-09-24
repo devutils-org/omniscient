@@ -1,80 +1,102 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh vertical
-#   cd ../omniscient-vertical && claude     # paste the prompt it printed
+#   scripts/spawn.sh hotattach
+#   cd ../omniscient-hotattach && claude "$(cat ../omniscient-hotattach.prompt)"
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
 #
-# This wave divides by layer rather than by family, so the lock is a named file
-# list per stream. The shared eBPF layer -- btf.rs, insn.rs, map.rs, syscall.rs
-# -- belongs to nobody; attach.rs belongs to the fentry stream, because fentry
-# is an attach kind. The two session indexes, examples/README.md and GUIDE.md,
-# belong to the coordinator and are held to the sessions on disk by a test, so a
-# session added without a row is a red suite rather than a silent gap.
+# This wave divides by roadmap task: the last task of phases 4, 6 and 8, and the
+# first of phase 10. The lock is a named file list per stream. The shared layers
+# -- join, emit, encode, render, resolve, validate, catalog, and the eBPF layer
+# in src/bpf/{btf,insn,map,syscall,attach,usdt,mod}.rs -- belong to nobody this
+# wave, and the coordinator is working in them on main while the streams run.
+# The two session indexes, examples/README.md and GUIDE.md, belong to the
+# coordinator and are held to the sessions on disk by a test, so a session
+# added without a row is a red suite rather than a silent gap.
+#
+# The prompt is also written beside the worktree, so the agent can be started
+# in one line:
+#
+#   cd ../omniscient-<stream> && claude "$(cat ../omniscient-<stream>.prompt)"
 set -euo pipefail
 
 declare -A OWNS=(
-    [vertical]="src/bpf/map.rs src/bpf/syscall.rs src/bpf/io.rs src/bpf/request*.rs src/collect/io/block.rs src/collect/net/request*.rs catalog/net.yaml tests/vertical.rs examples/vertical-*.yml"
-    [pagecache]="src/bpf/io_pagecache*.rs src/collect/io/** (except block.rs) catalog/io.yaml examples/io-*.yml tests/scenario_io.rs"
-    [shim]="shim/** src/collect/mem/heap/** src/collect/sched/** src/collect/gpu/** catalog/sched.yaml catalog/gpu.yaml examples/sched-*.yml examples/gpu-*.yml tests/scenario_sched.rs tests/scenario_gpu.rs"
-    [ibs]="src/perf.rs src/collect/mem/** (except heap/**) catalog/mem.yaml examples/mem-*.yml tests/scenario_mem.rs"
+    [hotattach]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/session.rs src/request.rs tests/runner.rs tests/budget.rs examples/attach-*.yml"
+    [network]="src/bpf/request*.rs src/bpf/net_*.rs src/collect/net/** catalog/net.yaml examples/vertical/** examples/vertical-*.yml examples/net-*.yml tests/vertical.rs tests/scenario_net.rs docs/families/net.md"
+    [bench]="tests/bench_*.rs examples/bench/** examples/bench-*.yml scripts/bench.sh src/capabilities.rs"
+    [triage]="src/triage/** src/cli.rs src/main.rs src/lib.rs tests/triage.rs examples/triage-*.yml man/omn.1"
 )
 declare -A TITLE=(
-    [vertical]="Stream V -- the vertical case"
-    [pagecache]="Stream P -- the page cache"
-    [shim]="Stream S -- the shim, pointed elsewhere"
-    [ibs]="Stream B -- memory by IBS"
+    [hotattach]="Stream H -- hot attach"
+    [network]="Stream N -- the network rows"
+    [bench]="Stream X -- the bench"
+    [triage]="Stream T -- triage"
 )
 declare -A LOG=(
-    [vertical]="docs/scenarios/vertical.md"
-    [pagecache]="docs/families/io.md"
-    [shim]="docs/families/sched.md and docs/families/gpu.md"
-    [ibs]="docs/families/mem.md"
+    [hotattach]="docs/scenarios/attach.md"
+    [network]="docs/scenarios/vertical.md"
+    [bench]="docs/bench.md"
+    [triage]="docs/triage.md"
 )
 declare -A SCENARIO=(
-    [vertical]="tests/vertical.rs"
-    [pagecache]="tests/scenario_io.rs"
-    [shim]="tests/scenario_sched.rs and tests/scenario_gpu.rs"
-    [ibs]="tests/scenario_mem.rs"
+    [hotattach]="tests/runner.rs and tests/budget.rs"
+    [network]="tests/vertical.rs and tests/scenario_net.rs"
+    [bench]="tests/bench_*.rs (the cheap, non-ignored ones)"
+    [triage]="tests/triage.rs"
 )
 
-VERTICAL_WORK='ROADMAP.md phase 4, the milestone it calls the real one: one request that reads
-a file, decomposed boundary by boundary, each line carrying its evidence, checked
-against a server whose delays the test injected. The segments must sum to the
-client-measured latency within 10 %, and each injected delay must land in its row.
+HOTATTACH_WORK='ROADMAP.md phase 6, task 4: a collector added and removed mid-session, without
+restarting the run or breaking in-flight joins. DECISIONS.md settled that this
+lives inside a session, with no daemon. The run loop is run_all_within in
+src/collect/mod.rs; today every request shares one window. Build a request whose
+window is its own and inside the run'"'"'s. The surface (a per-request start and
+stop in the session file, then the CLI) is your decision: write it down, and
+keep the dumped request reading back unchanged. Each of these is a scenario:
+every document states its own window; a join across a detached source is not
+counted as a loss (src/join.rs is not yours -- file the field it needs); attach
+costs and first-tick losses are counted; a preload source attached late is
+refused by name before the run. Ground truth: a two-phase program, one source
+attached only for the first phase. The escalation of phase 10 is NOT this wave.'
 
-The one new mechanism is bpf_task_storage. Write a request id into the current
-task storage where the request enters, read it at block_rq_issue in src/bpf/io.rs,
-and put req:<id> on the event: that is what makes block_io IDENTITY rather than
-KEY. Where a request is born -- derived from the connection, or declared by the
-server through a USDT probe -- is your decision. Write down which and why.'
+NETWORK_WORK='The two rows of the ROADMAP.md phase 4 tree the tool does not draw yet: net_rx
+and net_tx. docs/scenarios/vertical.md left the design: the connection'"'"'s cookie
+at the request'"'"'s birth and end, bpf_get_socket_cookie on the socket the server
+received on, a second argument on the same two USDT probes. Both rows are KEY by
+the roadmap'"'"'s table, and the ladder must say so. The ground truth needs no
+root: a client that sends half its request, sleeps a known 30 ms and sends the
+rest puts 30 ms in net_rx; a client with a small receive buffer that reads
+slowly puts a known wait in net_tx. The rows must still sum to the client'"'"'s
+latency within 10 %. src/bpf/mod.rs is not yours: a new program file'"'"'s mod line
+goes in your handoff. Also yours: drained: true on catalog/net.yaml.'
 
-PAGECACHE_WORK='io.pagecache and io.readahead, which have waited only on a collector since the
-seventh wave landed the BTF walk into folio.mapping. The catalog already names
-the two tracepoints io.readahead reads. Ground truth: a file of known size read
-cold then warm, and sequential against random. Aggregate in the kernel, and give
-every row program a stack-region test and a byte-coverage test first: finding 46
-is the file that had neither. src/collect/io/block.rs is stream V, not yours.'
+BENCH_WORK='ROADMAP.md phase 8: a cost, resolution and loss table for every (source,
+backend) this machine serves, and the resolver'"'"'s choices confirmed or corrected.
+cost.json and --backend force:<id> exist; the harness around them does not.
+Workloads, warmup, >= 20 repetitions round-robin, median and IQR; then the
+backend comparison, the resolution sweep (0.5 to 50 us) and the observer effect.
+The variance gate comes FIRST and will refuse while three other agents build on
+this machine: that refusal is the gate working. Do not produce a table from a
+noisy machine; the real measurement runs once, alone, after the merge, and your
+handoff gives the one command. Bench tests are #[ignore] and run through
+scripts/bench.sh -- never in make check. src/capabilities.rs is yours: the
+prefetcher state goes in the environment capture (captured, not controlled), and
+stream S'"'"'s dynamic-linking probe request is yours to answer.'
 
-SHIM_WORK='sched.mutex and gpu.api through the LD_PRELOAD shim that already interposes
-malloc. A launch carries ONE shim stream since the eighth wave: extend what it
-sends, do not open a second pipe. Ground truth for sched.mutex: two threads, a
-known number of acquisitions, a known hold time. gpu.api may not be reachable on
-this headless NVIDIA machine: prove the interposition on a symbol you can call
-and skip loudly with what the machine offered. src/collect/mem/heap/** is yours;
-the rest of src/collect/mem is stream B.'
-
-IBS_WORK='mem.latency and mem.sharing through AMD IBS op sampling, which this Zen 2 machine
-has: the dynamic PMU type is in /sys/bus/event_source/devices/ibs_op/type, and a
-sample carries the data address and the load latency. src/perf.rs is yours.
-Ground truth: a walk that lands in L1 on one pass and in memory on another, and
-two threads on one cache line against two on two. Read docs/scenarios/mem.md
-first -- the family already measures a 64 MiB walk against a 4 KiB one.
-src/collect/mem/heap/** is stream S, not yours.'
+TRIAGE_WORK='ROADMAP.md phase 10, everything but the escalation. The layer sits ABOVE the
+engine and calls it like any other user: src/triage/ builds requests, runs them
+through the library calls main.rs makes, and reads the results. It never edits
+the collector layer, the join engine or the emit layer -- a filed request
+instead. The objective comes first: a triage request that does not name one is
+refused with the list. Then omn latency (TSA as a question, residue and evidence
+carried through), omn saturate (USE, with Little'"'"'s law and every Shortfall
+kept), and differential flame graphs from the existing encoders. Ground truth:
+cpu-bound, I/O-blocked and lock-contended workloads each named correctly for the
+objective asked, and one program run twice with one function'"'"'s cost doubled.
+man/omn.1 is yours this wave, including the pending between/decompose request.'
 
 stream="${1:-}"
 if [[ -z "$stream" || -z "${OWNS[$stream]:-}" ]]; then
@@ -94,17 +116,14 @@ else
 fi
 
 case "$stream" in
-    vertical) WORK="$VERTICAL_WORK" ;;
-    pagecache) WORK="$PAGECACHE_WORK" ;;
-    shim) WORK="$SHIM_WORK" ;;
-    ibs) WORK="$IBS_WORK" ;;
+    hotattach) WORK="$HOTATTACH_WORK" ;;
+    network) WORK="$NETWORK_WORK" ;;
+    bench) WORK="$BENCH_WORK" ;;
+    triage) WORK="$TRIAGE_WORK" ;;
 esac
 
-cat <<PROMPT
-
---- worktree ready: $worktree (branch $branch) ---
---- start the agent there, and give it this prompt: ---
-
+prompt_file="${worktree}.prompt"
+cat >"$prompt_file" <<PROMPT
 You are ${TITLE[$stream]} of the Omniscient project.
 
 Read these first, in this order:
@@ -131,8 +150,8 @@ available, which reads like the machine changed rather than the binary.
 ${WORK}
 
 HOW YOU TEST -- this is a rule, not advice, and CLAUDE.md "How much to test,
-and when" is the long version. The full suite is ~1600 tests and 5 to 10
-minutes; four agents running it by reflex is what made the last wave slow.
+and when" is the long version. The full suite is ~1620 tests and 5 to 10
+minutes; four agents running it by reflex is what made the eighth wave slow.
 
   - While iterating: ONLY \`cargo test --lib <your module>\` and
     \`cargo test --test <file>\` for ${SCENARIO[$stream]}. Never \`make check\`.
@@ -156,10 +175,14 @@ state -- and check the tool against that.
 
 A test that skips is not a test that passes, and a test that asserts what the
 machine was doing is worse than either. Four streams share this machine. Assert
-the separation rather than a calibrated threshold, carry the reference
+the separation rather than a calibrated threshold, carry the reference's
 own resolution as slack, and where the property cannot be created here, skip
 loudly with the numbers that show why, and say so in ${LOG[$stream]}.
 
 Commit on ${branch}. Do not merge; the coordinator does that.
 
 PROMPT
+
+echo "--- worktree ready: $worktree (branch $branch) ---"
+echo "--- prompt written to $prompt_file; start the agent with: ---"
+echo "cd $worktree && claude \"\$(cat $prompt_file)\""

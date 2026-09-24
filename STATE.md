@@ -223,11 +223,40 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 
 ## What remains, in the order it is worth doing
 
-Nineteen sources have no collector, and **all but eight of them are blocked by
-nothing at all**: the catalog pass below has landed, so what is left for them is
-a collector written against an attach path that works today. The fifth wave
-closed 52 of the sixty-three defects the scenario wave found; the eleven that
-are left are named in `docs/fixes/`.
+**This section is the one place the plan after the current wave is written.**
+`BRIEF.md` is the wave being run; there is no second brief for the one after it,
+because a plan kept in two documents drifted in both.
+
+What is left is depth, and the tenth wave (`BRIEF.md`) is running four streams
+on it: the vertical case's two network rows, hot attach, the self-benchmark,
+and the layer above the engine. **After it, in order:**
+
+1. **The escalation** — phase 10, item 3: once triage names a suspect, attach
+   that layer's detailed collectors and detach the rest, holding the budget. It
+   stands on hot attach, which is why it is not in the tenth wave.
+2. **The flight recorder** — a session whose duration is *until a predicate
+   fires*, with a retention bound and one document per trigger. `DECISIONS.md`
+   settled that it is a mode of a session, and it also follows hot attach.
+3. **The bench's real measurement** — run once, alone, after the tenth wave's
+   merge: its variance gate refuses on a machine shared with building agents,
+   and a table from a noisy machine is worse than none.
+4. **Phase 11**, an MCP surface over the resolved file, the results and the
+   catalog, after phase 10 and deliberately not before.
+5. **The two injections that need root**, `tc netem` and `dm-delay`, for the
+   vertical case's ground truth, on a machine where root is available.
+
+Below the milestones, and not scheduled:
+
+- **CTF import** — ingest an LTTng-UST stream and merge it into the timeline.
+  A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
+  why LTTng is a peer rather than a backend. Low priority; nothing depends on
+  it and no measurement here is worse without it.
+- **The decisions nobody has taken**: `CAP_NET_RAW` for `net.capture`, whether
+  a polled counter takes a closing read (below), and dynamic binary
+  instrumentation (`DECISIONS.md`, open).
+
+The fifth wave closed 52 of the sixty-three defects the scenario wave found;
+the eleven that are left are named in `docs/fixes/`.
 
 ### 1. ~~The catalog pass, the collectors, and the short distribution~~ — **done**
 

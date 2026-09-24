@@ -1,7 +1,9 @@
 # The briefs, wave by wave
 
 `BRIEF.md` at the root is the **current** wave, and it is overwritten each time a
-new one is dispatched. That is a problem this directory exists to fix: dozens of
+new one is dispatched. It is the only brief: what comes after it is written in
+`STATE.md` under "What remains", not in a second brief, and a wave's brief is
+copied here when that wave closes. That is a problem this directory exists to fix: dozens of
 documents and tests cite `BRIEF.md` for something a later wave replaced. Fifteen
 of them say "the four classes of `BRIEF.md`", which are the scenario wave's and
 have not been in that file since the wave after it.

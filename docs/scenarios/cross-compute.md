@@ -266,7 +266,7 @@ each event holds many blocks -- and a wakeup join onto a drained total is
 refused with that reason, before anything is attached, rather than attributing
 drains and calling it `WAKEUP`.
 
-`BRIEF_NEXT.md` names `sched.wakeup -> sched.offcpu` for "what released each
+The seventh wave's brief (`docs/briefs/wave-7-crossings.md`) names `sched.wakeup -> sched.offcpu` for "what released each
 block". A `sched.offcpu` event is a total drained every 100 ms and stands for as
 many blocks as its `blocks` attribute says -- 159, 171, 169 and 101 for the pipe
 read here. A wakeup join credits each `to` event to the most recent wakeup of

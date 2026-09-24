@@ -247,5 +247,5 @@ Restated from `ROADMAP.md` because they are decisions, not omissions.
    why its events do not exist for an eBPF program. If it is ever worth having,
    it is worth having as an **import** -- a CTF stream merged into the timeline
    after the fact, a consumer of one more format rather than a source. That is
-   written down in `BRIEF_NEXT.md` under what is left, at the priority it
+   written down in `STATE.md` under what remains, at the priority it
    deserves.

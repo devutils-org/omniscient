@@ -4,7 +4,7 @@
 #   omn -f examples/cross-compute-drained-wakeup.yml
 #
 # `sched.wakeup -> sched.offcpu` reads like "what released each block", and it
-# is the join `BRIEF_NEXT.md` names for this crossing. It is not that, and this
+# is the join the seventh wave's brief (`docs/briefs/wave-7-crossings.md`) names for this crossing. It is not that, and this
 # session shows why with the half-blocked workload's 600 round trips.
 #
 # `sched.offcpu` keeps its totals in the kernel and drains them every 100 ms: one
