@@ -355,6 +355,9 @@
   filter_fields: [comm, dev, ino, call, fs]
   determinism: low
   caveats:
+    - "Attaching the trampolines costs about 65 ms, paid once per run whatever
+       the run sees, and on a short run it is most of what the run cost: the
+       bench measured 64 ms with no event."
     - "fsync, fdatasync and msync(MS_SYNC). sync(2), syncfs(2) and
        sync_file_range(2) take other paths and are not here."
     - "A sync that returned an error made nothing durable; its event carries

@@ -22,6 +22,9 @@
   filter_fields: [comm, daddr, dport, family, outcome]
   determinism: low
   caveats:
+    - "Attaching the trampolines costs about 65 ms, paid once per run whatever
+       the run sees, and on a short run it is most of what the run cost: the
+       bench measured 68 ms with no connection."
     - "Every handshake ends established, refused or failed, and each outcome
        is its own latency: a refusal in 30 us is not a fast connection."
     - "A SYN the peer dropped is retransmitted after the kernel's initial RTO,

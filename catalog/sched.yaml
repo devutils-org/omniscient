@@ -75,6 +75,12 @@
   keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu, prio]
   determinism: low
+  caveats:
+    - "On a contended program this source shortens what it measures: the bench
+       measured the contended workload 9 % faster under it, because a program on
+       the context switch changes the lock's convoy. A lock measurement describes
+       the run it perturbed, and is read beside that run rather than against an
+       untraced one."
 
 - id: sched.offcpu
   family: sched
@@ -99,6 +105,11 @@
   filter_fields: [comm, pid, state, queued_ns, blocked_ns]
   determinism: low
   caveats:
+    - "On a contended program this source shortens what it measures: the bench
+       measured the contended workload 11 % faster under it, because a program on
+       the context switch changes the lock's convoy. A lock measurement describes
+       the run it perturbed, and is read beside that run rather than against an
+       untraced one."
     - "An event is one bucket of one window, and it is stamped at the moment the
        window's first wait began rather than at the drain that read it. A join
        that *opens* on this source would otherwise open at the window's close,
@@ -192,6 +203,11 @@
   filter_fields: [comm, pid]
   determinism: low
   caveats:
+    - "On a contended program this source shortens what it measures: the bench
+       measured the contended workload 21 % faster under it, because a program on
+       the context switch changes the lock's convoy. A lock measurement describes
+       the run it perturbed, and is read beside that run rather than against an
+       untraced one."
     - "An event is one bucket of one window, and it is stamped at the moment the
        window's first one began rather than at the drain that read it. A join
        that *opens* on this source would otherwise open at the window's close,
@@ -244,6 +260,9 @@
   filter_fields: [comm, addr, how, released_by]
   determinism: low
   caveats:
+    - "Through the preload shim a record goes into a 3 MiB ring the tool maps in
+       the program, so up to 3 MiB of the program's resident memory, as `mem.rss`
+       reads it beside this source, is the ring."
     - "One event per acquisition, stamped when the thread asked for the mutex:
        `wait_ns` is the time until it had it, `hold_ns` the time until it let go.
        An uncontended acquisition is here too, with a wait of tens of

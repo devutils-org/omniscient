@@ -74,6 +74,9 @@
   filter_fields: [device]
   determinism: low
   caveats:
+    - "A clock read through NVML costs about 15 ms of the tool's cpu on this
+       driver, measured by the bench: poll it slower than the default when that
+       matters."
     - "The reported clock is the one the device is running at when it is asked,
        and a GPU idles at a fraction of its boost clock. A frequency series says
        what the device did, never what it was allowed to do."
@@ -95,6 +98,9 @@
   filter_fields: [device]
   determinism: low
   caveats:
+    - "A power read through NVML costs about 34 ms of the tool's cpu on this
+       driver, measured by the bench: at the default 100 ms poll that is a fifth
+       of a core. Poll it slower when that matters more than the resolution."
     - "Energy is read from the device's own counter, not integrated from sampled
        power. Integrating a 100 ms poll across a workload that swings between 50
        and 300 W is a number with no error bar."
