@@ -47,8 +47,13 @@ const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 /// the same burst needs far more room than it would without stacks.
 ///
 /// Per task: each task has an event and a ring of its own, and one task yields
-/// at most a sample per period between drains.
+/// at most a sample per period between drains. The target's own task keeps
+/// the 256 pages the profile had when it followed that task alone: when the
+/// rings became one per thread they were cut to 32 each, and a single-threaded
+/// program sampled at 100 kHz went from losing no sample to losing about 6400
+/// of 22000, every one of them in the one ring it has.
 const RING_PAGES: usize = 32;
+const ROOT_RING_PAGES: usize = 256;
 
 /// A frequency in hertz, as a period of cpu nanoseconds.
 fn period_for(hz: u64) -> u64 {
@@ -247,14 +252,20 @@ impl Collector for ProfileCollector {
 
         let spec =
             SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
-        let mut event = TaskSampler::open(&spec, self.pid, self.whole_process, RING_PAGES)
-            .map_err(|error| {
-                format!(
-                    "perf_event_open for a cpu-clock profile of pid {} was refused ({error}); \
+        let mut event = TaskSampler::open(
+            &spec,
+            self.pid,
+            self.whole_process,
+            ROOT_RING_PAGES,
+            RING_PAGES,
+        )
+        .map_err(|error| {
+            format!(
+                "perf_event_open for a cpu-clock profile of pid {} was refused ({error}); \
                  check /proc/sys/kernel/perf_event_paranoid",
-                    self.pid
-                )
-            })?;
+                self.pid
+            )
+        })?;
         event.enable().map_err(|error| error.to_string())?;
         // Read while the events are open and kept: `stop` closes them, and
         // the notes are gathered afterwards.

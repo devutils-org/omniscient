@@ -315,3 +315,15 @@ command line, which is the filed command the brief asked for.
   reason names `Prepared::follows_only_later_threads`; the fix went the other
   way the request offered, one counter per thread, so the reason's text is
   stale as well as the attribute.
+
+## At the merge: the profile's ring, per task
+
+Following every thread gave each task a ring of its own, and the rings were
+cut from 256 pages to 32 so that a program with many threads would not map a
+megabyte each. A single-threaded program then had an eighth of the room it
+had, and `a_verdict_read_off_a_lossy_profile_says_its_amount_is_a_lower_bound`
+began failing alone: at 100 kHz the profile went from **0 dropped of about
+22 000 samples** before this stream to **about 6 400 dropped**, all in the one
+ring the program had. The coordinator gave the target's own task its 256 pages
+back (`TaskSampler::open` takes the root's ring apart from the others'), and
+kept 32 for every other thread: 0 dropped again on the same run, twice.

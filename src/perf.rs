@@ -1807,7 +1807,11 @@ pub struct TaskSampler {
     spec: SampleSpec,
     root: i32,
     follows: bool,
+    /// The ring of every task but the root's.
     ring_pages: usize,
+    /// The root task's ring: the one task every profile has, and the one a
+    /// single-threaded program puts every sample into.
+    root_ring_pages: usize,
     rings: std::collections::BTreeMap<i32, SampledEvent>,
     enabled: bool,
     at_open: usize,
@@ -1817,8 +1821,16 @@ pub struct TaskSampler {
 }
 
 impl TaskSampler {
-    /// Opens `spec` on `pid` and, when `follows`, on every task under it now.
-    pub fn open(spec: &SampleSpec, pid: i32, follows: bool, ring_pages: usize) -> io::Result<Self> {
+    /// Opens `spec` on `pid` and, when `follows`, on every task under it now:
+    /// `pid` with a ring of `root_ring_pages`, every other task with one of
+    /// `ring_pages`.
+    pub fn open(
+        spec: &SampleSpec,
+        pid: i32,
+        follows: bool,
+        root_ring_pages: usize,
+        ring_pages: usize,
+    ) -> io::Result<Self> {
         let mut sampler = Self {
             spec: SampleSpec {
                 inherit: false,
@@ -1827,6 +1839,7 @@ impl TaskSampler {
             root: pid,
             follows,
             ring_pages,
+            root_ring_pages,
             rings: std::collections::BTreeMap::new(),
             enabled: false,
             at_open: 0,
@@ -1842,7 +1855,12 @@ impl TaskSampler {
         };
         let mut first_error = None;
         for task in tasks {
-            match SampledEvent::open(&sampler.spec, Scope::Process(task.tid), ring_pages) {
+            let pages = if task.tid == pid {
+                root_ring_pages
+            } else {
+                ring_pages
+            };
+            match SampledEvent::open(&sampler.spec, Scope::Process(task.tid), pages) {
                 Ok(event) => {
                     sampler.rings.insert(task.tid, event);
                 }
@@ -1871,9 +1889,15 @@ impl TaskSampler {
             if self.rings.contains_key(&task.tid) {
                 continue;
             }
-            let Ok(event) =
-                SampledEvent::open(&self.spec, Scope::Process(task.tid), self.ring_pages)
-            else {
+            let Ok(event) = SampledEvent::open(
+                &self.spec,
+                Scope::Process(task.tid),
+                if task.tid == self.root {
+                    self.root_ring_pages
+                } else {
+                    self.ring_pages
+                },
+            ) else {
                 continue;
             };
             if self.enabled && event.enable().is_err() {
@@ -3083,7 +3107,7 @@ mod following_tests {
             1_000_000_000 / HZ,
             Callchain::Off,
         );
-        let mut sampler = match TaskSampler::open(&spec, std::process::id() as i32, true, 8) {
+        let mut sampler = match TaskSampler::open(&spec, std::process::id() as i32, true, 8, 8) {
             Ok(sampler) => sampler,
             Err(error) => {
                 eprintln!("skipped: this machine refuses unprivileged perf sampling: {error}");
