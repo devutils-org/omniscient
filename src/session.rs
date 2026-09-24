@@ -69,6 +69,9 @@ pub fn load(path: &Path, forced: Option<InputFormat>) -> Result<(Session, Origin
         .parse(&text)
         .map_err(|error| ParseError::new(format!("{origin}: {error}")))?;
     session.apply_defaults();
+    session
+        .check_escalation()
+        .map_err(|error| ParseError::new(format!("{origin}: {error}")))?;
     Ok((session, origin))
 }
 

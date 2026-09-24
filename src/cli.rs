@@ -187,6 +187,13 @@ pub struct TraceArgs {
     #[arg(long, value_name = "force:ID", conflicts_with = "file")]
     pub backend: Option<BackendOverride>,
 
+    /// When, inside the run, this request is attached and detached: `1s..3s`,
+    /// `1s..` or `..2s`. Absent is the whole run. Parsed by the same code as a
+    /// session file's `window`, so the two refuse the same things in the same
+    /// words.
+    #[arg(long, value_name = "START..STOP", conflicts_with = "file")]
+    pub window: Option<crate::request::Window>,
+
     /// Where results and the resolved file are written.
     #[arg(short = 'o', long, value_name = "DIR")]
     pub out: Option<PathBuf>,
@@ -493,13 +500,16 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         stack: args.stack,
         backend: args.backend.clone(),
         label: args.label.clone(),
-        window: None,
+        window: args.window,
     };
 
-    Ok((
-        Session::single(request, args.format, args.out.clone()),
-        defaulted,
-    ))
+    let session = Session::single(request, args.format, args.out.clone());
+    // `--window on <layer>` parses, because the two surfaces share one
+    // parser; it cannot mean anything on one request, which has no cheap
+    // pass beside it to decide from, and is refused here in the words a
+    // session file gets.
+    session.check_escalation()?;
+    Ok((session, defaulted))
 }
 
 fn target_from(args: &TraceArgs) -> Option<Target> {
@@ -602,6 +612,65 @@ mod tests {
         assert_eq!(request.keys, vec![KeyKind::Blk, KeyKind::Task]);
         assert_eq!(request.filter.as_ref().unwrap().to_string(), "bytes > 4KiB");
         assert!(defaulted.is_empty());
+    }
+
+    #[test]
+    fn a_window_on_the_command_line_is_the_window_a_session_file_carries() {
+        for text in ["1s..3s", "1s..", "..2s"] {
+            let args = parse(&[
+                "omn",
+                "trace",
+                "mem.rss",
+                "--pid",
+                "1",
+                "--mode",
+                "poll@100ms",
+                "--emit",
+                "summary",
+                "--duration",
+                "5s",
+                "--window",
+                text,
+            ]);
+            let (session, _) = to_session(&args, &catalog()).unwrap();
+            let from_file: crate::request::Window = text.parse().unwrap();
+            assert_eq!(session.requests[0].window, Some(from_file));
+            assert_eq!(session.requests[0].window.unwrap().to_string(), text);
+        }
+    }
+
+    #[test]
+    fn a_window_the_command_line_cannot_mean_is_refused_in_the_session_file_s_words() {
+        for text in ["3s..1s", "..", "2s"] {
+            let from_file = text.parse::<crate::request::Window>().unwrap_err();
+            let error =
+                Cli::try_parse_from(["omn", "trace", "mem.rss", "--pid", "1", "--window", text])
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains(from_file.message()), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_request_held_for_an_escalation_is_refused_on_its_own() {
+        let args = parse(&[
+            "omn",
+            "trace",
+            "sched.futex",
+            "--mode",
+            "trace",
+            "--emit",
+            "summary",
+            "--window",
+            "on lock",
+            "--",
+            "./prog",
+        ]);
+        let error = to_session(&args, &catalog()).unwrap_err();
+        assert!(
+            error.message().contains("held for an escalation"),
+            "{error}"
+        );
     }
 
     #[test]

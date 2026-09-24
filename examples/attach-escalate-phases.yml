@@ -1,0 +1,71 @@
+# A run that decides which layer to pay for, from its own cheap numbers.
+#
+#   omn -f examples/attach-escalate-phases.yml
+#
+# The program is cpu-bound for a second, then lock-bound for a second: it
+# spins, then takes a pthread mutex a helper thread holds 2 ms at a time, a
+# thousand times. `omn latency` would pay for every detailed layer over both
+# phases. This session pays for one layer at a time.
+#
+# The cheap pass runs for the whole of it: `sched.offcpu` says where the main
+# thread blocked and in which state, `cpu.oncpu_time` how much cpu the process
+# burned. Every 200 ms the escalation reads what arrived, and when one state
+# holds more than half of two readings in a row it attaches that state's
+# detailed sources -- the requests whose window is `on <layer>` -- and lets go
+# of the ones it attached before. So the profile is attached in the first
+# phase and detached in the second, when `sched.futex` is attached instead.
+#
+# `sched.mutex` is held for the lock layer too, and cannot be served: a launched
+# program is given the preload shim at exec, which cannot be attached mid-run,
+# and glibc's probes are not a backend for a launch. It is never attached, and
+# the run says so with the resolver's reasons, beside the futex waits that were
+# measured. Each held request's notes say when it was attached or let go and
+# why; `blocked`'s notes carry the escalation's decisions.
+#
+# Build the program first: `cargo test --test triage` builds it.
+# `tests/triage.rs` holds the futex waits to the program's own clock around
+# each pthread_mutex_lock, over exactly the window the escalation gave them.
+name: escalate from the cheap pass
+format: text
+escalate:
+  objective: latency
+
+requests:
+  - label: blocked
+    source: sched.offcpu
+    target: &program
+      launch: [target/omn-triage-fixture/workload, phases, '1000', '1000', '2000', target/omn-escalate-waits.txt]
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: *program
+    mode: poll@50ms
+    emit: [summary]
+
+  - label: profile
+    source: cpu.profile
+    target: *program
+    mode: sample@997hz
+    emit: [stack]
+    keys: [task]
+    stack: fp
+    window: on cpu
+
+  - label: futex
+    source: sched.futex
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task]
+    window: on lock
+
+  - label: mutex
+    source: sched.mutex
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task]
+    window: on lock

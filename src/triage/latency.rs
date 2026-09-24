@@ -212,6 +212,7 @@ impl Ask {
                 by: KeyKind::Task,
                 top: 16,
             }],
+            escalate: None,
         }
     }
 }

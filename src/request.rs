@@ -981,15 +981,119 @@ serde_as_string!(BackendOverride);
 /// session formats and on a command line, and so that a dumped request reads
 /// back as the text that was written: `0s..2s` and `..2s` watch the same span
 /// and are kept apart, because the file is a record of what was asked.
+///
+/// **A window the run decides.** `on lock` is a window whose ends are not
+/// times: the request is prepared before the run and held, attached when the
+/// session's escalation names the `lock` layer from the cheap pass's own
+/// numbers, and detached when it names another. The session says which
+/// objective the escalation decides for, in its `escalate:` block, and that
+/// objective is copied here by [`Session::apply_defaults`] so that the runner,
+/// which is handed requests and not sessions, can say what a decision was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     /// When the request is attached. `None` is with the rest, before the gate.
     pub start: Option<Duration>,
     /// When it is detached. `None` is at the end of the run.
     pub stop: Option<Duration>,
+    /// Held for the escalation: attached when it names this layer. Neither
+    /// end is a time when this is set.
+    pub on: Option<Held>,
+}
+
+/// A request held for the escalation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Held {
+    /// The layer whose detailed source this is.
+    pub layer: Layer,
+    /// What the escalation decides for: the session's, copied down. `None`
+    /// until [`Session::apply_defaults`] has run, and refused there when the
+    /// session names none.
+    pub objective: Option<crate::triage::Objective>,
+}
+
+/// Where a task's wall clock can go, as the escalation names it: the four
+/// states thread state analysis splits a wall clock into, each with the
+/// detailed sources that say *why* rather than *how long*.
+///
+/// The cheap pass tells these apart and nothing finer: which lock, which
+/// function, which device is the detailed layer's question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Layer {
+    /// On a cpu, doing its own work: the profile says which function.
+    Cpu,
+    /// Runnable and waiting for a cpu: the run queue says how long, per wakeup.
+    Queue,
+    /// Blocked uninterruptibly, which is a device and usually a disk.
+    Disk,
+    /// Asleep waiting for something another task will do: a lock, a
+    /// condition, a timer. The lock sources say which, and whether it was one.
+    Lock,
+}
+
+impl Layer {
+    pub const ALL: [Layer; 4] = [Layer::Cpu, Layer::Queue, Layer::Disk, Layer::Lock];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layer::Cpu => "cpu",
+            Layer::Queue => "queue",
+            Layer::Disk => "disk",
+            Layer::Lock => "lock",
+        }
+    }
+
+    /// The state of a task this layer explains, in the words the cheap pass
+    /// reports it in.
+    pub fn state(self) -> &'static str {
+        match self {
+            Layer::Cpu => "on a cpu",
+            Layer::Queue => "runnable, waiting for a cpu",
+            Layer::Disk => "blocked uninterruptibly",
+            Layer::Lock => "blocked sleeping",
+        }
+    }
+}
+
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Layer {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        Layer::ALL
+            .into_iter()
+            .find(|layer| layer.as_str() == s)
+            .ok_or_else(|| {
+                ParseError::new(format!(
+                    "`{s}` is not a layer the escalation names: {}",
+                    Layer::ALL
+                        .iter()
+                        .map(|layer| format!("`{layer}` ({})", layer.state()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+    }
 }
 
 impl Window {
+    /// A window the escalation decides, for the `layer` it names.
+    pub fn on(layer: Layer) -> Self {
+        Window {
+            start: None,
+            stop: None,
+            on: Some(Held {
+                layer,
+                objective: None,
+            }),
+        }
+    }
+
     /// When the request is attached, in nanoseconds after the gate.
     pub fn start_ns(&self) -> u64 {
         self.start.map_or(0, Duration::as_nanos)
@@ -997,8 +1101,15 @@ impl Window {
 
     /// Whether the request is attached after the others, once the program is
     /// already running -- which is what a collector given at exec cannot do.
+    /// A held request always is.
     pub fn attaches_late(&self) -> bool {
-        self.start_ns() > 0
+        self.start_ns() > 0 || self.on.is_some()
+    }
+
+    /// The layer this request is held for, when the escalation decides its
+    /// window.
+    pub fn layer(&self) -> Option<Layer> {
+        self.on.map(|held| held.layer)
     }
 }
 
@@ -1007,10 +1118,14 @@ impl FromStr for Window {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+        if let Some(layer) = s.strip_prefix("on ") {
+            return Ok(Window::on(layer.parse()?));
+        }
         let Some((start, stop)) = s.split_once("..") else {
             return Err(ParseError::new(format!(
                 "`{s}` is not a window: write `<start>..<stop>` relative to the run, for \
-                 instance `1s..3s`, `1s..` or `..2s`"
+                 instance `1s..3s`, `1s..` or `..2s`, or `on <layer>` for one the escalation \
+                 decides, such as `on lock`"
             )));
         };
         let end = |text: &str| -> Result<Option<Duration>, ParseError> {
@@ -1024,6 +1139,7 @@ impl FromStr for Window {
         let window = Window {
             start: end(start)?,
             stop: end(stop)?,
+            on: None,
         };
         if window.start.is_none() && window.stop.is_none() {
             return Err(ParseError::new(
@@ -1044,6 +1160,9 @@ impl FromStr for Window {
 
 impl fmt::Display for Window {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(held) = self.on {
+            return write!(f, "on {}", held.layer);
+        }
         if let Some(start) = self.start {
             write!(f, "{start}")?;
         }
@@ -1122,6 +1241,24 @@ pub struct Session {
     /// target, which is what this session is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decompose: Vec<crate::join::Decomposition>,
+    /// What the run decides for itself: which layer's detailed sources to
+    /// attach, from the cheap pass's own numbers. Present exactly when some
+    /// request's window is `on <layer>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate: Option<Escalation>,
+}
+
+/// A session's escalation: the objective its decisions are for.
+///
+/// Required rather than defaulted, for the reason every triage request carries
+/// one: the layer that dominates a task's wall clock is the suspect *for its
+/// latency*, and a run escalating for an objective nobody named would attach
+/// a confident wrong layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Escalation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<crate::triage::Objective>,
 }
 
 impl Session {
@@ -1136,12 +1273,14 @@ impl Session {
             requests: vec![request],
             joins: Vec::new(),
             decompose: Vec::new(),
+            escalate: None,
         }
     }
 
     /// Pushes session-wide defaults down into the requests that omit them, so
     /// that every request is self-contained from here on.
     pub fn apply_defaults(&mut self) {
+        let objective = self.escalate.and_then(|escalation| escalation.objective);
         for request in &mut self.requests {
             if request.duration.is_none() {
                 request.duration = self.duration;
@@ -1149,7 +1288,112 @@ impl Session {
             if request.budget.is_none() {
                 request.budget = self.budget;
             }
+            if let Some(held) = request
+                .window
+                .as_mut()
+                .and_then(|window| window.on.as_mut())
+            {
+                held.objective = held.objective.or(objective);
+            }
         }
+    }
+
+    /// Refuses an escalation that cannot mean anything as written: requests
+    /// held for one the session does not declare, one declared with nothing
+    /// held for it, or one with no objective, or an objective it cannot
+    /// decide for.
+    ///
+    /// Asked where a session is built, from a file or from a command line, so
+    /// the refusal comes before anything is resolved or launched. What needs
+    /// the machine -- whether the cheap pass's sources are there -- is asked
+    /// by the runner, before the launch.
+    pub fn check_escalation(&self) -> Result<(), ParseError> {
+        let held: Vec<String> = self
+            .requests
+            .iter()
+            .filter(|request| request.window.is_some_and(|window| window.on.is_some()))
+            .map(|request| {
+                format!(
+                    "`{}`",
+                    request
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| request.source.to_string())
+                )
+            })
+            .collect();
+        match (self.escalate, held.is_empty()) {
+            (None, true) => Ok(()),
+            (None, false) => Err(ParseError::new(format!(
+                "{} {} held for an escalation (`window: on <layer>`), and this session declares \
+                 none: add `escalate: {{objective: latency}}`, which says what the run decides \
+                 for, beside cheap requests it decides from",
+                held.join(", "),
+                if held.len() == 1 { "is" } else { "are" }
+            ))),
+            (Some(_), true) => Err(ParseError::new(
+                "this session declares an escalation and holds no request for it: give the \
+                 detailed sources a `window: on <layer>`, such as `on lock` for `sched.futex`, \
+                 or leave `escalate` out",
+            )),
+            (Some(escalation), false) => {
+                crate::triage::escalate::decides_for(escalation.objective)?;
+                self.nothing_reads_across_a_held_window()
+            }
+        }
+    }
+
+    /// Refuses a join or a decomposition that reads a source the escalation
+    /// attaches and detaches.
+    ///
+    /// A held request is watched for a span the run decides, and the join
+    /// engine does not yet know when each source was watching (`apply_within`,
+    /// filed with `src/join.rs`): a state opened before a detach would absorb
+    /// every event after it, and a decomposition would weigh a part watched
+    /// for half a second against a whole of two. Either is a number that
+    /// looks right and is not, so the combination is refused until the
+    /// engine can say what fell outside the window.
+    fn nothing_reads_across_a_held_window(&self) -> Result<(), ParseError> {
+        let held: Vec<&str> = self
+            .requests
+            .iter()
+            .filter(|request| request.window.is_some_and(|window| window.on.is_some()))
+            .map(|request| request.source.as_str())
+            .collect();
+        let across = |source: &str| held.contains(&source);
+        let readers = self
+            .joins
+            .iter()
+            .flat_map(|rule| {
+                [Some(&rule.from), Some(&rule.to), rule.waker.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|source| across(source))
+                    .map(move |source| format!("join `{}` reads `{source}`", rule.id))
+            })
+            .chain(self.decompose.iter().flat_map(|decomposition| {
+                decomposition
+                    .parts
+                    .iter()
+                    .filter(|part| across(&part.from))
+                    .map(move |part| {
+                        format!(
+                            "decomposition `{}` reads `{}` for `{}`",
+                            decomposition.id, part.from, part.state
+                        )
+                    })
+            }))
+            .collect::<Vec<_>>();
+        if readers.is_empty() {
+            return Ok(());
+        }
+        Err(ParseError::new(format!(
+            "{}, which the escalation attaches and detaches mid-run: the join engine does not yet \
+             know when a source was watching, so what fell outside its window would be credited \
+             to a stale state or weighed against the whole run. Join and decompose the cheap \
+             pass, which runs for the whole of it, or leave the escalation out",
+            readers.join("; ")
+        )))
     }
 }
 
@@ -1202,6 +1446,91 @@ mod tests {
         assert!(no_range.message().contains("<start>..<stop>"), "{no_range}");
         let no_unit = "1..2s".parse::<Window>().unwrap_err();
         assert!(no_unit.message().contains("no unit"), "{no_unit}");
+    }
+
+    #[test]
+    fn a_window_the_escalation_decides_round_trips_and_names_its_layer() {
+        for layer in Layer::ALL {
+            let text = format!("on {layer}");
+            let window: Window = text.parse().unwrap();
+            assert_eq!(window.to_string(), text);
+            assert_eq!(window.layer(), Some(layer));
+            assert!(window.attaches_late() && window.start.is_none() && window.stop.is_none());
+        }
+        let unknown = "on memory".parse::<Window>().unwrap_err();
+        for layer in Layer::ALL {
+            assert!(unknown.message().contains(layer.as_str()), "{unknown}");
+        }
+    }
+
+    fn escalating(yaml: &str) -> Result<Session, ParseError> {
+        let mut session: Session = serde_norway::from_str(yaml).expect("a session");
+        session.apply_defaults();
+        session.check_escalation().map(|()| session)
+    }
+
+    const HELD: &str = r#"
+requests:
+  - {label: blocked, source: sched.offcpu, target: {launch: [prog]}, mode: trace}
+  - {label: futex, source: sched.futex, target: {launch: [prog]}, mode: trace, window: on lock}
+"#;
+
+    #[test]
+    fn the_session_s_objective_reaches_every_held_request() {
+        let session = escalating(&format!("escalate: {{objective: latency}}\n{HELD}")).unwrap();
+        let held = session.requests[1].window.unwrap().on.unwrap();
+        assert_eq!(held.objective, Some(crate::triage::Objective::Latency));
+        assert_eq!(session.requests[0].window, None);
+    }
+
+    #[test]
+    fn an_escalation_that_cannot_mean_anything_is_refused_with_the_reason() {
+        let no_block = escalating(HELD).unwrap_err();
+        assert!(no_block.message().contains("`futex` is held"), "{no_block}");
+
+        let nothing_held = escalating(
+            "escalate: {objective: latency}\nrequests:\n  - {source: sched.offcpu, target: \
+             {launch: [prog]}, mode: trace}\n",
+        )
+        .unwrap_err();
+        assert!(
+            nothing_held.message().contains("holds no request"),
+            "{nothing_held}"
+        );
+
+        let no_objective = escalating(&format!("escalate: {{}}\n{HELD}")).unwrap_err();
+        assert!(
+            no_objective.message().contains("needs an objective"),
+            "{no_objective}"
+        );
+
+        let throughput =
+            escalating(&format!("escalate: {{objective: throughput}}\n{HELD}")).unwrap_err();
+        assert!(
+            throughput.message().contains("omn saturate"),
+            "{throughput}"
+        );
+    }
+
+    #[test]
+    fn a_join_across_a_held_source_is_refused_until_the_engine_knows_its_window() {
+        let joined = escalating(&format!(
+            "escalate: {{objective: latency}}\n{HELD}joins:\n  - {{id: across, from: \
+             sched.offcpu, to: sched.futex, via: task, match: eq}}\n"
+        ))
+        .unwrap_err();
+        assert!(
+            joined
+                .message()
+                .contains("join `across` reads `sched.futex`"),
+            "{joined}"
+        );
+        // The cheap pass runs for the whole run, and joining it is fine.
+        let cheap = escalating(&format!(
+            "escalate: {{objective: latency}}\n{HELD}joins:\n  - {{id: cheap, from: \
+             sched.offcpu, to: sched.offcpu, via: task, match: eq}}\n"
+        ));
+        assert!(cheap.is_ok(), "{cheap:?}");
     }
 
     #[test]

@@ -1010,3 +1010,597 @@ fn a_profile_that_is_not_one_is_refused_by_name() {
         spoken(&output)
     );
 }
+
+// ------------------------------------------------------------------ the escalation
+//
+// A session that holds its detailed sources with `window: on <layer>` and
+// decides, from a cheap pass it runs for the whole of it, which to attach.
+// Ground truth is the `phases` mode: cpu-bound, then lock-bound, with the
+// switch stamped on CLOCK_MONOTONIC and every acquisition of the second phase
+// written down as its start and its wait on the same clock.
+
+/// The helper thread holds the mutex this long at a time.
+const HOLD_US: u64 = 2_000;
+
+/// The detailed sources, held for their layers.
+const PROFILE: &str =
+    "  - {label: profile, source: cpu.profile, target: *program, mode: sample@997hz, \
+                       emit: [stack], keys: [task], stack: fp, window: on cpu}\n";
+const FUTEX: &str =
+    "  - {label: futex, source: sched.futex, target: *program, mode: trace, emit: [raw], \
+                     keys: [task], window: on lock}\n";
+const MUTEX: &str = "  - {label: mutex, source: sched.mutex, target: *program, mode: trace, \
+                     emit: [summary], keys: [task], window: on lock}\n";
+
+/// A session with the cheap pass over `program`, and `held` beside it.
+fn escalation_session(program: &[String], held: &str) -> String {
+    let argv = program
+        .iter()
+        .map(|arg| format!("'{arg}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "escalate: {{objective: latency}}\n\
+         requests:\n\
+         \x20 - {{label: blocked, source: sched.offcpu, target: &program {{launch: [{argv}]}}, \
+         mode: trace, emit: [summary], keys: [task]}}\n\
+         \x20 - {{label: on-cpu, source: cpu.oncpu_time, target: *program, mode: poll@50ms, \
+         emit: [summary]}}\n\
+         {held}"
+    )
+}
+
+/// One escalating run: its results, what it cost, and what the program said.
+struct Escalated {
+    results: Value,
+    cost: Value,
+    truth: BTreeMap<String, String>,
+    text: String,
+}
+
+impl Escalated {
+    fn result(&self, label: &str) -> &Value {
+        self.results["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .find(|result| result["label"] == label)
+            .unwrap_or_else(|| panic!("no result `{label}`:\n{}", self.text))
+    }
+
+    fn notes(&self, label: &str) -> Vec<String> {
+        self.result(label)["degradations"]
+            .as_array()
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter_map(|note| note.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn stopped(&self, label: &str) -> String {
+        self.result(label)["stopped_because"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn truth(&self, name: &str) -> u64 {
+        self.truth
+            .get(name)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("the workload reported no `{name}`:\n{}", self.text))
+    }
+
+    /// When the escalation attached `label`: from the moment it began the
+    /// attach to the moment the collector was live, on CLOCK_MONOTONIC.
+    fn attached(&self, label: &str) -> Option<(u64, u64)> {
+        self.notes(label).iter().find_map(|note| {
+            let (_, after) = note.split_once("(CLOCK_MONOTONIC ")?;
+            let (from, rest) = after.split_once(" to ")?;
+            let (to, _) = rest.split_once(" ns)")?;
+            Some((from.parse().ok()?, to.parse().ok()?))
+        })
+    }
+
+    fn cost_of(&self, label: &str) -> &Value {
+        self.cost
+            .as_array()
+            .expect("cost.json is a list")
+            .iter()
+            .find(|cost| cost["label"] == label)
+            .unwrap_or_else(|| panic!("no cost for `{label}`"))
+    }
+}
+
+/// Runs `session` through `omn -f`, or says why it could not and returns
+/// nothing. Missing privileges is the one refusal allowed to stop a test.
+fn escalate(
+    name: &str,
+    session: &str,
+    extra: &[&str],
+    would_have_checked: &str,
+) -> Option<Escalated> {
+    let dir = scratch(name);
+    let file = dir.join("session.yml");
+    std::fs::write(&file, session).unwrap();
+    let out = dir.join("out");
+    let mut args = vec![
+        "-f",
+        file.to_str().unwrap(),
+        "--format",
+        "json",
+        "-o",
+        out.to_str().unwrap(),
+    ];
+    args.extend(extra);
+    let output = omn(&args);
+    let text = spoken(&output);
+    if !output.status.success() && (text.contains("CAP_BPF") || text.contains("CAP_PERFMON")) {
+        eprintln!(
+            "skipped: the escalation's cheap pass needs CAP_BPF and CAP_PERFMON, which this \
+             binary does not carry (run `make`, which grants them). It would have checked \
+             {would_have_checked}"
+        );
+        return None;
+    }
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the run failed:\n{session}\n{text}"
+    );
+    let results: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("not one json document ({error}):\n{text}"));
+    let cost: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("cost.json")).unwrap()).unwrap();
+    let truth = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("omn-truth "))
+        .map(|line| {
+            line.split_whitespace()
+                .filter_map(|pair| {
+                    let (name, value) = pair.split_once('=')?;
+                    Some((name.to_owned(), value.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Escalated {
+        results,
+        cost,
+        truth,
+        text,
+    })
+}
+
+/// The `phases` program: `cpu_ms` of spinning, then `locks` acquisitions of
+/// the mutex, each written to the returned log.
+fn phases(name: &str, cpu_ms: u64, locks: u64) -> Option<(Vec<String>, PathBuf)> {
+    let fixture = match fixture() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return None;
+        }
+    };
+    let log = scratch(&format!("{name}-log")).join("waits.txt");
+    let program = vec![
+        fixture.to_string_lossy().into_owned(),
+        "phases".to_owned(),
+        cpu_ms.to_string(),
+        locks.to_string(),
+        HOLD_US.to_string(),
+        log.to_string_lossy().into_owned(),
+    ];
+    Some((program, log))
+}
+
+/// Every acquisition the program timed: `(start_ns, wait_ns)`.
+fn acquisitions(log: &Path) -> Vec<(u64, u64)> {
+    std::fs::read_to_string(log)
+        .expect("the program wrote its waits")
+        .lines()
+        .filter_map(|line| {
+            let (start, wait) = line.split_once(' ')?;
+            Some((start.parse().ok()?, wait.parse().ok()?))
+        })
+        .collect()
+}
+
+/// The ground truth: cpu-bound for a second, then lock-bound for a second.
+///
+/// The run must name `cpu` in the first phase and attach the profile there,
+/// name `lock` after the switch -- attaching `sched.futex` and detaching the
+/// profile, in that order of release -- and the futex waits it then measured
+/// for the main thread must be the program's own waits inside
+/// `pthread_mutex_lock` over exactly the window the escalation gave them.
+///
+/// The slack is the reference's: each futex wait lies inside one
+/// `pthread_mutex_lock` call, whose clock also covers the compare-and-swap
+/// before it (5 % and 2 ms), and one call can straddle the attach (one hold).
+#[test]
+fn a_program_cpu_bound_then_lock_bound_escalates_to_the_lock_layer_and_its_waits_match_its_own_clock(
+) {
+    let _machine = one_at_a_time();
+    let Some((program, log)) = phases("ground", 1000, 1000) else {
+        return;
+    };
+    let session = escalation_session(&program, &format!("{PROFILE}{FUTEX}{MUTEX}"));
+    let Some(run) = escalate(
+        "ground",
+        &session,
+        &[],
+        "that the lock layer is attached after the switch and its waits match the program's",
+    ) else {
+        return;
+    };
+    let switch_ns = run.truth("switch_ns");
+    let main = run.truth("tid");
+    let at = |ns: u64| (ns as f64 - switch_ns as f64) / 1e6;
+
+    // The cpu layer, in the first phase.
+    let (_, profile_live) = run
+        .attached("profile")
+        .unwrap_or_else(|| panic!("the profile was never attached:\n{}", run.text));
+    let profile_closed = profile_live + run.result("profile")["observed_ns"].as_u64().unwrap();
+    assert!(
+        profile_live < switch_ns,
+        "the cpu layer is attached in the cpu phase: live {:.1} ms from the switch",
+        at(profile_live)
+    );
+    assert!(
+        run.notes("profile")
+            .iter()
+            .any(|note| note.contains("named the `cpu` layer") && note.contains("for latency")),
+        "{:?}",
+        run.notes("profile")
+    );
+
+    // The lock layer, after the switch, with the cpu layer let go first.
+    let (futex_from, futex_live) = run
+        .attached("futex")
+        .unwrap_or_else(|| panic!("the lock layer was never attached:\n{}", run.text));
+    assert!(
+        futex_from > switch_ns,
+        "the lock layer is named from the lock phase's own numbers: attached {:.1} ms from the \
+         switch",
+        at(futex_from)
+    );
+    assert!(
+        profile_closed >= switch_ns && profile_closed <= futex_from,
+        "the profile ran past the switch, and was let go before the lock layer was attached: \
+         closed {:.1} ms, futex from {:.1} ms",
+        at(profile_closed),
+        at(futex_from)
+    );
+    let stopped = run.stopped("profile");
+    assert!(
+        stopped.contains("by the escalation")
+            && stopped.contains("`lock` layer")
+            && stopped.contains("one detailed layer at a time"),
+        "{stopped}"
+    );
+
+    // The waits, against the program's own clock over the same window.
+    let waits = acquisitions(&log);
+    let after_live: u64 = waits
+        .iter()
+        .filter(|(start, _)| *start >= futex_live)
+        .map(|(_, wait)| wait)
+        .sum();
+    let since_attach: u64 = waits
+        .iter()
+        .filter(|(start, _)| *start >= futex_from)
+        .map(|(_, wait)| wait)
+        .sum();
+    let measured: u64 = run.result("futex")["outputs"][0]["events"]
+        .as_array()
+        .expect("raw futex rows")
+        .iter()
+        .filter(|event| event["keys"][0]["task"]["tid"].as_u64() == Some(main))
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|attr| attr["name"] == "total_ns")
+                .and_then(|attr| attr["value"].as_u64())
+                .unwrap_or(0)
+        })
+        .sum();
+    eprintln!(
+        "switch at 0; profile live {:.1} ms, closed {:.1} ms; futex from {:.1} ms, live {:.1} ms; \
+         the program waited {:.2} ms after the attach and {:.2} ms after it was live; futex \
+         measured {:.2} ms",
+        at(profile_live),
+        at(profile_closed),
+        at(futex_from),
+        at(futex_live),
+        since_attach as f64 / 1e6,
+        after_live as f64 / 1e6,
+        measured as f64 / 1e6
+    );
+    assert!(
+        after_live > 100_000_000,
+        "the lock layer was attached with at least 100 ms of waits left to measure: {:.2} ms",
+        after_live as f64 / 1e6
+    );
+    let slack = 2_000_000 + HOLD_US * 1_000;
+    assert!(
+        measured as f64 >= after_live as f64 * 0.95 - slack as f64,
+        "futex saw less than the program waited once it was live: {measured} < {after_live}"
+    );
+    assert!(
+        measured <= since_attach + slack,
+        "futex saw more than the program waited from the attach on: {measured} > {since_attach}"
+    );
+
+    // The layer this machine cannot serve on a launch is said, not skipped.
+    let mutex = run.stopped("mutex");
+    assert!(
+        mutex.contains("never attached") && mutex.contains("preload"),
+        "{mutex}"
+    );
+    assert_eq!(run.result("mutex")["events_seen"], 0);
+    let summary = run.notes("blocked").join("\n");
+    assert!(
+        summary.contains("named `cpu` at")
+            && summary.contains("then `lock` at")
+            && summary.contains("attaching `futex`")
+            && summary.contains("letting go of `profile`")
+            && summary.contains("not served: `mutex`"),
+        "{summary}"
+    );
+}
+
+/// The budget holds, measured: every collection's cost is under the ceiling
+/// it was given, or it was let go for exceeding it and says so -- and the
+/// run's whole cost, every collector's cpu against the program's, is under it
+/// too.
+#[test]
+fn an_escalating_run_holds_its_budget_and_names_what_it_let_go() {
+    let _machine = one_at_a_time();
+    let Some((program, _)) = phases("budget", 800, 1500) else {
+        return;
+    };
+    let session = escalation_session(&program, &format!("{PROFILE}{FUTEX}"));
+    let Some(run) = escalate(
+        "budget",
+        &session,
+        &["--budget", "5%"],
+        "the run's cost against a 5 % budget",
+    ) else {
+        return;
+    };
+    let mut spent_ns = 0u64;
+    for cost in run.cost.as_array().unwrap() {
+        let label = cost["label"].as_str().unwrap();
+        spent_ns += cost["overhead"]["attributed_cpu_ns"].as_u64().unwrap_or(0);
+        let shed = cost["stopped_because"]
+            .as_str()
+            .is_some_and(|why| why.contains("to hold the budget"));
+        assert!(
+            cost["within_budget"] != false || shed,
+            "`{label}` exceeded its budget and was not let go for it: {cost}"
+        );
+    }
+    let program_ns = run.cost_of("blocked")["overhead"]["observed_cpu_ns"]
+        .as_u64()
+        .expect("the program's cpu");
+    let percent = spent_ns as f64 * 100.0 / program_ns as f64;
+    eprintln!(
+        "the run spent {:.2} ms of cpu against the program's {:.2} ms: {percent:.3} %",
+        spent_ns as f64 / 1e6,
+        program_ns as f64 / 1e6
+    );
+    assert!(
+        percent <= 5.0,
+        "the run's own cost is over its budget: {percent:.3} %"
+    );
+    // What it let go to stay there is named: the cpu layer, either at the
+    // switch or earlier because its own first readings -- which carry what
+    // attaching it cost while the program ran -- were over the ceiling.
+    let profile = run.stopped("profile");
+    assert!(
+        profile.contains("one detailed layer at a time") || profile.contains("to hold the budget"),
+        "{profile}"
+    );
+    assert!(
+        run.cost_of("profile")["overhead"]["wall_ns"]
+            .as_u64()
+            .unwrap()
+            < run.cost_of("blocked")["overhead"]["wall_ns"]
+                .as_u64()
+                .unwrap(),
+        "a detailed layer is paid for over its window, not over the run"
+    );
+}
+
+/// A detailed layer that costs more than its ceiling, with nothing cheaper
+/// in its chain, is let go and the run goes on: the cheap pass keeps reading
+/// and the escalation keeps deciding. Without the escalation, a run over its
+/// budget with nowhere to go ends.
+#[test]
+fn a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on() {
+    let _machine = one_at_a_time();
+    let Some((program, _)) = phases("shed", 1000, 800) else {
+        return;
+    };
+    let greedy =
+        "  - {label: profile, source: cpu.profile, target: *program, mode: sample@20000hz, \
+                  emit: [stack], keys: [task], stack: fp, budget: 0.2%, window: on cpu}\n";
+    let session = escalation_session(&program, &format!("{greedy}{FUTEX}"));
+    let Some(run) = escalate(
+        "shed",
+        &session,
+        &[],
+        "that a profile over its 0.2 % ceiling is let go and the run goes on",
+    ) else {
+        return;
+    };
+    let stopped = run.stopped("profile");
+    assert!(
+        stopped.contains("to hold the budget") && stopped.contains("ceiling of 0.2"),
+        "the profile says it was let go for the budget, and against which ceiling: {stopped}"
+    );
+    assert!(
+        run.attached("futex").is_some(),
+        "the escalation went on deciding, and named the lock layer after the shed:\n{}",
+        run.text
+    );
+    assert!(
+        run.notes("blocked")
+            .iter()
+            .any(|note| note.contains("`profile` was let go to hold the budget")),
+        "{:?}",
+        run.notes("blocked")
+    );
+}
+
+/// A layer the run names and this machine cannot serve is reported with the
+/// reason, and the cheap answer stands: nothing else is attached in its
+/// place, and the layer the run left is let go all the same.
+///
+/// On a launched program the lock layer's `sched.mutex` resolves to the
+/// preload shim, which is given at exec and cannot be attached mid-run, and
+/// glibc's probes are refused for a launch by the catalog: this machine
+/// cannot serve that layer mid-run, which is the property.
+#[test]
+fn a_layer_this_run_cannot_serve_is_reported_and_the_cheap_answer_stands() {
+    let _machine = one_at_a_time();
+    let Some((program, _)) = phases("unserved", 700, 700) else {
+        return;
+    };
+    let session = escalation_session(&program, &format!("{PROFILE}{MUTEX}"));
+    let Some(run) = escalate(
+        "unserved",
+        &session,
+        &[],
+        "that a lock layer this run cannot serve is reported with the reason",
+    ) else {
+        return;
+    };
+    let notes = run.notes("blocked").join("\n");
+    assert!(
+        notes.contains("the `lock` layer, named at")
+            && notes.contains("could not be served")
+            && notes.contains("preload")
+            && notes.contains("The cheap answer stands")
+            && notes.contains("blocked sleeping"),
+        "{notes}"
+    );
+    assert!(run.stopped("mutex").contains("never attached"));
+    assert!(
+        run.stopped("profile").contains("`lock` layer"),
+        "the cpu layer is let go when the lock layer is named, served or not: {}",
+        run.stopped("profile")
+    );
+}
+
+/// A run that escalated and a run that did not are different documents. A
+/// program over before two readings could name anything attaches no detailed
+/// source, and every held request says it measured nothing -- rather than
+/// reading as a quiet one.
+#[test]
+fn a_run_too_short_to_decide_attaches_nothing_and_says_so() {
+    let _machine = one_at_a_time();
+    let fixture = needs_fixture!();
+    let program = vec![
+        fixture.to_string_lossy().into_owned(),
+        "cpu".to_owned(),
+        "150".to_owned(),
+    ];
+    let session = escalation_session(&program, &format!("{PROFILE}{FUTEX}"));
+    let Some(run) = escalate(
+        "short",
+        &session,
+        &[],
+        "that a run too short to decide attaches nothing",
+    ) else {
+        return;
+    };
+    let notes = run.notes("blocked").join("\n");
+    assert!(notes.contains("named no layer"), "{notes}");
+    for label in ["profile", "futex"] {
+        let stopped = run.stopped(label);
+        assert!(
+            stopped.contains("never attached") && stopped.contains("did not name its layer"),
+            "{label}: {stopped}"
+        );
+        assert_eq!(run.result(label)["events_seen"], 0, "{label}");
+        assert_eq!(
+            run.cost_of(label)["overhead"]["attributed_cpu_ns"],
+            0,
+            "{label}"
+        );
+    }
+}
+
+/// An escalation that cannot mean anything is refused before anything runs,
+/// with the reason -- exit 2, the validator's code.
+#[test]
+fn an_escalation_that_cannot_decide_anything_is_refused_before_the_launch() {
+    let dir = scratch("refused");
+    let run = |name: &str, yaml: &str| {
+        let file = dir.join(format!("{name}.yml"));
+        std::fs::write(&file, yaml).unwrap();
+        omn(&["-f", file.to_str().unwrap()])
+    };
+    let held_rss =
+        "  - {label: rss, source: mem.rss, target: {launch: [sleep, '5']}, mode: poll@100ms, \
+         emit: [summary], window: on cpu}\n";
+    for (name, yaml, says) in [
+        (
+            "no-block",
+            format!("requests:\n{held_rss}"),
+            "held for an escalation",
+        ),
+        (
+            "no-objective",
+            format!("escalate: {{}}\nrequests:\n{held_rss}"),
+            "needs an objective",
+        ),
+        (
+            "throughput",
+            format!("escalate: {{objective: throughput}}\nrequests:\n{held_rss}"),
+            "omn saturate --objective throughput",
+        ),
+        (
+            "no-cheap-pass",
+            format!("escalate: {{objective: latency}}\nrequests:\n{held_rss}"),
+            "does not run `sched.offcpu` or `cpu.oncpu_time`",
+        ),
+        (
+            "join-across",
+            format!(
+                "escalate: {{objective: latency}}\nrequests:\n{held_rss}joins:\n  - {{id: \
+                 across, from: mem.rss, to: mem.rss, via: task, match: eq}}\n"
+            ),
+            "join `across` reads `mem.rss`",
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let output = run(name, &yaml);
+        let text = spoken(&output);
+        assert_eq!(output.status.code(), Some(2), "{name}: {text}");
+        assert!(text.contains(says), "{name}: {text}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "{name}: refused before the five-second program ran"
+        );
+    }
+
+    let output = omn(&[
+        "sched.futex",
+        "--mode",
+        "trace",
+        "--window",
+        "on lock",
+        "--",
+        "true",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", spoken(&output));
+    assert!(spoken(&output).contains("held for an escalation"));
+}
