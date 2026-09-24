@@ -269,6 +269,22 @@ in
 .I stopped_because
 and on standard error. Every run reports what it cost, budget or no budget.
 .TP
+.BI \-\-window " START..STOP"
+When, inside the run, the request is attached and detached, relative to the
+launch gate:
+.BR 1s..3s ,
+.BR 1s..
+(attached late, kept to the end) or
+.BR ..2s
+(attached with the rest, detached early). Absent is the whole run. The same
+text a session file's
+.B window
+takes, parsed by the same code, so the two refuse the same things in the same
+words. A collection's
+.I observed
+span and its rates are over its window, and a late attach is named in its notes
+with what the attach itself took while the program ran.
+.TP
 .BI \-\-stack " MODE"
 .BR fp ", " dwarf ", " lbr " or " none .
 .B dwarf
@@ -369,6 +385,39 @@ has at most one \fIworkload\fR target \(em \fBlaunch\fR, \fBpid\fR, \fBtid\fR,
 beside it (\fBsystem\fR, \fBcpu\fR, \fBiface\fR): that is the shape of every
 confounder check, where the machine's state is read beside the program it might
 explain. Only the workload target decides when the run ends.
+.SS Windows and the escalation
+A request's \fBwindow\fR is when it is watched inside the run: \fB1s..3s\fR,
+\fB1s..\fR or \fB..2s\fR, as on the command line. The rest of the session
+keeps running across every attach and detach.
+.PP
+A window written \fBon\fR \fIlayer\fR is one the run decides: the request is
+validated, resolved and prepared before the launch like any other, then held,
+attached when the session's escalation names that layer from its own cheap
+numbers and detached when it names another. The layers are the states of a
+task's wall clock: \fBcpu\fR (on a cpu), \fBqueue\fR (runnable, waiting for
+one), \fBdisk\fR (blocked uninterruptibly) and \fBlock\fR (blocked
+sleeping). A session that holds a request needs an \fBescalate:\fR block with
+its objective, and the cheap pass beside it, run for the whole run:
+.PP
+.RS
+.EX
+escalate: {objective: latency}
+requests:
+  \- {label: blocked, source: sched.offcpu, target: &p {launch: [./prog]},
+     mode: trace, emit: [summary], keys: [task]}
+  \- {label: on\-cpu, source: cpu.oncpu_time, target: *p,
+     mode: poll@50ms, emit: [summary]}
+  \- {label: profile, source: cpu.profile, target: *p, mode: sample@997hz,
+     emit: [stack], stack: fp, window: on cpu}
+  \- {label: futex, source: sched.futex, target: *p, mode: trace,
+     emit: [summary], window: on lock}
+.EE
+.RE
+.PP
+A held request is attached at most once: a request has one window. A join or a
+decomposition that reads a held source is refused until the join engine knows
+when a source was watching; join the cheap pass instead. \fBTRIAGE\fR says how
+the escalation decides.
 .SS Joins
 A join is declared beside its sources and matches their events by a key.
 .TP
@@ -508,6 +557,29 @@ is the difference when its own (leaf) cost moved beyond three standard
 deviations of Poisson noise, \fI|b \- a| / sqrt(a + b)\fR; the inclusive table
 shows what carried it. A folded file carries no loss accounting and no rate,
 and the answer says it could not check either.
+.SS The escalation
+\fBomn latency\fR pays for every detailed layer over the whole run. A session
+with an \fBescalate:\fR block pays for one at a time: its cheap pass \(em
+\fBsched.offcpu\fR for where the main thread blocked and in which state,
+\fBcpu.oncpu_time\fR for what the process burned \(em is read every 200 ms,
+and a state is named when it holds more than half of a reading and more than
+any other. The main thread's time on a cpu is bounded both ways: no more than
+the process burned, no more than what its own blocks left of the interval.
+When the same state is named twice in a row, the run attaches that layer's held
+requests and lets go of the ones it attached before \(em released first, so
+two detailed layers are never paid for at once. Only \fBlatency\fR is
+decided for; \fBtail\fR, \fBthroughput\fR and \fBenergy\fR are refused and
+name the command that answers them.
+.PP
+Every held request's notes say when it was attached or let go and why, with
+the reading that decided it; the cheap pass's notes carry the decisions. A
+layer named that cannot be served \(em a source given to the program at exec,
+which cannot be attached mid-run \(em is said with the reason, and the cheap
+answer stands: nothing is attached in its place. Under \fB\-\-budget\fR, a
+held request over its ceiling with nothing cheaper in its chain is let go
+rather than ending the run, and says so; a request attached mid-run is weighed
+once it has run for 100 ms, because before that its attach is most of its
+account.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -625,6 +697,11 @@ What a program queues for, and what it costs in energy:
 .EX
 omn saturate \-\-objective throughput \-\- ./build.sh
 omn saturate \-\-objective energy \-\- ./build.sh
+.EE
+.TP
+A run that decides which layer to pay for, from its own cheap numbers:
+.EX
+omn \-f examples/attach\-escalate\-phases.yml \-\-budget 5%
 .EE
 .TP
 Which function a change made slower:

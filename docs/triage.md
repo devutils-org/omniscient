@@ -1,14 +1,17 @@
-# Triage — the layer above the engine
+# Triage — the layer above the engine, and the escalation
 
-`ROADMAP.md` phase 10, everything but the escalation. The tenth wave's stream
-T. This is the deliverable, not a log about one: what the layer is, what it
-answers and against what ground truth, what it does not do and why, what it
-asked of the files it does not own, and the rows the coordinator pastes.
+`ROADMAP.md` phase 10: the tenth wave's stream T built the three questions,
+and the eleventh wave's stream E the escalation, item 3. This is the
+deliverable, not a log about one: what the layer is, what it answers and
+against what ground truth, what it does not do and why, what it asked of the
+files it does not own, and the rows the coordinator pastes.
 
 ```console
 omn latency  --objective latency|tail        [--runs N] [--pid PID -d DUR | -- PROGRAM]
 omn saturate --objective throughput|tail|energy          [--pid PID -d DUR | -- PROGRAM]
 omn diff BEFORE AFTER [--format text|json|folded]
+omn -f SESSION          # a session with `escalate:` decides which layer to pay for
+omn SOURCE --window START..STOP ...
 ```
 
 ---
@@ -38,8 +41,11 @@ the answer rather than summarised away. A value from a lossy run prints behind
 | `src/triage/latency.rs` | `omn latency`: TSA as a question |
 | `src/triage/saturate.rs` | `omn saturate`: USE with Little's law |
 | `src/triage/diff.rs` | `omn diff`: differential profiles |
+| `src/triage/escalate.rs` | the escalation's policy: a reading of the cheap pass, and which layer it names |
+| `src/collect/mod.rs` | `Escalate`, the trait the runner asks between rounds, and the held slots |
+| `src/request.rs` | `window: on <layer>`, `escalate: {objective}`, and their refusals |
 | `src/triage/workload.c` | the ground-truth fixture every scenario launches |
-| `tests/triage.rs` | 17 scenarios: ground truth, refusals, the loss path, the capability sweep |
+| `tests/triage.rs` | 23 scenarios: ground truth, refusals, the loss path, the capability sweep, the escalation |
 
 ---
 
@@ -224,6 +230,205 @@ and the same program run twice unchanged: no function beyond the noise.
 
 ---
 
+## The escalation — pay for one layer at a time
+
+`omn latency` pays for every detailed layer for the whole run -- the on-cpu
+profile, the blocking stacks, the lock sources -- because it does not know
+ahead of time where the time will go. A session with an `escalate:` block runs
+a cheap pass instead, and once the cheap pass names the state a task's wall
+clock is going to, attaches that state's detailed sources and lets go of the
+rest (`examples/attach-escalate-phases.yml`):
+
+```yaml
+escalate: {objective: latency}
+requests:
+  - {label: blocked, source: sched.offcpu,   target: &p {launch: [...]}, mode: trace, emit: [summary], keys: [task]}
+  - {label: on-cpu,  source: cpu.oncpu_time, target: *p, mode: poll@50ms, emit: [summary]}
+  - {label: profile, source: cpu.profile,    target: *p, mode: sample@997hz, emit: [stack], stack: fp, window: on cpu}
+  - {label: futex,   source: sched.futex,    target: *p, mode: trace, emit: [summary], window: on lock}
+  - {label: mutex,   source: sched.mutex,    target: *p, mode: trace, emit: [summary], window: on lock}
+```
+
+### The mechanism, which is the decision worth writing down
+
+**Declared, then decided.** A detailed source is a request like any other,
+held with a window written `on <layer>`: validated, resolved and *prepared*
+before the program is launched. What the run decides is only when each one is
+attached and detached. So an escalation can never reach a backend the
+resolver did not choose, or a source answering a question the session did not
+ask -- the one thing the brief rules out, ruled out by construction rather
+than by a check. The layers are the four states thread state analysis splits a
+wall clock into: `cpu`, `queue` (runnable), `disk` (uninterruptible) and
+`lock` (sleeping).
+
+**The runner asks a trait; triage answers.** `collect::Escalate` has three
+methods -- `decide` (what to attach and detach now), `shed` (let an
+over-budget layer go rather than end the run?) and `close` (what each
+collection should say) -- and the runner knows nothing behind it, the way it
+knows `Cheaper`. It asks once a round, *after* the round's reads (the edge
+convention: read first, then decide) and after the stop condition, so a run
+that is ending attaches nothing. It applies the answer **detaches first**, so
+the run never pays for two detailed layers at once. The one line of the
+collector layer that names triage is `escalation_for`, the registration, as
+`registry()` names the families.
+
+**Why a session and not a subcommand.** `src/main.rs` is stream J's this wave,
+and a new subcommand needs a dispatch line there. The session is also the
+better surface: `-o`, `--budget`, `cost.json`, the encoders and the resolved
+file all come with `omn -f` for free, and the file is the record of what was
+asked, as `DECISIONS.md` settled for every other measurement.
+
+**The cheap pass** is two requests the session runs for the whole run, on the
+workload: `sched.offcpu` (where the main thread blocked, in which state, and
+how long it then queued) and `cpu.oncpu_time` (what the process burned). The
+main thread is the one whose id is the process id, as for `omn latency`.
+
+**A decision** (`src/triage/escalate.rs`) reads what arrived since the last
+one, every 200 ms -- two drains of `sched.offcpu`. The main thread's time on a
+cpu is bounded from both sides the cheap pass has: no more than the process
+burned, and no more than what the main thread's own blocks left of the
+interval (a helper spinning a whole cpu while the main thread sleeps is not a
+cpu-bound main thread; a unit test holds that). A state is **named** when it
+holds more than half of the reading and more than any other; a layer is
+**escalated to** when the same state is named in two readings in a row, so a
+reading straddling a phase change attaches nothing for the phase that ended.
+
+### What it says, each a scenario
+
+Every held request's notes say when it was attached or let go, by the
+escalation, with the reading that decided it and the monotonic span of the
+attach; `blocked`'s notes carry the decisions. Measured here (the example,
+`--budget 5%`):
+
+```
+blocked   the escalation, for latency, named `cpu` at 0.450 s, attaching `profile`; then `lock` at
+          1.461 s, attaching `futex` and letting go of `profile` (not served: `mutex`: never attached:
+          it is served through `preload`, which is given to the program at exec ...)
+profile   559 events over 1.01s, stopped because detached 1.461 s into the run by the escalation: for
+          latency, the cheap pass named the `lock` layer (over the last 200.07ms, the main thread was
+          blocked sleeping 197.92ms (99 %), on a cpu at most 1.61ms (1 %), ...), so the `cpu` layer's
+          detailed sources were let go: the run pays for one detailed layer at a time
+futex     attached 1.461 s into the run by the escalation ... attaching it took 5.2ms while the target ran
+budget: [cpu.profile] --budget 5% held: 2.31 % measured
+budget: [sched.futex] --budget 5% held: 0.89 % measured
+```
+
+- **What it escalated to and why** -- the verdict, the objective, the moment,
+  the sources attached and let go: the ground-truth scenario asserts each
+  field. A run that decided nothing is a different document: a 150 ms program
+  (`a_run_too_short_to_decide_attaches_nothing_and_says_so`) says "named no
+  layer", and every held request "never attached: the escalation did not name
+  its layer", with no events and no cost.
+- **The budget holds, measured**
+  (`an_escalating_run_holds_its_budget_and_names_what_it_let_go`): every
+  collection in `cost.json` is under the ceiling or was let go for exceeding
+  it and says so, and the run's whole cost -- every collector's cpu against
+  the program's -- was **0.71 % and 0.73 %** of a 5 % budget in two runs. What
+  it let go to stay there is named: the profile, at the switch. A layer over
+  its own ceiling with nothing cheaper in its chain
+  (`a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on`: a
+  20 kHz profile under 0.2 %) is let go "to hold the budget", the run goes on,
+  and the escalation still names `lock` afterwards.
+- **A layer this machine cannot serve**
+  (`a_layer_this_run_cannot_serve_is_reported_and_the_cheap_answer_stands`):
+  on a launched program `sched.mutex` resolves to the preload shim, given at
+  exec, and glibc's probes are refused for a launch by the catalog -- so this
+  run cannot serve that source mid-run, which is real rather than simulated.
+  Named, the lock layer is reported "could not be served", with the reason,
+  and "the cheap answer stands, and it is only what the cheap pass can say:
+  ... blocked sleeping ...". Nothing is attached in its place. The cpu layer is
+  let go all the same, since it is no longer the suspect.
+- **Joins across the switch are honest** by refusal, until J's windows land:
+  a join or a decomposition that reads a held source is refused at load
+  ("the join engine does not yet know when a source was watching"), and the
+  cheap pass, which runs for the whole run, can be joined freely. See below.
+
+### Ground truth: cpu-bound for a second, then lock-bound for a second
+
+`workload phases 1000 1000 2000 LOG` spins a second of its own cpu, stamps the
+switch on `CLOCK_MONOTONIC`, then takes a mutex a helper holds 2 ms at a time a
+thousand times, writing every acquisition's start and wait to `LOG` on the same
+clock. The tool reads none of it.
+`a_program_cpu_bound_then_lock_bound_escalates_to_the_lock_layer_and_its_waits_match_its_own_clock`
+asserts: the profile is live before the switch and named `cpu`; `sched.futex`
+is attached after the switch; the profile was closed after the switch and
+before the futex attach began; and the futex waits measured for the main
+thread lie between the program's own waits that started once the futex
+program was live (less 5 % and 2 ms, the compare-and-swap before each wait)
+and those that started from the moment the attach began (plus one hold, a
+call straddling the attach). Three runs:
+
+```
+lock layer attached   program waited, from live .. from attach   futex measured
+  +463.7 ms              531.47 .. 535.41 ms                        532.74 ms
+  +406.3 ms              602.45 .. 606.39 ms                        603.67 ms
+  +421.5 ms              592.47 .. 596.38 ms                        591.96 ms
+```
+
+The lock layer is attached 0.4 to 0.5 s after the switch: two readings of
+200 ms, the first of them straddling it.
+
+### Refused before anything runs
+
+Exit 2, the validator's code, before the launch
+(`an_escalation_that_cannot_decide_anything_is_refused_before_the_launch`): a
+request held with no `escalate:` block; an `escalate:` block with no
+objective (the list), or with `throughput`, `tail` or `energy` (each names the
+command that answers it); a session with no cheap pass; a join across a held
+source; and `--window on lock` on the command line, which has no cheap pass
+beside it.
+
+### What the escalation does not do, and why
+
+- **One window per request.** A layer named, let go, and named again is not
+  attached a second time: a collection has one window, and two would be two
+  series under one label. The decision says so. The flight recorder (next
+  wave) is where a request that comes and goes belongs.
+- **Only `latency`.** The tail takes several runs; throughput and energy are
+  about every task, and the cheap pass reads one task's wall clock.
+- **A held request that does not resolve refuses the run**, because `main.rs`
+  resolves every request before running and stops at the first failure. The
+  request that makes it a reported layer instead is filed with J.
+- **The on-cpu reading is the process's**, bounded by the main thread's own
+  blocks: `cpu.oncpu_time` through `/proc/<pid>/stat` has no per-thread
+  figure, and its bpf backend is not built. Its tick granularity (10 ms) is in
+  every reading, which is one reason a reading is 200 ms.
+- **An attach mid-run is charged to its request**, as hot attach decided. Two
+  things follow and both are in the runner now. The kernel's symbol table,
+  which a profile reads on its first start, took **962 ms** inside the round
+  the first time -- every other collector unread, the profile's cost 71 % of
+  the program's -- and is now read before the launch when any late request
+  asks for stacks. And a request attached mid-run is weighed against its
+  budget once it has run for 100 ms: a few milliseconds in, its attach is most
+  of its account and a percentage says how recently it was attached. A layer
+  attached less than 100 ms before the run ends is never weighed and its
+  `cost.json` can show it over the ceiling (seen once: 6.46 % over 93 ms, 5.2
+  ms of it the attach), which the budget line reports as exceeded.
+
+### Joins avoided
+
+None of the escalation's sessions joins a held source, and the session
+refuses one: `Session::check_escalation` names the join or decomposition part
+that reads it. Stream H measured what such a join does today -- a state
+opened before the detach absorbs every event after it -- and J's
+`apply_within` is the fix. The refusal is one function to lift for joins once
+it lands and `main.rs` passes the windows; a decomposition part would also need
+weighing against its own window.
+
+---
+
+## `--window` on the command line
+
+Stream H's request, filed with `src/cli.rs` last wave: `omn SOURCE --window
+1s..3s` builds the same `Request` a session's `window: 1s..3s` does, through
+the same `FromStr`, so the two refuse the same things in the same words (a
+unit test compares the refusal texts). `a_window_on_the_command_line_is_attached_and_detached_as_a_session_s_is`
+in `tests/runner.rs` runs one: a 200 ms window over a one-second program,
+detached where it was asked and watched for its window only. `man/omn.1` has
+the option.
+
+---
+
 ## Ground truth
 
 Every scenario launches `src/triage/workload.c`, which `tests/triage.rs` builds
@@ -262,8 +467,6 @@ development machine; `cargo test --test triage` is 17 tests in about 23 s.
 
 ## What it does not do, and why
 
-- **The escalation** (phase 10 item 3) is the next wave's: it stands on hot
-  attach, which stream H is building now.
 - **A tail below a hundred runs is a maximum.** `omn latency --objective tail`
   compares the slowest of N with the median and says, under a hundred, that it
   is not a percentile. A tail within one long-running process — operations
@@ -284,50 +487,42 @@ development machine; `cargo test --test triage` is 17 tests in about 23 s.
   energy is mostly theirs.
 - **Memory is PSI only**, of the workload's cgroup, which holds more than the
   workload. Utilization of memory has no single number here worth naming.
-- **No `--budget`.** A triage run pays for the sources its method needs and
-  measures what they cost on every result; the budget ladder lives in
-  `main.rs`'s `trace` path, and moving it into the library is not needed until
-  the escalation, which is where a budget decides something.
+- **No `--budget` on `omn latency` or `omn saturate`.** A triage question
+  pays for the sources its method needs and measures what they cost on every
+  result. The escalation is where a budget decides something, and it runs
+  through `omn -f`, where `--budget` and the ladder already are.
 
 ---
 
 ## The manual
 
-`man/omn.1` gained the three commands in `SYNOPSIS` and `COMMANDS`, a
-`TRIAGE` section (the objective, the verdict rules, Little's law, the diff
-arithmetic) and triage examples. `EXIT STATUS` carried the table from before
-the exit codes changed — 2 for "this machine cannot serve it", which is 1 now —
-and is fixed. `FILES` no longer counts the sessions.
-
-**The eighth wave's request for `between` and `decompose:`** was already
-answered in the manual when this wave started — the `Joins` section has
-`between`, `Decompositions` has the block, and `EVIDENCE` defines `TEMPORAL`
-by what produces it. What was missing is the part fields, and they are there
-now: `less:`, `filter:`, `reading:`, `names:`, `by:` and `top:`.
-
-**The ninth wave's request to say what `=~` does** is left, deliberately:
-`tests/scenario_runtime.rs` asserts the manual is still silent and is not this
-stream's, so landing the text alone would turn the suite red. It goes in at
-the merge with that assertion; `docs/open-findings.md` says where both are.
+`man/omn.1`, this wave: `--window` under *Measurement*; a *Windows and the
+escalation* section under *SESSION FILES* (`window`, `on <layer>`, the
+`escalate:` block, one window per request, the refusal of joins across a held
+source); *The escalation* under *TRIAGE* (the reading, the naming rule, the
+release order, the unservable layer, the budget); and the example. The tenth
+wave's changes are as that wave left them: the three commands, the `TRIAGE`
+section, `EXIT STATUS` and `FILES`.
 
 ---
 
 ## Filed in `docs/open-findings.md`
 
-Under *Needs from another stream — the tenth wave, stream T (triage)*:
+Under *Needs from another stream — the eleventh wave, stream E (the
+escalation)*:
 
-1. `src/join.rs`: a filtered part that matched nothing is a measured zero, not a
-   missing row.
-2. `src/collect/cpu/` or `src/perf.rs`: a profile that follows the threads a
-   launched program starts.
-3. The coordinator: a `triage-fixture` target in the `Makefile`, the shape of
-   `vertical-server`, so `examples/triage-*.yml` run after `make` alone.
-4. The coordinator: `=~` in the manual together with the assertion that waits
-   for it.
-5. The coordinator: the objective rules for `DECISIONS.md`.
+1. `src/main.rs` (J): a held request that does not resolve is set aside with
+   the resolver's reason rather than refusing the run, so the escalation can
+   report the layer with the probes' reasons when it names it.
+2. `src/join.rs` (J): once `apply_within` lands, lift the refusal of joins
+   across a held source in `Session::check_escalation`.
+3. `src/emit.rs` (J): the window on `Results`, seconded -- the escalation's
+   windows are in its notes, with monotonic stamps, until it is a field.
+4. The coordinator: the escalation's mechanism for `DECISIONS.md`, and the
+   index rows below.
 
-No `mod` line is asked of anyone: `src/lib.rs` is this stream's and gained
-`pub mod triage;`.
+The tenth wave's five requests are still under their own heading, *the tenth
+wave, stream T (triage)*.
 
 ---
 
@@ -335,44 +530,58 @@ No `mod` line is asked of anyone: `src/lib.rs` is this stream's and gained
 
 ```console
 make                                  # capabilities; the eBPF sources need them
-cargo test --test triage              # builds the fixture, runs the 17 scenarios
+cargo test --test triage              # builds the fixture, runs the 23 scenarios
 W=target/omn-triage-fixture/workload
 omn latency  --objective latency -- $W lock 150 2000
 omn latency  --objective tail --runs 5 -- $W tail /tmp/counter 5 100 200
 omn saturate --objective throughput -- $W queue 4 250
 omn latency  --objective latency --dump-session -- $W io 300 target | omn -f - --input-format yaml
+omn -f examples/attach-escalate-phases.yml --budget 5%
+omn mem.rss -m poll@20ms -e summary --window 200ms..400ms -- sleep 1
 ```
 
 ---
 
 ## The suite on this branch
 
-One `make check`, then one `cargo test --workspace --no-fail-fast`: every test
-passes but three, none of them in this stream's files.
+One `make check`, red at `tests/cli.rs`, then one `cargo test --workspace
+--no-fail-fast`: 1762 passed, 9 ignored (the bench's), 4 failed -- one
+expected, three that passed alone on their one rerun.
 
-- `tests/cli.rs::the_session_indexes_hold_exactly_the_sessions_on_disk` — the
-  five `examples/triage-*.yml` below, until their rows are pasted. Expected.
-- `tests/aggregation.rs::two_emits_of_one_request_describe_the_same_events` —
-  an `assert_eq!` on two `f64`s one ulp apart, red on `main` as well; the
-  eighth wave's stream J filed the fix in `docs/open-findings.md` ("a float
-  compared exactly").
-- `tests/scenario_mem.rs::two_processes_on_one_line_take_it_from_each_other_and_on_two_lines_do_not`
-  — "HITM came from" one process of the two, under the load of four streams'
-  suites. Rerun alone once: it passed. It is not in the flaky tally by name and
-  belongs there: a hardware-sampled cache-line fight is exactly the kind of
-  measurement a shared machine takes from.
+- `tests/cli.rs::the_session_indexes_hold_exactly_the_sessions_on_disk` -- the
+  one session below, until its rows are pasted. Expected.
+- `tests/triage.rs::the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail`
+  -- the median of five runs was named `cpu_queue`, "runnable 180.75ms (63.4 %
+  of its wall clock)": the machine's cpus were busy with the other streams'
+  builds, and the test asserts `cpu`. This stream's file and the tenth wave's
+  scenario; nothing this wave changed is on its path (`omn latency` runs no
+  escalation). It asserts what the machine was doing, and belongs in the
+  flaky tally beside finding 41's kind, with a skip on the fixture's own
+  run-queue share the way the io saturation scenario has one -- left for a
+  quiet look rather than patched under load.
+- `tests/cli.rs::a_known_allocation_shows_up_in_the_measured_series` --
+  "touched 67108864 bytes but the measured rise was only 17391616". Not this
+  stream's; passed alone.
+- `src/perf.rs::tests::an_ibs_sample_says_which_level_answered_the_load` --
+  "too few samples to say anything" (7 loads of the 256 MiB walk sampled).
+  Not this stream's; passed alone.
+
+`cargo test --test triage` is 23 tests in about 40 s, `--test runner` 21 and
+`--test budget` 12; `clippy -D warnings` and `fmt --check` are clean.
 
 ---
 
 ## Index rows
 
-For `examples/README.md` and `GUIDE.md` — the session-index test in
-`tests/cli.rs` is red on this branch until they are added:
+For `examples/README.md` and `GUIDE.md` -- the session-index test in
+`tests/cli.rs` is red on this branch until they are added. The tenth wave's
+five `triage-*` rows are in both indexes already.
 
 ```
-| `triage-latency-cpu.yml` | Why is a cpu-bound program slow? The session `omn latency` asks through: on-cpu dominates, and the hottest function is named. |
-| `triage-latency-io.yml` | Why is a program making synchronous writes slow? Its blocked time is uninterruptible, from fdatasync: the disk. |
-| `triage-latency-lock.yml` | Why is a thread taking a contended mutex slow? Its sleep is covered by pthread_mutex_lock waits, and the mutex is named. |
-| `triage-latency-tail.yml` | What makes the slowest of five runs slow, when the median is cpu-bound? The one run's 200 ms sleep. |
-| `triage-saturate-queue.yml` | What do four threads on one cpu queue for? The cpu, three deep, by Little's law over `sched.runqlat`. |
+| `attach-escalate-phases.yml` | Can a run decide which layer to pay for from its own cheap numbers? A program cpu-bound then lock-bound gets the profile, then the futex waits, one layer at a time. |
 ```
+
+## Ignored tests this half makes ready
+
+None. The two ignored scenarios in `tests/runner.rs` wait on stream J's join
+windows and stream S's per-task counters, and this stream did not touch them.

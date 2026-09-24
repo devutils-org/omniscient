@@ -15,6 +15,8 @@
  *                                      spin MS; every EVERY-th run also sleep BLOCK_MS
  *   workload queue THREADS MS          THREADS threads spin MS each, all on one cpu
  *   workload diff FACTOR               four functions of equal cost, `beta` FACTOR times
+ *   workload phases MS N HOLD_US LOG   spin MS, then the lock mode's N acquisitions,
+ *                                      each written to LOG as `start_ns wait_ns`
  *
  * The spin is a chain of dependent multiplies: its speed is the multiplier's
  * latency, which an SMT sibling does not share, so a unit of work costs about
@@ -162,6 +164,51 @@ static int mode_lock(int n, uint64_t hold)
 	return 0;
 }
 
+/* ---------------------------------------------------------------- phases */
+
+/* Cpu-bound, then lock-bound: the escalation's ground truth. The switch is
+ * stamped on CLOCK_MONOTONIC, the clock the tool stamps with, and every
+ * acquisition of the second phase is written to LOG as its start and its wait
+ * on the same clock, so a test can add up exactly the waits that fell inside
+ * whatever window the escalation gave its lock sources. */
+static int mode_phases(uint64_t cpu_ms, int n, uint64_t hold, const char *log)
+{
+	FILE *out = fopen(log, "w");
+	if (!out) {
+		fprintf(stderr, "cannot create %s: %s\n", log, strerror(errno));
+		return 1;
+	}
+	uint64_t start = now_ns(CLOCK_MONOTONIC);
+	spin_cpu_ms(cpu_ms);
+	uint64_t switched = now_ns(CLOCK_MONOTONIC);
+	hold_us = hold;
+	pthread_t thread;
+	pthread_mutex_lock(&mutex);
+	pthread_create(&thread, NULL, holder, NULL);
+	usleep(1000);
+	pthread_mutex_unlock(&mutex);
+	usleep(100);
+	uint64_t waited = 0;
+	for (int i = 0; i < n; i++) {
+		uint64_t before = now_ns(CLOCK_MONOTONIC);
+		pthread_mutex_lock(&mutex);
+		uint64_t wait = now_ns(CLOCK_MONOTONIC) - before;
+		waited += wait;
+		sink ^= work(1);
+		pthread_mutex_unlock(&mutex);
+		fprintf(out, "%llu %llu\n", (unsigned long long)before, (unsigned long long)wait);
+		usleep(20);
+	}
+	stop = 1;
+	fclose(out);
+	char extra[128];
+	snprintf(extra, sizeof extra, "switch_ns=%llu lock_wait_ns=%llu locks=%d",
+		 (unsigned long long)switched, (unsigned long long)waited, n);
+	truth("phases", start, extra);
+	pthread_join(thread, NULL);
+	return 0;
+}
+
 /* ---------------------------------------------------------------- tail */
 
 static int mode_tail(const char *counter, int every, uint64_t ms, uint64_t block_ms)
@@ -272,7 +319,11 @@ int main(int argc, char **argv)
 		return mode_queue(atoi(argv[2]), strtoull(argv[3], NULL, 10));
 	if (argc >= 3 && strcmp(argv[1], "diff") == 0)
 		return mode_diff(atoi(argv[2]));
+	if (argc >= 6 && strcmp(argv[1], "phases") == 0)
+		return mode_phases(strtoull(argv[2], NULL, 10), atoi(argv[3]),
+				   strtoull(argv[4], NULL, 10), argv[5]);
 	fprintf(stderr, "usage: workload cpu MS | io N DIR | lock N HOLD_US | "
-			"tail COUNTER EVERY MS BLOCK_MS | queue THREADS MS | diff FACTOR\n");
+			"tail COUNTER EVERY MS BLOCK_MS | queue THREADS MS | diff FACTOR | "
+			"phases MS N HOLD_US LOG\n");
 	return 2;
 }

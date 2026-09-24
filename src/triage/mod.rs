@@ -18,9 +18,12 @@
 //! - [`latency`]: `omn latency`, thread state analysis -- *why is this slow*.
 //! - [`saturate`]: `omn saturate`, USE with Little's law -- *what does it queue for*.
 //! - [`diff`]: `omn diff`, two profiles and a subtraction.
+//! - [`escalate`]: the escalation -- a run that attaches the detailed sources
+//!   of the layer its own cheap pass names, and lets go of the rest.
 
 pub mod diff;
 pub mod engine;
+pub mod escalate;
 pub mod latency;
 pub mod objective;
 pub mod saturate;

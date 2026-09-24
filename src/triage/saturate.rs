@@ -193,6 +193,7 @@ impl Ask {
             requests,
             joins: Vec::new(),
             decompose: Vec::new(),
+            escalate: None,
         }
     }
 }

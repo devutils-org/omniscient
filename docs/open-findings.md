@@ -6589,3 +6589,85 @@ never defaulted; and a method refuses an objective it does not answer for and
 names the one that does (`omn latency` answers latency and tail, `omn saturate`
 throughput, tail and energy). `cost` is not an objective: nothing here measures
 a price.
+
+## Needs from another stream — the eleventh wave, stream E (the escalation)
+
+None blocking: a session with an `escalate:` block and requests held with
+`window: on <layer>` runs through `omn -f` today, attaches the layer its cheap
+pass names, and holds its budget, with its scenarios in `tests/triage.rs`.
+`docs/triage.md` is the record. What it would say better with a file it does
+not own:
+
+### To whoever owns `src/main.rs` (stream J this wave): a held request that does not resolve is a layer this machine cannot serve, not a failed run
+
+`trace` resolves every request of a session and returns at the first
+`ResolveError`. For a request held for the escalation that is the wrong answer:
+the session asked for it only in case its layer were named, the cheap pass
+does not need it, and the probes' reasons are exactly what the escalation
+should print when it names that layer. Today such a session exits 1 before
+anything runs. Wanted, in the resolution loop:
+
+```rust
+// A request held for the escalation (`window: on <layer>`) that this machine
+// cannot serve is not a reason to refuse the run: set it aside with the
+// resolver's reason, and the escalation reports it if it names that layer.
+let held = request.window.is_some_and(|window| window.on.is_some());
+match resolve::resolve(&catalog, &capabilities, request) {
+    Ok(resolved) => resolutions.push(resolved),
+    Err(error) if held => unserved.push(omn::collect::Unserved {
+        request: request.clone(),
+        reason: error.to_string(),
+    }),
+    Err(error) => { /* as today */ }
+}
+```
+
+and `collect::run_all_within_unserved(&resolutions, &mut ladder, &unserved)`
+in `measure`, which this stream will add beside `run_all_within` once the call
+site is agreed -- the policy already reports a named layer whose held requests
+could not be attached, with each one's reason (`src/triage/escalate.rs`,
+`close`). Until then a held request that does not resolve refuses the run with
+the resolver's own message, which is honest and louder than it needs to be.
+
+### To whoever owns `src/join.rs` (stream J): lift one refusal when `apply_within` lands
+
+`Session::check_escalation` (`src/request.rs`) refuses a join or a
+decomposition that reads a held source, because a state opened before the
+escalation detaches its source would absorb every event after it -- the shape
+stream H measured at 67 matches for 40. Once `join::apply_within` closes states
+at the `from` window's end and counts `outside_window`, and `main.rs` passes
+the windows, `nothing_reads_across_a_held_window` can go for joins. A
+decomposition's parts would also need weighing against their own window rather
+than the run's whole; that half stays.
+
+### To whoever owns `src/emit.rs` (stream J): the window on `Results`, seconded
+
+The escalation's documents say where each held request was watched in words --
+"attached 1.413 s into the run by the escalation ... (CLOCK_MONOTONIC a to b
+ns)", "detached 1.481 s into the run by the escalation: ..." -- and the
+scenarios parse the monotonic stamps out of the note. `Results::window`, copied
+from `Collection::window`, would make that a field; the notes stay, since they
+carry the *why*.
+
+### To the coordinator: `DECISIONS.md`, the escalation's mechanism
+
+Worth recording as settled, and enforced by `src/collect/mod.rs`'s tests:
+
+- The runner asks `collect::Escalate` once a round, after its reads and after
+  the stop condition, and applies the answer detaches first. It never learns
+  what a layer is: the one line of the collector layer that names triage is
+  `escalation_for`, the registration, as `registry()` is for the families.
+- An escalation can only attach requests the session declared, held with
+  `window: on <layer>`, validated, resolved and prepared before the launch. It
+  cannot reach a backend the resolver did not choose.
+- A held request is attached at most once: a collection has one window.
+- A held request over its budget with nothing cheaper is let go, not the end
+  of the run; a request attached mid-run is weighed once it has run for one
+  budget check interval.
+- The objective is required (`escalate: {objective: latency}`), and only
+  `latency` is decided for.
+
+### To the coordinator: the index rows
+
+One session, `examples/attach-escalate-phases.yml`; its rows are at the end of
+`docs/triage.md`.

@@ -1729,3 +1729,54 @@ fn a_session_with_windows_dumps_unchanged() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&again_path);
 }
+
+/// `--window` on the command line is the window a session file carries: the
+/// same request, attached and detached at the same moments, and said the
+/// same way. Ground truth is the run's own record of where the window was --
+/// the run began at the gate, and the window was asked to close 400 ms in --
+/// against a program that runs for a second.
+#[test]
+fn a_window_on_the_command_line_is_attached_and_detached_as_a_session_s_is() {
+    let output = run(&[
+        "mem.rss",
+        "--mode",
+        "poll@20ms",
+        "--emit",
+        "summary",
+        "--window",
+        "200ms..400ms",
+        "--format",
+        "json",
+        "--",
+        "sleep",
+        "1",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &document["results"][0];
+    let stopped = result["stopped_because"].as_str().unwrap_or_default();
+    let detached_at: f64 = stopped
+        .strip_prefix("its window closed: detached ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("the window did not close on it: {stopped}"));
+    assert!(
+        (0.4..0.9).contains(&detached_at),
+        "detached where it was asked, not earlier and not at the end: {detached_at} s"
+    );
+    let observed_ms = result["observed_ns"].as_u64().unwrap() as f64 / 1e6;
+    assert!(
+        (150.0..500.0).contains(&observed_ms),
+        "watched for its window, about 200 ms, and not for the run: {observed_ms} ms"
+    );
+    let notes = result["degradations"].to_string();
+    assert!(notes.contains("watched only from 0.2"), "{notes}");
+
+    let refused = run(&["mem.rss", "--window", "3s..1s", "--", "true"]);
+    assert_eq!(refused.status.code(), Some(EXIT_REJECTED));
+    assert!(
+        stderr(&refused).contains("closes before it opens"),
+        "{}",
+        stderr(&refused)
+    );
+}

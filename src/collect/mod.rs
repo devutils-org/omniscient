@@ -160,6 +160,11 @@ pub enum CollectError {
         reason: String,
         whose: Whose,
     },
+    /// The session's escalation cannot decide anything from what it runs:
+    /// no cheap pass to read, or a target it cannot follow. Refused before
+    /// the launch, for the reason a window is.
+    #[error("the escalation cannot run: {reason}")]
+    Escalation { reason: String },
 }
 
 impl CollectError {
@@ -207,7 +212,9 @@ impl CollectError {
             // through `Prepared::share_launch`, and what is left here is a gap
             // in that, which is exit 3.
             CollectError::ConflictingEnvironment { .. } => Whose::Build,
-            CollectError::NoStopCondition | CollectError::MixedTargets { .. } => Whose::Request,
+            CollectError::NoStopCondition
+            | CollectError::MixedTargets { .. }
+            | CollectError::Escalation { .. } => Whose::Request,
             CollectError::Launch { .. } => Whose::Machine,
             CollectError::Several { refusals } => refusals
                 .iter()
@@ -803,6 +810,79 @@ impl Cheaper for StopWhenOverBudget {
     }
 }
 
+/// Where a run turns when its own numbers name a suspect.
+///
+/// The runner can attach and detach a request between two rounds -- a window
+/// does it at times the session wrote. What it cannot know is *which* request
+/// the run's numbers so far call for: that is a question about what a task's
+/// time went to, and answering it here would put triage inside the collector
+/// layer. So the question is handed out, the way [`Cheaper`] is, and the
+/// runner only applies the answer: requests held for the escalation (a window
+/// written `on <layer>`) are prepared before the run and wait, and this is
+/// asked once a round which of them to attach and which attached ones to let
+/// go.
+///
+/// Its only power is over requests the session declared: every one was
+/// validated, resolved and prepared before the program was launched, so an
+/// escalation can never attach a backend the resolver did not choose, or a
+/// source that answers a question the session did not ask.
+pub trait Escalate {
+    /// What to attach and detach now, from what the run has collected so far.
+    /// Asked after the round's reads and after the stop condition, so a run
+    /// that is ending attaches nothing. An empty answer leaves it as it is.
+    fn decide(&mut self, run: &Progress<'_>) -> Vec<Switch>;
+
+    /// A request this escalation attached is over its budget, and nothing
+    /// cheaper serves it. Answers why to detach it and go on with the cheap
+    /// pass -- the budget holds and the cheap answer stands -- or `None` to end
+    /// the run, as any other run over its budget ends.
+    fn shed(&mut self, index: usize, over: &str) -> Option<String>;
+
+    /// What each request's collection says about the escalation once the run
+    /// is over: the decisions taken, and the layers named that could not be
+    /// served. Pairs of a request's index and a sentence.
+    fn close(&mut self, run: &Progress<'_>) -> Vec<(usize, String)>;
+}
+
+/// What the escalation is shown of a run in progress.
+pub struct Progress<'a> {
+    /// When the run opened, on `CLOCK_MONOTONIC`.
+    pub opened_ns: u64,
+    /// Now, on the same clock.
+    pub now_ns: u64,
+    /// Every event each request has produced so far, in the order they
+    /// arrived. A drained source's arrive on its drain tick, not as they
+    /// happen.
+    pub events: &'a [Vec<Event>],
+    /// Where each request is.
+    pub standing: &'a [Standing],
+    /// The target each request is bound to: a launched program is its pid.
+    pub bound: &'a [Target],
+}
+
+/// Where one request is in the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// Prepared, and not attached yet.
+    Waiting,
+    Attached,
+    /// Attached once and let go: a request has one window, so it is not
+    /// attached again.
+    Detached,
+    /// Never attached, and why.
+    Missed(String),
+}
+
+/// One thing the escalation asks of the runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switch {
+    pub index: usize,
+    /// Attach when true, detach when false.
+    pub attach: bool,
+    /// Why, in the words the request's collection will carry.
+    pub why: String,
+}
+
 /// One source of events.
 pub trait Collector {
     fn id(&self) -> &CollectorId;
@@ -1045,6 +1125,46 @@ pub fn run_all_within(
     resolved: &[ResolvedRequest],
     cheaper: &mut dyn Cheaper,
 ) -> Result<Vec<Collection>, CollectError> {
+    let mut escalation = escalation_for(resolved)?;
+    run_all_escalating(
+        resolved,
+        cheaper,
+        escalation
+            .as_deref_mut()
+            .map(|escalation| escalation as &mut dyn Escalate),
+    )
+}
+
+/// Where a session's escalation is answered from: the one line of the
+/// collector layer that names triage.
+///
+/// The runner knows [`Escalate`] and nothing behind it, the way it knows
+/// [`Cheaper`]; this is the registration, as `registry()` is for the
+/// families. A session holds a request for the escalation with a window
+/// written `on <layer>`, and one that holds none is run without asking
+/// anything.
+fn escalation_for(resolved: &[ResolvedRequest]) -> Result<Option<Box<dyn Escalate>>, CollectError> {
+    if !resolved
+        .iter()
+        .any(|one| one.request.window.is_some_and(|window| window.on.is_some()))
+    {
+        return Ok(None);
+    }
+    crate::triage::escalate::Policy::for_run(resolved)
+        .map(|policy| Some(Box::new(policy) as Box<dyn Escalate>))
+        .map_err(|refusal| CollectError::Escalation {
+            reason: refusal.to_string(),
+        })
+}
+
+/// The same run, asking `escalation` between rounds which held requests to
+/// attach and detach. `None` runs it as [`run_all_within`] would a session
+/// that holds nothing; a held request is then never attached, and says so.
+pub fn run_all_escalating(
+    resolved: &[ResolvedRequest],
+    cheaper: &mut dyn Cheaper,
+    escalation: Option<&mut dyn Escalate>,
+) -> Result<Vec<Collection>, CollectError> {
     assert!(!resolved.is_empty(), "a run needs at least one request");
     let workload = workload_of(resolved)?;
     // Whether each request is about the workload, which decides what it is
@@ -1073,20 +1193,31 @@ pub fn run_all_within(
     // A window this collector or this mode cannot honour is refused while
     // nothing is running, and before the environment is merged: a collector
     // given to the program at exec is exactly the one a window cannot move.
-    all_or_nothing(
+    let unheld: Vec<Option<String>> = all_or_nothing(
         resolved
             .iter()
             .zip(&prepared)
             .map(|(resolved, prepared)| window_honoured(resolved, prepared.as_ref())),
     )?;
+    let mut plans: Vec<Plan> = resolved
+        .iter()
+        .map(|resolved| Plan::of(resolved.request.window))
+        .collect();
+    for (plan, unheld) in plans.iter_mut().zip(&unheld) {
+        plan.unheld.clone_from(unheld);
+    }
 
     // Only the collectors of the launch act on it. A machine target beside it
     // is not given to the program, so what its collector would want of the
     // program's environment -- nothing, for every collector written -- is not
-    // the program's business.
+    // the program's business. Nor is a held request's that this run cannot
+    // hold: it is never attached.
     let launching: Vec<bool> = resolved
         .iter()
-        .map(|resolved| matches!(resolved.request.target, Target::Launch(_)))
+        .zip(&unheld)
+        .map(|(resolved, unheld)| {
+            matches!(resolved.request.target, Target::Launch(_)) && unheld.is_none()
+        })
         .collect();
     share_launches(&mut prepared, &launching);
     let environment = merge_environments(
@@ -1103,7 +1234,7 @@ pub fn run_all_within(
     // first sent a caller off to add a flag that would change nothing.
     for (index, prepared) in prepared.iter().enumerate() {
         let target = &resolved[index].request.target;
-        if matches!(target, Target::Launch(_)) {
+        if matches!(target, Target::Launch(_)) || unheld[index].is_some() {
             continue;
         }
         if let Some(reason) = prepared.requires_launch() {
@@ -1146,6 +1277,24 @@ pub fn run_all_within(
         )?;
     }
 
+    // A collector attached mid-run pays for its attach inside the run, while
+    // the target runs and while every other collector waits for the round to
+    // finish. The one fixed cost there known to be large is the kernel's
+    // symbol table, which a profile that walks into the kernel reads on its
+    // first start: measured at 962 ms for a `cpu.profile` the escalation
+    // attached, during which nothing else was read and which the profile's
+    // own cost then carried as 71 % of the target's cpu. It describes the
+    // machine rather than the target, so it is paid here, before the launch,
+    // whenever a request attached late asks for stacks.
+    let late_stacks = resolved.iter().any(|resolved| {
+        let request = &resolved.request;
+        request.window.is_some_and(|window| window.attaches_late())
+            && (request.stack.is_some() || request.emit.contains(&crate::request::Emit::Stack))
+    });
+    if late_stacks {
+        crate::stack::prime_kernel_symbols();
+    }
+
     // A launched program is both the target and the clock: the run ends when it
     // does, which is what makes `omn <source> -- ./prog` a complete measurement
     // rather than a sample of one. It is held at a gate so that collectors are
@@ -1181,6 +1330,10 @@ pub fn run_all_within(
     // for it is the one a running target can give.
     let mut slots: Vec<Slot> = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
+        if plans[index].unheld.is_some() {
+            slots.push(Slot::Missed);
+            continue;
+        }
         if resolved[index]
             .request
             .window
@@ -1247,11 +1400,8 @@ pub fn run_all_within(
         .iter()
         .map(|resolved| Meter::of(&resolved.request.target, launched_pid))
         .collect();
-    let plans: Vec<Plan> = resolved
-        .iter()
-        .map(|resolved| Plan::of(resolved.request.window))
-        .collect();
     let mut spending = Spending::open(meters, bound, resolved.to_vec(), cheaper);
+    spending.sheddable = plans.iter().map(|plan| plan.held).collect();
     let started_ns = spending.opened_ns;
     let wake = child.as_ref().and_then(|child| child.exit_fd());
     let Driven {
@@ -1260,6 +1410,7 @@ pub fn run_all_within(
         mut watched,
         mut closed_because,
         stopped_because,
+        mut escalated,
     } = drive(
         &mut slots,
         &mut paces,
@@ -1267,6 +1418,7 @@ pub fn run_all_within(
         &about_workload,
         wake,
         &mut spending,
+        escalation,
         || {
             if let Some(child) = child.as_mut() {
                 if let Some(status) = child.finished() {
@@ -1303,10 +1455,25 @@ pub fn run_all_within(
                     ));
                 }
             }
+            Slot::Waiting(_) if plans[index].held => {
+                let layer = resolved[index]
+                    .request
+                    .window
+                    .and_then(|window| window.layer())
+                    .map_or_else(String::new, |layer| format!(" `{layer}`"));
+                let why = format!(
+                    "never attached: the escalation did not name its layer{layer} in the {ended_s:.3} \
+                     s the run lasted"
+                );
+                degradations[index].push(format!("{why}, so it measured nothing and cost nothing"));
+                closed_because[index] = Some(why);
+                *slot = Slot::Missed;
+            }
             Slot::Waiting(_) => {
                 let window = resolved[index].request.window.unwrap_or(Window {
                     start: None,
                     stop: None,
+                    on: None,
                 });
                 let why = format!(
                     "never attached: the run ended {ended_s:.3} s in, before this request's \
@@ -1366,6 +1533,7 @@ pub fn run_all_within(
             let filtered = apply_filter(&resolved[index], &mut collected);
             let mut notes = std::mem::take(&mut degradations[index]);
             notes.extend(std::mem::take(&mut spending.notes[index]));
+            notes.extend(std::mem::take(&mut escalated[index]));
             notes.extend(collector_notes);
             // Everything is in: the runner's counts, what the collector knew it
             // lost, and anything a budget added. The magnitudes become the one
@@ -1404,9 +1572,9 @@ pub fn run_all_within(
 fn window_honoured(
     resolved: &ResolvedRequest,
     prepared: &dyn Prepared,
-) -> Result<(), CollectError> {
+) -> Result<Option<String>, CollectError> {
     let Some(window) = resolved.request.window else {
-        return Ok(());
+        return Ok(None);
     };
     let refuse = |reason: String, whose: Whose| CollectError::Window {
         source_id: resolved.request.source.to_string(),
@@ -1424,6 +1592,17 @@ fn window_honoured(
         } else {
             "detached while the program is still running"
         };
+        // Held for the escalation, it is not refused: the session asked for
+        // it only in case its layer were named, and the cheap answer does not
+        // need it. The escalation says so when it names that layer.
+        if window.on.is_some() {
+            return Ok(Some(format!(
+                "it is served through `{}`, which is given to the program at exec and read \
+                 until it exits, so it cannot be {what}{}",
+                resolved.backend.id,
+                passed_over(resolved),
+            )));
+        }
         return Err(refuse(
             format!(
                 "it is served through `{}`, which is given to the program at exec and read until \
@@ -1442,7 +1621,34 @@ fn window_honoured(
             Whose::Request,
         ));
     }
-    Ok(())
+    Ok(None)
+}
+
+/// What the resolver said of the backends it did not choose, for a request
+/// held for a layer it cannot serve: the probes' own reasons, so the reader
+/// learns what this machine lacks rather than only that it lacks something.
+fn passed_over(resolved: &ResolvedRequest) -> String {
+    use crate::resolve::Verdict;
+    let reasons: Vec<String> = resolved
+        .chain
+        .iter()
+        .filter_map(|considered| match &considered.verdict {
+            Verdict::Rejected(why) => Some(format!("`{}`: {}", considered.id, why.join("; "))),
+            Verdict::Unimplemented => Some(format!(
+                "`{}`: this build has no collector for it",
+                considered.id
+            )),
+            Verdict::Selected | Verdict::NotReached => None,
+        })
+        .collect();
+    if reasons.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; the rest of its chain was passed over -- {}",
+            reasons.join(", ")
+        )
+    }
 }
 
 /// Whether a request's window lies inside the run a duration bounds.
@@ -1535,10 +1741,16 @@ struct Detached {
 
 /// When one request is attached and detached, in nanoseconds after the run
 /// opened.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Plan {
     attach_ns: u64,
     detach_ns: Option<u64>,
+    /// Held for the escalation, which decides both ends.
+    held: bool,
+    /// Held, and this run cannot hold it: why. It is never attached, and the
+    /// escalation is told so rather than the run refused, because the cheap
+    /// answer does not need it.
+    unheld: Option<String>,
 }
 
 impl Plan {
@@ -1546,6 +1758,8 @@ impl Plan {
         window.map_or(Plan::default(), |window| Plan {
             attach_ns: window.start_ns(),
             detach_ns: window.stop.map(crate::scalar::Duration::as_nanos),
+            held: window.on.is_some(),
+            unheld: None,
         })
     }
 }
@@ -1662,6 +1876,12 @@ struct Spending<'a> {
     /// The overhead of a collection that was detached, taken at the detach:
     /// what the run spent after it is not its cost.
     frozen: Vec<Option<Overhead>>,
+    /// Which collections the escalation attached, and may detach rather than
+    /// see the run end when they are over budget.
+    sheddable: Vec<bool>,
+    /// Collections found over budget with nowhere cheaper to go that the
+    /// escalation may shed, with the reason the run would otherwise stop for.
+    over: Vec<(usize, String)>,
 }
 
 impl<'a> Spending<'a> {
@@ -1715,6 +1935,8 @@ impl<'a> Spending<'a> {
             served_by: serving_ids,
             window_since: vec![None; count],
             frozen: vec![None; count],
+            sheddable: vec![false; count],
+            over: Vec::new(),
         }
     }
 
@@ -1792,6 +2014,17 @@ impl<'a> Spending<'a> {
             if !matches!(slots[index], Slot::Attached(_)) {
                 continue;
             }
+            // A collection attached mid-run is weighed once it has run for
+            // one check interval. Before that its attach -- loading a program,
+            // reading the target's maps -- is most of its account, and a
+            // percentage taken a few milliseconds in says how recently it was
+            // attached rather than what it costs to run.
+            if self.window_since[index].is_some_and(|since| {
+                entered_ns.saturating_sub(since.wall_opened_ns)
+                    < BUDGET_CHECK_INTERVAL.as_nanos() as u64
+            }) {
+                continue;
+            }
             let observed_cpu_ns = self.meters[index].read();
             let spent = self.spent(
                 index,
@@ -1838,10 +2071,15 @@ impl<'a> Spending<'a> {
                     }
                 },
                 None => {
-                    stop = Some(format!(
+                    let reason = format!(
                         "`{source}` spent {percent:.2} % of the target's cpu time{window} against \
                          a ceiling of {ceiling} %, and nothing cheaper than `{was}` is available"
-                    ));
+                    );
+                    if self.sheddable[index] {
+                        self.over.push((index, reason));
+                        continue;
+                    }
+                    stop = Some(reason);
                     break;
                 }
             }
@@ -1986,6 +2224,7 @@ impl Spending<'static> {
         spending.served_by = vec![Vec::new(); count];
         spending.window_since = vec![None; count];
         spending.frozen = vec![None; count];
+        spending.sheddable = vec![false; count];
         spending
     }
 
@@ -2075,6 +2314,8 @@ struct Driven {
     /// closed, or it was never attached.
     closed_because: Vec<Option<String>>,
     stopped_because: String,
+    /// What the escalation said about each request once the run was over.
+    escalated: Vec<Vec<String>>,
 }
 
 /// Why one request stopped being read before the run ended.
@@ -2113,6 +2354,14 @@ enum Finished {
 /// and only then stopped and dropped, so its last interval is measured to its
 /// detach just as the run's last interval is measured to the run's end.
 ///
+/// A request held for the escalation has no time in its plan. The escalation
+/// is asked once per round, after the reads and after the stop condition --
+/// a run that is ending attaches nothing -- and what it answers is applied
+/// detaches first: the layer it leaves is released before the one it names is
+/// loaded, so the run never pays for two detailed layers at once. A collector
+/// it attaches is due at once and read on the next round, which follows
+/// without a sleep.
+///
 /// `ended` is consulted once per round and returns why the run should stop.
 /// It is a closure rather than a launched child and a deadline so that the
 /// convention can be tested against a stop condition a test controls.
@@ -2124,6 +2373,7 @@ enum Finished {
 /// is a descriptor that becomes readable when the run should look again at
 /// once -- the launched program's pidfd -- so that a program exiting between
 /// two ticks ends the run at its exit rather than at the next tick.
+#[allow(clippy::too_many_arguments)]
 fn drive(
     slots: &mut [Slot],
     paces: &mut [Pace],
@@ -2131,33 +2381,46 @@ fn drive(
     about_workload: &[bool],
     wake: Option<RawFd>,
     spending: &mut Spending<'_>,
+    mut escalation: Option<&mut dyn Escalate>,
     mut ended: impl FnMut() -> Option<String>,
 ) -> Driven {
     let count = slots.len();
-    let mut events: Vec<Vec<Event>> = vec![Vec::new(); count];
-    let mut losses: Vec<Losses> = vec![Losses::default(); count];
-    let mut sequences = vec![0u64; count];
-    // Only a run serving several collectors has to share its cpu time out
-    // between them, and only then are the two clock reads a round worth taking:
-    // with one collector the share is the whole.
-    let attributing = count > 1;
     let opened_ns = spending.opened_ns;
-    // Everything is due at once on the first round: a series starts with a
-    // reading, and a counter's first read is the baseline the rest are against.
-    let mut due_ns = vec![monotonic_ns(); count];
-    let mut finished: Vec<Option<Finished>> = vec![None; count];
-    let mut watched: Vec<Watched> = slots
-        .iter()
-        .map(|slot| Watched {
-            run_opened_ns: opened_ns,
-            opened_ns,
-            closed_ns: opened_ns,
-            attached: matches!(slot, Slot::Attached(_)),
-            attach_ns: None,
-        })
-        .collect();
-    let mut closed_because: Vec<Option<String>> = vec![None; count];
-    let into_run = |ns: u64| ns.saturating_sub(opened_ns) as f64 / 1e9;
+    let mut ledger = Ledger {
+        events: vec![Vec::new(); count],
+        losses: vec![Losses::default(); count],
+        sequences: vec![0u64; count],
+        // Everything is due at once on the first round: a series starts with
+        // a reading, and a counter's first read is the baseline the rest are
+        // against.
+        due_ns: vec![monotonic_ns(); count],
+        finished: vec![None; count],
+        watched: slots
+            .iter()
+            .map(|slot| Watched {
+                run_opened_ns: opened_ns,
+                opened_ns,
+                closed_ns: opened_ns,
+                attached: matches!(slot, Slot::Attached(_)),
+                attach_ns: None,
+            })
+            .collect(),
+        closed_because: vec![None; count],
+        // Only a run serving several collectors has to share its cpu time
+        // out between them, and only then are the two clock reads a round
+        // worth taking: with one collector the share is the whole.
+        attributing: count > 1,
+    };
+    // A held request the runner could not hold -- a collector given at exec
+    // -- is never attached, and has said why already.
+    for (index, slot) in slots.iter().enumerate() {
+        if matches!(slot, Slot::Missed) {
+            ledger.finished[index] = Some(Finished::Window);
+            if let Some(reason) = &plans[index].unheld {
+                ledger.closed_because[index] = Some(format!("never attached: {reason}"));
+            }
+        }
+    }
     // When a collector's window closes, which makes it due then whatever its
     // pace says.
     let detach_at = |index: usize| plans[index].detach_ns.map(|ns| opened_ns + ns);
@@ -2168,64 +2431,13 @@ fn drive(
         // Windows that open now. The account is opened before the attach, so
         // what attaching costs while the target runs is this request's.
         for index in 0..count {
-            if !matches!(slots[index], Slot::Waiting(_))
+            if plans[index].held
+                || !matches!(slots[index], Slot::Waiting(_))
                 || round_started_ns < opened_ns + plans[index].attach_ns
             {
                 continue;
             }
-            let Slot::Waiting(prepared) = std::mem::replace(&mut slots[index], Slot::Missed) else {
-                unreachable!("checked above");
-            };
-            spending.attaching(index);
-            let entered_ns = monotonic_ns();
-            let attached = match blind_to_running_threads(prepared.as_ref(), &spending.bound[index])
-            {
-                Some(reason) => Err(reason),
-                None => prepared
-                    .attach(&spending.bound[index])
-                    .and_then(|mut collector| collector.start().map(|()| collector)),
-            };
-            let attached_ns = monotonic_ns();
-            let took_ns = attached_ns.saturating_sub(entered_ns);
-            if attributing {
-                spending.inside_ns[index] += took_ns;
-            }
-            let source = spending.serving[index].request.source.to_string();
-            match attached {
-                Ok(collector) => {
-                    let mode = spending.serving[index].request.mode;
-                    paces[index] = pace_of(collector.as_ref(), mode);
-                    if let Some(note) =
-                        unpaced(&spending.serving[index], collector.as_ref(), paces[index])
-                    {
-                        spending.notes[index].push(note);
-                    }
-                    spending.notes[index].push(format!(
-                        "watched only from {:.3} s into the run, as its window asked: attaching \
-                         it took {} while the target ran, and its numbers cover its window alone",
-                        into_run(entered_ns),
-                        span_ns(took_ns),
-                    ));
-                    due_ns[index] = attached_ns;
-                    watched[index].opened_ns = attached_ns;
-                    watched[index].attached = true;
-                    watched[index].attach_ns = Some(took_ns);
-                    slots[index] = Slot::Attached(collector);
-                }
-                Err(reason) => {
-                    // A window that asked for something and got nothing: a
-                    // loss, not an empty series that reads as a quiet one.
-                    losses[index].failed_reads += 1;
-                    losses[index].note(format!(
-                        "`{source}` could not be attached {:.3} s into the run, so nothing was \
-                         collected over its window: {reason}",
-                        into_run(entered_ns),
-                    ));
-                    closed_because[index] = Some(format!("never attached: {reason}"));
-                    slots[index] = Slot::Missed;
-                    finished[index] = Some(Finished::Window);
-                }
-            }
+            ledger.attach(index, slots, paces, spending, None);
         }
 
         let mut gone = None;
@@ -2233,57 +2445,20 @@ fn drive(
             let Slot::Attached(collector) = slot else {
                 continue;
             };
-            let due = detach_at(index).map_or(due_ns[index], |at| due_ns[index].min(at));
-            if finished[index].is_some() || round_started_ns < due {
+            let due =
+                detach_at(index).map_or(ledger.due_ns[index], |at| ledger.due_ns[index].min(at));
+            if ledger.finished[index].is_some() || round_started_ns < due {
                 continue;
             }
-            let entered_ns = if attributing { monotonic_ns() } else { 0 };
-            match collector.sample(sequences[index]) {
-                Ok(mut sampled) => {
-                    sequences[index] += sampled.len() as u64;
-                    events[index].append(&mut sampled);
-                }
-                Err(SampleError::TargetGone(reason)) if about_workload[index] => {
-                    gone = Some(reason)
-                }
-                Err(SampleError::TargetGone(reason)) => {
-                    losses[index].note(format!(
-                        "stopped reading {:.3} s into the run, before the workload ended: {reason}",
-                        into_run(round_started_ns)
-                    ));
-                    finished[index] = Some(Finished::Gone);
-                    continue;
-                }
-                Err(SampleError::Transient(reason)) => {
-                    losses[index].failed_reads += 1;
-                    losses[index].note(reason);
-                }
-            }
-            if attributing {
-                spending.inside_ns[index] += monotonic_ns().saturating_sub(entered_ns);
-            }
-
-            if paces[index].snapshot {
-                finished[index] = Some(Finished::Snapshot);
-                continue;
-            }
-            // When the next reading was due, and whether this one got in the
-            // way of it. A round that overran is counted as a late tick -- at
-            // that point the series no longer has the spacing it claims -- and
-            // the schedule is re-based on now, so that being late once does not
-            // leave every reading after it owing time it can never make up.
-            let interval_ns = paces[index].interval.as_nanos() as u64;
-            let finished_ns = monotonic_ns();
-            let took_ns = finished_ns.saturating_sub(due_ns[index]);
-            // An interval of zero is "as fast as this can be read", which is
-            // not a cadence and cannot be fallen behind. Counting every round
-            // of such a run as late is how a snapshot served as a poll came to
-            // report 158 losses that had not happened.
-            if interval_ns > 0 && took_ns > interval_ns {
-                losses[index].late_tick(took_ns, interval_ns);
-                due_ns[index] = finished_ns;
-            } else {
-                due_ns[index] += interval_ns;
+            if let Some(reason) = ledger.read(
+                index,
+                collector.as_mut(),
+                paces[index],
+                about_workload[index],
+                round_started_ns,
+                spending,
+            ) {
+                gone = Some(reason);
             }
         }
         if let Some(reason) = gone {
@@ -2298,38 +2473,28 @@ fn drive(
             if !closing || !matches!(slots[index], Slot::Attached(_)) {
                 continue;
             }
-            let Slot::Attached(mut collector) = std::mem::replace(&mut slots[index], Slot::Missed)
-            else {
-                unreachable!("checked above");
-            };
-            let mut trailing = collector.stop();
-            events[index].append(&mut trailing);
-            losses[index].absorb(collector.losses());
-            let record = Detached {
-                value_attr: collector.value_attr(),
-                stacks: collector.stacks(),
-                notes: collector.notes(),
-            };
-            drop(collector);
-            let closed_ns = monotonic_ns();
-            watched[index].closed_ns = closed_ns;
-            spending.detached(index, closed_ns);
-            closed_because[index] = Some(format!(
-                "its window closed: detached {:.3} s into the run, as asked",
-                into_run(closed_ns)
-            ));
-            slots[index] = Slot::Detached(record);
-            // A collection whose target had already gone keeps saying so.
-            finished[index].get_or_insert(Finished::Window);
+            ledger.detach(index, slots, spending, |at| {
+                format!("its window closed: detached {at:.3} s into the run, as asked")
+            });
         }
 
-        let waiting = slots.iter().any(|slot| matches!(slot, Slot::Waiting(_)));
-        if !waiting && finished.iter().all(Option::is_some) {
-            let every = |kind: Finished| finished.iter().all(|done| *done == Some(kind));
-            if every(Finished::Gone) {
+        // A held request still waiting keeps nothing going: the escalation
+        // decides from the requests that run, and once they are all done
+        // there is nothing left for it to decide from.
+        let waiting = slots
+            .iter()
+            .zip(plans)
+            .any(|(slot, plan)| !plan.held && matches!(slot, Slot::Waiting(_)));
+        let settled = |index: usize| {
+            ledger.finished[index].is_some()
+                || (plans[index].held && matches!(slots[index], Slot::Waiting(_)))
+        };
+        if !waiting && (0..count).all(settled) && ledger.finished.iter().any(Option::is_some) {
+            let done: Vec<Finished> = ledger.finished.iter().flatten().copied().collect();
+            if done.iter().all(|kind| *kind == Finished::Gone) {
                 break "every target of the run went away".to_owned();
             }
-            if finished.contains(&Some(Finished::Snapshot)) {
+            if done.contains(&Finished::Snapshot) {
                 break "snapshot: a single read".to_owned();
             }
             break "every request's window had closed".to_owned();
@@ -2339,10 +2504,46 @@ fn drive(
             break reason;
         }
 
+        // Asked after the stop condition, so a run that is ending attaches
+        // nothing; and before the budget, so a layer attached now is weighed
+        // from its first round.
+        if let Some(escalation) = escalation.as_deref_mut() {
+            let standing = standing_of(slots, &ledger.closed_because);
+            let switches = escalation.decide(&Progress {
+                opened_ns,
+                now_ns: monotonic_ns(),
+                events: &ledger.events,
+                standing: &standing,
+                bound: &spending.bound,
+            });
+            ledger.switch(switches, slots, paces, spending);
+        }
+
         // Asked after the stop condition, so a run that was going to end anyway
         // ends for the reason it was going to end for rather than being
         // condemned on its last tick.
-        if let Some(reason) = spending.check(slots, &mut events, &mut losses) {
+        if let Some(reason) = spending.check(slots, &mut ledger.events, &mut ledger.losses) {
+            break reason;
+        }
+        // A request the escalation attached and nothing cheaper serves is
+        // offered back to it before the run is ended for it: detaching it
+        // keeps the budget and the cheap answer.
+        let mut over = None;
+        for (index, reason) in std::mem::take(&mut spending.over) {
+            let shed = escalation
+                .as_deref_mut()
+                .and_then(|escalation| escalation.shed(index, &reason));
+            match shed {
+                Some(why) => ledger.detach(index, slots, spending, |at| {
+                    format!("detached {at:.3} s into the run to hold the budget: {why}")
+                }),
+                None => {
+                    over = Some(reason);
+                    break;
+                }
+            }
+        }
+        if let Some(reason) = over {
             break reason;
         }
 
@@ -2351,10 +2552,12 @@ fn drive(
         // moment in the past, and the run goes straight round again.
         let next_due_ns = (0..count)
             .filter_map(|index| match &slots[index] {
+                Slot::Waiting(_) if plans[index].held => None,
                 Slot::Waiting(_) => Some(opened_ns + plans[index].attach_ns),
-                Slot::Attached(_) if finished[index].is_none() => {
-                    Some(detach_at(index).map_or(due_ns[index], |at| due_ns[index].min(at)))
-                }
+                Slot::Attached(_) if ledger.finished[index].is_none() => Some(
+                    detach_at(index)
+                        .map_or(ledger.due_ns[index], |at| ledger.due_ns[index].min(at)),
+                ),
                 Slot::Attached(_) => detach_at(index),
                 Slot::Detached(_) | Slot::Missed => None,
             })
@@ -2367,12 +2570,258 @@ fn drive(
         }
     };
 
+    // What the escalation has to say about each request, now that it has
+    // seen the whole run.
+    let mut escalated = vec![Vec::new(); count];
+    if let Some(escalation) = escalation {
+        let standing = standing_of(slots, &ledger.closed_because);
+        for (index, note) in escalation.close(&Progress {
+            opened_ns,
+            now_ns: monotonic_ns(),
+            events: &ledger.events,
+            standing: &standing,
+            bound: &spending.bound,
+        }) {
+            if let Some(notes) = escalated.get_mut(index) {
+                notes.push(note);
+            }
+        }
+    }
+
     Driven {
-        events,
-        losses,
-        watched,
-        closed_because,
+        events: ledger.events,
+        losses: ledger.losses,
+        watched: ledger.watched,
+        closed_because: ledger.closed_because,
         stopped_because,
+        escalated,
+    }
+}
+
+/// Where each request stands, as the escalation is shown it.
+fn standing_of(slots: &[Slot], closed_because: &[Option<String>]) -> Vec<Standing> {
+    slots
+        .iter()
+        .zip(closed_because)
+        .map(|(slot, because)| match slot {
+            Slot::Waiting(_) => Standing::Waiting,
+            Slot::Attached(_) => Standing::Attached,
+            Slot::Detached(_) => Standing::Detached,
+            Slot::Missed => Standing::Missed(
+                because
+                    .clone()
+                    .unwrap_or_else(|| "it was never attached".to_owned()),
+            ),
+        })
+        .collect()
+}
+
+/// Everything a run keeps per request while it drives them: what each has
+/// produced and lost, when it is next due, and the span it was watched for.
+struct Ledger {
+    events: Vec<Vec<Event>>,
+    losses: Vec<Losses>,
+    sequences: Vec<u64>,
+    due_ns: Vec<u64>,
+    finished: Vec<Option<Finished>>,
+    watched: Vec<Watched>,
+    closed_because: Vec<Option<String>>,
+    attributing: bool,
+}
+
+impl Ledger {
+    fn seconds_in(&self, ns: u64) -> f64 {
+        ns.saturating_sub(self.watched.first().map_or(ns, |one| one.run_opened_ns)) as f64 / 1e9
+    }
+
+    /// Reads one collector that is due. Returns why the run must end, when
+    /// the workload's own target went away.
+    fn read(
+        &mut self,
+        index: usize,
+        collector: &mut dyn Collector,
+        pace: Pace,
+        about_workload: bool,
+        round_started_ns: u64,
+        spending: &mut Spending<'_>,
+    ) -> Option<String> {
+        let entered_ns = if self.attributing { monotonic_ns() } else { 0 };
+        match collector.sample(self.sequences[index]) {
+            Ok(mut sampled) => {
+                self.sequences[index] += sampled.len() as u64;
+                self.events[index].append(&mut sampled);
+            }
+            Err(SampleError::TargetGone(reason)) if about_workload => return Some(reason),
+            Err(SampleError::TargetGone(reason)) => {
+                let at = self.seconds_in(round_started_ns);
+                self.losses[index].note(format!(
+                    "stopped reading {at:.3} s into the run, before the workload ended: {reason}"
+                ));
+                self.finished[index] = Some(Finished::Gone);
+                return None;
+            }
+            Err(SampleError::Transient(reason)) => {
+                self.losses[index].failed_reads += 1;
+                self.losses[index].note(reason);
+            }
+        }
+        if self.attributing {
+            spending.inside_ns[index] += monotonic_ns().saturating_sub(entered_ns);
+        }
+
+        if pace.snapshot {
+            self.finished[index] = Some(Finished::Snapshot);
+            return None;
+        }
+        // When the next reading was due, and whether this one got in the
+        // way of it. A round that overran is counted as a late tick -- at
+        // that point the series no longer has the spacing it claims -- and
+        // the schedule is re-based on now, so that being late once does not
+        // leave every reading after it owing time it can never make up.
+        let interval_ns = pace.interval.as_nanos() as u64;
+        let finished_ns = monotonic_ns();
+        let took_ns = finished_ns.saturating_sub(self.due_ns[index]);
+        // An interval of zero is "as fast as this can be read", which is
+        // not a cadence and cannot be fallen behind. Counting every round
+        // of such a run as late is how a snapshot served as a poll came to
+        // report 158 losses that had not happened.
+        if interval_ns > 0 && took_ns > interval_ns {
+            self.losses[index].late_tick(took_ns, interval_ns);
+            self.due_ns[index] = finished_ns;
+        } else {
+            self.due_ns[index] += interval_ns;
+        }
+        None
+    }
+
+    /// Attaches a request that was waiting, while the target runs: by its
+    /// window when `escalated` is `None`, by the escalation otherwise, whose
+    /// reason is then the first thing its collection says.
+    fn attach(
+        &mut self,
+        index: usize,
+        slots: &mut [Slot],
+        paces: &mut [Pace],
+        spending: &mut Spending<'_>,
+        escalated: Option<&str>,
+    ) {
+        let Slot::Waiting(prepared) = std::mem::replace(&mut slots[index], Slot::Missed) else {
+            unreachable!("only a waiting request is attached");
+        };
+        spending.attaching(index);
+        let entered_ns = monotonic_ns();
+        let attached = match blind_to_running_threads(prepared.as_ref(), &spending.bound[index]) {
+            Some(reason) => Err(reason),
+            None => prepared
+                .attach(&spending.bound[index])
+                .and_then(|mut collector| collector.start().map(|()| collector)),
+        };
+        let attached_ns = monotonic_ns();
+        let took_ns = attached_ns.saturating_sub(entered_ns);
+        if self.attributing {
+            spending.inside_ns[index] += took_ns;
+        }
+        let source = spending.serving[index].request.source.to_string();
+        let at = self.seconds_in(entered_ns);
+        match attached {
+            Ok(collector) => {
+                let mode = spending.serving[index].request.mode;
+                paces[index] = pace_of(collector.as_ref(), mode);
+                if let Some(note) =
+                    unpaced(&spending.serving[index], collector.as_ref(), paces[index])
+                {
+                    spending.notes[index].push(note);
+                }
+                spending.notes[index].push(match escalated {
+                    None => format!(
+                        "watched only from {at:.3} s into the run, as its window asked: \
+                         attaching it took {} while the target ran, and its numbers cover its \
+                         window alone",
+                        span_ns(took_ns),
+                    ),
+                    Some(why) => format!(
+                        "attached {at:.3} s into the run by the escalation, and watched from \
+                         then only: {why}; attaching it took {} while the target ran \
+                         (CLOCK_MONOTONIC {entered_ns} to {attached_ns} ns)",
+                        span_ns(took_ns),
+                    ),
+                });
+                self.due_ns[index] = attached_ns;
+                self.watched[index].opened_ns = attached_ns;
+                self.watched[index].attached = true;
+                self.watched[index].attach_ns = Some(took_ns);
+                slots[index] = Slot::Attached(collector);
+            }
+            Err(reason) => {
+                // A window that asked for something and got nothing: a loss,
+                // not an empty series that reads as a quiet one.
+                self.losses[index].failed_reads += 1;
+                self.losses[index].note(format!(
+                    "`{source}` could not be attached {at:.3} s into the run, so nothing was \
+                     collected over its window: {reason}"
+                ));
+                self.closed_because[index] = Some(format!("never attached: {reason}"));
+                slots[index] = Slot::Missed;
+                self.finished[index] = Some(Finished::Window);
+            }
+        }
+    }
+
+    /// Stops and drops an attached collector, draining what it still holds
+    /// into its own collection first. `because` is given how far into the run
+    /// the detach happened and says why, as the collection's
+    /// `stopped_because`.
+    fn detach(
+        &mut self,
+        index: usize,
+        slots: &mut [Slot],
+        spending: &mut Spending<'_>,
+        because: impl FnOnce(f64) -> String,
+    ) {
+        let Slot::Attached(mut collector) = std::mem::replace(&mut slots[index], Slot::Missed)
+        else {
+            unreachable!("only an attached request is detached");
+        };
+        let mut trailing = collector.stop();
+        self.events[index].append(&mut trailing);
+        self.losses[index].absorb(collector.losses());
+        let record = Detached {
+            value_attr: collector.value_attr(),
+            stacks: collector.stacks(),
+            notes: collector.notes(),
+        };
+        drop(collector);
+        let closed_ns = monotonic_ns();
+        self.watched[index].closed_ns = closed_ns;
+        spending.detached(index, closed_ns);
+        self.closed_because[index] = Some(because(self.seconds_in(closed_ns)));
+        slots[index] = Slot::Detached(record);
+        // A collection whose target had already gone keeps saying so.
+        self.finished[index].get_or_insert(Finished::Window);
+    }
+
+    /// Applies what the escalation answered: detaches, then attaches.
+    fn switch(
+        &mut self,
+        switches: Vec<Switch>,
+        slots: &mut [Slot],
+        paces: &mut [Pace],
+        spending: &mut Spending<'_>,
+    ) {
+        let (detaches, attaches): (Vec<Switch>, Vec<Switch>) =
+            switches.into_iter().partition(|one| !one.attach);
+        for Switch { index, why, .. } in detaches {
+            if matches!(slots.get(index), Some(Slot::Attached(_))) {
+                self.detach(index, slots, spending, |at| {
+                    format!("detached {at:.3} s into the run by the escalation: {why}")
+                });
+            }
+        }
+        for Switch { index, why, .. } in attaches {
+            if matches!(slots.get(index), Some(Slot::Waiting(_))) {
+                self.attach(index, slots, paces, spending, Some(&why));
+            }
+        }
     }
 }
 
@@ -2545,6 +2994,7 @@ mod tests {
             about_workload,
             wake,
             spending,
+            None,
             ended,
         );
         collectors.extend(slots.into_iter().map(|slot| match slot {
@@ -3785,6 +4235,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             until(deadline_ns),
         );
         assert_eq!(driven.stopped_because, "the deadline");
@@ -3888,6 +4339,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             until(deadline_ns),
         );
         let overheads = spending.close();
@@ -3950,6 +4402,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             until(deadline_ns),
         );
         assert_eq!(driven.stopped_because, "the deadline");
@@ -4056,6 +4509,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             until(deadline_ns),
         );
         assert_eq!(driven.losses[1].dropped, 7);
@@ -4086,6 +4540,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             || None,
         );
         let ended_ms = (monotonic_ns() - opened_ns) / 1_000_000;
@@ -4136,7 +4591,7 @@ mod tests {
                 assert_eq!(error.whose(), Whose::Request);
                 assert!(error.to_string().contains("single read"), "{error}");
             }
-            Ok(()) => panic!("a snapshot with a stop was accepted"),
+            Ok(_) => panic!("a snapshot with a stop was accepted"),
         }
         assert!(
             window_honoured(
@@ -4210,5 +4665,303 @@ mod tests {
             late.stopped_because
         );
         assert!(late.overhead.wall_ns < whole.overhead.wall_ns);
+    }
+
+    /// Something prepared that stamps the moment it is attached.
+    struct Stamping {
+        collector: Box<dyn Collector>,
+        attached_ns: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Prepared for Stamping {
+        fn attach(self: Box<Self>, _: &Target) -> Result<Box<dyn Collector>, String> {
+            self.attached_ns.set(monotonic_ns());
+            Ok(self.collector)
+        }
+    }
+
+    type Stamps = std::rc::Rc<std::cell::Cell<u64>>;
+
+    /// A held collector, its reads, when it was stopped and when attached.
+    fn stamping(
+        name: &str,
+    ) -> (
+        Slot,
+        std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+        Stamps,
+        Stamps,
+    ) {
+        let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let stopped_ns = std::rc::Rc::new(std::cell::Cell::new(0));
+        let attached_ns = std::rc::Rc::new(std::cell::Cell::new(0));
+        let slot = Slot::Waiting(Box::new(Stamping {
+            collector: Box::new(Clocked {
+                id: CollectorId::new(name),
+                reads_ns: reads_ns.clone(),
+                stopped_ns: stopped_ns.clone(),
+            }),
+            attached_ns: attached_ns.clone(),
+        }));
+        (slot, reads_ns, stopped_ns, attached_ns)
+    }
+
+    fn held() -> Plan {
+        Plan {
+            held: true,
+            ..Plan::default()
+        }
+    }
+
+    /// An escalation that answers from a script: at each offset into the run,
+    /// these switches, once. It records where each request stood whenever it
+    /// was asked, and whether it was asked to shed.
+    struct Scripted {
+        script: Vec<(u64, Vec<Switch>)>,
+        seen: Vec<Vec<Standing>>,
+        sheds: bool,
+        shed_asked: Vec<usize>,
+    }
+
+    impl Escalate for Scripted {
+        fn decide(&mut self, run: &Progress<'_>) -> Vec<Switch> {
+            self.seen.push(run.standing.to_vec());
+            let into_ms = run.now_ns.saturating_sub(run.opened_ns) / 1_000_000;
+            match self.script.first() {
+                Some((at_ms, _)) if into_ms >= *at_ms => self.script.remove(0).1,
+                _ => Vec::new(),
+            }
+        }
+
+        fn shed(&mut self, index: usize, over: &str) -> Option<String> {
+            self.shed_asked.push(index);
+            self.sheds.then(|| format!("scripted to shed: {over}"))
+        }
+
+        fn close(&mut self, _run: &Progress<'_>) -> Vec<(usize, String)> {
+            vec![(0, "scripted summary".to_owned())]
+        }
+    }
+
+    fn switch(index: usize, attach: bool) -> Switch {
+        Switch {
+            index,
+            attach,
+            why: format!("scripted {}", if attach { "attach" } else { "detach" }),
+        }
+    }
+
+    /// The escalation names a layer, then another, and the runner does what
+    /// it says -- and nothing it does not.
+    ///
+    /// Ground truth is each collector's own record of when it was attached,
+    /// read and stopped, on the one clock. A held request is not attached
+    /// before it is named; the layer the run leaves is stopped *before* the
+    /// one it names is attached, even when the answer lists them the other
+    /// way round, so two detailed layers are never paid for at once; and the
+    /// cheap collector beside them is read from the first round to the last.
+    #[test]
+    fn an_escalation_attaches_what_it_names_and_lets_go_of_the_layer_it_leaves() {
+        const FIRST_MS: u64 = 40;
+        const SECOND_MS: u64 = 100;
+        const RUN_MS: u64 = 160;
+        let (cheap, cheap_reads) = clocked("cheap");
+        let (first, first_reads, first_stopped, first_attached) = stamping("first");
+        let (second, second_reads, _, second_attached) = stamping("second");
+        let mut slots = vec![Slot::Attached(cheap), first, second];
+        let mut paces = vec![pace_ms(10), Pace::UNSET, Pace::UNSET];
+        let plans = [Plan::default(), held(), held()];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(None, poll_ms(10)),
+            windowed(None, poll_ms(10)),
+            windowed(None, poll_ms(10)),
+        ]);
+        let mut script = Scripted {
+            script: vec![
+                (FIRST_MS, vec![switch(1, true)]),
+                // Listed attach first: the runner must still detach first.
+                (SECOND_MS, vec![switch(2, true), switch(1, false)]),
+            ],
+            seen: Vec::new(),
+            sheds: false,
+            shed_asked: Vec::new(),
+        };
+        let opened_ns = spending.opened_ns;
+        let deadline_ns = opened_ns + RUN_MS * 1_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true, true],
+            None,
+            &mut spending,
+            Some(&mut script),
+            until(deadline_ns),
+        );
+        let at = |ms: u64| opened_ns + ms * 1_000_000;
+        assert_eq!(driven.stopped_because, "the deadline");
+        assert!(
+            matches!(slots[1], Slot::Detached(_)),
+            "the first layer was let go"
+        );
+        assert!(
+            matches!(slots[2], Slot::Attached(_)),
+            "the second is attached to the end"
+        );
+
+        assert!(
+            script.seen[0][1] == Standing::Waiting && script.seen[0][2] == Standing::Waiting,
+            "both are held until named: {:?}",
+            script.seen[0]
+        );
+        let first_reads = first_reads.borrow();
+        let second_reads = second_reads.borrow();
+        assert!(first_attached.get() >= at(FIRST_MS) && second_attached.get() >= at(SECOND_MS));
+        assert!(
+            first_reads
+                .iter()
+                .all(|read| *read >= first_attached.get() && *read <= first_stopped.get()),
+            "every read of the first layer is inside the span the escalation gave it"
+        );
+        assert!(
+            first_stopped.get() <= second_attached.get(),
+            "the layer left is stopped before the layer named is attached: stopped {} us, \
+             attached {} us",
+            (first_stopped.get() - opened_ns) / 1_000,
+            (second_attached.get() - opened_ns) / 1_000
+        );
+        assert!(second_reads[0] >= second_attached.get() && !second_reads.is_empty());
+        let cheap_reads = cheap_reads.borrow();
+        assert!(cheap_reads[0] < at(FIRST_MS) && *cheap_reads.last().unwrap() >= deadline_ns);
+
+        assert!(
+            driven.closed_because[1]
+                .as_deref()
+                .is_some_and(|why| why.contains("by the escalation: scripted detach")),
+            "{:?}",
+            driven.closed_because
+        );
+        assert!(
+            spending.notes[2]
+                .iter()
+                .any(|note| note.contains("by the escalation") && note.contains("scripted attach")),
+            "{:?}",
+            spending.notes[2]
+        );
+        assert_eq!(driven.escalated[0], vec!["scripted summary".to_owned()]);
+        assert!(driven.watched[1].attached && driven.watched[1].closed_ns < deadline_ns);
+    }
+
+    /// A held request the escalation never names is never attached, keeps
+    /// the run open no longer than the rest, and closes it no sooner.
+    #[test]
+    fn a_held_request_nothing_names_is_never_attached_and_holds_nothing_open() {
+        const RUN_MS: u64 = 80;
+        let (cheap, _) = clocked("cheap");
+        let (never, never_reads, _, never_attached) = stamping("never");
+        let mut slots = vec![Slot::Attached(cheap), never];
+        let mut paces = vec![pace_ms(10), Pace::UNSET];
+        let plans = [Plan::default(), held()];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(None, poll_ms(10)),
+            windowed(None, poll_ms(10)),
+        ]);
+        let mut script = Scripted {
+            script: Vec::new(),
+            seen: Vec::new(),
+            sheds: false,
+            shed_asked: Vec::new(),
+        };
+        let deadline_ns = spending.opened_ns + RUN_MS * 1_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            Some(&mut script),
+            until(deadline_ns),
+        );
+        assert_eq!(driven.stopped_because, "the deadline");
+        assert!(monotonic_ns() >= deadline_ns);
+        assert!(matches!(slots[1], Slot::Waiting(_)));
+        assert_eq!(never_attached.get(), 0);
+        assert!(never_reads.borrow().is_empty());
+        assert!(!driven.watched[1].attached);
+        assert!(
+            script.seen.len() > 3,
+            "asked once a round: {}",
+            script.seen.len()
+        );
+    }
+
+    /// A layer the escalation attached that costs more than its ceiling, with
+    /// nothing cheaper to move onto, is let go and the run goes on -- where
+    /// the same collector not held for an escalation ends the run, as every
+    /// run over its budget does.
+    ///
+    /// The denominator is this process's own cpu time, as in the ceiling test
+    /// above, so a collector that spins is around one hundred percent of it
+    /// and a ceiling of 50 % is exceeded whatever the machine is doing.
+    #[test]
+    fn an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on() {
+        let run = |sheds: bool| {
+            let (cheap, _) = clocked("cheap");
+            let (mut burning, spun_ns) = burning(20_000_000);
+            let mut slots = vec![
+                Slot::Attached(cheap),
+                Slot::Waiting(Box::new(Handing {
+                    collector: Ok(burning.remove(0)),
+                    spin_ns: 0,
+                    at_exec: false,
+                })),
+            ];
+            let mut paces = vec![pace_ms(10), Pace::UNSET];
+            let plans = [Plan::default(), held()];
+            let mut spending = Spending::weighed_against_this_process(vec![
+                windowed(None, poll_ms(10)),
+                weighed("50%"),
+            ]);
+            spending.sheddable = vec![false, true];
+            let mut script = Scripted {
+                script: vec![(0, vec![switch(1, true)])],
+                seen: Vec::new(),
+                sheds,
+                shed_asked: Vec::new(),
+            };
+            let deadline_ns = spending.opened_ns + 700_000_000;
+            let driven = drive(
+                &mut slots,
+                &mut paces,
+                &plans,
+                &[true, true],
+                None,
+                &mut spending,
+                Some(&mut script),
+                until(deadline_ns),
+            );
+            assert!(
+                spun_ns.get() > 0,
+                "the escalated layer ran and cost something"
+            );
+            assert_eq!(script.shed_asked, vec![1], "asked about the held one, once");
+            (driven, slots)
+        };
+
+        let (shed, slots) = run(true);
+        assert_eq!(shed.stopped_because, "the deadline", "the run went on");
+        assert!(matches!(slots[1], Slot::Detached(_)));
+        let why = shed.closed_because[1].clone().unwrap_or_default();
+        assert!(
+            why.contains("to hold the budget") && why.contains("ceiling of 50"),
+            "the collection says it was let go for the budget, and which: {why}"
+        );
+
+        let (kept, _) = run(false);
+        assert!(
+            kept.stopped_because.contains("ceiling of 50"),
+            "an escalation that does not shed leaves the run to end as any run over budget: {}",
+            kept.stopped_because
+        );
     }
 }
