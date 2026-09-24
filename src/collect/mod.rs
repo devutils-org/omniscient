@@ -2237,6 +2237,26 @@ impl Spending<'static> {
     /// matters here: `cargo test` runs its tests in parallel threads of one
     /// process, and a measurement of "this process" is a measurement of all of
     /// them.
+    /// The same, with this thread as the denominator rather than the process.
+    ///
+    /// For a request attached mid-run the numerator is that one collector's
+    /// cpu, read on the thread that drives it, while "this process" is every
+    /// test `cargo test` runs in parallel beside it -- twenty-odd threads in a
+    /// full run, which put a collector spinning a whole thread under a 50 %
+    /// ceiling and made the escalation's shedding test fail in every full run
+    /// and pass alone. `/proc/<tid>/stat` is the thread's own account.
+    fn weighed_against_this_thread(serving: Vec<ResolvedRequest>) -> Spending<'static> {
+        // SAFETY: `gettid` takes no argument and cannot fail.
+        let thread = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        let count = serving.len();
+        Spending::open(
+            (0..count).map(|_| Meter::Tasks(vec![thread])).collect(),
+            vec![Target::Pid(vec![thread]); count],
+            serving,
+            Box::leak(Box::new(StopWhenOverBudget)),
+        )
+    }
+
     fn weighed_against_this_process(serving: Vec<ResolvedRequest>) -> Spending<'static> {
         let own = std::process::id() as i32;
         let count = serving.len();
@@ -4900,9 +4920,10 @@ mod tests {
     /// the same collector not held for an escalation ends the run, as every
     /// run over its budget does.
     ///
-    /// The denominator is this process's own cpu time, as in the ceiling test
-    /// above, so a collector that spins is around one hundred percent of it
-    /// and a ceiling of 50 % is exceeded whatever the machine is doing.
+    /// The denominator is this thread's own cpu time, the thread the collector
+    /// is read on, so a collector that spins is around one hundred percent of
+    /// it and a ceiling of 50 % is exceeded whatever else the process and the
+    /// machine are doing.
     #[test]
     fn an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on() {
         let run = |sheds: bool| {
@@ -4918,7 +4939,7 @@ mod tests {
             ];
             let mut paces = vec![pace_ms(10), Pace::UNSET];
             let plans = [Plan::default(), held()];
-            let mut spending = Spending::weighed_against_this_process(vec![
+            let mut spending = Spending::weighed_against_this_thread(vec![
                 windowed(None, poll_ms(10)),
                 weighed("50%"),
             ]);
