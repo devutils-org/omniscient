@@ -959,6 +959,7 @@ fn distribution(losses: Losses) -> Results {
                 layout: BucketLayout::Log2,
                 series: vec![SeriesHist {
                     key: "task:7".into(),
+                    unmeasured: 0,
                     count: records as usize,
                     min: 2.0 * MIB,
                     max: 64.0 * MIB,
@@ -982,6 +983,7 @@ fn distribution(losses: Losses) -> Results {
             emit::Output::Summary {
                 series: vec![SeriesSummary {
                     key: "task:7".into(),
+                    unmeasured: 0,
                     count: records as usize,
                     min: 2.0 * MIB,
                     max: 64.0 * MIB,

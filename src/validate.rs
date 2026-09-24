@@ -306,7 +306,7 @@ pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
 /// the question rather than inherit an answer.
 fn adds_up(unit: Unit) -> bool {
     match unit {
-        Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules => true,
+        Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
         Unit::Ratio | Unit::Hz | Unit::Celsius => false,
     }
 }
@@ -369,15 +369,23 @@ fn check_mode(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>)
 /// rather than the resolution: a source every one of whose implemented backends
 /// buckets in the kernel cannot be told it is aggregating in userspace, whatever
 /// the resolver later picks.
-fn aggregates_in_kernel(entry: &Entry) -> bool {
-    // The mechanism, not the source: a `bpf:` backend with a collector is one
-    // that has a map to bucket into, and that is what makes the difference the
-    // warning is about.
-    entry
+/// Whether a budget could move this source's histogram into the kernel.
+///
+/// Only when the chain has both: a written backend that buckets in a map
+/// (`drained`), and a written one that streams every event to be bucketed
+/// here, which the resolver may prefer until a budget turns it away. A source
+/// whose every collector already buckets in the kernel (`sched.runqlat`) is not
+/// waiting for a budget, and one with no such collector at all (a preload
+/// source, whose only backend is the shim) has nowhere for a budget to send it.
+/// Telling either to pass `--budget` sends the reader to a flag that changes
+/// nothing.
+fn budget_moves_hist(entry: &Entry) -> bool {
+    let written: Vec<_> = entry
         .backends
         .iter()
         .filter(|backend| crate::collect::implements(entry.id.as_str(), &backend.id))
-        .any(|backend| backend.id.starts_with("bpf:"))
+        .collect();
+    written.iter().any(|backend| backend.drained) && written.iter().any(|backend| !backend.drained)
 }
 
 fn check_emits(
@@ -448,12 +456,10 @@ fn check_emits(
             ));
             continue;
         }
-        // A source whose collector already buckets in the kernel is not
-        // waiting for a budget to move it there: `sched.runqlat` drains
-        // `(task, bucket) -> count` from a BPF map and always has. Saying
-        // otherwise sent a reader to a flag that would change nothing.
+        // Said only where a budget can change the answer; see
+        // `budget_moves_hist` for the two shapes where it cannot.
         if let (Emit::Hist(_), Mode::Trace) = (emit, request.mode) {
-            if request.budget.is_none() && !aggregates_in_kernel(entry) {
+            if request.budget.is_none() && budget_moves_hist(entry) {
                 report.push(format!(
                     "`trace` with `{kind}` aggregates in userspace unless a budget lets the resolver \
                      move the histogram into the kernel; consider --budget"
@@ -858,5 +864,24 @@ mod tests {
                 .any(|warning| warning.contains("writeback")),
             "a source caveat must not be filed as a warning about this request"
         );
+    }
+
+    /// A budget moves a histogram into the kernel only by choosing a backend
+    /// that buckets there. `sched.mutex` has one written backend, the preload
+    /// shim, and `sched.runqlat` buckets in the kernel whatever it is asked:
+    /// neither is given advice a budget cannot act on.
+    #[test]
+    fn the_budget_advice_is_given_only_where_a_budget_can_act() {
+        for source in ["sched.mutex", "sched.runqlat"] {
+            let request = request(source, Target::Pid(vec![1]), "trace", "hist");
+            let report = validate_request(&catalog(), &request, OutputFormat::Text)
+                .unwrap_or_else(|rejections| panic!("{source}: {rejections:?}"));
+            assert!(
+                !report
+                    .warnings()
+                    .any(|warning| warning.contains("consider --budget")),
+                "{source} was told to pass a budget that changes nothing: {report:?}"
+            );
+        }
     }
 }

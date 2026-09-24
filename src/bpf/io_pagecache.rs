@@ -42,7 +42,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{self, helper, read_field, read_pointer, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash};
+use super::map::{map_failure, Counters, Hash, TaskStorage};
 use super::mem_program::{check_signature, comm, count_drop, load, long, read_comm, word};
 use super::syscall;
 use super::DrainLosses;
@@ -69,9 +69,10 @@ const DROP_ROWS: u32 = 0;
 /// for -- a file with no inode is not a file -- but counted, because a number
 /// here that is not zero means the chain read something other than a file.
 const UNNAMED: u32 = 1;
-/// A lookup whose thread the `last` map had no room for. Not a lost event: it
-/// is counted, but the next continuation of the same read cannot be recognised
-/// and is counted again.
+/// A lookup whose thread the kernel could not give a slot of the `last`
+/// storage, which it allocates on the thread's first lookup. Not a lost event:
+/// it is counted, but the next continuation of the same read cannot be
+/// recognised and is counted again.
 const UNTRACKED: u32 = 2;
 /// Calls recognised as the continuation of a read already counted.
 const CONTINUED: u32 = 3;
@@ -87,11 +88,8 @@ const SCRATCH: i16 = -112;
 /// The number of pages the file currently spans, for the created-or-filled
 /// test and for clamping a lookup to the file.
 const FILE_PAGES: i16 = -120;
-/// The thread's previous lookup, as the program writes it into `last`.
-const LAST_VALUE: i16 = -152;
-const LAST_KEY: i16 = -156;
-
-/// A thread's previous lookup, as byte offsets within the `last` map's value.
+/// A thread's previous lookup, as byte offsets within its slot of the `last`
+/// task storage.
 ///
 /// `filemap_read` calls `filemap_get_pages` once per batch of folios, and each
 /// call reports the whole *remaining* range: a 1 MiB read reports
@@ -99,23 +97,21 @@ const LAST_KEY: i16 = -156;
 /// counted 3168 pages for a 1024-page file. A call from the same thread, on
 /// the same mapping, with the same end and a start that has advanced, is the
 /// read it continues, and adds nothing.
+///
+/// The slot lives in the thread itself (`BPF_MAP_TYPE_TASK_STORAGE`), so it
+/// dies with the thread. It used to be a hash keyed by tid, which kept a
+/// thread's entry after it exited until a userspace sweep removed it, and lost
+/// any entry the kernel refreshed between the sweep's look and its removal.
+/// Neither can happen to a slot the kernel frees with its task, and a recycled
+/// tid starts with an empty one.
 const LAST_MAPPING: i16 = 0;
 const LAST_START: i16 = 8;
 const LAST_END: i16 = 16;
-/// When the thread last looked anything up, for the userspace sweep that
-/// removes threads that have gone.
-const LAST_TS: i16 = 24;
-const LAST_KEY_BYTES: usize = 4;
-const LAST_VALUE_BYTES: usize = 32;
+const LAST_VALUE_BYTES: usize = 24;
 
-/// Threads whose last lookup the map can hold. Every thread that reads a file
-/// has one, and one that has exited keeps it until the sweep removes it.
-const MAX_THREADS: u32 = 16384;
-
-/// How long a thread's last lookup is kept after it was made. A continuation
-/// comes microseconds after the call it continues -- or, cold, one device
-/// read later -- so a second is three orders of magnitude of margin.
-pub const LAST_KEPT_NS: u64 = 1_000_000_000;
+/// `BPF_LOCAL_STORAGE_GET_F_CREATE`: a thread's first lookup makes its slot,
+/// zeroed, and a zero mapping matches no file.
+const F_CREATE: i32 = 1;
 
 /// A row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -449,14 +445,15 @@ fn get_pages_instructions(
     program.label("in_file");
 
     // The thread's previous lookup: the same mapping, the same end and a start
-    // that advanced is the next batch of a read already counted.
-    program.push(Insn::ldx(BPF_W, 1, R10, PID_TGID));
-    program.push(Insn::stx(BPF_W, R10, LAST_KEY, 1));
+    // that advanced is the next batch of a read already counted. r6 to r9 --
+    // the inode, the range and the mapping -- survive the two helper calls.
+    program.push(Insn::call(helper::GET_CURRENT_TASK_BTF));
+    program.push(Insn::mov64_reg(2, 0));
     program.extend(Insn::load_map_fd(1, last_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, LAST_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    program.jump_to("fresh", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::mov64_imm(3, 0));
+    program.push(Insn::mov64_imm(4, F_CREATE));
+    program.push(Insn::call(helper::TASK_STORAGE_GET));
+    program.jump_to("untracked", Insn::jeq_imm(0, 0, 0));
     program.push(Insn::ldx(BPF_DW, 1, 0, LAST_MAPPING));
     program.push(Insn::sub64_reg(1, 9));
     program.jump_to("fresh", Insn::jne_imm(1, 0, 0));
@@ -471,28 +468,18 @@ fn get_pages_instructions(
 
     program.label("continued");
     // Moved forward in place, so a third batch continues the second. The
-    // entry belongs to this thread alone, so a plain store is enough.
+    // slot belongs to this thread alone, so a plain store is enough.
     program.push(Insn::stx(BPF_DW, 0, LAST_START, 7));
-    program.push(Insn::mov64_reg(6, 0));
-    program.push(Insn::call(helper::KTIME_GET_NS));
-    program.push(Insn::stx(BPF_DW, 6, LAST_TS, 0));
     count_drop(&mut program, drops_fd, DROP_KEY, CONTINUED, "done");
     program.jump_to("done", Insn::ja());
 
     program.label("fresh");
-    program.push(Insn::stx(BPF_DW, R10, LAST_VALUE + LAST_MAPPING, 9));
-    program.push(Insn::stx(BPF_DW, R10, LAST_VALUE + LAST_START, 7));
-    program.push(Insn::stx(BPF_DW, R10, LAST_VALUE + LAST_END, 8));
-    program.push(Insn::call(helper::KTIME_GET_NS));
-    program.push(Insn::stx(BPF_DW, R10, LAST_VALUE + LAST_TS, 0));
-    program.extend(Insn::load_map_fd(1, last_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, LAST_KEY as i32));
-    program.push(Insn::mov64_reg(3, R10));
-    program.push(Insn::add64_imm(3, LAST_VALUE as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
-    program.jump_to("tracked", Insn::jsge_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, 0, LAST_MAPPING, 9));
+    program.push(Insn::stx(BPF_DW, 0, LAST_START, 7));
+    program.push(Insn::stx(BPF_DW, 0, LAST_END, 8));
+    program.jump_to("tracked", Insn::ja());
+
+    program.label("untracked");
     count_drop(&mut program, drops_fd, DROP_KEY, UNTRACKED, "tracked");
     program.label("tracked");
 
@@ -602,7 +589,8 @@ fn add_instructions(
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct PageCacheProgram {
     rows: Hash,
-    last: Hash,
+    /// Held so the storage outlives the programs that write into it.
+    _last: TaskStorage,
     drops: Counters,
     programs: Vec<OwnedFd>,
     _links: Vec<OwnedFd>,
@@ -621,8 +609,8 @@ impl PageCacheProgram {
         }
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_pc_rows")
             .map_err(|error| map_failure("page cache row map", error))?;
-        let last = Hash::create(LAST_KEY_BYTES, LAST_VALUE_BYTES, MAX_THREADS, "omn_pc_last")
-            .map_err(|error| map_failure("page cache per-thread map", error))?;
+        let last = TaskStorage::create(LAST_VALUE_BYTES, "omn_pc_last")
+            .map_err(|error| map_failure("page cache per-thread storage", error))?;
         let drops = Counters::create(DROP_SLOTS, "omn_pc_drop")
             .map_err(|error| map_failure("page cache drop counter", error))?;
 
@@ -661,7 +649,7 @@ impl PageCacheProgram {
         }
         Ok(Self {
             rows,
-            last,
+            _last: last,
             drops,
             programs,
             _links: links,
@@ -688,43 +676,7 @@ impl PageCacheProgram {
         Ok((rows, losses))
     }
 
-    /// Removes the last lookup of every thread that has made none for
-    /// [`LAST_KEPT_NS`], and returns how many it removed and how many it
-    /// removed that the kernel had refreshed in between.
-    ///
-    /// A plain hash map has no eviction, and a thread that exits keeps its
-    /// entry: without this a long run on a machine that starts processes fills
-    /// the map, and every read after that is counted batch by batch again. An
-    /// entry refreshed between the look and the removal is lost, and the
-    /// caller counts it with the untracked ones: that thread's next batch, if
-    /// it continues a read, is counted as a lookup of its own.
-    pub fn sweep(&self, now_ns: u64) -> Result<(usize, u64), String> {
-        let fd = self.last.as_raw_fd();
-        let (keys, _) = self
-            .last
-            .keys()
-            .map_err(|error| format!("cannot walk the page cache per-thread map: {error}"))?;
-        let stale =
-            |value: &[u8]| now_ns.saturating_sub(long(value, LAST_TS as usize)) >= LAST_KEPT_NS;
-        let (mut removed, mut raced) = (0, 0);
-        for key in keys {
-            let Ok(Some(value)) = syscall::map_lookup(fd, &key, LAST_VALUE_BYTES) else {
-                continue;
-            };
-            if !stale(&value) {
-                continue;
-            }
-            if let Ok(Some(taken)) = syscall::map_take(fd, &key, LAST_VALUE_BYTES) {
-                removed += 1;
-                if !stale(&taken) {
-                    raced += 1;
-                }
-            }
-        }
-        Ok((removed, raced))
-    }
-
-    /// Lookups whose thread the per-thread map had no room for, so that a
+    /// Lookups whose thread the kernel could not give a slot, so that a
     /// continuation of theirs may have been counted as a lookup of its own.
     pub fn untracked(&self) -> u64 {
         self.drops.read(UNTRACKED)
@@ -792,12 +744,7 @@ mod tests {
             (VALUE_CREATED, 8),
             (VALUE_COMM, COMM_BYTES as i16),
         ];
-        let last = [
-            (LAST_MAPPING, 8),
-            (LAST_START, 8),
-            (LAST_END, 8),
-            (LAST_TS, 8),
-        ];
+        let last = [(LAST_MAPPING, 8), (LAST_START, 8), (LAST_END, 8)];
         for (fields, bytes, what) in [
             (&key[..], ROW_KEY_BYTES, "the row key"),
             (&value[..], ROW_VALUE_BYTES, "the row value"),
@@ -831,8 +778,6 @@ mod tests {
             (DROP_KEY, 4, "drop key"),
             (SCRATCH, 8, "scratch"),
             (FILE_PAGES, 8, "file pages"),
-            (LAST_VALUE, LAST_VALUE_BYTES as i16, "last value"),
-            (LAST_KEY, LAST_KEY_BYTES as i16, "last key"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -861,8 +806,6 @@ mod tests {
             (DROP_KEY, 4),
             (SCRATCH, 8),
             (FILE_PAGES, 8),
-            (LAST_VALUE, LAST_VALUE_BYTES as i16),
-            (LAST_KEY, LAST_KEY_BYTES as i16),
         ];
         for built in [
             add_instructions(btf, Narrowing::default(), 3, 4).expect("the fill program"),

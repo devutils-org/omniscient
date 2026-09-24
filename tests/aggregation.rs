@@ -302,13 +302,16 @@ fn two_emits_of_one_request_describe_the_same_events() {
         Some(seen),
         "and the ranking, which has one series here: {results}"
     );
-    assert_eq!(
-        histogram["sum"].as_f64(),
-        summary["mean"]
-            .as_f64()
-            .zip(summary["count"].as_f64())
-            .map(|(mean, count)| mean * count),
-        "the histogram's sum and the summary's mean describe the same values"
+    // Within the rounding of one division and one product, not exactly: a
+    // mean times a count is not the sum it came from in floating point, and on
+    // a run of 216 MB it missed by one ulp every time.
+    let sum = histogram["sum"].as_f64().expect("a histogram sum");
+    let expected =
+        summary["mean"].as_f64().expect("a mean") * summary["count"].as_f64().expect("a count");
+    assert!(
+        (sum - expected).abs() <= 4.0 * f64::EPSILON * sum.abs().max(1.0),
+        "the histogram's sum and the summary's mean describe the same values: {sum} against \
+         {expected}"
     );
 }
 

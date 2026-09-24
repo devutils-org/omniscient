@@ -46,7 +46,12 @@ impl Prepared for Prepare {
                 target.kind()
             )
         })?;
-        Ok(Box::new(PageFaultCollector::new(pid, self.0)))
+        let mut collector = PageFaultCollector::new(pid, self.0);
+        // A `--tid` target is one task because that is what was asked for;
+        // every other target that names a process is a task and whatever it
+        // starts, and a sampling event follows none of them.
+        collector.more_than_one_task = !matches!(target, crate::request::Target::Tid(_));
+        Ok(Box::new(collector))
     }
 }
 
@@ -61,6 +66,14 @@ pub struct PageFaultCollector {
     comms: Comms,
     /// Counted here rather than in the ring so it survives `stop`.
     losses: Losses,
+    /// Whether the target is more than the one task the event is opened on.
+    more_than_one_task: bool,
+    /// The tasks faults were sampled from: the measured half of the
+    /// disclosure in `notes`.
+    sampled_tasks: std::collections::BTreeSet<i32>,
+    /// What the event cannot see, read at `start` because `stop` closes it
+    /// before the notes are gathered.
+    disclosure: Option<&'static str>,
 }
 
 impl PageFaultCollector {
@@ -72,6 +85,9 @@ impl PageFaultCollector {
             event: None,
             comms: Comms::new(),
             losses: Losses::default(),
+            more_than_one_task: false,
+            sampled_tasks: std::collections::BTreeSet::new(),
+            disclosure: None,
         }
     }
 
@@ -81,12 +97,14 @@ impl PageFaultCollector {
         };
         let id = self.id.clone();
         let comms = &mut self.comms;
+        let seen = &mut self.sampled_tasks;
         let mut index = seq;
         let mut dropped = 0u64;
         let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
             Record::Sample(sample) => {
+                seen.insert(sample.tid as i32);
                 events.push(Event {
                     ts_ns: sample.time_ns,
                     ts_err_ns: 0,
@@ -178,6 +196,7 @@ impl Collector for PageFaultCollector {
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
+        self.disclosure = Some(event.sampled_threads());
         self.event = Some(event);
         Ok(())
     }
@@ -209,6 +228,24 @@ impl Collector for PageFaultCollector {
 
     fn losses(&self) -> Losses {
         self.losses.clone()
+    }
+
+    /// What this event never saw, as `cpu.profile` and `sched.switches` say
+    /// it: the kernel will not inherit a per-task sampling event, so the faults
+    /// of a thread or a child the target starts afterwards are not sampled,
+    /// and nothing counts them as lost because they were never taken.
+    fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let (true, Some(limit)) = (self.more_than_one_task, self.disclosure) {
+            let tasks = self.sampled_tasks.len();
+            notes.push(format!(
+                "a sampling event is not inherited, so these faults are {limit}; they came \
+                 from {tasks} task{}, and a fault taken in a thread or a child process the \
+                 target started is in no number here",
+                if tasks == 1 { "" } else { "s" }
+            ));
+        }
+        notes
     }
 }
 

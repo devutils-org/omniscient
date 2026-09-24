@@ -151,7 +151,7 @@
   emits: [hist, topk, stack, raw, summary]
   targets: {pid: native, launch: native}
   keys: [task, mem]
-  filter_fields: [bytes, comm]
+  filter_fields: [bytes, comm, op, freed_bytes, freed_untracked]
   determinism: high
   caveats:
     - "A preloaded shim reaches a program only at exec, so this needs a program
@@ -271,7 +271,7 @@
 - id: mem.latency
   family: mem
   summary: "Memory access latency (load latency sampling)"
-  unit: count
+  unit: cycles
   backends:
     - {id: "pmu:pebs", requires: ["pmu:pebs:mem-loads"], cost: med}
     - {id: "pmu:ibs", requires: ["pmu:ibs_op"], cost: med,

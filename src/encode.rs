@@ -816,9 +816,13 @@ fn text(results: &Results) -> String {
         let _ = writeln!(out, "  no loss: every read succeeded and no tick ran late");
     } else {
         let _ = writeln!(out, "  {}", loss_headline(&results.losses));
-        for (reason, count) in &results.losses.reasons {
-            let _ = writeln!(out, "    {count}x {reason}");
-        }
+    }
+    // A reason is printed whatever the counters say. A collector that explains
+    // a result without having lost anything -- "no allocation was reported:
+    // statically linked" -- noted it for the reader, and hiding it behind a
+    // clean headline left a silent zero with its explanation one branch away.
+    for (reason, count) in &results.losses.reasons {
+        let _ = writeln!(out, "    {count}x {reason}");
     }
 
     // A filter that ran here is part of how the numbers came to be: the events
@@ -905,6 +909,13 @@ fn text(results: &Results) -> String {
                         quantity(summary.max, results.unit),
                         quantity(summary.last, results.unit),
                     );
+                    if summary.unmeasured > 0 {
+                        let _ = writeln!(
+                            out,
+                            "    {:<14} and {} events that carried no value, in none of the above",
+                            "", summary.unmeasured
+                        );
+                    }
                 }
                 push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
@@ -953,6 +964,13 @@ fn text(results: &Results) -> String {
                         quantity(total.total, results.unit),
                         total.events
                     );
+                    if total.unmeasured > 0 {
+                        let _ = writeln!(
+                            out,
+                            "        and {} events that carried no value",
+                            total.unmeasured
+                        );
+                    }
                 }
                 // A ranking that does not say what it left out reads as a
                 // statement about everything.
@@ -1334,6 +1352,13 @@ fn hist_text(out: &mut String, histogram: &SeriesHist, unit: Unit) {
             histogram.unbucketable
         );
     }
+    if histogram.unmeasured > 0 {
+        let _ = writeln!(
+            out,
+            "      {} events carried no value and are in no bucket",
+            histogram.unmeasured
+        );
+    }
 }
 
 /// `[low, high)` in the source's own unit, which is what makes a latency
@@ -1620,9 +1645,9 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
         // a format that has nowhere structural to put them.
         if !results.losses.is_clean() {
             comments.push(format!("  {}", loss_headline(&results.losses)));
-            for (reason, count) in &results.losses.reasons {
-                comments.push(format!("    {count}x {reason}"));
-            }
+        }
+        for (reason, count) in &results.losses.reasons {
+            comments.push(format!("    {count}x {reason}"));
         }
         for degradation in &results.degradations {
             comments.push(format!("  degraded: {degradation}"));
@@ -1691,6 +1716,7 @@ fn pprof_unit(unit: Unit) -> (&'static str, bool) {
         Unit::Hz => ("hertz", false),
         Unit::Joules => ("joules", false),
         Unit::Celsius => ("celsius", false),
+        Unit::Cycles => ("cycles", false),
     }
 }
 
@@ -2183,6 +2209,7 @@ mod tests {
                 Output::Summary {
                     series: vec![SeriesSummary {
                         key: "task:7".into(),
+                        unmeasured: 0,
                         count: 2,
                         min: 1_048_576.0,
                         max: 2_097_152.0,
@@ -2254,6 +2281,21 @@ mod tests {
         assert!(text.contains("no loss"), "{text}");
         assert!(text.contains("degraded:"), "{text}");
         assert!(text.contains("1.0 MiB"), "{text}");
+    }
+
+    /// The heap collector's "statically linked, never calls malloc" was noted
+    /// from the first wave and never once printed, because the reasons were
+    /// only written under a non-zero counter.
+    #[test]
+    fn a_reason_noted_beside_clean_counters_is_printed() {
+        let mut results = sample();
+        results
+            .losses
+            .note("no allocation was reported: statically linked");
+        assert!(results.losses.is_clean());
+        let text = super::results(OutputFormat::Text, &results).unwrap();
+        assert!(text.contains("no loss"), "{text}");
+        assert!(text.contains("statically linked"), "{text}");
     }
 
     #[test]
@@ -2456,6 +2498,7 @@ mod tests {
             layout: crate::emit::BucketLayout::Log2,
             series: vec![SeriesHist {
                 key: "task:7".into(),
+                unmeasured: 0,
                 count: 102,
                 min: 1024.0,
                 max: 1_048_576.0,
@@ -2492,12 +2535,14 @@ mod tests {
                 SeriesTotal {
                     short: None,
                     key: "task:2".into(),
+                    unmeasured: 0,
                     events: 1,
                     total: 300.0,
                 },
                 SeriesTotal {
                     short: None,
                     key: "task:3".into(),
+                    unmeasured: 0,
                     events: 2,
                     total: 100.0,
                 },
@@ -3166,6 +3211,7 @@ mod tests {
                     k: 10,
                     series: vec![SeriesTotal {
                         key: "task:7".into(),
+                        unmeasured: 0,
                         events: 90,
                         total: 900.0,
                         short: short.clone(),

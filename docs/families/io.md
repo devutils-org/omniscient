@@ -965,6 +965,15 @@ lookup of its own, and the run then says `lookups` is an upper bound.
 `bpf_task_storage` (stream V's, this wave) is the right home for this state: it
 dies with the task and needs no sweep. It was not there to use.
 
+*Since the tenth wave it is used.* The coordinator moved the state into a
+`BPF_MAP_TYPE_TASK_STORAGE` slot of three `u64`s -- mapping, start, end -- that
+the kernel allocates on a thread's first lookup and frees with the thread. The
+sweep, its one-second constant and the race it lost entries to are gone, and so
+is the need for `map_update` outside `#[cfg(test)]`. A lookup is now untracked
+only when the kernel cannot allocate the slot. Measured after the change: a
+4 MiB file read cold in four 1 MiB reads is 1024 pages in 4 lookups, 896
+filled; read warm, 1024 in 4, none filled.
+
 **4. A lookup's range is clamped to the file.** The range's end is where the
 read's buffer ends, so a 1 MiB read of a 100 KiB file reports 256 pages of which
 25 exist, and the read at EOF that returns zero reports a range entirely past

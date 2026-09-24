@@ -49,11 +49,6 @@ use crate::request::{Mode, Target};
 /// cat` far below the map's capacity.
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(100);
 
-/// How often threads that have stopped reading are swept out of the program's
-/// per-thread map. Once a second: an entry is kept for a second after its last
-/// lookup, and sweeping faster would only walk the same live entries again.
-const SWEEP_INTERVAL_NS: u64 = crate::bpf::PAGE_CACHE_LAST_KEPT_NS;
-
 /// Which question a collector answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reading {
@@ -128,11 +123,7 @@ pub struct PageCacheCollector {
     skipped: u64,
     unnamed: u64,
     untracked: u64,
-    /// Entries the sweep removed that the kernel had refreshed in between.
-    raced: u64,
     continued: u64,
-    /// When the per-thread map was last swept of threads that have gone.
-    swept_ns: u64,
     window_opened_ns: u64,
     run_opened_ns: u64,
     /// A `count` run's totals, by the row's whole key.
@@ -172,9 +163,7 @@ impl PageCacheCollector {
             skipped: 0,
             unnamed: 0,
             untracked: 0,
-            raced: 0,
             continued: 0,
-            swept_ns: 0,
             window_opened_ns: 0,
             run_opened_ns: 0,
             counted: BTreeMap::new(),
@@ -307,22 +296,14 @@ impl PageCacheCollector {
         }
         self.unnamed = program.unnamed();
         self.continued = program.continued();
-        let untracked = program.untracked() + self.raced;
+        let untracked = program.untracked();
         if untracked > self.untracked {
             self.losses.note(
-                "more threads had read a file within the last second than the per-thread map \
-                 holds, so a read of theirs larger than one batch of folios may have had each \
+                "the kernel could not allocate a reading thread's slot for its previous lookup, \
+                 so a read of that thread larger than one batch of folios may have had each \
                  batch counted as a lookup of its own: `lookups` is an upper bound",
             );
             self.untracked = untracked;
-        }
-        let now = monotonic_ns();
-        if now.saturating_sub(self.swept_ns) >= SWEEP_INTERVAL_NS {
-            match program.sweep(now) {
-                Ok((_, raced)) => self.raced += raced,
-                Err(reason) => self.losses.note(reason),
-            }
-            self.swept_ns = now;
         }
     }
 }

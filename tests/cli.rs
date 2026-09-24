@@ -109,60 +109,82 @@ fn an_impossible_request_is_refused_before_anything_is_attached() {
 /// the refusal and it broke because the refusal stopped happening.
 #[test]
 fn a_valid_request_with_no_collector_names_the_ones_that_exist() {
+    // Every source with no collector, asked every way its entry declares, on
+    // the whole machine where it takes one and on this test's own process
+    // otherwise. The first that is neither rejected as a request nor out of
+    // this machine's reach is the one the refusal is about. Picking one shape
+    // in advance ran out of candidates twice as the breadth waves collected
+    // them, and then picked a source this machine cannot serve and asserted
+    // nothing.
     let catalog = omn::Catalog::embedded().expect("the embedded catalog loads");
-    let uncollected = catalog
-        .entries()
-        .iter()
-        .find(|entry| {
-            entry
-                .backends
-                .iter()
-                .all(|backend| !omn::collect::implements(&entry.id.to_string(), &backend.id))
-                && entry.modes.iter().any(|mode| mode.as_str() == "trace")
-                && entry.emits.iter().any(|emit| emit.as_str() == "raw")
-                && (entry.target_support(omn::request::TargetKind::System)
-                    != omn::catalog::TargetSupport::No
-                    || entry.target_support(omn::request::TargetKind::Pid)
-                        != omn::catalog::TargetSupport::No)
-        })
-        .map(|entry| {
-            // The whole machine where the source takes it, and this test's own
-            // process otherwise: the breadth of the ninth wave left only
-            // sources that take a process among the ones with no collector.
-            let target = if entry.target_support(omn::request::TargetKind::System)
-                != omn::catalog::TargetSupport::No
-            {
-                vec!["--system".to_owned()]
-            } else {
-                vec!["--pid".to_owned(), std::process::id().to_string()]
-            };
-            (entry.id.to_string(), target)
-        });
-    let Some((uncollected, target)) = uncollected else {
-        // The day every source that takes a trace and a raw emit is collected,
-        // there is nothing left to refuse this way, and that is the goal
-        // rather than a failure.
-        eprintln!("skipped: every source that could be asked this way has a collector");
-        return;
-    };
-
-    let mut args = vec![uncollected.as_str()];
-    args.extend(target.iter().map(String::as_str));
-    args.extend(["-m", "trace", "-e", "raw", "-d", "1s"]);
-    let output = run(&args);
-    let code = output.status.code();
-    if code == Some(EXIT_UNAVAILABLE) {
-        // This machine cannot serve it either, which is a different answer and
-        // one this test is not about.
+    let pid = std::process::id().to_string();
+    let mut candidates: Vec<Vec<String>> = Vec::new();
+    for entry in catalog.entries() {
+        let id = entry.id.to_string();
+        if entry
+            .backends
+            .iter()
+            .any(|backend| omn::collect::implements(&id, &backend.id))
+        {
+            continue;
+        }
+        let target = if entry.target_support(omn::request::TargetKind::System)
+            != omn::catalog::TargetSupport::No
+        {
+            vec!["--system".to_owned()]
+        } else if entry.target_support(omn::request::TargetKind::Pid)
+            != omn::catalog::TargetSupport::No
+        {
+            vec!["--pid".to_owned(), pid.clone()]
+        } else {
+            continue;
+        };
+        for mode in &entry.modes {
+            for emit in &entry.emits {
+                let mut args = vec![id.clone()];
+                args.extend(target.iter().cloned());
+                args.extend(["-m".to_owned(), mode.as_str().to_owned()]);
+                args.extend(["-e".to_owned(), emit.as_str().to_owned()]);
+                if mode.as_str() != "snapshot" {
+                    args.extend(["-d".to_owned(), "1s".to_owned()]);
+                }
+                candidates.push(args);
+            }
+        }
+    }
+    if candidates.is_empty() {
+        // The day every source is collected there is nothing left to refuse
+        // this way, and that is the goal rather than a failure.
+        eprintln!("skipped: every source in the catalog has a collector");
         return;
     }
-    assert_eq!(
-        code,
-        Some(EXIT_NOT_IMPLEMENTED),
-        "`{uncollected}` has no collector, so the refusal is the build's: {}",
-        stderr(&output)
+
+    let mut unavailable = Vec::new();
+    for args in &candidates {
+        let output = run(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        match output.status.code() {
+            Some(EXIT_REJECTED) => continue,
+            // This machine cannot serve it either, which is a different answer
+            // and one this test is not about.
+            Some(EXIT_UNAVAILABLE) => unavailable.push(args[0].clone()),
+            code => {
+                assert_eq!(
+                    code,
+                    Some(EXIT_NOT_IMPLEMENTED),
+                    "`{}` has no collector, so the refusal is the build's: {}",
+                    args.join(" "),
+                    stderr(&output)
+                );
+                assert!(stderr(&output).contains("mem.rss"), "{}", stderr(&output));
+                return;
+            }
+        }
+    }
+    unavailable.dedup();
+    eprintln!(
+        "skipped: every source with no collector is also out of this machine's reach ({})",
+        unavailable.join(", ")
     );
-    assert!(stderr(&output).contains("mem.rss"), "{}", stderr(&output));
 }
 
 #[test]

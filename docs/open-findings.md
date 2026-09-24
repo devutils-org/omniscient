@@ -6134,3 +6134,66 @@ No other stream of the ninth wave owns either file. Two sessions were added,
 `examples/vertical-one-request.yml` and `examples/vertical-abandoned.yml`;
 their rows for `examples/README.md` and `GUIDE.md` are at the end of
 `docs/scenarios/vertical.md`.
+
+---
+
+## The tenth wave's coordinator: what was answered on `main`
+
+Answers to the ninth wave's requests, landed in files no stream owns this wave.
+
+- **A cycle unit** (stream B): `Unit::Cycles`, spelled `cycles`, adds up like a
+  duration, and `mem.latency` declares it.
+- **An event whose value was not measured** (stream B): `hist`, `summary` and
+  `topk` count an event without its value attribute as `unmeasured`, beside the
+  numbers and moving none of them; an attribute that is there and is not a
+  number is still `NotNumeric`. `src/collect/mem/ibs.rs` can now emit its L1
+  hits as events with a level and no latency instead of a note.
+- **A loss reason beside clean counters** (stream S): printed whatever the
+  counters say, in the text encoder and the pprof comments.
+- **The `hist` budget advice** (stream S): given only when the chain has both a
+  written backend that buckets in the kernel and one that streams, which is the
+  one case a budget can act on. It was previously given in exactly the case it
+  could not: a chain with no kernel backend at all.
+- **Three filter fields on `mem.heap.alloc`** (stream S): `op`, `freed_bytes`,
+  `freed_untracked`.
+- **`drained: true`** (stream J): on `io.syscall`, `io.fs`, `io.pagecache` and
+  `io.readahead`. `catalog/net.yaml` is stream N's this wave and is in its brief.
+- **`map_update` outside `#[cfg(test)]`** and **the page cache's map onto task
+  storage** (stream P): the second made the first unnecessary. The per-thread
+  state is a task-storage slot now; the sweep and its race are gone.
+- **A test that ran out of candidates** (stream P): it now tries every source
+  without a collector, every mode and emit its entry declares, and asserts on
+  the first this machine can serve. Before, it picked `cpu.flow`, which this
+  machine cannot serve, and returned without asserting anything.
+- **`dynamic-linking`** (stream S) is stream X's this wave, with
+  `src/capabilities.rs`.
+
+### To stream T, for `man/omn.1`: two corrections from the fifth wave
+
+The exit-status section still says exit 2 is "it cannot mean what it asks for,
+**or this machine cannot serve it**" and exit 1 "usage, parsing, or a failure
+while running". Since the fifth wave, a machine that cannot serve a valid
+request exits **1** and a request that cannot mean anything exits **2**;
+`GUIDE.md` under "The refusal" has the four-row table that is true. And `=~`
+is listed among the filter operators without saying what it does:
+`docs/fixes/emit.md` has the line wanted.
+
+### To stream H, for `src/request.rs` and `src/collect/mod.rs`: three left from the fifth wave
+
+`sched` 5, `count` refusing `topk` although a counted run has series to rank
+(one arm of `ModeKind::valid_emits`); the counted window rounding up to the
+runner's tick; and `what_a_run_reports_spending_is_the_cpu_it_actually_burned`
+driving to a wall deadline instead of a cpu one. `docs/fixes/catalog.md` and
+`docs/fixes/mem.md` have the reasoning. None blocks hot attach; the second is
+close to what a per-request window touches anyway.
+
+### For the flaky tally: two seen once under the tenth wave's load
+
+Both failed once in a `--no-fail-fast` run while four stream agents were
+building on this machine, and both passed alone on the first rerun. Neither is
+in a path the change under test touched.
+
+- `budget::what_the_tool_says_it_spent_moves_with_how_often_it_was_asked_to_read`
+  -- a measurement of the tool's own cpu against a read interval, which a
+  loaded machine moves.
+- `scenario_sched::a_blocking_stack_names_the_call_that_blocked`.

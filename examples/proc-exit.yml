@@ -16,13 +16,14 @@
 # session asks for two seconds. The run must stop at the exit, not at the
 # deadline, and must say which.
 #
-# There is a third answer procfs gives that this collector does not yet handle,
-# and it is visible in every run of this file. A process that has exited but
-# has not been reaped is a zombie, and a zombie's `/proc/<pid>/fd` is neither
-# ESRCH nor ENOENT: it is an empty directory that reads successfully. So the
-# last point of the series is a truthful-looking zero -- no open descriptors,
-# full headroom, no loss -- for a program that never closed a handle in its
-# life. Defect 2 of docs/scenarios/proc.md.
+# There is a third answer procfs gives, and it is the one this file was written
+# for. A process that has exited but has not been reaped is a zombie, and a
+# zombie's `/proc/<pid>/fd` is neither ESRCH nor ENOENT: it is an empty
+# directory that reads successfully. Reported as a measurement it was a
+# truthful-looking zero -- no open descriptors, full headroom, no loss -- for a
+# program that never closed a handle in its life. The collector now reads the
+# process state, so that round publishes nothing and the run ends for the
+# reason the runner knows, which includes the exit status.
 name: the target left
 duration: 2s
 format: text

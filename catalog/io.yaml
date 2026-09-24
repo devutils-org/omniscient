@@ -202,7 +202,7 @@
     # syscalls, and three hundred pwrites put no call through them. Not
     # `vfs_read` either: that is `io.fs`, and the descriptor is exactly what
     # this layer has and that one does not.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__x64_sys_read", "fentry:__x64_sys_write", "fentry:__x64_sys_pread64", "fentry:__x64_sys_pwrite64"], cost: low}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__x64_sys_read", "fentry:__x64_sys_write", "fentry:__x64_sys_pread64", "fentry:__x64_sys_pwrite64"], cost: low, drained: true}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med,
        degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,
@@ -232,7 +232,7 @@
     # `tracepoint:ext4:*` backend this entry used to carry is gone: a glob is
     # not a name, and converting it would have meant choosing which filesystem
     # `io.fs` is about. `docs/families/io.md` has the decision.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low, drained: true}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, degraded: "no BTF: struct layouts are not portable"}
   modes: [trace, count]
   emits: [hist, topk, raw, summary]
@@ -260,7 +260,7 @@
     # is a miss count with nothing to be a share of. Counted in the kernel per
     # task and file; `docs/families/io.md` has why these two and not the fault
     # tracepoints.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: med}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, summary, raw]
@@ -293,7 +293,7 @@
   summary: "Readahead: pages filled ahead of what reads looked up"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: low, equivalent: true}
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"], cost: low, equivalent: true}
   modes: [trace, count]

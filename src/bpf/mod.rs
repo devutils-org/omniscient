@@ -66,10 +66,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 pub use io::{BlockEvent, BlockProgram, Stage, Submitter, NO_OPEN, SCOPE_IS_OURS};
-pub use io_pagecache::{
-    Narrowing as PageCacheNarrowing, PageCacheProgram, PageCacheRow,
-    LAST_KEPT_NS as PAGE_CACHE_LAST_KEPT_NS,
-};
+pub use io_pagecache::{Narrowing as PageCacheNarrowing, PageCacheProgram, PageCacheRow};
 pub use io_writeback::{Writeback, WritebackProgram};
 pub use mem_alloc::{AllocProgram, AllocRow, Allocator};
 pub use mem_stall::{Stall, StallDrops, StallProgram, StallRow, SCOPE_CGROUP, SCOPE_GLOBAL};

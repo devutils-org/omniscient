@@ -1,0 +1,11 @@
+io.pagecache  via bpf:raw_tp  (io.pagecache)
+  4 events over 2.23ms, stopped because the launched program exited with exit status 0
+  the launched program ran 2.06ms (gate to exit; the exit bracketed to the last 1.87ms), 2.08ms of cpu at the reap
+  no loss: every read succeeded and no tick ran late
+  degraded: 7 pages looked up in 7 lookups, 0 filled inside a file and 0 created at the end of one, counted in the kernel and reported as 4 rows: an event is a task's pages of one file over one drain, not a page
+
+  raw
+     1716775648084  io.pagecache  file:28+919086 task:76711  misses=0 lookups=3 lookup_calls=3 filled=0 folios=0 created=0 window_ns=2143523 tid=76711 pid=76711 comm=omn ino=919086 dev=0:28 sb_dev=28 fs=btrfs
+     1716775657604  io.pagecache  file:28+908168 task:76711  misses=0 lookups=2 lookup_calls=2 filled=0 folios=0 created=0 window_ns=2143523 tid=76711 pid=76711 comm=omn ino=908168 dev=0:28 sb_dev=28 fs=btrfs
+     1716776268520  io.pagecache  file:28+908177 task:76711  misses=0 lookups=1 lookup_calls=1 filled=0 folios=0 created=0 window_ns=2143523 tid=76711 pid=76711 comm=dd ino=908177 dev=0:28 sb_dev=28 fs=btrfs
+     1716776492583  io.pagecache  file:28+908881 task:76711  misses=0 lookups=1 lookup_calls=1 filled=0 folios=0 created=0 window_ns=2143523 tid=76711 pid=76711 comm=dd ino=908881 dev=0:28 sb_dev=28 fs=btrfs

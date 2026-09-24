@@ -357,6 +357,10 @@ pub enum Unit {
     Hz,
     Joules,
     Celsius,
+    /// Core clock cycles, as the hardware counted them. Kept apart from `ns`
+    /// on purpose: converting goes through a clock that moves with load and
+    /// temperature, which is a number the hardware did not measure.
+    Cycles,
 }
 
 impl Unit {
@@ -369,6 +373,7 @@ impl Unit {
             Unit::Hz => "hz",
             Unit::Joules => "joules",
             Unit::Celsius => "celsius",
+            Unit::Cycles => "cycles",
         }
     }
 }
@@ -654,7 +659,7 @@ impl FromStr for Unit {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        const ALL: [Unit; 7] = [
+        const ALL: [Unit; 8] = [
             Unit::Ns,
             Unit::Bytes,
             Unit::Count,
@@ -662,6 +667,7 @@ impl FromStr for Unit {
             Unit::Hz,
             Unit::Joules,
             Unit::Celsius,
+            Unit::Cycles,
         ];
         ALL.into_iter()
             .find(|unit| unit.as_str() == s.trim())

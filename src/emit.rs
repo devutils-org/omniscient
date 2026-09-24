@@ -22,7 +22,7 @@ use crate::catalog::Unit;
 use crate::collect::{Collection, Filtered, Losses};
 use crate::error::ParseError;
 use crate::event::{Event, KeyValue};
-use crate::request::{Emit, EmitKind, HistScale};
+use crate::request::{Emit, EmitKind, HistScale, KeyKind};
 use crate::resolve::ResolvedRequest;
 
 /// The attribute a collector puts on an event to say which stack it was taken
@@ -162,6 +162,29 @@ impl SeriesKey {
                 .map(KeyValue::to_string)
                 .unwrap_or_else(|| Self::SYSTEM.to_owned()),
         )
+    }
+
+    /// The series an event belongs to when the request names what to group
+    /// by: one part per requested key, in the order asked, joined by a space.
+    /// An event that carries none of a requested kind is `<kind>:?` in that
+    /// part rather than folded into a neighbour's series. With no keys asked
+    /// for this is [`SeriesKey::of`].
+    pub fn by(event: &Event, axes: &[crate::request::KeyKind]) -> Self {
+        if axes.is_empty() {
+            return Self::of(event);
+        }
+        let parts: Vec<String> = axes
+            .iter()
+            .map(|axis| {
+                event
+                    .keys
+                    .iter()
+                    .find(|key| key.kind() == *axis)
+                    .map(KeyValue::to_string)
+                    .unwrap_or_else(|| format!("{}:?", axis.as_str()))
+            })
+            .collect();
+        Self(parts.join(" "))
     }
 
     pub fn as_str(&self) -> &str {
@@ -464,6 +487,12 @@ pub struct SeriesSummary {
     pub max: f64,
     pub mean: f64,
     pub last: f64,
+    /// Events that carried no value at all: measured by the collector as
+    /// having happened, with nothing for this emit to aggregate -- an L1 hit
+    /// that AMD's IBS samples by level and does not time. Counted rather than
+    /// refused, and left out of every other number here.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
     /// What this run lost, when it lost something that biases the shape.
     ///
     /// Beside the numbers rather than above them: `count`, `mean` and `max`
@@ -482,6 +511,12 @@ pub struct SeriesTotal {
     pub key: SeriesKey,
     pub events: usize,
     pub total: f64,
+    /// Events that carried no value at all: measured by the collector as
+    /// having happened, with nothing for this emit to aggregate -- an L1 hit
+    /// that AMD's IBS samples by level and does not time. Counted rather than
+    /// refused, and left out of every other number here.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
     /// What the run did not see, when it lost anything.
     ///
     /// Deliberately not folded into [`Rest`], which is a different fact:
@@ -655,6 +690,12 @@ pub struct SeriesHist {
     /// and `sum`.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub unbucketable: usize,
+    /// Events that carried no value at all: measured by the collector as
+    /// having happened, with nothing for this emit to aggregate -- an L1 hit
+    /// that AMD's IBS samples by level and does not time. Counted rather than
+    /// refused, and left out of every other number here.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
 }
 
 fn is_zero_usize(value: &usize) -> bool {
@@ -714,6 +755,9 @@ pub fn aggregate(
         per_record(&collection.events),
     );
 
+    // `--keys` regroups every reducing emit; the default is the collector's
+    // primary key, which is what `SeriesKey` documents.
+    let axes = request.keys.as_slice();
     let mut outputs = Vec::new();
     for emit in &request.emit {
         outputs.push(match emit {
@@ -721,14 +765,15 @@ pub fn aggregate(
                 events: collection.events.clone(),
             },
             Emit::Timeline => Output::Timeline {
-                series: timeline(&collection.events, first_ts_ns, value_attr)?,
+                series: timeline_by(&collection.events, axes, first_ts_ns, value_attr)?,
             },
             Emit::Summary => Output::Summary {
-                series: summary(&collection.events, value_attr, short.as_ref())?,
+                series: summary_by(&collection.events, axes, value_attr, short.as_ref())?,
             },
             Emit::Rate => Output::Rate {
-                series: rate(
+                series: rate_by(
                     &collection.events,
+                    axes,
                     collection.observed_ns,
                     value_attr,
                     short.as_ref(),
@@ -738,10 +783,10 @@ pub fn aggregate(
                 let layout = BucketLayout::from(*scale);
                 Output::Hist {
                     layout,
-                    series: hist(&collection.events, value_attr, layout, short.as_ref())?,
+                    series: hist_by(&collection.events, axes, value_attr, layout, short.as_ref())?,
                 }
             }
-            Emit::TopK(k) => topk(&collection.events, value_attr, *k, short.as_ref())?,
+            Emit::TopK(k) => topk_by(&collection.events, axes, value_attr, *k, short.as_ref())?,
             Emit::Stack => stack(&collection.events, value_attr, short.as_ref())?,
         });
     }
@@ -789,12 +834,63 @@ pub fn aggregate(
 }
 
 /// Groups events by their [`SeriesKey`], keeping the order they arrived in.
-fn grouped(events: &[Event]) -> BTreeMap<SeriesKey, Vec<&Event>> {
+///
+/// `axes` are the keys the request asked to group by (`--keys`); empty means
+/// the collector's own primary key.
+fn grouped<'a>(events: &'a [Event], axes: &[KeyKind]) -> BTreeMap<SeriesKey, Vec<&'a Event>> {
     let mut groups: BTreeMap<SeriesKey, Vec<&Event>> = BTreeMap::new();
     for event in events {
-        groups.entry(SeriesKey::of(event)).or_default().push(event);
+        groups
+            .entry(SeriesKey::by(event, axes))
+            .or_default()
+            .push(event);
     }
     groups
+}
+
+/// The five reducing emits as the unit tests call them: by the primary key.
+#[cfg(test)]
+fn timeline(events: &[Event], first_ts_ns: u64, attr: &str) -> Result<Vec<Series>, EmitError> {
+    timeline_by(events, &[], first_ts_ns, attr)
+}
+
+#[cfg(test)]
+fn rate(
+    events: &[Event],
+    window_ns: u64,
+    attr: &str,
+    short: Option<&Shortfall>,
+) -> Result<Vec<SeriesRate>, EmitError> {
+    rate_by(events, &[], window_ns, attr, short)
+}
+
+#[cfg(test)]
+fn summary(
+    events: &[Event],
+    attr: &str,
+    short: Option<&Shortfall>,
+) -> Result<Vec<SeriesSummary>, EmitError> {
+    summary_by(events, &[], attr, short)
+}
+
+#[cfg(test)]
+fn hist(
+    events: &[Event],
+    attr: &str,
+    layout: BucketLayout,
+    short: Option<&Shortfall>,
+) -> Result<Vec<SeriesHist>, EmitError> {
+    hist_by(events, &[], attr, layout, short)
+}
+
+#[cfg(test)]
+fn topk(
+    events: &[Event],
+    attr: &str,
+    k: u32,
+    short: Option<&Shortfall>,
+) -> Result<Output, EmitError> {
+    topk_by(events, &[], attr, k, short)
 }
 
 fn value_of(event: &Event, attr: &str) -> Result<f64, EmitError> {
@@ -806,9 +902,32 @@ fn value_of(event: &Event, attr: &str) -> Result<f64, EmitError> {
         })
 }
 
-fn timeline(events: &[Event], first_ts_ns: u64, attr: &str) -> Result<Vec<Series>, EmitError> {
+/// An event's value, or `None` when it carries no value attribute at all.
+///
+/// Absent and malformed are different answers. An event without the attribute
+/// is one the collector saw happen and could not time, and the emits that
+/// reduce values count it as `unmeasured`; an attribute that is there and is
+/// not a number is still a refusal, because that is a collector bug.
+fn measured(event: &Event, attr: &str) -> Result<Option<f64>, EmitError> {
+    match event.attr(attr) {
+        None => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| EmitError::NotNumeric {
+                attr: attr.to_owned(),
+            }),
+    }
+}
+
+fn timeline_by(
+    events: &[Event],
+    axes: &[KeyKind],
+    first_ts_ns: u64,
+    attr: &str,
+) -> Result<Vec<Series>, EmitError> {
     let mut series = Vec::new();
-    for (key, events) in grouped(events) {
+    for (key, events) in grouped(events, axes) {
         let mut points = Vec::with_capacity(events.len());
         for event in events {
             points.push(Point {
@@ -821,15 +940,16 @@ fn timeline(events: &[Event], first_ts_ns: u64, attr: &str) -> Result<Vec<Series
     Ok(series)
 }
 
-fn rate(
+fn rate_by(
     events: &[Event],
+    axes: &[KeyKind],
     window_ns: u64,
     attr: &str,
     short: Option<&Shortfall>,
 ) -> Result<Vec<SeriesRate>, EmitError> {
     let seconds = (window_ns > 0).then(|| window_ns as f64 / 1e9);
     let mut rates = Vec::new();
-    for (key, events) in grouped(events) {
+    for (key, events) in grouped(events, axes) {
         let total: f64 = events
             .iter()
             .map(|event| Ok(value_of(event, attr)? * weight_of(event)))
@@ -848,18 +968,35 @@ fn rate(
     Ok(rates)
 }
 
-fn summary(
+fn summary_by(
     events: &[Event],
+    axes: &[KeyKind],
     attr: &str,
     short: Option<&Shortfall>,
 ) -> Result<Vec<SeriesSummary>, EmitError> {
     let mut summaries = Vec::new();
-    for (key, events) in grouped(events) {
-        let values: Vec<(f64, f64)> = events
-            .iter()
-            .map(|event| Ok((value_of(event, attr)?, weight_of(event))))
-            .collect::<Result<_, EmitError>>()?;
+    for (key, events) in grouped(events, axes) {
+        let mut values: Vec<(f64, f64)> = Vec::with_capacity(events.len());
+        let mut unmeasured = 0;
+        for event in &events {
+            match measured(event, attr)? {
+                Some(value) => values.push((value, weight_of(event))),
+                None => unmeasured += 1,
+            }
+        }
         if values.is_empty() {
+            if unmeasured > 0 {
+                summaries.push(SeriesSummary {
+                    key,
+                    count: 0,
+                    min: 0.0,
+                    max: 0.0,
+                    mean: 0.0,
+                    last: 0.0,
+                    unmeasured,
+                    short: short.cloned(),
+                });
+            }
             continue;
         }
         // Weighted, because an event may stand for many measurements; see
@@ -889,14 +1026,16 @@ fn summary(
             max,
             mean,
             last,
+            unmeasured,
             short: short.cloned(),
         });
     }
     Ok(summaries)
 }
 
-fn hist(
+fn hist_by(
     events: &[Event],
+    axes: &[KeyKind],
     attr: &str,
     layout: BucketLayout,
     short: Option<&Shortfall>,
@@ -905,15 +1044,19 @@ fn hist(
         return Err(EmitError::ZeroBucketWidth);
     }
     let mut histograms = Vec::new();
-    for (key, events) in grouped(events) {
+    for (key, events) in grouped(events, axes) {
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
         let mut unbucketable = 0;
+        let mut unmeasured = 0;
         let mut count = 0;
         let mut sum = 0.0;
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
         for event in events {
-            let value = value_of(event, attr)?;
+            let Some(value) = measured(event, attr)? else {
+                unmeasured += 1;
+                continue;
+            };
             if !value.is_finite() || value < 0.0 {
                 unbucketable += 1;
                 continue;
@@ -928,7 +1071,7 @@ fn hist(
             min = min.min(value);
             max = max.max(value);
         }
-        if count == 0 && unbucketable == 0 {
+        if count == 0 && unbucketable == 0 && unmeasured == 0 {
             continue;
         }
         histograms.push(SeriesHist {
@@ -940,6 +1083,7 @@ fn hist(
             short: short.cloned(),
             buckets: buckets(&counts, layout),
             unbucketable,
+            unmeasured,
         });
     }
     Ok(histograms)
@@ -982,23 +1126,29 @@ fn buckets(counts: &BTreeMap<u64, usize>, layout: BucketLayout) -> Vec<Bucket> {
     rendered
 }
 
-fn topk(
+fn topk_by(
     events: &[Event],
+    axes: &[KeyKind],
     attr: &str,
     k: u32,
     short: Option<&Shortfall>,
 ) -> Result<Output, EmitError> {
     let mut totals = Vec::new();
-    for (key, events) in grouped(events) {
+    for (key, events) in grouped(events, axes) {
         let mut total = 0.0;
+        let mut unmeasured = 0;
         for event in &events {
-            total += value_of(event, attr)? * weight_of(event);
+            match measured(event, attr)? {
+                Some(value) => total += value * weight_of(event),
+                None => unmeasured += 1,
+            }
         }
         totals.push(SeriesTotal {
             short: short.cloned(),
             key,
-            events: events.len(),
+            events: events.len() - unmeasured,
             total,
+            unmeasured,
         });
     }
 
@@ -1771,6 +1921,80 @@ mod tests {
             })
             .count();
         assert!(between > 0, "{:?}", histogram.buckets);
+    }
+
+    /// `--keys` was accepted, recorded, and ignored: every series was the
+    /// collector's first key whatever the request asked for (sched 7). A
+    /// request that names its axes is grouped by them, in the order asked.
+    #[test]
+    fn the_keys_a_request_names_are_what_its_series_are_grouped_by() {
+        let with_file = |tid: i32, ino: u64, bytes: u64| {
+            let mut event = event(0, tid, bytes);
+            event.keys.push(KeyValue::File { dev: 28, ino });
+            event
+        };
+        let events = vec![
+            with_file(1, 10, 4),
+            with_file(1, 11, 8),
+            with_file(2, 10, 16),
+        ];
+
+        let by = |axes: &[KeyKind]| -> Vec<(String, f64)> {
+            let Output::TopK { series, .. } = topk_by(&events, axes, "bytes", 10, None).unwrap()
+            else {
+                panic!("topk is a ranking");
+            };
+            series
+                .into_iter()
+                .map(|total| (total.key.to_string(), total.total))
+                .collect()
+        };
+        assert_eq!(by(&[]), [("task:2".into(), 16.0), ("task:1".into(), 12.0)]);
+        assert_eq!(
+            by(&[KeyKind::File]),
+            [("file:28+10".into(), 20.0), ("file:28+11".into(), 8.0)]
+        );
+        assert_eq!(
+            by(&[KeyKind::File, KeyKind::Task]),
+            [
+                ("file:28+10 task:2".into(), 16.0),
+                ("file:28+11 task:1".into(), 8.0),
+                ("file:28+10 task:1".into(), 4.0),
+            ]
+        );
+        // A key the event does not carry is its own part, not a neighbour's.
+        assert_eq!(by(&[KeyKind::Cpu]), [("cpu:?".into(), 28.0)]);
+    }
+
+    /// An event with no value attribute is one the collector saw and could not
+    /// time -- an L1 hit under AMD's IBS. It is counted beside the numbers in
+    /// every emit that reduces values, not refused, and it moves none of them.
+    #[test]
+    fn an_event_without_a_value_is_counted_as_unmeasured_and_moves_nothing() {
+        let mut untimed = event(0, 1, 0);
+        untimed.attrs.clear();
+        let events = vec![event(0, 1, 8), event(0, 1, 24), untimed];
+
+        let histogram = &hist(&events, "bytes", BucketLayout::Log2, None).unwrap()[0];
+        assert_eq!((histogram.count, histogram.unmeasured), (2, 1));
+        assert_eq!(histogram.sum, 32.0);
+
+        let summary = &summary(&events, "bytes", None).unwrap()[0];
+        assert_eq!((summary.count, summary.unmeasured), (2, 1));
+        assert_eq!((summary.min, summary.mean, summary.max), (8.0, 16.0, 24.0));
+
+        let Output::TopK { series, .. } = topk(&events, "bytes", 5, None).unwrap() else {
+            panic!("topk is a ranking");
+        };
+        assert_eq!(
+            (series[0].events, series[0].unmeasured, series[0].total),
+            (2, 1, 32.0)
+        );
+
+        // A value that is there and is not a number is still a collector bug.
+        let mut malformed = event(0, 1, 0);
+        malformed.attrs = vec![Attr::text("bytes", "eight")];
+        assert!(hist(&[malformed], "bytes", BucketLayout::Log2, None).is_err());
     }
 
     /// There is no bucket below zero, and putting a negative value in `[0, 1)`

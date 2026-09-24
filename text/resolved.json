@@ -1,0 +1,122 @@
+[
+  {
+    "request": {
+      "source": "io.pagecache",
+      "target": {
+        "launch": [
+          "dd",
+          "if=/tmp/claude-1000/-home-moha-repos-omniscient/af122a86-5281-4940-b5e8-0b8a34561321/scratchpad/pc.bin",
+          "of=/dev/null",
+          "bs=1M"
+        ]
+      },
+      "mode": "count",
+      "emit": [
+        "raw"
+      ]
+    },
+    "backend": {
+      "id": "bpf:raw_tp",
+      "cost": "med",
+      "rank": 1,
+      "requirements": [
+        {
+          "needs": "bpf",
+          "probe": {
+            "state": "available"
+          }
+        },
+        {
+          "needs": "btf",
+          "probe": {
+            "state": "available"
+          }
+        },
+        {
+          "needs": "raw_tracepoint:mm_filemap_get_pages",
+          "probe": {
+            "state": "available"
+          }
+        },
+        {
+          "needs": "raw_tracepoint:mm_filemap_add_to_page_cache",
+          "probe": {
+            "state": "available"
+          }
+        },
+        {
+          "needs": "kernel>=5.8",
+          "probe": {
+            "state": "available"
+          }
+        }
+      ]
+    },
+    "chain": [
+      {
+        "id": "bpf:raw_tp",
+        "verdict": {
+          "verdict": "selected"
+        }
+      },
+      {
+        "id": "bpf:tp",
+        "verdict": {
+          "verdict": "not_reached"
+        }
+      }
+    ],
+    "environment": {
+      "kernel_release": "7.2.6-arch2-1",
+      "kernel_version": {
+        "major": 7,
+        "minor": 2
+      },
+      "arch": "x86_64",
+      "cpus": 24,
+      "clocksource": "tsc",
+      "cpu_governor": "performance",
+      "transparent_hugepage": "always",
+      "smt": "on",
+      "perf_event_paranoid": -1,
+      "kernel_btf": "readable",
+      "cgroup2": "readable",
+      "tracefs": "restricted",
+      "mitigations": {
+        "gather_data_sampling": "Not affected",
+        "ghostwrite": "Not affected",
+        "indirect_target_selection": "Not affected",
+        "itlb_multihit": "Not affected",
+        "l1tf": "Not affected",
+        "mds": "Not affected",
+        "meltdown": "Not affected",
+        "mmio_stale_data": "Not affected",
+        "old_microcode": "Not affected",
+        "reg_file_data_sampling": "Not affected",
+        "retbleed": "Mitigation: untrained return thunk; SMT enabled with STIBP protection",
+        "spec_rstack_overflow": "Mitigation: Safe RET",
+        "spec_store_bypass": "Mitigation: Speculative Store Bypass disabled via prctl",
+        "spectre_v1": "Mitigation: usercopy/swapgs barriers and __user pointer sanitization",
+        "spectre_v2": "Mitigation: Retpolines; IBPB: conditional; STIBP: always-on; RSB filling; PBRSB-eIBRS: Not affected; BHI: Not affected",
+        "srbds": "Not affected",
+        "tsa": "Not affected",
+        "tsx_async_abort": "Not affected",
+        "vmscape": "Mitigation: IBPB before exit to userspace"
+      },
+      "gpus": [
+        {
+          "card": "card1",
+          "pci_id": "0x10de:0x1e07",
+          "driver": "nvidia",
+          "driver_version": "615.71.09"
+        }
+      ],
+      "not_captured": [
+        "microarchitecture",
+        "NUMA topology",
+        "virtualization and steal time",
+        "vendor userspace library versions (NVML, CUDA, ROCm)"
+      ]
+    }
+  }
+]
