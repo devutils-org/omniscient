@@ -487,6 +487,40 @@ Filed under "Needs from another stream — the ninth wave, stream S" in
   the histogram into the kernel" is printed for a preload backend, where there
   is no kernel side to move anything to.
 
+## A running process, through glibc's probes (tenth wave)
+
+The shim reaches a program only at exec, so until the tenth wave `sched.mutex
+--pid` was refused. Glibc publishes `libc:mutex_entry`, `mutex_acquired`,
+`mutex_release` and `cond_wait` as USDT probes, and `bpf:usdt` is now the
+backend for a `pid` or `tid` target: `src/collect/sched/mutex_usdt.rs` loads
+`src/bpf/usdt.rs`'s stream program on the thirteen sites this machine's
+`/usr/lib/libc.so.6` carries and pairs the hits per thread and per mutex in
+userspace. It writes the event the shim writes -- stamped at the ask, `wait_ns`
+the value, `hold_ns` beside it -- so a session reads the same either way.
+
+A launch stays on the shim: it is the same measurement for 132 ns instead of
+three uprobes, and the backend declares `launch: "no"` so the resolver cannot
+choose it there. (It would otherwise, today: the shim's `dynamic-linking`
+requirement has no probe yet, and an unverified requirement never counts as
+available.)
+
+**Ground truth**, `a_running_process_is_measured_through_glibcs_probes`: the
+mutex fixture started by the test, two threads sharing a 2 ms hold, measured
+by a run that attaches 200 ms later. Every hold that ended in an unlock is at
+least the 2 ms the fixture slept inside it, and one of the threads waits at
+least half a hold. Measured by hand the same way: holds of 20.06 ms against a
+20 ms sleep, waits of 1 to 3 us uncontended and 19 ms behind the holder.
+
+**What it cannot see**, each counted in the notes: a successful
+`pthread_mutex_trylock`, which has no probe, arrives as a release of a mutex
+never seen taken; the reacquisition inside `pthread_cond_wait` is an
+acquisition with no entry and is not an event, as with the shim; a mutex taken
+before the probes went in is released unseen. A release that follows a
+`cond_wait` hit for the same mutex is `released_by: cond_wait`. A mutex still
+held when the run ends is an event with no `hold_ns`, `released_by:
+still_held`. Unlike the shim, it also sees glibc's own callers of
+`pthread_mutex_lock`: the fixture's 1000 acquisitions read as 1003.
+
 ## Index rows for the coordinator
 
 For `examples/README.md` and `GUIDE.md`, `sched` table:

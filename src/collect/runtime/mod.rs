@@ -8,7 +8,8 @@
 //! mechanism, `usdt.rs` here for which probes each source means.
 
 mod jit_map;
-mod objects;
+/// Also read by `sched.mutex`, whose USDT backend reads glibc's probes.
+pub(crate) mod objects;
 mod usdt;
 
 use super::Factory;

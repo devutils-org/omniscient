@@ -21,6 +21,7 @@ mod irq;
 mod lock;
 mod migrations;
 mod mutex;
+mod mutex_usdt;
 mod numa_balance;
 mod offcpu;
 mod runqlat;
@@ -90,6 +91,13 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("sched.mutex", "preload", |resolved| {
             mutex::prepare(&resolved.request.emit)
+        }),
+        Factory::new("sched.mutex", "bpf:usdt", |resolved| {
+            Ok(Box::new(mutex_usdt::Prepare {
+                target: resolved.request.target.clone(),
+                filter: resolved.request.filter.clone(),
+                emits: resolved.request.emit.clone(),
+            }))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
             Ok(Box::new(switches::Prepare(resolved.request.mode)))

@@ -2872,8 +2872,11 @@ fn a_mutex_storm_the_pipe_cannot_carry_is_counted_to_the_last_record() {
 /// reason rather than answered with nothing.
 #[test]
 fn a_mutex_request_the_shim_cannot_serve_is_refused_by_name() {
-    // A process already running: a preloaded library is given at exec.
+    // A process already running: a preloaded library is given at exec, so
+    // the shim is passed over for it by name, and since the tenth wave glibc's
+    // probes serve it instead of the run being refused.
     let running = omn(&[
+        "--dump-request",
         "sched.mutex",
         "--mode",
         "trace",
@@ -2881,15 +2884,14 @@ fn a_mutex_request_the_shim_cannot_serve_is_refused_by_name() {
         "summary",
         "--pid",
         &std::process::id().to_string(),
-        "-d",
-        "50ms",
     ]);
     let text = spoken(&running);
-    assert_eq!(exit_code(&running), 3, "{text}");
-    assert!(
-        text.contains("at exec"),
-        "the refusal must say why:\n{text}"
-    );
+    if !unprivileged(&text) {
+        assert!(
+            text.contains("backend   bpf:usdt"),
+            "a running process is read through glibc's probes:\n{text}"
+        );
+    }
 
     // Stacks, which the uprobe backend could take and the shim cannot.
     let stacks = omn(&[
@@ -2907,4 +2909,170 @@ fn a_mutex_request_the_shim_cannot_serve_is_refused_by_name() {
         text.contains("carries no stacks") && text.contains("sched.futex"),
         "the refusal must say what does carry them:\n{text}"
     );
+}
+
+// ===========================================================================
+// The tenth wave: `sched.mutex` over glibc's USDT probes
+//
+// The preload shim reaches a program only at exec. A process already running is
+// read through `libc:mutex_entry`, `mutex_acquired` and `mutex_release`, and
+// these scenarios hold the same fixture to the same property from outside: a
+// hold the fixture chose, measured by a run that attached after it started.
+// ===========================================================================
+
+/// The attribute `name` of a raw event, as a number.
+fn raw_number(event: &Value, name: &str) -> Option<u64> {
+    event["attrs"]
+        .as_array()?
+        .iter()
+        .find(|attr| attr["name"] == name)
+        .and_then(|attr| attr["value"].as_u64())
+}
+
+/// A running fixture, killed when dropped.
+struct Running(std::process::Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Every acquisition of a process already running is measured from outside,
+/// and each hold is at least the hold the fixture chose: the release probe
+/// fires after the fixture's own sleep, so the tool's hold nests around it.
+#[test]
+fn a_running_process_is_measured_through_glibcs_probes() {
+    needs_mutex_fixture!();
+    const HOLD_US: u64 = 2_000;
+    let child = Command::new(mutex_fixture_path())
+        .args(["2", "100000", &HOLD_US.to_string(), "shared"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the fixture starts");
+    let running = Running(child);
+    // Long enough for both threads to be inside their loop before the probes
+    // go in, so what is measured is the steady state.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let pid = running.0.id().to_string();
+    let output = omn(&[
+        "sched.mutex",
+        "--pid",
+        &pid,
+        "-d",
+        "600ms",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: `sched.mutex` over USDT needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    if text.contains("is not among the probes this process carries") {
+        eprintln!("skipped: this machine's glibc publishes no mutex probes:\n{text}");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let result = &results(&output)[0];
+    assert_eq!(
+        result["backend"], "bpf:usdt",
+        "a pid target is not the shim's: {text}"
+    );
+    let events = result["outputs"][0]["events"]
+        .as_array()
+        .expect("a raw emit carries its events");
+    let unlocked: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            event["attrs"]
+                .as_array()
+                .is_some_and(|attrs| attrs.iter().any(|attr| attr["value"] == "unlock"))
+        })
+        .collect();
+    // Two threads taking turns on a 2 ms hold for 600 ms is about three
+    // hundred acquisitions; a tenth of that is the separation from nothing.
+    assert!(
+        unlocked.len() >= 30,
+        "{} acquisitions ended in an unlock over 600 ms of a 2 ms hold:\n{text}",
+        unlocked.len()
+    );
+    for event in &unlocked {
+        let hold = raw_number(event, "hold_ns").expect("an unlocked hold has a length");
+        assert!(
+            hold >= HOLD_US * 1000,
+            "a hold of {hold} ns is shorter than the {HOLD_US} us the fixture slept inside it"
+        );
+    }
+    // And the two threads contend: one of them waited for most of a hold.
+    let longest_wait = unlocked
+        .iter()
+        .filter_map(|event| raw_number(event, "wait_ns"))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest_wait >= HOLD_US * 1000 / 2,
+        "two threads sharing a {HOLD_US} us hold never waited half of one: the longest \
+         wait was {longest_wait} ns"
+    );
+}
+
+/// The shim still serves a launch, where it is the cheaper of the two, and the
+/// probes serve a pid, which the shim cannot.
+#[test]
+fn a_launch_goes_to_the_shim_and_a_pid_to_the_probes() {
+    let launched = omn(&[
+        "--dump-request",
+        "sched.mutex",
+        "-e",
+        "summary",
+        "--",
+        "true",
+    ]);
+    let pid = omn(&[
+        "--dump-request",
+        "sched.mutex",
+        "-e",
+        "summary",
+        "--pid",
+        "1",
+    ]);
+    let (launched, pid) = (spoken(&launched), spoken(&pid));
+    if unprivileged(&pid) {
+        eprintln!("skipped: the USDT backend needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert!(
+        launched.contains("preload"),
+        "a launch resolves onto the shim:\n{launched}"
+    );
+    assert!(
+        pid.contains("bpf:usdt"),
+        "a pid resolves onto glibc's probes:\n{pid}"
+    );
+}
+
+/// The probe program hands up a mutex and a thread, not a stack, and says so.
+#[test]
+fn a_stack_over_the_probes_is_refused_by_name() {
+    let output = omn(&[
+        "sched.mutex",
+        "--pid",
+        &std::process::id().to_string(),
+        "-e",
+        "stack",
+        "-d",
+        "100ms",
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: the USDT backend needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_ne!(exit_code(&output), 0, "{text}");
+    assert!(text.contains("carries no stacks"), "{text}");
 }
