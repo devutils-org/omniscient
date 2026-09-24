@@ -6231,3 +6231,76 @@ Still open from the same entry: the drain racing the program's increment in
 - **`net/capture.rs`'s refusal** names `CAP_NET_RAW`. Since the tenth wave
   `make CAPTURE=1` is what grants it (`DECISIONS.md`, "`CAP_NET_RAW` is
   opt-in"); the refusal should name that command beside the capability.
+
+## Needs from another stream — the tenth wave, stream X (the bench)
+
+Four defects the bench's ground truth found in files this stream does not own.
+Each was met by a workload that knows its own count, and each has the one
+command that reproduces it. None blocks the bench -- each is worked around in
+`tests/bench_*.rs`, and the workaround is named there -- but three of them are
+the silent degradation this project is built against. `docs/bench.md` has the
+context.
+
+### To whoever owns `src/filter.rs` and `src/collect/proc/`: `syscall == 110` drops every call it pushed down
+
+```console
+omn trace proc.syscall -m trace -e summary --filter 'syscall == 110' -- <anything calling getppid>
+  degraded: only `getppid` (110) was timed: the predicate on `syscall` was pushed into the program ...
+  degraded: the predicate removed 2000 calls here and kept 0
+```
+
+The number is pushed into the eBPF program correctly -- only getppid is timed --
+and then a second, userspace pass evaluates the same predicate against the
+`syscall` attribute, which is the *name*, and a string is never equal to 110.
+Every call the kernel kept is dropped, and the result is an empty summary on a
+workload that made 200 000 of them. `syscall == "getppid"` counts 200 000 of
+200 000. Either the userspace pass compares a number against `nr`, or it is
+skipped for a predicate the program already applied, or `syscall == <number>`
+is refused with the spelling that works. Found by
+`the_forced_backends_count_what_the_workload_did`.
+
+### To whoever owns `src/collect/proc/events.rs` (or the filter's push-down): `proc.exec` accepts a filter and applies none
+
+```console
+omn trace proc.exec --system -d 1s -m trace -e raw --filter 'filename == "/nonexistent/path"'
+```
+
+reports every exec on the machine, `/bin/true` and `/usr/bin/env` included,
+and says nothing about the filter: no degradation, no warning. The same with
+`comm == "nosuchcomm"`. Both fields are in the catalog's `filter_fields`, so
+the validator accepts them. A filter that is accepted and not applied is the
+one outcome the invariants rule out: apply it, or refuse it with the reason.
+Found when a count of 200 execs came back 266 on a shared machine.
+
+### To whoever owns `src/resolve.rs`: `--backend force:` walks past a backend's missing probes
+
+```console
+omn trace mem.cache_llc --backend force:pmu -m count -e summary -- true
+error: cannot start collecting `mem.cache_llc`: perf_event_open ... refused (No such file or directory)
+```
+
+`omn list mem.cache_llc` says both of `pmu`'s requirements are missing on this
+cpu (`LLC-load-misses` and `LLC-loads`, which Zen 2 does not publish), and
+`--dump-resolved` with the backend forced carries those two `missing` probes
+in the file it prints -- and accepts the request. The run then launches the
+target and fails at attach, which is finding 15's shape again, reached through
+the pin instead of the probe. A pinned backend whose requirements probe
+missing should be refused before the launch, with the probes' reasons; the
+bench now reads them out of the resolved file itself to avoid the launch.
+
+### To whoever owns `catalog/mem.yaml` or `src/collect/mem/page_faults.rs`: `count` mode is declared and refused
+
+`mem.faults` declares `count`, the validator accepts `-m count`, and the
+collector refuses it after the launch: *"`count` mode does not sample page
+faults"*. Either the catalog stops declaring the mode for `pmu:sw`, or the
+collector counts -- a `PERF_COUNT_SW_PAGE_FAULTS` counting event is the
+cheapest thing it could do. The bench's plan now tries each accepted setting
+once and moves to the next when a collector refuses it, and lists every such
+refusal in its table's "Not measured here".
+
+### To the coordinator
+
+No registration lines and no sessions: the bench adds no module, no collector
+and no `examples/bench-*.yml` session, so the index test is not affected by
+this branch. `docs/bench.md` is the handoff and ends with the one command for
+the real measurement.
