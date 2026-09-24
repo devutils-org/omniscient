@@ -111,6 +111,9 @@ pub struct OffCpuCollector {
     /// evicted by the time it was asked. Different failures, counted apart.
     unwalkable: u64,
     evicted_stacks: u64,
+    /// Blocks whose stack the kernel walked and had no room to keep: the
+    /// bucket it hashed to already held another stack.
+    crowded_out: u64,
     /// Blocks whose releasing wakeup this run did not see, so their queue wait
     /// is unknown rather than zero.
     blocks_without_a_wakeup: u64,
@@ -134,6 +137,7 @@ impl OffCpuCollector {
             symbolizers: HashMap::new(),
             unwalkable: 0,
             evicted_stacks: 0,
+            crowded_out: 0,
             blocks_without_a_wakeup: 0,
             wants_stacks,
         }
@@ -246,6 +250,10 @@ impl OffCpuCollector {
         }
         let id = match entry.stack {
             Some(id) => id,
+            None if entry.stack_error == Some(libc::EEXIST) => {
+                self.crowded_out += entry.blocks;
+                return None;
+            }
             None => {
                 self.unwalkable += entry.blocks;
                 return None;
@@ -437,6 +445,16 @@ impl Collector for OffCpuCollector {
                 self.blocks_without_a_wakeup
             ));
         }
+        if self.crowded_out > 0 {
+            notes.push(format!(
+                "{} blocks were walked and their stack not kept: the kernel's stack map holds one \
+                 stack per bucket over {} buckets and refuses a second, so a stack that hashed \
+                 onto one already taken is not kept -- the blocks are counted, and cannot be \
+                 placed",
+                self.crowded_out,
+                OffCpuProgram::STACK_SLOTS,
+            ));
+        }
         if self.evicted_stacks > 0 {
             notes.push(format!(
                 "{} blocks named a stack the kernel had already evicted from its stack map, so \
@@ -496,6 +514,7 @@ mod tests {
             blocks: 2,
             comm: "sleep".to_owned(),
             stack: None,
+            stack_error: None,
         };
         let attributes = attributes(&entry, 100_000);
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
@@ -528,6 +547,7 @@ mod tests {
             blocks: 1,
             comm: "kworker".to_owned(),
             stack: None,
+            stack_error: None,
         };
         let attributes = attributes(&entry, 1);
         let named = attributes.iter().find(|attr| attr.name == "state");

@@ -34,7 +34,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{self, count_drop, helper, Insn, Log2Labels, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash};
+use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::syscall;
 
 /// Helper numbers this family needs and the shared `insn::helper` module does
@@ -88,6 +88,9 @@ const ROW_KEY: i16 = -80;
 const PEND_VALUE: i16 = -96;
 const PEND_KEY: i16 = -104;
 const DROP_KEY: i16 = -112;
+/// Where the exit program keeps the row map it looked up through the
+/// generation slot, once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -120;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -346,7 +349,11 @@ fn exit_instructions(
     insn::push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one call in each.
+    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -373,7 +380,7 @@ fn exit_instructions(
     program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_COMM) as i32));
     program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
     program.push(Insn::call(extra_helper::GET_CURRENT_COMM));
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -381,6 +388,7 @@ fn exit_instructions(
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    program.label("no_rows");
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
@@ -398,7 +406,7 @@ fn exit_instructions(
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct SyscallProgram {
     pending: Hash,
-    rows: Hash,
+    rows: Rows,
     drops: Counters,
     enter_program: OwnedFd,
     _enter_link: OwnedFd,
@@ -435,7 +443,7 @@ impl SyscallProgram {
             "omn_sys_pend",
         )
         .map_err(|error| map_failure("pending syscall map", error))?;
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sys_hist")
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sys_hist")
             .map_err(|error| map_failure("syscall histogram map", error))?;
         let drops = Counters::create(2, "omn_sys_drop")
             .map_err(|error| map_failure("syscall drop counter", error))?;
@@ -476,9 +484,10 @@ impl SyscallProgram {
 
     /// Takes every row the kernel has accumulated since the last drain.
     ///
-    /// Each row is a delta over the interval between two drains: rows are
-    /// removed as they are read, so what comes back next time is what happened
-    /// in between.
+    /// Each row is a delta over the interval between two drains: the programs
+    /// are pointed at an empty map first, and the one they were writing is
+    /// read and emptied once nothing can still be adding to it -- see
+    /// `map::Rows` for why that is the whole fix to a race that lost calls.
     pub fn drain(&self) -> Result<(Vec<SyscallRow>, SyscallDrainLosses), String> {
         let drained = self
             .rows
@@ -733,6 +742,7 @@ mod tests {
             (PEND_VALUE, PEND_VALUE_BYTES as i16, "pending value"),
             (PEND_KEY, PEND_KEY_BYTES as i16, "pending key"),
             (DROP_KEY, 4, "drop key"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -774,5 +784,15 @@ mod tests {
             covered.iter().all(|byte| *byte),
             "the row value has a byte the program never writes"
         );
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

@@ -593,6 +593,13 @@ fn each_child_that_exits_is_named_as_the_one_that_released_the_shell() {
 /// fix reads the maps every tick and keeps the last read that had anything in
 /// it, so what a stack is resolved against is the most recent mapping the
 /// target had while it was alive.
+///
+/// It failed in two full runs of three at the tenth wave's close and passed
+/// alone, and neither the symbolizer nor the exit was the cause: the program
+/// walked every blocking stack on the machine before narrowing to the target,
+/// and a loaded machine filled the stack map before the target blocked. The
+/// deterministic version of that is
+/// `a_targets_blocking_stack_is_named_while_another_process_floods_the_stack_map`.
 #[test]
 fn a_blocking_stack_names_the_call_that_blocked() {
     // The workload says when it is ready, and the test waits for it to say so.
@@ -3075,4 +3082,284 @@ fn a_stack_over_the_probes_is_refused_by_name() {
     }
     assert_ne!(exit_code(&output), 0, "{text}");
     assert!(text.contains("carries no stacks"), "{text}");
+}
+
+// ------------------------------------------------- drains that lose nothing
+
+/// A program that counts its own syscalls, so the tool's total can be checked
+/// against a number the tool had no part in.
+///
+/// Eight threads call `getppid` -- which glibc does not cache and nothing else
+/// in this program makes -- as fast as they can for a fixed wall time, each
+/// counting its own calls, and the program prints the sum when every thread has
+/// joined. As fast as they can because the defect this is written against is a
+/// race between the program's increment and the drain's take: the more often
+/// the exit half is between its lookup and its add when a drain walks the map,
+/// the more of them are lost. Over a second and a half on a 100 ms tick, that
+/// is fifteen drains against rows being written by eight cpus at once.
+const DRAIN_FIXTURE_SOURCE: &str = r#"
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+#define THREADS 8
+
+static double run_for;
+static unsigned long long calls[THREADS];
+
+static double now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void *hammer(void *slot) {
+    unsigned long long *mine = slot;
+    double until = now() + run_for;
+    while (now() < until) {
+        for (int i = 0; i < 1000; i++) {
+            syscall(SYS_getppid);
+        }
+        *mine += 1000;
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    run_for = argc > 1 ? atof(argv[1]) : 1.5;
+    pthread_t threads[THREADS];
+    for (int i = 0; i < THREADS; i++) {
+        pthread_create(&threads[i], NULL, hammer, &calls[i]);
+    }
+    unsigned long long total = 0;
+    for (int i = 0; i < THREADS; i++) {
+        pthread_join(threads[i], NULL);
+        total += calls[i];
+    }
+    fprintf(stderr, "fixture: calls=%llu threads=%d\n", total, THREADS);
+    return 0;
+}
+"#;
+
+/// Builds a C fixture into `target/omn-drains/`, beside and renamed so a
+/// half-written binary is never at the path a test launches.
+fn build_c(name: &str, source: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/omn-drains")
+        .join(name);
+    let dir = path.parent().expect("a directory");
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let source_path = dir.join(format!("{name}.c"));
+    std::fs::write(&source_path, source).map_err(|error| error.to_string())?;
+    let partial = dir.join(format!("{name}.{}", std::process::id()));
+    let built = Command::new("cc")
+        .args(["-O1", "-fno-omit-frame-pointer", "-pthread", "-o"])
+        .arg(&partial)
+        .arg(&source_path)
+        .output()
+        .map_err(|error| format!("no C compiler (`cc`) to build the fixture with: {error}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "the `{name}` fixture did not build:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        ));
+    }
+    std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn drain_fixture() -> Result<PathBuf, String> {
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_c("getppid", DRAIN_FIXTURE_SOURCE))
+        .clone()
+}
+
+/// Every call the program made is in a row or in a counted loss, over several
+/// runs -- the drain never takes a row out from under the increment that was
+/// about to land in it.
+///
+/// The eighth wave measured the race on the fentry histograms: a hundred
+/// thousand reads, 55192 counted, 44807 gone. `proc.syscall` and every other
+/// drained program in `sched` and `mem` had the same shape; they now share the
+/// two-map drain of `bpf::map::Rows`. Against the single-map drain this test
+/// fails -- the numbers are in `docs/families/drains.md`.
+///
+/// Exact, not close. The program's count is its own, the filter is pushed into
+/// the kernel, and a call that is neither in a row nor in `losses` is the
+/// defect. A loss the tool counted is allowed, and printed, because it is the
+/// invariant being kept rather than broken -- but a run that lost nothing is
+/// what a clean drain should give, and the spread over the runs is printed so a
+/// reader can see which one this machine gave.
+#[test]
+fn every_call_a_program_made_is_in_a_row_or_a_counted_loss_on_a_short_tick() {
+    const RUNS: usize = 3;
+    let fixture = match drain_fixture() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let fixture = fixture.to_string_lossy().into_owned();
+    for run in 0..RUNS {
+        let output = omn(&[
+            "proc.syscall",
+            "--mode",
+            "trace",
+            "--filter",
+            "syscall == 'getppid'",
+            "--emit",
+            "raw",
+            "--format",
+            "json",
+            "-d",
+            "5s",
+            "--",
+            &fixture,
+            "1.5",
+        ]);
+        let text = spoken(&output);
+        if unprivileged(&text) {
+            eprintln!("skipped: proc.syscall needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        let made = fixture_said(&output)["calls"];
+        let results = results(&output);
+        let result = &results[0];
+        let counted = total_attribute(result, "count");
+        let losses = &result["losses"];
+        let lost: u64 = ["dropped", "undecoded", "throttled"]
+            .iter()
+            .filter_map(|field| losses[*field].as_u64())
+            .sum();
+        eprintln!("run {run}: made {made}, counted {counted}, losses {losses}");
+        assert!(
+            counted <= made,
+            "run {run}: {counted} calls counted for {made} made -- an increment landed in \
+             another row's element; losses {losses}"
+        );
+        assert!(
+            counted + lost >= made,
+            "run {run}: the program made {made} calls, {counted} are in rows and {lost} are \
+             counted as lost: {} vanished without a trace; losses {losses}",
+            made - counted - lost
+        );
+    }
+}
+
+// ---------------------------------------- a blocking stack on a loaded machine
+
+/// A program that blocks from a different user stack almost every time: a
+/// random walk twenty calls deep through two mutually recursive functions,
+/// then a 20 us sleep at the leaf, on eight threads. Tens of thousands of
+/// distinct stacks a second -- what a machine running a test suite, a build and
+/// three other agents looks like to a machine-wide stack walk.
+const STACK_NOISE_SOURCE: &str = r#"
+#include <pthread.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static __attribute__((noinline)) void b(unsigned *seed, int depth);
+static __attribute__((noinline)) void a(unsigned *seed, int depth) {
+    if (depth == 0) { usleep(20); return; }
+    if (rand_r(seed) & 1) a(seed, depth - 1); else b(seed, depth - 1);
+    __asm__ volatile("" ::: "memory");
+}
+static __attribute__((noinline)) void b(unsigned *seed, int depth) {
+    if (depth == 0) { usleep(20); return; }
+    if (rand_r(seed) & 1) a(seed, depth - 1); else b(seed, depth - 1);
+    __asm__ volatile("" ::: "memory");
+}
+static void *run(void *arg) {
+    unsigned seed = (unsigned)(long)arg;
+    for (;;) a(&seed, 20);
+    return 0;
+}
+int main(int argc, char **argv) {
+    pthread_t thread;
+    for (long i = 1; i <= 8; i++) pthread_create(&thread, 0, run, (void *)i);
+    sleep(argc > 1 ? atoi(argv[1]) : 10);
+    return 0;
+}
+"#;
+
+/// The target's blocking stack is named while another process floods the
+/// kernel's stack map -- which is what `a_blocking_stack_names_the_call_that_blocked`
+/// was failing on in full runs.
+///
+/// The stack map holds one stack per bucket, 4096 of them, and refuses a
+/// second stack in a bucket rather than replacing the first. The program
+/// walked the stack of every task on the machine that blocked and narrowed to
+/// the target afterwards, so on a loaded machine the map was full of other
+/// processes' stacks within a few hundred milliseconds, and the target's block
+/// came back with none -- reported as "no user stack to walk", which was not
+/// the reason either. It passed alone and failed in two full runs of three,
+/// depending on whether the target blocked before the rest of the machine had
+/// filled the map.
+///
+/// Here the rest of the machine is a program this test controls, and the
+/// target waits 400 ms before it blocks in earnest -- long after the noise has
+/// filled every bucket. The noise is a separate process, so a narrowed run
+/// must not walk its stacks at all: the target's stack has to be named, and no
+/// block of it may be reported as crowded out.
+#[test]
+fn a_targets_blocking_stack_is_named_while_another_process_floods_the_stack_map() {
+    const SLEEPER: &str = "import sys, time\nprint('ready', flush=True)\ntime.sleep(0.4)\n\
+                           for _ in range(10): time.sleep(0.05)";
+    if !have("python3") {
+        eprintln!(
+            "skipped: this machine has no `python3`, which the sleeping workload is written in"
+        );
+        return;
+    }
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    let noise = match BUILT.get_or_init(|| build_c("stack-noise", STACK_NOISE_SOURCE)) {
+        Ok(path) => path.clone(),
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let mut noise = Command::new(noise)
+        .arg("10")
+        .spawn()
+        .expect("the stack noise should start");
+
+    let mut sleeper = Command::new("python3")
+        .args(["-c", SLEEPER])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the sleeping workload should start");
+    let mut ready = String::new();
+    std::io::BufReader::new(sleeper.stdout.take().expect("a piped stdout"))
+        .read_line(&mut ready)
+        .expect("the workload announces itself before it sleeps");
+    let pid = sleeper.id().to_string();
+    let output = omn(&["sched.offcpu", "--pid", &pid, "--emit", "stack", "-d", "1s"]);
+    let _ = sleeper.wait();
+    let _ = noise.kill();
+    let _ = noise.wait();
+
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: sched.offcpu needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    assert!(
+        text.contains("clock_nanosleep"),
+        "the workload blocked in `clock_nanosleep` while another process flooded the stack \
+         map, and its stack does not say so:\n{text}"
+    );
+    assert!(
+        !text.contains("their stack not kept"),
+        "a narrowed run lost the target's stacks to another process's:\n{text}"
+    );
 }

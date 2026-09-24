@@ -40,7 +40,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{count_drop, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash, StackTraces};
+use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::syscall;
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context: one 64-bit
@@ -105,6 +105,9 @@ const TOTAL_KEY: i16 = -56;
 const IN_FLIGHT_VALUE: i16 = -40;
 const IN_FLIGHT_KEY: i16 = -8;
 const DROP_KEY: i16 = -104;
+/// Where the program keeps the row map it looked up through the generation
+/// slot, once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -112;
 
 /// The layout of a totals key, as byte offsets within it.
 ///
@@ -200,6 +203,13 @@ pub struct OffCpu {
     /// frames the kernel could not follow. The kernel returns a negative errno
     /// there, and a failed walk is not stack zero.
     pub stack: Option<u32>,
+    /// Why there is no stack, as the kernel's errno, when `stack` is `None`.
+    ///
+    /// Two answers mean different things and are reported apart: `EFAULT`
+    /// is a task with no user stack the kernel could follow, and `EEXIST` is
+    /// a stack the map had no room for, because the bucket it hashed to held
+    /// another stack already.
+    pub stack_error: Option<i32>,
 }
 
 impl OffCpu {
@@ -251,12 +261,16 @@ impl OffCpu {
             queued_ns: long(value, VALUE_QUEUED_NS as usize),
             blocks: long(value, VALUE_BLOCKS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
+            // Signed on the wire: `bpf_get_stackid` answers with an id or
+            // with a negative errno, and reading the latter as an unsigned id
+            // would look up a stack four billion entries in.
             stack: {
-                // Signed on the wire: `bpf_get_stackid` answers with an id or
-                // with a negative errno, and reading the latter as an unsigned
-                // id would look up a stack four billion entries in.
                 let raw = word(key, KEY_STACK as usize) as i32;
                 (raw >= 0).then_some(raw as u32)
+            },
+            stack_error: {
+                let raw = word(key, KEY_STACK as usize) as i32;
+                (raw < 0).then_some(-raw)
             },
         })
     }
@@ -314,6 +328,27 @@ fn instructions(
         IN_FLIGHT_VALUE + IN_FLIGHT_WOKEN,
         0,
     ));
+    // A run observes one process. The filter is written into the instruction
+    // stream rather than kept in a map: the thread group is known before the
+    // program loads and never changes, so a lookup on a path that runs tens of
+    // thousands of times a second would buy nothing.
+    //
+    // **Before the stack walk, not after it.** The stack map is shared by
+    // every task the walk is asked about, holds one stack per bucket and
+    // refuses a second (`-EEXIST`) rather than replacing the first. Walked for
+    // every task on the machine and filtered afterwards, a loaded machine
+    // filled it with other processes' stacks within a few hundred
+    // milliseconds, and the target's own block then came back with no stack:
+    // `a_blocking_stack_names_the_call_that_blocked` failing in two full runs
+    // out of three was exactly that, and it read as "no user stack to walk".
+    // It also walked every blocking stack on the machine to keep one
+    // process's.
+    if let Some(tgid) = target_tgid {
+        read_field(&mut program, TOTAL_KEY + KEY_TGID, 4, 7, tgid_offset);
+        program.push(Insn::ldx(BPF_W, 1, R10, TOTAL_KEY + KEY_TGID));
+        program.jump_to("left", Insn::jne_imm(1, tgid as i32, 0));
+    }
+
     // The stack of the task that is leaving, taken here because here is the
     // only place it exists. `sched_switch` runs in the outgoing task's context
     // -- the scheduler has not switched the stack yet -- so the walk goes
@@ -335,16 +370,6 @@ fn instructions(
     // slot, and the four the program does not write are still hashed.
     program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
     read_field(&mut program, IN_FLIGHT_KEY, 4, 7, pid_offset);
-
-    // A run observes one process. The filter is written into the instruction
-    // stream rather than kept in a map: the thread group is known before the
-    // program loads and never changes, so a lookup on a path that runs tens of
-    // thousands of times a second would buy nothing.
-    if let Some(tgid) = target_tgid {
-        read_field(&mut program, TOTAL_KEY + KEY_TGID, 4, 7, tgid_offset);
-        program.push(Insn::ldx(BPF_W, 1, R10, TOTAL_KEY + KEY_TGID));
-        program.jump_to("left", Insn::jne_imm(1, tgid as i32, 0));
-    }
 
     program.extend(Insn::load_map_fd(1, in_flight_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -409,7 +434,11 @@ fn instructions(
     program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_TID, 1));
     read_field(&mut program, TOTAL_KEY + KEY_TGID, 4, 7, tgid_offset);
 
-    program.extend(Insn::load_map_fd(1, totals_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one occurrence in each. See `map::Rows`.
+    select_rows(&mut program, totals_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, TOTAL_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -438,7 +467,7 @@ fn instructions(
         7,
         comm_offset,
     );
-    program.extend(Insn::load_map_fd(1, totals_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, TOTAL_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -446,6 +475,11 @@ fn instructions(
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_TOTALS, "done");
+
+    program.jump_to("done", Insn::ja());
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_TOTALS, "done");
 
     program.label("done");
@@ -512,7 +546,7 @@ fn wakeup_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct OffCpuProgram {
     in_flight: Hash,
-    totals: Hash,
+    totals: Rows,
     drops: Counters,
     stacks: StackTraces,
     program: OwnedFd,
@@ -555,7 +589,7 @@ impl OffCpuProgram {
             "omn_offcpu_run",
         )
         .map_err(|error| map_failure("off-cpu in-flight map", error))?;
-        let totals = Hash::create(
+        let totals = Rows::create(
             TOTAL_KEY_BYTES,
             TOTAL_VALUE_BYTES,
             MAX_TOTALS,
@@ -660,6 +694,10 @@ impl OffCpuProgram {
         self.stacks.get(id).ok().flatten()
     }
 
+    /// How many buckets the stack map has, which is how many distinct stacks
+    /// one run can keep at the very most.
+    pub const STACK_SLOTS: u32 = MAX_STACKS;
+
     /// How deep the kernel was asked to walk, which is what a stack of exactly
     /// this many frames was probably truncated at.
     pub fn stack_depth(&self) -> usize {
@@ -738,6 +776,7 @@ mod tests {
                 "in-flight value",
             ),
             (IN_FLIGHT_KEY, 8, "in-flight key slot"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -769,6 +808,60 @@ mod tests {
             .filter(|insn| insn.code == 0x85)
             .map(|insn| insn.imm)
             .collect()
+    }
+
+    /// A run narrowed to one process asks the kernel for that process's
+    /// stacks and no one else's: the comparison with the thread group comes
+    /// before the stack walk. The other order filled the stack map with the
+    /// machine's stacks and crowded the target's out, which is what made
+    /// `a_blocking_stack_names_the_call_that_blocked` fail under a loaded suite.
+    #[test]
+    fn a_narrowed_run_walks_only_the_targets_stacks() {
+        const TGID: i32 = 4242;
+        let Some(btf) = kernel_btf() else { return };
+        let program = instructions(&btf, Some(TGID as u32), 3, 4, 5, 6).expect("a program");
+        let compared = program
+            .iter()
+            .position(|insn| insn.imm == TGID)
+            .expect("the thread group is compared in the program");
+        let walked = program
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::GET_STACKID)
+            .expect("the program walks the stack");
+        assert!(
+            compared < walked,
+            "the thread group is compared at {compared} and the stack walked at {walked}"
+        );
+
+        // And a machine-wide run still walks every stack, with nothing to
+        // compare against.
+        let everything = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        assert!(!everything.iter().any(|insn| insn.imm == TGID));
+        assert!(helpers_called(&everything).contains(&helper::GET_STACKID));
+    }
+
+    /// A stack the map had no room for and a stack that could not be walked
+    /// are two errnos, and the entry keeps which one it was.
+    #[test]
+    fn a_failed_stack_keeps_the_kernels_reason() {
+        let mut key = [0u8; TOTAL_KEY_BYTES];
+        let value = [0u8; TOTAL_VALUE_BYTES];
+        let with = |key: &mut [u8; TOTAL_KEY_BYTES], raw: i32| {
+            key[KEY_STACK as usize..KEY_STACK as usize + 4].copy_from_slice(&raw.to_ne_bytes());
+            OffCpu::decode(key, &value).expect("a well-sized entry")
+        };
+        let crowded = with(&mut key, -libc::EEXIST);
+        assert_eq!(
+            (crowded.stack, crowded.stack_error),
+            (None, Some(libc::EEXIST))
+        );
+        let unwalkable = with(&mut key, -libc::EFAULT);
+        assert_eq!(
+            (unwalkable.stack, unwalkable.stack_error),
+            (None, Some(libc::EFAULT))
+        );
+        let walked = with(&mut key, 17);
+        assert_eq!((walked.stack, walked.stack_error), (Some(17), None));
     }
 
     /// Invariant 6, checked in the instruction stream rather than trusted.
@@ -900,5 +993,15 @@ mod tests {
             (entry.tid, entry.total_ns, entry.comm.as_str()),
             (99, 1234, "true")
         );
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = instructions(&btf, Some(1), 3, 4, 5, 6).expect("a program");
+        crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

@@ -33,7 +33,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash};
+use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::mem_program::{
     bucket_low, check_signature, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id,
     read_comm, read_pid_tgid, word,
@@ -61,6 +61,9 @@ const PID_TGID: i16 = -88;
 const START_KEY: i16 = -96;
 const START_VALUE: i16 = -104;
 const DROP_KEY: i16 = -108;
+/// Where the program keeps the row map it looked up through the generation
+/// slot, once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -120;
 
 /// The layout of a row key.
 const KEY_TID: i16 = 0;
@@ -430,7 +433,11 @@ fn end_instructions(
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
     read_cgroup_id(&mut program, ROW_KEY + KEY_CGROUP, stall.with_cgroup());
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one occurrence in each. See `map::Rows`.
+    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -460,7 +467,7 @@ fn end_instructions(
         program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_YIELD, 0));
     }
     read_comm(&mut program, ROW_VALUE + VALUE_COMM);
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -473,6 +480,11 @@ fn end_instructions(
 
     program.label("unpaired");
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_UNPAIRED, "done");
+
+    program.jump_to("done", Insn::ja());
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -487,7 +499,7 @@ fn end_instructions(
 pub struct StallProgram {
     stall: Stall,
     in_flight: Hash,
-    rows: Hash,
+    rows: Rows,
     drops: Counters,
     absent: Vec<String>,
     programs: Vec<OwnedFd>,
@@ -521,7 +533,7 @@ impl StallProgram {
 
         let in_flight = Hash::create(START_KEY_BYTES, START_VALUE_BYTES, MAX_IN_FLIGHT, live_name)
             .map_err(|error| map_failure("in-flight map", error))?;
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
             .map_err(|error| map_failure("stall histogram map", error))?;
         let drops = Counters::create(DROP_SLOTS, drops_name)
             .map_err(|error| map_failure("stall drop counter", error))?;
@@ -873,6 +885,7 @@ mod tests {
             (START_KEY, 8, "in-flight key slot"),
             (START_VALUE, START_VALUE_BYTES as i16, "in-flight value"),
             (DROP_KEY, 4, "drop key"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -917,5 +930,14 @@ mod tests {
         assert_eq!(row.comm, "hog");
         // Bucket 21 starts at 2^20 nanoseconds, just over a millisecond.
         assert_eq!(row.duration_ns(), 1 << 20);
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }
