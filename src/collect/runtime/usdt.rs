@@ -16,7 +16,9 @@
 //!
 //! **What a probe costs is not what the catalog's band suggests.** A uprobe
 //! traps into the kernel on every hit: 740 ns per event against 132 ns for the
-//! preload shim on the same event (finding 6). USDT is the path that reaches a
+//! preload shim on the same event in isolation (finding 6) -- though the
+//! bench's malloc workload, with every record written, put the shim at about
+//! 1.1 us an allocation (finding 47). USDT is the path that reaches a
 //! program this tool did not launch and cannot preload into, and one whose
 //! events are named by the program itself -- not the cheap one. The notes of
 //! every run say how many hits it paid for.

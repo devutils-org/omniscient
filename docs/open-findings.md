@@ -6608,6 +6608,13 @@ each item is a request to whoever owns the file this wave or the next.
   itself does), and the catalog's bands for per-event raw-tracepoint backends
   reconsidered against the column. To whoever owns `src/collect/mod.rs` (the
   budget) and the catalogs.
+- **The preload shim on an allocation-bound program: about +15 500 %.** A
+  million allocations, 7 ms bare, about 1.1 s under each of the three heap
+  sources -- the two that only poll included, so the cost is the interposed
+  call and its record, not the emit. About 1.1 us an allocation, against the
+  132 ns finding 6 measured in isolation, which the code and the catalog still
+  quote in places: corrected where no stream owns the file, and
+  `src/collect/sched/mutex.rs` and `mutex_usdt.rs` at the eleventh wave's merge.
 - **The preload shim under a lock storm: +1043 %, 3.9 GiB, 54.9 million
   records lost.** `sched.mutex` on four threads doing a million round trips
   each. The losses are counted; the memory is the tool's own, buffering what

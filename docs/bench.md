@@ -323,10 +323,9 @@ effect it looks for is a few percent; it is in the real run.
 (Zen 2, 24 cpus, boost off, governor `performance`), with the release build
 carrying its capabilities: every workload admitted by the gate, `io` at 121
 repetitions and `contended` at 26, 94 (source, backend) pairs in 55 minutes.
-The heap sources are missing from this run -- the gate knew only the six
+The heap sources were missing from this run -- the gate knew only the six
 reference workloads and excluded the `malloc` one it had no baseline for, which
-is fixed; their rows come from a rerun, `OMN_BENCH_ONLY=mem.heap scripts/bench.sh
-backends`, pasted below when it has been made.
+is fixed -- and their rows are from a rerun right after it, below the table.
 
 **What it says, before the table.** The two columns disagree more than anything
 else, and the disagreement is the finding:
@@ -338,6 +337,13 @@ else, and the disagreement is the finding:
   `io.syscall` (+3.8 %) and `sched.futex` (+5.8 %) are the same shape, smaller.
   The dilation column is the one to read for an in-kernel collector; the
   resolver's cost bands were written from the other.
+- **The preload shim costs its target a hundred and fifty times on an
+  allocation-bound program.** The heap rerun: a million allocations that take
+  7 ms bare take about 1.1 s under any of the three heap sources, **+15 400 to
+  +15 700 %**, including the two that only poll -- the cost is the interposed
+  call and its record, whatever the emit. That is about 1.1 us an allocation,
+  where finding 6 measured the shim at 132 ns in isolation, and
+  `mem.heap.alloc` also held 2.6 GiB and counted 6.6 million records lost.
 - **The preload shim does not survive a mutex storm.** `sched.mutex` on the
   contended workload -- four threads, a million lock round trips each --
   dilates it **+1043 %**, spends 1.6 s of cpu, holds **3.9 GiB**, and counts
@@ -367,7 +373,20 @@ either not clearly cheaper or cheaper by giving up what the catalog says it
 degrades (`mem.rss` through `statm` is a hundred times cheaper and has no
 per-VMA breakdown).
 
-#### Backend comparison
+#
+#### The heap rows, from the rerun
+
+```
+  malloc        40   7.05ms        180.56us        1.64 %    0.92 %   pass
+```
+
+| source | backend | resolver | mode | target | workload | collector cpu | % of target | dilation | omn peak RSS | events | losses | dropped (throttled) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| mem.heap.alloc | preload | chosen | trace | launch | malloc | 1.113s [5.19ms] | 103.12 % [0.14 %] | +15661.19 % [+79.79 %] | 2655.3 MiB | 1834999 | 6588124 | 0 |
+| mem.heap.live | preload | chosen | poll@100ms | launch | malloc | 183.27ms [1.82ms] | 17.26 % [0.18 %] | +15383.46 % [+91.97 %] | 10.4 MiB | 13 | 0 | 0 |
+| mem.heap.retained | preload | chosen | poll@100ms | launch | malloc | 247.15ms [2.81ms] | 23.31 % [0.33 %] | +15384.35 % [+105.14 %] | 25.3 MiB | 12 | 0 | 0 |
+
+### Backend comparison
 
 Measured with /home/moha/repos/omniscient/target/release/omn (release build, carrying CAP_BPF and CAP_PERFMON), at least 20 repetitions round-robin (more for a workload whose spread needed them to resolve 1 %, as the gate table says) after 2 warmup runs, the LLC evicted before each. Collector cpu and dilation are median [IQR]. A poll is measured at 100 ms and a sample at 997 Hz.
 
@@ -711,7 +730,7 @@ Clippy and fmt are clean.
 
 - [x] *A cost/resolution/loss table measured for every (source, backend).* 94
   pairs, every one this build serves here, under "The table"; the three heap
-  sources from a rerun the gate's first version prevented.
+  sources from the rerun below it.
 - [x] *The resolver's choices are confirmed by measurement, or corrected.* The
   seven sources with a second served backend: all confirmed. What the table
   corrects instead is the cost bands the resolver reads, for in-kernel

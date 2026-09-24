@@ -498,8 +498,10 @@ backend for a `pid` or `tid` target: `src/collect/sched/mutex_usdt.rs` loads
 userspace. It writes the event the shim writes -- stamped at the ask, `wait_ns`
 the value, `hold_ns` beside it -- so a session reads the same either way.
 
-A launch stays on the shim: it is the same measurement for 132 ns instead of
-three uprobes, and the backend declares `launch: "no"` so the resolver cannot
+A launch stays on the shim: it is the same measurement for one interposed call
+instead of three uprobes (finding 6 put the call at 132 ns in isolation; the
+bench's allocation workload, finding 47, at about 1.1 us with its record
+written, and under a lock storm the shim is the backend that fails first), and the backend declares `launch: "no"` so the resolver cannot
 choose it there. (It would otherwise, today: the shim's `dynamic-linking`
 requirement has no probe yet, and an unverified requirement never counts as
 available.)

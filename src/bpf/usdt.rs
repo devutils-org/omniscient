@@ -26,7 +26,9 @@
 //! **This is not the cheap path, and nothing here pretends it is.** A uprobe
 //! is a breakpoint trap into the kernel on every hit: finding 6 of
 //! `docs/open-findings.md` measured 740 ns per event against 132 ns for the
-//! preload shim on the same event. What USDT buys is reach -- a program this
+//! preload shim on the same event, in isolation; finding 47 measured the shim
+//! at about 1.1 us an allocation once its records are written, on a workload
+//! that does nothing else. What USDT buys is reach -- a program this
 //! tool did not launch and cannot preload into -- and names: the program says
 //! which events it has, rather than having them guessed from symbol names.
 //!
