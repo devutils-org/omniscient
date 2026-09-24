@@ -475,14 +475,21 @@ the `never ran` wording -- in the order they are worth doing:
    The double count was the one thing no amount of engine work downstream could
    have fixed, so it went first: `total_ns - queued_ns` is the blocked row, and
    the queue wait it takes out is the one `sched.runqlat` reports.
-2. **The launched program's lifetime in the results** (finding 4). It is the
-   whole the parts are a decomposition of.
-3. **A decomposition in the engine**, declared beside the joins in a session,
-   with a row per state that carries its kind and its evidence, the residue
-   printed as a signed number, and an `interrupted` row where the sampled and
-   the kernel's on-cpu figures differ.
-4. **A wakeup join that refuses a drained `to` side** (finding 5), and ranks by
-   chain (finding 6).
+2. ~~**The launched program's lifetime in the results** (finding 4)~~ --
+   **landed** in the eighth wave, as `whole: lifetime`.
+3. ~~**A decomposition in the engine**~~ -- **landed** in the eighth wave: a
+   `decompose:` block beside the joins, a row per state with its kind and
+   evidence, and a signed residue that is never rounded away. The
+   `interrupted` row is still not built: it needs the kernel's own on-cpu
+   figure as a source, and nothing reads `schedstat` yet.
+4. ~~**A wakeup join that refuses a drained `to` side** (finding 5), and ranks
+   by chain (finding 6)~~ -- **landed** in the eighth wave; the refusal is at
+   validation, and `examples/cross-compute-drained-wakeup.yml` carries it.
+
+And the `never ran` wording is gone: a chain with events attributed to it is
+`still open at the end` (`src/encode.rs`). The tool now produces this table
+itself -- `examples/join-decompose-compute.yml` -- and `omn latency` asks for
+it as a question since the tenth wave.
 
 Then the objective. `STATE.md` puts it as a request parameter -- *limited for
 what* -- and this crossing shows why it has to come before any verdict: the

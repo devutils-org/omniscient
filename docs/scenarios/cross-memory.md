@@ -491,7 +491,10 @@ in the environment capture.
 
 ## What a later wave should take from this
 
-- **The engine has no way to say `TEMPORAL`.** No match kind produces it — D1 is
+- ~~**The engine has no way to say `TEMPORAL`.**~~ *Since the eighth wave it
+  has: `between` is that match kind, and `examples/join-between-residency.yml`
+  is the resident-size join this paragraph asked for.* What it said then: no
+  match kind produces it — D1 is
   the engine producing it by accident and calling it `KEY` — so the
   one honest way to put a resident size beside a range today is to leave it out
   of the join — which is what these sessions do — and do the arithmetic in a
