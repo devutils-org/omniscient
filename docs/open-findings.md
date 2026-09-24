@@ -6638,3 +6638,30 @@ each item is a request to whoever owns the file this wave or the next.
   defect -- the observer effect the roadmap asks the bench to measure -- and
   worth a caveat on the three sources: a lock measurement describes the run it
   perturbed. To whoever owns `catalog/sched.yaml`.
+
+### Answered on `main`: the shim writes into a shared ring
+
+The shim's record cost was two system calls, `gettid` and `write(2)`, and they
+were all of it: on a million allocations, interposing without reporting took
+14 ms against 7 ms bare, reporting to `/dev/null` 767 ms, and reporting into a
+drained pipe 1133 ms. Since then `omn` maps a 3 MiB ring in a `memfd` and hands
+it over (`OMN_SHIM_RING_FD`); a record is a compare-and-swap reservation, a
+copy and a release store, and the thread id is read once per thread (reset
+after `fork`). The pipe remains the fallback, and a full ring drops and counts
+in its header, which the reader turns into the drop record it always read.
+
+Measured on the same workload, release shim and release `omn`: the program
+runs in **90 ms instead of 1.40 s** -- about 70 ns a record -- and every record
+is still accounted for (196 608 events and 1 803 397 counted drops of 2 000 005).
+What changed is who is slow: the program now produces thirty million records a
+second, and `omn` reads about seven, so a storm like this one is mostly counted
+drops where it was mostly a program slowed to a crawl. That is the trade the
+invariants ask for -- the target is not changed to be measured, and what was
+not measured is said -- and the reader's own speed (about 1.3 us a record in a
+debug build, the event model's allocations) is the next limit, not the shim's.
+
+Two things this leaves for others. The ring's pages are mapped in the target,
+so up to 3 MiB of a `mem.rss` read beside a preload source is the ring: a
+caveat for `catalog/mem.yaml` (stream S's this wave) and `catalog/sched.yaml`.
+And the bench's heap rows in `docs/bench.md` predate the ring; one rerun of
+`OMN_BENCH_ONLY=mem.heap scripts/bench.sh backends` replaces them.

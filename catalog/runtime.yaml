@@ -31,8 +31,8 @@
        runtime's account of its collector, not a measurement of how long the
        program's other threads were stopped."
     - "Each probe hit is a uprobe trap into the kernel, measured at about 740 ns
-       against 132 ns for a preload shim on the same event in isolation (the
-       shim is nearer 1.1 us once its records are written, finding 47). Two per pause is
+       against about 70 ns for a preload shim writing the same event into its
+       shared ring (finding 47). Two per pause is
        nothing; it is the per-hit price every USDT source pays."
 
 - id: runtime.jit
@@ -132,7 +132,7 @@
        than 6.6 the sites go through the uprobe PMU instead, which needs
        CAP_SYS_ADMIN and maintains no semaphore, and the run says so."
     - "Each hit is a uprobe trap into the kernel, measured at about 740 ns
-       against 132 ns for a preload shim on the same event in isolation (the
-       shim is nearer 1.1 us once its records are written, finding 47). USDT is how a
+       against about 70 ns for a preload shim writing the same event into its
+       shared ring (finding 47). USDT is how a
        program you did not launch is reached, not a cheap way to reach one you
        did."

@@ -376,6 +376,10 @@ per-VMA breakdown).
 #
 #### The heap rows, from the rerun
 
+*Measured through the pipe. The shim has written into a shared ring since
+(finding 47): the same workload runs in about 90 ms instead of 1.1 s, and these
+rows want one more rerun.*
+
 ```
   malloc        40   7.05ms        180.56us        1.64 %    0.92 %   pass
 ```

@@ -271,10 +271,13 @@ impl Collector for JitMapCollector {
         let appended = self.read_new().unwrap_or_default();
         let trailing = self.decode(&appended, u64::MAX / 2);
 
-        if self.compilations == 0 {
+        if self.compilations == 0 && self.absent_before_first_read > 0 {
             // Every poll of this run looked and found nothing. That is what the
             // run has to report: not zero compilations, but zero observations.
-            self.losses.failed_reads += self.absent_before_first_read;
+            // One failed read, not one per poll: the source could not be read
+            // at all, and a count of polls is the run's length over its tick --
+            // 360 of them in the bench's table, a number that measured nothing.
+            self.losses.failed_reads += 1;
             self.losses.note(format!(
                 "{} does not exist: nothing was read for pid {}, because the program either \
                  has no JIT or was not started so that it writes one \
@@ -556,8 +559,10 @@ mod tests {
         );
     }
 
-    /// A run that never read a map reports every poll that found nothing, so
-    /// that "nothing was watching" cannot be read as "nothing was compiled".
+    /// A run that never read a map reports it as one failed read with its
+    /// reason, so that "nothing was watching" cannot be read as "nothing was
+    /// compiled" -- and not as one per poll, a count that only measured how
+    /// long the run was.
     #[test]
     fn polls_that_found_no_map_at_all_are_reported_at_the_end() {
         let (path, mut collector) = writing("never");
@@ -572,8 +577,8 @@ mod tests {
         assert!(collector.stop().is_empty());
         assert_eq!(
             collector.losses().failed_reads,
-            5,
-            "four polls and the final read"
+            1,
+            "four polls and the final read found nothing: one source not read"
         );
         assert!(collector
             .losses()

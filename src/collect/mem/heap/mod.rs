@@ -64,6 +64,29 @@ const CLASS_GPU: u8 = 4;
 /// difference between a complete measurement and a partial one.
 const WANTED_PIPE_BYTES: i32 = 1 << 20;
 
+/// The shared ring the shim writes into when it can map it: 65 536 slots of
+/// 48 bytes, 3 MiB, two and a half times what the pipe held.
+///
+/// Its pages are mapped in the observed program too, so up to 3 MiB of what a
+/// `mem.rss` read beside a preload source reports is this ring -- the price of
+/// a record that costs no system call, stated rather than hidden.
+const RING_SLOTS: usize = 1 << 16;
+
+/// The ring's layout, mirrored from `shim/src/lib.rs`'s `ring` module; both
+/// sides pin the numbers in a test.
+const RING_MAGIC: u64 = 0x676e_6972_5f6e_6d6f;
+const RING_HEAD: usize = 64;
+const RING_TAIL: usize = 128;
+const RING_DROPS: usize = 192;
+const RING_SLOTS_AT: usize = 256;
+const RING_SLOT_BYTES: usize = 48;
+
+/// Drains a slot a writer reserved and never published -- a thread that died
+/// between the two -- after this many reads have found it so, so that one lost
+/// record does not hold back every record behind it. At the 10 ms drain, half
+/// a second.
+const RING_STUCK_READS: u32 = 50;
+
 /// How often the pipe is drained, whatever the request's poll interval is.
 ///
 /// These collectors have two cadences: the stream has to be read often enough
@@ -159,6 +182,143 @@ impl Which {
     }
 }
 
+/// The ring's reading end: omn's mapping, what it has read, and what it has
+/// already reported of the ring's drop counters.
+struct Ring {
+    base: *mut u8,
+    length: usize,
+    /// The `memfd`, open until the program has been forked with its copy.
+    fd: RawFd,
+    tail: u64,
+    reported_drops: [u64; 3],
+    /// The slot a read last found reserved and unpublished, and how many reads
+    /// in a row found it so.
+    stuck: (u64, u32),
+}
+
+impl Ring {
+    fn create() -> Result<Self, String> {
+        let length = RING_SLOTS_AT + RING_SLOTS * RING_SLOT_BYTES;
+        // SAFETY: a name we own; no MFD_CLOEXEC, because the program must
+        // inherit the descriptor across exec, as it inherits the pipe.
+        let fd = unsafe { libc::memfd_create(c"omn-shim-ring".as_ptr(), 0) };
+        if fd < 0 {
+            return Err(format!(
+                "cannot create the shim's ring: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: sizing and mapping a descriptor this process just created;
+        // each failure is checked and closes it.
+        unsafe {
+            if libc::ftruncate(fd, length as libc::off_t) != 0 {
+                let error = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(format!("cannot size the shim's ring: {error}"));
+            }
+            let base = libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if base == libc::MAP_FAILED {
+                let error = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(format!("cannot map the shim's ring: {error}"));
+            }
+            (base as *mut u64).write_volatile(RING_MAGIC);
+            Ok(Self {
+                base: base.cast(),
+                length,
+                fd,
+                tail: 0,
+                reported_drops: [0; 3],
+                stuck: (u64::MAX, 0),
+            })
+        }
+    }
+
+    fn word(&self, offset: usize) -> &std::sync::atomic::AtomicU64 {
+        // SAFETY: every offset used is inside the mapping and 8-byte aligned,
+        // and the mapping outlives `self`.
+        unsafe { &*(self.base.add(offset) as *const std::sync::atomic::AtomicU64) }
+    }
+
+    fn close_fd(&mut self) {
+        if self.fd >= 0 {
+            // SAFETY: closing the descriptor this ring owns, once.
+            unsafe { libc::close(self.fd) };
+            self.fd = -1;
+        }
+    }
+
+    /// Appends every published record to `into`, as the bytes the pipe would
+    /// have carried, and a drop record per class whose counter moved -- so
+    /// what reads the pipe reads the ring without knowing which it was.
+    fn drain_into(&mut self, into: &mut Vec<u8>) {
+        use std::sync::atomic::Ordering;
+        let mask = (RING_SLOTS - 1) as u64;
+        loop {
+            let slot = RING_SLOTS_AT + (self.tail & mask) as usize * RING_SLOT_BYTES;
+            let published = self.word(slot).load(Ordering::Acquire);
+            if published == self.tail + 1 {
+                // SAFETY: the slot is published and inside the mapping; the
+                // writer does not touch it again until `tail` passes it.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(self.base.add(slot + 8), RECORD_SIZE) };
+                into.extend_from_slice(bytes);
+                self.tail += 1;
+                self.stuck = (u64::MAX, 0);
+                continue;
+            }
+            // Reserved and not published: a writer between its two steps, or
+            // one that died there. Waited for, then skipped as undecoded.
+            if self.word(RING_HEAD).load(Ordering::Acquire) > self.tail {
+                if self.stuck.0 == self.tail {
+                    self.stuck.1 += 1;
+                } else {
+                    self.stuck = (self.tail, 1);
+                }
+                if self.stuck.1 >= RING_STUCK_READS {
+                    // A record of no known operation: every reader counts it
+                    // as undecoded.
+                    into.extend_from_slice(&[0u8; RECORD_SIZE]);
+                    self.tail += 1;
+                    self.stuck = (u64::MAX, 0);
+                    continue;
+                }
+            }
+            break;
+        }
+        self.word(RING_TAIL).store(self.tail, Ordering::Release);
+
+        for (index, class) in [CLASS_HEAP, CLASS_MUTEX, CLASS_GPU].into_iter().enumerate() {
+            let drops = self.word(RING_DROPS + 8 * index).load(Ordering::Relaxed);
+            let new = drops.saturating_sub(self.reported_drops[index]);
+            if new == 0 {
+                continue;
+            }
+            self.reported_drops[index] = drops;
+            let mut record = [0u8; RECORD_SIZE];
+            record[8..16].copy_from_slice(&u64::from(class).to_ne_bytes());
+            record[16..24].copy_from_slice(&new.to_ne_bytes());
+            record[36] = OP_DROPPED;
+            into.extend_from_slice(&record);
+        }
+    }
+}
+
+impl Drop for Ring {
+    fn drop(&mut self) {
+        self.close_fd();
+        // SAFETY: unmapping this ring's own mapping, once.
+        unsafe { libc::munmap(self.base.cast(), self.length) };
+    }
+}
+
 /// The shim's pipe, and every collector of one launch that reads it.
 ///
 /// Bytes rather than records are fanned out, so that a record split across
@@ -174,6 +334,9 @@ struct Pipe {
     /// What the program is asked to report: every class a collector of this
     /// launch reads.
     classes: u8,
+    /// The shared ring, when one could be made. The shim writes into it and
+    /// falls back to the pipe when it cannot map it, so both are read.
+    ring: Option<Ring>,
 }
 
 impl Pipe {
@@ -183,6 +346,7 @@ impl Pipe {
             write_fd,
             unread: Vec::new(),
             classes: 0,
+            ring: None,
         }
     }
 
@@ -198,6 +362,9 @@ impl Pipe {
             unsafe { libc::close(self.write_fd) };
             self.write_fd = -1;
         }
+        if let Some(ring) = &mut self.ring {
+            ring.close_fd();
+        }
     }
 
     /// Reads whatever the shim has written, gives every reader a copy, and
@@ -205,7 +372,15 @@ impl Pipe {
     fn take(&mut self, reader: usize) -> Vec<u8> {
         let mut collected = Vec::new();
         let mut buffer = [0u8; 64 * 1024];
+        if let Some(ring) = &mut self.ring {
+            ring.drain_into(&mut collected);
+        }
         if self.read_fd < 0 {
+            if !collected.is_empty() {
+                for unread in &mut self.unread {
+                    unread.extend_from_slice(&collected);
+                }
+            }
             return std::mem::take(&mut self.unread[reader]);
         }
         loop {
@@ -329,6 +504,9 @@ impl ShimPrepared {
         }
         let mut pipe = Pipe::new(read_fd, write_fd);
         pipe.classes = which.class();
+        // Without a ring the shim reports through the pipe, as it always did;
+        // a ring that cannot be made is a slower run, not a refused one.
+        pipe.ring = Ring::create().ok();
         Ok(Self {
             which,
             interval,
@@ -346,11 +524,16 @@ impl Prepared for ShimPrepared {
     /// variable.
     fn launch_environment(&self) -> Vec<(String, String)> {
         let pipe = self.pipe.borrow();
-        vec![
+        let mut environment = vec![
             ("LD_PRELOAD".to_owned(), self.shim.display().to_string()),
             ("OMN_SHIM_FD".to_owned(), pipe.write_fd.to_string()),
             ("OMN_SHIM_REPORT".to_owned(), pipe.classes.to_string()),
-        ]
+        ];
+        if let Some(ring) = &pipe.ring {
+            environment.push(("OMN_SHIM_RING_FD".to_owned(), ring.fd.to_string()));
+            environment.push(("OMN_SHIM_RING_SLOTS".to_owned(), RING_SLOTS.to_string()));
+        }
+        environment
     }
 
     fn share_launch(&mut self, earlier: &mut dyn Prepared) -> bool {
@@ -717,5 +900,105 @@ pub(crate) mod tests {
             .err()
             .expect("a snapshot cannot be served by the shim");
         assert!(error.contains("before it allocated anything"), "{error}");
+    }
+
+    /// Plays the shim's part: reserves the next slot, copies a record in and
+    /// publishes it, as `shim/src/lib.rs`'s `ring::write` does.
+    fn publish(ring: &Ring, op: u8, ptr: u64) {
+        use std::sync::atomic::Ordering;
+        let reserved = ring.word(RING_HEAD).fetch_add(1, Ordering::Relaxed);
+        let slot = RING_SLOTS_AT + (reserved as usize & (RING_SLOTS - 1)) * RING_SLOT_BYTES;
+        let mut record = [0u8; RECORD_SIZE];
+        record[8..16].copy_from_slice(&ptr.to_ne_bytes());
+        record[36] = op;
+        // SAFETY: a slot inside the ring's own mapping.
+        unsafe {
+            std::ptr::copy_nonoverlapping(record.as_ptr(), ring.base.add(slot + 8), RECORD_SIZE)
+        };
+        ring.word(slot).store(reserved + 1, Ordering::Release);
+    }
+
+    /// The numbers the shim writes by: a renumbering on one side would read
+    /// every record from the wrong offset.
+    #[test]
+    fn the_ring_layout_is_the_one_the_shim_writes() {
+        assert_eq!(RING_MAGIC, 0x676e_6972_5f6e_6d6f);
+        assert_eq!(
+            (
+                RING_HEAD,
+                RING_TAIL,
+                RING_DROPS,
+                RING_SLOTS_AT,
+                RING_SLOT_BYTES
+            ),
+            (64, 128, 192, 256, 48)
+        );
+        assert!(RING_SLOTS.is_power_of_two());
+        assert_eq!(RING_SLOT_BYTES, 8 + RECORD_SIZE);
+    }
+
+    /// What the ring hands over is what the pipe would have carried, in order,
+    /// and the tail it publishes frees exactly the slots it read.
+    #[test]
+    fn published_records_come_out_in_order_and_free_their_slots() {
+        use std::sync::atomic::Ordering;
+        let mut ring = Ring::create().expect("a ring");
+        for ptr in 1..=3 {
+            publish(&ring, OP_ALLOC, ptr);
+        }
+        let mut bytes = Vec::new();
+        ring.drain_into(&mut bytes);
+        let ptrs: Vec<u64> = bytes
+            .chunks_exact(RECORD_SIZE)
+            .map(|record| u64::from_ne_bytes(record[8..16].try_into().unwrap()))
+            .collect();
+        assert_eq!(ptrs, [1, 2, 3]);
+        assert_eq!(ring.word(RING_TAIL).load(Ordering::Acquire), 3);
+    }
+
+    /// A full ring counts in its header, and the reader turns the count into
+    /// the drop record every class's reader already understands.
+    #[test]
+    fn a_full_ring_reaches_the_reader_as_a_drop_record_of_its_class() {
+        use std::sync::atomic::Ordering;
+        let mut ring = Ring::create().expect("a ring");
+        ring.word(RING_DROPS + 8).fetch_add(7, Ordering::Relaxed); // the mutex class
+        let mut bytes = Vec::new();
+        ring.drain_into(&mut bytes);
+        assert_eq!(bytes.len(), RECORD_SIZE);
+        assert_eq!(bytes[36], OP_DROPPED);
+        assert_eq!(
+            u64::from_ne_bytes(bytes[8..16].try_into().unwrap()),
+            u64::from(CLASS_MUTEX)
+        );
+        assert_eq!(u64::from_ne_bytes(bytes[16..24].try_into().unwrap()), 7);
+        // Counted once, not on every drain.
+        let mut again = Vec::new();
+        ring.drain_into(&mut again);
+        assert!(again.is_empty());
+    }
+
+    /// A slot reserved and never published -- a writer that died between its
+    /// two steps -- holds back the records behind it only for a while, and is
+    /// then passed as a record no reader decodes.
+    #[test]
+    fn a_slot_never_published_is_skipped_after_a_while_and_counted() {
+        use std::sync::atomic::Ordering;
+        let mut ring = Ring::create().expect("a ring");
+        ring.word(RING_HEAD).fetch_add(1, Ordering::Relaxed); // reserved, abandoned
+        publish(&ring, OP_ALLOC, 42);
+        let mut bytes = Vec::new();
+        for _ in 0..RING_STUCK_READS - 1 {
+            ring.drain_into(&mut bytes);
+        }
+        assert!(
+            bytes.is_empty(),
+            "waited for, while it may still be published"
+        );
+        ring.drain_into(&mut bytes);
+        let records: Vec<&[u8]> = bytes.chunks_exact(RECORD_SIZE).collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0][36], 0, "the abandoned slot, as no operation");
+        assert_eq!(records[1][36], OP_ALLOC);
     }
 }

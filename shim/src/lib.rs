@@ -31,6 +31,15 @@
 //! **Never fail the program.** If the pipe is missing, closed, or was never
 //! configured, the hooks still allocate and free correctly. Losing the
 //! measurement is acceptable; changing the program's behaviour is not.
+//!
+//! **No system call per record, when `omn` hands over a ring.** A record used
+//! to cost a `gettid` and a `write(2)`: measured on a million allocations, 7 ms
+//! bare became 1.13 s, about 560 ns a record, and every thread of the program
+//! queued on the one pipe (finding 47). Since then `omn` maps a shared ring
+//! (`OMN_SHIM_RING_FD`), the thread id is read once per thread, and a record
+//! is a reservation, a copy and a release store. The pipe stays as the
+//! fallback for a ring that could not be mapped, and the three rules above
+//! hold for both: a full ring drops and counts, in the ring's own header.
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_int, c_void};
@@ -41,6 +50,11 @@ mod mutex;
 
 /// Environment variable naming the file descriptor to report on.
 const FD_VARIABLE: &[u8] = b"OMN_SHIM_FD\0";
+
+/// Environment variables naming the shared ring and its size in slots, when
+/// `omn` provides one. See [`ring`].
+const RING_FD_VARIABLE: &[u8] = b"OMN_SHIM_RING_FD\0";
+const RING_SLOTS_VARIABLE: &[u8] = b"OMN_SHIM_RING_SLOTS\0";
 
 /// Environment variable naming the classes to report, as a decimal bit set of
 /// the `CLASS_*` values. Absent means the heap alone, which is what the shim
@@ -108,6 +122,10 @@ thread_local! {
     /// and `Copy`, so touching it never allocates and never registers a
     /// destructor.
     static IN_HOOK: Cell<bool> = const { Cell::new(false) };
+    /// This thread's id, read once: `gettid` is a system call, and it was half
+    /// the price of a record. Zero until the first read, and zeroed again in a
+    /// forked child, whose one thread has a new id.
+    static TID: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Allocations served before `dlsym` has produced the real allocator.
@@ -214,6 +232,12 @@ fn configure() {
     if let Some(fd) = decimal_variable(FD_VARIABLE) {
         REPORT_FD.store(fd, Ordering::Relaxed);
     }
+    if let (Some(fd), Some(slots)) = (
+        decimal_variable(RING_FD_VARIABLE),
+        decimal_variable(RING_SLOTS_VARIABLE),
+    ) {
+        ring::map(fd, slots as u64);
+    }
 }
 
 /// Configured before `main`, while the program has one thread.
@@ -224,6 +248,17 @@ fn configure() {
 /// record, and running it here is what makes that window empty in practice.
 extern "C" fn configure_at_load() {
     configure();
+    // A forked child keeps the parent thread's cached id in its one thread,
+    // whose id is the child's pid. Registered inside a guard: the registration
+    // may allocate, and that allocation is the loader's, not the program's.
+    guarded(|| {
+        // SAFETY: registering a handler with no preparation and no parent half.
+        unsafe { libc::pthread_atfork(None, None, Some(forget_thread_id)) };
+    });
+}
+
+extern "C" fn forget_thread_id() {
+    TID.with(|tid| tid.set(0));
 }
 
 #[used]
@@ -254,8 +289,16 @@ fn monotonic_ns() -> u64 {
 }
 
 fn thread_id() -> u32 {
-    // SAFETY: `gettid` takes no argument and cannot fail.
-    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+    TID.with(|cached| {
+        let known = cached.get();
+        if known != 0 {
+            return known;
+        }
+        // SAFETY: `gettid` takes no argument and cannot fail.
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+        cached.set(tid);
+        tid
+    })
 }
 
 /// Writes one allocator record, when the heap was asked for.
@@ -294,6 +337,9 @@ fn dropped_record(class: u8, count: u64) -> Record {
 /// Writes one record, dropping it rather than blocking the program.
 fn report(class: u8, record: Record) {
     configure();
+    if ring::write(class, &record) {
+        return;
+    }
     let fd = REPORT_FD.load(Ordering::Relaxed);
     if fd < 0 {
         return;
@@ -373,6 +419,122 @@ extern "C" fn flush_at_exit() {
 #[used]
 #[link_section = ".fini_array"]
 static FLUSH_AT_EXIT: extern "C" fn() = flush_at_exit;
+
+/// The shared ring `omn` maps and hands over, so that a record costs no
+/// system call.
+///
+/// A multi-producer, single-consumer ring of fixed slots in a `memfd` both
+/// sides map. The layout is fixed and mirrored in `src/collect/mem/heap/`:
+///
+/// ```text
+///   0    magic                 written by omn, checked here
+///   64   head   (u64)          the next slot to reserve, advanced by writers
+///   128  tail   (u64)          the next slot omn will read, advanced by omn
+///   192  drops  (3 x u64)      records a full ring refused, per class
+///   256  slots  (SLOT_BYTES each): a sequence word, then the 40-byte record
+/// ```
+///
+/// A writer reserves slot `h` by compare-and-swap on `head`, only while
+/// `h - tail` is under the slot count -- so a slot is never reused before omn
+/// has read it -- copies the record in, and publishes it by storing `h + 1`
+/// into the slot's sequence word with release ordering. omn reads slots in
+/// order while their sequence word says they are published, and then advances
+/// `tail`. A full ring is a drop, counted in the header, never a wait.
+mod ring {
+    use super::{Record, RECORD_SIZE};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    pub const MAGIC: u64 = 0x676e_6972_5f6e_6d6f; // "omn_ring", little endian
+    pub const HEAD: usize = 64;
+    pub const TAIL: usize = 128;
+    pub const DROPS: usize = 192;
+    pub const SLOTS: usize = 256;
+    pub const SLOT_BYTES: usize = 48;
+
+    static BASE: AtomicUsize = AtomicUsize::new(0);
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// Maps the ring omn created, or leaves the pipe in charge if it cannot.
+    pub fn map(fd: i32, slots: u64) {
+        if slots == 0 || !slots.is_power_of_two() {
+            return;
+        }
+        let length = SLOTS + slots as usize * SLOT_BYTES;
+        // SAFETY: mapping a descriptor omn passed for this purpose; a failure
+        // is checked and leaves the ring unset.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return;
+        }
+        // SAFETY: the mapping is at least `SLOTS` bytes long.
+        let magic = unsafe { (base as *const u64).read_volatile() };
+        if magic != MAGIC {
+            // SAFETY: unmapping what was just mapped.
+            unsafe { libc::munmap(base, length) };
+            return;
+        }
+        COUNT.store(slots, Ordering::Relaxed);
+        BASE.store(base as usize, Ordering::Release);
+    }
+
+    fn word(base: usize, offset: usize) -> &'static AtomicU64 {
+        // SAFETY: every offset used is inside the mapping and 8-byte aligned,
+        // and the mapping lives as long as the process.
+        unsafe { &*((base + offset) as *const AtomicU64) }
+    }
+
+    /// Writes `record` into the ring. `false` when there is no ring, so the
+    /// caller falls back to the pipe; a full ring is `true` -- the record was
+    /// handled, by being counted as dropped.
+    pub fn write(class: u8, record: &Record) -> bool {
+        let base = BASE.load(Ordering::Acquire);
+        if base == 0 {
+            return false;
+        }
+        let slots = COUNT.load(Ordering::Relaxed);
+        let head = word(base, HEAD);
+        let tail = word(base, TAIL);
+        let mut reserved = head.load(Ordering::Relaxed);
+        loop {
+            if reserved.wrapping_sub(tail.load(Ordering::Acquire)) >= slots {
+                word(base, DROPS + 8 * class.trailing_zeros() as usize)
+                    .fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            match head.compare_exchange_weak(
+                reserved,
+                reserved + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => reserved = actual,
+            }
+        }
+        let slot = base + SLOTS + (reserved & (slots - 1)) as usize * SLOT_BYTES;
+        // SAFETY: the slot is this writer's alone until it is published: it was
+        // reserved above, and omn read its previous occupant before `tail`
+        // moved past it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (record as *const Record).cast::<u8>(),
+                (slot + 8) as *mut u8,
+                RECORD_SIZE,
+            );
+        }
+        word(slot, 0).store(reserved + 1, Ordering::Release);
+        true
+    }
+}
 
 fn write_record(fd: i32, record: &Record) -> bool {
     // SAFETY: writing `RECORD_SIZE` bytes from a struct of exactly that size.
@@ -588,5 +750,24 @@ mod tests {
         let outside: *mut c_void = (&raw mut owned).cast();
         assert!(!is_bootstrap(outside));
         assert!(!is_bootstrap(std::ptr::null_mut()));
+    }
+
+    /// The ring's numbers, pinned here and in `src/collect/mem/heap/`: a
+    /// renumbering on one side would have omn read every record from the
+    /// wrong offset.
+    #[test]
+    fn the_ring_layout_is_the_one_omn_reads() {
+        assert_eq!(ring::MAGIC, 0x676e_6972_5f6e_6d6f);
+        assert_eq!(
+            (
+                ring::HEAD,
+                ring::TAIL,
+                ring::DROPS,
+                ring::SLOTS,
+                ring::SLOT_BYTES
+            ),
+            (64, 128, 192, 256, 48)
+        );
+        assert_eq!(ring::SLOT_BYTES, 8 + RECORD_SIZE);
     }
 }
