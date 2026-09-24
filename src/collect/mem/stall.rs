@@ -130,6 +130,8 @@ pub struct StallCollector {
     cgroups: Option<BTreeSet<u64>>,
     program: Option<StallProgram>,
     losses: Losses,
+    /// The kernel's skipped runs of the program, cumulative, as last read.
+    skipped: u64,
     /// The programs' counters are cumulative, so what is new is the difference.
     dropped: StallDrops,
     window_opened_ns: u64,
@@ -177,6 +179,7 @@ impl StallCollector {
             cgroups,
             program: None,
             losses: Losses::default(),
+            skipped: 0,
             dropped: StallDrops::default(),
             window_opened_ns: 0,
             run_opened_ns: 0,
@@ -291,6 +294,20 @@ impl StallCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        // The kernel's own count of runs it skipped, which no counter of the
+        // program's can hold. It is the machine's -- the program runs on every
+        // occurrence and narrows to the target after -- so it is an upper
+        // bound on what the target lost, and the reason says so.
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of this program because one was already running on \
+                 that cpu, so an occurrence was never seen; the count is the machine's, an \
+                 upper bound on the target's share, and every total here is a lower bound",
+            );
+            self.skipped = skipped;
+        }
         let now = program.dropped();
         let episode = self.stall.episode();
         for (new, old, reason) in [

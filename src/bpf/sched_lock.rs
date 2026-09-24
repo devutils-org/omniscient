@@ -517,13 +517,22 @@ pub struct LockProgram {
     rows: Hash,
     drops: Counters,
     stacks: StackTraces,
-    _begin_program: OwnedFd,
+    begin_program: OwnedFd,
     _begin_link: OwnedFd,
-    _end_program: OwnedFd,
+    end_program: OwnedFd,
     _end_link: OwnedFd,
 }
 
 impl LockProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.begin_program, &self.end_program])
+    }
+
     pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
@@ -574,9 +583,9 @@ impl LockProgram {
             rows,
             drops,
             stacks,
-            _begin_program: begin_program,
+            begin_program,
             _begin_link: begin_link,
-            _end_program: end_program,
+            end_program,
             _end_link: end_link,
         })
     }

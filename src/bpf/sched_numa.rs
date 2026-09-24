@@ -201,11 +201,20 @@ pub struct NumaDrops {
 pub struct NumaProgram {
     rows: Hash,
     drops: Counters,
-    _program: OwnedFd,
+    program: OwnedFd,
     _link: OwnedFd,
 }
 
 impl NumaProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program])
+    }
+
     pub fn load() -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_numa_rows")
@@ -234,7 +243,7 @@ impl NumaProgram {
         Ok(Self {
             rows,
             drops,
-            _program: program,
+            program,
             _link: link,
         })
     }

@@ -347,11 +347,17 @@ pub struct GpuJobProgram {
     in_flight: Hash,
     done: Hash,
     drops: Counters,
-    _run: PerfAttachment,
-    _done: PerfAttachment,
+    run: PerfAttachment,
+    done_attachment: PerfAttachment,
 }
 
 impl GpuJobProgram {
+    /// Runs the kernel skipped because one of the two programs was already
+    /// running on that cpu; see `WakeupProgram::skipped`.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([self.run.program(), self.done_attachment.program()])
+    }
+
     pub fn load() -> Result<Self, String> {
         let fences = Fences::discover()?;
 
@@ -392,8 +398,8 @@ impl GpuJobProgram {
             in_flight,
             done,
             drops,
-            _run: run,
-            _done: done_attachment,
+            run,
+            done_attachment,
         })
     }
 

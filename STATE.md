@@ -251,9 +251,9 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **The decisions nobody has taken**: `CAP_NET_RAW` for `net.capture`, whether
-  a polled counter takes a closing read (below), and dynamic binary
-  instrumentation (`DECISIONS.md`, open).
+- **No decision is open.** `CAP_NET_RAW`, the closing read and dynamic binary
+  instrumentation were the last three, and the tenth wave settled all of them in
+  `DECISIONS.md`.
 
 The fifth wave closed 52 of the sixty-three defects the scenario wave found;
 the eleven that are left are named in `docs/fixes/`.
@@ -338,12 +338,13 @@ sources and put the capability advice where the failure actually is.
   `not_captured` beside it, vendor library versions included. This line stayed
   in two documents after the thing it describes was done, which is its own small
   lesson about where a claim lives.
-- **`net.capture` needs `CAP_NET_RAW`**, which the build does not grant. That is
-  a decision rather than an omission: the capability lets the binary read every
-  frame on the machine, and the scenario wave deliberately left it to be made
-  rather than making it.
-- **The closing read of a polled counter.** `net` takes one and `io`/`power`
-  deliberately do not, for a reason each. Both cannot be right.
+- **`net.capture` needs `CAP_NET_RAW`**, which `make` grants only when asked,
+  as `make CAPTURE=1`. Settled in `DECISIONS.md` in the tenth wave: it is the one
+  capability here that acts rather than observes.
+- **The closing read of a polled counter** was settled in `DECISIONS.md` ("the
+  runner closes the window"): `io` and `power` are right, and `net/dev.rs` still
+  reads again in `stop`. The fix is one function in a file stream N owns this
+  wave, and is filed with it.
 
 ---
 

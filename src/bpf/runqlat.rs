@@ -483,9 +483,9 @@ pub struct RunqLatProgram {
     queued: Hash,
     rows: Hash,
     drops: Counters,
-    _wakeup_program: OwnedFd,
+    wakeup_program: OwnedFd,
     _wakeup_link: OwnedFd,
-    _switch_program: OwnedFd,
+    switch_program: OwnedFd,
     _switch_link: OwnedFd,
 }
 
@@ -499,6 +499,15 @@ pub struct DrainLosses {
 }
 
 impl RunqLatProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.wakeup_program, &self.switch_program])
+    }
+
     pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
@@ -541,9 +550,9 @@ impl RunqLatProgram {
             queued,
             rows,
             drops,
-            _wakeup_program: wakeup_program,
+            wakeup_program,
             _wakeup_link: wakeup_link,
-            _switch_program: switch_program,
+            switch_program,
             _switch_link: switch_link,
         })
     }

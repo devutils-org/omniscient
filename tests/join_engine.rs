@@ -903,10 +903,17 @@ fn a_half_blocked_task_decomposes_as_the_kernel_says_and_its_releaser_heads_the_
         "the responder releases the driver every round trip, and the top chain is `{chain}`: \
          {join}"
     );
+    // The slack is three plus whatever either side says it lost: a wakeup the
+    // kernel skipped because the program was already running on that cpu is
+    // counted as dropped since the tenth wave, and a chain one short for a
+    // counted loss is the run being honest, not the join being wrong.
     let wakeups = number(&top["wakeups"]);
+    let lost = number(&run.result("released-by")["losses"]["dropped"])
+        + number(&run.result("switched-out")["losses"]["dropped"]);
     assert!(
-        (wakeups - ROUND_TRIPS).abs() <= 3.0,
-        "the responder released the driver {ROUND_TRIPS} times and its chain folds {wakeups}"
+        (wakeups - ROUND_TRIPS).abs() <= 3.0 + lost,
+        "the responder released the driver {ROUND_TRIPS} times and its chain folds {wakeups}, \
+         with {lost} counted lost"
     );
     assert!(
         number(&join["top"][1]["wakeups"]) < ROUND_TRIPS / 10.0,

@@ -297,7 +297,9 @@ pub enum Cost {
     Med,
     /// 5 to 20 %.
     High,
-    /// Over 10x: replay or dynamic binary instrumentation.
+    /// Over 10x: kernel replay, as a GPU profiler does it to read more counters
+    /// than the hardware has. Not dynamic binary instrumentation, which
+    /// `DECISIONS.md` rules out as a backend.
     Extreme,
 }
 

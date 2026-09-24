@@ -286,4 +286,37 @@ mod tests {
         assert!(advice.contains("CAP_BPF"), "{advice}");
         assert!(advice.contains("setcap"), "{advice}");
     }
+
+    /// Every file that attaches a raw tracepoint says how many runs the kernel
+    /// skipped. A raw tracepoint's program runs behind a per-cpu guard, and a
+    /// run that finds it taken -- an interrupt re-entering it -- is counted in
+    /// `bpf_prog_info.recursion_misses` and nowhere else. Fifteen programs went
+    /// three waves without reading it, because the file that first learned it
+    /// had no way to reach the others; this is the test in every file of the
+    /// kind that finding 46 asks for. `mod.rs` and `syscall.rs` define the
+    /// attach and attach nothing themselves.
+    #[test]
+    fn every_program_that_attaches_a_raw_tracepoint_reports_the_runs_it_skipped() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let mut silent = Vec::new();
+        for entry in std::fs::read_dir(&directory).expect("src/bpf is readable") {
+            let path = entry.expect("a directory entry").path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if !name.ends_with(".rs") || name == "mod.rs" || name == "syscall.rs" {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("a source file");
+            if source.contains("raw_tracepoint_open(") && !source.contains("pub fn skipped(") {
+                silent.push(name.to_owned());
+            }
+        }
+        silent.sort();
+        assert!(
+            silent.is_empty(),
+            "these attach a raw tracepoint and never read the runs the kernel skipped: {silent:?}"
+        );
+    }
 }

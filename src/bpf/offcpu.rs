@@ -515,9 +515,9 @@ pub struct OffCpuProgram {
     totals: Hash,
     drops: Counters,
     stacks: StackTraces,
-    _program: OwnedFd,
+    program: OwnedFd,
     _link: OwnedFd,
-    _wakeup_program: OwnedFd,
+    wakeup_program: OwnedFd,
     _wakeup_link: OwnedFd,
 }
 
@@ -536,6 +536,15 @@ pub struct DrainLosses {
 }
 
 impl OffCpuProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program, &self.wakeup_program])
+    }
+
     pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
@@ -605,9 +614,9 @@ impl OffCpuProgram {
             totals,
             drops,
             stacks,
-            _program: program,
+            program,
             _link: link,
-            _wakeup_program: wakeup_program,
+            wakeup_program,
             _wakeup_link: wakeup_link,
         })
     }

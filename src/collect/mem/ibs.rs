@@ -461,8 +461,9 @@ impl IbsCollector {
     ///
     /// Every memory access is made into an event before either question looks
     /// at it, because the tally below is taken over the accesses the request's
-    /// filter keeps: an L1 hit is never emitted by `mem.latency`, and the count
-    /// of them is only worth reading if it is a count of the ones asked about.
+    /// filter keeps: an L1 hit is emitted by `mem.latency` without a latency,
+    /// and the count of them is only worth reading if it is a count of the ones
+    /// asked about.
     fn keep(&mut self, sample: &Sample, seq: u64) -> Option<Event> {
         self.tally.ops += 1;
         let access = sample.access?;
@@ -489,8 +490,12 @@ impl IbsCollector {
         if hitm {
             self.tally.hitm += 1;
         }
+        // Every sampled load, timed or not. A load this cpu did not time -- an
+        // L1 hit, on family 17h -- is an event with its level and no
+        // `latency_cycles`, which the emits count as `unmeasured` beside the
+        // distribution instead of leaving it to a sentence.
         let kept = match self.question {
-            Question::Latency => op == MemOp::Load && access.latency_cycles > 0,
+            Question::Latency => op == MemOp::Load,
             Question::Sharing => hitm,
         };
         if !kept {
@@ -537,17 +542,24 @@ impl IbsCollector {
                 _ => None,
             })
             .collect();
-        let mut attrs = vec![
-            match self.question {
-                Question::Latency => Attr::uint("latency_cycles", u64::from(access.latency_cycles)),
-                Question::Sharing => Attr::uint("count", 1),
-            },
+        let mut attrs = Vec::with_capacity(8);
+        match self.question {
+            // Absent rather than zero when the unit did not time the load: a
+            // zero would be a measurement of an instant access.
+            Question::Latency if access.latency_cycles > 0 => attrs.push(Attr::uint(
+                "latency_cycles",
+                u64::from(access.latency_cycles),
+            )),
+            Question::Latency => {}
+            Question::Sharing => attrs.push(Attr::uint("count", 1)),
+        }
+        attrs.extend([
             Attr::text("level", access.source.level().as_str()),
             Attr::uint("addr", sample.addr),
             Attr::uint("line", line),
             Attr::uint("ip", sample.ip),
             Attr::uint("tlb_miss", u64::from(access.source.tlb_miss())),
-        ];
+        ]);
         if self.question == Question::Sharing {
             attrs.push(Attr::uint(
                 "latency_cycles",
@@ -713,9 +725,10 @@ impl Collector for IbsCollector {
                         .collect::<Vec<_>>()
                         .join(", ");
                     notes.push(format!(
-                        "{untimed} of {} sampled loads{} carry no latency and are in no bucket: \
-                         this cpu times a load only when it misses L1d, so the distribution is \
-                         of the loads that missed; sampled loads by level: {levels}",
+                        "{untimed} of {} sampled loads{} carry no latency and are counted as \
+                         unmeasured rather than bucketed: this cpu times a load only when it \
+                         misses L1d, so the distribution is of the loads that missed; sampled \
+                         loads by level: {levels}",
                         tally.loads,
                         if self.filter.is_some() {
                             " the filter kept"

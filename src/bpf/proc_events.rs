@@ -514,11 +514,20 @@ fn signal_instructions(
 pub struct EventStream {
     ring: RingBuffer,
     drops: Counters,
-    _program: OwnedFd,
+    program: OwnedFd,
     _link: OwnedFd,
 }
 
 impl EventStream {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program])
+    }
+
     /// Creates the two maps, builds the program with their descriptors, loads
     /// it and attaches it to `tracepoint`.
     fn load(
@@ -559,7 +568,7 @@ impl EventStream {
         Ok(Self {
             ring,
             drops,
-            _program: program,
+            program,
             _link: link,
         })
     }
@@ -588,6 +597,11 @@ impl EventStream {
 pub struct ExecProgram(EventStream);
 
 impl ExecProgram {
+    /// See [`EventStream::skipped`].
+    pub fn skipped(&self) -> u64 {
+        self.0.skipped()
+    }
+
     pub fn load(requested_ring_bytes: usize) -> Result<Self, String> {
         EventStream::load(
             "sched_process_exec",
@@ -611,6 +625,11 @@ impl ExecProgram {
 pub struct ExitProgram(EventStream);
 
 impl ExitProgram {
+    /// See [`EventStream::skipped`].
+    pub fn skipped(&self) -> u64 {
+        self.0.skipped()
+    }
+
     pub fn load(requested_ring_bytes: usize) -> Result<Self, String> {
         EventStream::load(
             "sched_process_exit",
@@ -634,6 +653,11 @@ impl ExitProgram {
 pub struct SignalProgram(EventStream);
 
 impl SignalProgram {
+    /// See [`EventStream::skipped`].
+    pub fn skipped(&self) -> u64 {
+        self.0.skipped()
+    }
+
     pub fn load(target_tgid: Option<u32>, requested_ring_bytes: usize) -> Result<Self, String> {
         EventStream::load(
             "signal_generate",

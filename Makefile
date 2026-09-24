@@ -19,7 +19,12 @@
 
 PROFILE   ?= debug
 BINARY     = target/$(PROFILE)/omn
-CAPS       = cap_bpf,cap_perfmon+ep
+comma     := ,
+# `make CAPTURE=1` adds CAP_NET_RAW, which only `net.capture` needs and which is
+# never granted by default: it also lets the binary send arbitrary frames, which
+# is not observing. DECISIONS.md, "Settled in the tenth wave", has the reasoning.
+CAPS       = cap_bpf,cap_perfmon$(if $(CAPTURE),$(comma)cap_net_raw,)+ep
+CAPCHECK   = $(if $(CAPTURE),cap_net_raw,cap_bpf)
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
 .PHONY: vertical-server all build release caps test check demo demo-all man fmt clippy clean
@@ -68,7 +73,7 @@ release:
 #
 #   <user> ALL=(root) NOPASSWD: /usr/sbin/setcap $(CAPS) <absolute path to $(BINARY)>
 caps:
-	@if getcap $(BINARY) 2>/dev/null | grep -q cap_bpf; then \
+	@if getcap $(BINARY) 2>/dev/null | grep -q $(CAPCHECK); then \
 	    echo "capabilities already on $(BINARY)"; \
 	elif sudo -n setcap $(CAPS) $(BINARY) 2>/dev/null; then \
 	    echo "granted $(CAPS) to $(BINARY)"; \

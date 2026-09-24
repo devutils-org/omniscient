@@ -191,7 +191,7 @@ fn instructions(
 pub struct WakeupProgram {
     ring: RingBuffer,
     drops: Counters,
-    _program: OwnedFd,
+    program: OwnedFd,
     _link: OwnedFd,
 }
 
@@ -204,6 +204,15 @@ pub struct WakeupProgram {
 const LICENSE: &str = "GPL";
 
 impl WakeupProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program])
+    }
+
     /// Loads and attaches the program, or says why the kernel refused.
     pub fn load(target_tgid: Option<u32>, requested_ring_bytes: usize) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
@@ -238,7 +247,7 @@ impl WakeupProgram {
         Ok(Self {
             ring,
             drops,
-            _program: program,
+            program,
             _link: link,
         })
     }

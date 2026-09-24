@@ -162,54 +162,79 @@ every collector written since.
 
 ---
 
+## Settled in the tenth wave: `CAP_NET_RAW` is opt-in
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `CAP_NET_RAW` for `net.capture` | **Never granted by `make`; `make CAPTURE=1` grants it with the other two.** The capture's refusal names that command. | It is the only capability here that acts rather than observes. |
+
+The scenario wave left this open on purpose, and the argument that settles it
+is not the one it was left open for. It was left open because the capability
+lets the binary read every frame on the machine -- but `CAP_BPF` and
+`CAP_PERFMON` already let a tracing program read kernel memory, packets
+included, so reading is not what `CAP_NET_RAW` adds. What it adds is **sending**:
+a raw socket can put any frame on any interface, spoofed or not. Boundary 5
+says this tool observes and does not act on the machine, and a capability whose
+distinctive power is acting has no place in the default grant, however narrow
+the one source that wants it.
+
+It is also the only capability that one source alone needs. Every eBPF and
+per-cpu perf backend shares the other two, which is why `make` grants them
+unasked; `net.capture` is one source out of a hundred, and a person who wants it
+can say so once per build. So the capability is opt-in rather than refused: the
+refusal already names it, and `make CAPTURE=1` is what grants it. Like the other
+two it does not survive a relink, and like them it is re-applied by the build
+that asked for it. A sudoers line for it is its own line, because it is its own
+command.
+
+Reversible at the price of one Makefile variable. What would reverse it is a
+capture path that does not need a raw socket at all -- a BPF program copying
+frames into a ring from a tracepoint -- which would move `net.capture` under
+the two capabilities already granted.
+
+---
+
+## Settled in the tenth wave: no dynamic binary instrumentation backend
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Dynamic binary instrumentation | **Never a backend.** If it ever earns a place it is as an import of another tool's output, the way LTTng-UST would be, never as a mode of a session. | Under a DBI engine the program is not running on this machine and not on this clock, which are the two things every other line in this file assumes. |
+
+It was left open because the tree held a contradiction: `Cost::Extreme` was
+documented as *"replay or dynamic binary instrumentation"* while the accepted
+boundaries put DBI outside the kernel-level core. The contradiction resolves
+without deleting anything, because the band never needed DBI to exist: the two
+backends that declare it, `gpu.counters`' `vendor:ncu` and `vendor:rocprof`,
+are **kernel replay** -- the GPU profiler runs each kernel several times to
+read more counters than the hardware has. So the band stays, its comment names
+replay only, and the boundary stands.
+
+What decided the rest is the reasoning the open line already gave, taken in
+order of what it would cost:
+
+- **The clock.** Under DBI wall time dilates twenty- to a hundred-fold. That is
+  not an uncertain timestamp, which `ts_err_ns` could carry; it is a different
+  time base, and every temporal join, every wakeup chain and every
+  decomposition means nothing across it. Phase 1's one non-negotiable is one
+  clock domain.
+- **The machine.** Its counters, caches and timings are the simulator's. A
+  session that mixed a DBI source with any other would be measuring two
+  machines at once, and the request model would need a whole-session mode to
+  refuse that -- a shape it does not have and should not grow for one backend.
+- **Determinism.** A cachegrind run is exact about a cache that is not this
+  machine's. The `Determinism` enum says "never `exact`" on purpose.
+
+Someone who wants what Valgrind or DynamoRIO measures should run Valgrind or
+DynamoRIO; this tool's thesis is the real machine. Reversible, like every line
+here, by writing the import -- which touches no collector.
+
+---
+
 ## Open
 
-These do not block the request surface, which is machine-independent by
-construction. They block the resolver, which is the next milestone.
-
-| Decision | Options | What it costs to decide either way |
-|---|---|---|
-| Dynamic binary instrumentation | Never · a `dbi:` backend, mutually exclusive with every other | The catalog already has a slot for it and the boundaries already exclude it, and those two cannot both be right. See below. |
-
-### Dynamic binary instrumentation, and the contradiction already in the tree
-
-`Cost::Extreme` is documented as *"over 10x: replay or dynamic binary
-instrumentation"*, so the cost model has a band reserved for a mechanism the
-accepted boundaries say is *"outside the kernel-level core"*. One of those is
-wrong, and the question has never been asked in so many words.
-
-**Writing a DBI engine is not on the table.** Valgrind, DynamoRIO and Pin have
-ten to twenty years each, and the cost is not the JIT — it is the long tail of
-SIMD extensions arriving every year, syscalls, TLS, signals, self-modifying
-code and threads. That is a second product, and it is not this one's thesis.
-
-**Consuming one is a different question, and the answer is not obviously no.**
-A `dbi:valgrind` backend would produce events with a `task:tid` key, counters,
-and attribution by code site — the shape every other collector produces. Three
-things make it unlike anything else here, and each is a reason the decision
-cannot be made by adding a catalog entry:
-
-- **It is mutually exclusive with the machine.** Under a DBI engine the program
-  is not running on this cpu: the PMU counters, the timings and the cache are
-  the simulator's. It is a mode of a whole session rather than a backend chosen
-  per source, and the validator would have to refuse every combination — which
-  is a shape the request model does not currently have.
-- **Its clock is a different domain, and that is phase 1's one
-  non-negotiable.** Wall time dilates twenty- to a hundred-fold. `ts_err_ns`
-  exists for a device whose timestamps are *uncertain*; a dilated clock is not
-  uncertain, it is a different time base, and every temporal join and every
-  wakeup chain means nothing across it. Only identity keys survive.
-- **It would need a fourth `Determinism`.** The enum is `low`, `medium`, `high`,
-  and its doc says *"never `exact`: bit-exact determinism is outside this
-  tool's boundary"*. A cachegrind run is exact, and it is exact about **a cache
-  that is not this machine's** — no prefetcher, no TLB, no coherence. Perfectly
-  reproducible and only moderately predictive of real time, which is the
-  determinism-against-validity trade in its sharpest form.
-
-Left open rather than settled, because settling it means either deleting a cost
-band or amending a boundary, and both deserve to be done deliberately. If it is
-ever taken, **DynamoRIO is the entry point rather than Valgrind**: 2–10× instead
-of 20–100×, and a client tool is a project of weeks rather than years.
+Nothing is open. The last line, dynamic binary instrumentation, was settled in
+the tenth wave, below. A new open line goes here with what it costs to leave it
+open, which is the habit that kept this section honest.
 
 ---
 

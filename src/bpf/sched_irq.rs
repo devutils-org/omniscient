@@ -334,13 +334,22 @@ pub struct IrqProgram {
     rows: Hash,
     drops: Counters,
     _in_flight: Counters,
-    _entry_program: OwnedFd,
+    entry_program: OwnedFd,
     _entry_link: OwnedFd,
-    _exit_program: OwnedFd,
+    exit_program: OwnedFd,
     _exit_link: OwnedFd,
 }
 
 impl IrqProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.entry_program, &self.exit_program])
+    }
+
     pub fn load() -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
@@ -380,9 +389,9 @@ impl IrqProgram {
             rows,
             drops,
             _in_flight: in_flight,
-            _entry_program: entry_program,
+            entry_program,
             _entry_link: entry_link,
-            _exit_program: exit_program,
+            exit_program,
             _exit_link: exit_link,
         })
     }

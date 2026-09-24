@@ -58,7 +58,7 @@ To be recalled at every phase — these are the project's natural drifts:
 | Clock | `CLOCK_MONOTONIC` **everywhere** | non-negotiable, see Phase 1 |
 | Privileges | root · `CAP_BPF`+`CAP_PERFMON` · unprivileged degraded | changes half the backends |
 | Scope | single machine (phases 1-8) · fleet (later) | multi-host adds inter-machine clock drift |
-| Usage target | one-off session · continuous daemon · daemon with a flight recorder | sampling vs capture, online aggregation vs raw storage. The third is the second plus a trigger, and it is what catches a p99.9 that cannot be reproduced. Still open; `DECISIONS.md` says what it costs to leave it so |
+| Usage target | one-off session · continuous daemon · daemon with a flight recorder | sampling vs capture, online aggregation vs raw storage. The third is the second plus a trigger, and it is what catches a p99.9 that cannot be reproduced. Settled in the ninth wave: a session, with hot attach and the flight recorder inside it and no daemon (`DECISIONS.md`) |
 
 **Output**: a filled-in `DECISIONS.md`. Every line settled, with the reason.
 

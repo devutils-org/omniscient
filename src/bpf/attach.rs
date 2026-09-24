@@ -95,10 +95,15 @@ pub enum Scope {
 /// why the program is held here rather than by the caller.
 pub struct PerfAttachment {
     events: Vec<OwnedFd>,
-    _program: OwnedFd,
+    program: OwnedFd,
 }
 
 impl PerfAttachment {
+    /// The program the events run, for what the kernel counts about it.
+    pub fn program(&self) -> &OwnedFd {
+        &self.program
+    }
+
     /// How many perf events this attachment holds open, which is one per cpu
     /// for a machine-wide attach and one for a thread.
     pub fn events(&self) -> usize {
@@ -432,10 +437,7 @@ fn open_and_set(
         }
         events.push(fd);
     }
-    Ok(PerfAttachment {
-        events,
-        _program: program,
-    })
+    Ok(PerfAttachment { events, program })
 }
 
 /// Where this machine has `tracefs`, if it has it anywhere.

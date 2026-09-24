@@ -6197,3 +6197,37 @@ in a path the change under test touched.
   -- a measurement of the tool's own cpu against a read interval, which a
   loaded machine moves.
 - `scenario_sched::a_blocking_stack_names_the_call_that_blocked`.
+
+### Answered: the kernel's skips, on every raw-tracepoint program
+
+The eighth wave's "the kernel's skips are a loss nothing counts" is closed for
+the fifteen programs it named: `runqlat`, `offcpu`, `wakeup`, `migrate`, the
+four `sched_*` raw-tracepoint programs, `proc_syscall`, the three
+`proc_events` streams, `mem_alloc`, `mem_stall`, and `sched_drm`'s classic
+tracepoint pair through a new `PerfAttachment::program`. Each program has
+`skipped()`, each collector reads it beside its drop counters into
+`Losses::dropped`, and the reason says the count is the machine's.
+
+It was not theoretical. The first run after the change counted skips in
+`sched.lock` under `scenario_sched`'s contended workload, and a join that
+folded 595 of 600 known wakeups -- which had passed with a fixed slack of three
+-- now has a counted loss beside it; `tests/join_engine.rs` carries that count
+as its slack. A unit test in `src/bpf/mod.rs` refuses any file that attaches a
+raw tracepoint without a `skipped()`, which is the per-file test finding 46
+asks for.
+
+Still open from the same entry: the drain racing the program's increment in
+`runqlat` and `proc_syscall`, which the two-map generation scheme of
+`fentry::HistogramProgram` would close.
+
+### To stream N, for `src/collect/net/`: two lines the tenth wave's decisions leave you
+
+- **`net/dev.rs::stop` takes a closing read**, and `DECISIONS.md` ("the runner
+  closes the window") settled that it should not: the runner's last round is
+  the closing read, and the extra one covers tens of microseconds and emits a
+  zero-delta point at the previous offset. `io` and `power` already refuse to
+  read there. Wanted: `stop` returns what is buffered and reads nothing, and a
+  scenario that no series ends in two points at one offset.
+- **`net/capture.rs`'s refusal** names `CAP_NET_RAW`. Since the tenth wave
+  `make CAPTURE=1` is what grants it (`DECISIONS.md`, "`CAP_NET_RAW` is
+  opt-in"); the refusal should name that command beside the capability.

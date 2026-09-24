@@ -50,6 +50,8 @@ struct Streaming {
     losses: Losses,
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,
+    /// The kernel's skipped runs, cumulative in the same way.
+    skipped: u64,
 }
 
 impl Streaming {
@@ -58,6 +60,7 @@ impl Streaming {
             id: CollectorId::new(id),
             losses: Losses::default(),
             dropped: 0,
+            skipped: 0,
         }
     }
 
@@ -73,7 +76,19 @@ impl Streaming {
     /// Reads a program's own drop counter, which is the only place an event the
     /// ring could not hold is recorded: the BPF ring buffer does not report its
     /// own overflows, so an unread drop is an event that simply never existed.
-    fn absorb_drops(&mut self, dropped: u64, what: &str) {
+    ///
+    /// `skipped` is the kernel's count of runs it skipped because the program
+    /// was already running on that cpu, which no counter of the program's can
+    /// hold. It is the machine's, and the reason says so.
+    fn absorb_drops(&mut self, dropped: u64, skipped: u64, what: &str) {
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(format!(
+                "the kernel skipped a run of the {what} program because one was already running \
+                 on that cpu, so an event was never seen; the count is the machine's"
+            ));
+            self.skipped = skipped;
+        }
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
             self.losses.note(format!(
@@ -239,7 +254,7 @@ impl Collector for ExecCollector {
         self.drain_into(&mut events, seq);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
-            self.inner.absorb_drops(dropped, "exec");
+            self.inner.absorb_drops(dropped, program.skipped(), "exec");
         }
         Ok(events)
     }
@@ -249,7 +264,7 @@ impl Collector for ExecCollector {
         self.drain_into(&mut trailing, u64::MAX / 2);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
-            self.inner.absorb_drops(dropped, "exec");
+            self.inner.absorb_drops(dropped, program.skipped(), "exec");
         }
         self.program = None;
         trailing
@@ -417,7 +432,7 @@ impl Collector for ExitCollector {
         self.drain_into(&mut events, seq);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
-            self.inner.absorb_drops(dropped, "exit");
+            self.inner.absorb_drops(dropped, program.skipped(), "exit");
         }
         Ok(events)
     }
@@ -427,7 +442,7 @@ impl Collector for ExitCollector {
         self.drain_into(&mut trailing, u64::MAX / 2);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
-            self.inner.absorb_drops(dropped, "exit");
+            self.inner.absorb_drops(dropped, program.skipped(), "exit");
         }
         self.program = None;
         trailing
@@ -677,7 +692,8 @@ impl Collector for SignalCollector {
         self.drain_into(&mut events, seq);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
-            self.inner.absorb_drops(dropped, "signal");
+            self.inner
+                .absorb_drops(dropped, program.skipped(), "signal");
         }
         Ok(events)
     }
@@ -687,7 +703,8 @@ impl Collector for SignalCollector {
         self.drain_into(&mut trailing, u64::MAX / 2);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
-            self.inner.absorb_drops(dropped, "signal");
+            self.inner
+                .absorb_drops(dropped, program.skipped(), "signal");
         }
         self.program = None;
         if self.mode == Mode::Count {

@@ -1720,14 +1720,17 @@ fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
         !reasons.is_empty(),
         "{lost} waits were dropped and the run gave no reason for any of them"
     );
-    // Each of the four things this source can fail to record has its own
+    // Each of the things this source can fail to record has its own
     // sentence. A reason that is none of them is a number with prose around it.
+    // The last is the kernel's: a run of the program skipped because one was
+    // already running on that cpu, which this contended workload does provoke.
     let known = [
         "than the in-flight map holds",
         "without ending its first",
         "already being updated on this cpu",
         "before it began",
         "than the histogram holds",
+        "already running on that cpu",
     ];
     for reason in reasons.keys() {
         assert!(

@@ -400,9 +400,9 @@ pub struct SyscallProgram {
     pending: Hash,
     rows: Hash,
     drops: Counters,
-    _enter_program: OwnedFd,
+    enter_program: OwnedFd,
     _enter_link: OwnedFd,
-    _exit_program: OwnedFd,
+    exit_program: OwnedFd,
     _exit_link: OwnedFd,
 }
 
@@ -416,6 +416,15 @@ pub struct SyscallDrainLosses {
 }
 
 impl SyscallProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.enter_program, &self.exit_program])
+    }
+
     pub fn load(narrowing: Narrowing) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
@@ -458,9 +467,9 @@ impl SyscallProgram {
             pending,
             rows,
             drops,
-            _enter_program: enter_program,
+            enter_program,
             _enter_link: enter_link,
-            _exit_program: exit_program,
+            exit_program,
             _exit_link: exit_link,
         })
     }

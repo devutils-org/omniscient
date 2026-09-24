@@ -490,7 +490,7 @@ pub struct StallProgram {
     rows: Hash,
     drops: Counters,
     absent: Vec<String>,
-    _programs: Vec<OwnedFd>,
+    programs: Vec<OwnedFd>,
     _links: Vec<OwnedFd>,
 }
 
@@ -506,6 +506,15 @@ pub struct StallDrops {
 }
 
 impl StallProgram {
+    /// Runs the kernel skipped because one of these programs was already
+    /// running on that cpu -- an interrupt re-entering it, since a raw
+    /// tracepoint runs with preemption off. The kernel counts them in
+    /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
+    /// program's own counters can say an occurrence was never seen.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped(self.programs.iter())
+    }
+
     pub fn load(stall: Stall, target_tgid: Option<u32>) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let [live_name, rows_name, drops_name, begin_name, end_name] = stall.names();
@@ -586,7 +595,7 @@ impl StallProgram {
             rows,
             drops,
             absent,
-            _programs: programs,
+            programs,
             _links: links,
         })
     }

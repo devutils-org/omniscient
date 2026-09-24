@@ -87,6 +87,8 @@ pub struct RunqLatCollector {
     filter: Option<u32>,
     program: Option<RunqLatProgram>,
     losses: Losses,
+    /// The kernel's skipped runs of the program, cumulative, as last read.
+    skipped: u64,
     notes: Vec<String>,
     /// The program's counters are cumulative, so what is new is the difference.
     dropped_queued: u64,
@@ -113,6 +115,7 @@ impl RunqLatCollector {
             filter,
             program: None,
             losses: Losses::default(),
+            skipped: 0,
             notes: Vec::new(),
             dropped_queued: 0,
             dropped_rows: 0,
@@ -202,6 +205,20 @@ impl RunqLatCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        // The kernel's own count of runs it skipped, which no counter of the
+        // program's can hold. It is the machine's -- the program runs on every
+        // occurrence and narrows to the target after -- so it is an upper
+        // bound on what the target lost, and the reason says so.
+        let skipped = program.skipped();
+        if skipped > self.skipped {
+            self.losses.dropped += skipped - self.skipped;
+            self.losses.note(
+                "the kernel skipped a run of this program because one was already running on \
+                 that cpu, so an occurrence was never seen; the count is the machine's, an \
+                 upper bound on the target's share, and every total here is a lower bound",
+            );
+            self.skipped = skipped;
+        }
         let (queued, rows) = program.dropped();
         if queued > self.dropped_queued {
             self.losses.dropped += queued - self.dropped_queued;
