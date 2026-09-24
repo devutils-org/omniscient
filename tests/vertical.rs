@@ -7,13 +7,20 @@
 //! and this file is the only reader.
 //!
 //! The session is `examples/vertical-one-request.yml`, run once and shared by
-//! every test below. Three requests:
+//! every test below. Five requests:
 //!
 //! | id     | injected                                     | must land in                  |
 //! |--------|----------------------------------------------|-------------------------------|
 //! | `a001` | 40 ms waiting for a lock held under a sleep  | `lock_wait`, holder named     |
 //! | `a002` | 64 pages read with `O_DIRECT`, cache dropped | `block_io`, 64 requests       |
 //! | `a003` | 20 ms on the lock, then 32 pages             | both, and nowhere else        |
+//! | `a004` | the client pauses 30 ms mid-request          | `net_rx`                      |
+//! | `a005` | a client that reads 128 KiB slowly           | `net_tx`, not `lock_wait`     |
+//!
+//! The last two are injected by the client, which is why they need no root:
+//! `tc netem` would put a delay where the tool never sees it happen, and a
+//! client that pauses, or reads slowly through a small receive buffer, puts one
+//! exactly where the tool does.
 //!
 //! What is independent of the tool, and what each check leans on:
 //!
@@ -29,6 +36,14 @@
 //!   response, which is the latency the roadmap's 10 % is measured against.
 //! - **The thread ids** each role prints, which the holder the tool names must
 //!   be, and which no request's thread may be but the worker's.
+//! - **The client's own stamps**, on `CLOCK_MONOTONIC` like the kernel's: its
+//!   two sends either side of the pause, and for the slow reader the start of
+//!   the read after which less than a receive buffer was left (the earliest the
+//!   response's last byte can have left the server) and the end of its last
+//!   read (the latest). The tool's first-byte and last-byte stamps are held
+//!   between them in absolute time, not as durations.
+//! - **The socket's cookie**, which the server reads with `SO_COOKIE` on the
+//!   connection it accepted, and which the tool's `sock` key must be.
 //!
 //! The four states of `net.request` add up to its total by construction, and
 //! nothing here treats that as evidence. The evidence is which row a delay
@@ -85,34 +100,49 @@ fn server_path() -> PathBuf {
 /// Builds the server once per test process, or says why it cannot.
 fn server() -> Result<PathBuf, String> {
     static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    BUILT.get_or_init(|| build(server_path(), &[])).clone()
+}
+
+/// The same server with both probes behind a semaphore.
+fn guarded_server() -> Result<PathBuf, String> {
+    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            let path = server_path();
-            let dir = path.parent().expect("a directory");
-            std::fs::create_dir_all(dir)
-                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
-            let source = dir.join("server.c");
-            std::fs::write(&source, SERVER_SOURCE).map_err(|error| error.to_string())?;
-            // Built beside and renamed, so a half-written binary is never at
-            // the path the example launches.
-            let partial = dir.join(format!("server.{}", std::process::id()));
-            let built = Command::new("cc")
-                .args(["-O0", "-pthread", "-o"])
-                .arg(&partial)
-                .arg(&source)
-                .output()
-                .map_err(|error| format!("no C compiler (`cc`) to build the server: {error}"))?;
-            if !built.status.success() {
-                return Err(format!(
-                    "the server did not build -- most likely <sys/sdt.h> is missing, which \
-                     systemtap's development headers provide:\n{}",
-                    text(&built.stderr)
-                ));
-            }
-            std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
-            Ok(path)
+            build(
+                root().join("target/omn-vertical/server-guarded"),
+                &["-DGUARDED"],
+            )
         })
         .clone()
+}
+
+fn build(path: PathBuf, flags: &[&str]) -> Result<PathBuf, String> {
+    let dir = path.parent().expect("a directory");
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let source = dir.join(format!("{name}.c"));
+    std::fs::write(&source, SERVER_SOURCE).map_err(|error| error.to_string())?;
+    // Built beside and renamed, so a half-written binary is never at
+    // the path the example launches.
+    let partial = dir.join(format!("{name}.{}", std::process::id()));
+    let built = Command::new("cc")
+        .args(["-O0", "-pthread"])
+        .args(flags)
+        .arg("-o")
+        .arg(&partial)
+        .arg(&source)
+        .output()
+        .map_err(|error| format!("no C compiler (`cc`) to build the server: {error}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "the server did not build -- most likely <sys/sdt.h> is missing, which \
+             systemtap's development headers provide:\n{}",
+            text(&built.stderr)
+        ));
+    }
+    std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------- the run
@@ -344,6 +374,13 @@ impl Request<'_> {
 
 const MS: f64 = 1e6;
 
+/// Every request of the session, in the order the client sends them.
+const IDS: [&str; 5] = ["a001", "a002", "a003", "a004", "a005"];
+
+fn maybe(event: &serde_json::Value, name: &str) -> Option<f64> {
+    attrs(event).get(name).and_then(|value| value.as_f64())
+}
+
 // ---------------------------------------------------------------- scenarios
 
 /// Each delay lands in the row it was injected into, and nowhere else.
@@ -367,7 +404,7 @@ const MS: f64 = 1e6;
 #[test]
 fn each_injected_delay_lands_in_the_row_it_was_injected_into() {
     let run = needs_run!();
-    for id in ["a001", "a002", "a003"] {
+    for id in IDS {
         let request = run.request(id);
         let held: Option<f64> = (field(request.worker, "lock_ms") > 0.0).then(|| {
             // The holder reports each hold in order, one per locking request.
@@ -465,7 +502,7 @@ fn each_injected_delay_lands_in_the_row_it_was_injected_into() {
 fn every_block_request_a_request_submitted_carries_its_id_and_no_other_does() {
     let run = needs_run!();
     let worker: f64 = field(run.role("worker"), "tid");
-    for id in ["a001", "a002", "a003"] {
+    for id in IDS {
         let request = run.request(id);
         let reads = field(request.worker, "done_reads") as usize;
         let sectors: std::collections::BTreeSet<u64> = request
@@ -507,7 +544,7 @@ fn every_block_request_a_request_submitted_carries_its_id_and_no_other_does() {
         "the file's creation is the negative control: the worker wrote and synced it before any \
          request, and nothing reached the device"
     );
-    let ids = ["a001", "a002", "a003"].map(|id| run.request(id));
+    let ids = IDS.map(|id| run.request(id));
     for event in &unclaimed {
         let created = number(event, "open_ts");
         for request in &ids {
@@ -525,16 +562,17 @@ fn every_block_request_a_request_submitted_carries_its_id_and_no_other_does() {
 /// The roadmap's exit criterion: the segments add up to the latency the client
 /// measured, within 10 %.
 ///
-/// The segments are the tool's own rows, and the client's clock is the only
-/// thing here nobody in the server could have fudged: it runs from before the
-/// request is sent to the last byte of the response, and includes everything
-/// the server's rows cannot -- the loopback in both directions, the accept, the
-/// parse before the birth, the client's own wakeups. What is left between the
-/// two is printed, so a gap that grows is visible before it fails.
+/// The segments are the tool's own rows, six of them now, and the client's
+/// clock is the only thing here nobody in the server could have fudged: it runs
+/// from before the request is sent to the last byte of the response. What the
+/// rows cannot hold is the client's own: its send before the first byte is
+/// queued, its wakeups, and the reading of bytes that had already left the
+/// server -- for the slow reader, the last receive buffer's worth. What is left
+/// between the two is printed, so a gap that grows is visible before it fails.
 #[test]
 fn the_segments_sum_to_the_latency_the_client_measured() {
     let run = needs_run!();
-    for id in ["a001", "a002", "a003"] {
+    for id in IDS {
         let request = run.request(id);
         let client = field(request.client, "client_ns");
         let parts = request.parts();
@@ -586,16 +624,16 @@ fn only_the_thread_that_declared_a_request_is_followed() {
     let run = needs_run!();
     let worker = field(run.role("worker"), "tid");
     let events = run.raw("requests");
-    assert_eq!(events.len(), 3, "three requests declared, three ended");
+    assert_eq!(events.len(), 5, "five requests declared, five ended");
     for event in events {
         assert_eq!(number(event, "tid"), worker, "{event}");
     }
 }
 
 /// The tables the tool printed are the decomposition of what it measured: one
-/// per request, the first against the request's own life, the second against
-/// its wait for its block I/O, whose one row is the device's time for exactly
-/// the block requests carrying the id.
+/// per request, the first against the request's span -- its first byte in to
+/// its last byte out -- the second against its wait for its block I/O, whose
+/// one row is the device's time for exactly the block requests carrying the id.
 #[test]
 fn the_tool_decomposes_each_request_against_its_own_life() {
     let run = needs_run!();
@@ -603,12 +641,18 @@ fn the_tool_decomposes_each_request_against_its_own_life() {
         let decomposition = run.decomposition(name);
         assert_eq!(decomposition["by"], "req", "{name}");
     }
-    assert_eq!(run.decomposition("one-request")["keys_seen"], 3);
-    for id in ["a001", "a002", "a003"] {
+    assert_eq!(run.decomposition("one-request")["keys_seen"], 5);
+    for id in IDS {
         let request = run.request(id);
+        let span = number(request.event, "span_ns");
+        assert_eq!(request.table["whole"]["amount"].as_f64(), Some(span));
+        // The span is the life with the network on either side of it.
         assert_eq!(
-            request.table["whole"]["amount"].as_f64(),
-            Some(number(request.event, "total_ns"))
+            span,
+            number(request.event, "rx_queued_ns")
+                + number(request.event, "total_ns")
+                + number(request.event, "tx_drain_ns"),
+            "req:{id}"
         );
         match request.block_table {
             Some(table) => {
@@ -639,6 +683,321 @@ fn the_tool_decomposes_each_request_against_its_own_life() {
              them"
         );
     }
+}
+
+/// The pause a client makes in the middle of its request lands in `net_rx`.
+///
+/// `req:a004`'s client sends the first half of its request, sleeps 30 ms on
+/// its own clock and sends the rest. The server cannot declare a request it has
+/// not read, so the pause is between the request's first byte and its birth --
+/// which is the stretch `net_rx` covers before the birth. Three references,
+/// all the client's, on the same clock as the kernel's stamps:
+///
+/// - the first byte cannot have reached the socket before the client sent it,
+///   nor after the pause that followed its half (causality, no slack);
+/// - the birth cannot have come before the client sent the second half, so
+///   `net_rx` is at least the second send less the first byte (no slack);
+/// - and against the pause itself, measured by the client around its sleep,
+///   `net_rx` holds all of it but for how late the first half was delivered,
+///   which is printed.
+///
+/// And the absence: no other request paused, and none has a `net_rx` a tenth
+/// the size of this one.
+#[test]
+fn a_pause_in_the_middle_of_the_request_lands_in_net_rx() {
+    let run = needs_run!();
+    let request = run.request("a004");
+    let sent = field(request.client, "sent_ns");
+    let first_end = field(request.client, "first_end_ns");
+    let second = field(request.client, "second_ns");
+    let paused = second - first_end;
+    let first_byte = number(request.event, "first_byte_ns");
+    let net_rx = request.row("net_rx");
+    eprintln!(
+        "req:a004  net_rx {:.3} ms against a {:.3} ms pause; the first byte stamped {:+.1} us \
+         after the client's first send returned",
+        net_rx / MS,
+        paused / MS,
+        (first_byte - first_end) / 1e3
+    );
+    assert!(
+        sent <= first_byte && first_byte <= second,
+        "the first byte was stamped at {first_byte}, and the client sent it at {sent} and paused \
+         until {second}"
+    );
+    assert!(
+        net_rx >= second - first_byte,
+        "the request cannot have been born before its second half was sent: net_rx {net_rx} is \
+         less than {} ns",
+        second - first_byte
+    );
+    assert!(
+        net_rx >= 0.9 * paused,
+        "the client paused {:.3} ms mid-request and net_rx holds {:.3} ms",
+        paused / MS,
+        net_rx / MS
+    );
+    assert!(net_rx <= field(request.client, "client_ns"));
+    for id in IDS.iter().filter(|id| **id != "a004") {
+        let other = run.request(id).row("net_rx");
+        assert!(
+            other < paused / 10.0,
+            "req:{id} did not pause and has {:.3} ms of net_rx",
+            other / MS
+        );
+    }
+}
+
+/// A slow reader's response is held in `net_tx`, and not in `lock_wait`.
+///
+/// `req:a005`'s client asks for 128 KiB through a 4 KiB receive buffer and
+/// sleeps a millisecond after every read; the server answers through a small
+/// send buffer. The send blocks on the closed window -- an interruptible sleep
+/// that `lock_wait` held before the socket was followed -- and returns with
+/// the last send buffer's worth still queued, which leaves the stack well after
+/// the server has declared the request done. `net_tx` is both.
+///
+/// The references, on the client's and the server's clocks:
+///
+/// - the last byte left the stack **before the client read it**, and **not
+///   before the client made room for it**: before the read after which less
+///   than a receive buffer was unread, more than a window of the response had
+///   not been transmitted. Both are absolute stamps, with no slack;
+/// - the waits inside the send are inside the server's own clock around it;
+/// - from the send's start to the last byte leaving, the thread was either
+///   waiting on the socket or on a cpu or runnable, so `net_tx` and those two
+///   together cover it, and `net_tx` alone does not exceed it.
+///
+/// And the absence: every other request's response fits the window, and has
+/// less than a millisecond of `net_tx`.
+#[test]
+fn a_slow_reader_holds_the_response_in_net_tx() {
+    let run = needs_run!();
+    let request = run.request("a005");
+    let drained = number(request.event, "drained_ns");
+    let room = field(request.client, "room_ns");
+    let last = field(request.client, "last_ns");
+    let send_start = field(request.worker, "send_start_ns");
+    let tx_wait = number(request.event, "tx_wait_ns");
+    let net_tx = request.row("net_tx");
+    eprintln!(
+        "req:a005  net_tx {:.3} ms ({:.3} ms blocked in the send, the server's own send {:.3} ms; \
+         {:.3} ms draining after the end); the client slept {:.3} ms over {} reads; the last byte \
+         left {:.3} ms after the client made room and {:.3} ms before its last read ended",
+        net_tx / MS,
+        tx_wait / MS,
+        field(request.worker, "send_ns") / MS,
+        number(request.event, "tx_drain_ns") / MS,
+        field(request.client, "slept_ns") / MS,
+        field(request.client, "reads"),
+        (drained - room) / MS,
+        (last - drained) / MS,
+    );
+    assert!(
+        room <= drained && drained <= last,
+        "the last byte left at {drained}; the client made room for it at {room} and had read it \
+         by {last}"
+    );
+    assert!(tx_wait > 0.0, "the send never blocked on the window");
+    assert!(
+        tx_wait <= field(request.worker, "send_ns"),
+        "more wait on the socket than the server's own clock around its send"
+    );
+    let covered = drained - send_start;
+    assert!(
+        net_tx <= covered,
+        "net_tx {:.3} ms is more than the {:.3} ms from the send to the last byte",
+        net_tx / MS,
+        covered / MS
+    );
+    assert!(
+        net_tx + request.row("cpu_on") + request.row("sched_wait") >= covered,
+        "net_tx {:.3} ms, on a cpu and runnable leave part of the {:.3} ms from the send to the \
+         last byte uncovered",
+        net_tx / MS,
+        covered / MS
+    );
+    assert!(
+        request.row("lock_wait") < MS,
+        "the wait on the window is not a lock"
+    );
+    for id in IDS.iter().filter(|id| **id != "a005") {
+        let other = run.request(id).row("net_tx");
+        assert!(
+            other < MS,
+            "req:{id} sent a response that fits the window and has {:.3} ms of net_tx",
+            other / MS
+        );
+    }
+}
+
+/// The network rows are read by the socket the server accepted, and the ladder
+/// says what that is worth.
+///
+/// Each event carries `sock:<cookie>` beside `req:<id>`, and the cookie is the
+/// one the server read off its accepted connection with `SO_COOKIE` -- a
+/// number the tool obtains through `bpf_get_socket_cookie` at the first byte,
+/// on another thread's cpu, and the server obtains from the kernel on its own.
+///
+/// The evidence: the four rows read off the serving thread are `IDENTITY`, and
+/// `net_rx` and `net_tx` should read `KEY`. **Today they read `IDENTITY`**: the
+/// decomposition rates every row by its `by` alone, and the fix is a field on
+/// the part that `src/join.rs` does not have yet -- filed under stream N in
+/// `docs/open-findings.md`. When it lands, the session takes `via: sock` on the
+/// two parts and the `IDENTITY` below becomes `KEY`.
+#[test]
+fn the_network_rows_are_read_by_the_socket_the_server_accepted() {
+    let run = needs_run!();
+    for id in IDS {
+        let request = run.request(id);
+        let cookie = key(request.event, "sock")
+            .and_then(|sock| sock["cookie"].as_f64())
+            .unwrap_or_else(|| panic!("req:{id} carries no socket: {}", request.event));
+        assert_eq!(
+            cookie,
+            field(request.worker, "cookie"),
+            "req:{id}: the server's SO_COOKIE"
+        );
+        let evidence = |state: &str| {
+            request.table["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["state"] == state)
+                .map(|row| row["evidence"].as_str().unwrap_or_default().to_owned())
+                .unwrap_or_default()
+        };
+        for state in ["cpu_on", "sched_wait", "lock_wait", "block_io"] {
+            assert_eq!(evidence(state), "IDENTITY", "req:{id} {state}");
+        }
+        for state in ["net_rx", "net_tx"] {
+            // Over-rated, and filed: `KEY` once a part can say `via: sock`.
+            assert_eq!(evidence(state), "IDENTITY", "req:{id} {state}");
+        }
+    }
+}
+
+/// Without the socket, a wait on it is a sleep, and the run says so.
+///
+/// The same slow reader through `bpf:usdt:threads`, the backend for a kernel
+/// that cannot trace the socket functions: the request has no network rows and
+/// no `sock` key, the run says which backend would have them, and the send's
+/// wait on the window is in `sleep_ns` -- with the client, whose reads opened
+/// the window, named as the thread that "released" it. That is the misreading
+/// the socket rows exist to prevent, shown on purpose.
+#[test]
+fn without_the_socket_a_wait_on_it_is_a_sleep_and_the_run_says_so() {
+    let Ok(server) = server() else {
+        eprintln!("SKIPPED: no server");
+        return;
+    };
+    let output = omn(&[
+        "net.request",
+        "--backend",
+        "force:bpf:usdt:threads",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        server.to_str().unwrap(),
+        "target/omn-vertical/threads",
+        "0:0:0:131072",
+    ]);
+    let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
+    if !output.status.success() && machine_cannot_serve(&stderr) {
+        eprintln!("SKIPPED: {}", stderr.lines().next().unwrap_or_default());
+        return;
+    }
+    assert!(output.status.success(), "{stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("one json document");
+    let result = &document["results"][0];
+    let notes: Vec<&str> = result["degradations"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .filter_map(|note| note.as_str())
+        .collect();
+    assert!(
+        notes.iter().any(|note| note.contains("does not follow one")
+            && note.contains("`bpf:usdt` is the backend that does")),
+        "{notes:#?}"
+    );
+    let event = &result["outputs"][0]["events"][0];
+    assert!(key(event, "sock").is_none(), "{event}");
+    for absent in ["net_rx_ns", "net_tx_ns", "span_ns"] {
+        assert!(maybe(event, absent).is_none(), "{absent} on {event}");
+    }
+    let send_ns: f64 = stderr
+        .lines()
+        .find_map(|line| line.split("send_ns=").nth(1))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        .expect("the worker timed its send");
+    let client_tid: f64 = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("vertical: role=client tid="))
+        .and_then(|rest| rest.trim().parse().ok())
+        .expect("the client introduced itself");
+    let sleep = number(event, "sleep_ns");
+    assert!(
+        sleep >= 0.5 * send_ns,
+        "the send blocked {:.3} ms and only {:.3} ms of sleep was seen",
+        send_ns / MS,
+        sleep / MS
+    );
+    assert_eq!(
+        number(event, "holder_tid"),
+        client_tid,
+        "the reader's window update is what woke the send"
+    );
+}
+
+/// A probe behind a semaphore fires, because the kernel raises it.
+///
+/// The server built with `-DGUARDED` skips both probe sites unless their
+/// semaphores are non-zero, which is how a program makes a probe cost nothing
+/// when nobody listens, and it prints the semaphore it saw at the birth. The
+/// ninth wave refused such a probe; the link now hands the kernel each site's
+/// semaphore to raise for as long as it is attached. The reference is the
+/// server's own read of it: raised under the tool, and the request followed.
+#[test]
+fn a_probe_behind_a_semaphore_is_raised_and_followed() {
+    let server = match guarded_server() {
+        Ok(server) => server,
+        Err(reason) => {
+            eprintln!("SKIPPED: {reason}");
+            return;
+        }
+    };
+    let output = omn(&[
+        "net.request",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        server.to_str().unwrap(),
+        "target/omn-vertical/guarded",
+        "5:0",
+    ]);
+    let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
+    if !output.status.success() && machine_cannot_serve(&stderr) {
+        eprintln!("SKIPPED: {}", stderr.lines().next().unwrap_or_default());
+        return;
+    }
+    assert!(output.status.success(), "{stderr}");
+    let guard = stderr
+        .lines()
+        .find_map(|line| line.split(" guard=").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("the worker reported its semaphore");
+    assert_eq!(guard, "1", "the semaphore was raised: {stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("one json document");
+    let events = document["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("events");
+    assert_eq!(events.len(), 1, "the guarded request was followed");
+    assert_eq!(request_of(&events[0]).as_deref(), Some("a001"));
 }
 
 /// A program that declares no request is refused with what it does carry.
@@ -713,10 +1072,14 @@ fn without_the_capabilities_the_session_says_which_it_needs() {
 /// `examples/vertical-abandoned.yml`: the server declares a request and never
 /// ends it, then serves an ordinary one on the same thread. The first has no
 /// total and can be in no event; what it must be in is the run's account of
-/// itself -- born two, ended one, which one did not end and in which thread,
+/// itself -- born three, ended two, which one did not end and in which thread,
 /// and that the second birth replaced a live request. And the second request
 /// must be whole: its lock wait is the holder's sleep, not the abandoned
 /// request's time added to it.
+///
+/// The third is the network's loss path: it ends, and its client closes
+/// without reading the answer, so the response never leaves the stack. The
+/// request is an event with no `net_tx`, and the run counts it.
 #[test]
 fn a_request_that_never_ends_is_counted_and_named_and_does_not_leak() {
     if let Err(reason) = server() {
@@ -752,7 +1115,7 @@ fn a_request_that_never_ends_is_counted_and_named_and_does_not_leak() {
 
     assert!(
         said.iter()
-            .any(|note| note.starts_with("2 requests were born and 1 ended")),
+            .any(|note| note.starts_with("3 requests were born and 2 ended")),
         "{said:#?}"
     );
     assert!(
@@ -774,8 +1137,27 @@ fn a_request_that_never_ends_is_counted_and_named_and_does_not_leak() {
         .filter(|output| output["emit"] == "raw")
         .flat_map(|output| output["events"].as_array().expect("events"))
         .collect();
-    assert_eq!(events.len(), 1, "one request ended");
-    let event = events[0];
+    assert_eq!(events.len(), 2, "two requests ended");
+    // The third ended and its response never left the stack: the client closed
+    // without reading it. Its event is whole but for `net_tx`, which is absent
+    // rather than the part of a drain that was seen, and the run says why.
+    let unread = events
+        .iter()
+        .find(|event| request_of(event).as_deref() == Some("a003"))
+        .expect("the unread request ended");
+    assert!(maybe(unread, "net_rx_ns").is_some(), "{unread}");
+    for absent in ["net_tx_ns", "tx_drain_ns", "span_ns"] {
+        assert!(maybe(unread, absent).is_none(), "{absent} on {unread}");
+    }
+    assert!(
+        said.iter()
+            .any(|note| note.contains("1 response had not left the stack when the run ended")),
+        "{said:#?}"
+    );
+    let event = events
+        .iter()
+        .find(|event| request_of(event).as_deref() == Some("a002"))
+        .expect("the second request ended");
     assert_eq!(request_of(event).as_deref(), Some("a002"));
     let sleep = number(event, "sleep_ns");
     let total = number(event, "total_ns");

@@ -10,6 +10,14 @@
 //! one event per request. The birth is seen too -- the kernel publishes it --
 //! and is used here to say which requests began and never ended, rather than
 //! to make an event of its own that half of every emit would have to skip.
+//!
+//! **And why it can be published later than the end.** A request whose probes
+//! name its socket has two more rows, `net_rx` and `net_tx`
+//! (`src/bpf/request_net.rs`), and the second of them runs past the end: a
+//! send returns when the response is queued, and it has left the stack only
+//! when the last byte is transmitted. When it had not by the end, the kernel
+//! says so on the end's record and publishes a drain record when it has; the
+//! request is held here until then. Its event is still stamped at its end.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +44,10 @@ pub struct Prepare {
     /// execed, and its pid says nothing about what it will run.
     pub target: Target,
     pub filter: Option<FilterExpr>,
+    /// Whether the backend follows the socket a probe names: `bpf:usdt` does,
+    /// `bpf:usdt:threads` is the fallback for a kernel whose socket functions
+    /// cannot be traced.
+    pub sockets: bool,
 }
 
 /// The executable a target runs, which is where its probes are looked for.
@@ -118,31 +130,20 @@ impl Prepared for Prepare {
         };
         let path = executable(&self.target, pid)?;
         let (starts, ends) = request_sites(&path)?;
-        Ok(Box::new(RequestCollector {
-            id: CollectorId::new("net.request/bpf:usdt"),
-            pid,
-            starts,
-            ends,
-            program: None,
-            losses: Losses::default(),
-            predicate: self.filter,
-            counts: RequestCounts::default(),
-            skipped: 0,
-            open: BTreeMap::new(),
-            ended: 0,
-            mismatched: 0,
-            anomalies: 0,
-            filtered_out: 0,
-            object: path,
-        }))
+        let declares_socket = starts.iter().chain(&ends).any(|site| site.args.len() >= 2);
+        // Loaded here, before the run's window opens, as every other eBPF
+        // source here loads: an fentry attach patches kernel text, and six of
+        // them cost this process about a hundred milliseconds of system time
+        // that is the attach's, not the measurement's.
+        let program = RequestProgram::load(&starts, &ends, pid, RING_BYTES, self.sockets)?;
+        let mut collector = RequestCollector::new(path, self.sockets, declares_socket, self.filter);
+        collector.program = Some(program);
+        Ok(Box::new(collector))
     }
 }
 
 pub struct RequestCollector {
     id: CollectorId,
-    pid: i32,
-    starts: Vec<Site>,
-    ends: Vec<Site>,
     object: PathBuf,
     program: Option<RequestProgram>,
     losses: Losses,
@@ -151,10 +152,60 @@ pub struct RequestCollector {
     skipped: u64,
     /// Requests born and not yet ended, by id, with the thread and the birth.
     open: BTreeMap<u64, (u32, u64)>,
+    /// Ended requests whose response had not left the stack, by id and end.
+    awaiting: BTreeMap<(u64, u64), RequestRecord>,
+    /// Drains that arrived before their request's end record, which the
+    /// transmit program can publish first: the end arms the socket, and the
+    /// last byte can leave on another cpu before the end has published.
+    drains: BTreeMap<(u64, u64), u64>,
+    net: NetCounts,
     ended: u64,
     mismatched: u64,
     anomalies: u64,
     filtered_out: u64,
+    /// Whether the socket programs were attached, kept past the program's end
+    /// so that the run's account of itself can say.
+    follows_sockets: bool,
+    /// Whether any probe names a socket.
+    declares_socket: bool,
+    /// Whether this backend follows it.
+    sockets: bool,
+}
+
+/// What was followed of the requests' sockets, for the run's account of itself.
+#[derive(Debug, Default)]
+struct NetCounts {
+    /// Ended requests whose probes named a socket.
+    declared: u64,
+    /// Of those, the ones with both rows measured.
+    both: u64,
+    /// The reasons a row was not, with how many requests each.
+    rx_unknown: BTreeMap<&'static str, u64>,
+    tx_unknown: BTreeMap<&'static str, u64>,
+    /// Responses still in the stack when the run ended.
+    undrained: u64,
+    /// Drain records that matched no ended request.
+    orphan_drains: u64,
+}
+
+/// The network rows of one request, when its probes named a socket.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NetRows {
+    /// From the first byte to the birth.
+    rx_queued: Option<u64>,
+    /// From the end to the last byte leaving.
+    tx_drain: Option<u64>,
+}
+
+fn net_rows(record: &RequestRecord) -> NetRows {
+    let rx_queued = (record.rx_unknown().is_none() && record.first_byte_ns != 0)
+        .then(|| record.born_ns.saturating_sub(record.first_byte_ns));
+    let tx_drain = (record.tx_unknown().is_none() && record.drained_ns != 0)
+        .then(|| record.drained_ns.saturating_sub(record.done_ns));
+    NetRows {
+        rx_queued,
+        tx_drain,
+    }
 }
 
 /// The event for one ended request.
@@ -184,16 +235,42 @@ fn event(id: &CollectorId, record: &RequestRecord, seq: u64) -> Event {
     if record.flags & crate::bpf::ID_MISMATCH != 0 {
         attrs.push(Attr::text("declared", request_key(record.declared_id)));
     }
+    let mut keys = vec![
+        KeyValue::Req {
+            id: request_key(record.id),
+        },
+        KeyValue::task(record.tid as i32),
+    ];
+    if record.cookie != 0 {
+        // The rows below are read by this key, not by the request's id:
+        // nothing on the receive or the transmit path runs in the serving
+        // thread, and what ties them to the request is the socket.
+        keys.push(KeyValue::Sock {
+            cookie: record.cookie,
+        });
+        attrs.push(Attr::uint("rx_wait_ns", record.rx_wait_ns));
+        attrs.push(Attr::uint("tx_wait_ns", record.tx_wait_ns));
+        let rows = net_rows(record);
+        if let Some(queued) = rows.rx_queued {
+            attrs.push(Attr::uint("first_byte_ns", record.first_byte_ns));
+            attrs.push(Attr::uint("rx_queued_ns", queued));
+            attrs.push(Attr::uint("net_rx_ns", queued + record.rx_wait_ns));
+        }
+        if let Some(drain) = rows.tx_drain {
+            attrs.push(Attr::uint("drained_ns", record.drained_ns));
+            attrs.push(Attr::uint("tx_drain_ns", drain));
+            attrs.push(Attr::uint("net_tx_ns", record.tx_wait_ns + drain));
+        }
+        if let (Some(queued), Some(drain)) = (rows.rx_queued, rows.tx_drain) {
+            // First byte in to last byte out: the whole the six rows tile.
+            attrs.push(Attr::uint("span_ns", queued + total + drain));
+        }
+    }
     Event {
         ts_ns: record.done_ns,
         ts_err_ns: 0,
         kind: "net.request".to_owned(),
-        keys: vec![
-            KeyValue::Req {
-                id: request_key(record.id),
-            },
-            KeyValue::task(record.tid as i32),
-        ],
+        keys,
         attrs,
         collector_id: id.clone(),
         seq,
@@ -201,6 +278,38 @@ fn event(id: &CollectorId, record: &RequestRecord, seq: u64) -> Event {
 }
 
 impl RequestCollector {
+    fn new(
+        object: PathBuf,
+        sockets: bool,
+        declares_socket: bool,
+        predicate: Option<FilterExpr>,
+    ) -> Self {
+        RequestCollector {
+            id: CollectorId::new(if sockets {
+                "net.request/bpf:usdt"
+            } else {
+                "net.request/bpf:usdt:threads"
+            }),
+            sockets,
+            program: None,
+            losses: Losses::default(),
+            predicate,
+            counts: RequestCounts::default(),
+            skipped: 0,
+            open: BTreeMap::new(),
+            awaiting: BTreeMap::new(),
+            drains: BTreeMap::new(),
+            net: NetCounts::default(),
+            ended: 0,
+            mismatched: 0,
+            anomalies: 0,
+            filtered_out: 0,
+            follows_sockets: sockets,
+            declares_socket,
+            object,
+        }
+    }
+
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
         let Some(program) = self.program.as_mut() else {
             return;
@@ -213,9 +322,28 @@ impl RequestCollector {
             self.losses
                 .note("a record in the request ring was shorter than one request");
         }
+        self.absorb(records, events, seq);
+    }
+
+    /// What the ring carried, in the order it carried it: births, ends and
+    /// drains, a drain possibly before the end it belongs to.
+    fn absorb(&mut self, records: Vec<RequestRecord>, events: &mut Vec<Event>, seq: u64) {
         for record in records {
             if record.is_birth() {
                 self.open.insert(record.id, (record.tid, record.born_ns));
+                continue;
+            }
+            if record.is_drain() {
+                let key = (record.id, record.done_ns);
+                match self.awaiting.remove(&key) {
+                    Some(mut ended) => {
+                        ended.drained_ns = record.drained_ns;
+                        self.publish(ended, events, seq);
+                    }
+                    None => {
+                        self.drains.insert(key, record.drained_ns);
+                    }
+                }
                 continue;
             }
             self.open.remove(&record.id);
@@ -224,15 +352,63 @@ impl RequestCollector {
                 self.mismatched += 1;
             }
             self.anomalies += u64::from(record.anomalies);
-            let event = event(&self.id, &record, seq + events.len() as u64);
-            if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
-                    self.filtered_out += 1;
-                    continue;
+            let mut record = record;
+            if record.tx_pending() {
+                let key = (record.id, record.done_ns);
+                match self.drains.remove(&key) {
+                    Some(drained) => record.drained_ns = drained,
+                    None => {
+                        self.awaiting.insert(key, record);
+                        continue;
+                    }
                 }
             }
-            events.push(event);
+            self.publish(record, events, seq);
         }
+    }
+
+    /// The end of the run: a request still waiting for its drain is published
+    /// without one.
+    fn flush(&mut self, events: &mut Vec<Event>) {
+        let held = std::mem::take(&mut self.awaiting);
+        for record in held.into_values() {
+            self.publish(record, events, u64::MAX / 2);
+        }
+        self.net.orphan_drains += self.drains.len() as u64;
+        self.drains.clear();
+    }
+
+    /// Makes the event of one ended request, whole or as whole as it will get.
+    fn publish(&mut self, record: RequestRecord, events: &mut Vec<Event>, seq: u64) {
+        if record.declared_socket() {
+            self.net.declared += 1;
+            if let Some(why) = record.rx_unknown() {
+                *self.net.rx_unknown.entry(why).or_default() += 1;
+            } else if record.first_byte_ns == 0 {
+                *self
+                    .net
+                    .rx_unknown
+                    .entry("its first byte was not seen")
+                    .or_default() += 1;
+            }
+            if let Some(why) = record.tx_unknown() {
+                *self.net.tx_unknown.entry(why).or_default() += 1;
+            } else if record.drained_ns == 0 {
+                self.net.undrained += 1;
+            }
+            let rows = net_rows(&record);
+            if rows.rx_queued.is_some() && rows.tx_drain.is_some() {
+                self.net.both += 1;
+            }
+        }
+        let event = event(&self.id, &record, seq + events.len() as u64);
+        if let Some(predicate) = &self.predicate {
+            if !crate::filter::matches(predicate, &event) {
+                self.filtered_out += 1;
+                return;
+            }
+        }
+        events.push(event);
     }
 
     fn absorb_counters(&mut self) {
@@ -276,6 +452,94 @@ impl RequestCollector {
     }
 }
 
+impl RequestCollector {
+    /// Whether the socket programs are attached.
+    fn attached(&self) -> bool {
+        match &self.program {
+            Some(program) => program.follows_sockets(),
+            None => self.follows_sockets,
+        }
+    }
+
+    /// What the run could say about the requests' network rows.
+    fn socket_notes(&self) -> Vec<String> {
+        let plural = |n: u64| if n == 1 { "" } else { "s" };
+        if !self.declares_socket {
+            return vec![format!(
+                "the probes name no socket, so no request has `net_rx` or `net_tx`, and a sleep \
+                 on the socket is counted in `sleep_ns`: `{START}(id, fd)` and `{DONE}(id, fd)`, \
+                 with the descriptor the request was received and answered on, is what follows \
+                 it"
+            )];
+        }
+        if !self.sockets {
+            return vec![format!(
+                "the probes name a socket, and this backend does not follow one: no request has \
+                 `net_rx` or `net_tx`, and a sleep on the socket is counted in `sleep_ns`. `{}` \
+                 is the backend that does, on a kernel that can trace {}",
+                "bpf:usdt",
+                RequestProgram::socket_functions().join(", ")
+            )];
+        }
+        if !self.attached() {
+            return vec![
+                "the probes name a socket and the socket programs are not attached: no request \
+                 has `net_rx` or `net_tx`, and a sleep on the socket is counted in `sleep_ns`"
+                    .to_owned(),
+            ];
+        }
+        let mut notes = vec![format!(
+            "{} of {} request{} whose probes named a socket have both network rows, read by the \
+             socket's cookie rather than the request's id -- `net_rx` from its first byte \
+             reaching the socket, over `{}` and `{}`, and `net_tx` to its last byte leaving, \
+             over `{}` and `{}` -- which is KEY evidence, not the IDENTITY of the rows read off \
+             the serving thread",
+            self.net.both,
+            self.net.declared,
+            plural(self.net.declared),
+            RequestProgram::socket_functions()[0],
+            RequestProgram::socket_functions()[2],
+            RequestProgram::socket_functions()[3],
+            RequestProgram::socket_functions()[1],
+        )];
+        for (why, count) in &self.net.rx_unknown {
+            notes.push(format!(
+                "{count} request{} {} no `net_rx`: {why}",
+                plural(*count),
+                if *count == 1 { "has" } else { "have" },
+            ));
+        }
+        for (why, count) in &self.net.tx_unknown {
+            notes.push(format!(
+                "{count} request{} {} no `net_tx`: {why}",
+                plural(*count),
+                if *count == 1 { "has" } else { "have" },
+            ));
+        }
+        if self.net.undrained > 0 {
+            notes.push(format!(
+                "{} response{} had not left the stack when the run ended, so {} no `net_tx` \
+                 rather than a short one",
+                self.net.undrained,
+                plural(self.net.undrained),
+                if self.net.undrained == 1 {
+                    "its request has"
+                } else {
+                    "their requests have"
+                },
+            ));
+        }
+        if self.net.orphan_drains > 0 {
+            notes.push(format!(
+                "{} drain record{} matched no ended request",
+                self.net.orphan_drains,
+                plural(self.net.orphan_drains),
+            ));
+        }
+        notes
+    }
+}
+
 impl Collector for RequestCollector {
     fn id(&self) -> &CollectorId {
         &self.id
@@ -286,12 +550,6 @@ impl Collector for RequestCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(RequestProgram::load(
-            &self.starts,
-            &self.ends,
-            self.pid,
-            RING_BYTES,
-        )?);
         Ok(())
     }
 
@@ -306,7 +564,18 @@ impl Collector for RequestCollector {
         let mut trailing = Vec::new();
         self.drain_into(&mut trailing, u64::MAX / 2);
         self.absorb_counters();
-        self.program = None;
+        if let Some(program) = &self.program {
+            self.follows_sockets = program.follows_sockets();
+        }
+        // The programs stay attached until the collector is dropped, after the
+        // run has read its own cost: unpatching six fentry trampolines costs
+        // this process some 60 ms of system time, which is the detach's and
+        // not the measurement's -- and every other source here detaches at
+        // the drop too.
+        //
+        // A response still in the stack at the end of the run: the request is
+        // whole but for its `net_tx`, which is left out rather than cut short.
+        self.flush(&mut trailing);
         trailing
     }
 
@@ -398,6 +667,7 @@ impl Collector for RequestCollector {
                 self.filtered_out
             ));
         }
+        notes.extend(self.socket_notes());
         notes
     }
 }
@@ -407,8 +677,14 @@ mod tests {
     use super::*;
 
     fn record(flags: u32) -> RequestRecord {
-        let mut bytes = [0u8; 120];
-        let put = |bytes: &mut [u8; 120], at: usize, value: u64| {
+        with_socket(flags, 0, [0; 4], 0)
+    }
+
+    /// A record with the network half filled: the cookie, the first byte, the
+    /// two waits, the drain and the flags, at the offsets the kernel writes.
+    fn with_socket(flags: u32, cookie: u64, net: [u64; 4], net_flags: u32) -> RequestRecord {
+        let mut bytes = [0u8; 168];
+        let put = |bytes: &mut [u8; 168], at: usize, value: u64| {
             bytes[at..at + 8].copy_from_slice(&value.to_ne_bytes())
         };
         put(&mut bytes, 0, 0xa3f1);
@@ -422,7 +698,90 @@ mod tests {
         bytes[72..76].copy_from_slice(&8821u32.to_ne_bytes());
         bytes[84..88].copy_from_slice(&flags.to_ne_bytes());
         put(&mut bytes, 88, 0xbeef);
+        put(&mut bytes, 120, cookie);
+        for (slot, value) in net.iter().enumerate() {
+            put(&mut bytes, 128 + slot * 8, *value);
+        }
+        bytes[160..164].copy_from_slice(&net_flags.to_ne_bytes());
         RequestRecord::from_bytes(&bytes).expect("a full record")
+    }
+
+    const DECLARED: u32 = 1;
+    const RX_UNSEEN: u32 = 4;
+    const TX_PENDING: u32 = 8;
+    const DRAIN: u32 = 4;
+
+    fn collector() -> RequestCollector {
+        RequestCollector::new(PathBuf::from("/srv"), true, true, None)
+    }
+
+    fn value(event: &Event, name: &str) -> Option<f64> {
+        event.attr(name).and_then(|value| value.as_f64())
+    }
+
+    /// The span is the first byte to the last byte out, and the six rows tile
+    /// it: `net_rx` and `net_tx` are each a stretch outside the life plus the
+    /// socket's waits inside it, which are not in `sleep_ns`.
+    #[test]
+    fn a_followed_socket_adds_both_rows_and_the_span_they_tile() {
+        // Born at 1 ms, ended at 43 ms; first byte at 0.4 ms, drained at 45 ms.
+        let record = with_socket(0, 77, [400_000, 1_000, 2_000, 45_000_000], DECLARED);
+        let event = event(&CollectorId::new("t"), &record, 0);
+        assert!(event.keys.contains(&KeyValue::Sock { cookie: 77 }));
+        assert_eq!(value(&event, "rx_queued_ns"), Some(600_000.0));
+        assert_eq!(value(&event, "net_rx_ns"), Some(601_000.0));
+        assert_eq!(value(&event, "tx_drain_ns"), Some(2_000_000.0));
+        assert_eq!(value(&event, "net_tx_ns"), Some(2_002_000.0));
+        assert_eq!(value(&event, "span_ns"), Some(44_600_000.0));
+    }
+
+    /// A first byte that was not seen is no `net_rx`, and no span: a row the
+    /// programs could not measure is absent, not zero.
+    #[test]
+    fn an_unseen_first_byte_is_no_row_rather_than_a_zero() {
+        let record = with_socket(0, 77, [0, 0, 0, 45_000_000], DECLARED | RX_UNSEEN);
+        let event = event(&CollectorId::new("t"), &record, 0);
+        assert_eq!(value(&event, "net_rx_ns"), None);
+        assert_eq!(value(&event, "span_ns"), None);
+        assert_eq!(value(&event, "net_tx_ns"), Some(2_000_000.0));
+    }
+
+    /// An end whose response had not left waits for its drain, whichever of
+    /// the two the ring carries first, and is published once, whole.
+    #[test]
+    fn an_end_and_its_drain_are_joined_in_either_order() {
+        let ended = with_socket(0, 77, [400_000, 0, 5_000, 0], DECLARED | TX_PENDING);
+        let mut drain = with_socket(DRAIN, 77, [0, 0, 0, 51_000_000], DECLARED);
+        drain.done_ns = ended.done_ns;
+        for order in [vec![ended, drain], vec![drain, ended]] {
+            let mut collector = collector();
+            let mut events = Vec::new();
+            collector.absorb(order, &mut events, 0);
+            assert_eq!(events.len(), 1);
+            assert_eq!(value(&events[0], "tx_drain_ns"), Some(8_000_000.0));
+            assert_eq!(value(&events[0], "net_tx_ns"), Some(8_005_000.0));
+            assert_eq!(events[0].ts_ns, 43_000_000, "stamped at its end");
+            assert!(collector.awaiting.is_empty() && collector.drains.is_empty());
+        }
+    }
+
+    /// A response still in the stack when the run ends: the request is
+    /// published without `net_tx`, and the run counts it.
+    #[test]
+    fn a_response_that_never_left_is_published_without_net_tx_and_counted() {
+        let ended = with_socket(0, 77, [400_000, 0, 5_000, 0], DECLARED | TX_PENDING);
+        let mut collector = collector();
+        let mut events = Vec::new();
+        collector.absorb(vec![ended], &mut events, 0);
+        assert!(events.is_empty(), "held for its drain");
+        collector.flush(&mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(value(&events[0], "net_tx_ns"), None);
+        assert_eq!(value(&events[0], "net_rx_ns"), Some(600_000.0));
+        assert!(collector
+            .socket_notes()
+            .iter()
+            .any(|note| note.starts_with("1 response had not left the stack")));
     }
 
     /// The request is the series and its thread the second key; the total is

@@ -167,8 +167,10 @@
     # own `sendmsg`, because every syscall path inlines `__sock_sendmsg` and
     # `sock_sendmsg` sees only the kernel's own senders: measured, 2000 sends
     # and zero calls.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_recvmsg", "fentry:inet_sendmsg"], cost: low}
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med,
+    # Both count in the kernel, one row per (task, op, socket, log2 bucket)
+    # drained on a tick: one event stands for every call in its bucket.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_recvmsg", "fentry:inet_sendmsg"], cost: low, drained: true}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, drained: true,
        degraded: "no BTF: struct offsets are not portable across kernels"}
   modes: [trace, count]
   emits: [hist, topk, raw, summary]
@@ -209,8 +211,10 @@
   summary: "Transmit scheduling latency"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue", "raw_tracepoint:qdisc_dequeue", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_enqueue", "tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true}
+    # Bucketed in the kernel and drained on a tick: one event is one bucket of
+    # one window, standing for every packet in it.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue", "raw_tracepoint:qdisc_dequeue", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_enqueue", "tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true, drained: true}
   modes: [trace]
   emits: [hist, raw, summary, timeline]
   targets: {system: native, iface: bpf_only}
@@ -230,8 +234,9 @@
   summary: "Time spent in network softirq processing"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry", "raw_tracepoint:softirq_exit", "kernel>=5.8"], cost: med}
-    - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true}
+    # A count and an exact total per (cpu, vector, bucket), drained on a tick.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry", "raw_tracepoint:softirq_exit", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
   targets: {system: native, cpu: native}
@@ -365,7 +370,7 @@
 
 - id: net.request
   family: net
-  summary: "One request's life, from the server's own birth to its end, by state"
+  summary: "One request's life by state, and the network on either side of it"
   unit: ns
   backends:
     # The server declares where a request starts and ends, with two USDT
@@ -376,11 +381,20 @@
     # block layer's issue to put `req:<id>` on the requests it submits. See
     # `src/bpf/request.rs`, and `docs/scenarios/vertical.md` for why the birth
     # is declared rather than derived from the connection.
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf", "raw_tracepoint:sched_switch", "raw_tracepoint:sched_waking"], cost: low}
+    #
+    # A second argument on both probes, the descriptor of the connection,
+    # adds the two network rows: `net_rx` from the request's first byte
+    # reaching the socket, `net_tx` to the response's last byte leaving it.
+    # Neither runs in the serving thread, so both are read by the socket's
+    # cookie -- see `src/bpf/request_net.rs`. Those four functions are the
+    # first backend's; the second follows the thread and not the socket.
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf", "raw_tracepoint:sched_switch", "raw_tracepoint:sched_waking", "fentry:tcp_data_ready", "fentry:tcp_event_new_data_sent", "fentry:sk_wait_data", "fentry:sk_stream_wait_memory"], cost: low}
+    - {id: "bpf:usdt:threads", requires: ["uprobe", "bpf", "btf", "raw_tracepoint:sched_switch", "raw_tracepoint:sched_waking"], cost: low,
+       degraded: "no `net_rx` or `net_tx`: the socket the probes name is not followed, and a sleep on it is counted in `sleep_ns`"}
   modes: [trace]
   emits: [raw, summary, hist, topk]
   targets: {pid: native, launch: native}
-  keys: [req, task]
+  keys: [req, task, sock]
   filter_fields: [comm, tid, holder_tid]
   determinism: medium
   caveats:
@@ -399,8 +413,23 @@
        is evidence is which state a known delay lands in, and the block
        requests that carry the request's id in `io.latency`."
     - "`sleep_ns` is the interruptible sleep of the serving task: a lock, a
-       timer, a socket. `holder_tid` is the task whose wakeup ended the longest
-       such sleep, which for a lock is the thread that released it. `disk_ns`
+       timer, another socket. A sleep on the request's own socket is not in it
+       when the probes name that socket -- it is `rx_wait_ns` or `tx_wait_ns`.
+       `holder_tid` is the task whose wakeup ended the longest such sleep,
+       which for a lock is the thread that released it. `disk_ns`
        is uninterruptible sleep, usually a disk, and on btrfs the completion
        reaches the reader through a kworker, so it is the device's time plus
        that hop."
+    - "`net_rx_ns` and `net_tx_ns` are read by the socket's cookie, not by the
+       request's id: the first byte is queued in softirq and the last leaves
+       when the peer opens its window, and neither runs in the serving thread.
+       They are KEY where every other row is IDENTITY. `span_ns`, first byte
+       in to last byte out, is the whole the six rows tile."
+    - "`net_rx` starts at the first byte that arrived on the socket since its
+       previous request ended; bytes that arrive while a request is live are
+       that request's. Two pipelined requests whose bytes arrive before the
+       first is born give the second no `net_rx` rather than a wrong one."
+    - "`net_tx` ends when the last byte leaves the stack -- `snd_nxt` reaching
+       what the server had queued at `request__done` -- which on loopback is
+       its arrival in the peer's receive queue. What the client then takes to
+       read it is the client's, and in no row."

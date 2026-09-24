@@ -15,6 +15,12 @@
 # whole: an abandoned request on a thread does not leak into the next one,
 # because the next birth resets the thread's storage.
 #
+# The third is the network's loss path. It ends, and its response never leaves
+# the stack: the client closes without reading a byte of it, and 16 KiB is more
+# than its window. Its life is whole, so it is an event -- with no `net_tx`,
+# since a drain that never happened has no end, and the run says so rather
+# than printing the part it saw as the whole of it.
+#
 # Build the server first; see `examples/vertical-one-request.yml`.
 name: a request that never ends
 format: text
@@ -28,6 +34,7 @@ requests:
         - target/omn-vertical/abandoned
         - "-1:0"
         - "5:0"
+        - "0:0:0:-16384"
     mode: trace
     emit: [raw, summary]
     keys: [req]

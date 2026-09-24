@@ -3,15 +3,22 @@
 #   omn -f examples/vertical-one-request.yml
 #
 # ROADMAP.md phase 4, the milestone it calls the real one. A real TCP server on
-# loopback serves three requests, each with delays injected where the test
+# loopback serves five requests, each with delays injected where the test
 # chose them:
 #
 #   req:a001   40 ms waiting for a lock another thread sleeps under
 #   req:a002   64 pages read with O_DIRECT from a file dropped from the cache
 #   req:a003   both: 20 ms on the lock, then 32 pages
+#   req:a004   the client sends half its request, pauses 30 ms, sends the rest
+#   req:a005   the client reads a 128 KiB answer through a 4 KiB receive
+#              buffer, a millisecond between reads
 #
-# The server declares each request with two USDT probes, `request__start(id)`
-# and `request__done(id)`. The birth writes the id into the serving thread's
+# The last two need no root: `tc netem` would delay packets where the tool
+# never sees it happen, and a client that pauses or reads slowly puts the delay
+# exactly where the tool does.
+#
+# The server declares each request with two USDT probes, `request__start(id,
+# fd)` and `request__done(id, fd)`. The birth writes the id into the serving thread's
 # own task storage, and every program that later runs in that thread reads it
 # back -- `sched_switch`, to add the request's time up by state, and the block
 # layer's issue, to put `req:<id>` on the block requests it submits. That last
@@ -21,17 +28,28 @@
 #
 # Two tables, both read per request.
 #
-# `one-request` is where the request's life went, and its whole is that life,
-# birth to end:
+# `one-request` is where the request's time went, and its whole is its span,
+# from its first byte reaching the server's socket to its last byte leaving it:
 #
+#   net_rx       `net.request` net_rx_ns  the first byte to the birth, and any
+#                                         wait in `recv` for the rest after it
 #   cpu_on       `net.request` oncpu_ns   on a cpu while carrying the id
 #   sched_wait   `net.request` runq_ns    runnable, waiting for a cpu
-#   lock_wait    `net.request` sleep_ns   asleep interruptibly: the lock here,
-#                                         and `holder_tid` names who released it
+#   lock_wait    `net.request` sleep_ns   asleep interruptibly, not on the
+#                                         socket: the lock here, and
+#                                         `holder_tid` names who released it
 #   block_io     `net.request` disk_ns    asleep uninterruptibly: the reads
+#   net_tx       `net.request` net_tx_ns  blocked in `send` on a closed window,
+#                                         and the end to the last byte leaving
 #
-# The four tile the life exactly, so its residue is zero by construction and
+# The six tile the span exactly, so its residue is zero by construction and
 # says nothing; what says something is which row each injected delay lands in.
+#
+# `net_rx` and `net_tx` are read by the socket's cookie -- the descriptor the
+# probes pass -- because nothing on the receive or the transmit path runs in
+# the serving thread. They are KEY, and the table prints them IDENTITY until a
+# part can say which key it was read through: filed in docs/open-findings.md,
+# stream N, where two lines of this file take `via: sock` when it lands.
 #
 # `block-io` opens the last row. Its whole is that same uninterruptible wait,
 # and its one part is the device's time for every block request carrying this
@@ -67,6 +85,8 @@ requests:
         - "40:0"
         - "0:64"
         - "20:32"
+        - "0:0:30"
+        - "0:0:0:131072"
     mode: trace
     emit: [raw, summary]
     keys: [req]
@@ -81,13 +101,15 @@ requests:
 decompose:
   - id: one-request
     by: req
-    whole: {from: net.request, value: total_ns}
+    whole: {from: net.request, value: span_ns}
     parts:
+      - {state: net_rx, from: net.request, value: net_rx_ns}
       - {state: cpu_on, from: net.request, value: oncpu_ns}
       - {state: sched_wait, from: net.request, value: runq_ns}
       - {state: lock_wait, from: net.request, value: sleep_ns, names: holder_tid}
       - {state: block_io, from: net.request, value: disk_ns}
-    top: 3
+      - {state: net_tx, from: net.request, value: net_tx_ns}
+    top: 5
 
   - id: block-io
     by: req

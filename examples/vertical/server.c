@@ -1,6 +1,6 @@
 /* BEGIN SERVER -- omn's vertical-case server.
  *
- *   server <file> <lock_ms>:<reads> ...
+ *   server <file> <lock_ms>:<reads>[:<gap_ms>[:<body>]] ...
  *
  * A real TCP server on loopback, a client thread that measures each request's
  * latency on its own clock, and a holder thread that takes the server's lock
@@ -9,10 +9,38 @@
  * `reads` pages of `file` with O_DIRECT after dropping it from the page cache,
  * so each read is one block request. A `lock_ms` of -1 abandons the request:
  * it is declared at its start and never ended, which is the loss the tool
- * must count rather than hide. Every request is declared with USDT
- * probes, `omn:request__start(id)` and `omn:request__done(id)`, and the server
- * and the client print what their own clocks saw on stderr, prefixed `vertical:`. */
+ * must count rather than hide.
+ *
+ * The two network injections are the client's, and need no root. A `gap_ms`
+ * makes the client send the first half of its request, sleep, and send the
+ * rest: the server cannot declare a request it has not read, so the pause is
+ * between the request's first byte and its birth. A `body` makes the server
+ * answer with that many bytes through a small send buffer, to a client with a
+ * small receive buffer that sleeps a millisecond after every read: the send
+ * blocks on the closed window, and the last bytes leave the stack well after
+ * the server has declared the request done. A negative `body` is a client that
+ * never reads the answer and closes: the response never leaves the stack,
+ * which is the loss the tool must say rather than hide.
+ *
+ * Every request is declared with USDT probes, `omn:request__start(id, fd)` and
+ * `omn:request__done(id, fd)`, the descriptor being the connection's, and the
+ * server and the client print what their own clocks saw on stderr, prefixed
+ * `vertical:`. */
 #define _GNU_SOURCE
+/* Built with -DGUARDED, both probes are behind a semaphore, as a program that
+ * wants its probes to cost nothing when nobody listens declares them: the site
+ * is skipped unless the semaphore is raised, which the tool asks the kernel to
+ * do. */
+#ifdef GUARDED
+#define _SDT_HAS_SEMAPHORES 1
+unsigned short omn_request__start_semaphore __attribute__((section(".probes"))) = 0;
+unsigned short omn_request__done_semaphore __attribute__((section(".probes"))) = 0;
+#define START_ENABLED() (omn_request__start_semaphore != 0)
+#define DONE_ENABLED() (omn_request__done_semaphore != 0)
+#else
+#define START_ENABLED() 1
+#define DONE_ENABLED() 1
+#endif
 #include <sys/sdt.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -31,10 +59,16 @@
 #define PAGE 4096
 #define STRIDE (64 * 1024)
 #define MAX_PLAN 64
+#define MAX_READS 4096
+/* The slow reader's buffers: the client's receive buffer as it asks for it, the
+ * server's send buffer, and the pause after each read. */
+#define SLOW_RCVBUF 4096
+#define SLOW_SNDBUF 16384
+#define SLOW_READ_PAUSE_NS 1000000L
 /* The largest value an eventfd holds, which is how the holder is told to stop. */
 #define QUIT 0xfffffffffffffffeULL
 
-static long plan_lock[MAX_PLAN], plan_reads[MAX_PLAN];
+static long plan_lock[MAX_PLAN], plan_reads[MAX_PLAN], plan_gap[MAX_PLAN], plan_body[MAX_PLAN];
 static int plan_n, port, hold_fd, held_fd;
 static const char *path;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -68,39 +102,111 @@ static void *holder(void *arg) {
     }
 }
 
-/* One request at a time over a fresh connection, timed from before the send to
- * the last byte of the response. */
+static void pause_ns(long ns) {
+    struct timespec d = { (time_t)(ns / 1000000000L), ns % 1000000000L };
+    nanosleep(&d, NULL);
+}
+
+/* One request at a time over a fresh connection, timed from before the first
+ * send to the last byte of the response. */
 static void *client(void *arg) {
     (void)arg;
     SAY("role=client tid=%d\n", tid());
+    static long read_start[MAX_READS], read_end[MAX_READS], read_total[MAX_READS];
+    static char buf[64 * 1024];
     for (int i = 0; i < plan_n; i++) {
-        struct timespec gap = { 0, 50 * 1000000L };
-        nanosleep(&gap, NULL);
+        pause_ns(50 * 1000000L);
         int s = socket(AF_INET, SOCK_STREAM, 0);
+        int slow = plan_body[i] != 0, unread = plan_body[i] < 0, rcvbuf = 0;
+        if (slow) {
+            /* Before the connect, so the window the handshake offers is this
+             * one, and locked: the kernel no longer grows a buffer set by hand. */
+            int want = SLOW_RCVBUF;
+            setsockopt(s, SOL_SOCKET, SO_RCVBUF, &want, sizeof want);
+        }
+        socklen_t len = sizeof rcvbuf;
+        getsockopt(s, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &len);
         struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port) };
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (connect(s, (struct sockaddr *)&a, sizeof a)) { perror("connect"); exit(1); }
-        char request[128];
+        char request[160];
         int n = snprintf(request, sizeof request,
-                         "GET /?lock=%ld&reads=%ld HTTP/1.1\r\nHost: omn\r\n\r\n",
-                         plan_lock[i], plan_reads[i]);
-        long t0 = now_ns();
-        (void)!send(s, request, n, 0);
-        char buf[512];
-        long got = 0, r;
-        while ((r = recv(s, buf, sizeof buf, 0)) > 0) got += r;
+                         "GET /?lock=%ld&reads=%ld&body=%ld HTTP/1.1\r\nHost: omn\r\n\r\n",
+                         plan_lock[i], plan_reads[i], plan_body[i]);
+        long t0 = now_ns(), first_end = 0, second = 0;
+        if (plan_gap[i] > 0) {
+            int half = n / 2;
+            (void)!send(s, request, half, 0);
+            first_end = now_ns();
+            pause_ns(plan_gap[i] * 1000000L);
+            second = now_ns();
+            (void)!send(s, request + half, n - half, 0);
+        } else {
+            (void)!send(s, request, n, 0);
+            first_end = now_ns();
+        }
+        long got = 0, r, slept = 0, expect = -1;
+        int reads = 0;
+        if (unread) {
+            /* Long enough for the server to have answered, then gone without
+             * reading a byte: the close with unread data resets the connection. */
+            pause_ns(20 * 1000000L);
+            close(s);
+            SAY("role=client req=%x unread=1\n", 0xa001 + i);
+            continue;
+        }
+        for (;;) {
+            long rs = now_ns();
+            r = recv(s, buf, slow ? sizeof buf : 512, 0);
+            long re = now_ns();
+            if (r <= 0) break;
+            got += r;
+            if (reads < MAX_READS) {
+                read_start[reads] = rs;
+                read_end[reads] = re;
+                read_total[reads] = got;
+            }
+            reads++;
+            if (expect < 0) {
+                char *end = memmem(buf, r, "\r\n\r\n", 4);
+                long length = 0;
+                if (end && sscanf(buf, "HTTP/1.1 200 OK\r\nContent-Length: %ld", &length) == 1)
+                    expect = (end + 4 - buf) + length;
+            }
+            /* No pause once the whole answer is in: what is left is the close. */
+            if (slow && got < expect) {
+                long p0 = now_ns();
+                pause_ns(SLOW_READ_PAUSE_NS);
+                slept += now_ns() - p0;
+            }
+        }
         long t1 = now_ns();
         close(s);
-        SAY("role=client req=%x client_ns=%ld sent_ns=%ld bytes=%ld\n", 0xa001 + i, t1 - t0, t0, got);
+        /* The earliest the response's last byte can have left the server: the
+         * start of the first read after which fewer than a receive buffer of
+         * bytes were left. Before it, more than a buffer was unread, and the
+         * server cannot have sent past the window a buffer allows. */
+        long room = 0, last = 0;
+        int kept = reads < MAX_READS ? reads : MAX_READS;
+        for (int k = 0; k < kept; k++)
+            if (read_total[k] >= got - rcvbuf) { room = read_start[k]; break; }
+        if (kept > 0) last = read_end[kept - 1];
+        SAY("role=client req=%x client_ns=%ld sent_ns=%ld first_end_ns=%ld second_ns=%ld "
+            "bytes=%ld reads=%d slept_ns=%ld rcvbuf=%d room_ns=%ld last_ns=%ld\n",
+            0xa001 + i, t1 - t0, t0, first_end, second, got, reads, slept, rcvbuf, room, last);
     }
     return NULL;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: server <file> <lock_ms>:<reads> ...\n"); return 2; }
+    if (argc < 3) {
+        fprintf(stderr, "usage: server <file> <lock_ms>:<reads>[:<gap_ms>[:<body>]] ...\n");
+        return 2;
+    }
     path = argv[1];
     for (int i = 2; i < argc && plan_n < MAX_PLAN; i++, plan_n++)
-        if (sscanf(argv[i], "%ld:%ld", &plan_lock[plan_n], &plan_reads[plan_n]) != 2) return 2;
+        if (sscanf(argv[i], "%ld:%ld:%ld:%ld", &plan_lock[plan_n], &plan_reads[plan_n],
+                   &plan_gap[plan_n], &plan_body[plan_n]) < 2) return 2;
 
     /* The file every read comes from: incompressible, on the device, and out of
      * the page cache -- which is what makes one O_DIRECT page one request. */
@@ -138,6 +244,11 @@ int main(int argc, char **argv) {
     char *page = aligned_alloc(PAGE, PAGE);
     for (int i = 0; i < plan_n; i++) {
         int conn = accept(listener, NULL, NULL);
+        /* The socket's cookie, as the kernel names it: what the tool's `sock`
+         * key must be, read here by the server and nowhere else. */
+        unsigned long long cookie = 0;
+        socklen_t clen = sizeof cookie;
+        getsockopt(conn, SOL_SOCKET, SO_COOKIE, &cookie, &clen);
         char buf[512];
         long got = 0, r;
         while (got < (long)sizeof buf - 1 && (r = recv(conn, buf + got, sizeof buf - 1 - got, 0)) > 0) {
@@ -145,12 +256,17 @@ int main(int argc, char **argv) {
             buf[got] = 0;
             if (strstr(buf, "\r\n\r\n")) break;
         }
-        long lock_ms = 0, reads = 0;
-        sscanf(buf, "GET /?lock=%ld&reads=%ld", &lock_ms, &reads);
+        long lock_ms = 0, reads = 0, body = 0;
+        sscanf(buf, "GET /?lock=%ld&reads=%ld&body=%ld", &lock_ms, &reads, &body);
         unsigned long id = 0xa001 + i;
+        if (body != 0) {
+            int want = SLOW_SNDBUF;
+            setsockopt(conn, SOL_SOCKET, SO_SNDBUF, &want, sizeof want);
+        }
 
         long born = now_ns();
-        DTRACE_PROBE1(omn, request__start, id);
+        int guard = START_ENABLED();
+        if (guard) DTRACE_PROBE2(omn, request__start, id, conn);
 
         int abandoned = lock_ms < 0;
         long lock_ns = 0;
@@ -177,14 +293,27 @@ int main(int argc, char **argv) {
             close(fd);
         }
 
-        const char response[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
-        (void)!send(conn, response, sizeof response - 1, 0);
-        if (!abandoned) DTRACE_PROBE1(omn, request__done, id);
+        char header[128];
+        long length = body > 0 ? body : body < 0 ? -body : 2;
+        int hn = snprintf(header, sizeof header,
+                          "HTTP/1.1 200 OK\r\nContent-Length: %ld\r\nConnection: close\r\n\r\n",
+                          length);
+        char *response = malloc(hn + length);
+        memcpy(response, header, hn);
+        memset(response + hn, 'x', length);
+        long send_start = now_ns(), sent = 0, w;
+        while (sent < hn + length && (w = send(conn, response + sent, hn + length - sent, 0)) > 0)
+            sent += w;
+        long send_ns = now_ns() - send_start;
+        free(response);
+        if (!abandoned && DONE_ENABLED()) DTRACE_PROBE2(omn, request__done, id, conn);
         long ended = now_ns();
         close(conn);
         SAY("role=worker req=%lx tid=%d lock_ms=%ld reads=%ld done_reads=%ld lock_ns=%ld "
-            "read_ns=%ld span_ns=%ld born_ns=%ld abandoned=%d\n",
-            id, tid(), lock_ms, reads, done_reads, lock_ns, read_ns, ended - born, born, abandoned);
+            "read_ns=%ld send_start_ns=%ld send_ns=%ld sent=%ld span_ns=%ld born_ns=%ld cookie=%llu "
+            "guard=%d abandoned=%d\n",
+            id, tid(), lock_ms, reads, done_reads, lock_ns, read_ns, send_start, send_ns, sent,
+            ended - born, born, cookie, guard, abandoned);
     }
     pthread_join(c, NULL);
     uint64_t quit = QUIT;
