@@ -29,8 +29,8 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash};
+use super::insn::{count_drop, helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::sched_common::{count_update_failure, read_field, text_of, E2BIG};
 use super::syscall;
 
@@ -59,6 +59,9 @@ const COUNTER_SLOTS: u32 = 2;
 const ROW_VALUE: i16 = -48;
 const ROW_KEY: i16 = -24;
 const DROP_KEY: i16 = -8;
+/// Where the program keeps the row map it looked up through the generation
+/// slot, once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -56;
 
 /// The layout of a key.
 const KEY_TID: i16 = 0;
@@ -144,7 +147,11 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     program.push(Insn::ldx(BPF_DW, 1, 6, ARG_DST_CPU));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_DST_CPU, 1));
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one occurrence in each. See `map::Rows`.
+    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -164,7 +171,7 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
         7,
         comm_offset,
     );
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -180,6 +187,11 @@ fn instructions(btf: &Btf, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
         DROP_ROWS_BUSY,
         "done",
     );
+
+    program.jump_to("done", Insn::ja());
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS_BUSY, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -199,7 +211,7 @@ pub struct NumaDrops {
 
 /// A loaded, attached program and the map it fills.
 pub struct NumaProgram {
-    rows: Hash,
+    rows: Rows,
     drops: Counters,
     program: OwnedFd,
     _link: OwnedFd,
@@ -217,7 +229,7 @@ impl NumaProgram {
 
     pub fn load() -> Result<Self, String> {
         let btf = super::kernel_btf()?;
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_numa_rows")
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_numa_rows")
             .map_err(|error| map_failure("NUMA balancing map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_numa_drop")
             .map_err(|error| map_failure("NUMA balancing drop counter", error))?;
@@ -384,6 +396,7 @@ mod tests {
             (ROW_VALUE, ROW_VALUE_BYTES as i16, "value"),
             (ROW_KEY, ROW_KEY_BYTES as i16, "key"),
             (DROP_KEY, 4, "drop key"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -418,5 +431,15 @@ mod tests {
             (row.src_cpu, row.dst_cpu, row.count, row.comm.as_str()),
             (3, 19, 11, "walker")
         );
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = instructions(&btf, 3, 4).expect("a program");
+        crate::bpf::map::assert_rows_taken_once(&program, 3);
     }
 }

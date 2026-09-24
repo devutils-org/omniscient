@@ -6589,3 +6589,101 @@ never defaulted; and a method refuses an objective it does not answer for and
 names the one that does (`omn latency` answers latency and tail, `omn saturate`
 throughput, tail and energy). `cost` is not an objective: nothing here measures
 a price.
+
+## Needs from another stream — the eleventh wave, stream K (drains that lose nothing)
+
+`src/bpf/map.rs` now has `Rows`: two row maps behind a one-slot
+`BPF_MAP_TYPE_ARRAY_OF_MAPS`, a drain that swaps the slot, waits for a grace
+period with `membarrier(MEMBARRIER_CMD_GLOBAL)` and empties the map it retired.
+Ten programs in `sched`, `proc` and `mem` use it; `docs/families/drains.md` has
+the measurement (17 to 25 calls lost per run on `main` for a program that counts
+its own, none after). Three drained programs outside this stream's files still
+have the race, and one has the lagging version of the fix with a grace period
+this kernel does not honour.
+
+### To whoever owns `src/bpf/io_pagecache.rs`, `net_qdisc.rs` and `net_softirq.rs`: the same race, the same fix
+
+Each drains a row map with lookup-and-delete while its programs look a row up
+and add to it. Moving one is four lines and a test:
+
+```rust
+use super::map::{row_map, select_rows, Rows};
+
+let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_x_rows")?; // was Hash::create
+// before the first row lookup, once per run; ROWS_SLOT is an 8-byte stack slot
+select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+program.push(row_map(1, ROWS_SLOT));          // replaces each load_map_fd(1, rows_fd)
+// and a "no_rows" label that counts a row drop, which is never reached while
+// the slot holds a map
+
+#[test]
+fn the_row_map_is_taken_from_the_slot_once_per_run() {
+    crate::bpf::map::assert_rows_taken_once(&program, rows_fd);
+}
+```
+
+`drain()` keeps its signature and its meaning -- every row since the last
+drain, nothing a tick late -- so no collector changes. Add `ROWS_SLOT` to the
+file's stack-region test.
+
+### To whoever owns `src/bpf/fentry.rs`: the last drain's 1 ms is not a grace period here
+
+`HistogramProgram::drain(last: true)` flips the word and sleeps a millisecond
+for "a call that read the generation before the flip". On this kernel
+(`CONFIG_PREEMPT=y`, 7.2) BPF programs are preemptible: `proc.syscall`'s
+`sys_exit` program, which no interrupt re-enters, was skipped by the kernel's
+recursion guard 4300 and 15829 times in two runs of eight busy threads, which
+only happens when a run was preempted mid-program on its cpu. A preempted
+exit half can hold the retired map far longer than 1 ms. Either
+`membarrier(MEMBARRIER_CMD_GLOBAL)` in place of the sleep (5 to 18 ms here, and
+exact), or moving to `map::Rows`, which also removes the tick of lateness. The
+ordinary drains, which wait a whole interval, make the same bet with a hundred
+times the margin; it is still a bet.
+
+### To stream E, for `src/collect/mod.rs`: one grace period per round, not per source
+
+`Rows::drain` sleeps 5 to 18 ms for its grace period, in the runner's thread.
+One drained source never notices. Six drained sources in one session, drained
+one after another, can push a 100 ms round past its tick, which the runner then
+counts as `late_ticks` -- honest, but avoidable. A two-phase drain would pay
+once per round:
+
+```rust
+// in map.rs, beside Rows::drain
+pub fn retire(&self) -> io::Result<usize>;      // swap only; returns the retired side
+pub fn take(&self, retired: usize) -> io::Result<Drained>;
+pub fn grace_period() -> io::Result<()>;       // made pub
+```
+
+and a `Collector::retire(&mut self)` the runner calls on every drained
+collector of a round before one `grace_period()` and then the ordinary
+`sample()`. Not done here: it is a change to the collector trait and the round
+loop, which are E's this wave, and nothing is wrong without it.
+
+### To whoever owns `src/collect/mem/` (IBS) and `tests/scenario_mem.rs`: a `stack` over `mem.latency` fails one run in ten, as a machine limit
+
+`omn mem.latency -m sample@997hz -e stack -- /bin/sh -c "sleep 0.05"` exits 1
+about one run in ten, on `main` as on this branch, with
+
+```
+error: `latency_cycles` is not a numeric attribute, so it cannot be aggregated
+```
+
+Exit 1 says the machine cannot serve the request, which is not what happened:
+some run's events carry `latency_cycles` as something other than a number,
+most likely when an IBS op had no latency to report. It is what makes
+`scenario_mem::every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code`
+flap -- `["mem.latency sample stack"]` against `[]` -- and it failed in both of
+this stream's full runs, once alone. Not investigated further here: none of
+it is in this stream's files.
+
+### For the flaky tally: seen once in a full run, passed alone at once
+
+`collect::tests::weighing_a_run_costs_a_fraction_of_the_run` (12.3 ms of a
+605 ms window), `scenario_sched::a_workload_that_is_half_blocked_measures_as_half_blocked`
+(the `sched.wakeup` half: 1584 wakeups against 1200 +-25 %; the off-cpu half,
+the drained one, passed), `scenario_net::every_segment_the_kernel_resent_is_one_this_run_saw`
+(4 against 3), `scenario_proc::what_the_signal_ring_could_not_hold_is_counted_and_closes_against_what_was_sent`
+(6 late ticks of a 10 ms tick), and `join_engine::the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_program_predicts`
+(118 644 bytes over the interpreter allowance). None of them reads a drained
+program.

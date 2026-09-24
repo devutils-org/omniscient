@@ -29,6 +29,8 @@
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
+use super::insn::{helper, Insn, Program, BPF_DW, R10};
+
 use super::syscall::{
     self, TypedMap, BPF_F_NO_PREALLOC, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_ARRAY,
     BPF_MAP_TYPE_STACK_TRACE, BPF_MAP_TYPE_TASK_STORAGE,
@@ -152,6 +154,287 @@ impl Hash {
     pub fn len(&self) -> io::Result<usize> {
         Ok(self.keys()?.0.len())
     }
+}
+
+/// `BPF_MAP_TYPE_ARRAY_OF_MAPS`, and the two commands a swap needs, which
+/// `syscall.rs` does not offer.
+const BPF_MAP_TYPE_ARRAY_OF_MAPS: u32 = 12;
+const BPF_MAP_CREATE: i32 = 0;
+const BPF_MAP_UPDATE_ELEM: i32 = 2;
+
+/// The prefix of `union bpf_attr` that `BPF_MAP_CREATE` reads, as far as
+/// `inner_map_fd` and the name. The kernel requires every byte past what it
+/// is given to be zero, and a shorter attribute is how that is guaranteed.
+#[repr(C)]
+#[derive(Default)]
+struct OuterCreateAttr {
+    map_type: u32,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32,
+    map_flags: u32,
+    inner_map_fd: u32,
+    numa_node: u32,
+    map_name: [u8; 16],
+}
+
+#[repr(C)]
+struct ElemAttr {
+    map_fd: u32,
+    pad: u32,
+    key: u64,
+    value: u64,
+    flags: u64,
+}
+
+/// A row map a program writes into while userspace drains it, made safe to
+/// drain.
+///
+/// **The race this closes.** A program that counts into a hash looks its row
+/// up and adds to it a few instructions later. A drain that takes the row with
+/// lookup-and-delete between the two has already copied it out, and the
+/// addition lands in a freed element -- or, the map being preallocated, in
+/// whatever key the element was handed to next. Nothing counts it. Measured by
+/// the eighth wave on the fentry histograms: a hundred thousand reads, 55192
+/// counted, 44807 gone.
+///
+/// **Two row maps, and the drain only ever empties the one nobody can be
+/// writing.** `fentry::HistogramProgram` found that shape: a generation word
+/// says which map is written, a drain flips it and empties the other. Its
+/// grace period is an interval -- the map drained is the one retired a tick
+/// ago -- which costs every row a tick of lateness and makes the last drain a
+/// special case with a sleep in it.
+///
+/// Here the word is a one-slot `BPF_MAP_TYPE_ARRAY_OF_MAPS`, which the
+/// programs look up once per run to find the row map they write, and a drain
+/// **swaps the slot and then waits for a grace period** before it reads the
+/// map it retired. Every program this layer loads runs inside an RCU read-side
+/// section -- `__bpf_trace_run` and the trampolines take `rcu_read_lock()`
+/// around the program -- so once `synchronize_rcu()` has returned, no program
+/// that could have read the old slot is still running, and the retired map is
+/// written by no one. It is emptied whole: nothing arrives a tick late, and
+/// nothing is left behind at the end of the run.
+///
+/// **The kernel's own swap is not the grace period.** Its comment on
+/// `maybe_wait_bpf_programs` promises one on a map-of-maps update, and on this
+/// machine (7.2) the update returns in 20 to 30 us, where a real
+/// `synchronize_rcu()` takes 5 to 18 ms. Whatever the update waits for, it is
+/// not what this needs, so the wait is asked for explicitly:
+/// `membarrier(MEMBARRIER_CMD_GLOBAL)` is `synchronize_rcu()` from userspace.
+/// And the programs here *can* be preempted mid-run -- `sys_exit`, which no
+/// interrupt enters, shows thousands of the kernel's recursion misses under
+/// eight busy threads -- so "a program runs for microseconds" is not a bound.
+///
+/// The price is that wait, paid once per drain in the drain's thread and never
+/// by the program: 5 to 18 ms of sleeping on this machine, against a 100 ms
+/// tick.
+pub struct Rows {
+    outer: OwnedFd,
+    maps: [Hash; 2],
+    /// Which of the two the slot names now.
+    writing: std::cell::Cell<usize>,
+}
+
+impl Rows {
+    pub fn create(
+        key_bytes: usize,
+        value_bytes: usize,
+        max_entries: u32,
+        name: &str,
+    ) -> io::Result<Self> {
+        if !grace_periods_offered() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this kernel offers no way to wait for a grace period from userspace \
+                 (`membarrier(MEMBARRIER_CMD_GLOBAL)` is withdrawn under `nohz_full`), and \
+                 without one a drain would race the programs writing the map it reads",
+            ));
+        }
+        let maps = [
+            Hash::create(key_bytes, value_bytes, max_entries, name)?,
+            Hash::create(key_bytes, value_bytes, max_entries, name)?,
+        ];
+        let mut attr = OuterCreateAttr {
+            map_type: BPF_MAP_TYPE_ARRAY_OF_MAPS,
+            key_size: 4,
+            value_size: 4,
+            max_entries: 1,
+            inner_map_fd: maps[0].as_raw_fd() as u32,
+            map_name: kernel_name(&format!("{name}_gen")),
+            ..Default::default()
+        };
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                BPF_MAP_CREATE,
+                &mut attr as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<OuterCreateAttr>() as u32,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let outer = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd as RawFd) };
+        let rows = Self {
+            outer,
+            maps,
+            writing: std::cell::Cell::new(0),
+        };
+        rows.point_at(0)?;
+        Ok(rows)
+    }
+
+    /// The map the programs load, which is the slot and not either row map.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.outer.as_raw_fd()
+    }
+
+    /// Points the slot at one row map. Programs that begin after this read the
+    /// new one; programs already running may still hold the old one, which is
+    /// what [`grace_period`] is for.
+    fn point_at(&self, which: usize) -> io::Result<()> {
+        let key = 0u32;
+        let value = self.maps[which].as_raw_fd() as u32;
+        let mut attr = ElemAttr {
+            map_fd: self.outer.as_raw_fd() as u32,
+            pad: 0,
+            key: &key as *const u32 as u64,
+            value: &value as *const u32 as u64,
+            flags: 0,
+        };
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                BPF_MAP_UPDATE_ELEM,
+                &mut attr as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<ElemAttr>() as u32,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.writing.set(which);
+        Ok(())
+    }
+
+    /// Every row counted since the last drain, removed.
+    ///
+    /// The slot is pointed at the empty map first, a grace period is waited
+    /// for, and only then is the other map read -- so a row is either in this
+    /// drain whole or in the next one whole.
+    pub fn drain(&self) -> io::Result<Drained> {
+        let retired = self.writing.get();
+        self.point_at(1 - retired)?;
+        grace_period()?;
+        self.maps[retired].drain()
+    }
+
+    /// How many rows the map being written holds now, without taking any.
+    #[cfg(test)]
+    pub fn len(&self) -> io::Result<usize> {
+        self.maps[self.writing.get()].len()
+    }
+}
+
+/// `MEMBARRIER_CMD_QUERY` and `MEMBARRIER_CMD_GLOBAL`, from
+/// `include/uapi/linux/membarrier.h`.
+const MEMBARRIER_CMD_QUERY: libc::c_long = 0;
+const MEMBARRIER_CMD_GLOBAL: libc::c_long = 1;
+
+/// Whether this kernel will wait for a grace period on request. A query, so
+/// that a machine that cannot is refused when the program loads rather than
+/// failing on its first drain.
+fn grace_periods_offered() -> bool {
+    let offered = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0) };
+    offered >= 0 && offered & MEMBARRIER_CMD_GLOBAL != 0
+}
+
+/// Returns once every RCU read-side section that had begun has ended -- which
+/// is every eBPF program that was running on any cpu when it was called.
+fn grace_period() -> io::Result<()> {
+    let result = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A name, truncated to the 15 characters plus NUL the kernel stores.
+fn kernel_name(name: &str) -> [u8; 16] {
+    let mut buffer = [0u8; 16];
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(15);
+    buffer[..len].copy_from_slice(&bytes[..len]);
+    buffer
+}
+
+/// Looks the row map up through a [`Rows`] slot and keeps it on the stack at
+/// `spill`, an eight-byte slot of the program's own; `missing` is where a run
+/// goes if the lookup finds nothing.
+///
+/// **Once per run, and before the first row lookup.** Two lookups of the slot
+/// in one run could straddle a swap and name two different maps -- a row found
+/// in one and created in the other -- so the pointer is taken once and every
+/// row access of the run reads it back with [`row_map`]. `missing` cannot be
+/// reached while the slot holds a map, which it does from creation; the
+/// verifier insists on the branch, and the caller counts it as a row it could
+/// not record, so that if it ever is reached it is not silent.
+///
+/// Clobbers `r0` through `r5`.
+pub fn select_rows(program: &mut Program, rows_fd: RawFd, spill: i16, missing: &'static str) {
+    program.push(Insn::st_imm(BPF_DW, R10, spill, 0));
+    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, spill as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(missing, Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, R10, spill, 0));
+}
+
+/// Loads the row map [`select_rows`] kept at `spill` into `dst`: what every
+/// `load_map_fd(dst, rows)` of a drained program becomes.
+pub fn row_map(dst: u8, spill: i16) -> Insn {
+    Insn::ldx(BPF_DW, dst, R10, spill)
+}
+
+/// The check every program drained through [`Rows`] runs on itself: the slot
+/// is read once, kept on the stack, and every row access reads it back from
+/// there.
+///
+/// A second read of the slot is the defect this layer exists to prevent, and
+/// it is invisible in every test that does not look at the instructions: two
+/// reads can straddle a drain's swap, find a row in one map and create it in
+/// the other, and the occurrence is counted twice or not at all depending on
+/// which way the drain went.
+#[cfg(test)]
+pub fn assert_rows_taken_once(instructions: &[Insn], rows_fd: RawFd) {
+    const LD_IMM64: u8 = 0x18;
+    const STX_DW: u8 = 0x7b;
+    const LDX_DW: u8 = 0x79;
+    let loads: Vec<usize> = instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, insn)| insn.code == LD_IMM64 && insn.imm == rows_fd)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        loads.len(),
+        1,
+        "the generation slot is read once per run, and this program reads it at {loads:?}"
+    );
+    let spill = instructions[loads[0]..]
+        .iter()
+        .find(|insn| insn.code == STX_DW && insn.regs & 0x0f == R10 && insn.regs >> 4 == 0)
+        .expect("the map the slot named is kept on the stack")
+        .off;
+    let refills = instructions
+        .iter()
+        .filter(|insn| insn.code == LDX_DW && insn.regs == (R10 << 4) | 1 && insn.off == spill)
+        .count();
+    assert!(
+        refills >= 2,
+        "the row lookup and the row insert both use the map the slot named; {refills} read it"
+    );
 }
 
 /// Walks a map's keys, stopping at the end or at `capacity`.
@@ -519,6 +802,58 @@ mod tests {
                 eprintln!("skipped: this machine does not let this process create a map: {error}");
             }
         }
+    }
+
+    /// The check refuses what it exists to refuse: a program that reads the
+    /// generation slot twice in one run.
+    #[test]
+    #[should_panic(expected = "read once per run")]
+    fn a_program_that_reads_the_slot_twice_is_refused() {
+        let mut program = Program::new();
+        select_rows(&mut program, 7, -8, "missing");
+        select_rows(&mut program, 7, -16, "missing");
+        program.label("missing");
+        program.push(Insn::exit());
+        assert_rows_taken_once(&program.build(), 7);
+    }
+
+    /// Rows written into the map being written come back from one drain, and
+    /// rows written after it come back from the next -- neither lost at the
+    /// swap nor returned twice.
+    #[test]
+    fn a_drain_takes_the_map_written_until_now_and_leaves_the_next_one_empty() {
+        let rows = match Rows::create(4, 8, 16, "omn_test_rows") {
+            Ok(rows) => rows,
+            Err(error) => {
+                assert!(
+                    error.raw_os_error().is_some() || error.kind() == io::ErrorKind::Unsupported
+                );
+                eprintln!(
+                    "skipped: this machine does not let this process create the row maps: {error}"
+                );
+                return;
+            }
+        };
+        let write = |key: u32, value: u64| {
+            let map = &rows.maps[rows.writing.get()];
+            syscall::map_update(map.as_raw_fd(), &key.to_ne_bytes(), &value.to_ne_bytes())
+                .expect("a write into a map this process owns");
+        };
+        write(1, 10);
+        write(2, 20);
+        assert_eq!(rows.len().expect("a length"), 2);
+        let first = rows.drain().expect("a drain");
+        assert_eq!(first.entries.len(), 2, "both rows of the first interval");
+        assert_eq!(
+            rows.len().expect("a length"),
+            0,
+            "the map now written is empty"
+        );
+        write(3, 30);
+        let second = rows.drain().expect("a second drain");
+        assert_eq!(second.entries.len(), 1, "only what was written since");
+        assert_eq!(second.entries[0].0, 3u32.to_ne_bytes());
+        assert!(rows.drain().expect("a third drain").entries.is_empty());
     }
 
     /// The BTF handed to the kernel is checked byte by byte on the other side,

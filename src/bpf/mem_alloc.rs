@@ -35,7 +35,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash};
+use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::mem_program::{
     bucket_low, check_signature, comm, count_drop, load, long, push_log2_bucket, read_cgroup_id,
     read_comm, read_pid_tgid, word,
@@ -67,6 +67,9 @@ const ROW_VALUE: i16 = -48;
 const ROW_KEY: i16 = -80;
 const PID_TGID: i16 = -88;
 const DROP_KEY: i16 = -92;
+/// Where the program keeps the row map it looked up through the generation
+/// slot, once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -104;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -358,7 +361,11 @@ fn instructions(
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
     read_cgroup_id(&mut program, ROW_KEY + KEY_CGROUP, with_cgroup);
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one occurrence in each. See `map::Rows`.
+    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -393,7 +400,7 @@ fn instructions(
     // The name is read once, when the row is created, rather than on every
     // allocation: it does not change, and this is the hot path.
     read_comm(&mut program, ROW_VALUE + VALUE_COMM);
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -401,6 +408,11 @@ fn instructions(
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
+
+    program.jump_to("done", Insn::ja());
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS, "done");
 
     program.label("done");
@@ -418,7 +430,7 @@ fn instructions(
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct AllocProgram {
     allocator: Allocator,
-    rows: Hash,
+    rows: Rows,
     drops: Counters,
     programs: Vec<OwnedFd>,
     _links: Vec<OwnedFd>,
@@ -438,7 +450,7 @@ impl AllocProgram {
         let btf = super::kernel_btf()?;
         let (rows_name, drops_name, program_names) = allocator.map_prefix();
 
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, rows_name)
             .map_err(|error| map_failure("allocation histogram map", error))?;
         let drops = Counters::create(1, drops_name)
             .map_err(|error| map_failure("allocation drop counter", error))?;
@@ -694,6 +706,7 @@ mod tests {
             (ROW_KEY, ROW_KEY_BYTES as i16, "row key"),
             (PID_TGID, 8, "pid and tgid"),
             (DROP_KEY, 4, "drop key"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -750,5 +763,16 @@ mod tests {
         assert!(row.freeing);
         assert_eq!(row.cgroup_id, 4242);
         assert_eq!(row.comm, "python");
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        let program =
+            instructions(&btf, &Allocator::Pages.sites()[0], true, 3, 4).expect("a program");
+        crate::bpf::map::assert_rows_taken_once(&program, 3);
     }
 }

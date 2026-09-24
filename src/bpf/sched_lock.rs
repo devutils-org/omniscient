@@ -32,7 +32,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash, StackTraces};
+use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
     bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, text_of, Log2Labels,
     BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
@@ -92,6 +92,9 @@ const ROW_KEY: i16 = -80;
 const WAIT_VALUE: i16 = -56;
 const WAIT_KEY: i16 = -40;
 const DROP_KEY: i16 = -32;
+/// Where the program keeps the row map it looked up through the generation
+/// slot, once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -128;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -431,7 +434,11 @@ fn end_instructions(
     program.push(Insn::rsh64_imm(1, 32));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_TGID, 1));
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one occurrence in each. See `map::Rows`.
+    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -461,7 +468,7 @@ fn end_instructions(
     program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
     program.push(Insn::call(helper::GET_CURRENT_COMM));
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -477,6 +484,11 @@ fn end_instructions(
         DROP_ROWS_BUSY,
         "done",
     );
+
+    program.jump_to("done", Insn::ja());
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS_BUSY, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -514,7 +526,7 @@ pub struct LockDrops {
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct LockProgram {
     waiting: Hash,
-    rows: Hash,
+    rows: Rows,
     drops: Counters,
     stacks: StackTraces,
     begin_program: OwnedFd,
@@ -543,7 +555,7 @@ impl LockProgram {
             "omn_lock_wait",
         )
         .map_err(|error| map_failure("lock wait map", error))?;
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_lock_hist")
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_lock_hist")
             .map_err(|error| map_failure("lock histogram map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_lock_drop")
             .map_err(|error| map_failure("lock drop counter", error))?;
@@ -812,6 +824,7 @@ mod tests {
             (WAIT_VALUE, WAIT_VALUE_BYTES as i16, "in-flight value"),
             (WAIT_KEY, 8, "in-flight key"),
             (DROP_KEY, 4, "drop key"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -875,5 +888,15 @@ mod tests {
         assert_eq!(of(LCB_F_WRITE | LCB_F_PERCPU), "percpu+write");
         // A bit this build has never seen is not a guess at one it has.
         assert_eq!(of(1 << 20), "other");
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = end_instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }
