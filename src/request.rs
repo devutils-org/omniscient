@@ -1343,16 +1343,16 @@ impl Session {
         }
     }
 
-    /// Refuses a join or a decomposition that reads a source the escalation
-    /// attaches and detaches.
+    /// Refuses a decomposition that reads a source the escalation attaches and
+    /// detaches.
     ///
-    /// A held request is watched for a span the run decides, and the join
-    /// engine does not yet know when each source was watching (`apply_within`,
-    /// filed with `src/join.rs`): a state opened before a detach would absorb
-    /// every event after it, and a decomposition would weigh a part watched
-    /// for half a second against a whole of two. Either is a number that
-    /// looks right and is not, so the combination is refused until the
-    /// engine can say what fell outside the window.
+    /// A join across a held source is allowed since the eleventh wave's
+    /// `join::apply_within`: an event outside the source's window is counted
+    /// as `outside_window` and states still open when it is detached close
+    /// there, so nothing is credited to a state the run had stopped watching.
+    /// A decomposition is still refused, because it would weigh a part watched
+    /// for half a second against a whole of two -- a number that looks right
+    /// and is not, until parts are weighed against their own window.
     fn nothing_reads_across_a_held_window(&self) -> Result<(), ParseError> {
         let held: Vec<&str> = self
             .requests
@@ -1362,16 +1362,9 @@ impl Session {
             .collect();
         let across = |source: &str| held.contains(&source);
         let readers = self
-            .joins
+            .decompose
             .iter()
-            .flat_map(|rule| {
-                [Some(&rule.from), Some(&rule.to), rule.waker.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .filter(|source| across(source))
-                    .map(move |source| format!("join `{}` reads `{source}`", rule.id))
-            })
-            .chain(self.decompose.iter().flat_map(|decomposition| {
+            .flat_map(|decomposition| {
                 decomposition
                     .parts
                     .iter()
@@ -1382,16 +1375,16 @@ impl Session {
                             decomposition.id, part.from, part.state
                         )
                     })
-            }))
+            })
             .collect::<Vec<_>>();
         if readers.is_empty() {
             return Ok(());
         }
         Err(ParseError::new(format!(
-            "{}, which the escalation attaches and detaches mid-run: the join engine does not yet \
-             know when a source was watching, so what fell outside its window would be credited \
-             to a stale state or weighed against the whole run. Join and decompose the cheap \
-             pass, which runs for the whole of it, or leave the escalation out",
+            "{}, which the escalation attaches and detaches mid-run: a decomposition weighs every \
+             part against one whole, and a part watched for part of the run would be weighed \
+             against all of it. Decompose the cheap pass, which runs for the whole of it, or \
+             leave the escalation out; a join across a held source is fine",
             readers.join("; ")
         )))
     }

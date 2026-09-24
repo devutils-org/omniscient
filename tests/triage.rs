@@ -1538,6 +1538,58 @@ fn a_run_too_short_to_decide_attaches_nothing_and_says_so() {
     }
 }
 
+/// A join whose `from` side is held for the escalation is allowed, and what
+/// fell outside that source's window is counted there rather than matched.
+///
+/// The ground truth is the workload's shape: its first second is spent on a
+/// cpu, and the lock layer -- `sched.futex` -- cannot be attached before the
+/// switch to the lock phase. So every reading `cpu.oncpu_time` took in that
+/// first second, one every 50 ms, was taken while the join's `from` source was
+/// not watching: at least ten of them must be outside its window, and the
+/// join's four counts must add up to every reading there was.
+#[test]
+fn a_join_from_a_held_source_counts_what_fell_outside_its_window() {
+    let _machine = one_at_a_time();
+    let Some((program, _log)) = phases("join-across", 1000, 1000) else {
+        return;
+    };
+    let session = format!(
+        "{}joins:\n  - {{id: waits-then-cpu, from: sched.futex, to: cpu.oncpu_time, via: task, \
+         match: eq, window: 60s}}\n",
+        escalation_session(&program, FUTEX)
+    );
+    let Some(run) = escalate(
+        "join-across",
+        &session,
+        &[],
+        "that a join from the held lock layer counts the cpu phase outside its window",
+    ) else {
+        return;
+    };
+    assert!(
+        run.attached("futex").is_some(),
+        "the lock layer was attached:\n{}",
+        run.text
+    );
+    let join = run.results["joins"]
+        .as_array()
+        .and_then(|joins| joins.iter().find(|join| join["rule"] == "waits-then-cpu"))
+        .unwrap_or_else(|| panic!("no join in the results:\n{}", run.text));
+    let count = |field: &str| join[field].as_u64().unwrap_or(0);
+    let outside = count("outside_window");
+    assert!(
+        outside >= 10,
+        "a second of cpu before the lock layer could be attached is twenty readings at 50 ms, \
+         and only {outside} were outside the futex window: {join}"
+    );
+    let readings = run.result("on-cpu")["events_seen"].as_u64().unwrap();
+    assert_eq!(
+        count("matched") + count("unmatched") + count("keyless") + outside,
+        readings,
+        "every reading is matched, unmatched, keyless or outside the window: {join}"
+    );
+}
+
 /// An escalation that cannot mean anything is refused before anything runs,
 /// with the reason -- exit 2, the validator's code.
 #[test]
@@ -1573,12 +1625,13 @@ fn an_escalation_that_cannot_decide_anything_is_refused_before_the_launch() {
             "does not run `sched.offcpu` or `cpu.oncpu_time`",
         ),
         (
-            "join-across",
+            "decomposition-across",
             format!(
-                "escalate: {{objective: latency}}\nrequests:\n{held_rss}joins:\n  - {{id: \
-                 across, from: mem.rss, to: mem.rss, via: task, match: eq}}\n"
+                "escalate: {{objective: latency}}\nrequests:\n{held_rss}decompose:\n  - {{id: \
+                 across, whole: lifetime, parts: [{{state: resident, from: mem.rss, value: \
+                 bytes}}]}}\n"
             ),
-            "join `across` reads `mem.rss`",
+            "decomposition `across` reads `mem.rss`",
         ),
     ] {
         let started = std::time::Instant::now();
