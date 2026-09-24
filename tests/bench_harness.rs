@@ -80,32 +80,80 @@ fn a_series_of_nothing_has_no_statistics_and_a_zero_mean_no_finite_cv() {
 
 // ------------------------------------------------------------------ gate
 
-/// The roadmap's bound, from both sides: 1.03 % refuses, 0.51 % passes.
+/// The bound is on the median's resolution, from both sides. Twenty runs at a
+/// CV of 1.03 % resolve 0.82 % and pass -- the old gate refused them for a
+/// spread no median of twenty has. Twenty at 1.54 % resolve 1.22 % and are
+/// excluded, with every number that decided it.
 #[test]
-fn the_gate_refuses_a_series_over_one_percent_and_passes_one_under() {
-    let noisy = baseline("compute", &alternating(20, 1000.0, 10.0));
-    let quiet = baseline("compute", &alternating(20, 1000.0, 5.0));
+fn a_workload_is_judged_by_what_its_median_resolves() {
+    let moderate = baseline("launch", &alternating(20, 1000.0, 10.0));
+    let resolved = moderate.stats.resolution();
+    assert!((resolved - 0.00818).abs() < 0.0001, "{resolved}");
+    let gate = judge(&[moderate], &performance()).expect("a median that resolves 0.82 %");
+    assert_eq!(gate.repetitions("launch", 20), Some(20));
 
-    let refusal = judge(&[noisy], &performance()).expect_err("CV 1.03 % must refuse");
-    let text = refusal.to_string();
-    assert!(
-        text.contains("1.03 %"),
-        "the refusal must carry its number:\n{text}"
-    );
-    assert!(text.contains("nothing was measured"), "{text}");
-
-    judge(&[quiet], &performance()).expect("CV 0.51 % must pass");
+    let noisy = baseline("io", &alternating(20, 1000.0, 15.0));
+    let quiet = baseline("compute", &alternating(20, 1000.0, 1.0));
+    let gate = judge(&[quiet, noisy], &performance()).expect("compute can still be measured");
+    assert_eq!(gate.repetitions("io", 20), None);
+    let why = &gate.excluded["io"];
+    for number in ["1.54 %", "1.22 %", "30 repetitions"] {
+        assert!(
+            why.contains(number),
+            "the exclusion must carry `{number}`: {why}"
+        );
+    }
 }
 
-/// One noisy workload among quiet ones is enough: the table would carry its
-/// rows, and those are the ones that could not resolve a small overhead.
+/// The repetitions a spread needs are what the formula says, and never fewer
+/// than the floor.
 #[test]
-fn one_noisy_workload_refuses_the_whole_run() {
+fn the_repetitions_a_spread_needs_are_the_ones_that_resolve_the_target() {
+    let series = Stats::of(&alternating(20, 1000.0, 22.7)).unwrap();
+    let needed = series.repetitions_to_resolve(RESOLUTION_TARGET);
+    assert!(
+        resolution_at(series.cv(), needed) <= RESOLUTION_TARGET
+            && resolution_at(series.cv(), needed - 1) > RESOLUTION_TARGET,
+        "{needed} repetitions for a CV of {:.2} %",
+        series.cv() * 100.0
+    );
+    let quiet = Stats::of(&alternating(20, 1000.0, 1.0)).unwrap();
+    assert_eq!(
+        quiet.repetitions_to_resolve(RESOLUTION_TARGET),
+        MIN_REPETITIONS
+    );
+}
+
+/// A steady load hides from every spread, so it is refused on what it costs
+/// the other cpus.
+#[test]
+fn a_machine_busy_elsewhere_is_refused_whatever_the_spread() {
     let quiet = baseline("compute", &alternating(20, 1000.0, 1.0));
+    let busy = Conditions {
+        foreign_busy_cpus: Some(9.5),
+        ..performance()
+    };
+    let text = judge(std::slice::from_ref(&quiet), &busy)
+        .unwrap_err()
+        .to_string();
+    assert!(text.contains("9.5 cpus busy"), "{text}");
+    let calm = Conditions {
+        foreign_busy_cpus: Some(1.2),
+        ..performance()
+    };
+    judge(&[quiet], &calm).expect("the harness's own cpu is allowed for");
+}
+
+/// A noisy workload excludes itself and nothing else; only a run where
+/// nothing is left to measure is refused.
+#[test]
+fn only_a_run_with_nothing_left_to_measure_is_refused() {
     let noisy = baseline("io", &alternating(20, 1000.0, 50.0));
-    let refusal = judge(&[quiet, noisy], &performance()).unwrap_err();
-    assert_eq!(refusal.reasons.len(), 1, "{:?}", refusal.reasons);
-    assert!(refusal.reasons[0].contains("`io`"), "{:?}", refusal.reasons);
+    let refusal = judge(&[noisy], &performance()).unwrap_err();
+    let text = refusal.to_string();
+    assert!(text.contains("every workload was excluded"), "{text}");
+    assert!(text.contains("`io`"), "{text}");
+    assert!(text.contains("nothing was"), "{text}");
 }
 
 #[test]
@@ -365,7 +413,7 @@ fn the_gate_on_this_machine() {
     let (baselines, throttled) =
         harness::baselines(&reference_workloads(), MIN_REPETITIONS).expect("the baselines");
     say(format!(
-        "gate, {} repetitions round-robin, LLC evicted before each run:",
+        "gate, at least {} repetitions round-robin, LLC evicted before each run:",
         MIN_REPETITIONS
     ));
     eprint!("{}", gate_table(&baselines));
@@ -374,8 +422,19 @@ fn the_gate_on_this_machine() {
             "{count} run(s) of `{workload}` throttled and dropped"
         ));
     }
-    if let Err(refusal) = judge(&baselines, &Conditions::read()) {
-        panic!("{refusal}");
+    let conditions = Conditions::read();
+    if let Some(busy) = conditions.foreign_busy_cpus {
+        say(format!(
+            "the unpinned cpus were {busy:.2} cpus busy meanwhile"
+        ));
+    }
+    match judge(&baselines, &conditions) {
+        Err(refusal) => panic!("{refusal}"),
+        Ok(gate) => {
+            for line in gate.exclusions() {
+                say(format!("excluded, and not measured: {line}"));
+            }
+        }
     }
 }
 
@@ -442,9 +501,13 @@ fn the_gate_refuses_a_machine_loaded_on_purpose() {
     }
     let (baselines, _) = result.expect("the baselines");
     eprint!("{}", gate_table(&baselines));
-    match judge(&baselines, &performance()) {
+    let conditions = Conditions {
+        foreign_busy_cpus: Conditions::read().foreign_busy_cpus,
+        ..performance()
+    };
+    match judge(&baselines, &conditions) {
         Err(refusal) => say(format!("refused, as it must:\n{refusal}")),
-        Ok(()) => panic!(
+        Ok(_) => panic!(
             "the gate passed a machine loaded on purpose with bursts on all {cpus} cpus:\n{}",
             gate_table(&baselines)
         ),

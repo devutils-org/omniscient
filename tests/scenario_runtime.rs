@@ -926,7 +926,10 @@ fn defect_2_the_match_operator_is_a_substring_test_and_says_so() {
     let described = lines
         .windows(2)
         .any(|pair| pair[0].trim() == ".BR =~" && pair[1].contains("substring"));
-    assert!(described, "the manual must say that `=~` is a substring test");
+    assert!(
+        described,
+        "the manual must say that `=~` is a substring test"
+    );
 }
 
 // ---------------------------------------------------------------------------

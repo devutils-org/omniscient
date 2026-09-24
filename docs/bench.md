@@ -120,48 +120,67 @@ is written as a coefficient of variation.
 
 ### The variance gate
 
-Baseline without any tracer, twenty repetitions of each reference workload.
-It **refuses** on:
+**Rewritten after the tenth wave, because it could not pass a quiet machine.**
+Run alone on the development machine -- load average 1, and then with boost
+off -- the original gate refused five times out of five, and never on the same
+workloads twice: `io` at 1.1 to 3.3 %, `contended` at 1.0 to 1.8 %, `launch`
+and `syscall` either side of 1 %. A cold read from a disk and four threads on
+one mutex are noisy run to run on any machine, and no environment control a
+reader can apply brings them under 1 %. The gate was asking the wrong
+question of them.
 
-- any workload with a CV over 1 % -- the roadmap's bound, below which a 1–3 %
-  overhead cannot be resolved;
-- fewer than twenty repetitions, however quiet;
-- a governor other than `performance`. It is read, never set: boundary 5, and
-  the refusal says `cpupower frequency-set -g performance` is the reader's
-  to run.
+**The question is whether a median resolves 1 %**, because the table compares
+medians of many runs, not single runs. A median of `n` runs has a standard
+error of about `1.2533 * stddev / sqrt(n)`, the difference of two has
+`sqrt(2)` times that, and two of those is a 95 % bound: the smallest overhead
+a workload can resolve is `3.545 * CV / sqrt(n)` (`Stats::resolution`). The
+roadmap's aim -- resolve a 1-3 % overhead -- is that bound at 1 % or under.
 
-Boost and THP are recorded in the table's environment rather than refused,
-because their effect, when there is one, is what the CV already measures.
+So the gate now, per workload:
 
-**It refuses on this machine, which is the gate working.** During the smoke
-run, at a load average of 9 over 24 cpus with the other streams building:
+- **admits** it when its baseline's median resolves 1 %;
+- otherwise gives it the repetitions its spread needs, round-robin among the
+  workloads that need more, up to **200**, re-reading the spread once they are
+  in -- and the backend comparison measures that workload with the same count;
+- **excludes it by name** when 200 are not enough, with the resolution it did
+  reach and the count it would have needed, and every source measured against
+  it goes under "not measured here" with that sentence. The rest are measured.
+
+It **refuses the run** only when nothing can be measured: no baseline, fewer
+than twenty repetitions anywhere (a smoke run), every workload excluded, a
+governor other than `performance` (read, never set -- boundary 5), or **the
+rest of the machine busy**.
+
+**That last one is new, and it is what the old gate could never see.** Its own
+ground truth, `the_gate_refuses_a_machine_loaded_on_purpose`, had stopped
+refusing: with a hog on every cpu, `memory`'s median moved from 366 to 428 ms
+(+17 %) and its spread stayed at 0.74 % -- a steady load slows every run alike
+and hides from any spread, the CV's as much as the median's. What it cannot
+hide is the busy time of the cpus no workload is pinned to, read from
+`/proc/stat` over the baseline: **0.35 cpus** for the harness and a quiet
+desktop together, **13.1** with the hogs. The gate refuses over 2.
+
+Measured on the development machine after the change, alone, boost off:
 
 ```
-  WORKLOAD      N   MEDIAN        IQR           CV       GATE
-  launch        20   115.69ms      1.44ms          4.91 %  REFUSE
-  compute       20   147.06ms      669.61us        0.60 %  pass
-  memory        20   358.55ms      7.24ms         17.33 %  REFUSE
-  syscall       20   28.59ms       430.62us       19.88 %  REFUSE
-  io            20   72.30ms       3.56ms         47.11 %  REFUSE
-  contended     20   135.58ms      2.10ms          4.72 %  REFUSE
+  WORKLOAD      N   MEDIAN        IQR           CV       RESOLVES   GATE
+  launch        20   128.05ms      1.57ms          0.76 %    0.60 %   pass
+  compute       20   164.12ms      507.79us        0.29 %    0.23 %   pass
+  memory        20   365.63ms      1.58ms          0.53 %    0.42 %   pass
+  syscall       20   32.05ms       280.02us        0.91 %    0.72 %   pass
+  io           115   70.28ms       1.83ms          2.63 %    0.87 %   pass
+  contended     20   140.68ms      1.63ms          0.99 %    0.79 %   pass
+  the unpinned cpus were 0.35 cpus busy meanwhile
 ```
 
-**Ground truth for the refusal** is `the_gate_refuses_a_machine_loaded_on_purpose`:
-one thread per cpu alternating random bursts of spinning and sleeping (1 to
-16 ms each), and one streaming through 64 MiB, so the pinned workload shares
-its core and its cache with a load nothing can predict. Measured:
+and with the hogs, refused on 13.1 busy cpus with every spread passing. The
+cheap tests check the resolution against its closed form, the repetitions a
+spread needs from both sides, an excluded workload carrying its numbers while
+the rest are admitted, a run with nothing left refused, and a busy machine
+refused whatever the spread.
 
-```
-  compute       20   151.60ms      887.05us        0.85 %  pass
-  memory        20   169.89ms      9.30ms          3.59 %  REFUSE
-```
-
-and the gate refused, as it must. Note what passed: a compute loop pinned to
-one core is robust even to that -- 0.85 % -- which is why the gate is decided
-on *every* workload and one noisy one refuses the run. The cheap tests check
-the bound from both sides on series whose CV is known in closed form (1.03 %
-refuses, 0.51 % passes), the twenty-repetition floor, the governor, and that
-one noisy workload among quiet ones is enough.
+Boost and THP are still recorded rather than refused; turning boost off moved
+nothing that decided the gate here.
 
 ### Environment control
 

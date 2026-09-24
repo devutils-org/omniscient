@@ -81,8 +81,14 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             "SMOKE RUN ({repetitions} repetitions): the gate's refusal is recorded, not obeyed, \
              and nothing written is a measurement\n{refusal}"
         )),
-        (Ok(()), _) => say("the gate passed"),
+        (Ok(admitted), _) => {
+            say("the gate passed");
+            for line in admitted.exclusions() {
+                say(format!("excluded, and not measured: {line}"));
+            }
+        }
     }
+    let admitted = gate.as_ref().ok().cloned().unwrap_or_default();
 
     // 2. The plan: every (source, backend) this build serves here.
     let (planned, unplanned) = plan(&omn, only().as_deref());
@@ -104,8 +110,28 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
     let mut rows: Vec<(Planned, Samples)> = Vec::new();
     let mut bare_elapsed: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut excluded: Vec<(String, String)> = Vec::new();
     for (source, group) in &by_source {
         let workload = group[0].workload.clone();
+        // A workload the gate excluded cannot resolve the overhead this table
+        // is for, so its sources are listed under "not measured" with why. A
+        // smoke run measures everything at its own count, and says so.
+        let repetitions = if smoke || gate.is_err() {
+            repetitions
+        } else {
+            match admitted.repetitions(&workload.name, repetitions) {
+                Some(needed) => needed,
+                None => {
+                    let why = admitted
+                        .excluded
+                        .get(&workload.name)
+                        .cloned()
+                        .unwrap_or_else(|| "its workload has no baseline".into());
+                    excluded.push((source.clone(), format!("`{}` {why}", workload.name)));
+                    continue;
+                }
+            }
+        };
         let methods = group.len() + 1; // index 0 is the bare run
         let mut samples: Vec<Samples> = (0..group.len()).map(|_| Samples::default()).collect();
         let bare = bare_elapsed.entry(source.clone()).or_default();
@@ -170,7 +196,8 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
         );
     }
     table.push_str(&format!(
-        "# Backend comparison\n\nMeasured with {}, {repetitions} repetitions round-robin \
+        "# Backend comparison\n\nMeasured with {}, at least {repetitions} repetitions round-robin \
+         (more for a workload whose spread needed them to resolve 1 %, as the gate table says) \
          after {WARMUP} warmup runs, the LLC evicted before each. Collector cpu and dilation \
          are median [IQR]. A poll is measured at 100 ms and a sample at 997 Hz.\n\n",
         omn.describe()
@@ -288,6 +315,12 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             one.why.replace('|', "/")
         ));
     }
+    for (source, why) in &excluded {
+        table.push_str(&format!(
+            "| {source} | every backend | the gate excluded its workload: {} |\n",
+            why.replace('|', "/")
+        ));
+    }
 
     std::fs::write(dir.join("table.md"), &table).unwrap();
     std::fs::write(
@@ -299,6 +332,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             "environment": environment_record(&omn),
             "rows": json_rows,
             "not_measured": unplanned.iter().map(|u| json!({"source": u.source, "backend": u.backend, "why": u.why})).collect::<Vec<Value>>(),
+            "excluded_by_the_gate": excluded.iter().map(|(source, why)| json!({"source": source, "why": why})).collect::<Vec<Value>>(),
         }))
         .unwrap(),
     )

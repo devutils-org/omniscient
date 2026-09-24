@@ -105,6 +105,44 @@ impl Stats {
             self.stddev / self.mean.abs()
         }
     }
+
+    /// The smallest relative difference between this series' median and
+    /// another's of the same spread and size that the bench can tell from
+    /// noise, at about 95 % confidence.
+    ///
+    /// The table compares medians, not single runs, and a median of `n`
+    /// runs is known far better than one run: its standard error is about
+    /// `1.2533 * stddev / sqrt(n)`. The difference of two such medians has
+    /// `sqrt(2)` times that, and two of those is the 95 % bound. So the
+    /// question the roadmap asks -- can this machine resolve a 1-3 %
+    /// overhead? -- is `resolution() <= 1 %`, not `cv() <= 1 %`, which held a
+    /// median of twenty to the spread of one run and refused every machine
+    /// with a disk or a scheduler in its workloads.
+    pub fn resolution(&self) -> f64 {
+        resolution_at(self.cv(), self.n)
+    }
+
+    /// Repetitions this series' spread needs to resolve `target`.
+    pub fn repetitions_to_resolve(&self, target: f64) -> usize {
+        let cv = self.cv();
+        if !cv.is_finite() {
+            return usize::MAX;
+        }
+        ((RESOLUTION_FACTOR * cv / target).powi(2).ceil() as usize).max(MIN_REPETITIONS)
+    }
+}
+
+/// `2 * sqrt(2) * 1.2533`: a 95 % bound on the difference of two medians, in
+/// units of one run's standard deviation over `sqrt(n)`. See
+/// [`Stats::resolution`].
+pub const RESOLUTION_FACTOR: f64 = 2.0 * std::f64::consts::SQRT_2 * 1.2533;
+
+/// [`Stats::resolution`] for a spread and a size.
+pub fn resolution_at(cv: f64, n: usize) -> f64 {
+    if n == 0 {
+        return f64::INFINITY;
+    }
+    RESOLUTION_FACTOR * cv / (n as f64).sqrt()
 }
 
 /// A quantile by linear interpolation between order statistics -- R's type 7,
@@ -120,11 +158,20 @@ pub fn quantile(sorted: &[f64], p: f64) -> f64 {
 
 // ------------------------------------------------------------------ gate
 
-/// The roadmap's bound: over 1 % the bench cannot resolve a 1-3 % overhead.
-pub const MAX_CV: f64 = 0.01;
+/// The roadmap's aim: resolve an overhead of 1 %, the low end of the 1-3 % a
+/// collector is expected to cost. Judged on the median, see
+/// [`Stats::resolution`].
+pub const RESOLUTION_TARGET: f64 = 0.01;
 
 /// The roadmap's floor: at least twenty repetitions per method.
 pub const MIN_REPETITIONS: usize = 20;
+
+/// The ceiling on repetitions a noisy workload is given to reach
+/// [`RESOLUTION_TARGET`]. Past it the workload is excluded by name, with the
+/// resolution it did reach, rather than measured with a bound it cannot keep.
+/// Two hundred is ten times the floor, and at the slowest reference workload
+/// about seventy seconds of the baseline.
+pub const MAX_REPETITIONS: usize = 200;
 
 /// The environment the gate reads beside the samples.
 #[derive(Debug, Clone, Default)]
@@ -137,6 +184,69 @@ pub struct Conditions {
     /// Whether the clocks may boost, which is what "locked clocks" is about.
     pub boost: Option<bool>,
     pub transparent_hugepage: Option<String>,
+    /// How many cpus' worth of time the cpus the workloads are not pinned to
+    /// spent busy while the last baseline ran. See [`MAX_FOREIGN_CPUS`].
+    pub foreign_busy_cpus: Option<f64>,
+}
+
+/// The most the rest of the machine may be doing while the baseline runs, in
+/// cpus' worth of busy time on the cpus no workload is pinned to.
+///
+/// A variance gate cannot see a steady load: a machine with a hog on every cpu
+/// slowed `memory` by 17 % here and left its spread at 0.74 %, so both the
+/// median-resolution gate and the CV gate before it passed a machine loaded on
+/// purpose. What the load does show is busy time on the cpus the workloads
+/// are not on: 0.35 cpus here for the harness itself -- the eviction sweep,
+/// the test runner -- and a quiet desktop together, and 13.1 with a hog on
+/// every cpu. Two is well clear of both.
+pub const MAX_FOREIGN_CPUS: f64 = 2.0;
+
+/// Written by [`baselines`], read by [`Conditions::read`]: the busy time of
+/// the unpinned cpus over the last baseline, in cpus.
+static FOREIGN_BUSY: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
+/// Per cpu, the busy and total ticks `/proc/stat` has counted so far.
+fn cpu_ticks() -> BTreeMap<usize, (u64, u64)> {
+    let mut ticks = BTreeMap::new();
+    let Ok(stat) = std::fs::read_to_string("/proc/stat") else {
+        return ticks;
+    };
+    for line in stat.lines() {
+        let Some(rest) = line.strip_prefix("cpu") else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let Some(cpu) = fields.next().and_then(|cpu| cpu.parse::<usize>().ok()) else {
+            continue;
+        };
+        let values: Vec<u64> = fields.filter_map(|value| value.parse().ok()).collect();
+        if values.len() < 5 {
+            continue;
+        }
+        let total: u64 = values.iter().sum();
+        let idle = values[3] + values[4];
+        ticks.insert(cpu, (total - idle, total));
+    }
+    ticks
+}
+
+/// Busy time between two readings over the cpus below `first_pinned`, in cpus.
+fn foreign_busy(
+    before: &BTreeMap<usize, (u64, u64)>,
+    after: &BTreeMap<usize, (u64, u64)>,
+    first_pinned: usize,
+) -> Option<f64> {
+    let (mut busy, mut total, mut cpus) = (0u64, 0u64, 0usize);
+    for (cpu, (busy_after, total_after)) in after {
+        if *cpu >= first_pinned {
+            continue;
+        }
+        let (busy_before, total_before) = before.get(cpu)?;
+        busy += busy_after.saturating_sub(*busy_before);
+        total += total_after.saturating_sub(*total_before);
+        cpus += 1;
+    }
+    (total > 0 && cpus > 0).then(|| busy as f64 / (total as f64 / cpus as f64))
 }
 
 impl Conditions {
@@ -170,6 +280,7 @@ impl Conditions {
                     .find_map(|word| word.strip_prefix('[')?.strip_suffix(']'))
                     .map(str::to_owned)
             }),
+            foreign_busy_cpus: *FOREIGN_BUSY.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
 }
@@ -193,8 +304,8 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "the variance gate refused: this machine cannot resolve a 1-3 % overhead now, \
-             and nothing was measured"
+            "the variance gate refused: nothing on this machine can be measured now, and \
+             nothing was"
         )?;
         for reason in &self.reasons {
             writeln!(f, "  - {reason}")?;
@@ -207,41 +318,88 @@ impl fmt::Display for Refusal {
                 self.conditions.cpus
             )?;
         }
+        if let Some(busy) = self.conditions.foreign_busy_cpus {
+            writeln!(f, "  the unpinned cpus were {busy:.2} cpus busy meanwhile")?;
+        }
         Ok(())
     }
 }
 
 /// The baselines as the gate saw them, one line per workload.
 pub fn gate_table(baselines: &[Baseline]) -> String {
-    let mut out = String::from("  WORKLOAD      N   MEDIAN        IQR           CV       GATE\n");
+    let mut out =
+        String::from("  WORKLOAD      N   MEDIAN        IQR           CV       RESOLVES   GATE\n");
     for baseline in baselines {
         let stats = &baseline.stats;
         out.push_str(&format!(
-            "  {:<12} {:>3}   {:<12}  {:<12}  {:>6.2} %  {}\n",
+            "  {:<12} {:>3}   {:<12}  {:<12}  {:>6.2} %  {:>6.2} %   {}\n",
             baseline.workload,
             stats.n,
             span(stats.median),
             span(stats.iqr()),
             stats.cv() * 100.0,
-            if stats.n >= MIN_REPETITIONS && stats.cv() <= MAX_CV {
+            stats.resolution() * 100.0,
+            if stats.n < MIN_REPETITIONS {
+                "REFUSE"
+            } else if admitted(stats) {
                 "pass"
             } else {
-                "REFUSE"
+                "EXCLUDE"
             }
         ));
     }
     out
 }
 
-/// Decides whether this machine may be measured on.
+/// Whether a baseline is measured: enough repetitions, and a median that
+/// resolves [`RESOLUTION_TARGET`].
+fn admitted(stats: &Stats) -> bool {
+    stats.n >= MIN_REPETITIONS && stats.resolution() <= RESOLUTION_TARGET
+}
+
+/// What the gate let through: each admitted workload with the repetitions it
+/// needs, and each excluded one with why.
+#[derive(Debug, Clone, Default)]
+pub struct Gate {
+    pub admitted: BTreeMap<String, usize>,
+    pub excluded: BTreeMap<String, String>,
+}
+
+impl Gate {
+    /// Repetitions to measure `workload` with: what its baseline needed to
+    /// resolve the target, never under `floor`. `None` when it was excluded
+    /// or never judged.
+    pub fn repetitions(&self, workload: &str, floor: usize) -> Option<usize> {
+        self.admitted
+            .get(workload)
+            .map(|needed| (*needed).max(floor))
+    }
+
+    /// One line per excluded workload, for the table's "not measured".
+    pub fn exclusions(&self) -> Vec<String> {
+        self.excluded
+            .iter()
+            .map(|(workload, why)| format!("`{workload}`: {why}"))
+            .collect()
+    }
+}
+
+/// Decides whether this machine may be measured on, and what on.
 ///
-/// Refuses on any baseline over [`MAX_CV`] or under [`MIN_REPETITIONS`], and on
-/// a governor other than `performance`: the roadmap's environment controls,
-/// of which this is the one a reader can fix and the bench must not fix for
-/// them (boundary 5). Boost and THP are recorded rather than refused, because
-/// their effect, when there is one, is exactly what the CV already measures.
-pub fn judge(baselines: &[Baseline], conditions: &Conditions) -> Result<(), Box<Refusal>> {
+/// Each workload is judged on its own. One whose median resolves
+/// [`RESOLUTION_TARGET`] is admitted with the repetitions that took; one that
+/// cannot within [`MAX_REPETITIONS`] is **excluded by name**, with the
+/// resolution it reached, and the rest are measured -- a noisy disk says
+/// nothing about whether a cpu counter's cost can be read. The run is refused
+/// outright only when nothing can be measured: no baseline, fewer than
+/// [`MIN_REPETITIONS`] anywhere (a smoke run), every workload excluded, or a
+/// governor other than `performance`, which is the one environment control a
+/// reader can fix and the bench must not fix for them (boundary 5). Boost and
+/// THP are recorded rather than refused, because their effect, when there is
+/// one, is exactly what the spread already measures.
+pub fn judge(baselines: &[Baseline], conditions: &Conditions) -> Result<Gate, Box<Refusal>> {
     let mut reasons = Vec::new();
+    let mut gate = Gate::default();
     if baselines.is_empty() {
         reasons.push("no baseline was measured, so there is no variance to judge".into());
     }
@@ -252,15 +410,29 @@ pub fn judge(baselines: &[Baseline], conditions: &Conditions) -> Result<(), Box<
                 "`{}` has {} repetitions and the protocol asks for at least {MIN_REPETITIONS}",
                 baseline.workload, stats.n
             ));
+        } else if admitted(stats) {
+            gate.admitted.insert(baseline.workload.clone(), stats.n);
+        } else {
+            gate.excluded.insert(
+                baseline.workload.clone(),
+                format!(
+                    "varies by {:.2} % run to run, so a median of {} resolves {:.2} %, over the \
+                     {:.0} % the protocol aims for; it would need {} repetitions and the \
+                     ceiling is {MAX_REPETITIONS}",
+                    stats.cv() * 100.0,
+                    stats.n,
+                    stats.resolution() * 100.0,
+                    RESOLUTION_TARGET * 100.0,
+                    stats.repetitions_to_resolve(RESOLUTION_TARGET),
+                ),
+            );
         }
-        if stats.cv() > MAX_CV {
-            reasons.push(format!(
-                "`{}` varies by {:.2} % run to run (CV), over the {:.0} % the protocol allows",
-                baseline.workload,
-                stats.cv() * 100.0,
-                MAX_CV * 100.0
-            ));
-        }
+    }
+    if !baselines.is_empty() && reasons.is_empty() && gate.admitted.is_empty() {
+        reasons.push(format!(
+            "every workload was excluded, so nothing can be measured: {}",
+            gate.exclusions().join("; ")
+        ));
     }
     if conditions.governors.iter().any(|g| g != "performance") {
         reasons.push(format!(
@@ -269,8 +441,18 @@ pub fn judge(baselines: &[Baseline], conditions: &Conditions) -> Result<(), Box<
             conditions.governors.join(", ")
         ));
     }
+    if let Some(busy) = conditions.foreign_busy_cpus {
+        if busy > MAX_FOREIGN_CPUS {
+            reasons.push(format!(
+                "the rest of the machine kept {busy:.1} cpus busy while the baseline ran, over \
+                 the {MAX_FOREIGN_CPUS:.0} the protocol allows: a steady load slows every \
+                 workload alike and hides from any spread, so it is refused on what it costs \
+                 the other cpus"
+            ));
+        }
+    }
     if reasons.is_empty() {
-        Ok(())
+        Ok(gate)
     } else {
         Err(Box::new(Refusal {
             reasons,
@@ -1472,21 +1654,65 @@ pub fn baselines(
 ) -> Result<(Vec<Baseline>, BTreeMap<String, usize>), String> {
     let mut evictor = Evictor::new();
     let mut samples: Vec<Vec<f64>> = vec![Vec::new(); workloads.len()];
+    let pinned = workloads.iter().map(|w| w.threads).max().unwrap_or(1);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let ticks_before = cpu_ticks();
     let mut throttled: BTreeMap<String, usize> = BTreeMap::new();
     for workload in workloads {
         for _ in 0..WARMUP {
             run_bare(workload)?;
         }
     }
-    for index in round_robin(workloads.len(), repetitions) {
+    let mut measure = |index: usize, samples: &mut Vec<Vec<f64>>| -> Result<(), String> {
         evictor.evict();
         let run = run_bare(&workloads[index])?;
         if run.throttled {
             *throttled.entry(workloads[index].name.clone()).or_default() += 1;
-            continue;
+        } else {
+            samples[index].push(run.elapsed_ns() as f64);
         }
-        samples[index].push(run.elapsed_ns() as f64);
+        Ok(())
+    };
+    for index in round_robin(workloads.len(), repetitions) {
+        measure(index, &mut samples)?;
     }
+    // A workload whose median does not resolve the target yet is given the
+    // repetitions its spread asks for, up to the ceiling, round-robin among
+    // the ones that need more -- never in a smoke run, which is under the
+    // floor and refused anyway. The spread is re-read once the top-up is in,
+    // because the first twenty runs estimate it only roughly.
+    if repetitions >= MIN_REPETITIONS {
+        loop {
+            let short: Vec<(usize, usize)> = samples
+                .iter()
+                .enumerate()
+                .filter_map(|(index, series)| {
+                    let stats = Stats::of(series)?;
+                    let needed = stats
+                        .repetitions_to_resolve(RESOLUTION_TARGET)
+                        .min(MAX_REPETITIONS);
+                    (stats.resolution() > RESOLUTION_TARGET && stats.n < needed)
+                        .then(|| (index, needed - stats.n))
+                })
+                .collect();
+            if short.is_empty() {
+                break;
+            }
+            let rounds = short.iter().map(|(_, more)| *more).max().unwrap_or(0);
+            for round in 0..rounds {
+                for (slot, _) in short.iter().enumerate() {
+                    let (index, more) = short[(round + slot) % short.len()];
+                    if round < more {
+                        measure(index, &mut samples)?;
+                    }
+                }
+            }
+        }
+    }
+    *FOREIGN_BUSY.lock().unwrap_or_else(|e| e.into_inner()) =
+        foreign_busy(&ticks_before, &cpu_ticks(), cpus.saturating_sub(pinned));
     let baselines = workloads
         .iter()
         .zip(samples)

@@ -296,9 +296,13 @@ finally earns its place.
 1. **Harness**: reference workloads (launch-bound, compute-bound, memory-bound,
    syscall-heavy, IO-heavy, contended multithread), warmup, ≥ 20 repetitions,
    round-robin between methods, median + IQR.
-2. **Variance gate**: baseline without any tracer, measured CV. **If CV > 1 %, the
-   bench cannot resolve a 1-3 % overhead** — fix the environment before measuring
-   anything.
+2. **Variance gate**: baseline without any tracer. **If a workload's median cannot
+   resolve a 1 % difference, the bench cannot resolve a 1-3 % overhead on it** --
+   give it the repetitions its spread needs, or name it and leave it out; and if
+   the rest of the machine is busy, fix the environment before measuring
+   anything. *Written first as "CV > 1 %", which held a median of twenty to the
+   spread of one run: it refused a quiet machine every time and passed one with
+   a steady load on every cpu. `docs/bench.md` has both measurements.*
 3. **Environment control**: `performance` governor, locked clocks, frozen THP,
    affinity, invalidation of any throttled run (`power.*` collected
    unconditionally).

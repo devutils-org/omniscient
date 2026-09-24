@@ -118,7 +118,14 @@ fn the_collectors_on_an_asynchronous_sequence() {
         (Err(refusal), true) => say(format!(
             "SMOKE RUN ({repetitions} repetitions): the refusal is recorded, not obeyed\n{refusal}"
         )),
-        (Ok(()), _) => say("the gate passed"),
+        (Ok(admitted), _) => {
+            say("the gate passed");
+            for line in admitted.exclusions() {
+                say(format!(
+                    "excluded, and measured anyway, so read with its resolution: {line}"
+                ));
+            }
+        }
     }
 
     let method = |source: &str, backend: &str| Method {
