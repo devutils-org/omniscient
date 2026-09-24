@@ -25,13 +25,28 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(status::Prepare(status::Counted::Threads)))
         }),
         Factory::new("proc.exec", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(events::PrepareExec(resolved.request.mode)))
+            Ok(Box::new(events::PrepareExec {
+                mode: resolved.request.mode,
+                // Applied by the collector, for the reason `syscall` below
+                // gives: nothing else would.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("proc.exit", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(events::PrepareExit(resolved.request.mode)))
+            Ok(Box::new(events::PrepareExit {
+                mode: resolved.request.mode,
+                // Applied by the collector, for the reason `syscall` below
+                // gives: nothing else would.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("proc.signals", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(events::PrepareSignals(resolved.request.mode)))
+            Ok(Box::new(events::PrepareSignals {
+                mode: resolved.request.mode,
+                // Applied by the collector, for the reason `syscall` below
+                // gives: nothing else would.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("proc.syscall", "bpf:raw_tp", |resolved| {
             Ok(Box::new(syscall::Prepare {

@@ -12,6 +12,22 @@
 //! on-cpu profile means: the count of samples on a stack is proportional to the
 //! cpu time spent there, and a request for 199 Hz asks for one sample per
 //! 5.025 ms of cpu, not one per 5.025 ms of wall clock.
+//!
+//! **It follows every thread**, the ones the target already has and the ones
+//! it starts, and the processes it forks: one event per task, each carrying
+//! its own period across every cpu ([`TaskSampler`]), and the tasks the target
+//! starts found on each tick. Until the eleventh wave it sampled the one task
+//! it was opened on, and `omn latency` read every other thread's on-cpu time as
+//! nothing. A forked child is another address space, so each process met is
+//! symbolized against its own mappings.
+//!
+//! Not inherited, deliberately. An inherited event would follow a task from
+//! its first instruction, but the kernel maps one only pinned to a cpu, and a
+//! task sampled by one event per cpu loses the unfinished part of a period on
+//! every cpu it ran on: five to nine milliseconds of a 400 ms program, where a
+//! time decomposition states one period as this row's resolution. A task found
+//! on a tick has its cpu time until then read from its `schedstat`, and the run
+//! says how much cpu went unsampled that way.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
@@ -21,7 +37,7 @@ use perf_event_open_sys::bindings as perf;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Callchain, Record, SampledEvent, Scope};
+use crate::perf::{Callchain, Found, Record, SampleSpec, TaskSampler};
 use crate::request::{Mode, Target};
 use crate::stack::Unwinder;
 
@@ -29,11 +45,23 @@ const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 
 /// A sample with a callchain is a word per frame rather than a fixed record, so
 /// the same burst needs far more room than it would without stacks.
-const RING_PAGES: usize = 256;
+///
+/// Per task: each task has an event and a ring of its own, and one task yields
+/// at most a sample per period between drains.
+const RING_PAGES: usize = 32;
 
 /// A frequency in hertz, as a period of cpu nanoseconds.
 fn period_for(hz: u64) -> u64 {
     (1_000_000_000 / hz).max(1)
+}
+
+/// The cpu time a task had used when it was found, from the first field of
+/// its `schedstat`: nanoseconds on a cpu, the kernel's own account.
+fn cpu_before(task: Found) -> u64 {
+    std::fs::read_to_string(format!("/proc/{}/task/{}/schedstat", task.tgid, task.tid))
+        .ok()
+        .and_then(|line| line.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0)
 }
 
 pub struct Prepare {
@@ -54,9 +82,8 @@ impl Prepared for Prepare {
             pid,
             self.mode,
             self.callchain,
-            // A `--tid` target is one task because that is what was asked for.
-            // Every other target that names a process is a task *and whatever
-            // it starts*, and a sampling event follows none of them.
+            // A `--tid` target is that task and what it starts. Every other
+            // target that names a process is every thread it has.
             !matches!(target, Target::Tid(_)),
         )))
     }
@@ -67,43 +94,58 @@ pub struct ProfileCollector {
     pid: i32,
     mode: Mode,
     callchain: Callchain,
-    event: Option<SampledEvent>,
-    /// Built at construction and re-read every tick. A symbolizer reads the
-    /// target's `/proc/<pid>/maps`, and those are gone the moment it exits --
-    /// but for a launched program they are also not yet the target's when this
-    /// is built, because the child is still a fork of this process waiting at
-    /// the gate. See [`Unwinder::refresh_symbols`].
-    unwinder: Unwinder,
-    losses: Losses,
-    /// Whether the target names more than the one task this event can follow.
-    more_than_one_task: bool,
-    /// The tasks samples actually arrived from.
+    event: Option<TaskSampler>,
+    /// One per process samples arrived from, by pid, re-read every tick. A
+    /// symbolizer reads its process's `/proc/<pid>/maps`, and those are gone
+    /// the moment it exits -- but for a launched program they are also not yet
+    /// the target's when this is built, because the child is still a fork of
+    /// this process waiting at the gate. See [`Unwinder::refresh_symbols`].
     ///
-    /// The measured half of the disclosure below: the limit is structural, but
-    /// how many tasks a run really saw is a number, and one task out of a
-    /// program that was plainly doing work elsewhere is what a reader needs to
-    /// be told.
+    /// More than one because the events are inherited across `fork`, and a
+    /// child that execs is another program at other addresses: its frames
+    /// symbolized against the target's maps would name functions it never ran.
+    unwinders: BTreeMap<u32, Unwinder>,
+    /// Each unwinder numbers its own stacks from zero, so the id an event
+    /// carries is this run's: `(pid, the unwinder's id)` to the run's id, and
+    /// the run's ids in order.
+    stack_ids: BTreeMap<(u32, u64), u64>,
+    stack_origins: Vec<(u32, u64)>,
+    losses: Losses,
+    /// Whether every thread of `pid` is followed rather than `pid` alone.
+    whole_process: bool,
+    /// The tasks samples actually arrived from.
     sampled_tasks: BTreeSet<i32>,
-    /// What the open event does and does not see, and whether it was asked to
-    /// unwind. Both are read at `start` and kept, because `stop` closes the
-    /// event and the notes are gathered after it.
-    disclosure: Option<&'static str>,
+    /// How many tasks had an event from the open, read at `start` and kept,
+    /// because `stop` closes the events and the notes are gathered after it.
+    at_open: usize,
+    /// Tasks found on a tick after they began, and the cpu they had used by
+    /// then: time no sample of this run covers.
+    found_late: usize,
+    unsampled_ns: u64,
     unwinding: bool,
 }
 
 impl ProfileCollector {
-    pub fn new(pid: i32, mode: Mode, callchain: Callchain, more_than_one_task: bool) -> Self {
+    pub fn new(pid: i32, mode: Mode, callchain: Callchain, whole_process: bool) -> Self {
+        let mut unwinders = BTreeMap::new();
+        if pid > 0 {
+            unwinders.insert(pid as u32, Unwinder::for_process(pid));
+        }
         Self {
             id: CollectorId::new("cpu.profile/pmu:sw"),
             pid,
             mode,
             callchain,
             event: None,
-            unwinder: Unwinder::for_process(pid),
+            unwinders,
+            stack_ids: BTreeMap::new(),
+            stack_origins: Vec::new(),
             losses: Losses::default(),
-            more_than_one_task,
+            whole_process,
             sampled_tasks: BTreeSet::new(),
-            disclosure: None,
+            at_open: 0,
+            found_late: 0,
+            unsampled_ns: 0,
             unwinding: true,
         }
     }
@@ -113,7 +155,9 @@ impl ProfileCollector {
             return;
         };
         let id = self.id.clone();
-        let unwinder = &mut self.unwinder;
+        let unwinders = &mut self.unwinders;
+        let stack_ids = &mut self.stack_ids;
+        let stack_origins = &mut self.stack_origins;
         let seen = &mut self.sampled_tasks;
         let mut index = seq;
         let mut dropped = 0u64;
@@ -126,8 +170,15 @@ impl ProfileCollector {
                 // Symbolized here, while the target is alive, and stored once:
                 // the event carries the identity and the table travels beside
                 // the results.
+                let unwinder = unwinders
+                    .entry(sample.pid)
+                    .or_insert_with(|| Unwinder::for_process(sample.pid as i32));
                 if let Some(stack) = unwinder.record(&sample) {
-                    attrs.push(Attr::uint(STACK_ID_ATTR, stack.0));
+                    let run_id = *stack_ids.entry((sample.pid, stack.0)).or_insert_with(|| {
+                        stack_origins.push((sample.pid, stack.0));
+                        stack_origins.len() as u64 - 1
+                    });
+                    attrs.push(Attr::uint(STACK_ID_ATTR, run_id));
                 }
                 events.push(Event {
                     ts_ns: sample.time_ns,
@@ -194,24 +245,20 @@ impl Collector for ProfileCollector {
             }
         };
 
-        let event = SampledEvent::open_software_with(
-            perf::PERF_COUNT_SW_CPU_CLOCK as u64,
-            period,
-            Scope::Process(self.pid),
-            RING_PAGES,
-            self.callchain,
-        )
-        .map_err(|error| {
-            format!(
-                "perf_event_open for a cpu-clock profile of pid {} was refused ({error}); \
+        let spec =
+            SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
+        let mut event = TaskSampler::open(&spec, self.pid, self.whole_process, RING_PAGES)
+            .map_err(|error| {
+                format!(
+                    "perf_event_open for a cpu-clock profile of pid {} was refused ({error}); \
                  check /proc/sys/kernel/perf_event_paranoid",
-                self.pid
-            )
-        })?;
+                    self.pid
+                )
+            })?;
         event.enable().map_err(|error| error.to_string())?;
-        // Read while the event is open and kept: `stop` closes it, and the
-        // notes are gathered afterwards.
-        self.disclosure = Some(event.sampled_threads());
+        // Read while the events are open and kept: `stop` closes them, and
+        // the notes are gathered afterwards.
+        self.at_open = event.at_open();
         self.unwinding = event.callchain() != Callchain::Off;
         self.event = Some(event);
         Ok(())
@@ -221,7 +268,15 @@ impl Collector for ProfileCollector {
         // Before the drain, so that the stacks interned from this tick's
         // samples are symbolized against mappings read while the target was
         // alive rather than against whatever was there when it was launched.
-        self.unwinder.refresh_symbols();
+        for unwinder in self.unwinders.values_mut() {
+            unwinder.refresh_symbols();
+        }
+        if let Some(event) = self.event.as_mut() {
+            for task in event.discover() {
+                self.found_late += 1;
+                self.unsampled_ns += cpu_before(task);
+            }
+        }
         let mut events = Vec::new();
         self.drain_into(&mut events, seq);
         Ok(events)
@@ -229,7 +284,7 @@ impl Collector for ProfileCollector {
 
     fn stop(&mut self) -> Vec<Event> {
         let mut trailing = Vec::new();
-        if let Some(event) = self.event.as_ref() {
+        if let Some(event) = self.event.as_mut() {
             let _ = event.disable();
         }
         self.drain_into(&mut trailing, u64::MAX / 2);
@@ -251,38 +306,75 @@ impl Collector for ProfileCollector {
     /// Root first, which is the order [`crate::emit::Results::stacks`] stores
     /// and the `folded` format writes.
     fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
-        self.unwinder
-            .table()
+        self.stack_origins
             .iter()
-            .map(|(id, stack)| {
+            .enumerate()
+            .filter_map(|(run_id, (pid, local))| {
+                let stack = self
+                    .unwinders
+                    .get(pid)?
+                    .table()
+                    .get(crate::stack::StackId(*local))?;
                 let frames = stack
                     .frames
                     .iter()
                     .rev()
                     .map(crate::stack::Frame::label)
                     .collect();
-                (id.0, frames)
+                Some((run_id as u64, frames))
             })
             .collect()
     }
 
     fn notes(&self) -> Vec<String> {
-        let mut notes = self.unwinder.notes();
-        // What this event never saw. The kernel refuses to map a ring for an
-        // inherited per-task event, so `inherit` is off and the profile follows
-        // the one task it was opened on: a thread pool profiles as the thread
-        // that started it, and a shell that forks its work profiles as a shell
-        // waiting. Nothing else in the run says so -- there is no drop to
-        // count, because the samples were never taken -- which is why this is a
-        // degradation attached to every profile of a target that is more than
-        // one task, and not a loss.
-        if let (true, Some(limit)) = (self.more_than_one_task, self.disclosure) {
-            let tasks = self.sampled_tasks.len();
+        // Each process's unwinder speaks for its own samples; the same
+        // sentence from two of them is said once.
+        let mut notes: Vec<String> = Vec::new();
+        for note in self.unwinders.values().flat_map(Unwinder::notes) {
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+        if self.at_open > 1 {
             notes.push(format!(
-                "a sampling event is not inherited, so this profile followed {limit}; it has \
-                 samples from {tasks} task{}, and cpu burned in a thread or a child process the \
-                 target started is in no number here",
-                if tasks == 1 { "" } else { "s" }
+                "process {} was already running {} threads when the profile began, and each has \
+                 an event of its own; samples came from {} task{}",
+                self.pid,
+                self.at_open,
+                self.sampled_tasks.len(),
+                if self.sampled_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if self.found_late > 0 {
+            // Time, not a count of samples: how many samples it would have
+            // made is a guess at the phase of a period nobody was timing.
+            notes.push(format!(
+                "{} task{} the target started {} found on a tick after {} began, and had used \
+                 {:.2} ms of cpu by then, by the kernel's own account: that time is in no \
+                 sample here. A task that started and ended between two ticks is in none at \
+                 all",
+                self.found_late,
+                if self.found_late == 1 { "" } else { "s" },
+                if self.found_late == 1 { "was" } else { "were" },
+                if self.found_late == 1 { "it" } else { "they" },
+                self.unsampled_ns as f64 / 1e6,
+            ));
+        }
+        let processes = self
+            .unwinders
+            .iter()
+            .filter(|(pid, unwinder)| **pid != self.pid as u32 && !unwinder.table().is_empty())
+            .count();
+        if processes > 0 && self.pid > 0 {
+            notes.push(format!(
+                "{processes} process{} the target started {} sampled too, each symbolized \
+                 against its own mappings",
+                if processes == 1 { "" } else { "es" },
+                if processes == 1 { "was" } else { "were" },
             ));
         }
         if !self.unwinding {

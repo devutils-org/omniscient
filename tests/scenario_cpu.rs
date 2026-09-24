@@ -45,6 +45,9 @@ const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 /// below, and that test does the work and exits.
 const WORKLOAD_VAR: &str = "OMN_CPU_SCENARIO_WORKLOAD";
 
+/// Where a workload that reports on itself writes, when it does.
+const REPORT_VAR: &str = "OMN_CPU_SCENARIO_REPORT";
+
 /// The workload, when this binary is launched as one.
 ///
 /// It is a `#[test]` because that is how a libtest binary is asked to run one
@@ -73,6 +76,29 @@ fn workload_runs_only_when_this_binary_was_launched_as_a_workload() {
             std::thread::sleep(Duration::from_millis(number));
         }
         "spin" => spin_for(Duration::from_millis(number)),
+        // Three threads, each burning `number` ms of its own cpu, and each
+        // writing its id and what its own clock read: the ground truth a
+        // profile that follows threads is checked against, per thread.
+        "threads" => {
+            let workers: Vec<_> = (0..3)
+                .map(|_| {
+                    std::thread::spawn(move || {
+                        burn(Duration::from_millis(number));
+                        // SAFETY: a read-only query of this thread's own id.
+                        (unsafe { libc::gettid() }, thread_cpu_ns())
+                    })
+                })
+                .collect();
+            let lines: Vec<String> = workers
+                .into_iter()
+                .map(|worker| {
+                    let (tid, ns) = worker.join().expect("a worker finished");
+                    format!("{tid} {ns}")
+                })
+                .collect();
+            let report = std::env::var(REPORT_VAR).expect("a report path");
+            std::fs::write(report, lines.join("\n")).expect("the report is written");
+        }
         // Each sleep takes the task off the cpu exactly once, so the number of
         // switches away from it is the number in this file.
         "sleeps" => {
@@ -144,6 +170,17 @@ fn burn(cpu: Duration) {
     while consumed() < until {
         std::hint::spin_loop();
     }
+}
+
+/// This thread's cpu time so far, by the kernel's own clock for it.
+fn thread_cpu_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the kernel to write into.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
 }
 
 /// The `--` part of a command line: this binary, launched as a workload.
@@ -1995,32 +2032,25 @@ fn a_target_that_exits_ends_the_window_and_names_the_reason() {
     );
 }
 
-/// A profile of a program whose work is in another task finds none of it, and
-/// says nothing.
+/// A profile follows the process its target forks, and finds the work there.
 ///
-/// This is the loss the class exists for: not a number that is missing, but a
-/// run that lost everything and renders as a clean profile. One shell, one
-/// window, two sources. `cpu.instructions` is a counting event, which the
-/// kernel inherits, so it follows the child the shell starts and reports the
-/// work. `cpu.profile` is a sampling event, which cannot be inherited -- the
-/// kernel refuses to map a ring for an inherited per-task event -- so it
-/// samples the shell, which is blocked in `wait` for the whole run.
+/// This was the loss the class existed for: a run that lost everything and
+/// rendered as a clean profile. The shell below does its arithmetic in a
+/// subshell it forks and then waits; a sampling event was not inherited --
+/// the kernel refuses to map a ring for an inherited per-task event on every
+/// cpu at once -- so the profile sampled the shell blocked in `wait`, and all
+/// it could do was say so. It is inherited now, one event per thread per cpu,
+/// the events of one cpu sharing a ring, and the child is sampled.
 ///
-/// `src/perf.rs` has `SampledEvent::sampled_threads` to say it, "for the record
-/// that travels with the numbers", and until this defect was fixed nothing
-/// called it: the run reported "no loss", and the flame graph of a thread pool
-/// was a flame graph of the thread that started it.
-///
-/// So the invariant this now pins is the one the defect entry asked for: the
-/// profile either finds the work or states that it did not see it. It cannot
-/// find it -- the kernel refuses to map a ring for an inherited per-task event,
-/// which is a property of the mechanism and not of this build -- so what is
-/// asserted is the statement, and that it is a *degradation* rather than a
-/// loss. There is no drop to count here: the samples were never taken, and a
-/// number of them would be a precision nobody has.
+/// Ground truth is the kernel's own accounting of the program: the cpu time
+/// `wait4` reports for it, which includes the child it reaped. A profile at
+/// 997 Hz of cpu-clock takes one sample per 1.003 ms of that, so the samples
+/// are a prediction and not a threshold -- within the same thirty per cent the
+/// half-and-half scenario above carries, plus a sample either side.
 #[test]
-fn a_profile_that_cannot_see_the_work_says_it_did_not_see_it() {
+fn a_profile_follows_the_process_its_target_forks() {
     let _load = may_load_the_machine();
+    const HZ: f64 = 997.0;
     const WORK: &str =
         r#"[/bin/sh, -c, "(i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done) & wait"]"#;
     let session = format!(
@@ -2028,82 +2058,133 @@ fn a_profile_that_cannot_see_the_work_says_it_did_not_see_it() {
 name: the work is in the child
 format: json
 requests:
-  - label: what the program did
-    source: cpu.instructions
-    target: {{launch: {WORK}}}
-    mode: count
-    emit: [summary]
   - label: where it did it
     source: cpu.profile
     target: {{launch: {WORK}}}
     mode: sample@997hz
-    emit: [topk]
+    emit: [raw]
     stack: fp
 "#
     );
     let Some(document) = session_run(&session) else {
         return;
     };
-    let results = document["results"].as_array().expect("two results");
-    let instructions = results[0]["outputs"][0]["series"][0]["last"]
+    let result = &document["results"][0];
+    let samples = result["events_seen"].as_f64().expect("a sample count");
+    let cpu_ns = result["lifetime"]["cpu_ns"]
         .as_f64()
-        .expect("a counted value");
-    let samples = results[1]["events_seen"].as_f64().expect("a sample count");
-    let window = results[1]["observed_ns"].as_f64().expect("a window");
-    let losses = &results[1]["losses"];
-
-    // The workload's property, established by the source that can see it: this
-    // program spent its window doing arithmetic, in a task the profiler was not
-    // opened on.
+        .unwrap_or_else(|| panic!("the run reports the program's cpu: {result}"));
     assert!(
-        instructions > 1e8,
-        "the workload retired only {instructions:.0} instructions, so it is not the busy \
-         program this scenario needs"
-    );
-    let expected = 997.0 * window / 1e9;
-    assert!(
-        samples < expected * 0.05,
-        "the profile took {samples} samples of a program that was on a cpu for {:.0} ms, \
-         which is the work being found: a per-task sampling event has started following \
-         the tasks its target starts, and this scenario is measuring something else now",
-        window / 1e6
+        cpu_ns > 50e6,
+        "the workload used only {:.1} ms of cpu, so it is not the busy program this scenario \
+         needs",
+        cpu_ns / 1e6
     );
 
-    // The statement, in the record that travels with the numbers. Without it a
-    // reader has a flame graph of a shell blocked in `wait` and no way to know
-    // that the program's whole window is missing from it.
-    let said = results[1]["degradations"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|note| note.as_str().map(str::to_owned))
-        .find(|note| note.contains("not inherited"))
-        .unwrap_or_else(|| {
-            panic!(
-                "the profile saw {samples} samples of a program that retired \
-                 {instructions:.0} instructions in another task, and says nothing about \
-                 what it did not follow: {}",
-                results[1]["degradations"]
-            )
-        });
+    let expected = HZ * cpu_ns / 1e9;
+    let error = (samples - expected).abs() - 1.0;
     assert!(
-        said.contains("child process"),
-        "the disclosure names the threads it did not sample and not the child processes, \
-         which is where this workload's cpu went: {said}"
+        error < 0.3 * expected,
+        "the program and the child it forked used {:.0} ms of cpu, which at {HZ} Hz is about \
+         {expected:.0} samples, and the profile took {samples}: {}",
+        cpu_ns / 1e6,
+        result["degradations"]
     );
-    // Said as a degradation, not as a loss: nothing was dropped, because
-    // nothing was ever delivered to drop.
+
+    // And the child is named as what it is: another process, symbolized
+    // against its own mappings rather than the shell's.
+    let said = result["degradations"].to_string();
+    assert!(
+        said.contains("process the target started was sampled too"),
+        "a profile with samples from a process the target forked says so: {said}"
+    );
+    assert!(
+        !said.contains("not inherited"),
+        "the disclosure of what a sampling event could not follow is still there: {said}"
+    );
+    assert_eq!(result["losses"]["dropped"], 0, "{}", result["losses"]);
+}
+
+/// A profile samples every thread of a program, each for the cpu it used.
+///
+/// Stream T's request: `cpu.profile` on a launched program sampled the task it
+/// launched and no thread it started, so `omn latency` read every worker's
+/// on-cpu time as nothing. Ground truth is each thread's own clock: the
+/// workload starts three threads, each burns a chosen amount of cpu by
+/// `CLOCK_THREAD_CPUTIME_ID` and writes its id and what that clock read, and
+/// the main thread only waits. Each thread's samples are that clock at the
+/// frequency, within the thirty per cent the other profile scenarios carry and
+/// a sample either side; the main thread's are next to none.
+#[test]
+fn a_profile_samples_every_thread_for_the_cpu_it_used() {
+    let _load = may_load_the_machine();
+    const HZ: f64 = 997.0;
+    let report = std::env::temp_dir().join(format!("omn-cpu-threads-{}", std::process::id()));
+    let _ = std::fs::remove_file(&report);
+    let mut args: Vec<String> = [
+        "cpu.profile",
+        "--mode",
+        "sample@997hz",
+        "--emit",
+        "raw",
+        "--stack",
+        "fp",
+        "--format",
+        "json",
+        "--",
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    args.extend(workload_program());
+    let mut command = Command::new(BINARY);
+    command
+        .args(&args)
+        .env(WORKLOAD_VAR, "threads:200")
+        .env(REPORT_VAR, &report);
+    let outcome = into_outcome(command.output().expect("omn should run"));
+    let document = match outcome {
+        Outcome::Measured { document, .. } => document,
+        Outcome::Refused { code, message } => {
+            assert!(machine_cannot_serve(&message), "exit {code}: {message}");
+            eprintln!("skipped: {message}");
+            return;
+        }
+    };
+    let written = std::fs::read_to_string(&report).expect("the workload wrote its report");
+    let _ = std::fs::remove_file(&report);
+    let threads: Vec<(u64, f64)> = written
+        .lines()
+        .filter_map(|line| {
+            let (tid, ns) = line.split_once(' ')?;
+            Some((tid.parse().ok()?, ns.parse().ok()?))
+        })
+        .collect();
     assert_eq!(
-        losses["dropped"], 0,
-        "samples that were never taken are being counted as samples that were lost, which \
-         states a number nobody can know: {losses}"
+        threads.len(),
+        3,
+        "the workload runs three threads: {written}"
     );
-    eprintln!(
-        "a program that retired {instructions:.0} instructions over {:.0} ms was profiled \
-         with {samples} samples, and the run says why: {said}",
-        window / 1e6
-    );
+
+    let result = &document["results"][0];
+    let events = result["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events");
+    for (tid, cpu_ns) in &threads {
+        let samples = events
+            .iter()
+            .filter(|event| event["keys"][0]["task"]["tid"].as_u64() == Some(*tid))
+            .count() as f64;
+        let expected = HZ * cpu_ns / 1e9;
+        assert!(
+            (samples - expected).abs() - 1.0 < 0.3 * expected,
+            "thread {tid} used {:.0} ms of cpu by its own clock, which at {HZ} Hz is about \
+             {expected:.0} samples, and the profile took {samples} of it: {}",
+            cpu_ns / 1e6,
+            result["degradations"]
+        );
+    }
+    assert_eq!(result["losses"]["dropped"], 0, "{}", result["losses"]);
 }
 
 // ---------------------------------------------------------------------------

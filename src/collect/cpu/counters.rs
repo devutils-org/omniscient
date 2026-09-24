@@ -32,7 +32,7 @@ use crate::clock::monotonic_ns;
 use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Counter, CounterGroup, Reading, Scope};
+use crate::perf::{Counter, Reading, ThreadCounters};
 use crate::request::{Mode, Target};
 
 /// How often the collector is asked for events.
@@ -219,6 +219,24 @@ pub const SPECS: &[Spec] = &[
     },
 ];
 
+/// `mem.faults` in `count` mode: the kernel's own page-fault counter, read
+/// through this group.
+///
+/// Outside [`SPECS`] because `mem.faults` on `pmu:sw` is registered by its
+/// family, whose collector samples; this is what that collector hands a counted
+/// request to. The catalog declared `count` for the source and the collector
+/// refused it after the launch -- the cheapest thing it could do, turned down
+/// once the target was already running.
+pub const PAGE_FAULTS: Spec = Spec {
+    source: "mem.faults",
+    backend: "pmu:sw",
+    counters: &[Counter::software(
+        "page_faults",
+        perf::PERF_COUNT_SW_PAGE_FAULTS,
+    )],
+    value: Value::Count,
+};
+
 /// The source and backend a counting spec serves, or nothing when the pair is
 /// not one of them.
 pub fn spec_for(source: &str, backend: &str) -> Option<&'static Spec> {
@@ -276,7 +294,11 @@ impl Prepared for Prepare {
                         other.kind()
                     )
                 })?;
-                Ok(Box::new(CounterCollector::new(pid, self.0)))
+                let mut collector = CounterCollector::new(pid, self.0);
+                // A `--tid` target is that task and what it starts; every other
+                // target that names a process is every thread it has.
+                collector.whole_process = !matches!(other, Target::Tid(_));
+                Ok(Box::new(collector))
             }
         }
     }
@@ -420,7 +442,10 @@ pub struct CounterCollector {
     id: CollectorId,
     pid: i32,
     spec: &'static Spec,
-    group: Option<CounterGroup>,
+    group: Option<ThreadCounters>,
+    /// Whether the counters follow every thread of `pid` rather than `pid`
+    /// alone. See [`ThreadCounters`].
+    whole_process: bool,
     /// The catalog declares `comm` as a filter field on every counting source
     /// of this family, and a filter field nothing emits is false everywhere.
     comm: Comm,
@@ -435,6 +460,7 @@ impl CounterCollector {
             pid,
             spec,
             group: None,
+            whole_process: true,
             comm: Comm::of(pid),
             losses: Losses::default(),
             notes: Vec::new(),
@@ -474,15 +500,41 @@ impl Collector for CounterCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let group =
-            CounterGroup::open(self.spec.counters, Scope::Process(self.pid)).map_err(|error| {
-                format!(
-                    "perf_event_open for `{}` on pid {} was refused ({error}); \
-                     check /proc/sys/kernel/perf_event_paranoid, and whether this cpu \
-                     exposes the counter at all",
-                    self.spec.source, self.pid
-                )
-            })?;
+        let opened = if self.whole_process {
+            ThreadCounters::open(self.spec.counters, self.pid)
+        } else {
+            ThreadCounters::open_task(self.spec.counters, self.pid)
+        };
+        let group = opened.map_err(|error| {
+            format!(
+                "perf_event_open for `{}` on pid {} was refused ({error}); \
+                 check /proc/sys/kernel/perf_event_paranoid, and whether this cpu \
+                 exposes the counter at all",
+                self.spec.source, self.pid
+            )
+        })?;
+        // Said only when it is news: at the launch gate there is one thread,
+        // and a counter opened on it follows everything the program starts.
+        if group.threads().len() > 1 {
+            self.notes.push(format!(
+                "process {} was already running {} threads when `{}` was opened, so a counter \
+                 was opened on each and the count is their sum; each follows whatever its \
+                 thread starts",
+                self.pid,
+                group.threads().len(),
+                self.spec.source
+            ));
+        }
+        if group.unlisted() > 0 {
+            self.notes.push(format!(
+                "{} thread{} of process {} appeared while the counters were being opened; each \
+                 is counted if the thread that started it already had its counter, and not \
+                 otherwise, and which it was cannot be told from here",
+                group.unlisted(),
+                if group.unlisted() == 1 { "" } else { "s" },
+                self.pid
+            ));
+        }
         if group.kernel_excluded() {
             self.notes.push(format!(
                 "this machine would only open `{}` for user mode, so kernel-mode events \
@@ -547,6 +599,7 @@ impl Collector for CounterCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perf::{CounterGroup, Scope};
 
     fn spec(source: &str) -> &'static Spec {
         SPECS
@@ -1121,7 +1174,8 @@ mod tests {
         let cv = variance.sqrt() / mean;
         assert!(
             cv < 0.01,
-            "the counter varies by {:.2} % between identical runs ({counted:?}), so this              machine cannot resolve the differences this family exists to measure",
+            "the counter varies by {:.2} % between identical runs ({counted:?}), so this \
+             machine cannot resolve the differences this family exists to measure",
             cv * 100.0
         );
     }
@@ -1150,6 +1204,58 @@ mod tests {
             error < 0.05,
             "the work ran in a thread and retired {expected} instructions, but {count}              were counted: the event is not following the threads it should"
         );
+    }
+
+    /// A counter opened on a process that already runs a second thread counts
+    /// that thread too.
+    ///
+    /// The late-attach case, in process: the worker exists before the counter
+    /// is opened, and only then does its known work. Opened on the process as
+    /// one inherited counter, this measured the main thread -- which libtest
+    /// parks -- and read a few hundred thousand instructions for a loop of two
+    /// hundred million. The other tests of this binary run beside it, so the
+    /// loop is a floor and not an equality: the separation is five hundred to
+    /// one either way.
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn a_counter_opened_on_a_running_process_counts_the_threads_it_already_had() {
+        const ITERATIONS: u64 = 100_000_000;
+        let floor = (ITERATIONS * 2) as f64;
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            wait.recv().expect("the test says when to start");
+            known_loop(ITERATIONS);
+        });
+
+        let mut collector =
+            CounterCollector::new(std::process::id() as i32, spec("cpu.instructions"));
+        if let Err(reason) = collector.start() {
+            eprintln!("skipped: this machine refuses unprivileged perf counting: {reason}");
+            drop(go);
+            let _ = worker.join();
+            return;
+        }
+        go.send(()).expect("the worker is waiting");
+        worker.join().expect("the worker finished");
+        let events = collector.stop();
+
+        let count = events
+            .first()
+            .and_then(|event| event.attr("count"))
+            .and_then(crate::event::AttrValue::as_f64)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no count at all for a thread that retired {floor} instructions: {:?}",
+                    collector.losses()
+                )
+            });
+        assert!(
+            count >= floor,
+            "a thread that was running before the counter opened retired {floor} instructions \
+             and {count} were counted"
+        );
+        let notes = collector.notes().join("\n");
+        assert!(notes.contains("already running"), "{notes}");
     }
 
     /// The kernel keeps its own count of context switches per task, so this
@@ -1192,7 +1298,8 @@ mod tests {
         let ratio = counted / kernel as f64;
         assert!(
             (0.8..1.25).contains(&ratio),
-            "the counter says {counted} context switches where the kernel's own counter              says {kernel}"
+            "the counter says {counted} context switches where the kernel's own counter \
+             says {kernel}"
         );
     }
 

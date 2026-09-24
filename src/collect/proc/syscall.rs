@@ -80,8 +80,70 @@ impl Prepared for Prepare {
         Ok(Box::new(SyscallCollector::new(
             Narrowing { tgid, syscall_nr },
             self.mode,
-            self.filter,
+            self.filter.map(numbers_read_as_nr),
         )))
+    }
+}
+
+/// The predicate as the userspace pass has to read it: a number compared with
+/// `syscall` is compared with `nr`.
+///
+/// The event's `syscall` is the name, from this build's table, and `nr` is the
+/// number the kernel reported. `syscall == 110` is a question about the number
+/// -- the push-down reads it that way -- and evaluated against the name it is
+/// false for every row, so the kernel would keep getppid and this pass would
+/// then drop every call it kept: an empty series from a workload that made
+/// thousands, with the program's narrowing reported as though it had worked.
+/// Rewritten here once, the kernel's half and this half answer the same
+/// question in every position a comparison can sit in, `||` and `!` included.
+fn numbers_read_as_nr(filter: FilterExpr) -> FilterExpr {
+    match filter {
+        FilterExpr::And(left, right) => FilterExpr::And(
+            Box::new(numbers_read_as_nr(*left)),
+            Box::new(numbers_read_as_nr(*right)),
+        ),
+        FilterExpr::Or(left, right) => FilterExpr::Or(
+            Box::new(numbers_read_as_nr(*left)),
+            Box::new(numbers_read_as_nr(*right)),
+        ),
+        FilterExpr::Not(inner) => FilterExpr::Not(Box::new(numbers_read_as_nr(*inner))),
+        FilterExpr::Compare {
+            field,
+            operator,
+            value,
+        } if field == "syscall" => match value {
+            Value::Int { .. } => FilterExpr::Compare {
+                field: "nr".to_owned(),
+                operator,
+                value,
+            },
+            // A set of numbers is a set of `nr`s; a set mixing numbers and
+            // names is either one.
+            Value::List(values) => {
+                let (numbers, names): (Vec<Value>, Vec<Value>) = values
+                    .into_iter()
+                    .partition(|value| matches!(value, Value::Int { .. }));
+                let compare = |field: &str, values: Vec<Value>| FilterExpr::Compare {
+                    field: field.to_owned(),
+                    operator,
+                    value: Value::List(values),
+                };
+                match (numbers.is_empty(), names.is_empty()) {
+                    (true, _) => compare("syscall", names),
+                    (false, true) => compare("nr", numbers),
+                    (false, false) => FilterExpr::Or(
+                        Box::new(compare("nr", numbers)),
+                        Box::new(compare("syscall", names)),
+                    ),
+                }
+            }
+            value => FilterExpr::Compare {
+                field,
+                operator,
+                value,
+            },
+        },
+        other => other,
     }
 }
 
@@ -597,6 +659,47 @@ mod tests {
             .parse()
             .expect("a predicate");
         assert_eq!(pushed_down_syscall(&conjunction), Ok(Some(110)));
+    }
+
+    /// `syscall == 110` is pushed down as the number, so the userspace pass has
+    /// to read it as the number too: against the name, every row the kernel
+    /// kept would be dropped.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn a_syscall_number_is_compared_with_nr_in_userspace_wherever_it_sits() {
+        let event = |nr: u32| Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "proc.syscall".to_owned(),
+            keys: Vec::new(),
+            attrs: attributes(&SyscallRow { nr, ..row() }, 100_000),
+            collector_id: CollectorId::new("test"),
+            seq: 0,
+        };
+        let getppid = event(110);
+        let write = event(1);
+        for (text, keeps_getppid, keeps_write) in [
+            ("syscall == 110", true, false),
+            ("syscall != 110", false, true),
+            ("syscall in (110, 2)", true, false),
+            ("syscall in (110, 'write')", true, true),
+            ("comm == 'sh' && syscall == 110", true, false),
+            ("syscall == 110 || syscall == 'write'", true, true),
+            ("!(syscall == 1)", true, false),
+            ("syscall == 'getppid'", true, false),
+        ] {
+            let predicate = numbers_read_as_nr(text.parse().expect("a predicate"));
+            assert_eq!(
+                crate::filter::matches(&predicate, &getppid),
+                keeps_getppid,
+                "`{text}` read as `{predicate}` on getppid"
+            );
+            assert_eq!(
+                crate::filter::matches(&predicate, &write),
+                keeps_write,
+                "`{text}` read as `{predicate}` on write"
+            );
+        }
     }
 
     /// A disjunction names a syscall and does not narrow to one: pushing the

@@ -48,8 +48,12 @@
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only, container: bpf_only}
   keys: [task]
-  filter_fields: [comm, code]
+  filter_fields: [comm, code, group_dead]
   determinism: medium
+  caveats:
+    - "The tracepoint fires once per thread, so a count of these events is a count of
+       threads. `--filter 'group_dead == 1'` keeps one event per process, the last of
+       its threads to leave."
 
 - id: proc.fd
   family: proc

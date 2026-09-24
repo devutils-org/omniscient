@@ -9,6 +9,17 @@
 //! The kernel pushes these into a ring buffer, so this collector streams: it
 //! asks to be drained often, and reports what the ring dropped when it was not
 //! drained often enough.
+//!
+//! **It follows every thread**, the ones the target already has and the ones
+//! it starts: an inherited event per thread per cpu, the events of one cpu
+//! sharing its ring ([`ThreadSampler`]). Until the eleventh wave it sampled the
+//! task it was opened on and said so, and a program that faulted its memory in
+//! from a worker thread read as a program that faulted nothing.
+//!
+//! **`count` mode is the kernel's counter**, not this ring: one inherited
+//! software counter per thread, read at the end, through the `cpu` family's
+//! counting group ([`crate::collect::cpu::counters::PAGE_FAULTS`]). It has no
+//! addresses, and it is exact.
 
 use std::time::Duration as StdDuration;
 
@@ -17,7 +28,7 @@ use perf_event_open_sys::bindings as perf;
 use crate::collect::task::Comms;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Record, SampledEvent, Scope};
+use crate::perf::{Callchain, Record, SampleSpec, ThreadSampler};
 use crate::request::Mode;
 
 /// How often the ring is drained.
@@ -28,9 +39,15 @@ use crate::request::Mode;
 /// instead of the numbers quietly shrinking.
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 
-/// Data pages to ask for. `perf_event_mlock_kb` usually caps an unprivileged
-/// process well below this, and the ring shrinks to what the machine allows.
-const RING_PAGES: usize = 512;
+/// Data pages to ask for, per cpu. `perf_event_mlock_kb` usually caps an
+/// unprivileged process below this, and each ring shrinks to what the machine
+/// allows.
+///
+/// Per cpu rather than one ring for the whole target, because an inherited
+/// event can only be mapped pinned to a cpu. A burst lands on the cpus the
+/// faulting threads run on, so a ring a quarter the size of the one the old
+/// single-task event had is what one busy cpu gets to itself.
+const RING_PAGES: usize = 128;
 
 /// Holds the mode until the target exists.
 pub struct Prepare(pub Mode);
@@ -40,6 +57,17 @@ impl Prepared for Prepare {
         self: Box<Self>,
         target: &crate::request::Target,
     ) -> Result<Box<dyn Collector>, String> {
+        if self.0 == Mode::Count {
+            // Counted, not sampled: the page-fault counter of the `cpu`
+            // family's group, which serves every target the catalog declares
+            // -- a process through one counter per thread, a cpu or the
+            // machine through one per cpu.
+            let counted = crate::collect::cpu::counters::Prepare::new(
+                &crate::collect::cpu::counters::PAGE_FAULTS,
+                Mode::Count,
+            )?;
+            return Box::new(counted).attach(target);
+        }
         let pid = target.first_pid().ok_or_else(|| {
             format!(
                 "sampling page faults machine-wide needs per-cpu events and the privileges for them; a {} target names no process to sample",
@@ -47,10 +75,9 @@ impl Prepared for Prepare {
             )
         })?;
         let mut collector = PageFaultCollector::new(pid, self.0);
-        // A `--tid` target is one task because that is what was asked for;
-        // every other target that names a process is a task and whatever it
-        // starts, and a sampling event follows none of them.
-        collector.more_than_one_task = !matches!(target, crate::request::Target::Tid(_));
+        // A `--tid` target is that task and what it starts; every other target
+        // that names a process is every thread it has.
+        collector.whole_process = !matches!(target, crate::request::Target::Tid(_));
         Ok(Box::new(collector))
     }
 }
@@ -59,21 +86,21 @@ pub struct PageFaultCollector {
     id: CollectorId,
     pid: i32,
     mode: Mode,
-    event: Option<SampledEvent>,
+    event: Option<ThreadSampler>,
     /// Names by tid, not by the collector's pid: an event opened over a process
     /// receives samples from whichever of its threads faulted, and `comm` is a
     /// declared filter field on this source.
     comms: Comms,
     /// Counted here rather than in the ring so it survives `stop`.
     losses: Losses,
-    /// Whether the target is more than the one task the event is opened on.
-    more_than_one_task: bool,
-    /// The tasks faults were sampled from: the measured half of the
-    /// disclosure in `notes`.
+    /// Whether every thread of `pid` is followed rather than `pid` alone.
+    whole_process: bool,
+    /// The tasks faults were sampled from, for the note that says how many.
     sampled_tasks: std::collections::BTreeSet<i32>,
-    /// What the event cannot see, read at `start` because `stop` closes it
-    /// before the notes are gathered.
-    disclosure: Option<&'static str>,
+    /// What was opened, read at `start` because `stop` closes it before the
+    /// notes are gathered: the threads followed from the start, and the ones
+    /// that appeared while the events were being opened.
+    followed: (usize, usize),
 }
 
 impl PageFaultCollector {
@@ -85,9 +112,9 @@ impl PageFaultCollector {
             event: None,
             comms: Comms::new(),
             losses: Losses::default(),
-            more_than_one_task: false,
+            whole_process: true,
             sampled_tasks: std::collections::BTreeSet::new(),
-            disclosure: None,
+            followed: (0, 0),
         }
     }
 
@@ -179,16 +206,24 @@ impl Collector for PageFaultCollector {
         let period = match self.mode {
             Mode::Trace => 1,
             Mode::Sample { freq } => freq.as_hz(),
+            // `count` is served by the counting group, which `Prepare` hands
+            // it to; reaching here is a caller that built this collector
+            // directly.
             other => return Err(format!("`{other}` mode does not sample page faults")),
         };
 
-        let event = SampledEvent::open_software(
+        let spec = SampleSpec::software(
             perf::PERF_COUNT_SW_PAGE_FAULTS as u64,
             period,
-            Scope::Process(self.pid),
-            RING_PAGES,
-        )
-        .map_err(|error| {
+            Callchain::Off,
+        );
+        let opened = if self.whole_process {
+            ThreadSampler::open_process(&spec, self.pid, RING_PAGES)
+        } else {
+            crate::perf::online_cpus()
+                .and_then(|cpus| ThreadSampler::open(&spec, &[self.pid], &cpus, RING_PAGES))
+        };
+        let event = opened.map_err(|error| {
             format!(
                 "perf_event_open for page faults on pid {} was refused ({error}); \
                  check /proc/sys/kernel/perf_event_paranoid",
@@ -196,7 +231,7 @@ impl Collector for PageFaultCollector {
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
-        self.disclosure = Some(event.sampled_threads());
+        self.followed = (event.threads().len(), event.unlisted());
         self.event = Some(event);
         Ok(())
     }
@@ -230,19 +265,32 @@ impl Collector for PageFaultCollector {
         self.losses.clone()
     }
 
-    /// What this event never saw, as `cpu.profile` and `sched.switches` say
-    /// it: the kernel will not inherit a per-task sampling event, so the faults
-    /// of a thread or a child the target starts afterwards are not sampled,
-    /// and nothing counts them as lost because they were never taken.
+    /// What the events followed, when it is more than a launched program's
+    /// one thread, and what they may have missed.
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if let (true, Some(limit)) = (self.more_than_one_task, self.disclosure) {
-            let tasks = self.sampled_tasks.len();
+        let (threads, unlisted) = self.followed;
+        if threads > 1 {
             notes.push(format!(
-                "a sampling event is not inherited, so these faults are {limit}; they came \
-                 from {tasks} task{}, and a fault taken in a thread or a child process the \
-                 target started is in no number here",
-                if tasks == 1 { "" } else { "s" }
+                "process {} was already running {threads} threads when sampling began, so each \
+                 has an event of its own and each follows what it starts; faults came from {} \
+                 task{}",
+                self.pid,
+                self.sampled_tasks.len(),
+                if self.sampled_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if unlisted > 0 {
+            notes.push(format!(
+                "{unlisted} thread{} of process {} appeared while the events were being opened; \
+                 each is sampled if the thread that started it already had its event, and not \
+                 otherwise, and which it was cannot be told from here",
+                if unlisted == 1 { "" } else { "s" },
+                self.pid
             ));
         }
         notes
