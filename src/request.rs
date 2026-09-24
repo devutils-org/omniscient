@@ -1505,25 +1505,26 @@ requests:
         );
     }
 
+    /// Since `join::apply_within` knows each source's window, a join across a
+    /// held source is allowed; a decomposition reading one is still refused.
     #[test]
-    fn a_join_across_a_held_source_is_refused_until_the_engine_knows_its_window() {
+    fn a_join_across_a_held_source_is_allowed_and_a_decomposition_is_not() {
         let joined = escalating(&format!(
             "escalate: {{objective: latency}}\n{HELD}joins:\n  - {{id: across, from: \
              sched.offcpu, to: sched.futex, via: task, match: eq}}\n"
+        ));
+        assert!(joined.is_ok(), "{joined:?}");
+        let decomposed = escalating(&format!(
+            "escalate: {{objective: latency}}\n{HELD}decompose:\n  - {{id: across, whole: \
+             lifetime, parts: [{{state: waiting, from: sched.futex, value: wait_ns}}]}}\n"
         ))
         .unwrap_err();
         assert!(
-            joined
+            decomposed
                 .message()
-                .contains("join `across` reads `sched.futex`"),
-            "{joined}"
+                .contains("decomposition `across` reads `sched.futex`"),
+            "{decomposed}"
         );
-        // The cheap pass runs for the whole run, and joining it is fine.
-        let cheap = escalating(&format!(
-            "escalate: {{objective: latency}}\n{HELD}joins:\n  - {{id: cheap, from: \
-             sched.offcpu, to: sched.offcpu, via: task, match: eq}}\n"
-        ));
-        assert!(cheap.is_ok(), "{cheap:?}");
     }
 
     #[test]
