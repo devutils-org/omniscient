@@ -1388,8 +1388,6 @@ fn retire(turns: u64) {
 /// (`Prepared::follows_only_later_threads`, filed in `docs/open-findings.md`
 /// under Stream H); the runner already acts on the declaration.
 #[test]
-#[ignore = "waits on src/collect/cpu/counters.rs declaring Prepared::follows_only_later_threads \
-            (docs/open-findings.md, Stream H)"]
 fn a_counter_attached_late_counts_the_threads_already_running_or_says_it_cannot() {
     const SECOND: f64 = 2_000_000_000.0;
     let report = scratch("phases-threaded.report");
@@ -1619,11 +1617,16 @@ fn a_join_across_a_detached_source_does_not_count_what_fell_after_it_as_a_loss()
     );
     // Neither credited to a wakeup from before the detach, nor counted as
     // having followed none: the first phase's blocks, the gate's and the
-    // program's start are all that is left to match.
+    // program's start are all that is left to match. Asserted as the
+    // separation from the defect rather than as a count of the start's
+    // switches: a stale state absorbed every block after the detach, which
+    // put `matched` at the first phase plus the second (67 for 40 and 25);
+    // how many switches the launch itself adds moved from three to four when
+    // `sched.switches` began following every thread of the program.
     let matched = join["matched"].as_u64().unwrap_or(u64::MAX);
     let unmatched = join["unmatched"].as_u64().unwrap_or(u64::MAX);
     assert!(
-        matched <= FIRST + 3 && unmatched < SECOND,
+        matched < FIRST + SECOND / 2 && unmatched < SECOND,
         "what fell after the detach is neither matched nor unmatched: {join}"
     );
 }
