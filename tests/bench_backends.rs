@@ -70,9 +70,22 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
     say(format!("measuring {}", omn.describe()));
     prepare_io_file().expect("the io file");
 
-    // 1. The gate, before anything else is measured.
-    let (baselines, _) =
-        harness::baselines(&reference_workloads(), repetitions).expect("the baselines");
+    // 1. The plan: every (source, backend) this build serves here, made first
+    // so the gate can judge every workload it measures against.
+    let (planned, unplanned) = plan(&omn, only().as_deref());
+
+    // 2. The gate, before anything is measured, on the reference workloads
+    // and on every other workload the plan measures against -- `malloc` for
+    // the heap sources. A workload with no baseline has no resolution to
+    // judge, and the first real run excluded the heap sources for exactly
+    // that.
+    let mut workloads = reference_workloads();
+    for row in &planned {
+        if !workloads.iter().any(|w| w.name == row.workload.name) {
+            workloads.push(row.workload.clone());
+        }
+    }
+    let (baselines, _) = harness::baselines(&workloads, repetitions).expect("the baselines");
     eprint!("{}", gate_table(&baselines));
     let gate = judge(&baselines, &Conditions::read());
     match (&gate, smoke) {
@@ -90,8 +103,6 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
     }
     let admitted = gate.as_ref().ok().cloned().unwrap_or_default();
 
-    // 2. The plan: every (source, backend) this build serves here.
-    let (planned, unplanned) = plan(&omn, only().as_deref());
     say(format!(
         "{} (source, backend) pairs to measure, {} not served here",
         planned.len(),

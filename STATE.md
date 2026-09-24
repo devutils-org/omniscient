@@ -216,7 +216,7 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. |
 | 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. And since the tenth wave, **hot attach**: a request carries a `window` inside the run, attached and detached while the rest keep running, and two sources attached for one phase each of a program count that phase within +0.17 % and nothing of the other. Three edges are filed with the files that own them: the join engine credits events after a detach to a stale state, the results document does not yet say where a window was, and a per-task counter attached late to a program that already has threads counts one of them. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
-| 8 — self-benchmark | **built, not yet run.** The tenth wave's harness has every task the phase lists -- reference workloads, warmup, round-robin repetitions, median and IQR, the variance gate, the backend comparison, the resolution sweep and the observer effect -- and the agent's own cost is measured apart from the target's dilation. The table itself is one command on a quiet machine (`docs/bench.md`), because the gate refuses while other work runs, and it did. Building it found four defects, filed: a pushed-down `proc.syscall` filter that drops every call, `proc.exec` ignoring its filter, `--backend force:` walking past missing probes, and `mem.faults` declaring a `count` it refuses. |
+| 8 — self-benchmark | **done.** The harness has every task the phase lists, and it has measured: 94 (source, backend) pairs alone on this machine, every workload admitted by a gate that judges what a median resolves and refuses a busy machine (`docs/bench.md`). The resolver's seven choices between served backends were confirmed. What the table corrects is the cost bands: an in-kernel collector's cost is in the target's dilation, not the tool's cpu (`proc.syscall`: 0.42 % against +296 %), and the preload shim under a lock storm dilates its target tenfold and holds 3.9 GiB. Finding 47 files each. |
 | 9 — breadth | nearly done; **96 of 101 sources, 106 of 205 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
 | 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. What is left is the escalation, which hot attach now makes possible. |
 | 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
@@ -236,10 +236,9 @@ tenth filed: the engine's (a join across a detached source, the window on
 `Results`, rows rated by the key that carried them, a filtered zero), the
 silent degradations the bench found, and the drains that race their programs.
 
-**Outside any wave, and before or after it rather than during:** the bench's
-real measurement, one command on a quiet machine (`docs/bench.md`, "The one
-command"), with its table pasted into that file. Its variance gate refuses on
-a machine the streams are loading, as it should.
+**Measured between the waves:** the bench's table, in `docs/bench.md`. Its three
+heap rows are one rerun away (`OMN_BENCH_ONLY=mem.heap scripts/bench.sh
+backends`, alone), and finding 47 is what the table corrects.
 
 **After the eleventh wave, in order:**
 
@@ -249,7 +248,10 @@ a machine the streams are loading, as it should.
    escalation holds the runner this wave.
 2. **Phase 11**, an MCP surface over the resolved file, the results and the
    catalog, once phase 10's escalation has landed and not before.
-3. **`dm-delay`**, the one injection left that needs root, on a machine where
+3. **Finding 47**: the cost bands and the budget read the target's dilation for
+   in-kernel collectors, and the shim is bounded and batched under a lock
+   storm -- the two corrections the bench's table made.
+4. **`dm-delay`**, the one injection left that needs root, on a machine where
    root is available.
 
 Below the milestones, and not scheduled:

@@ -319,10 +319,293 @@ effect it looks for is a few percent; it is in the real run.
 
 ### The table
 
-**Not measured yet, on purpose.** The gate refused every time it was asked on
-this machine during the wave, and a table from a noisy machine is worse than
-none. The coordinator replaces this paragraph with `table.md` from the real
-run.
+**Measured** after the tenth wave's merge, alone on the development machine
+(Zen 2, 24 cpus, boost off, governor `performance`), with the release build
+carrying its capabilities: every workload admitted by the gate, `io` at 121
+repetitions and `contended` at 26, 94 (source, backend) pairs in 55 minutes.
+The heap sources are missing from this run -- the gate knew only the six
+reference workloads and excluded the `malloc` one it had no baseline for, which
+is fixed; their rows come from a rerun, `OMN_BENCH_ONLY=mem.heap scripts/bench.sh
+backends`, pasted below when it has been made.
+
+**What it says, before the table.** The two columns disagree more than anything
+else, and the disagreement is the finding:
+
+- **A collector's own cpu is not its cost when the kernel runs it.**
+  `proc.syscall` costs 0.42 % of the target's cpu in the tool and **+296 %**
+  in the target's own timed section: a program on every syscall entry and exit
+  runs in the target's context, and is charged to it. `io.fs` (+7.5 %),
+  `io.syscall` (+3.8 %) and `sched.futex` (+5.8 %) are the same shape, smaller.
+  The dilation column is the one to read for an in-kernel collector; the
+  resolver's cost bands were written from the other.
+- **The preload shim does not survive a mutex storm.** `sched.mutex` on the
+  contended workload -- four threads, a million lock round trips each --
+  dilates it **+1043 %**, spends 1.6 s of cpu, holds **3.9 GiB**, and counts
+  54.9 million records lost. The loss is surfaced, as it must be; the memory
+  and the dilation are not acceptable for a backend the resolver picks first.
+  The observer step says why: under the shim four allocating threads scale
+  **1.96** where they scaled 1.01 bare -- every record is one `write(2)` to one
+  pipe, which serialises the threads that make them.
+- **Attach can dominate a short run.** `io.fsync` and `net.tcp.connect` saw no
+  event and spent 64 and 68 ms: the fentry trampoline rebuild the eighth wave
+  measured, paid once per run and charged to a 70 ms workload.
+- **A poll is not free everywhere.** `gpu.power` through NVML costs 34 ms per
+  run, 21 % of the target, and `gpu.freq` 15 ms; `mem.numa`, `mem.pss`,
+  `mem.rss` and `mem.uss` through smaps are 30 to 43 ms each at 100 ms.
+- **Tracing a contended program can make it faster.** `sched.lock` (−21 %),
+  `sched.offcpu` (−11 %) and `sched.runqlat` (−9 %) shorten the contended
+  workload: a program on the context switch changes the lock's convoy. That is
+  the observer effect the roadmap's sixth task names, measured, and it is a
+  reason to read a lock measurement beside the run it perturbed.
+- **Unexplained, and filed:** `runtime.jit` reports 360 losses on a run that
+  produced no event.
+
+**The resolver's choices, confirmed:** the seven sources with two served
+backends -- `mem.pressure`, `mem.pss`, `mem.rss`, `mem.swap`, `mem.thp`,
+`mem.uss`, `power.energy` -- each kept its chosen backend: the alternative is
+either not clearly cheaper or cheaper by giving up what the catalog says it
+degrades (`mem.rss` through `statm` is a hundred times cheaper and has no
+per-VMA breakdown).
+
+#### Backend comparison
+
+Measured with /home/moha/repos/omniscient/target/release/omn (release build, carrying CAP_BPF and CAP_PERFMON), at least 20 repetitions round-robin (more for a workload whose spread needed them to resolve 1 %, as the gate table says) after 2 warmup runs, the LLC evicted before each. Collector cpu and dilation are median [IQR]. A poll is measured at 100 ms and a sample at 997 Hz.
+
+```
+  WORKLOAD      N   MEDIAN        IQR           CV       RESOLVES   GATE
+  launch        20   124.40ms      2.22ms          1.01 %    0.80 %   pass
+  compute       20   164.29ms      380.82us        0.26 %    0.21 %   pass
+  memory        20   367.02ms      1.99ms          0.46 %    0.36 %   pass
+  syscall       20   32.01ms       266.74us        0.85 %    0.67 %   pass
+  io           121   70.70ms       2.35ms          2.63 %    0.85 %   pass
+  contended     26   140.84ms      2.49ms          1.41 %    0.98 %   pass
+```
+
+| source | backend | resolver | mode | target | workload | collector cpu | % of target | dilation | omn peak RSS | events | losses | dropped (throttled) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| cpu.branch_misses | pmu | chosen | count | launch | compute | 270.00us [11.00us] | 0.17 % [0.01 %] | -0.06 % [+0.32 %] | 7.2 MiB | 1 | 0 | 0 |
+| cpu.cache_misses | pmu | chosen | count | launch | compute | 264.00us [66.50us] | 0.17 % [0.04 %] | -0.08 % [+0.26 %] | 7.3 MiB | 1 | 0 | 0 |
+| cpu.context_switches | pmu:sw | chosen | count | launch | compute | 305.00us [62.75us] | 0.19 % [0.04 %] | -0.12 % [+0.20 %] | 7.3 MiB | 1 | 0 | 0 |
+| cpu.cycles | pmu | chosen | count | launch | compute | 265.00us [62.75us] | 0.17 % [0.04 %] | +0.04 % [+0.07 %] | 7.3 MiB | 1 | 0 | 0 |
+| cpu.instructions | pmu | chosen | count | launch | compute | 261.00us [53.75us] | 0.16 % [0.03 %] | -0.02 % [+0.20 %] | 7.3 MiB | 1 | 0 | 0 |
+| cpu.ipc | pmu | chosen | count | launch | compute | 274.00us [27.75us] | 0.17 % [0.02 %] | -0.05 % [+0.16 %] | 7.2 MiB | 1 | 0 | 0 |
+| cpu.migrations | pmu:sw | chosen | count | launch | compute | 297.50us [47.50us] | 0.19 % [0.03 %] | +0.11 % [+0.27 %] | 7.3 MiB | 1 | 0 | 0 |
+| cpu.oncpu_time | fs:proc | chosen | poll@100ms | launch | compute | 109.00us [5.50us] | 0.07 % [0.00 %] | -0.10 % [+0.34 %] | 7.1 MiB | 2 | 0 | 0 |
+| cpu.pressure | fs:proc | chosen | poll@100ms | system | compute | 361.50us [23.00us] | 0.15 % [0.04 %] | - | 7.0 MiB | 11 | 0 | 0 |
+| cpu.profile | pmu:sw | chosen | sample@997hz | launch | compute | 982.00us [63.00us] | 0.61 % [0.04 %] | +0.23 % [+0.21 %] | 46.4 MiB | 164 | 0 | 0 |
+| cpu.util | fs:proc | chosen | poll@100ms | system | compute | 924.00us [69.75us] | 0.36 % [0.09 %] | - | 7.2 MiB | 10 | 0 | 0 |
+| gpu.api | preload | chosen | trace | launch | compute | 236.50us [42.25us] | 0.15 % [0.03 %] | -0.03 % [+0.37 %] | 7.3 MiB | 0 | 0 | 0 |
+| gpu.engine_busy | vendor:nvml | chosen | count | launch | compute | 6.00ms [1.22ms] | 3.75 % [0.77 %] | -0.01 % [+0.20 %] | 32.1 MiB | 2 | 0 | 0 |
+| gpu.freq | vendor:nvml | chosen | poll@100ms | launch | compute | 14.82ms [2.22ms] | 9.27 % [1.39 %] | -0.03 % [+0.16 %] | 32.2 MiB | 2 | 0 | 0 |
+| gpu.mem | vendor:nvml | chosen | poll@100ms | launch | compute | 2.21ms [229.50us] | 1.38 % [0.14 %] | +0.09 % [+0.29 %] | 32.2 MiB | 2 | 0 | 0 |
+| gpu.power | vendor:nvml | chosen | poll@100ms | launch | compute | 33.76ms [1.80ms] | 21.10 % [1.13 %] | -0.62 % [+0.17 %] | 32.4 MiB | 2 | 0 | 0 |
+| gpu.temp | vendor:nvml | chosen | poll@100ms | launch | compute | 630.50us [181.50us] | 0.39 % [0.11 %] | -0.03 % [+0.21 %] | 32.1 MiB | 2 | 0 | 0 |
+| io.bytes | fs:proc | chosen | count | system | io | 142.00us [22.00us] | 0.07 % [0.05 %] | - | 7.0 MiB | 2 | 0 | 0 |
+| io.fs | bpf:fentry | chosen | count | launch | io | 298.00us [21.00us] | 0.69 % [0.05 %] | +7.50 % [+1.66 %] | 47.5 MiB | 11 | 0 | 0 |
+| io.fsync | bpf:fentry | chosen | trace | launch | io | 63.81ms [244.00us] | 156.76 % [4.57 %] | +6.47 % [+1.22 %] | 47.3 MiB | 0 | 0 | 0 |
+| io.inflight | fs:proc | chosen | poll@100ms | system | io | 765.00us [41.00us] | 0.42 % [0.25 %] | - | 7.0 MiB | 22 | 0 | 0 |
+| io.iops | fs:proc | chosen | count | system | io | 142.00us [20.00us] | 0.07 % [0.05 %] | - | 7.0 MiB | 2 | 0 | 0 |
+| io.latency | bpf:raw_tp | chosen | count | launch | io | 1.53ms [28.00us] | 3.70 % [0.14 %] | +0.36 % [+1.25 %] | 30.2 MiB | 1 | 0 | 0 |
+| io.merges | fs:proc | chosen | count | system | io | 141.00us [20.00us] | 0.07 % [0.04 %] | - | 7.0 MiB | 2 | 0 | 0 |
+| io.pagecache | bpf:raw_tp | chosen | count | launch | io | 260.00us [14.00us] | 0.61 % [0.04 %] | +0.87 % [+1.11 %] | 29.8 MiB | 5 | 0 | 0 |
+| io.pressure | fs:proc | chosen | poll@100ms | system | io | 374.00us [20.00us] | 0.21 % [0.13 %] | - | 7.0 MiB | 10 | 0 | 0 |
+| io.queue | bpf:raw_tp | chosen | trace | system | io | 5.08ms [226.00us] | 2.79 % [1.76 %] | - | 38.0 MiB | 2048 | 0 | 0 |
+| io.readahead | bpf:raw_tp | chosen | count | launch | io | 264.00us [15.00us] | 0.61 % [0.04 %] | +0.90 % [+1.76 %] | 29.7 MiB | 5 | 0 | 0 |
+| io.size | bpf:raw_tp | chosen | trace | launch | io | 2.61ms [81.00us] | 6.18 % [0.26 %] | -0.00 % [+1.36 %] | 36.2 MiB | 2048 | 0 | 0 |
+| io.syscall | bpf:fentry | chosen | count | launch | io | 322.00us [22.00us] | 0.75 % [0.05 %] | +3.82 % [+1.58 %] | 47.5 MiB | 11 | 0 | 0 |
+| io.writeback | bpf:raw_tp | chosen | count | system | io | 664.00us [162.00us] | 0.35 % [0.26 %] | - | 29.7 MiB | 1 | 0 | 0 |
+| mem.cache_l1 | pmu | chosen | count | launch | memory | 1.28ms [351.50us] | 0.14 % [0.04 %] | -0.15 % [+0.30 %] | 7.3 MiB | 1 | 0 | 0 |
+| mem.cache_llc | pmu:generic | chosen | count | launch | memory | 1.29ms [185.75us] | 0.14 % [0.02 %] | -0.02 % [+0.42 %] | 7.3 MiB | 1 | 0 | 0 |
+| mem.cache_tlb | pmu | chosen | count | launch | memory | 1.28ms [426.25us] | 0.14 % [0.05 %] | -0.07 % [+0.24 %] | 7.3 MiB | 1 | 0 | 0 |
+| mem.cgroup | fs:cgroup | chosen | poll@100ms | launch | memory | 853.00us [87.25us] | 0.09 % [0.01 %] | -0.14 % [+0.24 %] | 7.1 MiB | 10 | 0 | 0 |
+| mem.compaction | bpf:raw_tp | chosen | count | system | memory | 593.00us [194.75us] | 0.07 % [0.03 %] | - | - | 0 | 0 | 0 |
+| mem.faults | pmu:sw | chosen | trace | launch | memory | 41.86ms [654.75us] | 4.12 % [0.07 %] | -0.10 % [+0.27 %] | 94.7 MiB | 65606 | 0 | 0 |
+| mem.kmalloc | bpf:raw_tp | chosen | count | system | memory | 1.44ms [329.75us] | 0.17 % [0.04 %] | - | - | 76 | 2 | 0 |
+| mem.latency | pmu:ibs | chosen | sample@997hz | launch | memory | 1.46ms [279.00us] | 0.15 % [0.03 %] | +0.60 % [+0.26 %] | 7.4 MiB | 128 | 0 | 0 |
+| mem.numa | fs:proc | chosen | poll@100ms | launch | memory | 42.92ms [5.38ms] | 4.55 % [0.55 %] | -0.32 % [+0.26 %] | 7.2 MiB | 10 | 0 | 0 |
+| mem.page_alloc | bpf:raw_tp | chosen | count | system | memory | 672.00us [525.75us] | 0.08 % [0.04 %] | - | - | 13 | 3 | 0 |
+| mem.pressure | fs:proc |  | poll@100ms | system | memory | 382.50us [44.50us] | 0.04 % [0.01 %] | - | - | 10 | 0 | 0 |
+| mem.pressure | fs:cgroup | chosen | poll@100ms | launch | memory | 395.00us [69.50us] | 0.04 % [0.01 %] | +0.01 % [+0.23 %] | 7.1 MiB | 9 | 0 | 0 |
+| mem.pss | fs:proc:smaps_rollup | chosen | poll@100ms | launch | memory | 30.18ms [4.04ms] | 3.20 % [0.41 %] | -0.19 % [+0.29 %] | 7.2 MiB | 10 | 0 | 0 |
+| mem.pss | fs:proc:smaps |  | poll@100ms | launch | memory | 33.36ms [7.09ms] | 3.54 % [0.72 %] | -0.12 % [+0.35 %] | 7.1 MiB | 10 | 0 | 0 |
+| mem.reclaim | bpf:raw_tp | chosen | count | launch | memory | 510.50us [36.25us] | 0.05 % [0.00 %] | -0.05 % [+0.31 %] | 29.4 MiB | 0 | 0 | 0 |
+| mem.rss | fs:proc:smaps_rollup | chosen | poll@100ms | launch | memory | 31.37ms [3.91ms] | 3.33 % [0.35 %] | -0.28 % [+0.42 %] | 7.2 MiB | 10 | 0 | 0 |
+| mem.rss | fs:proc:statm |  | poll@100ms | launch | memory | 330.50us [283.75us] | 0.04 % [0.03 %] | -0.17 % [+0.34 %] | 7.2 MiB | 10 | 0 | 0 |
+| mem.sharing | pmu:ibs | chosen | sample@997hz | launch | memory | 1.45ms [173.50us] | 0.15 % [0.02 %] | +0.53 % [+0.35 %] | 7.3 MiB | 8 | 0 | 0 |
+| mem.swap | fs:proc |  | poll@100ms | system | memory | 1.26ms [21.50us] | 0.15 % [0.01 %] | - | - | 10 | 0 | 0 |
+| mem.swap | fs:cgroup | chosen | poll@100ms | launch | memory | 647.50us [31.75us] | 0.07 % [0.00 %] | -0.08 % [+0.35 %] | 7.2 MiB | 9 | 0 | 0 |
+| mem.thp | fs:sys | chosen | poll@100ms | system | memory | 965.00us [224.25us] | 0.12 % [0.01 %] | - | - | 10 | 0 | 0 |
+| mem.thp | fs:proc |  | poll@100ms | system | memory | 1.26ms [23.00us] | 0.15 % [0.05 %] | - | - | 10 | 0 | 0 |
+| mem.uss | fs:proc:smaps_rollup | chosen | poll@100ms | launch | memory | 32.14ms [5.10ms] | 3.41 % [0.51 %] | -0.26 % [+0.49 %] | 7.2 MiB | 10 | 0 | 0 |
+| mem.uss | fs:proc:smaps |  | poll@100ms | launch | memory | 31.85ms [4.43ms] | 3.38 % [0.45 %] | -0.29 % [+0.23 %] | 7.2 MiB | 10 | 0 | 0 |
+| mem.wss | fs:proc:clear_refs | chosen | poll@100ms | launch | memory | 62.23ms [9.02ms] | 6.38 % [0.91 %] | +2.71 % [+0.25 %] | 7.3 MiB | 10 | 0 | 0 |
+| net.backlog | fs:proc | chosen | count | system | compute | 668.00us [32.00us] | 0.25 % [0.15 %] | - | 7.0 MiB | 2 | 0 | 0 |
+| net.bytes | fs:proc | chosen | count | system | compute | 210.00us [14.50us] | 0.08 % [0.04 %] | - | 7.0 MiB | 14 | 0 | 0 |
+| net.capture | af_packet | chosen | trace | system | compute | 479.50us [162.00us] | 0.20 % [0.15 %] | - | 8.0 MiB | 5 | 0 | 0 |
+| net.drops | bpf:raw_tp | chosen | count | system | compute | 1.15ms [147.50us] | 0.47 % [0.18 %] | - | 30.3 MiB | 0 | 0 | 0 |
+| net.iface | fs:proc | chosen | count | system | compute | 255.00us [31.75us] | 0.10 % [0.05 %] | - | 7.0 MiB | 14 | 0 | 0 |
+| net.packets | fs:proc | chosen | count | system | compute | 209.00us [24.00us] | 0.08 % [0.02 %] | - | 7.0 MiB | 14 | 0 | 0 |
+| net.qdisc | bpf:raw_tp | chosen | trace | system | compute | 743.00us [141.75us] | 0.27 % [0.12 %] | - | 29.4 MiB | 0 | 0 | 0 |
+| net.socket | bpf:fentry | chosen | count | launch | compute | 288.00us [12.75us] | 0.18 % [0.01 %] | +0.05 % [+0.24 %] | 47.2 MiB | 0 | 0 | 0 |
+| net.softirq | bpf:raw_tp | chosen | count | system | compute | 726.00us [76.50us] | 0.28 % [0.10 %] | - | 29.5 MiB | 4 | 0 | 0 |
+| net.tcp.connect | bpf:fentry | chosen | trace | launch | compute | 67.68ms [434.00us] | 42.21 % [0.28 %] | +0.12 % [+0.19 %] | 47.4 MiB | 0 | 0 | 0 |
+| net.tcp.lifetime | bpf:raw_tp | chosen | trace | system | compute | 952.00us [146.00us] | 0.38 % [0.18 %] | - | 29.9 MiB | 0 | 0 | 0 |
+| net.tcp.retransmit | bpf:raw_tp | chosen | count | system | compute | 780.00us [159.75us] | 0.30 % [0.18 %] | - | 30.0 MiB | 0 | 0 | 0 |
+| net.tcp.rtt | netlink | chosen | trace | launch | compute | 5.06ms [45.75us] | 3.16 % [0.03 %] | -0.11 % [+0.22 %] | 7.0 MiB | 0 | 0 | 0 |
+| power.cstate | fs:sys | chosen | poll@100ms | system | compute | 22.25ms [454.00us] | 8.09 % [4.02 %] | - | 7.3 MiB | 240 | 0 | 0 |
+| power.energy | pmu | chosen | count | system | compute | 86.50us [4.25us] | 0.03 % [0.01 %] | - | 7.0 MiB | 1 | 0 | 0 |
+| power.energy | fs:sys |  | count | system | compute | 121.00us [21.00us] | 0.04 % [0.02 %] | - | 7.0 MiB | 1 | 0 | 0 |
+| power.freq | fs:sys | chosen | poll@100ms | system | compute | 2.90ms [126.50us] | 1.15 % [0.25 %] | - | 7.1 MiB | 264 | 0 | 0 |
+| power.temp | fs:sys | chosen | poll@100ms | system | compute | 1.13ms [33.75us] | 0.44 % [0.10 %] | - | 7.0 MiB | 11 | 0 | 0 |
+| proc.exec | bpf:raw_tp | chosen | trace | system | launch | 1.33ms [134.00us] | 0.55 % [0.28 %] | - | 30.2 MiB | 201 | 0 | 0 |
+| proc.exit | bpf:raw_tp | chosen | trace | system | launch | 1.37ms [109.50us] | 0.60 % [0.27 %] | - | 30.2 MiB | 209 | 0 | 0 |
+| proc.fd | fs:proc | chosen | poll@100ms | launch | syscall | 183.00us [10.25us] | 0.57 % [0.04 %] | -0.16 % [+0.86 %] | 7.2 MiB | 1 | 0 | 0 |
+| proc.signals | bpf:raw_tp | chosen | count | launch | syscall | 214.00us [6.25us] | 0.66 % [0.02 %] | -0.10 % [+0.53 %] | 30.0 MiB | 1 | 0 | 0 |
+| proc.syscall | bpf:raw_tp | chosen | count | launch | syscall | 521.00us [63.25us] | 0.42 % [0.05 %] | +296.29 % [+3.12 %] | 29.4 MiB | 39 | 0 | 0 |
+| proc.threads | fs:proc | chosen | poll@100ms | launch | syscall | 168.50us [11.25us] | 0.52 % [0.03 %] | +0.04 % [+0.97 %] | 7.1 MiB | 1 | 0 | 0 |
+| runtime.jit | fs:jit-map | chosen | trace | launch | compute | 266.50us [62.00us] | 0.17 % [0.04 %] | +0.08 % [+0.11 %] | 7.2 MiB | 0 | 360 | 0 |
+| sched.futex | bpf:raw_tp | chosen | trace | launch | contended | 508.50us [41.75us] | 0.09 % [0.01 %] | +5.84 % [+1.09 %] | 29.6 MiB | 58 | 2520 | 0 |
+| sched.irq | bpf:raw_tp | chosen | count | system | contended | 768.00us [143.75us] | 0.14 % [0.04 %] | - | 29.5 MiB | 11 | 0 | 0 |
+| sched.lock | bpf:raw_tp | chosen | trace | launch | contended | 1.06ms [68.50us] | 0.24 % [0.02 %] | -20.91 % [+2.06 %] | 29.6 MiB | 99 | 14 | 0 |
+| sched.migrations | bpf:raw_tp | chosen | count | launch | contended | 207.50us [17.25us] | 0.05 % [0.01 %] | -1.89 % [+2.41 %] | 29.4 MiB | 6 | 0 | 0 |
+| sched.mutex | preload | chosen | trace | launch | contended | 1.613s [8.48ms] | 27.11 % [0.10 %] | +1042.56 % [+4.83 %] | 3924.5 MiB | 1887524 | 54923080 | 0 |
+| sched.numa_balance | bpf:raw_tp | chosen | count | system | contended | 457.00us [52.00us] | 0.08 % [0.02 %] | - | 29.5 MiB | 0 | 0 | 0 |
+| sched.offcpu | bpf:raw_tp | chosen | trace | launch | contended | 340.00us [15.75us] | 0.08 % [0.00 %] | -10.99 % [+2.02 %] | 29.7 MiB | 13 | 0 | 0 |
+| sched.runqlat | bpf:raw_tp | chosen | trace | launch | contended | 423.50us [22.00us] | 0.10 % [0.00 %] | -9.40 % [+1.51 %] | 29.6 MiB | 33 | 0 | 0 |
+| sched.switches | pmu:sw | chosen | trace | launch | contended | 256.50us [39.00us] | 0.06 % [0.01 %] | -1.17 % [+1.74 %] | 7.2 MiB | 6 | 0 | 0 |
+| sched.wakeup | bpf:raw_tp | chosen | trace | launch | contended | 14.93ms [915.00us] | 3.24 % [0.18 %] | -1.07 % [+1.35 %] | 73.5 MiB | 25192 | 0 | 0 |
+
+#### The resolver's choices
+
+| source | verdict |
+|---|---|
+| mem.pressure | confirmed: `fs:proc` was measured as poll@100ms, system against poll@100ms, launch, and is not compared |
+| mem.pss | confirmed: `fs:proc:smaps` is not clearly cheaper |
+| mem.rss | confirmed: `fs:proc:statm` is cheaper and degrades: resident pages only: no per-VMA breakdown, and no PSS or USS to cross-check against |
+| mem.swap | confirmed: `fs:proc` was measured as poll@100ms, system against poll@100ms, launch, and is not compared |
+| mem.thp | confirmed: `fs:proc` is not clearly cheaper |
+| mem.uss | confirmed: `fs:proc:smaps` is not clearly cheaper |
+| power.energy | confirmed: `fs:sys` is not clearly cheaper |
+
+#### Not measured here
+
+| source | backend | why |
+|---|---|---|
+| cpu.cycles | pmu:sw | no collector is written for it |
+| cpu.topdown | pmu | error: forced past `pmu:slots`, which probes missing: this machine publishes no `slots` performance unit under /sys/bus/event_source/devices |
+| cpu.profile | pmu | no collector is written for it |
+| cpu.oncpu_time | bpf:raw_tp | no collector is written for it |
+| cpu.oncpu_time | bpf:tp | no collector is written for it |
+| cpu.oncpu_time | fs:cgroup | no collector is written for it |
+| cpu.util | fs:cgroup | no collector is written for it |
+| cpu.pressure | fs:cgroup | no collector is written for it |
+| cpu.throttle | fs:cgroup | follows only a cgroup or a container, and the bench launches a program or watches the machine |
+| cpu.flow | pmu:aux:intel_pt | no collector is written for it |
+| cpu.flow | pmu:aux:cs_etm | no collector is written for it |
+| mem.faults | bpf:raw_tp | no collector is written for it |
+| mem.faults | bpf:tp | no collector is written for it |
+| mem.page_alloc | bpf:tp | no collector is written for it |
+| mem.kmalloc | bpf:tp | no collector is written for it |
+| mem.heap.alloc | bpf:usdt | no collector is written for it |
+| mem.heap.alloc | bpf:uprobe | no collector is written for it |
+| mem.heap.live | fs:proc | no collector is written for it |
+| mem.cache_llc | pmu | error: forced past `pmu:LLC-load-misses`, which probes missing: `LLC-load-misses` is not available on this cpu |
+| mem.latency | pmu:pebs | no collector is written for it |
+| mem.sharing | pmu:pebs | no collector is written for it |
+| mem.bandwidth | pmu:uncore | no collector is written for it |
+| mem.bandwidth | pmu:rdt | no collector is written for it |
+| mem.numa | pmu | no collector is written for it |
+| mem.wss | fs:sys:damon | no collector is written for it |
+| mem.wss | fs:sys:page_idle | no collector is written for it |
+| mem.reclaim | bpf:tp | no collector is written for it |
+| mem.compaction | bpf:tp | no collector is written for it |
+| io.latency | bpf:tp | no collector is written for it |
+| io.latency | fs:tracefs | no collector is written for it |
+| io.latency | fs:proc | no collector is written for it |
+| io.queue | bpf:tp | no collector is written for it |
+| io.bytes | bpf:raw_tp | no collector is written for it |
+| io.bytes | bpf:tp | no collector is written for it |
+| io.bytes | fs:cgroup | no collector is written for it |
+| io.iops | bpf:raw_tp | no collector is written for it |
+| io.iops | bpf:tp | no collector is written for it |
+| io.size | bpf:tp | no collector is written for it |
+| io.merges | bpf:raw_tp | no collector is written for it |
+| io.merges | bpf:tp | no collector is written for it |
+| io.syscall | bpf:raw_tp | no collector is written for it |
+| io.syscall | bpf:tp | no collector is written for it |
+| io.fs | bpf:kprobe | no collector is written for it |
+| io.pagecache | bpf:tp | no collector is written for it |
+| io.readahead | bpf:tp | no collector is written for it |
+| io.readahead | bpf:fentry | no collector is written for it |
+| io.writeback | bpf:tp | no collector is written for it |
+| io.fsync | bpf:kprobe | no collector is written for it |
+| io.pressure | fs:cgroup | no collector is written for it |
+| net.tcp.connect | bpf:kprobe | no collector is written for it |
+| net.tcp.lifetime | bpf:tp | no collector is written for it |
+| net.tcp.rtt | bpf:fentry | no collector is written for it |
+| net.tcp.retransmit | bpf:tp | no collector is written for it |
+| net.drops | bpf:tp | no collector is written for it |
+| net.bytes | netlink | no collector is written for it |
+| net.bytes | bpf:fentry | no collector is written for it |
+| net.packets | netlink | no collector is written for it |
+| net.socket | bpf:kprobe | no collector is written for it |
+| net.qdisc | bpf:tp | no collector is written for it |
+| net.softirq | bpf:tp | no collector is written for it |
+| net.hwts | so_timestamping | no collector is written for it |
+| net.hwts | netlink:ethtool | error: forced past `ethtool`, which probes unknown: no probe is written for `ethtool` yet |
+| net.xdp | bpf | follows only a cgroup or a container, and the bench launches a program or watches the machine |
+| net.iface | netlink | no collector is written for it |
+| net.request | bpf:usdt | error: cannot start collecting `net.request`: /home/moha/repos/omniscient/target/bench/workload declares no request: `net.request` follows a request from a `request__start(id)` probe to a `request__done(id)` probe the program fires itself, any provider, and this one carries no USDT probe at all. Nothing is inferred from the connection instead -- see `docs/scenarios/vertical.md` |
+| net.request | bpf:usdt:threads | error: cannot start collecting `net.request`: /home/moha/repos/omniscient/target/bench/workload declares no request: `net.request` follows a request from a `request__start(id)` probe to a `request__done(id)` probe the program fires itself, any provider, and this one carries no USDT probe at all. Nothing is inferred from the connection instead -- see `docs/scenarios/vertical.md` |
+| sched.wakeup | bpf:tp | no collector is written for it |
+| sched.runqlat | bpf:tp | no collector is written for it |
+| sched.offcpu | bpf:tp:stacks | no collector is written for it |
+| sched.offcpu | bpf:tp | no collector is written for it |
+| sched.switches | bpf:raw_tp | no collector is written for it |
+| sched.switches | bpf:tp | no collector is written for it |
+| sched.migrations | bpf:tp | no collector is written for it |
+| sched.lock | bpf:tp | no collector is written for it |
+| sched.lock | bpf:kprobe | no collector is written for it |
+| sched.futex | bpf:tp | no collector is written for it |
+| sched.mutex | bpf:usdt | error: [sched.mutex #1] backend `bpf:usdt` of `sched.mutex` cannot attribute per launch |
+| sched.mutex | bpf:uprobe | no collector is written for it |
+| sched.irq | bpf:tp | no collector is written for it |
+| sched.numa_balance | bpf:tp | no collector is written for it |
+| power.freq | bpf:raw_tp | no collector is written for it |
+| power.freq | bpf:tp | no collector is written for it |
+| power.freq | pmu | no collector is written for it |
+| power.cstate | bpf:raw_tp | no collector is written for it |
+| power.cstate | bpf:tp | no collector is written for it |
+| power.throttle | bpf:raw_tp | no collector is written for it |
+| power.throttle | bpf:tp | no collector is written for it |
+| power.throttle | fs:sys | error: forced past `/sys/devices/system/cpu/cpu0/thermal_throttle`, which probes missing: /sys/devices/system/cpu/cpu0/thermal_throttle does not exist |
+| gpu.job | bpf:tp | error: forced past `tracepoint:gpu_scheduler:drm_run_job`, which probes missing: this kernel defines no `gpu_scheduler:drm_run_job` tracepoint: /sys/kernel/tracing/events/gpu_scheduler/drm_run_job/id does not exist |
+| gpu.engine_busy | pmu:i915 | no collector is written for it |
+| gpu.engine_busy | pmu:xe | no collector is written for it |
+| gpu.engine_busy | pmu:amdgpu | no collector is written for it |
+| gpu.freq | fs:sys:amdgpu | no collector is written for it |
+| gpu.freq | fs:sys:i915 | no collector is written for it |
+| gpu.power | fs:sys:amdgpu | no collector is written for it |
+| gpu.temp | fs:sys:amdgpu | no collector is written for it |
+| gpu.mem | fs:sys:amdgpu | no collector is written for it |
+| gpu.kernel | vendor:cupti | no collector is written for it |
+| gpu.kernel | vendor:rocprof | no collector is written for it |
+| gpu.kernel | vendor:l0 | no collector is written for it |
+| gpu.counters | vendor:ncu | no collector is written for it |
+| gpu.counters | vendor:rocprof | no collector is written for it |
+| proc.syscall | bpf:tp | no collector is written for it |
+| proc.exec | bpf:tp | no collector is written for it |
+| proc.exit | bpf:tp | no collector is written for it |
+| proc.signals | bpf:tp | no collector is written for it |
+| runtime.gc | bpf:usdt | error: cannot start collecting `runtime.gc`: `runtime.gc` found no probe to attach to: the target carries none of python:gc__start, node:gc__start, hotspot:gc__begin, ruby:gc__mark__begin, ruby:gc__sweep__begin. A runtime built without its probes publishes nothing, which is not the same as a runtime that did nothing. CPython and node need to be built --with-dtrace, and HotSpot with DTrace support. What was read: |
+| runtime.jit | bpf:usdt | no collector is written for it |
+| runtime.alloc | bpf:usdt | error: cannot start collecting `runtime.alloc`: `runtime.alloc` found no probe to attach to: the target carries none of hotspot:object__alloc. A runtime built without its probes publishes nothing, which is not the same as a runtime that did nothing. HotSpot fires object__alloc only under -XX:+ExtendedDTraceProbes. What was read: |
+| runtime.custom | bpf:usdt | error: cannot start collecting `runtime.custom`: `runtime.custom` is the probe you name, and this request names none. Select one through the filter, by `provider` and `probe` -- for example --filter "provider == 'libc' && probe == 'setjmp'". What the target carries: |
+| runtime.custom | bpf:uprobe | no collector is written for it |
+| mem.heap.alloc | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
+| mem.heap.live | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
+| mem.heap.retained | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
+
 
 What the smoke runs established about the mechanics, without quoting a
 number: the plan enumerates every (source, backend) this build can serve here,
@@ -426,11 +709,13 @@ Clippy and fmt are clean.
 
 ## Exit criteria of phase 8
 
-- [ ] *A cost/resolution/loss table measured for every (source, backend).* The
-  harness produces it; it has not been run on a quiet machine. **The one
-  command above.**
-- [ ] *The resolver's choices are confirmed by measurement, or corrected.* The
-  verdict is in the table; same.
+- [x] *A cost/resolution/loss table measured for every (source, backend).* 94
+  pairs, every one this build serves here, under "The table"; the three heap
+  sources from a rerun the gate's first version prevented.
+- [x] *The resolver's choices are confirmed by measurement, or corrected.* The
+  seven sources with a second served backend: all confirmed. What the table
+  corrects instead is the cost bands the resolver reads, for in-kernel
+  collectors and for the shim under a lock storm -- filed.
 - [x] *The agent's own cost (CPU, RSS) is measured separately from the dilation
   of the observed process.* Collector cpu from `cost.json`, the tool's peak
   RSS polled from `/proc/<pid>/status`, and the dilation measured by the

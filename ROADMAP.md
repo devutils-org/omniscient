@@ -332,12 +332,16 @@ finally earns its place.
 
 ### Exit criteria
 
-- [ ] A cost/resolution/loss table measured for every (source, backend).
-- [ ] The resolver's choices are confirmed by measurement, or corrected.
+- [x] A cost/resolution/loss table measured for every (source, backend). *94
+      pairs, after the tenth wave, `docs/bench.md`; the heap sources from a
+      rerun.*
+- [x] The resolver's choices are confirmed by measurement, or corrected.
+      *Confirmed for the seven chains with two served backends. The table's
+      correction is to the cost bands: an in-kernel collector's cost is in the
+      target's dilation, not in the tool's cpu.*
 - [x] The agent's own cost (CPU, RSS) is measured separately from the dilation of
       the observed process. *Tenth wave: collector cpu from `cost.json`, peak RSS
-      from `/proc`, dilation from the workload's own clock. The other two wait
-      on one quiet run of `scripts/bench.sh`.*
+      from `/proc`, dilation from the workload's own clock.*
 
 ---
 

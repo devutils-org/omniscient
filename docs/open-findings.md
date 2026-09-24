@@ -6589,3 +6589,45 @@ never defaulted; and a method refuses an objective it does not answer for and
 names the one that does (`omn latency` answers latency and tail, `omn saturate`
 throughput, tail and energy). `cost` is not an objective: nothing here measures
 a price.
+
+---
+
+## 47. What the bench's first real run measured, and what it corrects
+
+`docs/bench.md`, "The table": 94 (source, backend) pairs, alone on the
+development machine after the tenth wave. The resolver's seven choices between
+served backends were all confirmed. What the table corrects is elsewhere, and
+each item is a request to whoever owns the file this wave or the next.
+
+- **The cost bands describe the tool's cpu, and an in-kernel collector's cost
+  is in the target.** `proc.syscall` in `count`: 0.42 % of the target's cpu in
+  `cost.json`, **+296 %** in the target's own timed section. The program runs
+  on every syscall in the target's context. `io.fs` +7.5 %, `sched.futex`
+  +5.8 %, `io.syscall` +3.8 %. Wanted: `cost.json` and the `--budget` ladder
+  read the dilation where the run has it (a launched target that times
+  itself does), and the catalog's bands for per-event raw-tracepoint backends
+  reconsidered against the column. To whoever owns `src/collect/mod.rs` (the
+  budget) and the catalogs.
+- **The preload shim under a lock storm: +1043 %, 3.9 GiB, 54.9 million
+  records lost.** `sched.mutex` on four threads doing a million round trips
+  each. The losses are counted; the memory is the tool's own, buffering what
+  it did read, and the dilation is one `write(2)` per record into one pipe,
+  which the observer step independently measures as a serialisation (four
+  allocating threads scale 1.96 under the shim against 1.01 bare). Wanted: a
+  bound on what the shim stream buffers before it drops and counts, and a
+  batched write in `shim/`. To whoever owns `shim/**` and
+  `src/collect/mem/heap/**`.
+- **Attach dominates a short fentry run**: `io.fsync` and `net.tcp.connect`
+  spent 64 and 68 ms with no event, the trampoline rebuild. Honest as a
+  number; worth a line in the cost band's caveat. To whoever owns
+  `catalog/io.yaml` and `catalog/net.yaml`.
+- **NVML's power query costs 34 ms a read** (`gpu.power`, 21 % of the target at
+  100 ms), `gpu.freq` 15 ms. The default poll for those two may want to be
+  slower than the family's. To whoever owns `catalog/gpu.yaml`.
+- **`runtime.jit` reports 360 losses on a run with no event.** Not diagnosed.
+  To whoever owns `src/collect/runtime/jit_map.rs`.
+- **Tracing a contended program shortens it**: `sched.lock` −21 %,
+  `sched.offcpu` −11 %, `sched.runqlat` −9 % on the contended workload. Not a
+  defect -- the observer effect the roadmap asks the bench to measure -- and
+  worth a caveat on the three sources: a lock measurement describes the run it
+  perturbed. To whoever owns `catalog/sched.yaml`.
