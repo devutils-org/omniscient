@@ -1,8 +1,9 @@
 //! `sched.mutex` over glibc's own USDT probes: the backend that reaches a
 //! process already running.
 //!
-//! The preload shim is cheaper -- about 132 ns per event against a uprobe's
-//! 740 ns (finding 6) -- and it reaches a program only at exec. A service that
+//! The preload shim is cheaper -- about 70 ns a record through its shared ring
+//! (finding 47) against a uprobe's 740 ns (finding 6) -- and it reaches a
+//! program only at exec. A service that
 //! is already up can only be read from outside, and glibc publishes the three
 //! points that make a mutex wait measurable from outside:
 //!

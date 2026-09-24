@@ -16,9 +16,11 @@
 //! which mutex object it was when a lock keeps its futex word elsewhere.
 //! `sched.lock` is the kernel's own locks and nothing in user space.
 //!
-//! The shim costs about 132 ns per event against a uprobe's 740 ns for the
-//! same one, and `pthread_mutex_lock` fires far more often than an allocation:
-//! that is why this backend is first and the uprobe is the fallback.
+//! The shim costs about 70 ns a record since it writes into a shared ring
+//! (finding 47; 132 ns in finding 6's isolated measurement, 560 through the
+//! pipe) against a uprobe's 740 ns for the same one, and
+//! `pthread_mutex_lock` fires far more often than an allocation: that is why
+//! this backend is first and the uprobe is the fallback.
 
 use crate::collect::mem::heap::{Record, ShimPrepared, Stream, Which, OP_MUTEX};
 use crate::collect::task::Comms;
