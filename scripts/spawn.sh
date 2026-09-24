@@ -26,24 +26,28 @@ declare -A OWNS=(
     [escalation]="src/triage/** src/cli.rs src/request.rs src/session.rs src/collect/mod.rs src/collect/launch.rs src/collect/task.rs tests/triage.rs tests/runner.rs tests/budget.rs examples/triage-*.yml examples/attach-*.yml man/omn.1"
     [debts]="src/join.rs src/emit.rs src/encode.rs src/render.rs src/main.rs tests/join_engine.rs tests/aggregation.rs tests/encoders.rs tests/vertical.rs examples/join-*.yml examples/vertical-one-request.yml"
     [silent]="src/filter.rs src/resolve.rs src/perf.rs src/collect/cpu/** src/collect/proc/** src/collect/mem/page_faults.rs catalog/cpu.yaml catalog/proc.yaml catalog/mem.yaml tests/scenario_cpu.rs tests/scenario_proc.rs tests/scenario_mem.rs tests/family_cpu.rs tests/family_proc.rs examples/cpu-*.yml examples/proc-*.yml"
+    [matrix]="scripts/matrix.sh scripts/vm/** tests/portability.rs .github/**"
     [drains]="src/bpf/map.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/proc_syscall.rs src/bpf/sched_*.rs src/bpf/migrate.rs src/bpf/mem_alloc.rs src/bpf/mem_stall.rs src/collect/sched/** tests/scenario_sched.rs tests/family_sched.rs"
 )
 declare -A TITLE=(
     [escalation]="Stream E -- the escalation"
     [debts]="Stream J -- the engine's debts"
     [silent]="Stream S -- the silent degradations"
+    [matrix]="Stream P -- the portability matrix"
     [drains]="Stream K -- drains that lose nothing"
 )
 declare -A LOG=(
     [escalation]="docs/triage.md"
     [debts]="docs/families/join.md"
     [silent]="docs/fixes/silent.md"
+    [matrix]="docs/portability.md"
     [drains]="docs/families/drains.md"
 )
 declare -A SCENARIO=(
     [escalation]="tests/triage.rs, tests/runner.rs and tests/budget.rs"
     [debts]="tests/join_engine.rs, tests/aggregation.rs, tests/encoders.rs and tests/vertical.rs"
     [silent]="tests/scenario_cpu.rs, tests/scenario_proc.rs and tests/scenario_mem.rs"
+    [matrix]="tests/portability.rs"
     [drains]="tests/scenario_sched.rs and tests/family_sched.rs"
 )
 
@@ -83,6 +87,21 @@ fix makes the answer right or the refusal say why. Ground truth: each filed
 command as a scenario failing on main; for the counter, the ignored test in
 tests/runner.rs, which you do not own -- say in your handoff that it is ready.'
 
+MATRIX_WORK='ROADMAP.md'"'"'s test strategy rows nobody built: a VM kernel matrix (the 6.1
+floor, an LTS, the host'"'"'s 7.2, and no BTF) and the degradation runs (no
+privileges, no BTF, no tracefs). Boot the host-built tool under prebuilt kernels
+in KVM (virtme-ng via pipx; /dev/kvm works here) -- do not build kernels: about
+9 GB of disk is free, and the cache lives under target/matrix/. Hide
+/sys/kernel/btf/vmlinux or tracefs inside a guest instead of finding such a
+kernel. Each cell is the capability sweep: every source available, missing or
+unknown with its reason, and AVAILABLE MEANS IT ATTACHES -- run each available
+source briefly and fail on a refusal at attach. What differs by kernel differs
+for the catalog'"'"'s reason (uprobe-multi is 6.6). tests/portability.rs checks the
+cells'"'"' documents cheaply; the VM runs are #[ignore] behind scripts/matrix.sh,
+like the bench. Also a GitHub Actions workflow under .github/: fmt, clippy, the
+suite on a hosted runner, failing on any skip that is not an expected one. Do
+not push. The Makefile is the coordinator'"'"'s: put a make target in your handoff.'
+
 DRAINS_WORK='A drained program'"'"'s drain takes a row with lookup-and-delete while the program
 is about to add to it, and the addition lands in a freed element -- measured by
 the eighth wave, still open. fentry::HistogramProgram solves it with two row
@@ -118,6 +137,7 @@ case "$stream" in
     debts) WORK="$DEBTS_WORK" ;;
     silent) WORK="$SILENT_WORK" ;;
     drains) WORK="$DRAINS_WORK" ;;
+    matrix) WORK="$MATRIX_WORK" ;;
 esac
 
 prompt_file="${worktree}.prompt"

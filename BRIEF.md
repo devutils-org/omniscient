@@ -64,6 +64,7 @@ which is the pattern the three debt streams below are about.
 | **E** | the escalation | triage names a suspect mid-run, attaches that layer's detailed collectors, detaches the rest, and holds the budget | `src/triage/**`, `src/cli.rs`, `src/request.rs`, `src/session.rs`, `src/collect/mod.rs`, `src/collect/launch.rs`, `src/collect/task.rs`, `tests/triage.rs`, `tests/runner.rs`, `tests/budget.rs`, `examples/triage-*.yml`, `examples/attach-*.yml`, `man/omn.1`, `docs/triage.md` |
 | **J** | the engine's debts | the join and the emit layer say what hot attach, the network rows and triage found they cannot | `src/join.rs`, `src/emit.rs`, `src/encode.rs`, `src/render.rs`, `src/main.rs`, `tests/join_engine.rs`, `tests/aggregation.rs`, `tests/encoders.rs`, `tests/vertical.rs`, `examples/join-*.yml`, `examples/vertical-one-request.yml`, `docs/families/join.md` |
 | **S** | the silent degradations | the four defects the bench found, and the per-task perf events that do not follow threads | `src/filter.rs`, `src/resolve.rs`, `src/perf.rs`, `src/collect/cpu/**`, `src/collect/proc/**`, `src/collect/mem/page_faults.rs`, `catalog/cpu.yaml`, `catalog/proc.yaml`, `catalog/mem.yaml`, `tests/scenario_cpu.rs`, `tests/scenario_proc.rs`, `tests/scenario_mem.rs`, `tests/family_cpu.rs`, `tests/family_proc.rs`, `examples/cpu-*.yml`, `examples/proc-*.yml`, `docs/fixes/silent.md` (new) |
+| **P** | the portability matrix (added mid-wave, when J merged) | the tool run on the kernels and configurations it claims to handle, and a CI that runs what a machine without privileges can | `scripts/matrix.sh` (new), `scripts/vm/**` (new), `tests/portability.rs` (new), `.github/**` (new), `docs/portability.md` (new) |
 | **K** | drains that lose nothing | the drained programs stop racing their own drain, and the one test that keeps failing is understood | `src/bpf/map.rs`, `src/bpf/runqlat.rs`, `src/bpf/offcpu.rs`, `src/bpf/proc_syscall.rs`, `src/bpf/sched_*.rs`, `src/bpf/migrate.rs`, `src/bpf/mem_alloc.rs`, `src/bpf/mem_stall.rs`, `src/collect/sched/**`, `tests/scenario_sched.rs`, `tests/family_sched.rs`, `docs/families/drains.md` (new) |
 
 **Two splits to respect.** `src/collect/proc/syscall.rs` is S's and
@@ -205,6 +206,57 @@ fix.
 
 ---
 
+## Stream P -- the portability matrix
+
+> **Mission.** `ROADMAP.md`'s cross-cutting test strategy has two rows nobody
+> has built: *Portability -- a VM kernel matrix: floor, LTS, recent, no BTF*,
+> and *Degradation -- run without privileges, without BTF, without tracefs:
+> check that it degrades while saying so*. Every claim this tool makes about
+> another machine has so far been checked on one.
+
+Added when stream J merged, so it starts from a later `main` than the others;
+its files are new and nobody else's.
+
+**The matrix.** Boot the tool, built on the host, under other kernels in KVM
+(`/dev/kvm` is usable here; `virtme-ng`, installable with `pipx`, boots a
+kernel against the host's root filesystem). Kernels: the floor `DECISIONS.md`
+settled (6.1), an LTS between (6.6 or 6.12), and the host's own (7.2). Take
+prebuilt kernels -- a distribution's, or Ubuntu's mainline builds -- rather
+than building one: **this machine has about 9 GB of disk free**, and the
+cache lives under `target/matrix/`, which is not committed. A kernel without
+BTF does not have to be found or built: hide `/sys/kernel/btf/vmlinux` inside
+the guest, and do the same for tracefs, and run once without the file
+capabilities, once as root.
+
+**What each cell checks is the capability sweep, across kernels**:
+
+- every source's answer in `omn list --format json` is available, missing or
+  unknown with its reason -- and **available means it attaches**: run each
+  source reported available for a fraction of a second and fail the cell if
+  it refuses at attach (finding 15's shape, on a kernel nobody tried);
+- what changes between kernels changes for the reason the catalog gives:
+  uprobe-multi is 6.6, so the USDT sources on 6.1 take the uprobe PMU and say
+  so; a raw tracepoint a kernel lacks is missing by name;
+- a kernel under the floor, or a configuration that removes a requirement, is
+  refused with the reason, never degraded silently.
+
+Write each cell's documents under `target/matrix/<kernel>-<config>/`, and
+make `tests/portability.rs` assert the invariants over whatever cells exist --
+`#[ignore]` for the ones that boot a VM, run through `scripts/matrix.sh`, the
+way the bench works; the checks on a cell's documents are cheap and run.
+
+**The CI.** A GitHub Actions workflow under `.github/` that runs `cargo fmt
+--check`, clippy and the suite on a hosted runner: no file capabilities, a
+distribution kernel, no GPU -- itself one cell of the matrix, and the one
+that runs on every push. The eBPF tests skip loudly there, as they are written
+to; the workflow must fail on a skip that is not one of those. **Do not push**:
+the coordinator decides when the workflow goes to the remote.
+
+`Makefile` is the coordinator's: if a `make matrix` target is wanted, it goes
+in your handoff with its exact recipe.
+
+---
+
 ## Stream K -- drains that lose nothing
 
 > **Mission.** The eighth wave measured it and nothing has closed it: a drained
@@ -240,7 +292,7 @@ The three that have held for ten waves:
 1. **The unit of ownership is a file set nobody else writes.** The table above.
 2. **The handoff is a file only that stream can write**: E's is
    `docs/triage.md`, J's `docs/families/join.md`, S's `docs/fixes/silent.md`,
-   K's `docs/families/drains.md`. End it with **the index rows for every
+   K's `docs/families/drains.md`, P's `docs/portability.md`. End it with **the index rows for every
    session you added** and **the ignored tests your half makes ready**.
 3. **A task is landed when its scenarios are**: ground truth, the capability
    sweep, the loss path, the refusal.
