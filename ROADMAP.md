@@ -207,9 +207,10 @@ req:a3f1   total 412 ms
 - [~] **Ground truth**: a synthetic server with known injected delays (`tc netem`,
       `dm-delay`, `usleep` under a lock) is decomposed correctly. Without that
       test, nothing proves the correlation is right rather than merely plausible.
-      *`usleep` under a lock and a cold read, each landing in its own row. `tc
-      netem` and `dm-delay` need root, and are the two injections left — which
-      is also why the tree's `net_rx` and `net_tx` rows are not decomposed yet.*
+      *`usleep` under a lock and a cold read, each landing in its own row; since
+      the tenth wave, a client's 30 ms mid-request pause in `net_rx` and a slow
+      reader's window in `net_tx`, injected from the client, which is what `tc
+      netem` was for and needs no root. `dm-delay` is the one injection left.*
 
 ---
 
@@ -256,7 +257,9 @@ Now, and not before: we have three real join types to generalize from.
 
 - [ ] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead.
 - [ ] Exceeding the budget produces an **announced** degradation, not a loss.
-- [ ] A collector can be added and removed mid-session.
+- [x] A collector can be added and removed mid-session. *A request's `window`,
+      tenth wave: one phase of a program counted within +0.17 %, and nothing of
+      the other. The join engine's view of a detached source is filed.*
 
 ---
 
@@ -327,8 +330,10 @@ finally earns its place.
 
 - [ ] A cost/resolution/loss table measured for every (source, backend).
 - [ ] The resolver's choices are confirmed by measurement, or corrected.
-- [ ] The agent's own cost (CPU, RSS) is measured separately from the dilation of
-      the observed process.
+- [x] The agent's own cost (CPU, RSS) is measured separately from the dilation of
+      the observed process. *Tenth wave: collector cpu from `cost.json`, peak RSS
+      from `/proc`, dilation from the workload's own clock. The other two wait
+      on one quiet run of `scripts/bench.sh`.*
 
 ---
 

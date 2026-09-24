@@ -41,8 +41,10 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**1620 tests pass**, of which 299 are scenarios: a workload whose property the
-scenario chose, a session that measures it, and a check against that property.
+**1745 tests pass** after the tenth wave's merge, nine more ignored -- the bench's
+measurements, which `scripts/bench.sh` runs on a quiet machine and the suite
+never does. Most of them are scenarios: a workload whose property the scenario
+chose, a session that measures it, and a check against that property.
 Twenty-seven of those are the seventh wave's **crossings** -- a question no
 single family can answer, checked against something the workload itself
 reports.
@@ -89,8 +91,8 @@ XDP program, and NVIDIA's CUPTI.
 ## What the numbers say
 
 ```
-101 sources: 90 usable here, 7 unverified, 4 out of reach on this machine.
-96 of them have a collector, covering 104 of their 203 backends.
+101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+96 of them have a collector, covering 106 of their 205 backends.
 ```
 
 Three different questions, deliberately kept apart.
@@ -98,7 +100,7 @@ Three different questions, deliberately kept apart.
 | Question | Answer | Meaning |
 |---|---|---|
 | What can this machine serve? | 90 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 96 sources, 104 backends | a collector is written and registered |
+| What can this build collect? | 96 sources, 106 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
 That `90` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
@@ -210,13 +212,13 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
-| 4 — the vertical case | **done, except the two injections that need root.** One request decomposed boundary by boundary on a real server, every row at `IDENTITY`, the lock's holder and the block device named, and the rows summing to the client's own latency within +0.11 % to +0.42 % against the 10 % asked. `tc netem` and `dm-delay` need root, which is also why the tree's `net_rx` and `net_tx` rows are not decomposed yet. |
+| 4 — the vertical case | **done, except `dm-delay`, which needs root.** One request decomposed boundary by boundary on a real server, the lock's holder and the block device named, and since the tenth wave the tree's two network rows: a client that pauses 30 ms mid-request puts 30.14 to 30.27 ms in `net_rx`, and a slow reader puts 32.8 to 33.8 ms in `net_tx`, both injected from the client without root. The rows sum to the client's latency within +0.06 % to +0.36 % (+3.1 % for the slow reader, whose last buffer the client reads after the server is done). The network rows print `IDENTITY` where they are `KEY`; the engine change is filed. |
 | 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. |
-| 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. What is left is the fourth task: **hot attach and detach**, which is also what `DECISIONS.md` defers concurrent requests on, and what phase 10's escalation assumes. The run-model line it was waiting on is settled: it lives inside a session, and needs no daemon. |
+| 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. And since the tenth wave, **hot attach**: a request carries a `window` inside the run, attached and detached while the rest keep running, and two sources attached for one phase each of a program count that phase within +0.17 % and nothing of the other. Three edges are filed with the files that own them: the join engine credits events after a detach to a stale state, the results document does not yet say where a window was, and a per-task counter attached late to a program that already has threads counts one of them. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
-| 8 — self-benchmark | **partly**. The cost of a run is measured and written beside the results as `cost.json`. What is left is running one measurement through every backend of a chain and comparing what each cost — `--backend force:` does the pinning, and the scenario wave uses it for agreement rather than for price. |
-| 9 — breadth | nearly done; **96 of 101 sources, 104 of 203 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
-| 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. What is not built is the layer above it: the objective as a request parameter, USE, the escalation, the question-oriented modes. |
+| 8 — self-benchmark | **built, not yet run.** The tenth wave's harness has every task the phase lists -- reference workloads, warmup, round-robin repetitions, median and IQR, the variance gate, the backend comparison, the resolution sweep and the observer effect -- and the agent's own cost is measured apart from the target's dilation. The table itself is one command on a quiet machine (`docs/bench.md`), because the gate refuses while other work runs, and it did. Building it found four defects, filed: a pushed-down `proc.syscall` filter that drops every call, `proc.exec` ignoring its filter, `--backend force:` walking past missing probes, and `mem.faults` declaring a `count` it refuses. |
+| 9 — breadth | nearly done; **96 of 101 sources, 106 of 205 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
+| 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. What is left is the escalation, which hot attach now makes possible. |
 | 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
 
 ---
@@ -227,23 +229,26 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
-What is left is depth, and the tenth wave (`BRIEF.md`) is running four streams
-on it: the vertical case's two network rows, hot attach, the self-benchmark,
-and the layer above the engine. **After it, in order:**
+The tenth wave -- the network rows, hot attach, the bench and triage -- is
+merged, and `docs/briefs/wave-10-depth.md` keeps its brief. **Next, in order:**
 
-1. **The escalation** — phase 10, item 3: once triage names a suspect, attach
-   that layer's detailed collectors and detach the rest, holding the budget. It
-   stands on hot attach, which is why it is not in the tenth wave.
-2. **The flight recorder** — a session whose duration is *until a predicate
-   fires*, with a retention bound and one document per trigger. `DECISIONS.md`
-   settled that it is a mode of a session, and it also follows hot attach.
-3. **The bench's real measurement** — run once, alone, after the tenth wave's
-   merge: its variance gate refuses on a machine shared with building agents,
-   and a table from a noisy machine is worse than none.
-4. **Phase 11**, an MCP surface over the resolved file, the results and the
+1. **The bench's real measurement**, before anything else is built on the
+   resolver's choices: one command, alone, on a quiet machine (`docs/bench.md`,
+   "The one command"), and its table pasted into that file.
+2. **Hot attach's three edges**, which the escalation would otherwise inherit:
+   the join engine's window for a detached source, the window on `Results`, and
+   a late per-task counter following threads. Filed under "stream H".
+3. **The escalation** -- phase 10, item 3: once triage names a suspect, attach
+   that layer's detailed collectors and detach the rest, holding the budget.
+4. **The flight recorder** -- a session whose duration is *until a predicate
+   fires*, with a retention bound and one document per trigger, a mode of a
+   session as `DECISIONS.md` settled.
+5. **The four defects the bench found** and the evidence the network rows
+   print, each filed with its signature under the tenth wave's streams.
+6. **Phase 11**, an MCP surface over the resolved file, the results and the
    catalog, after phase 10 and deliberately not before.
-5. **The two injections that need root**, `tc netem` and `dm-delay`, for the
-   vertical case's ground truth, on a machine where root is available.
+7. **`dm-delay`**, the one injection left that needs root, on a machine where
+   root is available.
 
 Below the milestones, and not scheduled:
 
