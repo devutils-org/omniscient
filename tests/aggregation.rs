@@ -783,3 +783,57 @@ fn sysctl(name: &str) -> String {
         .map(|text| text.trim().to_owned())
         .unwrap_or_else(|_| "?".to_owned())
 }
+
+/// A result says where in the run its request watched, not only for how long.
+///
+/// Two polls of one program in one run, one of them given `window: 300ms..`.
+/// The session is the ground truth: the windowed request cannot have been
+/// attached before 300 ms into the run, and the other was attached with the
+/// run. What is asserted is that separation, on the result's own `window`, and
+/// that the window is the span the result's rate is over -- not how long
+/// attaching took under whatever else this machine is doing.
+#[test]
+fn a_result_says_where_in_the_run_its_request_watched() {
+    let output = run_session(
+        "format: json\nrequests:\n  \
+         - label: whole\n    source: mem.rss\n    target: &program {launch: [/bin/sleep, '1']}\n    \
+         mode: poll@50ms\n    emit: [summary]\n  \
+         - label: late\n    source: mem.rss\n    target: *program\n    \
+         mode: poll@50ms\n    emit: [summary]\n    window: 300ms..\n",
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    let window = |label: &str| {
+        let result = document["results"]
+            .as_array()
+            .and_then(|results| results.iter().find(|result| result["label"] == label))
+            .unwrap_or_else(|| panic!("no result `{label}`"));
+        let window = &result["window"];
+        let at = |field: &str| {
+            window[field]
+                .as_u64()
+                .unwrap_or_else(|| panic!("`{label}` has no window.{field}: {result}"))
+        };
+        assert_eq!(window["attached"], true, "{result}");
+        assert_eq!(
+            result["observed_ns"].as_u64(),
+            Some(at("closed_ns") - at("opened_ns")),
+            "the rate is over the window: {result}"
+        );
+        (
+            at("opened_ns") - at("run_opened_ns"),
+            at("closed_ns") - at("run_opened_ns"),
+        )
+    };
+    let (whole_opened, whole_closed) = window("whole");
+    let (late_opened, late_closed) = window("late");
+    assert_eq!(whole_opened, 0, "attached with the run");
+    assert!(
+        late_opened >= 300_000_000,
+        "asked to attach 300 ms into the run, and says it attached {late_opened} ns into it"
+    );
+    assert!(
+        late_opened < late_closed && late_closed <= whole_closed,
+        "the late window lies inside the run: {late_opened}..{late_closed} of 0..{whole_closed}"
+    );
+}

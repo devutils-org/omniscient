@@ -93,6 +93,16 @@ pub struct Results {
     pub outputs: Vec<Output>,
     pub events_seen: usize,
     pub observed_ns: u64,
+    /// When this request was watching, inside the run: its own window when the
+    /// request carried one, the run's otherwise.
+    ///
+    /// `observed_ns` says for how long, and is what every rate is over; this
+    /// says *where*, which is what a reader comparing two requests needs --
+    /// two seconds of a ten-second run at its start and at its end are
+    /// different measurements of the same length -- and what a join across a
+    /// detached source is decided by.
+    #[serde(default)]
+    pub window: crate::collect::Watched,
     pub stopped_because: String,
     pub losses: Losses,
     /// What the request's filter removed after the fact, when the resolver
@@ -823,6 +833,7 @@ pub fn aggregate(
         outputs,
         events_seen: collection.events.len(),
         observed_ns: collection.observed_ns,
+        window: collection.window,
         stopped_because: collection.stopped_because,
         losses: collection.losses,
         filtered: collection.filtered,

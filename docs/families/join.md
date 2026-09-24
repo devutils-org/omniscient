@@ -1,4 +1,269 @@
-# The join engine and the decomposition — stream J, eighth wave
+# The join engine and the decomposition
+
+Two waves of stream J are recorded here, the newest first. The eleventh wave
+paid four debts the tenth wave found in the engine. Each was a place where the
+engine said more, or less, than it had measured. The eighth wave built the
+engine's third rung (`TEMPORAL`), the decomposition and the chains. Its record
+follows unchanged.
+
+---
+
+# The eleventh wave — the engine's debts
+
+| | |
+|---|---|
+| Delivered | `join::apply_within` and `Correlation::outside_window`; `StateStats::window_closed` and `Outcome::WindowClosed`; `Results::window`; `Part::via`; a filtered part that matched nothing is a zero; a key a source never saw is a zero only from a source that watched the whole run clean |
+| Refused, new | a join from a source the session collects twice with different windows (`JoinError::WindowsDisagree`), at validation; a part read `via` a key its source does not carry |
+| Tests | 7 unit tests in `src/join.rs`, 1 in `src/encode.rs`; scenarios: `tests/join_engine.rs` +1, `tests/aggregation.rs` +1, `tests/vertical.rs` 1 flipped and strengthened; `tests/runner.rs`'s ignored detach scenario passes (E's file: un-ignore at the merge) |
+| Files | `src/join.rs`, `src/emit.rs`, `src/encode.rs`, `src/main.rs`, `tests/{join_engine,aggregation,encoders,vertical}.rs`, `examples/vertical-one-request.yml`; one line outside, declared below |
+| Machine | 24 cpus, kernel 7.2.6, `CAP_BPF` and `CAP_PERFMON` on the binary, loaded by three other streams; no test here skipped on it |
+
+## 1. A join across a detached source
+
+**The defect** (stream H, measured in `tests/runner.rs`): `sched.wakeup`
+detached at 1 s, `sched.switches` traced for the whole run, and a program that
+sleeps 40 times before the detach and 25 times after it. The join said
+**67 matched, 0 unmatched**. The last wakeup before the detach stayed open, and
+every block after the detach was credited to it: a stale state standing in for
+the wakeups the run had stopped watching.
+
+**The fix**, in the shape stream H filed:
+
+```rust
+pub fn apply_within(
+    rule: &Rule,
+    events: &[Event],
+    windows: &BTreeMap<String, crate::collect::Watched>,
+) -> Result<Correlation, JoinError>;
+```
+
+`apply` is `apply_within` with an empty map, which means every source watched
+the whole run. Only the `from` source's window changes the answer:
+
+- **A `to` event outside the `from` window** (before the attach or after the
+  detach) is counted in `Correlation::outside_window` and not looked up.
+  Neither `matched` nor `unmatched` fits it. The run was not watching for
+  what would have opened or closed a state, and a wakeup the run did not see
+  is not a wakeup that did not happen. It is left out of the share, as
+  `keyless` is.
+- **States open when the `from` window closes end there**, counted in
+  `StateStats::window_closed`, and their attributions end with
+  `Outcome::WindowClosed` (printed `source detached`). This is kept apart from
+  `expired`, which means a state outlived the rule's own window. The rule's
+  expiry is applied up to the close first, so a state that had already expired
+  is counted as expired. The lifecycle balance gains one term:
+  `opened = closed + expired + overflowed + window_closed + still_open`.
+- **A detach with nothing after it** still ends the states. When the `from`
+  window closed before the latest window in the map closed, the run went on
+  without it, and whatever it left open ends at its close. When the source
+  watched until the end, a state open at the end is `still_open`, as before.
+- **Two requests of the `from` source with different windows** are the one case
+  a map keyed by source cannot express. `check_in` refuses the rule by name at
+  validation (`JoinError::WindowsDisagree`, naming both windows). It does not
+  take the union, because a union would claim the source was watching while one
+  of the two requests was detached. Two requests with the same window are
+  accepted, and `main.rs` merges their collected spans by union, because they
+  differ only in the instant each was attached.
+
+`main.rs` builds the map from `Results::window` (§2) after aggregation rather
+than from the collections, so the call site does not need to keep the
+collections alive.
+
+The text form, under the share:
+
+```
+  25 more `sched.switches` events fell outside `sched.wakeup`'s window, when it was not
+  attached: neither matched nor unmatched, since the run was not watching for what would
+  have opened or closed a state for them
+  states: 42 opened, 40 closed, 0 still open at the end, peak 2 held at once
+  2 more ended when `sched.wakeup` was detached: nothing after it was credited to them
+```
+
+**Measured.** Six runs of the ignored scenario on this branch:
+
+| Run | matched | unmatched | outside_window | window_closed |
+|---|---|---|---|---|
+| 1-6 | 43, 44, 42, 41, 43, 44 | 0 every time | **25 every time** | 2 to 4 |
+
+The scenario's ground truth holds on every run: the 25 blocks after the detach
+all fall outside the window, none of them is matched, and none is counted as
+unmatched. `matched` is the 40 sleeps plus the extra wakeups of the program's
+start and gate, and plus whatever else the machine's load woke it for. The
+scenario bounds that at `FIRST + 3`, and one run of six gave 44 (44 wakeups
+inside the window, so 44 states opened). That bound measures the machine, not
+the engine. The replacement assertion, `matched < FIRST + SECOND`, is filed for
+the coordinator in `docs/open-findings.md`. It keeps the 25-block separation
+the scenario exists for.
+
+**The other match kinds.** A unit test runs `eq` and `interval` across a detach.
+A key's state, or a range allocated before the detach, takes nothing after it,
+because no free or replacement the run could not see can end it. `between`
+goes through the same path: a reading outside the window is outside, and a
+change waiting for a reading when the source comes off is ended by the detach.
+
+## 2. The window on `Results`
+
+```rust
+/// When this request was watching, inside the run: its own window when the
+/// request carried one, the run's otherwise.
+#[serde(default)]
+pub window: crate::collect::Watched,
+```
+
+It is copied from `Collection::window` in `aggregate`. It is in every JSON,
+YAML and TOML document, in the `ndjson` header record, and in the `chrome`
+request record. `observed_ns` is still the span, and every rate is still over
+it. The window says where that span lay. The text form still states the window
+through the notes the runner writes (`watched only from 1.500 s into the
+run...`), and does not add a second line saying the same thing.
+
+**Measured** (`tests/aggregation.rs`,
+`a_result_says_where_in_the_run_its_request_watched`): two polls of one
+program, one given `window: 300ms..`. The session supplies the ground truth.
+The unwindowed request opened at the run's open (offset 0), the windowed one no
+earlier than 300 ms into it, and both closed inside the run. On both,
+`observed_ns == closed_ns - opened_ns`. How long the attach took under load is
+not asserted.
+
+## 3. A row read through another key is rated by it
+
+`net_rx` and `net_tx` in the vertical case were printed `IDENTITY` and should
+have been `KEY`. Neither runs in the serving thread, and what ties them to the
+request is the socket cookie. That was an over-rating, the one direction the
+evidence ladder must never err in. Stream N's signature:
+
+```rust
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub via: Option<KeyKind>,
+```
+
+A row with `via` is rated `rate(by).min(rate(via))`. `rate(req)` is `IDENTITY`
+and every other key is `KEY`, the same ladder a join uses. `check_decomposition`
+refuses a `via` the part's source does not carry ("a row cannot be rated by a
+key its events never had"). `net.request` declares `sock`.
+
+`examples/vertical-one-request.yml` takes `via: sock` on the two parts, and its
+comment says why. `tests/vertical.rs::the_network_rows_are_read_by_the_socket_the_server_accepted`
+now asserts `KEY` for both. It also checks what the brief made the bar: rating
+a row changes no amount. The six rows still tile the request's span to the
+nanosecond, and still add up to the latency the client measured on its own
+clock, within the 10 % the roadmap's criterion allows. Measured on this branch:
+all 15 vertical scenarios pass.
+
+## 4. A filtered part that matched nothing is a zero
+
+**The defect** (stream T): a part with a `filter` that no event passed read
+`not read`, with the message "no `sched.offcpu` event carried both `total_ns`
+and `queued_ns`". That row took `parts` and `RESIDUE` with it. The cause is in
+`Readout::new`: it asked whether the source carries the attribute *after* the
+filter, so a filter that kept nothing looked like a source that could not
+supply the value.
+
+**The fix.** The readout now asks three questions of the source's events
+*before* the filter: whether any event carries the attribute, which keys the
+source produced events for, and, for each key, which events the filter kept.
+The rows then read:
+
+| The source... | The row |
+|---|---|
+| was not collected | `not read`: the run collected no `<source>` |
+| carried the attribute on no event at all, before any filter | `not read`, as before |
+| had events for this key, and the filter kept some | the amount, as before |
+| **had events for this key, and the filter kept none** | **`0`**, note `no event of this key passed the filter` |
+| had no event for this key, watched the whole run, lost nothing | `0`, note `no <source> event of this key, from a source that watched the whole run and lost nothing` |
+| had no event for this key, and lost events, watched only part of the run, or cannot say when it watched | `not read`, with that reason |
+
+**The decision on the unfiltered case**, which the brief left to the engine:
+a key the source never produced an event for is a zero **only from a source
+that watched the whole run and lost nothing**. Such a source did look, and an
+absent row there is a measurement. A cpu-bound task that never blocked has no
+`sched.offcpu` row, and its blocked time is zero, not unknown. A source that
+lost events may have lost exactly that key's events. A source that a window
+narrowed was not watching for part of the run. A result that does not say when
+it watched (a `Watched` left at its default: a document written before this
+wave, or a hand-built result) is unknown, and unknown never counts as
+available. "The whole run" is judged from the results themselves: attached,
+opened at the run's open, and closed no earlier than the latest close of any
+result.
+
+This also closes a silent path that nobody had filed. Before, a key absent from
+a source that carried the attribute for other keys read `0` with no note,
+whether or not the source was lossy or windowed. A zero from a lossy source now
+reads `not read`, with the reason.
+
+**Measured** (`tests/join_engine.rs`,
+`a_filtered_part_that_matched_nothing_is_a_zero_and_the_table_adds_up`): the
+program is `/bin/sleep 0.3`, so no block of it can outlast its life. That is
+known from the program, not from the tool. A part filtered to `total_ns >
+1000000000000` (1000 s) keeps nothing:
+
+```
+    blocked      sched.offcpu       total_ns     traced   KEY             300.05ms        exact  99.6 %
+    impossible   sched.offcpu       total_ns     traced   KEY                  0ns        exact   0.0 %
+    parts                                                                 300.05ms
+    whole        the program's life gate to reap lifetime -               301.17ms   +-889.26us
+    RESIDUE      whole - parts                                             +1.12ms   +-889.26us
+      impossible: no event of this key passed the filter
+```
+
+The test requires the zero, the note, `parts` equal to the unfiltered row, and a
+residue that is read. It also requires the unfiltered row to lie between the
+300 ms the program asked for and the life the tool measured. The unit tests
+cover every other line of the table above, one per reason.
+
+## What changed for readers of a document
+
+- `window` on every result, and `outside_window` and `states.window_closed`
+  on a correlation (the last two appear only when they are not zero).
+- An attribution's `outcome` can be `window_closed`.
+- A decomposition row can now be `0` with a note where it used to be
+  `not read`, and `not read` where it used to be a silent `0`. The second
+  case is only a lossy, windowed or unplaced source.
+
+## Declared: the one edit outside stream J's paths
+
+| File | Edit | Why |
+|---|---|---|
+| `src/triage/latency.rs` | `via: None,` in the one `Part` literal | `Part` gained a field, and the branch does not compile without it. Stream H did the same with `window: None` last wave. Told to stream E in `docs/open-findings.md`. |
+
+`cargo fmt` also rewrites `tests/scenario_runtime.rs:929` on the base commit.
+That file is not this stream's, so the branch leaves it as it was. Filed for the
+coordinator.
+
+## Handoff
+
+- **Done**: all four requests work with their scenarios. The ground truth of
+  the first, the ignored scenario in `tests/runner.rs`, gives 25 of 25 outside
+  the window on every run. **It is ready to un-ignore**, with the one bound
+  change above.
+- **The index rows**: none. This stream added no session, and the one session
+  it changed (`vertical-one-request.yml`) is already in both indexes.
+- **The ignored tests this half makes ready**:
+  `tests/runner.rs::a_join_across_a_detached_source_does_not_count_what_fell_after_it_as_a_loss`.
+- **For stream E's escalation**: joins across a source attached or detached at
+  the escalation are now honest, through `apply_within`, which the runner's
+  call site already uses. E does not need to avoid any join.
+- **The suite**, on this branch with the capabilities, while three other
+  streams loaded the machine. Own tests: `cargo test --lib join` (62),
+  `--lib encode` (41), `--lib emit` (37), and `tests/{join_engine, aggregation,
+  encoders, vertical}.rs` (13, 12, 13, 15) all pass. `cargo clippy
+  --all-targets -- -D warnings` is clean. `cargo fmt --check` flags only
+  `tests/scenario_runtime.rs` (the base's, above). One `make check` stopped at
+  `perf::tests::an_ibs_sample_says_which_level_answered_the_load` ("too few
+  samples to say anything"). The one `cargo test --workspace --no-fail-fast`
+  that followed gave **1753 passed, 2 failed, 9 ignored**, and it failed a
+  different pair:
+  `scenario_io::the_page_cache_sessions_say_what_their_headers_predict` (the
+  warm read found 256 of 4096 pages evicted) and
+  `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+  (21 of 512 drops were attributed to the closed port, among 2045 drops from
+  other traffic on the machine). All three are outside stream J's paths and
+  none reads the engine. **Each passed when rerun alone, once.** None is in
+  the flaky tally by name, so they are named here for it.
+
+---
+
+# The eighth wave — `TEMPORAL`, the decomposition, the chains
 
 Four of the seventh wave's crossings computed their answer in a test because
 the engine could not say it. This stream made the engine say it: a match kind

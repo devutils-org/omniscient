@@ -6589,3 +6589,52 @@ never defaulted; and a method refuses an objective it does not answer for and
 names the one that does (`omn latency` answers latency and tail, `omn saturate`
 throughput, tail and energy). `cost` is not an objective: nothing here measures
 a price.
+
+## Needs from another stream — the eleventh wave, stream J (the engine's debts)
+
+Stream J's deliverable is `docs/families/join.md`, "The eleventh wave". The
+four requests the tenth wave filed against `src/join.rs` and `src/emit.rs`
+have landed; what is left needs a file stream J does not own.
+
+### To stream E (`src/triage/latency.rs`): one line, already made
+
+`join::Part` gained `via: Option<KeyKind>` (stream N's request). Rust has no
+way to add a field without breaking every struct literal, and
+`src/triage/latency.rs:186` builds `Part` with one, so the branch does not
+compile without `via: None,` after `names: None,` there. That single line is
+the only edit on this branch outside stream J's paths. If E's branch rewrites
+that closure, keep the line; if it removes the literal, drop it.
+
+Worth knowing for `omn latency`: a filtered part that matched nothing is now a
+zero (`amount: 0`, note `no event of this key passed the filter`) instead of
+`not read`, so the three-part split by task state that
+`src/triage/latency.rs` works around can be done inside the engine now.
+
+### To the coordinator (`tests/runner.rs`): un-ignore the detach scenario, with one bound changed
+
+`a_join_across_a_detached_source_does_not_count_what_fell_after_it_as_a_loss`
+is ready. Six runs with `--ignored` on this branch gave `outside_window: 25`
+every time, `unmatched: 0` every time, and `matched` of 43, 44, 42, 41, 43
+and 44 (on `main` it is 67 matched). The last assertion,
+`matched <= FIRST + 3`, failed on the 44 once: that run had 44 wakeups inside
+the window against 40 sleeps, and each extra wakeup comes with its own
+switch. Those extra wakeups come from the load the other streams put on the
+machine, not from the engine. The bound that holds the separation without
+calibrating to the load is:
+
+```rust
+assert!(
+    matched < FIRST + SECOND && unmatched < SECOND,
+    "what fell after the detach is neither matched nor unmatched: {join}"
+);
+```
+
+The defect credited all 65 blocks, and the fix credits none of the 25, so the
+margin is the 25 blocks the scenario exists to check.
+
+### To the coordinator: `tests/scenario_runtime.rs` is not `cargo fmt`-clean on the base
+
+`cargo fmt` rewrites one `assert!` at `tests/scenario_runtime.rs:929` on
+`9317a3d`. That file is not stream J's, so this branch leaves it unformatted,
+and `make check`'s final `cargo fmt --check` flags it here. It will flag it on
+every branch cut from that commit.

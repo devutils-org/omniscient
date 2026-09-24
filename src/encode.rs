@@ -181,6 +181,7 @@ fn correlation_text(correlation: &Correlation) -> String {
             correlation.keyless, correlation.to
         );
     }
+    outside_window_text(correlation, &mut out);
 
     let states = &correlation.states;
     let _ = writeln!(
@@ -188,6 +189,7 @@ fn correlation_text(correlation: &Correlation) -> String {
         "  states: {} opened, {} closed, {} still open at the end, peak {} held at once",
         states.opened, states.closed, states.still_open, states.peak_open
     );
+    window_closed_text(correlation, &mut out);
     if states.is_clean() {
         let _ = writeln!(
             out,
@@ -268,6 +270,34 @@ fn correlation_text(correlation: &Correlation) -> String {
     out
 }
 
+/// The downstream events a join did not look up, because the `from` source
+/// was not attached when they happened. Outside the share on purpose, as the
+/// keyless ones are: the run was not watching for what would have matched
+/// them, and counting them as unmatched would say it was.
+fn outside_window_text(correlation: &Correlation, out: &mut String) {
+    if correlation.outside_window > 0 {
+        let _ = writeln!(
+            out,
+            "  {} more `{}` events fell outside `{}`'s window, when it was not attached: \
+             neither matched nor unmatched, since the run was not watching for what would have \
+             opened or closed a state for them",
+            correlation.outside_window, correlation.to, correlation.from
+        );
+    }
+}
+
+/// The states the `from` source's detach ended, which are not evictions: the
+/// rule's window did not run out, the run stopped watching.
+fn window_closed_text(correlation: &Correlation, out: &mut String) {
+    if correlation.states.window_closed > 0 {
+        let _ = writeln!(
+            out,
+            "  {} more ended when `{}` was detached: nothing after it was credited to them",
+            correlation.states.window_closed, correlation.from
+        );
+    }
+}
+
 /// What an unattributed downstream event means, which is a different sentence
 /// for each match kind.
 fn unmatched_reason(kind: MatchKind) -> &'static str {
@@ -321,6 +351,7 @@ fn outcome(outcome: Outcome, kind: MatchKind) -> &'static str {
         (Outcome::Closed, _) => "closed",
         (Outcome::Expired, _) => "expired",
         (Outcome::Overflowed, _) => "evicted",
+        (Outcome::WindowClosed, _) => "source detached",
         // Not "never ran": a chain with events attributed to it did run, and
         // what is true of it is that no later wakeup ended it.
         (Outcome::StillOpen, MatchKind::Wakeup) => "still open at the end",
@@ -369,6 +400,8 @@ fn between_text(correlation: &Correlation, out: &mut String) {
              reading of their key, {} after the last",
             states.opened, states.closed, readings.before_first, states.still_open
         );
+        outside_window_text(correlation, out);
+        window_closed_text(correlation, out);
         if !states.is_clean() {
             let _ = writeln!(
                 out,
@@ -650,6 +683,7 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
         "unit": results.unit.as_str(),
         "events_seen": results.events_seen,
         "observed_ns": results.observed_ns,
+        "window": results.window,
         "stopped_because": results.stopped_because,
         "losses": results.losses,
     });
@@ -2122,6 +2156,7 @@ fn request_record(results: &Results) -> serde_json::Value {
         "unit": results.unit.as_str(),
         "events_seen": results.events_seen,
         "observed_ns": results.observed_ns,
+        "window": results.window,
         "stopped_because": results.stopped_because,
         "losses": results.losses,
         "degradations": results.degradations,
@@ -2236,6 +2271,7 @@ mod tests {
             ],
             events_seen: 2,
             observed_ns: 1_000_000_000,
+            window: Default::default(),
             stopped_because: "the requested duration elapsed".into(),
             losses: Losses::default(),
             filtered: None,
@@ -2368,6 +2404,7 @@ mod tests {
                 matched: 12,
                 unmatched: 3,
                 keyless: 0,
+                outside_window: 0,
                 states: crate::join::StateStats {
                     opened: 4,
                     closed: 3,
@@ -2967,6 +3004,7 @@ mod tests {
             matched: 3,
             unmatched: 1,
             keyless: 0,
+            outside_window: 0,
             states: StateStats {
                 opened: 2,
                 closed: 1,
@@ -3075,6 +3113,34 @@ mod tests {
         assert!(text.contains("602"), "{text}");
         assert!(text.contains("still open at the end"), "{text}");
         assert!(!text.contains("never ran"), "{text}");
+    }
+
+    /// A join across a detached source says what fell outside the source's
+    /// window apart from the share, and which states the detach ended,
+    /// without calling either an eviction.
+    #[test]
+    fn a_join_across_a_detach_says_what_fell_outside_and_what_it_ended() {
+        let mut correlation = correlated(MatchKind::Wakeup, "task:7 -> task:9", 0);
+        correlation.outside_window = 25;
+        correlation.states.window_closed = 1;
+        correlation.top[0].outcome = Outcome::WindowClosed;
+        let text = correlation_text(&correlation);
+        assert!(
+            text.contains("25 more `b` events fell outside `a`'s window"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 more ended when `a` was detached"),
+            "{text}"
+        );
+        assert!(text.contains("source detached"), "{text}");
+        assert!(!text.contains("EVICTED"), "{text}");
+
+        let plain = correlation_text(&correlated(MatchKind::Wakeup, "task:7 -> task:9", 0));
+        assert!(
+            !plain.contains("window"),
+            "nothing said when nothing was detached: {plain}"
+        );
     }
 
     /// A `between` correlation counts readings, says how much moved with

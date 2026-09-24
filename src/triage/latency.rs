@@ -191,6 +191,7 @@ impl Ask {
             reading: None,
             filter: None,
             names: None,
+            via: None,
         };
         Session {
             name: Some(format!("omn latency --objective {}", self.objective)),

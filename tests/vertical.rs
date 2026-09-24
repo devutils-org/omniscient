@@ -840,11 +840,12 @@ fn a_slow_reader_holds_the_response_in_net_tx() {
 /// on another thread's cpu, and the server obtains from the kernel on its own.
 ///
 /// The evidence: the four rows read off the serving thread are `IDENTITY`, and
-/// `net_rx` and `net_tx` should read `KEY`. **Today they read `IDENTITY`**: the
-/// decomposition rates every row by its `by` alone, and the fix is a field on
-/// the part that `src/join.rs` does not have yet -- filed under stream N in
-/// `docs/open-findings.md`. When it lands, the session takes `via: sock` on the
-/// two parts and the `IDENTITY` below becomes `KEY`.
+/// `net_rx` and `net_tx` are `KEY` -- the session reads them `via: sock`, and a
+/// row is rated the weaker of the key it was carried through and the table's.
+/// Rating them lower moves no amount, and that is checked here rather than
+/// assumed: the six rows still tile the request's span to the nanosecond, and
+/// still add up to the latency the client measured on its own clock, within
+/// the 10 % `the_segments_sum_to_the_latency_the_client_measured` holds them to.
 #[test]
 fn the_network_rows_are_read_by_the_socket_the_server_accepted() {
     let run = needs_run!();
@@ -871,9 +872,20 @@ fn the_network_rows_are_read_by_the_socket_the_server_accepted() {
             assert_eq!(evidence(state), "IDENTITY", "req:{id} {state}");
         }
         for state in ["net_rx", "net_tx"] {
-            // Over-rated, and filed: `KEY` once a part can say `via: sock`.
-            assert_eq!(evidence(state), "IDENTITY", "req:{id} {state}");
+            assert_eq!(evidence(state), "KEY", "req:{id} {state}");
         }
+        let residue = request.table["residue"].as_f64().expect("a residue");
+        assert!(
+            residue.abs() < 1.0,
+            "req:{id}: the six rows tile the span, and left {residue} ns"
+        );
+        let client = field(request.client, "client_ns");
+        assert!(
+            ((client - request.parts()) / client).abs() < 0.10,
+            "req:{id}: the rows add up to {:.3} ms and the client measured {:.3} ms",
+            request.parts() / MS,
+            client / MS
+        );
     }
 }
 
