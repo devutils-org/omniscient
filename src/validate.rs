@@ -676,6 +676,7 @@ mod tests {
             stack: None,
             backend: None,
             label: None,
+            window: None,
         }
     }
 

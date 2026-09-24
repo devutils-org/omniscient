@@ -694,6 +694,7 @@ mod tests {
             stack: None,
             backend: None,
             label: None,
+            window: None,
         };
         let dumped = Session::single(request, OutputFormat::Text, None);
         let text = session(&catalog, &dumped, &Report::default(), &[]);

@@ -66,6 +66,7 @@ fn request(source: &str, target: Target) -> Request {
         stack: None,
         backend: None,
         label: None,
+        window: None,
     }
 }
 

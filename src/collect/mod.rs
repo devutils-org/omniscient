@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::monotonic_ns;
 use crate::event::{CollectorId, Event};
-use crate::request::{Mode, Target};
+use crate::request::{Mode, Target, Window};
 use crate::resolve::{FilterPlacement, ResolvedRequest};
 
 pub use launch::Lifetime;
@@ -149,6 +149,17 @@ pub enum CollectError {
     /// same file take five runs to fix.
     #[error("{}", .refusals.iter().map(CollectError::to_string).collect::<Vec<_>>().join("\n"))]
     Several { refusals: Vec<CollectError> },
+    /// A request's window cannot be honoured: by this collector, by this mode
+    /// or by this run. Refused before anything is launched, because a window
+    /// quietly widened to the whole run is a different measurement under the
+    /// same label.
+    #[error("`{source_id}` cannot be watched over the window `{window}`: {reason}")]
+    Window {
+        source_id: String,
+        window: String,
+        reason: String,
+        whose: Whose,
+    },
 }
 
 impl CollectError {
@@ -188,7 +199,7 @@ impl CollectError {
             CollectError::NoCollector { .. } | CollectError::UnsupportedTarget { .. } => {
                 Whose::Build
             }
-            CollectError::Start { whose, .. } => *whose,
+            CollectError::Start { whose, .. } | CollectError::Window { whose, .. } => *whose,
             // Two collectors wanting different things of one launch is not a
             // request that cannot mean anything: each asked for something real,
             // and it is this build that cannot give a program two answers in
@@ -275,6 +286,53 @@ pub struct Collection {
     /// that difference cannot be told from zero against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<Lifetime>,
+    /// When this collection was watching, which is its own and not the run's
+    /// when its request carried a `window`.
+    ///
+    /// `observed_ns` is the length of this span, so a rate over a source
+    /// attached for two seconds of a ten-second run is a rate over two.
+    #[serde(default)]
+    pub window: Watched,
+}
+
+/// The span one collection watched, on `CLOCK_MONOTONIC`.
+///
+/// Every collection carries one. For a request without a window it is the
+/// run's own, from the moment the accounting opened to the moment the last
+/// collector was stopped; for a request attached or detached mid-run it is the
+/// part of the run it was attached for, and an event of another source outside
+/// it was outside *this source's* view rather than outside everything the run
+/// saw -- which is what a join across it needs to know.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Watched {
+    /// When the run itself opened: what the request's window is relative to.
+    pub run_opened_ns: u64,
+    /// When this collector was attached and first read. Equal to the run's
+    /// open for a request attached with the rest.
+    pub opened_ns: u64,
+    /// When it was stopped: its detach, or the end of the run.
+    pub closed_ns: u64,
+    /// Whether it was ever attached. A request whose window opened after the
+    /// run had ended never was, and its empty series is not a measurement of
+    /// nothing.
+    pub attached: bool,
+    /// Wall time spent attaching and starting it mid-run, while the target
+    /// ran. Absent for a collector attached before the launch gate opened,
+    /// whose attach is this tool's startup rather than part of the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_ns: Option<u64>,
+}
+
+impl Watched {
+    /// Whether an event stamped at `ts_ns` fell inside this collection's view.
+    pub fn contains(&self, ts_ns: u64) -> bool {
+        self.attached && self.opened_ns <= ts_ns && ts_ns <= self.closed_ns
+    }
+
+    /// How long this collection watched.
+    pub fn span_ns(&self) -> u64 {
+        self.closed_ns.saturating_sub(self.opened_ns)
+    }
 }
 
 /// What a filter the resolver could not push down did to a collection.
@@ -900,6 +958,21 @@ pub trait Prepared {
         None
     }
 
+    /// Set when this collector, attached to a process that is already
+    /// running, would follow only the thread it is opened on and the threads
+    /// started after it -- with the reason, so the loss explains itself.
+    ///
+    /// A per-task perf counter is the one that does: it follows a process by
+    /// inheritance, and inheritance is from the moment of the open. Attached at
+    /// the launch gate that is every thread there will ever be; attached by a
+    /// window to a program that has already started a thread pool, it counts
+    /// the main thread and nothing of the pool, which is a number that looks
+    /// right. The runner asks this before a late attach and, when the target
+    /// has threads the collector would not see, does not attach it.
+    fn follows_only_later_threads(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Binds to the target now that it exists.
     ///
     /// The target is passed whole rather than as a pid, because not every
@@ -997,6 +1070,16 @@ pub fn run_all_within(
     // rejection at once, and this is the same courtesy one layer down.
     let mut prepared: Vec<Box<dyn Prepared>> = all_or_nothing(resolved.iter().map(prepare))?;
 
+    // A window this collector or this mode cannot honour is refused while
+    // nothing is running, and before the environment is merged: a collector
+    // given to the program at exec is exactly the one a window cannot move.
+    all_or_nothing(
+        resolved
+            .iter()
+            .zip(&prepared)
+            .map(|(resolved, prepared)| window_honoured(resolved, prepared.as_ref())),
+    )?;
+
     // Only the collectors of the launch act on it. A machine target beside it
     // is not given to the program, so what its collector would want of the
     // program's environment -- nothing, for every collector written -- is not
@@ -1035,9 +1118,9 @@ pub fn run_all_within(
     // launched or anything is attached to it -- but after the collectors have
     // been asked for, because "no collector is written for this" is the deeper
     // answer and the one worth giving first. A duration, a program whose exit
-    // ends the run, or a single read: with none of the three there is no
-    // window, and observing a target that nothing will stop watching is worse
-    // than refusing.
+    // ends the run, a single read, or a window closing on every request: with
+    // none of them there is no window, and observing a target that nothing
+    // will stop watching is worse than refusing.
     let duration_ns = resolved
         .iter()
         .filter_map(|resolved| resolved.request.duration)
@@ -1046,8 +1129,21 @@ pub fn run_all_within(
     let snapshot = resolved
         .iter()
         .all(|resolved| resolved.request.mode == Mode::Snapshot);
-    if duration_ns.is_none() && launched_argv.is_none() && !snapshot {
+    let every_window_closes = resolved.iter().all(|resolved| {
+        resolved
+            .request
+            .window
+            .is_some_and(|window| window.stop.is_some())
+    });
+    if duration_ns.is_none() && launched_argv.is_none() && !snapshot && !every_window_closes {
         return Err(CollectError::NoStopCondition);
+    }
+    if let Some(duration_ns) = duration_ns {
+        all_or_nothing(
+            resolved
+                .iter()
+                .map(|resolved| window_inside_the_run(resolved, duration_ns)),
+        )?;
     }
 
     // A launched program is both the target and the clock: the run ends when it
@@ -1080,8 +1176,19 @@ pub fn run_all_within(
         })
         .collect();
 
-    let mut collectors = Vec::with_capacity(prepared.len());
+    // Everything is attached now except what a window asks to attach later,
+    // which waits prepared: its factory has answered, so the only refusal left
+    // for it is the one a running target can give.
+    let mut slots: Vec<Slot> = Vec::with_capacity(prepared.len());
     for (index, prepared) in prepared.into_iter().enumerate() {
+        if resolved[index]
+            .request
+            .window
+            .is_some_and(|window| window.attaches_late())
+        {
+            slots.push(Slot::Waiting(prepared));
+            continue;
+        }
         let source_id = resolved[index].request.source.to_string();
         // These two happen against a real target -- a counter that would not
         // open, a file that is not readable, a process that has gone -- so an
@@ -1096,7 +1203,7 @@ pub fn run_all_within(
             }
             return Err(CollectError::start(source_id, reason, Whose::Machine));
         }
-        collectors.push(collector);
+        slots.push(Slot::Attached(collector));
     }
 
     // Everything is attached; let the program run.
@@ -1105,30 +1212,27 @@ pub fn run_all_within(
     }
 
     // Each request at its own pace, from its own mode and its own collector.
-    let paces: Vec<Pace> = collectors
+    // A request still waiting for its window is paced when it is attached.
+    let mut paces: Vec<Pace> = slots
         .iter()
         .zip(resolved)
-        .map(|(collector, resolved)| pace_of(collector.as_ref(), resolved.request.mode))
+        .map(|(slot, resolved)| match slot {
+            Slot::Attached(collector) => pace_of(collector.as_ref(), resolved.request.mode),
+            _ => Pace::UNSET,
+        })
         .collect();
 
-    // A request that asked to be sampled and is being served by a collector
-    // with no cadence of its own is being read at a poll interval nobody asked
-    // for. The number that comes back is a real measurement of something; it is
-    // simply not a thousand samples a second, and the two are told apart here
-    // rather than left to be guessed at from a plausible figure.
-    let mut degradations: Vec<Vec<String>> = vec![Vec::new(); collectors.len()];
-    for (index, pace) in paces.iter().enumerate() {
-        let mode = resolved[index].request.mode;
-        if matches!(mode, Mode::Sample { .. } | Mode::Trace) && collectors[index].tick().is_none() {
-            degradations[index].push(format!(
-                "`{}` was asked for in `{mode}` mode and `{}` has no sampling of its own: it was \
-                 read every {}, which is a poll and not the rate that was requested",
-                resolved[index].request.source,
-                resolved[index].backend.id,
-                span_ns(pace.interval.as_nanos() as u64),
-            ));
-        }
-    }
+    let mut degradations: Vec<Vec<String>> = slots
+        .iter()
+        .zip(resolved)
+        .zip(&paces)
+        .map(|((slot, resolved), pace)| match slot {
+            Slot::Attached(collector) => unpaced(resolved, collector.as_ref(), *pace)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
 
     let deadline_ns = duration_ns.map(|longest| monotonic_ns() + longest);
 
@@ -1136,18 +1240,30 @@ pub fn run_all_within(
     // released: what was spent loading the catalog, probing the machine and
     // opening counters is this tool's startup, not the price of the
     // measurement, and charging the measurement for it would make every short
-    // run look ruinous.
+    // run look ruinous. A collector attached later is attached inside this
+    // window, and pays for its own attach.
     let launched_pid = child.as_ref().map(|child| child.pid());
     let meters = resolved
         .iter()
         .map(|resolved| Meter::of(&resolved.request.target, launched_pid))
         .collect();
+    let plans: Vec<Plan> = resolved
+        .iter()
+        .map(|resolved| Plan::of(resolved.request.window))
+        .collect();
     let mut spending = Spending::open(meters, bound, resolved.to_vec(), cheaper);
     let started_ns = spending.opened_ns;
     let wake = child.as_ref().and_then(|child| child.exit_fd());
-    let (mut events, mut losses, stopped_because) = drive(
-        &mut collectors,
-        &paces,
+    let Driven {
+        mut events,
+        mut losses,
+        mut watched,
+        mut closed_because,
+        stopped_because,
+    } = drive(
+        &mut slots,
+        &mut paces,
+        &plans,
         &about_workload,
         wake,
         &mut spending,
@@ -1168,11 +1284,40 @@ pub fn run_all_within(
 
     // Whatever the kernel or the shim published between the last tick and the
     // stop still belongs to this run.
-    for (index, collector) in collectors.iter_mut().enumerate() {
-        let mut trailing = collector.stop();
-        events[index].append(&mut trailing);
-        let collector_losses = collector.losses();
-        losses[index].absorb(collector_losses);
+    let ended_s = monotonic_ns().saturating_sub(started_ns) as f64 / 1e9;
+    for (index, slot) in slots.iter_mut().enumerate() {
+        match slot {
+            Slot::Attached(collector) => {
+                let mut trailing = collector.stop();
+                events[index].append(&mut trailing);
+                let collector_losses = collector.losses();
+                losses[index].absorb(collector_losses);
+                if let Some(stop) = resolved[index]
+                    .request
+                    .window
+                    .and_then(|window| window.stop)
+                {
+                    degradations[index].push(format!(
+                        "the run ended {ended_s:.3} s in, before this request's window closed at \
+                         {stop}: it was watched for less than it asked"
+                    ));
+                }
+            }
+            Slot::Waiting(_) => {
+                let window = resolved[index].request.window.unwrap_or(Window {
+                    start: None,
+                    stop: None,
+                });
+                let why = format!(
+                    "never attached: the run ended {ended_s:.3} s in, before this request's \
+                     window `{window}` opened"
+                );
+                degradations[index].push(format!("{why}, so its empty series measured nothing"));
+                closed_because[index] = Some(why);
+                *slot = Slot::Missed;
+            }
+            Slot::Detached(_) | Slot::Missed => {}
+        }
     }
 
     // A launched program that outlived the duration is stopped: the tool does
@@ -1183,15 +1328,37 @@ pub fn run_all_within(
         }
     }
 
-    let observed_ns = monotonic_ns().saturating_sub(started_ns);
+    let closed_ns = monotonic_ns();
+    for (index, slot) in slots.iter().enumerate() {
+        if matches!(slot, Slot::Attached(_)) {
+            watched[index].closed_ns = closed_ns;
+        } else if !watched[index].attached {
+            // Never attached: a span of nothing, at the end.
+            watched[index].opened_ns = closed_ns;
+            watched[index].closed_ns = closed_ns;
+        }
+    }
     let lifetime = child.as_ref().and_then(|child| child.lifetime());
     // Read once the child has been reaped: `getrusage(RUSAGE_CHILDREN)` is what
     // `time` prints, and it only prints it after the wait.
     let overheads = spending.close();
-    Ok(collectors
+    Ok(slots
         .iter()
         .enumerate()
-        .map(|(index, collector)| {
+        .map(|(index, slot)| {
+            let (value_attr, stacks, collector_notes) = match slot {
+                Slot::Attached(collector) => (
+                    collector.value_attr(),
+                    collector.stacks(),
+                    collector.notes(),
+                ),
+                Slot::Detached(record) => (
+                    record.value_attr,
+                    record.stacks.clone(),
+                    record.notes.clone(),
+                ),
+                Slot::Waiting(_) | Slot::Missed => ("", BTreeMap::new(), Vec::new()),
+            };
             let mut collected = std::mem::take(&mut events[index]);
             collected.sort_by_key(|event| event.ts_ns);
             // The filter is the request's, and a degradation does not change
@@ -1199,27 +1366,188 @@ pub fn run_all_within(
             let filtered = apply_filter(&resolved[index], &mut collected);
             let mut notes = std::mem::take(&mut degradations[index]);
             notes.extend(std::mem::take(&mut spending.notes[index]));
-            notes.extend(collector.notes());
+            notes.extend(collector_notes);
             // Everything is in: the runner's counts, what the collector knew it
             // lost, and anything a budget added. The magnitudes become the one
             // reason that carries them now, and not one reason each.
             let mut losses = std::mem::take(&mut losses[index]);
             losses.summarize();
             Collection {
-                observed_ns,
-                value_attr: collector.value_attr().to_owned(),
+                observed_ns: watched[index].span_ns(),
+                value_attr: value_attr.to_owned(),
                 events: collected,
                 losses,
-                stopped_because: stopped_because.clone(),
+                stopped_because: closed_because[index]
+                    .take()
+                    .unwrap_or_else(|| stopped_because.clone()),
                 notes,
-                stacks: collector.stacks(),
+                stacks,
                 filtered,
                 served_by: std::mem::take(&mut spending.served_by[index]),
                 overhead: overheads[index].clone(),
                 lifetime,
+                window: watched[index],
             }
         })
         .collect())
+}
+
+/// Whether a request's window is one its collector and its mode can honour.
+///
+/// Two things cannot be moved by a window. A collector given to the program at
+/// exec -- the preload shim -- exists only from the program's first
+/// instruction to its last: it cannot be attached to a program that is already
+/// running, and detaching it early would leave the program writing into a
+/// channel nobody reads, which blocks it or kills it and in either case
+/// changes the thing being measured. And a snapshot is a single read, which
+/// can be taken late but has nothing to stop.
+fn window_honoured(
+    resolved: &ResolvedRequest,
+    prepared: &dyn Prepared,
+) -> Result<(), CollectError> {
+    let Some(window) = resolved.request.window else {
+        return Ok(());
+    };
+    let refuse = |reason: String, whose: Whose| CollectError::Window {
+        source_id: resolved.request.source.to_string(),
+        window: window.to_string(),
+        reason,
+        whose,
+    };
+    let at_exec = prepared.requires_launch().is_some() || !prepared.launch_environment().is_empty();
+    if at_exec {
+        // This build's gap rather than the request's: the catalog has
+        // backends for these sources -- a uprobe, a USDT probe -- that attach
+        // to a running process, and a build that had them could honour this.
+        let what = if window.attaches_late() {
+            "attached once the program is running"
+        } else {
+            "detached while the program is still running"
+        };
+        return Err(refuse(
+            format!(
+                "it is served through `{}`, which is given to the program at exec and read until \
+                 it exits, so it cannot be {what}; leave the window out, or force a backend that \
+                 attaches to a running process",
+                resolved.backend.id
+            ),
+            Whose::Build,
+        ));
+    }
+    if resolved.request.mode == Mode::Snapshot && window.stop.is_some() {
+        return Err(refuse(
+            "a snapshot is a single read and has nothing to detach: give it a start and no \
+             stop, such as `2s..`"
+                .to_owned(),
+            Whose::Request,
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a request's window lies inside the run a duration bounds.
+///
+/// A window that opens or closes after the run has ended would quietly become
+/// a shorter one, or none, under the label that asked for more.
+fn window_inside_the_run(resolved: &ResolvedRequest, duration_ns: u64) -> Result<(), CollectError> {
+    let Some(window) = resolved.request.window else {
+        return Ok(());
+    };
+    let past = [window.start, window.stop]
+        .into_iter()
+        .flatten()
+        .find(|end| end.as_nanos() > duration_ns);
+    match past {
+        Some(end) => Err(CollectError::Window {
+            source_id: resolved.request.source.to_string(),
+            window: window.to_string(),
+            reason: format!(
+                "the run lasts at most {}, and this window reaches {end} past its start",
+                crate::scalar::Duration::from_nanos(duration_ns)
+            ),
+            whose: Whose::Request,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The note for a request asked to be sampled and served by a collector with
+/// no cadence of its own.
+///
+/// It is being read at a poll interval nobody asked for. The number that comes
+/// back is a real measurement of something; it is simply not a thousand
+/// samples a second, and the two are told apart here rather than left to be
+/// guessed at from a plausible figure.
+fn unpaced(resolved: &ResolvedRequest, collector: &dyn Collector, pace: Pace) -> Option<String> {
+    let mode = resolved.request.mode;
+    (matches!(mode, Mode::Sample { .. } | Mode::Trace) && collector.tick().is_none()).then(|| {
+        format!(
+            "`{}` was asked for in `{mode}` mode and `{}` has no sampling of its own: it was \
+             read every {}, which is a poll and not the rate that was requested",
+            resolved.request.source,
+            resolved.backend.id,
+            span_ns(pace.interval.as_nanos() as u64),
+        )
+    })
+}
+
+/// Why a collector must not be attached late to this target, when it must
+/// not: it would follow only threads started after it, and the target already
+/// has others.
+///
+/// Asked at the attach rather than before the run, because how many threads a
+/// program has by then is the program's business: a single-threaded one is
+/// followed whole by inheritance whenever the collector is opened on it.
+fn blind_to_running_threads(prepared: &dyn Prepared, target: &Target) -> Option<String> {
+    let reason = prepared.follows_only_later_threads()?;
+    let pid = target.first_pid()?;
+    let threads = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?.count();
+    (threads > 1).then(|| {
+        format!(
+            "{reason}, and process {pid} was already running {threads} threads, so a count              from here would be of one of them"
+        )
+    })
+}
+
+/// Where one request is in its window.
+///
+/// A request without a window is attached before the gate and stays
+/// `Attached` to the end, which is every request there was before hot attach.
+enum Slot {
+    /// Prepared, and waiting for its window to open.
+    Waiting(Box<dyn Prepared>),
+    Attached(Box<dyn Collector>),
+    /// Its window closed, and the collector with it: what is left is what the
+    /// results need of it.
+    Detached(Detached),
+    /// Never attached. Why is in the collection's `stopped_because`.
+    Missed,
+}
+
+/// What a detached collector leaves behind. Taken at the detach, because the
+/// collector itself is dropped then: releasing what it held in the kernel is
+/// the point of detaching.
+struct Detached {
+    value_attr: &'static str,
+    stacks: BTreeMap<u64, Vec<String>>,
+    notes: Vec<String>,
+}
+
+/// When one request is attached and detached, in nanoseconds after the run
+/// opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Plan {
+    attach_ns: u64,
+    detach_ns: Option<u64>,
+}
+
+impl Plan {
+    fn of(window: Option<Window>) -> Plan {
+        window.map_or(Plan::default(), |window| Plan {
+            attach_ns: window.start_ns(),
+            detach_ns: window.stop.map(crate::scalar::Duration::as_nanos),
+        })
+    }
 }
 
 /// The one workload target of a session, if it has one.
@@ -1291,6 +1619,10 @@ struct Since {
     self_cpu_ns: u64,
     observed_cpu_ns: u64,
     inside_ns: u64,
+    /// Everything spent inside every collector by then, so a share is a share
+    /// of the same span as the cpu time it divides.
+    total_inside_ns: u64,
+    wall_opened_ns: u64,
 }
 
 /// The cost half of a run: what it is spending, what it was allowed to spend,
@@ -1324,6 +1656,12 @@ struct Spending<'a> {
     notes: Vec<Vec<String>>,
     /// The backends each collection has run through, in order.
     served_by: Vec<Vec<String>>,
+    /// Where a collection attached mid-run started paying. Its overhead is
+    /// over its own window, because that is when it was running.
+    window_since: Vec<Option<Since>>,
+    /// The overhead of a collection that was detached, taken at the detach:
+    /// what the run spent after it is not its cost.
+    frozen: Vec<Option<Overhead>>,
 }
 
 impl<'a> Spending<'a> {
@@ -1363,6 +1701,8 @@ impl<'a> Spending<'a> {
                     self_cpu_ns: self_cpu_opened_ns,
                     observed_cpu_ns: observed_opened.get(index).copied().unwrap_or(0),
                     inside_ns: 0,
+                    total_inside_ns: 0,
+                    wall_opened_ns: opened_ns,
                 })
                 .collect(),
             opened_ns,
@@ -1373,6 +1713,8 @@ impl<'a> Spending<'a> {
             measurements: 0,
             notes: vec![Vec::new(); count],
             served_by: serving_ids,
+            window_since: vec![None; count],
+            frozen: vec![None; count],
         }
     }
 
@@ -1396,7 +1738,11 @@ impl<'a> Spending<'a> {
         // them at once. With one collector the share is the whole and there is
         // nothing to approximate; with several it is the fraction of the time
         // spent inside collectors that went to this one.
-        let total_inside_ns: u64 = self.inside_ns.iter().sum();
+        let total_inside_ns: u64 = self
+            .inside_ns
+            .iter()
+            .sum::<u64>()
+            .saturating_sub(since.total_inside_ns);
         let attributed_cpu_ns = match (self.inside_ns.len(), total_inside_ns) {
             (1, _) => collector_cpu_ns,
             (count, 0) => collector_cpu_ns / count as u64,
@@ -1411,7 +1757,7 @@ impl<'a> Spending<'a> {
             observed_cpu_ns: observed_cpu_ns
                 .map(|observed| observed.saturating_sub(since.observed_cpu_ns)),
             observed_from: self.meters[index].describes(),
-            wall_ns: now_ns.saturating_sub(self.opened_ns),
+            wall_ns: now_ns.saturating_sub(since.wall_opened_ns),
             measurement_ns: self.measurement_ns,
             measurements: self.measurements,
         }
@@ -1421,7 +1767,7 @@ impl<'a> Spending<'a> {
     /// ceiling. Returns the reason the run must stop, when there is one.
     fn check(
         &mut self,
-        collectors: &mut [Box<dyn Collector>],
+        slots: &mut [Slot],
         events: &mut [Vec<Event>],
         losses: &mut [Losses],
     ) -> Option<String> {
@@ -1437,10 +1783,15 @@ impl<'a> Spending<'a> {
         self.measurements += 1;
 
         let mut stop = None;
-        for index in 0..collectors.len() {
+        for index in 0..slots.len() {
             let Some(ceiling) = self.ceilings[index] else {
                 continue;
             };
+            // Only what is running is spending: a request waiting for its
+            // window, or past it, has nothing here to weigh.
+            if !matches!(slots[index], Slot::Attached(_)) {
+                continue;
+            }
             let observed_cpu_ns = self.meters[index].read();
             let spent = self.spent(
                 index,
@@ -1470,12 +1821,12 @@ impl<'a> Spending<'a> {
                 String::new()
             };
             match self.cheaper.next(index, &spent, ceiling) {
-                Some(next) => match self.degrade(index, next, collectors, events, losses) {
+                Some(next) => match self.degrade(index, next, slots, events, losses) {
                     Ok(onto) => self.notes[index].push(format!(
                         "over budget at {:.2} ms into the run: `{source}` through `{was}` spent \
                          {percent:.2} % of the target's cpu time against a ceiling of {ceiling} %, \
                          so it was moved onto `{onto}` for the rest of it",
-                        spent.wall_ns as f64 / 1e6,
+                        entered_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
                     )),
                     Err(why) => {
                         stop = Some(format!(
@@ -1510,33 +1861,84 @@ impl<'a> Spending<'a> {
         &mut self,
         index: usize,
         next: ResolvedRequest,
-        collectors: &mut [Box<dyn Collector>],
+        slots: &mut [Slot],
         events: &mut [Vec<Event>],
         losses: &mut [Losses],
     ) -> Result<String, String> {
         let onto = next.backend.id.clone();
+        let Slot::Attached(current) = &mut slots[index] else {
+            return Err("it is not attached".to_owned());
+        };
         let prepared = prepare(&next).map_err(|error| error.to_string())?;
         let mut replacement = prepared.attach(&self.bound[index])?;
         replacement.start()?;
 
-        let mut trailing = collectors[index].stop();
+        let mut trailing = current.stop();
         events[index].append(&mut trailing);
-        losses[index].absorb(collectors[index].losses());
+        losses[index].absorb(current.losses());
         losses[index].note(format!(
             "the budget moved this collection from `{}` to `{onto}` mid-run; the series is two \
              backends end to end",
             self.serving[index].backend.id
         ));
-        collectors[index] = replacement;
+        *current = replacement;
         self.serving[index] = next;
         self.served_by[index].push(onto.clone());
         // The replacement is weighed on its own account.
         self.since[index] = Since {
+            wall_opened_ns: self.opened_ns,
+            ..self.now(index)
+        };
+        Ok(onto)
+    }
+
+    /// Where one collection's account stands at this instant.
+    fn now(&self, index: usize) -> Since {
+        Since {
             self_cpu_ns: rusage_ns(libc::RUSAGE_SELF),
             observed_cpu_ns: self.meters[index].read().unwrap_or(0),
             inside_ns: self.inside_ns[index],
-        };
-        Ok(onto)
+            total_inside_ns: self.inside_ns.iter().sum(),
+            wall_opened_ns: monotonic_ns(),
+        }
+    }
+
+    /// Opens the account of a collection attached mid-run: its budget, and
+    /// the overhead its results report, are over its own window.
+    ///
+    /// Taken *before* the attach, so that what attaching cost -- loading a
+    /// program into the kernel while the target runs -- is in its account
+    /// rather than in nobody's.
+    fn attaching(&mut self, index: usize) {
+        let entered_ns = monotonic_ns();
+        let since = self.now(index);
+        self.since[index] = since;
+        self.window_since[index] = Some(since);
+        self.measurements += 1;
+        self.measurement_ns += monotonic_ns().saturating_sub(entered_ns);
+    }
+
+    /// Closes the account of a collection detached mid-run.
+    fn detached(&mut self, index: usize, closed_ns: u64) {
+        let entered_ns = monotonic_ns();
+        let since = self.window_since[index].unwrap_or(self.whole_run(index));
+        let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
+        let observed_cpu_ns = self.meters[index].read();
+        self.measurements += 1;
+        self.measurement_ns += monotonic_ns().saturating_sub(entered_ns);
+        self.frozen[index] =
+            Some(self.spent(index, since, self_cpu_ns, observed_cpu_ns, closed_ns));
+    }
+
+    /// The account of a collection that ran for the whole of the run.
+    fn whole_run(&self, index: usize) -> Since {
+        Since {
+            self_cpu_ns: self.self_cpu_opened_ns,
+            observed_cpu_ns: self.observed_opened.get(index).copied().unwrap_or(0),
+            inside_ns: 0,
+            total_inside_ns: 0,
+            wall_opened_ns: self.opened_ns,
+        }
     }
 
     /// Closes the accounting and shares the run's cost out between the
@@ -1552,18 +1954,11 @@ impl<'a> Spending<'a> {
 
         (0..self.ceilings.len())
             .map(|index| {
-                let whole_run = Since {
-                    self_cpu_ns: self.self_cpu_opened_ns,
-                    observed_cpu_ns: self.observed_opened.get(index).copied().unwrap_or(0),
-                    inside_ns: 0,
-                };
-                self.spent(
-                    index,
-                    whole_run,
-                    self_cpu_ns,
-                    observed_cpu_ns[index],
-                    closed_ns,
-                )
+                if let Some(frozen) = &self.frozen[index] {
+                    return frozen.clone();
+                }
+                let since = self.window_since[index].unwrap_or(self.whole_run(index));
+                self.spent(index, since, self_cpu_ns, observed_cpu_ns[index], closed_ns)
             })
             .collect()
     }
@@ -1589,6 +1984,8 @@ impl Spending<'static> {
         spending.since = vec![Since::default(); count];
         spending.notes = vec![Vec::new(); count];
         spending.served_by = vec![Vec::new(); count];
+        spending.window_since = vec![None; count];
+        spending.frozen = vec![None; count];
         spending
     }
 
@@ -1633,6 +2030,15 @@ struct Pace {
     snapshot: bool,
 }
 
+impl Pace {
+    /// The pace of a request whose collector is not attached yet, replaced
+    /// by its own the moment it is.
+    const UNSET: Pace = Pace {
+        interval: StdDuration::ZERO,
+        snapshot: false,
+    };
+}
+
 /// How one request is driven, from the mode it asked for and what its collector
 /// needs.
 ///
@@ -1659,7 +2065,30 @@ fn pace_of(collector: &dyn Collector, mode: Mode) -> Pace {
     }
 }
 
-/// Drives a set of collectors over one window, and closes it.
+/// What a run's collectors produced, per request, and why the run ended.
+struct Driven {
+    events: Vec<Vec<Event>>,
+    losses: Vec<Losses>,
+    /// The span each request was attached for.
+    watched: Vec<Watched>,
+    /// Why a request stopped before the run did, when it did: its window
+    /// closed, or it was never attached.
+    closed_because: Vec<Option<String>>,
+    stopped_because: String,
+}
+
+/// Why one request stopped being read before the run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Finished {
+    /// It was a single read, and that read is taken.
+    Snapshot,
+    /// Its target went away before the workload did.
+    Gone,
+    /// Its window closed, or never opened on anything.
+    Window,
+}
+
+/// Drives a set of collectors over one run, and closes it.
 ///
 /// The order inside a round is the whole of the edge convention: **read
 /// first, then decide**. A round reads every collector that is due, and only
@@ -1675,6 +2104,15 @@ fn pace_of(collector: &dyn Collector, mode: Mode) -> Pace {
 /// at the earliest of them, so the run is no less responsive to its stop
 /// condition than when one interval governed everything.
 ///
+/// A request with a window is attached and detached here, by its [`Plan`],
+/// while the rest keep running. The same convention holds at both of its
+/// edges. A window opens at the top of a round, so the collector's first read
+/// is the round it was attached in -- a counter's baseline is taken at its
+/// attach, not one interval later. And it closes at the bottom: a collector
+/// whose window is closing is due at that moment whatever its pace, it is read,
+/// and only then stopped and dropped, so its last interval is measured to its
+/// detach just as the run's last interval is measured to the run's end.
+///
 /// `ended` is consulted once per round and returns why the run should stop.
 /// It is a closure rather than a launched child and a deadline so that the
 /// convention can be tested against a stop condition a test controls.
@@ -1687,33 +2125,116 @@ fn pace_of(collector: &dyn Collector, mode: Mode) -> Pace {
 /// once -- the launched program's pidfd -- so that a program exiting between
 /// two ticks ends the run at its exit rather than at the next tick.
 fn drive(
-    collectors: &mut [Box<dyn Collector>],
-    paces: &[Pace],
+    slots: &mut [Slot],
+    paces: &mut [Pace],
+    plans: &[Plan],
     about_workload: &[bool],
     wake: Option<RawFd>,
     spending: &mut Spending<'_>,
     mut ended: impl FnMut() -> Option<String>,
-) -> (Vec<Vec<Event>>, Vec<Losses>, String) {
-    let mut events: Vec<Vec<Event>> = vec![Vec::new(); collectors.len()];
-    let mut losses: Vec<Losses> = vec![Losses::default(); collectors.len()];
-    let mut sequences = vec![0u64; collectors.len()];
+) -> Driven {
+    let count = slots.len();
+    let mut events: Vec<Vec<Event>> = vec![Vec::new(); count];
+    let mut losses: Vec<Losses> = vec![Losses::default(); count];
+    let mut sequences = vec![0u64; count];
     // Only a run serving several collectors has to share its cpu time out
     // between them, and only then are the two clock reads a round worth taking:
     // with one collector the share is the whole.
-    let attributing = collectors.len() > 1;
+    let attributing = count > 1;
+    let opened_ns = spending.opened_ns;
     // Everything is due at once on the first round: a series starts with a
     // reading, and a counter's first read is the baseline the rest are against.
-    let mut due_ns = vec![monotonic_ns(); collectors.len()];
-    let mut done = vec![false; collectors.len()];
-    // Done because its target went away rather than because it was a single
-    // read, which is not a reason for the run to call itself a snapshot.
-    let mut ended_early = vec![false; collectors.len()];
+    let mut due_ns = vec![monotonic_ns(); count];
+    let mut finished: Vec<Option<Finished>> = vec![None; count];
+    let mut watched: Vec<Watched> = slots
+        .iter()
+        .map(|slot| Watched {
+            run_opened_ns: opened_ns,
+            opened_ns,
+            closed_ns: opened_ns,
+            attached: matches!(slot, Slot::Attached(_)),
+            attach_ns: None,
+        })
+        .collect();
+    let mut closed_because: Vec<Option<String>> = vec![None; count];
+    let into_run = |ns: u64| ns.saturating_sub(opened_ns) as f64 / 1e9;
+    // When a collector's window closes, which makes it due then whatever its
+    // pace says.
+    let detach_at = |index: usize| plans[index].detach_ns.map(|ns| opened_ns + ns);
 
     let stopped_because = loop {
         let round_started_ns = monotonic_ns();
+
+        // Windows that open now. The account is opened before the attach, so
+        // what attaching costs while the target runs is this request's.
+        for index in 0..count {
+            if !matches!(slots[index], Slot::Waiting(_))
+                || round_started_ns < opened_ns + plans[index].attach_ns
+            {
+                continue;
+            }
+            let Slot::Waiting(prepared) = std::mem::replace(&mut slots[index], Slot::Missed) else {
+                unreachable!("checked above");
+            };
+            spending.attaching(index);
+            let entered_ns = monotonic_ns();
+            let attached = match blind_to_running_threads(prepared.as_ref(), &spending.bound[index])
+            {
+                Some(reason) => Err(reason),
+                None => prepared
+                    .attach(&spending.bound[index])
+                    .and_then(|mut collector| collector.start().map(|()| collector)),
+            };
+            let attached_ns = monotonic_ns();
+            let took_ns = attached_ns.saturating_sub(entered_ns);
+            if attributing {
+                spending.inside_ns[index] += took_ns;
+            }
+            let source = spending.serving[index].request.source.to_string();
+            match attached {
+                Ok(collector) => {
+                    let mode = spending.serving[index].request.mode;
+                    paces[index] = pace_of(collector.as_ref(), mode);
+                    if let Some(note) =
+                        unpaced(&spending.serving[index], collector.as_ref(), paces[index])
+                    {
+                        spending.notes[index].push(note);
+                    }
+                    spending.notes[index].push(format!(
+                        "watched only from {:.3} s into the run, as its window asked: attaching \
+                         it took {} while the target ran, and its numbers cover its window alone",
+                        into_run(entered_ns),
+                        span_ns(took_ns),
+                    ));
+                    due_ns[index] = attached_ns;
+                    watched[index].opened_ns = attached_ns;
+                    watched[index].attached = true;
+                    watched[index].attach_ns = Some(took_ns);
+                    slots[index] = Slot::Attached(collector);
+                }
+                Err(reason) => {
+                    // A window that asked for something and got nothing: a
+                    // loss, not an empty series that reads as a quiet one.
+                    losses[index].failed_reads += 1;
+                    losses[index].note(format!(
+                        "`{source}` could not be attached {:.3} s into the run, so nothing was \
+                         collected over its window: {reason}",
+                        into_run(entered_ns),
+                    ));
+                    closed_because[index] = Some(format!("never attached: {reason}"));
+                    slots[index] = Slot::Missed;
+                    finished[index] = Some(Finished::Window);
+                }
+            }
+        }
+
         let mut gone = None;
-        for (index, collector) in collectors.iter_mut().enumerate() {
-            if done[index] || round_started_ns < due_ns[index] {
+        for (index, slot) in slots.iter_mut().enumerate() {
+            let Slot::Attached(collector) = slot else {
+                continue;
+            };
+            let due = detach_at(index).map_or(due_ns[index], |at| due_ns[index].min(at));
+            if finished[index].is_some() || round_started_ns < due {
                 continue;
             }
             let entered_ns = if attributing { monotonic_ns() } else { 0 };
@@ -1728,10 +2249,9 @@ fn drive(
                 Err(SampleError::TargetGone(reason)) => {
                     losses[index].note(format!(
                         "stopped reading {:.3} s into the run, before the workload ended: {reason}",
-                        round_started_ns.saturating_sub(spending.opened_ns) as f64 / 1e9
+                        into_run(round_started_ns)
                     ));
-                    done[index] = true;
-                    ended_early[index] = true;
+                    finished[index] = Some(Finished::Gone);
                     continue;
                 }
                 Err(SampleError::Transient(reason)) => {
@@ -1744,7 +2264,7 @@ fn drive(
             }
 
             if paces[index].snapshot {
-                done[index] = true;
+                finished[index] = Some(Finished::Snapshot);
                 continue;
             }
             // When the next reading was due, and whether this one got in the
@@ -1770,11 +2290,49 @@ fn drive(
             break reason;
         }
 
-        if done.iter().all(|done| *done) {
-            if ended_early.iter().all(|early| *early) {
+        // Windows that close now, after the round's reads: the read that was
+        // due at the detach has been taken, and what the collector still
+        // holds is drained into its own collection before it is dropped.
+        for index in 0..count {
+            let closing = detach_at(index).is_some_and(|at| round_started_ns >= at);
+            if !closing || !matches!(slots[index], Slot::Attached(_)) {
+                continue;
+            }
+            let Slot::Attached(mut collector) = std::mem::replace(&mut slots[index], Slot::Missed)
+            else {
+                unreachable!("checked above");
+            };
+            let mut trailing = collector.stop();
+            events[index].append(&mut trailing);
+            losses[index].absorb(collector.losses());
+            let record = Detached {
+                value_attr: collector.value_attr(),
+                stacks: collector.stacks(),
+                notes: collector.notes(),
+            };
+            drop(collector);
+            let closed_ns = monotonic_ns();
+            watched[index].closed_ns = closed_ns;
+            spending.detached(index, closed_ns);
+            closed_because[index] = Some(format!(
+                "its window closed: detached {:.3} s into the run, as asked",
+                into_run(closed_ns)
+            ));
+            slots[index] = Slot::Detached(record);
+            // A collection whose target had already gone keeps saying so.
+            finished[index].get_or_insert(Finished::Window);
+        }
+
+        let waiting = slots.iter().any(|slot| matches!(slot, Slot::Waiting(_)));
+        if !waiting && finished.iter().all(Option::is_some) {
+            let every = |kind: Finished| finished.iter().all(|done| *done == Some(kind));
+            if every(Finished::Gone) {
                 break "every target of the run went away".to_owned();
             }
-            break "snapshot: a single read".to_owned();
+            if finished.contains(&Some(Finished::Snapshot)) {
+                break "snapshot: a single read".to_owned();
+            }
+            break "every request's window had closed".to_owned();
         }
 
         if let Some(reason) = ended() {
@@ -1784,17 +2342,22 @@ fn drive(
         // Asked after the stop condition, so a run that was going to end anyway
         // ends for the reason it was going to end for rather than being
         // condemned on its last tick.
-        if let Some(reason) = spending.check(collectors, &mut events, &mut losses) {
+        if let Some(reason) = spending.check(slots, &mut events, &mut losses) {
             break reason;
         }
 
-        // Sleep until the next collector falls due. A collector already behind
-        // its own schedule puts that moment in the past, and the run goes
-        // straight round again.
-        let next_due_ns = due_ns
-            .iter()
-            .zip(&done)
-            .filter_map(|(due_ns, done)| (!done).then_some(*due_ns))
+        // Sleep until the next collector falls due, or the next window opens
+        // or closes. A collector already behind its own schedule puts that
+        // moment in the past, and the run goes straight round again.
+        let next_due_ns = (0..count)
+            .filter_map(|index| match &slots[index] {
+                Slot::Waiting(_) => Some(opened_ns + plans[index].attach_ns),
+                Slot::Attached(_) if finished[index].is_none() => {
+                    Some(detach_at(index).map_or(due_ns[index], |at| due_ns[index].min(at)))
+                }
+                Slot::Attached(_) => detach_at(index),
+                Slot::Detached(_) | Slot::Missed => None,
+            })
             .min();
         if let Some(next_due_ns) = next_due_ns {
             let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
@@ -1804,7 +2367,13 @@ fn drive(
         }
     };
 
-    (events, losses, stopped_because)
+    Driven {
+        events,
+        losses,
+        watched,
+        closed_because,
+        stopped_because,
+    }
 }
 
 /// Sleeps for `ns`, or until `wake` becomes readable if that is sooner.
@@ -1954,6 +2523,36 @@ fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `drive` over collectors that are all attached before the run and stay
+    /// attached to its end: every run there was before windows, and what the
+    /// pacing and budget tests below are about.
+    fn drive_attached(
+        collectors: &mut Vec<Box<dyn Collector>>,
+        paces: &[Pace],
+        about_workload: &[bool],
+        wake: Option<RawFd>,
+        spending: &mut Spending<'_>,
+        ended: impl FnMut() -> Option<String>,
+    ) -> (Vec<Vec<Event>>, Vec<Losses>, String) {
+        let mut slots: Vec<Slot> = collectors.drain(..).map(Slot::Attached).collect();
+        let mut paces = paces.to_vec();
+        let plans = vec![Plan::default(); slots.len()];
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            about_workload,
+            wake,
+            spending,
+            ended,
+        );
+        collectors.extend(slots.into_iter().map(|slot| match slot {
+            Slot::Attached(collector) => collector,
+            _ => unreachable!("nothing here had a window"),
+        }));
+        (driven.events, driven.losses, driven.stopped_because)
+    }
     use crate::catalog::Catalog;
 
     /// Every registered collector must name a real catalog entry and a real
@@ -2054,6 +2653,7 @@ mod tests {
             stack: None,
             backend: None,
             label: None,
+            window: None,
         };
         let resolved: Vec<_> = [Target::Pid(vec![own]), Target::Pid(vec![1])]
             .into_iter()
@@ -2098,6 +2698,7 @@ mod tests {
             stack: None,
             backend: backend.map(|id| id.parse().unwrap()),
             label: None,
+            window: None,
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }
@@ -2197,6 +2798,7 @@ mod tests {
             stack: None,
             backend: None,
             label: None,
+            window: None,
         };
         let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
         let mut events = vec![event_with(Vec::new())];
@@ -2225,6 +2827,7 @@ mod tests {
             stack: None,
             backend: None,
             label: None,
+            window: None,
         };
         let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
         match run(&resolved) {
@@ -2265,6 +2868,7 @@ mod tests {
             stack: None,
             backend: Some("force:fs:proc".parse().unwrap()),
             label: None,
+            window: None,
         };
         let resolved =
             crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves");
@@ -2597,7 +3201,7 @@ mod tests {
             let (mut collectors, spun_ns) = burning(20_000_000);
             let mut spending = Spending::unweighed(1);
             let deadline_ns = monotonic_ns() + 200_000_000;
-            drive(
+            drive_attached(
                 &mut collectors,
                 &[Pace {
                     interval: StdDuration::ZERO,
@@ -2663,6 +3267,7 @@ mod tests {
             stack: None,
             backend: None,
             label: None,
+            window: None,
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }
@@ -2684,7 +3289,7 @@ mod tests {
             let (mut collectors, spun_ns) = burning(20_000_000);
             let mut spending = Spending::weighed_against_this_process(vec![weighed(ceiling)]);
             let deadline_ns = monotonic_ns() + 600_000_000;
-            let (_, _, stopped_because) = drive(
+            let (_, _, stopped_because) = drive_attached(
                 &mut collectors,
                 &[Pace {
                     interval: StdDuration::ZERO,
@@ -2738,7 +3343,7 @@ mod tests {
         let (mut collectors, _) = burning(5_000_000);
         let mut spending = Spending::weighed_against_this_process(vec![weighed("500%")]);
         let deadline_ns = monotonic_ns() + 600_000_000;
-        drive(
+        drive_attached(
             &mut collectors,
             &[Pace {
                 interval: StdDuration::ZERO,
@@ -2775,7 +3380,7 @@ mod tests {
         let (mut collectors, _) = burning(5_000_000);
         let mut spending = Spending::unweighed(1);
         let deadline_ns = monotonic_ns() + 400_000_000;
-        drive(
+        drive_attached(
             &mut collectors,
             &[Pace {
                 interval: StdDuration::ZERO,
@@ -2919,7 +3524,7 @@ mod tests {
 
         let interval = StdDuration::from_millis(20);
         let deadline_ns = monotonic_ns() + 90_000_000;
-        let (_, _, stopped_because) = drive(
+        let (_, _, stopped_because) = drive_attached(
             &mut collectors,
             &[Pace {
                 interval,
@@ -3020,7 +3625,7 @@ mod tests {
         let machine_reads = std::rc::Rc::new(std::cell::Cell::new(0));
         let mut collectors = vec![clocked(), vanishing(&machine_reads)];
         let deadline_ns = monotonic_ns() + 100_000_000;
-        let (_, losses, stopped_because) = drive(
+        let (_, losses, stopped_because) = drive_attached(
             &mut collectors,
             &[pace, pace],
             &[true, false],
@@ -3052,7 +3657,7 @@ mod tests {
         // The same collector as the workload ends the run.
         let workload_gone = std::rc::Rc::new(std::cell::Cell::new(0));
         let mut collectors = vec![vanishing(&workload_gone)];
-        let (_, _, stopped_because) = drive(
+        let (_, _, stopped_because) = drive_attached(
             &mut collectors,
             &[pace],
             &[true],
@@ -3061,5 +3666,549 @@ mod tests {
             || None,
         );
         assert_eq!(stopped_because, "the core went offline");
+    }
+
+    // -----------------------------------------------------------------------
+    // Hot attach: a request whose window is its own and inside the run's.
+    // -----------------------------------------------------------------------
+
+    /// A request resolved against this process, with `window` and `mode`.
+    fn windowed(window: Option<&str>, mode: crate::request::Mode) -> ResolvedRequest {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let request = crate::request::Request {
+            source: "mem.rss".parse().unwrap(),
+            target: Target::Pid(vec![std::process::id() as i32]),
+            mode,
+            emit: vec![crate::request::Emit::Summary],
+            keys: Vec::new(),
+            filter: None,
+            duration: Some("1s".parse().unwrap()),
+            budget: None,
+            stack: None,
+            backend: None,
+            label: None,
+            window: window.map(|text| text.parse().unwrap()),
+        };
+        crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
+    }
+
+    fn poll_ms(ms: u64) -> crate::request::Mode {
+        crate::request::Mode::Poll {
+            interval: crate::scalar::Duration::from_nanos(ms * 1_000_000),
+        }
+    }
+
+    /// Something prepared that hands over a collector when it is attached --
+    /// after spinning for `spin_ns` of this thread's cpu, which is the attach
+    /// cost the test injects -- or refuses to.
+    struct Handing {
+        collector: Result<Box<dyn Collector>, String>,
+        spin_ns: u64,
+        at_exec: bool,
+    }
+
+    impl Prepared for Handing {
+        fn requires_launch(&self) -> Option<&'static str> {
+            self.at_exec.then_some("given to the program at exec")
+        }
+
+        fn attach(self: Box<Self>, _: &Target) -> Result<Box<dyn Collector>, String> {
+            let started_ns = thread_cpu_ns();
+            while thread_cpu_ns().saturating_sub(started_ns) < self.spin_ns {}
+            self.collector
+        }
+    }
+
+    fn clocked(
+        name: &str,
+    ) -> (
+        Box<dyn Collector>,
+        std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+    ) {
+        let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collector = Box::new(Clocked {
+            id: CollectorId::new(name),
+            reads_ns: reads_ns.clone(),
+            stopped_ns: std::rc::Rc::new(std::cell::Cell::new(0)),
+        });
+        (collector, reads_ns)
+    }
+
+    fn pace_ms(ms: u64) -> Pace {
+        Pace {
+            interval: StdDuration::from_millis(ms),
+            snapshot: false,
+        }
+    }
+
+    /// A window opens and closes while the rest of the run keeps going.
+    ///
+    /// Ground truth is the collectors' own record of when they were read,
+    /// taken on the one clock: every read of the windowed collector must fall
+    /// inside the window it asked for, its first read must be the round it was
+    /// attached in, and its last must be the one taken at its detach. The
+    /// collector beside it is read from the first round to the last, which is
+    /// what "without restarting the run" means.
+    #[test]
+    fn a_window_is_attached_and_detached_while_the_rest_keep_running() {
+        const ATTACH_MS: u64 = 60;
+        const DETACH_MS: u64 = 140;
+        const RUN_MS: u64 = 220;
+        let (whole, whole_reads) = clocked("whole");
+        let (late, late_reads) = clocked("late");
+        let mut slots = vec![
+            Slot::Attached(whole),
+            Slot::Waiting(Box::new(Handing {
+                collector: Ok(late),
+                spin_ns: 0,
+                at_exec: false,
+            })),
+        ];
+        let mut paces = vec![pace_ms(10), Pace::UNSET];
+        let plans = [
+            Plan::default(),
+            Plan::of(Some(
+                format!("{ATTACH_MS}ms..{DETACH_MS}ms").parse().unwrap(),
+            )),
+        ];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(None, poll_ms(10)),
+            windowed(Some("60ms..140ms"), poll_ms(10)),
+        ]);
+        let opened_ns = spending.opened_ns;
+        let deadline_ns = opened_ns + RUN_MS * 1_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            until(deadline_ns),
+        );
+        assert_eq!(driven.stopped_because, "the deadline");
+        assert!(
+            matches!(slots[1], Slot::Detached(_)),
+            "the window closed on it"
+        );
+        assert!(
+            matches!(slots[0], Slot::Attached(_)),
+            "the rest is still running"
+        );
+
+        let at = |ms: u64| opened_ns + ms * 1_000_000;
+        let late_reads = late_reads.borrow();
+        let window = driven.watched[1];
+        eprintln!(
+            "window opened {} us and closed {} us into the run; {} reads, the first at {} us \
+             and the last at {} us",
+            (window.opened_ns - opened_ns) / 1_000,
+            (window.closed_ns - opened_ns) / 1_000,
+            late_reads.len(),
+            (late_reads[0] - opened_ns) / 1_000,
+            (late_reads.last().unwrap() - opened_ns) / 1_000,
+        );
+        assert!(window.attached && window.attach_ns.is_some());
+        assert!(
+            window.opened_ns >= at(ATTACH_MS) && window.closed_ns >= at(DETACH_MS),
+            "the window was placed where it was asked, not earlier: {window:?}"
+        );
+        assert!(
+            late_reads.iter().all(|read| window.contains(*read)),
+            "every read of a windowed collector is inside its window"
+        );
+        assert!(
+            late_reads[0] - window.opened_ns < 1_000_000,
+            "the first read is the round of the attach -- the baseline is taken at the attach"
+        );
+        assert!(
+            *late_reads.last().unwrap() >= at(DETACH_MS),
+            "the last read is the one taken at the detach, not one tick short of it"
+        );
+        assert!(
+            window.closed_ns < deadline_ns,
+            "a detached collector is stopped at its detach, not kept to the end of the run"
+        );
+        assert!(
+            driven.closed_because[1]
+                .as_deref()
+                .is_some_and(|why| why.contains("window closed")),
+            "{:?}",
+            driven.closed_because
+        );
+
+        // The collector beside it was read over the whole run, windows or not.
+        let whole_reads = whole_reads.borrow();
+        assert!(whole_reads[0] < at(ATTACH_MS) && *whole_reads.last().unwrap() >= deadline_ns);
+        let during = whole_reads
+            .iter()
+            .filter(|read| window.contains(**read))
+            .count();
+        assert!(
+            during >= 4,
+            "the run went on reading the rest while the window was open: {during} reads"
+        );
+    }
+
+    /// What attaching costs while the target runs is in the account of the
+    /// request that attached.
+    ///
+    /// Ground truth is a cost injected into the attach: 30 ms of this thread's
+    /// cpu, spun by the prepared collector before it hands itself over. That
+    /// cannot take less than 30 ms of wall time, and the process cannot have
+    /// spent less than 30 ms of cpu over the window -- so both the wall time
+    /// the window reports for the attach and the cpu it charges the request
+    /// are bounded below by the injection, whatever the rest of the suite is
+    /// doing to this process's account.
+    #[test]
+    fn attaching_mid_run_is_paid_for_by_the_request_that_attached() {
+        const SPIN_NS: u64 = 30_000_000;
+        let (whole, _) = clocked("whole");
+        let (late, _) = clocked("late");
+        let mut slots = vec![
+            Slot::Attached(whole),
+            Slot::Waiting(Box::new(Handing {
+                collector: Ok(late),
+                spin_ns: SPIN_NS,
+                at_exec: false,
+            })),
+        ];
+        let mut paces = vec![pace_ms(10), Pace::UNSET];
+        let plans = [Plan::default(), Plan::of(Some("20ms..".parse().unwrap()))];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(None, poll_ms(10)),
+            windowed(Some("20ms.."), poll_ms(10)),
+        ]);
+        let deadline_ns = spending.opened_ns + 150_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            until(deadline_ns),
+        );
+        let overheads = spending.close();
+        let attach_ns = driven.watched[1]
+            .attach_ns
+            .expect("an attach mid-run is timed");
+        eprintln!(
+            "attach took {attach_ns} ns of wall time; the late request was charged {} ns of the \
+             {} ns this process spent over its window",
+            overheads[1].attributed_cpu_ns, overheads[1].collector_cpu_ns
+        );
+        assert!(
+            attach_ns >= SPIN_NS,
+            "the attach is timed whole: {attach_ns} ns"
+        );
+        assert!(
+            overheads[1].collector_cpu_ns >= SPIN_NS,
+            "the window's account opens before the attach, so the attach is in it"
+        );
+        // The share is of wall time inside collectors, and the attach is almost
+        // all of this request's: most of the process's cpu is charged to it.
+        assert!(
+            overheads[1].attributed_cpu_ns * 2 >= overheads[1].collector_cpu_ns,
+            "the request that attached is charged for attaching: {:?}",
+            overheads[1]
+        );
+        assert!(
+            spending.notes[1]
+                .iter()
+                .any(|note| note.contains("attaching") && note.contains("into the run")),
+            "the attach is said where the reader looks: {:?}",
+            spending.notes[1]
+        );
+    }
+
+    /// A collector that could not be attached when its window opened is a
+    /// loss of that window, and the run carries on without it.
+    #[test]
+    fn a_late_attach_that_fails_is_a_loss_and_the_run_goes_on() {
+        let (whole, whole_reads) = clocked("whole");
+        let mut slots = vec![
+            Slot::Attached(whole),
+            Slot::Waiting(Box::new(Handing {
+                collector: Err("the tracepoint went away".to_owned()),
+                spin_ns: 0,
+                at_exec: false,
+            })),
+        ];
+        let mut paces = vec![pace_ms(10), Pace::UNSET];
+        let plans = [Plan::default(), Plan::of(Some("20ms..".parse().unwrap()))];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(None, poll_ms(10)),
+            windowed(Some("20ms.."), poll_ms(10)),
+        ]);
+        let deadline_ns = spending.opened_ns + 100_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            until(deadline_ns),
+        );
+        assert_eq!(driven.stopped_because, "the deadline");
+        assert!(matches!(slots[1], Slot::Missed));
+        assert!(!driven.watched[1].attached);
+        let lost = &driven.losses[1];
+        assert!(!lost.is_clean(), "an empty window is not a clean one");
+        assert!(
+            lost.reasons
+                .keys()
+                .any(|reason| reason.contains("mem.rss") && reason.contains("went away")),
+            "the loss names the source and the reason: {lost:?}"
+        );
+        assert!(*whole_reads.borrow().last().unwrap() >= deadline_ns);
+    }
+
+    /// A counter that would follow only threads started after it is not
+    /// attached late to a process that already has others: the window's loss
+    /// says why, rather than a count of one thread passing for the process.
+    ///
+    /// Ground truth is this test process, which `cargo test` runs with several
+    /// threads -- and one the test starts itself, so that it has more than one
+    /// whatever the harness does.
+    #[test]
+    fn a_counter_blind_to_running_threads_is_not_attached_late_to_a_threaded_target() {
+        struct Inheriting;
+        impl Prepared for Inheriting {
+            fn follows_only_later_threads(&self) -> Option<&'static str> {
+                Some("a per-task counter follows threads from its open")
+            }
+            fn attach(self: Box<Self>, _: &Target) -> Result<Box<dyn Collector>, String> {
+                panic!("attached to a target whose threads it cannot see");
+            }
+        }
+        let (stop, parked) = std::sync::mpsc::channel::<()>();
+        let helper = std::thread::spawn(move || {
+            let _ = parked.recv();
+        });
+        let own = Target::Pid(vec![std::process::id() as i32]);
+        let refusal = blind_to_running_threads(&Inheriting, &own);
+        drop(stop);
+        helper.join().unwrap();
+        let refusal = refusal.expect("this process has threads the counter would miss");
+        assert!(
+            refusal.contains("threads") && refusal.contains(&std::process::id().to_string()),
+            "{refusal}"
+        );
+
+        // A collector that does not follow by inheritance is not asked.
+        let (collector, _) = clocked("procfs");
+        let plain = Handing {
+            collector: Ok(collector),
+            spin_ns: 0,
+            at_exec: false,
+        };
+        assert_eq!(blind_to_running_threads(&plain, &own), None);
+    }
+
+    /// A collector that counts its own losses reports them over its window,
+    /// the first tick's included, like every other loss.
+    #[test]
+    fn a_detached_collector_s_losses_are_its_own() {
+        struct Lossy(CollectorId);
+        impl Collector for Lossy {
+            fn id(&self) -> &CollectorId {
+                &self.0
+            }
+            fn value_attr(&self) -> &'static str {
+                "count"
+            }
+            fn sample(&mut self, _: u64) -> Result<Vec<Event>, SampleError> {
+                Ok(Vec::new())
+            }
+            fn losses(&self) -> Losses {
+                Losses {
+                    dropped: 7,
+                    ..Losses::default()
+                }
+            }
+        }
+        let (whole, _) = clocked("whole");
+        let mut slots = vec![
+            Slot::Attached(whole),
+            Slot::Waiting(Box::new(Handing {
+                collector: Ok(Box::new(Lossy(CollectorId::new("lossy")))),
+                spin_ns: 0,
+                at_exec: false,
+            })),
+        ];
+        let mut paces = vec![pace_ms(10), Pace::UNSET];
+        let plans = [
+            Plan::default(),
+            Plan::of(Some("10ms..40ms".parse().unwrap())),
+        ];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(None, poll_ms(10)),
+            windowed(Some("10ms..40ms"), poll_ms(10)),
+        ]);
+        let deadline_ns = spending.opened_ns + 80_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            until(deadline_ns),
+        );
+        assert_eq!(driven.losses[1].dropped, 7);
+        assert_eq!(driven.losses[0].dropped, 0, "and nobody else's");
+    }
+
+    /// A run whose every request has a window that closes needs no duration:
+    /// it ends when the last of them has closed.
+    #[test]
+    fn a_run_ends_when_every_window_has_closed() {
+        let (first, _) = clocked("first");
+        let (second, _) = clocked("second");
+        let mut slots = vec![Slot::Attached(first), Slot::Attached(second)];
+        let mut paces = vec![pace_ms(10), pace_ms(10)];
+        let plans = [
+            Plan::of(Some("..30ms".parse().unwrap())),
+            Plan::of(Some("..60ms".parse().unwrap())),
+        ];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(Some("..30ms"), poll_ms(10)),
+            windowed(Some("..60ms"), poll_ms(10)),
+        ]);
+        let opened_ns = spending.opened_ns;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            || None,
+        );
+        let ended_ms = (monotonic_ns() - opened_ns) / 1_000_000;
+        assert_eq!(driven.stopped_because, "every request's window had closed");
+        assert!(
+            (60..500).contains(&ended_ms),
+            "the run ends at the last window's close, {ended_ms} ms in"
+        );
+        assert!(driven.watched[0].closed_ns < driven.watched[1].closed_ns);
+    }
+
+    /// The two windows a collector cannot honour are refused before the run,
+    /// by name, with whose gap each one is.
+    #[test]
+    fn a_window_its_collector_or_mode_cannot_honour_is_refused_by_name() {
+        let at_exec = |window: &str| {
+            let (collector, _) = clocked("shim");
+            let prepared = Handing {
+                collector: Ok(collector),
+                spin_ns: 0,
+                at_exec: true,
+            };
+            window_honoured(&windowed(Some(window), poll_ms(10)), &prepared)
+        };
+        for window in ["1s..", "..1s"] {
+            match at_exec(window) {
+                Err(error @ CollectError::Window { .. }) => {
+                    let message = error.to_string();
+                    assert_eq!(error.whose(), Whose::Build, "{message}");
+                    assert!(
+                        message.contains("mem.rss") && message.contains("at exec"),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected a refusal of `{window}`, got {other:?}"),
+            }
+        }
+
+        let (collector, _) = clocked("procfs");
+        let prepared = Handing {
+            collector: Ok(collector),
+            spin_ns: 0,
+            at_exec: false,
+        };
+        let snapshot = windowed(Some("1s..2s"), crate::request::Mode::Snapshot);
+        match window_honoured(&snapshot, &prepared) {
+            Err(error) => {
+                assert_eq!(error.whose(), Whose::Request);
+                assert!(error.to_string().contains("single read"), "{error}");
+            }
+            Ok(()) => panic!("a snapshot with a stop was accepted"),
+        }
+        assert!(
+            window_honoured(
+                &windowed(Some("1s.."), crate::request::Mode::Snapshot),
+                &prepared
+            )
+            .is_ok(),
+            "a late snapshot is one read taken late, which is fine"
+        );
+
+        match window_inside_the_run(&windowed(Some("500ms..2s"), poll_ms(10)), 1_000_000_000) {
+            Err(error) => {
+                assert_eq!(error.whose(), Whose::Request);
+                assert!(error.to_string().contains("2s"), "{error}");
+            }
+            Ok(()) => panic!("a window past the run's duration was accepted"),
+        }
+    }
+
+    /// The whole runner, on a real source: a request with a window reports a
+    /// span that is its own, and every event it produced falls inside it.
+    ///
+    /// Ground truth is the clock the test reads around the run: the run lasts
+    /// its duration, and the window is where the session put it inside that.
+    #[test]
+    fn a_windowed_request_s_collection_states_its_own_window() {
+        let mut whole = windowed(None, poll_ms(20));
+        whole.request.duration = Some("400ms".parse().unwrap());
+        let mut late = windowed(Some("100ms..250ms"), poll_ms(20));
+        late.request.duration = Some("400ms".parse().unwrap());
+        let collections = run_all(&[whole, late]).expect("the run completes");
+        let (whole, late) = (&collections[0], &collections[1]);
+
+        eprintln!(
+            "whole run {} ms, window {} ms from {} ms in, {} and {} readings",
+            whole.observed_ns / 1_000_000,
+            late.observed_ns / 1_000_000,
+            (late.window.opened_ns - late.window.run_opened_ns) / 1_000_000,
+            whole.events.len(),
+            late.events.len()
+        );
+        assert_eq!(whole.window.opened_ns, whole.window.run_opened_ns);
+        assert_eq!(late.window.run_opened_ns, whole.window.run_opened_ns);
+        assert!(whole.observed_ns >= 400_000_000);
+        // Each end is where it was asked or a round after it, so the span is
+        // the asked 150 ms give or take the lateness of either end -- and far
+        // from the run's 400.
+        let into_run = |ns: u64| ns - late.window.run_opened_ns;
+        assert!(
+            into_run(late.window.opened_ns) >= 100_000_000
+                && into_run(late.window.closed_ns) >= 250_000_000,
+            "the window is placed where it was asked: {:?}",
+            late.window
+        );
+        assert!(
+            (120_000_000..300_000_000).contains(&late.observed_ns),
+            "a window of 150 ms observed {} ns",
+            late.observed_ns
+        );
+        assert_eq!(late.observed_ns, late.window.span_ns());
+        assert!(!late.events.is_empty());
+        assert!(
+            late.events
+                .iter()
+                .all(|event| late.window.contains(event.ts_ns)),
+            "every event of a windowed request is inside its window"
+        );
+        assert!(
+            late.stopped_because.contains("window closed"),
+            "{}",
+            late.stopped_because
+        );
+        assert!(late.overhead.wall_ns < whole.overhead.wall_ns);
     }
 }

@@ -1,0 +1,36 @@
+# A kernel probe loaded while the program runs, and what it cannot see.
+#
+#   omn -f examples/attach-late-probe.yml
+#
+# `sched.wakeup` is an eBPF program on a raw tracepoint. Attached at 1 s it is
+# loaded into the kernel while the target is already running, and that load is
+# part of the run: the result's notes say when it was attached and how long the
+# attach took, and the cost line beside it is over its own window.
+#
+# The program sleeps twenty times, pauses, then sleeps twenty times more. The
+# late probe sees the wakeup that ends the pause and the twenty after it, and
+# nothing of the twenty before: it was not there. The one beside it, attached at
+# the gate, sees all of them. A wakeup that happened before a source was
+# attached is outside that source's window, which is not the same as not having
+# happened -- and a join across it has to say which of the two it is.
+#
+# It needs `CAP_BPF` and `CAP_PERFMON` on the binary, which `make` grants.
+name: a probe attached late
+format: text
+
+requests:
+  - label: attached at 1s
+    source: sched.wakeup
+    target: &program
+      launch: [python3, -c, "import time\nfor _ in range(20): time.sleep(0.01)\ntime.sleep(1.5)\nfor _ in range(20): time.sleep(0.01)"]
+    mode: trace
+    emit: [summary]
+    keys: [task]
+    window: 1s..
+
+  - label: the whole run
+    source: sched.wakeup
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task]

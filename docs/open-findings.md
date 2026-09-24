@@ -6134,3 +6134,156 @@ No other stream of the ninth wave owns either file. Two sessions were added,
 `examples/vertical-one-request.yml` and `examples/vertical-abandoned.yml`;
 their rows for `examples/README.md` and `GUIDE.md` are at the end of
 `docs/scenarios/vertical.md`.
+
+## Needs from another stream — the tenth wave, stream H (hot attach)
+
+A request's `window` (`1s..3s`, `1s..`, `..2s`) is attached and detached by
+the runner while the rest of the run goes on; every `Collection` carries the
+span it watched as `collect::Watched`. `docs/scenarios/attach.md` is the
+record. What that layer cannot finish from its own files:
+
+### To whoever owns `src/join.rs`: a `to` event outside the `from` source's window
+
+Measured, not assumed (`tests/runner.rs`,
+`a_join_across_a_detached_source_does_not_count_what_fell_after_it_as_a_loss`,
+ignored until this lands). `sched.wakeup` detached at 1 s, `sched.switches` for
+the whole run, a program with 40 sleeps before the detach and 25 after: the
+join says **67 matched, 0 unmatched**. The last wakeup it saw before the detach
+stays open, and every block after the detach is credited to it
+(`task:0 (idle) -> task`, 63 matches, `still_open`). That is worse than a loss:
+it is a stale state standing in for wakeups the run stopped watching. For
+`interval` and `eq` the same shape holds -- a range opened before the detach
+can no longer be closed, so it matches forever.
+
+Wanted, on `Correlation`:
+
+```rust
+/// Downstream events stamped outside the `from` source's window: before it
+/// was attached or after it was detached. Neither matched against a state
+/// nor counted as unmatched -- the run was not watching for what would have
+/// opened or closed one.
+#[serde(default, skip_serializing_if = "is_zero_u64")]
+pub outside_window: u64,
+```
+
+and an entry point that takes the windows, with `apply` kept as the whole-run
+case:
+
+```rust
+/// `apply`, knowing when each source was watching. `windows` maps an event
+/// kind (a source id) to the span its collection reports; a kind absent from
+/// it was watched for the whole run.
+pub fn apply_within(
+    rule: &Rule,
+    events: &[Event],
+    windows: &BTreeMap<String, crate::collect::Watched>,
+) -> Result<Correlation, JoinError>;
+```
+
+Inside it: a `to` event with `!windows[rule.from].contains(ts)` goes to
+`outside_window` and is not looked up; states still open when the `from`
+window closes are closed there, and counted apart from `expired`. Two requests
+of one source with different windows are the one case a map by kind cannot
+say; refuse that rule by name rather than taking the union.
+
+### To whoever owns `src/main.rs` (stream T this wave): pass the windows to the join
+
+In `measure`, where `join::apply(rule, &merged)` is called: build the map from
+the collections before they are consumed --
+
+```rust
+let windows: BTreeMap<String, collect::Watched> = collections
+    .iter()
+    .zip(resolved)
+    .map(|(collection, resolved)| (resolved.request.source.to_string(), collection.window))
+    .collect();
+```
+
+-- and call `join::apply_within(rule, &merged, &windows)` once it exists.
+
+### To whoever owns `src/emit.rs`: the window on `Results`
+
+`Collection::observed_ns` is already the request's own span, so `rate` is
+already over the window (a source attached for two seconds of ten has a rate
+over two). What a document cannot say yet is *where* the window was. Wanted,
+on `Results`, copied in `aggregate` from `collection.window`:
+
+```rust
+/// When this request was watching, inside the run: its own window when the
+/// request carried one, the run's otherwise.
+#[serde(default)]
+pub window: crate::collect::Watched,
+```
+
+Until it lands the placement reaches the reader only as a note -- "watched
+only from 1.500 s into the run, as its window asked: attaching it took 26.5us
+while the target ran" -- which `render.rs` prints under `degraded:`, and as the
+collection's `stopped_because` -- "its window closed: detached 2.000 s into the
+run, as asked".
+
+### To whoever owns `src/collect/cpu/counters.rs`: say what a late counter cannot see
+
+The largest thing this stream found. A per-task counter follows a process by
+inheritance, and inheritance is from the open: attached at the launch gate it
+follows every thread the program will ever start, and attached by a window to
+a program that already runs a second thread it counts the thread it was
+opened on and nothing else. Measured: a window over a phase that retires
+2,000,000,000 instructions on libtest's test thread counted **106,206**, with
+no loss and no note (`tests/runner.rs`,
+`a_counter_attached_late_counts_the_threads_already_running_or_says_it_cannot`,
+ignored until this lands).
+
+The runner already acts on a declaration: `Prepared::follows_only_later_threads`
+(in `src/collect/mod.rs`, default `None`). When it answers, and the target has
+more than one entry in `/proc/<pid>/task` at the attach, the window is not
+attached and its loss says why. Wanted, on `counters.rs`'s `Prepare` (and on
+any other per-task perf collector that inherits -- `cpu.profile`,
+`sched.switches` and `mem.faults` are worth checking):
+
+```rust
+fn follows_only_later_threads(&self) -> Option<&'static str> {
+    Some("a per-task counter follows a process by inheritance, from the moment it is opened")
+}
+```
+
+The better fix is in the collector: open one counter per entry of
+`/proc/<pid>/task` at the attach, and inherit from each. Then the declaration
+goes, and the ignored scenario passes on its first branch.
+
+### To whoever owns `src/cli.rs` (stream T this wave): `--window`
+
+The session file has it; the command line does not. In the request builder at
+`cli.rs:377`, which now carries `window: None`:
+
+```rust
+/// When, inside the run, this request is attached and detached: `1s..3s`,
+/// `1s..` or `..2s`. Absent is the whole run.
+#[arg(long, value_name = "START..STOP")]
+window: Option<omn::request::Window>,
+```
+
+and `window: args.window` in the literal. `Window` implements `FromStr` with
+the refusals a session file gives (a window that closes before it opens, `..`
+on its own), so the two surfaces refuse the same things in the same words.
+`man/omn.1` would want the same line.
+
+### To everyone who writes a `Request` literal: `window: None`
+
+`Request` gained `window: Option<Window>`. The five literals outside this
+stream's files -- `src/cli.rs`, `src/resolve.rs`, `src/render.rs`,
+`src/validate.rs`, `tests/catalog_model.rs` -- got one line each, `window:
+None`, because the build does not compile without it; nothing else in those
+files changed. Stream T's new `src/triage/` builds requests and will need the
+same line in each literal it adds.
+
+### To the coordinator: `DECISIONS.md`'s concurrent-requests line, and the indexes
+
+The line *"One request per run, for now -- a session with several is refused
+... concurrent attach is the honest fix, and it lands with hot attach"* has not
+described the code for several waves: a session runs any number of requests in
+one window, one workload beside any number of machine targets, and this wave
+gives each its own window inside it. What is still refused is two
+*workloads*, and hot attach does not change why -- whose exit ends the run,
+which program a launch means, and what an overhead is a percentage of each
+still have two answers. The line wants rewriting to say that. The two sessions
+this stream added have their rows at the end of `docs/scenarios/attach.md`.

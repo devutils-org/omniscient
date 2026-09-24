@@ -182,6 +182,76 @@ target = {pid = [4242]}
         }
     }
 
+    /// A window is part of the request, so it survives the dump: the file
+    /// and the command line build the same `Request`, and a dumped session is
+    /// the one that was run.
+    #[test]
+    fn a_window_survives_a_round_trip_through_every_format() {
+        const WINDOWED: &str = r#"
+duration: 3s
+requests:
+  - label: first phase
+    source: cpu.instructions
+    target: {launch: [./two-phases]}
+    mode: count
+    window: ..1s
+  - label: second phase
+    source: cpu.instructions
+    target: {launch: [./two-phases]}
+    mode: count
+    window: 1500ms..
+  - label: in between
+    source: cpu.instructions
+    target: {launch: [./two-phases]}
+    mode: count
+    window: 1s..1500ms
+  - label: whole
+    source: cpu.instructions
+    target: {launch: [./two-phases]}
+    mode: count
+"#;
+        let session = parse(InputFormat::Yaml, WINDOWED);
+        let windows: Vec<String> = session
+            .requests
+            .iter()
+            .map(|request| {
+                request
+                    .window
+                    .map(|window| window.to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(windows, ["..1s", "1500ms..", "1s..1500ms", ""]);
+        for format in [OutputFormat::Yaml, OutputFormat::Json, OutputFormat::Toml] {
+            let text = format.serialize_document(&session).expect("serializing");
+            let input = match format {
+                OutputFormat::Yaml => InputFormat::Yaml,
+                OutputFormat::Json => InputFormat::Json,
+                OutputFormat::Toml => InputFormat::Toml,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                parse(input, &text),
+                session,
+                "round trip through {format} changed a window:\n{text}"
+            );
+        }
+        // A request with no window says nothing about one: a session written
+        // before hot attach dumps as it did.
+        let text = OutputFormat::Yaml.serialize_document(&session).unwrap();
+        assert_eq!(text.matches("window:").count(), 3, "{text}");
+    }
+
+    #[test]
+    fn a_malformed_window_is_refused_where_it_is_written() {
+        let text = "requests: [{source: io.latency, target: system, mode: trace, window: 3s..1s}]";
+        let error = InputFormat::Yaml.parse::<Session>(text).unwrap_err();
+        assert!(
+            error.message().contains("closes before it opens"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn an_unknown_field_in_a_session_is_refused_rather_than_ignored() {
         let text = "requests: [{source: io.latency, target: system, mode: trace, emitt: [hist]}]";
