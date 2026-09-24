@@ -486,11 +486,27 @@ fn a_workload_that_is_half_blocked_measures_as_half_blocked() {
     );
 
     // And the wakeups are still two per round trip, which is what makes this
-    // workload reusable for the `sched.wakeup -> sched.offcpu` crossing.
-    let wakeups = events_seen(labelled(&results, "released-by"));
+    // workload reusable for the `sched.wakeup -> sched.offcpu` crossing: one
+    // for each of the two tasks, the driver and the responder, which are the
+    // two heaviest wakees. Not the run's total, which a busy machine inflates:
+    // a wakeup made from an interrupt that landed on the driver's cpu is
+    // credited to the driver as its waker, and a full suite put 3862 and 5496
+    // there for 1200 while the pair still had its 600 each (filed).
+    let pair: u64 = outputs(labelled(&results, "released-by"), "topk")
+        .flat_map(|output| {
+            output["series"]
+                .as_array()
+                .expect("a ranking carries series")
+                .iter()
+                .take(2)
+                .filter_map(|series| series["events"].as_u64())
+                .collect::<Vec<_>>()
+        })
+        .sum();
     assert!(
-        close_to(wakeups, 2 * HALF_BLOCKED_ROUND_TRIPS),
-        "a round trip is two wakeups, so {HALF_BLOCKED_ROUND_TRIPS} of them are {}, saw {wakeups}",
+        close_to(pair, 2 * HALF_BLOCKED_ROUND_TRIPS),
+        "a round trip wakes each of the two tasks once, so {HALF_BLOCKED_ROUND_TRIPS} of them \
+         are {} between the pair, saw {pair}",
         2 * HALF_BLOCKED_ROUND_TRIPS
     );
 }

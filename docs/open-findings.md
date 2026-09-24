@@ -6983,3 +6983,30 @@ file cannot). Wanted, per backend, what the program carries:
 and `placement()` then reports `Kernel` for a predicate over those fields
 alone, `Userspace` otherwise -- a change to `src/resolve.rs` once the field
 exists. Stream S did not guess the list from the collectors' code.
+
+---
+
+## 48. A wakeup made from an interrupt is credited to the task it interrupted
+
+Found chasing `a_workload_that_is_half_blocked_measures_as_half_blocked`,
+which failed in four full runs and passed alone. `sched.wakeup` keeps a wakeup
+when its waker or its wakee belongs to the target, and takes the waker from
+`bpf_get_current_pid_tgid` -- which, for a wakeup performed from a hard or soft
+interrupt, is whatever task the interrupt landed on. On a machine running a
+full suite, the interrupts landing on the target's cpu wake disk and network
+and timer work, and every one of those wakeups is attributed to the target as
+its waker.
+
+Reproduced on purpose: the half-blocked workload alone gives 1208 wakeups; with
+loopback datagrams and direct I/O raising interrupts beside it, 1384 -- the
+driver and the responder still at 605 and 602, and the extra 180 spread over
+55 wakees outside the target. A full suite put 3862 and 5496 there. The
+scenario now asserts the pair's wakeups, which is the workload's property, and
+this is filed because the tool's attribution is wrong, not the test's count.
+
+Wanted, in `src/bpf/wakeup.rs`: a wakeup in interrupt context does not name
+the interrupted task as its waker -- read `preempt_count` (the per-cpu
+`__preempt_count` on x86, through `bpf_this_cpu_ptr` of its ksym) and, under
+`HARDIRQ_MASK | SOFTIRQ_MASK`, record the waker as the interrupt (tid 0 with a
+flag) and keep the event only when its wakee is the target's. The `wakeup` join
+already has a vocabulary for a chain that starts in the kernel.
