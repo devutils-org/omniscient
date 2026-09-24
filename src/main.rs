@@ -3,6 +3,7 @@
 //! Everything here is dispatch and exit codes. The work lives in the library,
 //! which is also what a future API would call.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -767,8 +768,28 @@ fn measure(
         served_by.push(serving);
     }
 
+    // When each source was watching, for the joins across a window. Two
+    // requests of one source are merged by their union: the validator has
+    // refused a join from a source whose requests asked for different
+    // windows, so what is left differs only by when each was attached.
+    let mut windows: BTreeMap<String, collect::Watched> = BTreeMap::new();
+    for results in &run.results {
+        windows
+            .entry(results.source.clone())
+            .and_modify(
+                |watched| match (watched.attached, results.window.attached) {
+                    (_, false) => {}
+                    (false, true) => *watched = results.window,
+                    (true, true) => {
+                        watched.opened_ns = watched.opened_ns.min(results.window.opened_ns);
+                        watched.closed_ns = watched.closed_ns.max(results.window.closed_ns);
+                    }
+                },
+            )
+            .or_insert(results.window);
+    }
     for rule in &session.joins {
-        run.joins.push(join::apply(rule, &merged)?);
+        run.joins.push(join::apply_within(rule, &merged, &windows)?);
     }
     // The served requests rather than the session's: a budget can lower a
     // sampling rate, and a sample stands for the period it was taken at.

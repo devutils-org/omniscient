@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Catalog, MatchKind, Unit};
+use crate::collect::Watched;
 use crate::emit::{Results, Shortfall, TOTAL_OF_ATTR, WEIGHT_ATTR};
 use crate::event::{AttrValue, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -266,6 +267,17 @@ pub enum JoinError {
          `sched.switches`"
     )]
     DrainedTotal { id: String, to: String },
+    #[error(
+        "rule `{id}` joins from `{from}`, which this session collects twice with different \
+         windows ({windows}): a state opened by one request and an event outside the other's \
+         window cannot be told apart, and taking the union would claim the source watched \
+         when one of them was detached. Give both requests the same window, or join from one"
+    )]
+    WindowsDisagree {
+        id: String,
+        from: String,
+        windows: String,
+    },
     #[error("decomposition `{id}` {reason}")]
     Decomposition { id: String, reason: String },
 }
@@ -311,6 +323,13 @@ pub struct Correlation {
     /// them.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub keyless: u64,
+    /// Downstream events stamped outside the `from` source's window: before it
+    /// was attached or after it was detached. Neither matched against a state
+    /// nor counted as unmatched -- the run was not watching for what would have
+    /// opened or closed one, and a wakeup the run did not see is not a wakeup
+    /// that did not happen.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub outside_window: u64,
     pub states: StateStats,
     /// The heaviest attributions, most matched first.
     pub top: Vec<Attribution>,
@@ -351,8 +370,8 @@ pub struct Readings {
 /// The lifecycle of open states, which is where a join engine leaks if it does.
 ///
 /// Every state that opened ends exactly once, so `opened` equals `closed` plus
-/// `expired` plus `overflowed` plus `still_open`. A run where it does not is an
-/// engine dropping attributions on the floor.
+/// `expired` plus `overflowed` plus `window_closed` plus `still_open`. A run
+/// where it does not is an engine dropping attributions on the floor.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateStats {
     pub opened: u64,
@@ -368,6 +387,15 @@ pub struct StateStats {
     /// Evicted because the map was full. A non-zero count means attributions
     /// are missing, not that nothing matched.
     pub overflowed: u64,
+    /// Ended because the `from` source was detached while they were open.
+    ///
+    /// Counted apart from `expired`, which is a state outliving the rule's own
+    /// window: this is the run no longer watching for whatever would have
+    /// ended or replaced the state, and keeping it open would credit every
+    /// later event to a state the run could not see end -- the stale wakeup
+    /// that took 63 blocks after its source came off.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub window_closed: u64,
     /// Still open when the run ended.
     pub still_open: u64,
     pub peak_open: u64,
@@ -434,6 +462,8 @@ pub enum Outcome {
     Closed,
     Expired,
     Overflowed,
+    /// Open when the `from` source was detached.
+    WindowClosed,
     StillOpen,
 }
 
@@ -538,6 +568,19 @@ impl<K: Ord + Clone> States<K> {
                 self.stats.expired += 1;
                 finish(&mut self.finished, state, None, Outcome::Expired);
             }
+        }
+    }
+
+    /// Ends every open state at the instant the `from` source was detached.
+    fn window_closed(&mut self, closed_ns: u64) {
+        self.stats.window_closed += self.open.len() as u64;
+        for (_, state) in std::mem::take(&mut self.open) {
+            finish(
+                &mut self.finished,
+                state,
+                Some(closed_ns),
+                Outcome::WindowClosed,
+            );
         }
     }
 
@@ -654,6 +697,25 @@ pub fn check(rule: &Rule) -> Result<(), JoinError> {
 /// wakeup join onto a drained total runs, matches, and reports WAKEUP.
 pub fn check_in(rule: &Rule, requests: &[Request], catalog: &Catalog) -> Result<(), JoinError> {
     check(rule)?;
+    // [`apply_within`] reads one window per source. Two requests of the
+    // `from` source watching different spans are the one case that cannot
+    // say, and it is known from the session alone.
+    let windows: BTreeSet<String> = requests
+        .iter()
+        .filter(|request| request.source.as_str() == rule.from)
+        .map(|request| {
+            request
+                .window
+                .map_or_else(|| "the whole run".to_owned(), |window| window.to_string())
+        })
+        .collect();
+    if windows.len() > 1 {
+        return Err(JoinError::WindowsDisagree {
+            id: rule.id.clone(),
+            from: rule.from.clone(),
+            windows: windows.into_iter().collect::<Vec<_>>().join(", "),
+        });
+    }
     let onto = requests
         .iter()
         .filter(|request| request.source.as_str() == rule.to);
@@ -699,9 +761,30 @@ pub fn check_in(rule: &Rule, requests: &[Request], catalog: &Catalog) -> Result<
     }
 }
 
-/// Applies one rule to a stream of events, in timestamp order.
+/// Applies one rule to a stream of events, in timestamp order, every source
+/// having watched for the whole run.
 pub fn apply(rule: &Rule, events: &[Event]) -> Result<Correlation, JoinError> {
+    apply_within(rule, events, &BTreeMap::new())
+}
+
+/// `apply`, knowing when each source was watching. `windows` maps an event
+/// kind (a source id) to the span its collection reports; a kind absent from
+/// it was watched for the whole run.
+///
+/// Only the `from` source's window changes the answer. A `to` event outside it
+/// is counted in `outside_window` and not looked up: whatever would have
+/// opened or closed a state for it happened, or did not, while the run was not
+/// looking. And a state still open when the `from` window closes ends there,
+/// counted in `window_closed`, because every event after it would otherwise be
+/// credited to the last state the run saw open -- a wakeup from before the
+/// detach standing in for every wakeup after it.
+pub fn apply_within(
+    rule: &Rule,
+    events: &[Event],
+    windows: &BTreeMap<String, Watched>,
+) -> Result<Correlation, JoinError> {
     check(rule)?;
+    let mut watch = Watch::of(rule, windows);
 
     // Two streams merge here, and at an equal timestamp the order decides the
     // answer: an allocation has to be open before a fault inside it can be
@@ -711,22 +794,86 @@ pub fn apply(rule: &Rule, events: &[Event]) -> Result<Correlation, JoinError> {
     let mut ordered: Vec<&Event> = events.iter().collect();
     ordered.sort_by_key(|event| (event.ts_ns, u8::from(event.kind != rule.from)));
 
-    match rule.match_kind {
-        MatchKind::Interval => interval(rule, &ordered),
-        MatchKind::Eq | MatchKind::ScopedEq => keyed(rule, &ordered),
-        MatchKind::Wakeup => wakeup(rule, &ordered),
-        MatchKind::Between => between(rule, &ordered),
+    let mut correlation = match rule.match_kind {
+        MatchKind::Interval => interval(rule, &ordered, &mut watch),
+        MatchKind::Eq | MatchKind::ScopedEq => keyed(rule, &ordered, &mut watch),
+        MatchKind::Wakeup => wakeup(rule, &ordered, &mut watch),
+        MatchKind::Between => between(rule, &ordered, &mut watch),
+    }?;
+    correlation.outside_window = watch.outside;
+    Ok(correlation)
+}
+
+/// When the `from` source was watching, as one match walks the stream.
+struct Watch {
+    /// Absent when it watched the whole run, which is every join without a
+    /// window and the only case `apply` knows.
+    from: Option<Watched>,
+    /// The latest any source of the run was still watching. A `from` window
+    /// that closed before it closed before the run ended, and the states it
+    /// left open end at its close even when no event came after it.
+    run_closed_ns: u64,
+    /// The states open at the `from` window's close have been ended.
+    cut: bool,
+    outside: u64,
+}
+
+impl Watch {
+    fn of(rule: &Rule, windows: &BTreeMap<String, Watched>) -> Self {
+        Self {
+            from: windows.get(&rule.from).copied(),
+            run_closed_ns: windows
+                .values()
+                .map(|watched| watched.closed_ns)
+                .max()
+                .unwrap_or(0),
+            cut: false,
+            outside: 0,
+        }
+    }
+
+    /// Ends the states still open once the stream has passed the `from`
+    /// window's close. The rule's own expiry is applied up to the close
+    /// first, so a state that outlived the rule's window before the detach
+    /// is counted as expired and not as cut.
+    fn advance<K: Ord + Clone>(&mut self, ts_ns: u64, states: &mut States<K>) {
+        match self.from {
+            Some(from) if !self.cut && ts_ns > from.closed_ns => {
+                states.expire(from.closed_ns);
+                states.window_closed(from.closed_ns);
+                self.cut = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a `to` event fell outside the `from` window, counting it.
+    fn outside(&mut self, ts_ns: u64) -> bool {
+        let outside = self.from.is_some_and(|from| !from.contains(ts_ns));
+        self.outside += u64::from(outside);
+        outside
+    }
+
+    /// The end of the stream: a `from` window that closed before the run did
+    /// ends its states at its close, whether or not anything came after it.
+    fn finish<K: Ord + Clone>(&mut self, states: &mut States<K>) {
+        if let Some(from) = self.from {
+            if from.closed_ns < self.run_closed_ns {
+                self.advance(u64::MAX, states);
+            }
+        }
     }
 }
 
 /// An address inside a range: the match that attributes a page fault to the
 /// allocation that owns the page.
-fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+fn interval(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let mut states: States<u64> = States::new(rule);
     let (mut matched, mut unmatched) = (0u64, 0u64);
 
     for event in events {
+        watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
@@ -754,6 +901,9 @@ fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
 
         if event.kind == rule.to {
+            if watch.outside(event.ts_ns) {
+                continue;
+            }
             let Some(KeyValue::Mem { base: address, .. }) = event.key(rule.via) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
@@ -780,6 +930,7 @@ fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
+    watch.finish(&mut states);
     Ok(with_keyless(
         assemble(rule, matched, unmatched, states),
         keyless,
@@ -794,13 +945,14 @@ fn interval(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 /// arrives after its request was freed and the pointer reissued carries the
 /// scope of the request it belongs to, so under `scoped_eq` it does not match
 /// and is counted; under `eq` it lands on a stranger.
-fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let scoped = rule.match_kind == MatchKind::ScopedEq;
     let mut states: States<String> = States::new(rule);
     let (mut matched, mut unmatched) = (0u64, 0u64);
 
     for event in events {
+        watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
@@ -833,6 +985,9 @@ fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
 
         if event.kind == rule.to {
+            if watch.outside(event.ts_ns) {
+                continue;
+            }
             let Some(key) = event.key(rule.via) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
@@ -854,6 +1009,7 @@ fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
+    watch.finish(&mut states);
     Ok(with_keyless(
         assemble(rule, matched, unmatched, states),
         keyless,
@@ -869,7 +1025,7 @@ fn keyed(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 /// whatever task they interrupted, so a waker can be a task that had nothing to
 /// do with it, and a waker of zero is the idle task rather than a task at all.
 /// The evidence level says so, and the chain names what it found.
-fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let Some(attr) = rule.waker.as_deref() else {
         return Err(JoinError::NoWakerAttribute {
@@ -882,6 +1038,7 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
     let (mut matched, mut unmatched) = (0u64, 0u64);
 
     for event in events {
+        watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
@@ -913,6 +1070,9 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
 
         if event.kind == rule.to {
+            if watch.outside(event.ts_ns) {
+                continue;
+            }
             // The catalog's `drained` refuses this before the run for the
             // sources it names; this is the same refusal for a source whose
             // entry does not say so, found on the first event that shows it.
@@ -939,6 +1099,7 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
+    watch.finish(&mut states);
     Ok(with_keyless(
         assemble(rule, matched, unmatched, states),
         keyless,
@@ -963,7 +1124,7 @@ fn wakeup(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
 /// interval is the finest thing the clock can tell apart -- splitting a change
 /// between four states that opened in it would be inventing a precision the
 /// evidence does not have.
-fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
+fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let Some(attr) = rule.value.as_deref() else {
         return Err(JoinError::NoValueAttribute {
@@ -989,6 +1150,7 @@ fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
     };
 
     for event in events {
+        watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
@@ -1012,6 +1174,9 @@ fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
 
         if event.kind == rule.to {
+            if watch.outside(event.ts_ns) {
+                continue;
+            }
             let Some(key) = event.key(rule.via) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
@@ -1084,6 +1249,7 @@ fn between(rule: &Rule, events: &[&Event]) -> Result<Correlation, JoinError> {
         }
     }
 
+    watch.finish(&mut states);
     let mut correlation = assemble_with(rule, matched, unmatched, states, intervals);
     correlation.keyless = keyless;
     correlation.readings = Some(readings);
@@ -1246,6 +1412,7 @@ fn assemble_with<K: Ord + Clone>(
         matched,
         unmatched,
         keyless: 0,
+        outside_window: 0,
         states: stats,
         top: finished,
         total_attributed,
@@ -1512,6 +1679,13 @@ pub struct Part {
     /// should not read as the other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<String>,
+    /// The key the row's value was carried through before it reached the
+    /// decomposition's `by`: `sock` for a row the socket's cookie tied to the
+    /// request. The row is rated the weaker of the two keys -- a request's id
+    /// read back off a socket some other thread's program stamped is as good
+    /// as the socket, not as the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<KeyKind>,
 }
 
 impl Part {
@@ -1801,6 +1975,13 @@ pub fn check_decomposition(
                     decomposition.by, part.from
                 )));
             }
+            if let Some(via) = part.via.filter(|via| !entry.keys.contains(via)) {
+                return Err(refuse(format!(
+                    "reads {what} through `{via}`, which `{}` does not carry: a row cannot be \
+                     rated by a key its events never had",
+                    part.from
+                )));
+            }
         }
     }
     Ok(())
@@ -1883,13 +2064,23 @@ pub fn decompose(
     // Each row's events, per key, in time order.
     let mut per_key: BTreeMap<String, ()> = BTreeMap::new();
     let mut read_parts: Vec<Readout> = Vec::new();
+    // The span the run watched, to tell a source that watched all of it from
+    // one a window narrowed: only the first can say a key it never saw had
+    // nothing to see.
+    let run_closed_ns = results
+        .iter()
+        .map(|result| result.window.closed_ns)
+        .max()
+        .unwrap_or(0);
     for part in &decomposition.parts {
-        let readout = Readout::new(
+        let mut readout = Readout::new(
             &part.measure(),
             decomposition.by,
             served(&part.from),
             events,
+            run_closed_ns,
         );
+        readout.via = part.via;
         per_key.extend(readout.keys().map(|key| (key, ())));
         read_parts.push(readout);
     }
@@ -1899,6 +2090,7 @@ pub fn decompose(
             decomposition.by,
             served(&measure.from),
             events,
+            run_closed_ns,
         )),
         Whole::Span(_) => None,
     };
@@ -2077,9 +2269,18 @@ struct Readout<'a> {
     poll_ns: Option<f64>,
     /// Per key, the events in time order.
     events: BTreeMap<String, Vec<&'a Event>>,
-    /// Whether any event of the source carried each attribute: a row that
-    /// finds none reads as missing rather than as zero.
+    /// Whether any event of the source carried each attribute, before the
+    /// part's filter: a row that finds none reads as missing rather than as
+    /// zero. Counted before the filter because a filter that kept nothing is
+    /// the source answering, not the source unable to.
     carried: bool,
+    /// The keys the source produced any event for, before the part's filter.
+    seen: BTreeSet<String>,
+    /// The part asked for a subset of the source's events.
+    filtered: bool,
+    /// Why a key the source produced nothing for cannot be read as zero, when
+    /// it cannot: the source lost events, or watched less than the run.
+    absent_is_not_zero: Option<String>,
     short: Option<Shortfall>,
     collected: bool,
     /// The key the rows are read by. A request identity is propagated -- the
@@ -2088,6 +2289,9 @@ struct Readout<'a> {
     /// other key is shared by two sides without being carried from one to the
     /// other, which is KEY.
     by: KeyKind,
+    /// The key the value was carried through before it reached `by`; the row
+    /// is rated the weaker of the two.
+    via: Option<KeyKind>,
 }
 
 impl<'a> Readout<'a> {
@@ -2096,6 +2300,7 @@ impl<'a> Readout<'a> {
         by: KeyKind,
         served: Option<(&Request, &Results)>,
         events: &'a [Event],
+        run_closed_ns: u64,
     ) -> Self {
         let (source, value, less) = (
             measure.from.as_str(),
@@ -2104,11 +2309,8 @@ impl<'a> Readout<'a> {
         );
         let (reading, filter) = (measure.reading, measure.filter.as_ref());
         let mut per_key: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
-        let mut ordered: Vec<&Event> = events
-            .iter()
-            .filter(|event| event.kind == source)
-            .filter(|event| filter.is_none_or(|predicate| crate::filter::matches(predicate, event)))
-            .collect();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut ordered: Vec<&Event> = events.iter().filter(|event| event.kind == source).collect();
         ordered.sort_by_key(|event| event.ts_ns);
         let mut carried = value == SAMPLES;
         let mut records = 0u64;
@@ -2121,9 +2323,14 @@ impl<'a> Readout<'a> {
                 let has_less = less.is_none_or(|less| event.attr(less).is_some());
                 carried |= has_value && has_less;
             }
-            if let Some(key) = event.key(by) {
-                per_key.entry(key.to_string()).or_default().push(event);
+            let Some(key) = event.key(by) else {
+                continue;
+            };
+            let key = key.to_string();
+            if filter.is_none_or(|predicate| crate::filter::matches(predicate, event)) {
+                per_key.entry(key.clone()).or_default().push(event);
             }
+            seen.insert(key);
         }
 
         let (kind, period_ns, poll_ns) = match served.map(|(request, _)| request.mode) {
@@ -2144,6 +2351,9 @@ impl<'a> Readout<'a> {
             _ => reading.unwrap_or(Reading::Delta),
         };
         let short = served.and_then(|(_, result)| Shortfall::of(&result.losses, records, many));
+        let absent_is_not_zero = served.and_then(|(_, result)| {
+            absent_is_not_zero(source, result, short.as_ref(), run_closed_ns)
+        });
 
         Self {
             source: source.to_owned(),
@@ -2156,9 +2366,13 @@ impl<'a> Readout<'a> {
             poll_ns,
             events: per_key,
             carried,
+            seen,
+            filtered: filter.is_some(),
+            absent_is_not_zero,
             short,
             collected: served.is_some(),
             by,
+            via: None,
         }
     }
 
@@ -2178,6 +2392,10 @@ impl<'a> Readout<'a> {
                 ),
                 None => format!("no `{}` event carried `{}`", self.source, self.value),
             })
+        } else if events.is_empty() && !(self.filtered && self.seen.contains(key)) {
+            // The source had nothing at all for this key. That is a zero only
+            // from a source that watched the whole run and lost nothing.
+            self.absent_is_not_zero.clone()
         } else {
             None
         };
@@ -2199,6 +2417,19 @@ impl<'a> Readout<'a> {
         };
         let (amount, note) = if missing.is_some() {
             (None, None)
+        } else if events.is_empty() {
+            (
+                Some(0.0),
+                Some(if self.seen.contains(key) {
+                    "no event of this key passed the filter".to_owned()
+                } else {
+                    format!(
+                        "no `{}` event of this key, from a source that watched the whole run \
+                         and lost nothing",
+                        self.source
+                    )
+                }),
+            )
         } else if self.value == SAMPLES {
             let period = self.period_ns.unwrap_or(0.0);
             (
@@ -2237,10 +2468,9 @@ impl<'a> Readout<'a> {
             source: self.source.to_owned(),
             value: self.value.to_owned(),
             kind: self.kind,
-            evidence: Some(if self.by == KeyKind::Req {
-                Evidence::Identity
-            } else {
-                Evidence::Key
+            evidence: Some(match self.via {
+                Some(via) => rate(self.by).min(rate(via)),
+                None => rate(self.by),
             }),
             amount,
             resolution,
@@ -2251,6 +2481,58 @@ impl<'a> Readout<'a> {
             named: None,
         }
     }
+}
+
+/// What a row read by one key is worth: a propagated request identity is
+/// IDENTITY, every other key KEY -- the same ladder `evidence` gives a join.
+fn rate(key: KeyKind) -> Evidence {
+    if key == KeyKind::Req {
+        Evidence::Identity
+    } else {
+        Evidence::Key
+    }
+}
+
+/// Why a key a source produced no event for cannot be read as a zero, or
+/// `None` when it can.
+///
+/// A source that watched the whole run and lost nothing, and saw nothing of a
+/// key, measured that key doing nothing -- a task that never blocked has no
+/// off-cpu row, and its blocked time is zero, not unknown. A lossy source may
+/// have lost exactly that key's events, and one a window narrowed was not
+/// watching for part of the run; neither can say the same, and a zero from
+/// either would be a measurement of what it did not see.
+fn absent_is_not_zero(
+    source: &str,
+    result: &Results,
+    short: Option<&Shortfall>,
+    run_closed_ns: u64,
+) -> Option<String> {
+    let window = result.window;
+    if window == Watched::default() {
+        return Some(format!(
+            "no `{source}` event of this key, and the run did not say when `{source}` was \
+             watching, so its absence is not a zero"
+        ));
+    }
+    if !window.attached {
+        return Some(format!(
+            "no `{source}` event of this key: `{source}` was never attached"
+        ));
+    }
+    if window.opened_ns > window.run_opened_ns || window.closed_ns < run_closed_ns {
+        return Some(format!(
+            "no `{source}` event of this key, and `{source}` watched only part of the run, so \
+             its absence is not a zero"
+        ));
+    }
+    if short.is_some() || !result.losses.is_clean() {
+        return Some(format!(
+            "no `{source}` event of this key, and `{source}` lost events, so its absence is not \
+             a zero"
+        ));
+    }
+    None
 }
 
 fn period_label(period_ns: f64) -> String {
@@ -2319,7 +2601,11 @@ mod tests {
         let states = &correlation.states;
         assert_eq!(
             states.opened,
-            states.closed + states.expired + states.overflowed + states.still_open,
+            states.closed
+                + states.expired
+                + states.overflowed
+                + states.window_closed
+                + states.still_open,
             "a state opened and never ended: {states:?}"
         );
         assert!(
@@ -3561,5 +3847,310 @@ mod tests {
                 spec
             );
         }
+    }
+
+    // -- joins across a window ---------------------------------------------
+
+    /// A span of the run, from `opened_ns` to `closed_ns`, in a run that
+    /// opened at zero.
+    fn watched(opened_ns: u64, closed_ns: u64) -> Watched {
+        Watched {
+            run_opened_ns: 0,
+            opened_ns,
+            closed_ns,
+            attached: true,
+            attach_ns: None,
+        }
+    }
+
+    /// The run model of `tests/runner.rs`'s scenario, with its numbers: forty
+    /// sleeps while `sched.wakeup` is attached, the detach, twenty-five after
+    /// it. Before this, the last wakeup stayed open and took every block after
+    /// the detach -- 65 matched, 0 unmatched, one chain `still open`.
+    #[test]
+    fn a_join_across_a_detached_source_counts_what_fell_after_it_apart() {
+        let mut events = Vec::new();
+        for i in 0..40u64 {
+            events.push(woken(1_000 + i * 10, 100, 99));
+            events.push(switched(1_005 + i * 10, 100));
+        }
+        for i in 0..25u64 {
+            events.push(switched(5_000 + i * 10, 100));
+        }
+        let windows = BTreeMap::from([
+            ("sched.wakeup".to_owned(), watched(0, 2_000)),
+            ("sched.switches".to_owned(), watched(0, 9_000)),
+        ]);
+
+        let whole = apply(&wakeup_rule(), &events).unwrap();
+        assert_eq!(
+            (whole.matched, whole.outside_window),
+            (65, 0),
+            "the defect, kept as the contrast"
+        );
+
+        let within = apply_within(&wakeup_rule(), &events, &windows).unwrap();
+        assert_eq!(within.matched, 40);
+        assert_eq!(within.unmatched, 0);
+        assert_eq!(within.outside_window, 25);
+        assert_eq!(within.states.window_closed, 1, "{:?}", within.states);
+        assert_eq!(within.states.still_open, 0);
+        assert_eq!(within.states.expired, 0, "a detach is not an expiry");
+        assert_eq!(within.top[0].outcome, Outcome::WindowClosed);
+        assert_eq!(within.top[0].closed_ns, Some(2_000));
+        states_balance(&within);
+    }
+
+    /// A downstream event before the `from` source was attached is outside its
+    /// window too, and a state open at a detach with nothing after it still
+    /// ends there when the run went on past it.
+    #[test]
+    fn a_window_that_opens_late_and_closes_early_bounds_both_ends() {
+        let events = vec![
+            switched(100, 7),
+            woken(1_000, 7, 3),
+            switched(1_100, 7),
+            woken(1_500, 8, 3),
+        ];
+        let windows = BTreeMap::from([
+            ("sched.wakeup".to_owned(), watched(900, 2_000)),
+            ("sched.switches".to_owned(), watched(0, 3_000)),
+        ]);
+        let correlation = apply_within(&wakeup_rule(), &events, &windows).unwrap();
+        assert_eq!(
+            (
+                correlation.matched,
+                correlation.unmatched,
+                correlation.outside_window
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(correlation.states.window_closed, 2, "both tasks' wakeups");
+        states_balance(&correlation);
+
+        // The same stream, the source watching until the run's end: nothing
+        // was detached, so what is open at the end is open at the end.
+        let windows = BTreeMap::from([
+            ("sched.wakeup".to_owned(), watched(900, 3_000)),
+            ("sched.switches".to_owned(), watched(0, 3_000)),
+        ]);
+        let correlation = apply_within(&wakeup_rule(), &events, &windows).unwrap();
+        assert_eq!(correlation.states.window_closed, 0);
+        assert_eq!(correlation.states.still_open, 2);
+    }
+
+    /// The other matches keep the lifecycle across a detach: an `eq` state
+    /// open at the detach does not take what follows, and a range opened
+    /// before it cannot be freed after it, so matches nothing more.
+    #[test]
+    fn every_match_kind_ends_its_states_at_the_detach() {
+        let rule = eq_rule();
+        let events = vec![threads(10, 7), descriptors(20, 7), descriptors(40, 7)];
+        let windows = BTreeMap::from([(rule.from.clone(), watched(0, 30))]);
+        let keyed = apply_within(&rule, &events, &windows).unwrap();
+        assert_eq!((keyed.matched, keyed.outside_window), (1, 1));
+        assert_eq!(keyed.states.window_closed, 1);
+        states_balance(&keyed);
+
+        let rule = self::rule();
+        let events = vec![
+            allocation(10, 0x1000, 0x100, "alloc"),
+            fault(20, 0x1010),
+            fault(40, 0x1020),
+        ];
+        let windows = BTreeMap::from([(rule.from.clone(), watched(0, 30))]);
+        let ranged = apply_within(&rule, &events, &windows).unwrap();
+        assert_eq!((ranged.matched, ranged.outside_window), (1, 1));
+        assert_eq!(ranged.states.window_closed, 1);
+        states_balance(&ranged);
+    }
+
+    /// Two requests of the `from` source that watch different spans cannot
+    /// be one window, and the rule is refused by name before the run.
+    #[test]
+    fn a_join_from_a_source_collected_twice_with_different_windows_is_refused() {
+        let mut early = request("sched.wakeup", "trace");
+        early.window = Some("..1s".parse().unwrap());
+        let late = request("sched.wakeup", "trace");
+        let requests = [early.clone(), late, request("sched.switches", "trace")];
+        let error = check_in(&wakeup_rule(), &requests, &catalog()).unwrap_err();
+        assert!(
+            matches!(error, JoinError::WindowsDisagree { .. }),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("..1s") && message.contains("the whole run"),
+            "{message}"
+        );
+
+        let requests = [early.clone(), early, request("sched.switches", "trace")];
+        check_in(&wakeup_rule(), &requests, &catalog()).expect("one window, said twice");
+    }
+
+    // -- the decomposition: the key a row was read through, and the zeroes --
+
+    fn watched_result(source: &str, unit: Unit, window: Watched) -> Results {
+        let mut result = result(source, unit, window.span_ns());
+        result.window = window;
+        result
+    }
+
+    fn by_state<'a>(table: &'a Breakdown, state: &str) -> &'a Row {
+        table
+            .rows
+            .iter()
+            .find(|row| row.state == state)
+            .unwrap_or_else(|| panic!("no row `{state}`: {table:?}"))
+    }
+
+    /// A row carried through the socket to the request's id is worth the
+    /// socket, not the id: KEY under `by: req`, where a row read off the
+    /// serving thread is IDENTITY.
+    #[test]
+    fn a_row_read_through_another_key_is_rated_by_the_weaker() {
+        let spec = decomposition(
+            "{id: r, by: req, whole: {from: net.request, value: span_ns}, parts: [\
+               {state: cpu_on, from: net.request, value: oncpu_ns},\
+               {state: net_rx, from: net.request, value: net_rx_ns, via: sock}]}",
+        );
+        let requests = [request("net.request", "trace")];
+        check_decomposition(&spec, &requests, &catalog()).expect("net.request carries sock");
+        let results = [watched_result("net.request", Unit::Ns, watched(0, 100))];
+        let events = vec![Event {
+            keys: vec![KeyValue::Req {
+                id: "a001".to_owned(),
+            }],
+            ..total(
+                5,
+                "net.request",
+                7,
+                vec![
+                    Attr::uint("span_ns", 30),
+                    Attr::uint("oncpu_ns", 10),
+                    Attr::uint("net_rx_ns", 20),
+                ],
+            )
+        }];
+        let table = &decompose(&spec, &requests, &results, &events).tables[0];
+        assert_eq!(by_state(table, "cpu_on").evidence, Some(Evidence::Identity));
+        assert_eq!(by_state(table, "net_rx").evidence, Some(Evidence::Key));
+        assert_eq!(table.residue, Some(0.0), "rating a row changes no amount");
+
+        let refused = refused(
+            "{id: r, by: req, whole: window, parts: [\
+               {state: x, from: net.request, value: net_rx_ns, via: blk}]}",
+            &requests,
+        );
+        assert!(refused.contains("through `blk`"), "{refused}");
+    }
+
+    /// The source ran, lost nothing and had events for the key, and none of
+    /// them passed the part's filter: a measured zero, and the row says how it
+    /// knows. Before, the filter emptied the source and every row, parts and
+    /// residue read `not read`.
+    #[test]
+    fn a_filtered_part_that_matched_nothing_is_a_zero() {
+        let spec = decomposition(
+            "{id: t, whole: window, parts: [\
+               {state: disk, from: sched.offcpu, value: total_ns, \
+                filter: \"state == 'uninterruptible'\"},\
+               {state: sleep, from: sched.offcpu, value: total_ns, \
+                filter: \"state == 'sleeping'\"}]}",
+        );
+        let requests = [request("sched.offcpu", "trace")];
+        let results = [watched_result("sched.offcpu", Unit::Ns, watched(0, 100))];
+        let events = vec![total(
+            5,
+            "sched.offcpu",
+            7,
+            vec![Attr::uint("total_ns", 40), Attr::text("state", "sleeping")],
+        )];
+        let table = &decompose(&spec, &requests, &results, &events).tables[0];
+        let disk = by_state(table, "disk");
+        assert_eq!(disk.amount, Some(0.0), "{disk:?}");
+        assert_eq!(disk.missing, None);
+        assert!(
+            disk.note.as_deref().unwrap_or_default().contains("filter"),
+            "{disk:?}"
+        );
+        assert_eq!(by_state(table, "sleep").amount, Some(40.0));
+        assert_eq!(table.parts, Some(40.0));
+        assert_eq!(table.residue, Some(60.0));
+    }
+
+    /// The decision for a key the source saw nothing of at all: a zero from a
+    /// source that watched the whole run and lost nothing, and `not read` from
+    /// one that lost events, watched part of the run, or cannot say when it
+    /// watched -- each with its reason.
+    #[test]
+    fn a_key_a_source_never_saw_is_a_zero_only_from_a_clean_source_that_watched_it_all() {
+        let spec = decomposition(
+            "{id: t, whole: window, parts: [\
+               {state: on-cpu, from: cpu.profile, value: samples},\
+               {state: blocked, from: sched.offcpu, value: total_ns}]}",
+        );
+        let requests = [
+            request("cpu.profile", "sample@1000hz"),
+            request("sched.offcpu", "trace"),
+        ];
+        // Task 8 ran and never blocked; task 7 blocked, so the source is
+        // known to carry `total_ns`.
+        let events = vec![
+            total(1, "cpu.profile", 8, vec![Attr::uint("count", 1)]),
+            total(2, "sched.offcpu", 7, vec![Attr::uint("total_ns", 5)]),
+        ];
+        let blocked_of_8 = |offcpu: Results| {
+            let results = [
+                watched_result("cpu.profile", Unit::Count, watched(0, 100)),
+                offcpu,
+            ];
+            let output = decompose(&spec, &requests, &results, &events);
+            let table = output
+                .tables
+                .iter()
+                .find(|table| table.key == "task:8")
+                .expect("task 8 has a table")
+                .clone();
+            by_state(&table, "blocked").clone()
+        };
+
+        let clean = blocked_of_8(watched_result("sched.offcpu", Unit::Ns, watched(0, 100)));
+        assert_eq!(clean.amount, Some(0.0), "{clean:?}");
+        assert!(
+            clean
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("whole run"),
+            "{clean:?}"
+        );
+
+        let mut lossy = watched_result("sched.offcpu", Unit::Ns, watched(0, 100));
+        lossy.losses.dropped = 3;
+        let lossy = blocked_of_8(lossy);
+        assert_eq!(lossy.amount, None);
+        assert!(
+            lossy
+                .missing
+                .as_deref()
+                .unwrap_or_default()
+                .contains("lost"),
+            "{lossy:?}"
+        );
+
+        let narrowed = blocked_of_8(watched_result("sched.offcpu", Unit::Ns, watched(0, 60)));
+        assert_eq!(narrowed.amount, None);
+        assert!(
+            narrowed
+                .missing
+                .as_deref()
+                .unwrap_or_default()
+                .contains("part of the run"),
+            "{narrowed:?}"
+        );
+
+        let unknown = blocked_of_8(result("sched.offcpu", Unit::Ns, 100));
+        assert_eq!(unknown.amount, None, "unknown never counts as available");
     }
 }

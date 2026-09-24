@@ -1194,3 +1194,84 @@ fn a_program_s_life_is_a_whole_its_three_states_account_for() {
          resolution: residue {residue} ns against {resolution} ns\n{table}"
     );
 }
+
+// ------------------------------------- a filtered part that matched nothing
+
+/// A part whose filter nothing can pass is a measured zero, and the table
+/// still adds up.
+///
+/// The program sleeps 300 ms and exits, so no block of it can outlast its
+/// life, and a part that keeps only blocks longer than 1000 s keeps none --
+/// known from the program, not from the tool. `sched.offcpu` ran, lost
+/// nothing, and had events for the task; the filter kept none of them. Before
+/// the eleventh wave the row read `not read` -- the filter had emptied the
+/// source, so the engine concluded no event carried `total_ns` -- and took
+/// `parts` and the residue with it, which is what made every residue of
+/// `omn latency`'s split by state `not read`.
+///
+/// Checked against the same clock: the unfiltered row holds the sleep, at
+/// least the 300 ms the program asked for, and at most its life.
+#[test]
+fn a_filtered_part_that_matched_nothing_is_a_zero_and_the_table_adds_up() {
+    const SESSION: &str = "\
+name: a part nothing can pass
+format: json
+requests:
+  - source: sched.offcpu
+    target: {launch: [/bin/sleep, '0.3']}
+    mode: trace
+    emit: [summary]
+decompose:
+  - id: blocked
+    whole: lifetime
+    parts:
+      - {state: blocked, from: sched.offcpu, value: total_ns}
+      - {state: impossible, from: sched.offcpu, value: total_ns, filter: 'total_ns > 1000000000000'}
+";
+    let output = written_session(SESSION, &["--input-format", "yaml"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() && machine_cannot_serve(&said) {
+        eprintln!(
+            "SKIPPED: this machine cannot serve `sched.offcpu`, so the zero it would have \
+             checked -- a part keeping blocks longer than the program lived -- is not checked: \
+             {said}"
+        );
+        return;
+    }
+    assert!(output.status.success(), "{said}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("{error}: {said}"));
+    let losses = &document["results"][0]["losses"];
+    let table = &document["decompositions"][0]["tables"][0];
+    let rows = rows(table);
+    let life = number(&table["whole"]["amount"]);
+
+    let impossible = rows["impossible"];
+    assert_eq!(
+        impossible["amount"].as_f64(),
+        Some(0.0),
+        "no block outlasts a {life} ns life, and the row says so rather than `not read` \
+         (losses {losses}): {table}"
+    );
+    assert!(impossible.get("missing").is_none(), "{table}");
+    assert!(
+        impossible["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("passed the filter"),
+        "the row says how it knows: {table}"
+    );
+
+    let blocked = number(&rows["blocked"]["amount"]);
+    assert!(
+        (300e6..=life).contains(&blocked),
+        "the program slept 300 ms of its {life} ns life, and the unfiltered row holds {blocked} \
+         ns: {table}"
+    );
+    assert_eq!(
+        table["parts"].as_f64(),
+        Some(blocked),
+        "the zero adds to the parts instead of taking them away: {table}"
+    );
+    assert!(table["residue"].as_f64().is_some(), "{table}");
+}

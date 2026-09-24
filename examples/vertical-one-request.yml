@@ -47,9 +47,9 @@
 #
 # `net_rx` and `net_tx` are read by the socket's cookie -- the descriptor the
 # probes pass -- because nothing on the receive or the transmit path runs in
-# the serving thread. They are KEY, and the table prints them IDENTITY until a
-# part can say which key it was read through: filed in docs/open-findings.md,
-# stream N, where two lines of this file take `via: sock` when it lands.
+# the serving thread. `via: sock` on the two parts says so, and the table rates
+# each the weaker of its two keys: KEY, where the four rows read off the serving
+# thread are IDENTITY.
 #
 # `block-io` opens the last row. Its whole is that same uninterruptible wait,
 # and its one part is the device's time for every block request carrying this
@@ -103,12 +103,12 @@ decompose:
     by: req
     whole: {from: net.request, value: span_ns}
     parts:
-      - {state: net_rx, from: net.request, value: net_rx_ns}
+      - {state: net_rx, from: net.request, value: net_rx_ns, via: sock}
       - {state: cpu_on, from: net.request, value: oncpu_ns}
       - {state: sched_wait, from: net.request, value: runq_ns}
       - {state: lock_wait, from: net.request, value: sleep_ns, names: holder_tid}
       - {state: block_io, from: net.request, value: disk_ns}
-      - {state: net_tx, from: net.request, value: net_tx_ns}
+      - {state: net_tx, from: net.request, value: net_tx_ns, via: sock}
     top: 5
 
   - id: block-io
