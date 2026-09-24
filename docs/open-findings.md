@@ -6665,3 +6665,16 @@ so up to 3 MiB of a `mem.rss` read beside a preload source is the ring: a
 caveat for `catalog/mem.yaml` (stream S's this wave) and `catalog/sched.yaml`.
 And the bench's heap rows in `docs/bench.md` predate the ring; one rerun of
 `OMN_BENCH_ONLY=mem.heap scripts/bench.sh backends` replaces them.
+
+### For the flaky tally: two more, seen at load 20 during the eleventh wave
+
+Both failed once in a `--no-fail-fast` run while the four stream agents ran
+their own suites (load average 20 over 24 cpus), and both passed alone on the
+first rerun:
+
+- `per_cpu_utilisation_reports_one_series_for_each_core_asked_for`
+- `what_the_signal_ring_could_not_hold_is_counted_and_closes_against_what_was_sent`
+
+The same run also failed `collect::tests::what_a_run_reports_spending_is_the_cpu_it_actually_burned`
+(power 5, already in the tally) and `an_overflowing_wakeup_ring_says_what_it_could_not_hold`
+(`docs/fixes/stacks.md`, already there).
