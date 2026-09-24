@@ -93,12 +93,22 @@ pub fn factories() -> Vec<Factory> {
                 filter: resolved.request.filter.clone(),
             }))
         }),
-        // A request the server declared, followed in the task serving it.
+        // A request the server declared, followed in the task serving it --
+        // and, on the first backend, on the socket it named.
         Factory::new("net.request", "bpf:usdt", |resolved| {
             Ok(Box::new(request::Prepare {
                 mode: resolved.request.mode,
                 target: resolved.request.target.clone(),
                 filter: resolved.request.filter.clone(),
+                sockets: true,
+            }))
+        }),
+        Factory::new("net.request", "bpf:usdt:threads", |resolved| {
+            Ok(Box::new(request::Prepare {
+                mode: resolved.request.mode,
+                target: resolved.request.target.clone(),
+                filter: resolved.request.filter.clone(),
+                sockets: false,
             }))
         }),
         Factory::new("net.capture", "af_packet", |_| {

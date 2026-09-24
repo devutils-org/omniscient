@@ -60,6 +60,16 @@
 //! states then tile the request's life exactly, and a missed switch -- the
 //! kernel skips a program re-entered on its own cpu -- shows up as an
 //! `anomalies` count rather than as a number that looks right.
+//!
+//! ## And the socket on either side of the life
+//!
+//! When the probes pass a second argument, the connection's descriptor, the
+//! request also has the two network rows of the roadmap's tree: `net_rx`, from
+//! its first byte reaching the socket, and `net_tx`, to its last byte leaving
+//! it. Neither runs in the serving thread, so they are read by the socket's
+//! cookie rather than by the id, and a sleep on that socket inside the life is
+//! routed out of the four states' `sleep_ns` into their own. `request_net.rs`,
+//! a child of this file, has the programs and the reasoning.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::OnceLock;
@@ -70,6 +80,9 @@ use super::map::{map_failure, Counters, Hash, TaskStorage};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_RINGBUF};
 use super::usdt::{Operand, Site};
+
+#[path = "request_net.rs"]
+mod net;
 
 // ------------------------------------------------------------- helpers
 
@@ -108,8 +121,22 @@ const S_HOLDER_TID: i16 = 80;
 const S_BLOCKS: i16 = 84;
 const S_PREEMPTED: i16 = 88;
 const S_ANOMALIES: i16 = 92;
+/// Which of its socket's waits the task is in right now -- `net::WAIT_RX`,
+/// `net::WAIT_TX` -- or zero. Written by the socket programs in
+/// `request_net.rs`.
+const S_NETWAIT: i16 = 96;
+/// `S_NETWAIT` as it was at the last switch-out.
+const S_OFF_NET: i16 = 100;
+/// Sleeps inside the life that were the request's socket's: waiting for the
+/// rest of the request, and waiting for room to send the response.
+const S_RXWAIT: i16 = 104;
+const S_TXWAIT: i16 = 112;
+/// The socket the probes named, by cookie, and when its first byte arrived.
+const S_COOKIE: i16 = 120;
+const S_FIRST_BYTE: i16 = 128;
+const S_NET_FLAGS: i16 = 136;
 /// The size of the value, stated once for the map and for the programs.
-pub(crate) const STORAGE_BYTES: usize = 96;
+pub(crate) const STORAGE_BYTES: usize = 144;
 
 /// The one task-storage map a run's programs share.
 ///
@@ -205,9 +232,25 @@ pub struct RequestRecord {
     /// switched without this program seeing it. Their time is in no state.
     pub anomalies: u32,
     pad: u32,
+    /// The socket the probes named, by cookie; zero when they named none or it
+    /// could not be followed.
+    pub cookie: u64,
+    /// When the request's first byte reached that socket, before the birth.
+    pub first_byte_ns: u64,
+    /// Sleeps inside the life on the socket: for the rest of the request, and
+    /// for room to send the response.
+    pub rx_wait_ns: u64,
+    pub tx_wait_ns: u64,
+    /// When the last byte queued by the end left the stack: the end's own
+    /// moment when it had already, a drain record's when it had not, zero
+    /// while it is still waited for.
+    pub drained_ns: u64,
+    /// What of the socket was followed: `NET_*` in `request_net.rs`.
+    pub net_flags: u32,
+    pad2: u32,
 }
 
-const RECORD_BYTES: usize = 120;
+const RECORD_BYTES: usize = 168;
 
 const R_ID: i16 = 0;
 const R_BORN: i16 = 8;
@@ -226,6 +269,12 @@ const R_FLAGS: i16 = 84;
 const R_DECLARED: i16 = 88;
 const R_COMM: i16 = 96;
 const R_ANOMALIES: i16 = 112;
+const R_COOKIE: i16 = 120;
+const R_FIRST_BYTE: i16 = 128;
+const R_RXWAIT: i16 = 136;
+const R_TXWAIT: i16 = 144;
+const R_DRAINED: i16 = 152;
+const R_NET_FLAGS: i16 = 160;
 
 impl RequestRecord {
     pub fn comm(&self) -> String {
@@ -239,6 +288,58 @@ impl RequestRecord {
 
     pub fn is_birth(&self) -> bool {
         self.flags & BORN != 0
+    }
+
+    /// A drain record: the transmit program's word that the response of the
+    /// request `id`, which ended at `done_ns`, left the stack at `drained_ns`.
+    pub fn is_drain(&self) -> bool {
+        self.flags & net::DRAINED != 0
+    }
+
+    /// The probes named a socket for this request.
+    pub fn declared_socket(&self) -> bool {
+        self.net_flags & net::NET_DECLARED != 0
+    }
+
+    /// Why the socket's first byte is not known, when it is not.
+    pub fn rx_unknown(&self) -> Option<&'static str> {
+        self.socket_unknown().or_else(|| {
+            (self.net_flags & net::NET_RX_UNSEEN != 0).then_some(
+                "its first byte was not seen: it arrived before the programs attached, with the \
+                 previous request's bytes, or its socket's entry was evicted",
+            )
+        })
+    }
+
+    /// Why the moment the response left the stack is not known, when it is not
+    /// and none is coming.
+    pub fn tx_unknown(&self) -> Option<&'static str> {
+        let own = if self.net_flags & net::NET_OTHER_SOCKET != 0 {
+            Some("the end named a different socket from the birth")
+        } else if self.net_flags & net::NET_TX_UNSEEN != 0 {
+            Some("its socket's entry was evicted before the end")
+        } else if self.cookie == 0 {
+            Some("the birth followed no socket")
+        } else {
+            None
+        };
+        self.socket_unknown().or(own)
+    }
+
+    /// The response is still in the stack, and a drain record will say when it
+    /// leaves.
+    pub fn tx_pending(&self) -> bool {
+        self.net_flags & net::NET_TX_PENDING != 0
+    }
+
+    fn socket_unknown(&self) -> Option<&'static str> {
+        if !self.declared_socket() {
+            Some("the probes name no socket")
+        } else if self.net_flags & net::NET_NO_SOCKET != 0 {
+            Some("the descriptor the probes named is not a socket")
+        } else {
+            None
+        }
     }
 
     /// Decodes one ring record. Reachable from the collector's tests, which
@@ -270,6 +371,13 @@ impl RequestRecord {
             comm,
             anomalies: word(R_ANOMALIES),
             pad: 0,
+            cookie: long(R_COOKIE),
+            first_byte_ns: long(R_FIRST_BYTE),
+            rx_wait_ns: long(R_RXWAIT),
+            tx_wait_ns: long(R_TXWAIT),
+            drained_ns: long(R_DRAINED),
+            net_flags: word(R_NET_FLAGS),
+            pad2: 0,
         })
     }
 }
@@ -288,7 +396,14 @@ const TID: i16 = KEY0 - 4;
 const WAKER: i16 = TID - 4;
 const DROP_KEY: i16 = WAKER - 4;
 const SLEEPER_VALUE: i16 = DROP_KEY - 16;
-const _: () = assert!(SLEEPER_VALUE >= -512);
+/// The descriptor a probe named, and the walk from it to a socket.
+const ARG1: i16 = SLEEPER_VALUE - 8;
+const SOCK_KEY: i16 = ARG1 - 8;
+const FILE_PTR: i16 = SOCK_KEY - 8;
+const SEQ: i16 = FILE_PTR - 4;
+const LIMIT: i16 = SEQ - 4;
+const SOCK_VALUE: i16 = LIMIT - net::SOCKET_BYTES as i16;
+const _: () = assert!(SOCK_VALUE >= -512);
 
 /// A sleeper entry: the wakeup that ended a blocked stretch, and who made it.
 const SLEEPER_WAKE_TS: i16 = 0;
@@ -338,6 +453,8 @@ struct Maps {
     sleepers: i32,
     ring: i32,
     counters: i32,
+    /// The socket map and the walk to it, when the network rows are followed.
+    sockets: Option<(i32, net::Offsets)>,
 }
 
 fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
@@ -441,12 +558,25 @@ fn settle(program: &mut Program, maps: Maps) {
         "uninterruptible",
         Insn::jset_imm(1, TASK_UNINTERRUPTIBLE, 0),
     );
+    // An interruptible sleep inside one of the socket's waits is the socket's:
+    // the rest of the request had not arrived, or the response had no room.
+    program.push(Insn::ldx(BPF_W, 1, 7, S_OFF_NET));
+    program.jump_to("rx_wait", Insn::jeq_imm(1, net::WAIT_RX, 0));
+    program.jump_to("tx_wait", Insn::jeq_imm(1, net::WAIT_TX, 0));
     accumulate(program, S_SLEEP, 8);
     program.push(Insn::ldx(BPF_DW, 1, 7, S_HOLDER_NS));
     program.jump_to("cleared", Insn::jge_reg(1, 8, 0));
     program.push(Insn::stx(BPF_DW, 7, S_HOLDER_NS, 8));
     program.push(Insn::ldx(BPF_W, 1, R10, WAKER));
     program.push(Insn::stx(BPF_W, 7, S_HOLDER_TID, 1));
+    program.jump_to("cleared", Insn::ja());
+
+    program.label("rx_wait");
+    accumulate(program, S_RXWAIT, 8);
+    program.jump_to("cleared", Insn::ja());
+
+    program.label("tx_wait");
+    accumulate(program, S_TXWAIT, 8);
     program.jump_to("cleared", Insn::ja());
 
     program.label("uninterruptible");
@@ -480,18 +610,35 @@ fn current_storage(program: &mut Program, maps: Maps, create: bool, absent: &'st
     program.push(Insn::mov64_reg(7, 0));
 }
 
-/// Reads a probe's first argument into `ARG0`, sign- or zero-extended.
+/// Reads a probe's first argument into `ARG0`, zero-extended.
 ///
 /// `r6` holds the probe's `pt_regs`. An argument the note describes in a form
 /// this cannot read is refused before the program loads: a request id read as
 /// zero would be every request's id.
 fn read_argument(program: &mut Program, btf: &Btf, site: &Site) -> Result<(), String> {
-    let Some(arg) = site.args.first() else {
+    if site.args.is_empty() {
         return Err(format!(
             "`{}` declares no argument, and the request's id is its first",
             site.qualified()
         ));
-    };
+    }
+    read_argument_at(program, btf, site, 0, ARG0)
+}
+
+/// Whether a site names the request's socket: a second argument.
+fn declares_socket(site: &Site) -> bool {
+    site.args.len() >= 2
+}
+
+/// Reads argument `index` of a probe into the stack at `into`.
+fn read_argument_at(
+    program: &mut Program,
+    btf: &Btf,
+    site: &Site,
+    index: usize,
+    into: i16,
+) -> Result<(), String> {
+    let arg = &site.args[index];
     let register = |member: &str| -> Result<i16, String> {
         let offset = btf.member_offset("pt_regs", member)?;
         i16::try_from(offset).map_err(|_| format!("`pt_regs.{member}` is at {offset}"))
@@ -510,32 +657,34 @@ fn read_argument(program: &mut Program, btf: &Btf, site: &Site) -> Result<(), St
             if size < 8 {
                 program.push(Insn::and64_imm(1, ((1u64 << (8 * size)) - 1) as i32));
             }
-            program.push(Insn::stx(BPF_DW, R10, ARG0, 1));
+            program.push(Insn::stx(BPF_DW, R10, into, 1));
         }
         Operand::Immediate(value) => {
             let value = i32::try_from(*value).map_err(|_| {
                 format!(
-                    "`{}` passes its id as the constant {value}, which is not a request id",
+                    "`{}` passes the constant {value}, which is neither a request id nor a \
+                     descriptor",
                     site.qualified()
                 )
             })?;
-            program.push(Insn::st_imm(BPF_DW, R10, ARG0, value));
+            program.push(Insn::st_imm(BPF_DW, R10, into, value));
         }
         Operand::Memory { base, offset } => {
             let offset = i32::try_from(*offset)
                 .map_err(|_| format!("`{}`: an offset of {offset}", site.qualified()))?;
-            program.push(Insn::st_imm(BPF_DW, R10, ARG0, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, into, 0));
             program.push(Insn::ldx(BPF_DW, 3, 6, register(base)?));
             program.push(Insn::add64_imm(3, offset));
             program.push(Insn::mov64_reg(1, R10));
-            program.push(Insn::add64_imm(1, ARG0 as i32));
+            program.push(Insn::add64_imm(1, into as i32));
             program.push(Insn::mov64_imm(2, i32::from(arg.size.clamp(1, 8))));
             program.push(Insn::call(PROBE_READ_USER));
         }
         Operand::Unreadable(why) => {
             return Err(format!(
-                "`{}` passes its id as `{}`, which this build cannot read: {why}",
+                "`{}` passes its {} as `{}`, which this build cannot read: {why}",
                 site.qualified(),
+                if index == 0 { "id" } else { "socket" },
                 arg.text
             ))
         }
@@ -586,6 +735,10 @@ fn birth_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, S
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
     read_argument(&mut program, btf, site)?;
+    let socket = maps.sockets.filter(|_| declares_socket(site));
+    if socket.is_some() {
+        read_argument_at(&mut program, btf, site, 1, ARG1)?;
+    }
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, NOW, 0));
     count_drop(&mut program, maps.counters, DROP_KEY, BIRTHS, "counted");
@@ -604,6 +757,9 @@ fn birth_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, S
     program.push(Insn::ldx(BPF_DW, 1, R10, NOW));
     program.push(Insn::stx(BPF_DW, 7, S_BORN, 1));
     program.push(Insn::stx(BPF_DW, 7, S_RUN_SINCE, 1));
+    if let Some((sockets, at)) = socket {
+        net::birth_socket(&mut program, &at, sockets);
+    }
 
     // A birth record, so that the request has an event at its start: a join
     // opening on the request needs one before the block requests it covers.
@@ -614,6 +770,12 @@ fn birth_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, S
     program.push(Insn::ldx(BPF_DW, 1, R10, NOW));
     program.push(Insn::stx(BPF_DW, R10, REC + R_BORN, 1));
     program.push(Insn::st_imm(BPF_W, R10, REC + R_FLAGS, BORN as i32));
+    program.push(Insn::ldx(BPF_DW, 1, 7, S_COOKIE));
+    program.push(Insn::stx(BPF_DW, R10, REC + R_COOKIE, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 7, S_FIRST_BYTE));
+    program.push(Insn::stx(BPF_DW, R10, REC + R_FIRST_BYTE, 1));
+    program.push(Insn::ldx(BPF_W, 1, 7, S_NET_FLAGS));
+    program.push(Insn::stx(BPF_W, R10, REC + R_NET_FLAGS, 1));
     publish(&mut program, maps, "done");
     program.jump_to("done", Insn::ja());
 
@@ -628,6 +790,10 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
     read_argument(&mut program, btf, site)?;
+    let socket = maps.sockets.filter(|_| declares_socket(site));
+    if socket.is_some() {
+        read_argument_at(&mut program, btf, site, 1, ARG1)?;
+    }
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, NOW, 0));
     // The task is on its cpu, so that cpu's last switch is its switch-in.
@@ -656,6 +822,10 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
         (S_SLEEP, R_SLEEP),
         (S_DISK, R_DISK),
         (S_HOLDER_NS, R_HOLDER_NS),
+        (S_COOKIE, R_COOKIE),
+        (S_FIRST_BYTE, R_FIRST_BYTE),
+        (S_RXWAIT, R_RXWAIT),
+        (S_TXWAIT, R_TXWAIT),
     ] {
         program.push(Insn::ldx(BPF_DW, 1, 7, from));
         program.push(Insn::stx(BPF_DW, R10, REC + to, 1));
@@ -665,6 +835,7 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
         (S_BLOCKS, R_BLOCKS),
         (S_PREEMPTED, R_PREEMPTED),
         (S_ANOMALIES, R_ANOMALIES),
+        (S_NET_FLAGS, R_NET_FLAGS),
     ] {
         program.push(Insn::ldx(BPF_W, 1, 7, from));
         program.push(Insn::stx(BPF_W, R10, REC + to, 1));
@@ -680,6 +851,14 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
     program.label("mismatch");
     program.push(Insn::st_imm(BPF_W, R10, REC + R_FLAGS, ID_MISMATCH as i32));
     program.label("same_id");
+    match socket {
+        Some((sockets, at)) => net::end_socket(&mut program, &at, sockets),
+        // A birth that named a socket and an end that does not: the drain is
+        // not followed, and the record says the probes named none.
+        None => {
+            program.push(Insn::st_imm(BPF_W, R10, REC + R_NET_FLAGS, 0));
+        }
+    }
 
     // The id leaves the task before the record is published, so nothing the
     // task does after its end is credited to it even if the ring is full.
@@ -721,6 +900,8 @@ fn switch_instructions(btf: &Btf, maps: Maps) -> Result<Vec<Insn>, String> {
 
     program.push(Insn::ldx(BPF_DW, 1, R10, NOW));
     program.push(Insn::stx(BPF_DW, 7, S_OFF_SINCE, 1));
+    program.push(Insn::ldx(BPF_W, 1, 7, S_NETWAIT));
+    program.push(Insn::stx(BPF_W, 7, S_OFF_NET, 1));
     program.push(Insn::ldx(BPF_DW, 1, 6, ARG_PREV_STATE));
     program.push(Insn::stx(BPF_W, 7, S_OFF_STATE, 1));
     program.jump_to("sleeping", Insn::jne_imm(1, 0, 0));
@@ -783,6 +964,9 @@ fn wakeup_instructions(btf: &Btf, maps: Maps) -> Result<Vec<Insn>, String> {
 /// The birth and end probes, attached for one process, and the scheduler
 /// programs that keep each request's clock.
 pub struct RequestProgram {
+    /// The socket programs, first so that they detach before the storage and
+    /// the ring they write into close.
+    net: Option<net::SocketPrograms>,
     ring: RingBuffer,
     counters: Counters,
     _sleepers: Hash,
@@ -805,11 +989,17 @@ fn load(prog_type: u32, attach: u32, instructions: &[Insn], name: &str) -> Resul
 impl RequestProgram {
     /// `starts` and `ends` are the sites of `request__start` and
     /// `request__done`; `pid` the process whose hits count.
+    ///
+    /// `sockets` says whether to follow the socket a probe names, and when it
+    /// is set a failure to attach the socket programs is the run's failure: the
+    /// resolver chose this backend because the kernel declared every function
+    /// they trace.
     pub fn load(
         starts: &[Site],
         ends: &[Site],
         pid: i32,
         requested_ring_bytes: usize,
+        sockets: bool,
     ) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let storage = storage()?;
@@ -823,13 +1013,32 @@ impl RequestProgram {
             .map_err(|error| map_failure("request sleeper map", error))?;
         let last_switch = syscall::map_create(BPF_MAP_TYPE_PERCPU_ARRAY, 4, 8, 1, "omn_req_switch")
             .map_err(|error| map_failure("per-cpu switch map", error))?;
+        // The socket programs are attached before any probe, so that a
+        // request's first byte is seen; and only when a probe names a socket,
+        // since they run on every TCP socket of the machine.
+        let wanted = sockets && starts.iter().chain(ends).any(declares_socket);
+        let net = if wanted {
+            let at = net::offsets()?;
+            let programs = net::SocketPrograms::attach(
+                storage.as_raw_fd(),
+                ring_map.as_raw_fd(),
+                counters.as_raw_fd(),
+            )?;
+            Some((programs, at))
+        } else {
+            None
+        };
         let maps = Maps {
             storage: storage.as_raw_fd(),
             last_switch: last_switch.as_raw_fd(),
             sleepers: sleepers.as_raw_fd(),
             ring: ring_map.as_raw_fd(),
             counters: counters.as_raw_fd(),
+            sockets: net
+                .as_ref()
+                .map(|(programs, at)| (programs.sockets.as_raw_fd(), *at)),
         };
+        let net = net.map(|(programs, _)| programs);
 
         let mut programs = Vec::new();
         let mut links = Vec::new();
@@ -869,14 +1078,6 @@ impl RequestProgram {
             (starts, birth_instructions, "omn_req_start"),
         ] {
             for site in sites {
-                if site.semaphore.is_some() {
-                    return Err(format!(
-                        "`{}` in {} is guarded by a semaphore, and this build attaches request \
-                         probes without raising one: the probe would never fire",
-                        site.qualified(),
-                        site.object.display()
-                    ));
-                }
                 let instructions = build(btf, site, maps)?;
                 let program = load(
                     syscall::BPF_PROG_TYPE_KPROBE,
@@ -888,7 +1089,10 @@ impl RequestProgram {
                     program.as_raw_fd(),
                     &site.object,
                     site.offset,
-                    None,
+                    // A probe behind a semaphore fires only while someone has
+                    // raised it; the kernel raises it for as long as the link
+                    // lives, in every process the link covers.
+                    site.semaphore.map(|semaphore| semaphore.offset),
                     pid,
                 )
                 .map_err(|error| match error.raw_os_error() {
@@ -910,6 +1114,7 @@ impl RequestProgram {
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the request ring buffer: {error}"))?;
         Ok(Self {
+            net,
             ring,
             counters,
             _sleepers: sleepers,
@@ -942,6 +1147,18 @@ impl RequestProgram {
     /// never saw is a stretch that cannot be placed.
     pub fn skipped(&self) -> u64 {
         super::attach::fentry::skipped(self.programs.iter())
+            + self.net.as_ref().map_or(0, net::SocketPrograms::skipped)
+    }
+
+    /// Whether the network rows are followed: the probes name a socket and the
+    /// socket programs attached.
+    pub fn follows_sockets(&self) -> bool {
+        self.net.is_some()
+    }
+
+    /// The kernel functions the network rows are read from.
+    pub fn socket_functions() -> &'static [&'static str] {
+        &net::FUNCTIONS
     }
 }
 
@@ -965,6 +1182,7 @@ mod tests {
         sleepers: 5,
         ring: 6,
         counters: 7,
+        sockets: None,
     };
 
     fn site(arguments: &str) -> Site {
@@ -1022,6 +1240,32 @@ mod tests {
                 offset_of!(RequestRecord, anomalies),
                 "anomalies",
             ),
+            (R_COOKIE, offset_of!(RequestRecord, cookie), "cookie"),
+            (
+                R_FIRST_BYTE,
+                offset_of!(RequestRecord, first_byte_ns),
+                "first_byte_ns",
+            ),
+            (
+                R_RXWAIT,
+                offset_of!(RequestRecord, rx_wait_ns),
+                "rx_wait_ns",
+            ),
+            (
+                R_TXWAIT,
+                offset_of!(RequestRecord, tx_wait_ns),
+                "tx_wait_ns",
+            ),
+            (
+                R_DRAINED,
+                offset_of!(RequestRecord, drained_ns),
+                "drained_ns",
+            ),
+            (
+                R_NET_FLAGS,
+                offset_of!(RequestRecord, net_flags),
+                "net_flags",
+            ),
         ] {
             assert_eq!(
                 written as usize, field,
@@ -1045,6 +1289,12 @@ mod tests {
             (WAKER, 4),
             (DROP_KEY, 4),
             (SLEEPER_VALUE, SLEEPER_BYTES as i16),
+            (ARG1, 8),
+            (SOCK_KEY, 8),
+            (FILE_PTR, 8),
+            (SEQ, 4),
+            (LIMIT, 4),
+            (SOCK_VALUE, net::SOCKET_BYTES as i16),
         ];
         regions.sort();
         assert!(regions[0].0 >= -512);
@@ -1079,6 +1329,13 @@ mod tests {
             (S_BLOCKS, 4),
             (S_PREEMPTED, 4),
             (S_ANOMALIES, 4),
+            (S_NETWAIT, 4),
+            (S_OFF_NET, 4),
+            (S_RXWAIT, 8),
+            (S_TXWAIT, 8),
+            (S_COOKIE, 8),
+            (S_FIRST_BYTE, 8),
+            (S_NET_FLAGS, 4),
         ];
         fields.sort();
         for pair in fields.windows(2) {
@@ -1200,5 +1457,59 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         check_signature(btf, "sched_switch", &SWITCH_SIGNATURE).unwrap();
         check_signature(btf, "sched_waking", &WAKEUP_SIGNATURE).unwrap();
+    }
+
+    fn with_sockets() -> Option<Maps> {
+        let at = net::offsets().ok()?;
+        Some(Maps {
+            sockets: Some((net::tests::MAPS.sockets, at)),
+            ..MAPS
+        })
+    }
+
+    /// A probe that names a socket builds the socket's half into both
+    /// programs, and one that does not builds none of it -- the probe with one
+    /// argument is still a request, with no network rows.
+    #[test]
+    fn the_socket_half_is_built_only_for_a_probe_that_names_one() {
+        let Some(btf) = kernel_btf() else { return };
+        let Some(maps) = with_sockets() else { return };
+        let reads_cookie = |program: &[Insn]| {
+            program
+                .iter()
+                .any(|insn| insn.code == 0x85 && insn.imm == helper::MAP_LOOKUP_ELEM)
+                && program.iter().any(|insn| insn.off == SOCK_KEY)
+        };
+        for build in [birth_instructions, end_instructions] {
+            assert!(reads_cookie(
+                &build(btf, &site("8@%rdi -4@%esi"), maps).unwrap()
+            ));
+            assert!(!reads_cookie(&build(btf, &site("8@%rdi"), maps).unwrap()));
+            assert!(!reads_cookie(
+                &build(btf, &site("8@%rdi -4@%esi"), MAPS).unwrap()
+            ));
+        }
+    }
+
+    /// A socket's sleeps are routed to their own states, by the mark the
+    /// switch-out saw, and every other interruptible sleep is still `sleep_ns`.
+    #[test]
+    fn a_sleep_on_the_socket_is_not_counted_as_a_sleep() {
+        let Some(btf) = kernel_btf() else { return };
+        let switch = switch_instructions(btf, MAPS).unwrap();
+        let stores = |field: i16| {
+            switch
+                .iter()
+                .any(|insn| insn.code == 0x63 && insn.regs & 0xf == 7 && insn.off == field)
+        };
+        assert!(stores(S_OFF_NET), "the switch-out keeps the mark");
+        let adds = |field: i16| {
+            switch
+                .iter()
+                .any(|insn| insn.code == 0x7b && insn.regs & 0xf == 7 && insn.off == field)
+        };
+        for field in [S_RXWAIT, S_TXWAIT, S_SLEEP, S_DISK] {
+            assert!(adds(field), "settle writes {field}");
+        }
     }
 }

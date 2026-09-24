@@ -414,3 +414,64 @@ on the socket, which is the check that the send path is the right one.
 
 The first two need rows in `examples/README.md` and `GUIDE.md`, which are the
 coordinator's.
+
+---
+
+## The request's two network rows — tenth wave, stream N
+
+`net.request` gained `net_rx` and `net_tx`, the two rows of `ROADMAP.md`'s
+vertical tree the tool did not draw. `docs/scenarios/vertical.md` is the
+deliverable and has the design and the ground truth at length; what is here is
+what the family learned doing it.
+
+### A socket's cookie cannot be read where the socket is named
+
+The probes pass the connection's descriptor, and a uprobe program can walk
+`current->files` to the `struct sock` behind it -- but it cannot call
+`bpf_get_socket_cookie`, which takes a BTF pointer only tracing programs are
+handed. What it can do is read `sk->__sk_common.skc_cookie`, and that is zero
+until something asks for the cookie (the same finding as item 11 of
+`docs/scenarios/net.md`, from the other side). So the program that sees the
+first byte, an fentry on `tcp_data_ready`, *asks*, which assigns it, and the
+probes read back what it assigned. A socket whose first byte was not seen has
+no cookie there, and the request says so instead of carrying a zero.
+
+### `snd_nxt` moves after the function that sends
+
+`tcp_event_new_data_sent` is where new data leaves, and `snd_nxt` is written at
+its end. An fentry program there sees the old value: a request whose last byte
+was being sent at that instant would read as still waiting, and nothing would
+ever publish its drain. The program is an **fexit**. And because the end probe
+runs on another cpu, the two sides are a store-buffering pair -- each writes,
+then reads what the other wrote -- so each write is an atomic read-modify-write
+and the drain is claimed by compare-and-exchange. `src/bpf/request_net.rs` has
+the argument; `the_drain_is_claimed_by_compare_and_exchange_on_both_sides`
+holds the instruction stream to it.
+
+### A wait on the window read as a lock, and named the reader as its holder
+
+Before the socket was followed, a server whose send blocked on a slow reader's
+window showed the wait in `sleep_ns`, printed as `lock_wait`, with
+`holder_tid` naming the *client* -- whose read opened the window and woke the
+sender. Plausible, specific, and wrong. The fallback backend still does that,
+and `tests/vertical.rs::without_the_socket_a_wait_on_it_is_a_sleep_and_the_run_says_so`
+shows it on purpose. On `bpf:usdt` a sleep inside `sk_wait_data` or
+`sk_stream_wait_memory` on the request's own socket is `rx_wait_ns` or
+`tx_wait_ns`, and `sleep_ns` is what is left.
+
+### Six trampolines cost more to remove than to run
+
+With the socket followed, `net.request` costs a run 1.3 ms of cpu against a
+server's 3.3 ms. Detaching its six fentry programs costs **60 ms** of system
+time, every run, and while the collector detached at `stop()` that is what the
+run reported as the source's own cost: 2 500 %. The programs now load in `attach()` and detach when the collector is
+dropped, after the run has read its cost, as every other eBPF source here does.
+The BTF function index, 100 ms in a debug build, is built during resolution
+now that the first backend declares its four `fentry:` requirements.
+
+### `drained: true`
+
+`net.socket` (both backends), `net.qdisc` and `net.softirq` (both each) count
+in the kernel and are drained on a tick: one event stands for many
+occurrences. Stream J asked for the flag on every catalog in the eighth wave;
+`net.yaml` has it now.

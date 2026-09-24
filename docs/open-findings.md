@@ -6134,3 +6134,44 @@ No other stream of the ninth wave owns either file. Two sessions were added,
 `examples/vertical-one-request.yml` and `examples/vertical-abandoned.yml`;
 their rows for `examples/README.md` and `GUIDE.md` are at the end of
 `docs/scenarios/vertical.md`.
+
+## Needs from another stream — the tenth wave, stream N (the network rows)
+
+Stream N's deliverable is `docs/scenarios/vertical.md`; this is what it needs
+from a file it does not own, with the signature wanted.
+
+### To whoever owns `src/join.rs`: a row read through another key is rated by it
+
+`Readout::row` rates every row of a decomposition by the decomposition's `by`
+alone: `by: req` is `IDENTITY` for every row. `examples/vertical-one-request.yml`
+now has two rows that are not read by the request's id. `net_rx` and `net_tx`
+are measured by programs that never run in the serving thread -- the first
+byte is queued in softirq, the last leaves when the peer's acknowledgement
+opens the window -- and what ties them to the request is the socket's cookie,
+matched between those programs and the probe that named the socket. That is
+`KEY` by the roadmap's own table, and today the tool prints both rows
+`IDENTITY`: over-rated, which is the one direction the ladder must not err in.
+Wanted, on `Part`:
+
+```rust
+/// The key the row's value was carried through before it reached the
+/// decomposition's `by`: `sock` for a row the socket's cookie tied to the
+/// request. The row is rated the weaker of the two keys.
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub via: Option<KeyKind>,
+```
+
+and in `Readout::row`, with `rate(KeyKind::Req) == Identity` and every other
+kind `Key`, as today:
+
+```rust
+evidence: Some(match self.via {
+    Some(via) => rate(self.by).min(rate(via)),
+    None => rate(self.by),
+}),
+```
+
+When it lands, two lines of `examples/vertical-one-request.yml` take
+`via: sock` (the `net_rx` and `net_tx` parts), and
+`tests/vertical.rs::the_network_rows_are_read_by_the_socket_the_server_accepted`
+flips its one `IDENTITY` assertion to `KEY`; both are marked there.
