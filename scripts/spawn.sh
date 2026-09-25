@@ -25,25 +25,29 @@ set -euo pipefail
 
 declare -A OWNS=(
     [recorder]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/session.rs src/request.rs src/cli.rs src/main.rs src/emit.rs src/encode.rs src/render.rs src/triage/** tests/recorder.rs tests/runner.rs tests/budget.rs tests/triage.rs examples/record-*.yml man/omn.1"
-    [probes]="src/capabilities.rs src/catalog.rs src/validate.rs src/resolve.rs src/filter.rs src/perf.rs src/bpf/mod.rs src/bpf/request*.rs src/bpf/btf.rs src/bpf/attach.rs src/bpf/usdt.rs catalog/*.yaml src/collect/cpu/** src/collect/proc/** src/collect/gpu/** src/collect/power/** src/collect/runtime/** src/collect/mem/page_faults.rs tests/portability.rs tests/scenario_cpu.rs tests/scenario_proc.rs tests/scenario_gpu.rs tests/scenario_power.rs tests/scenario_runtime.rs tests/family_cpu.rs tests/family_proc.rs tests/vertical.rs scripts/matrix.sh scripts/vm/** .github/**"
+    [probes]="src/capabilities.rs src/bpf/mod.rs src/bpf/request*.rs src/bpf/btf.rs src/bpf/attach.rs src/bpf/usdt.rs catalog/*.yaml (except W's filter_in_program keys) src/collect/gpu/** src/collect/power/** src/collect/runtime/** tests/portability.rs tests/scenario_gpu.rs tests/scenario_power.rs tests/scenario_runtime.rs scripts/matrix.sh scripts/vm/** .github/**"
+    [resolver]="src/resolve.rs src/catalog.rs src/validate.rs src/filter.rs src/perf.rs the filter_in_program keys of catalog/*.yaml src/collect/cpu/** src/collect/proc/** src/collect/mem/page_faults.rs tests/scenario_cpu.rs tests/scenario_proc.rs tests/family_cpu.rs tests/family_proc.rs tests/vertical.rs tests/cross_compute.rs"
     [kernel]="src/bpf/wakeup.rs src/bpf/map.rs src/bpf/fentry.rs src/bpf/io_*.rs src/bpf/net_*.rs src/bpf/sched_*.rs src/bpf/mem_*.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/migrate.rs src/bpf/proc_syscall.rs src/collect/sched/** src/collect/io/** src/collect/net/** src/collect/mem/** (except page_faults.rs) tests/scenario_sched.rs tests/family_sched.rs tests/scenario_io.rs tests/scenario_net.rs tests/scenario_mem.rs"
     [mcp]="mcp/** (a new workspace member) the members line of Cargo.toml, Cargo.lock"
 )
 declare -A TITLE=(
     [recorder]="Stream R -- the flight recorder"
     [probes]="Stream V -- the probes tell the truth"
+    [resolver]="Stream W -- what the resolver promises"
     [kernel]="Stream D -- the kernel's attributions and drains"
     [mcp]="Stream M -- a model reads it"
 )
 declare -A LOG=(
     [recorder]="docs/recorder.md"
     [probes]="docs/portability.md"
+    [resolver]="docs/fixes/resolver.md"
     [kernel]="docs/families/kernel.md"
     [mcp]="docs/mcp.md"
 )
 declare -A SCENARIO=(
     [recorder]="tests/recorder.rs, tests/runner.rs, tests/budget.rs and tests/triage.rs"
-    [probes]="tests/portability.rs and the scenario_* and family_* files you own"
+    [probes]="tests/portability.rs, tests/scenario_gpu.rs, tests/scenario_power.rs and tests/scenario_runtime.rs"
+    [resolver]="tests/scenario_cpu.rs, tests/scenario_proc.rs, tests/family_cpu.rs, tests/family_proc.rs, tests/vertical.rs and tests/cross_compute.rs"
     [kernel]="tests/scenario_sched.rs, tests/family_sched.rs, tests/scenario_io.rs, tests/scenario_net.rs and tests/scenario_mem.rs"
     [mcp]="the tests under mcp/tests/ (cargo test -p omn-mcp)"
 )
@@ -65,17 +69,30 @@ evictions counted against what the workload says it did.'
 
 PROBES_WORK='The portability matrix (docs/portability.md) found ten classes, P1-P10, where a
 probe answers available and the attach then refuses -- each filed under "the
-eleventh wave, stream P" in docs/open-findings.md with what is wanted. Fix each
-in the probe or the catalog so the answer is missing WITH the reason the attach
-used to give, and remove its KNOWN_DEFECTS entry in tests/portability.rs. P8'"'"'s
-sched half is stream D'"'"'s. Also stream S'"'"'s request to src/catalog.rs: which
-fields each backend filters in the program, so resolve::placement says Kernel
-only for those. And the suite without capabilities: the four tests of stream P'"'"'s
-"five tests" list that are in your files, and tests/vertical.rs'"'"'s skip reason.
-Ground truth is the matrix: rerun scripts/matrix.sh on the cells a fix touches
-(about 9 GB of disk free; the cache is target/matrix/) and each goes from
-failing to passing, while the 7.2 cell keeps attaching what it attached. You
-touch the catalog loader and the resolver, which are shared layers.'
+eleventh wave, stream P" in docs/open-findings.md with what is wanted. Yours
+are the probe-side ones: P1-P6 and P10 (P7-P9 are stream W'"'"'s, P8'"'"'s sched half
+stream D'"'"'s). Fix each in the probe or the catalog so the answer is missing
+WITH the reason the attach used to give, and remove its KNOWN_DEFECTS entry in
+tests/portability.rs. Also scenario_gpu.rs'"'"'s capability-less test from stream
+P'"'"'s "five tests" list. Ground truth is the matrix: rerun scripts/matrix.sh on
+the cells a fix touches (the cache is target/matrix/; mind the disk) and each
+goes from failing to passing, while the 7.2 cell keeps attaching what it
+attached. src/bpf/mod.rs is a shared layer.'
+
+RESOLVER_WORK='The resolver-side half of the portability matrix'"'"'s findings: P7 (a collector
+that refuses the mode the resolver chose), P8'"'"'s cpu.profile and page_faults
+half (system: native refused), P9 (a per-task probe for a per-cpu event), each
+filed under "the eleventh wave, stream P" in docs/open-findings.md; say in your
+handoff which KNOWN_DEFECTS entries of tests/portability.rs (stream V'"'"'s file)
+your fixes retire. Stream S'"'"'s request to src/catalog.rs: a filter_in_program
+list per backend (you may add that key to backend lines of catalog/*.yaml, no
+other line there), and resolve::placement says Kernel only for a predicate
+over those fields. The capability-less tests in scenario_proc.rs and
+vertical.rs from stream P'"'"'s "five tests" list, and vertical.rs'"'"'s skip reason.
+And whatever stream R files against src/filter.rs. Ground truth: the matrix
+cell each class failed; a pushed-down predicate and one that is not, checked
+against the program'"'"'s own drop count; the suite with the binary stripped of
+its capabilities. The resolver and catalog loader are shared layers.'
 
 KERNEL_WORK='What the eleventh wave filed against kernel programs nobody owned. (1) Finding
 48: a wakeup made from a hard or soft interrupt is credited to the interrupted
@@ -128,6 +145,7 @@ fi
 case "$stream" in
     recorder) WORK="$RECORDER_WORK" ;;
     probes) WORK="$PROBES_WORK" ;;
+    resolver) WORK="$RESOLVER_WORK" ;;
     kernel) WORK="$KERNEL_WORK" ;;
     mcp) WORK="$MCP_WORK" ;;
 esac

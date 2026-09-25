@@ -1,6 +1,6 @@
 # Brief — the flight recorder, the probes that tell the truth, and a model that reads
 
-Four work streams. The twelfth fan-out: the runner's next piece (`STATE.md`'s
+Five work streams. The twelfth fan-out: the runner's next piece (`STATE.md`'s
 "What remains", item 1), phase 11 now that phase 10's escalation has landed
 (item 2), and two streams that close what the eleventh wave measured and filed
 -- the portability matrix's ten classes of *available but it does not attach*,
@@ -55,6 +55,10 @@ machine; `docs/bench.md` has its one command, for after this wave.
 **The CI workflow (`.github/workflows/ci.yml`) has never run.** It is not
 pushed; the coordinator decides when. Stream V owns it and may change it.
 
+**Stream W starts later than the others**, once the fix for
+`cross_compute`'s lossy-profile test is on `main`: that fix is in `src/perf.rs`
+and `src/collect/cpu/`, which are W's.
+
 ---
 
 ## The streams
@@ -62,7 +66,8 @@ pushed; the coordinator decides when. Stream V owns it and may change it.
 | | Stream | Delivers | Owns |
 |---|---|---|---|
 | **R** | the flight recorder | a session whose duration is *until a predicate fires*, with a retention bound and one document per trigger | `src/collect/mod.rs`, `src/collect/launch.rs`, `src/collect/task.rs`, `src/session.rs`, `src/request.rs`, `src/cli.rs`, `src/main.rs`, `src/emit.rs`, `src/encode.rs`, `src/render.rs`, `src/triage/**`, `tests/recorder.rs` (new), `tests/runner.rs`, `tests/budget.rs`, `tests/triage.rs`, `examples/record-*.yml` (new), `man/omn.1`, `docs/recorder.md` (new) |
-| **V** | the probes tell the truth | *available means it attaches*, on every kernel the matrix booted: P1-P10, where a predicate runs, and a suite that passes without capabilities | `src/capabilities.rs`, `src/catalog.rs`, `src/validate.rs`, `src/resolve.rs`, `src/filter.rs`, `src/perf.rs`, `src/bpf/mod.rs`, `src/bpf/request*.rs`, `src/bpf/btf.rs`, `src/bpf/attach.rs`, `src/bpf/usdt.rs`, `catalog/*.yaml`, `src/collect/cpu/**`, `src/collect/proc/**`, `src/collect/gpu/**`, `src/collect/power/**`, `src/collect/runtime/**`, `src/collect/mem/page_faults.rs`, `tests/portability.rs`, `tests/scenario_cpu.rs`, `tests/scenario_proc.rs`, `tests/scenario_gpu.rs`, `tests/scenario_power.rs`, `tests/scenario_runtime.rs`, `tests/family_cpu.rs`, `tests/family_proc.rs`, `tests/vertical.rs`, `scripts/matrix.sh`, `scripts/vm/**`, `.github/**`, `docs/portability.md` |
+| **V** | the probes tell the truth | *available means it attaches*, on every kernel the matrix booted: the probe-side classes P1-P6 and P10 | `src/capabilities.rs`, `src/bpf/mod.rs`, `src/bpf/request*.rs`, `src/bpf/btf.rs`, `src/bpf/attach.rs`, `src/bpf/usdt.rs`, `catalog/*.yaml` (except W's `filter_in_program` keys), `src/collect/gpu/**`, `src/collect/power/**`, `src/collect/runtime/**`, `tests/portability.rs`, `tests/scenario_gpu.rs`, `tests/scenario_power.rs`, `tests/scenario_runtime.rs`, `scripts/matrix.sh`, `scripts/vm/**`, `.github/**`, `docs/portability.md` |
+| **W** | what the resolver promises | a mode, a scope and a filter the resolver credits a backend with are what the collector does: P7-P9, where a predicate runs, and the capability-less tests | `src/resolve.rs`, `src/catalog.rs`, `src/validate.rs`, `src/filter.rs`, `src/perf.rs`, the `filter_in_program` keys of `catalog/*.yaml`, `src/collect/cpu/**`, `src/collect/proc/**`, `src/collect/mem/page_faults.rs`, `tests/scenario_cpu.rs`, `tests/scenario_proc.rs`, `tests/family_cpu.rs`, `tests/family_proc.rs`, `tests/vertical.rs`, `tests/cross_compute.rs`, `docs/fixes/resolver.md` (new) |
 | **D** | the kernel's attributions and drains | a wakeup from an interrupt is not the interrupted task's, and the drained programs outside last wave's files stop racing their drain | `src/bpf/wakeup.rs`, `src/bpf/map.rs`, `src/bpf/fentry.rs`, `src/bpf/io_*.rs`, `src/bpf/net_*.rs`, `src/bpf/sched_*.rs`, `src/bpf/mem_*.rs`, `src/bpf/runqlat.rs`, `src/bpf/offcpu.rs`, `src/bpf/migrate.rs`, `src/bpf/proc_syscall.rs`, `src/collect/sched/**`, `src/collect/io/**`, `src/collect/net/**`, `src/collect/mem/**` except `page_faults.rs`, `tests/scenario_sched.rs`, `tests/family_sched.rs`, `tests/scenario_io.rs`, `tests/scenario_net.rs`, `tests/scenario_mem.rs`, `docs/families/kernel.md` (new) |
 | **M** | a model reads it | `ROADMAP.md` phase 11: an MCP server over the resolved file, the results and the catalog -- a second surface on objects that exist | `mcp/**` (new workspace member), the `members` line of `Cargo.toml`, `Cargo.lock`, `docs/mcp.md` (new) |
 
@@ -75,7 +80,7 @@ file is append-only per stream.
 
 **Three splits to respect.**
 
-- `src/perf.rs` is V's; D's `sched.switches` moves onto its existing
+- `src/perf.rs` is W's; D's `sched.switches` moves onto its existing
   `ThreadSampler` without changing it. If D needs a change there, it files it.
 - `src/bpf/map.rs` is D's; the two-phase drain stream K proposed
   (`Rows::retire`, `take`, `grace_period` made public) is D's half, and the
@@ -120,7 +125,7 @@ that come from what is settled:
   through `Shortfall`, never silently.
 - **One clock.** The trigger's timestamp is `CLOCK_MONOTONIC`.
 - **The predicate uses the vocabulary that exists**: `src/filter.rs`'s grammar
-  over a request's own emitted values (V owns `filter.rs`; if it needs an
+  over a request's own emitted values (W owns `filter.rs`; if it needs an
   addition, file it). An invalid trigger is refused before the launch, with
   the reason.
 - **The budget still holds** over a run with no end: the same `--budget`
@@ -151,25 +156,16 @@ Handoff: `docs/recorder.md`.
 > answers available and an attach that then refuses is the defect finding 15
 > named, on a kernel nobody had tried.
 
-1. **P1 to P10**, each as filed: the tracepoint prototype checked in the
-   probe (P1), the BTF field a program reads checked by the probe rather than
-   at attach (P2), the `uprobe` requirement below 6.6 (P3), the USDT backends'
-   BTF requirement (P4), `net.request` below 6.6 (P5), a GPU library without
-   its driver (P6), a collector that refuses a mode the resolver chose (P7),
-   `system: native` refused (P8 -- the `cpu.profile` and `page_faults` half;
-   the `sched` half is D's, file it to D if you find it is theirs), a
-   per-task probe for a per-cpu event (P9), two requirements that name the
-   wrong thing (P10). `KNOWN_DEFECTS` in `tests/portability.rs` fails when an
-   entry stops matching: remove each entry as you fix it.
-2. **Where a predicate actually runs** (stream S's request to
-   `src/catalog.rs`): the catalog says per backend which fields the program
-   filters in the kernel, and `resolve::placement` reports `Kernel` only for a
-   predicate over those.
-3. **The suite passes without capabilities**: the five tests stream P listed
-   ("To the owners of five tests") assert the privileged answer where they
-   should skip loudly or accept the unprivileged one -- four are in your
-   files; `scenario_mem.rs`'s is D's. And `tests/vertical.rs`'s skip reason
-   prints the first stderr line instead of the refusal.
+1. **P1 to P6 and P10**, each as filed: the tracepoint prototype checked in
+   the probe (P1), the BTF field a program reads checked by the probe rather
+   than at attach (P2), the `uprobe` requirement below 6.6 (P3), the USDT
+   backends' BTF requirement (P4), `net.request` below 6.6 (P5), a GPU library
+   without its driver (P6), two requirements that name the wrong thing (P10).
+   `KNOWN_DEFECTS` in `tests/portability.rs` fails when an entry stops
+   matching: remove each entry as you fix it, and W's too when W's handoff
+   says its classes are fixed -- or leave that to the coordinator at the merge.
+2. **The suite passes without capabilities** in your files:
+   `tests/scenario_gpu.rs`'s test from stream P's "five tests" list.
 
 **Ground truth**: the matrix itself. Rerun `scripts/matrix.sh` on the cells a
 fix touches (the VM cache is under `target/matrix/`; mind the disk, about
@@ -178,11 +174,48 @@ answering missing *with the reason the attach used to give*. A fix that makes
 the probe say missing on 7.2 where the source attaches is a regression, and
 the 7.2 cell is what catches it.
 
-**You touch the catalog loader and the resolver**, which are shared layers:
-one full `make check` before each commit is the rule anyway, and the capability
-sweep in every `scenario_*` file is what a wrong probe breaks.
+**You touch the probes and `src/bpf/mod.rs`**, a shared layer: one full
+`make check` before each commit is the rule anyway, and the capability sweep in
+every `scenario_*` file is what a wrong probe breaks.
 
 Handoff: `docs/portability.md`, a section "The twelfth wave".
+
+---
+
+## Stream W -- what the resolver promises
+
+> **Mission.** The other half of the matrix's findings, and the half that is
+> the resolver's rather than the probes': a backend chosen for a mode, a scope
+> or a filter that its collector then refuses or does not apply.
+
+1. **P7** (a collector that refuses the mode the resolver chose), **P8**'s
+   `cpu.profile` and `page_faults` half (`system: native` refused; the `sched`
+   half is D's), **P9** (a per-task probe for a per-cpu event), each as filed
+   under "the eleventh wave, stream P" in `docs/open-findings.md`. The
+   `KNOWN_DEFECTS` entries are in `tests/portability.rs`, which is V's: say in
+   your handoff which entries your fixes retire.
+2. **Where a predicate actually runs** (stream S's request to
+   `src/catalog.rs`): a `filter_in_program` list per backend, the fields the
+   program filters in the kernel, and `resolve::placement` says `Kernel` only
+   for a predicate over those. You may add that key to backend lines in
+   `catalog/*.yaml`; every other line there is V's.
+3. **The suite passes without capabilities**: the three tests of stream P's
+   "five tests" list in `scenario_proc.rs` and `vertical.rs`, and
+   `tests/vertical.rs`'s skip reason, which prints the first stderr line
+   instead of the refusal.
+4. **Stream R's requests to `src/filter.rs`**, if it files any.
+
+**Ground truth**: for 1, the matrix cell that failed (`scripts/matrix.sh
+<kernel> --configs <config>`; V also runs it, so take the cells your class
+names); for 2, a predicate over a pushed-down field and one over a field that
+is not, and the resolved file says each where it ran -- checked against the
+program's own count of what it dropped; for 3, the suite with the binary
+stripped of its capabilities, as stream P rehearsed it.
+
+You touch the resolver and the catalog loader, shared layers: a full
+`make check` before each commit.
+
+Handoff: `docs/fixes/resolver.md`.
 
 ---
 
@@ -271,7 +304,7 @@ The three that have held for eleven waves:
 
 1. **The unit of ownership is a file set nobody else writes.** The table above.
 2. **The handoff is a file only that stream can write**: R's is
-   `docs/recorder.md`, V's `docs/portability.md`, D's
+   `docs/recorder.md`, V's `docs/portability.md`, W's `docs/fixes/resolver.md`, D's
    `docs/families/kernel.md`, M's `docs/mcp.md`. End it with **the index rows
    for every session you added**, **what is for `DECISIONS.md`**, and
    **anything you filed for another stream**.
