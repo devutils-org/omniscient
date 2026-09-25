@@ -591,12 +591,23 @@ mod tests {
     /// rebuilt from this file's own constants.
     #[test]
     fn the_shared_alu_encodings_are_the_kernels_numbers() {
-        assert_eq!(Insn::or64_imm(3, 0x10).code, 0x47, "BPF_ALU64 | BPF_OR | BPF_K");
-        assert_eq!(Insn::arsh64_imm(3, 8).code, 0xc7, "BPF_ALU64 | BPF_ARSH | BPF_K");
+        assert_eq!(
+            Insn::or64_imm(3, 0x10).code,
+            0x47,
+            "BPF_ALU64 | BPF_OR | BPF_K"
+        );
+        assert_eq!(
+            Insn::arsh64_imm(3, 8).code,
+            0xc7,
+            "BPF_ALU64 | BPF_ARSH | BPF_K"
+        );
         let [low, high] = Insn::ld_imm64(2, -2);
         assert_eq!(low.code, 0x18, "BPF_LD | BPF_DW | BPF_IMM");
         assert_eq!(low.regs, 2, "the destination, and no pseudo source");
-        assert_eq!((low.imm as u32, high.imm as u32), (0xffff_fffe, 0xffff_ffff));
+        assert_eq!(
+            (low.imm as u32, high.imm as u32),
+            (0xffff_fffe, 0xffff_ffff)
+        );
         assert_eq!(high.code, 0, "the second slot carries only the high half");
     }
 
