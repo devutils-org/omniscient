@@ -234,10 +234,13 @@ because a plan kept in two documents drifted in both.
 The eleventh wave -- the escalation, the engine's debts, the silent
 degradations, the drains and the portability matrix -- is merged, and
 `docs/briefs/wave-11-escalation.md` keeps its brief. **The twelfth wave
-(`BRIEF.md`) is running**: the flight recorder (R), the probes the matrix
-caught answering available for sources that do not attach (V, P1-P10), the
-kernel-side attributions and drains nobody owned (D, finding 48 among them),
-and phase 11's MCP surface (M).
+(`BRIEF.md`) is nearly merged**: the flight recorder (R), phase 11's MCP surface
+(M), the kernel-side attributions and drains (D -- finding 48 closed: an
+interrupt's wakeup is the interrupt's), and what the resolver promises (W --
+P7 to P9, and a filter placed in the kernel only where a program compares it)
+are on `main`, and the suite after them is green apart from the flaky tally
+(1900 passed). The probe side of the matrix (V, P1 to P6 and P10) is the one
+stream still running.
 
 **Found at the eleventh wave's merge:** `cross_compute`'s lossy-profile
 decomposition failed deterministically on `main`. The tool was right and the

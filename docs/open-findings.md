@@ -7281,6 +7281,9 @@ and `perf::tests::closing_a_group_gives_its_descriptors_back` (it counts the
 whole process's perf descriptors while other unit tests open theirs in
 parallel, which is `docs/contributing.md`'s second trap).
 
+And `scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not`,
+in the suite after R, D and W merged, passing alone at once.
+
 ### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
 
 `sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57
