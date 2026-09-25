@@ -41,8 +41,10 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**1745 tests pass** after the tenth wave's merge, nine more ignored -- the bench's
-measurements, which `scripts/bench.sh` runs on a quiet machine and the suite
+**1830 tests pass** after the eleventh wave's merge, eight more ignored, and
+four failed in that run: three passed alone at once (load-sensitive, in the
+flaky tally) and one is `cross_compute`'s lossy profile, below. The ignored are
+the bench's measurements, which `scripts/bench.sh` runs on a quiet machine and the suite
 never does. Most of them are scenarios: a workload whose property the scenario
 chose, a session that measures it, and a check against that property.
 Twenty-seven of those are the seventh wave's **crossings** -- a question no
