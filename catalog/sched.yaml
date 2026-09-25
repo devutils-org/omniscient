@@ -37,12 +37,12 @@
     - "A wakeup is not a latency. The pair `waking -> on cpu` is the run queue
        wait and belongs to `sched.runqlat`; this source says who made a task
        runnable, and when."
-    - "The waker is the task that was running when the wakeup was issued, which
-       is not always the task that caused it. A wakeup issued from interrupt or
-       softirq context is credited to whatever was interrupted: measured here, a
-       process doing nothing but `sleep 0.3` appeared to wake `rcu_preempt`, a
-       kworker and a network daemon. A waker of pid 0 is the idle task, which is
-       how a timer expiry looks. Read the waker as evidence, not as proof."
+    - "A wakeup issued from a hard interrupt, a served softirq or an NMI has the
+       interrupt as its waker -- `waker_tid` 0 and `waker_context` naming which
+       -- and a target keeps it only as its wakee. A softirq served in a task's
+       own `local_bh_enable` (loopback delivery in the sender's `sendmsg`) is
+       recorded as a softirq, though the sender caused it. A waker of 0 with
+       `waker_context: task` is the idle task."
 
 - id: sched.runqlat
   family: sched
@@ -59,7 +59,7 @@
     # is what lets a `wakeup` join be refused before the run rather than
     # credit a hundred waits to the last wakeup before the drain.
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup", "raw_tracepoint:sched_switch", "kernel>=6.1"]
+      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "kernel>=6.1"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
       drained: true
@@ -94,7 +94,7 @@
     # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
     # path needs a numeric id out of tracefs. Ordered ahead of it for the
     # reason DECISIONS.md settled: strictly fewer requirements, same events.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: med, drained: true,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "kernel>=6.1"], cost: med, drained: true,
        degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med, drained: true,
        degraded: "no stacks: tells you how long, not where"}
@@ -178,7 +178,7 @@
   summary: "Task migrations between cores"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -192,7 +192,7 @@
   summary: "Kernel lock contention"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin", "raw_tracepoint:contention_end", "kernel>=6.1"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin(void *, unsigned int)", "raw_tracepoint:contention_end(void *, int)", "kernel>=6.1"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med, equivalent: true}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "older kernels: futex and uprobe fallback, partial coverage"}
@@ -220,7 +220,7 @@
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
@@ -245,7 +245,7 @@
     # glibc's own probes: three traps per lock and unlock, and the one backend
     # that reaches a process already running. Not for a launch, which the shim
     # serves at a fraction of the cost.
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: high,
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf"], cost: high,
        targets: {pid: native, tid: native, launch: "no"},
        degraded: "three uprobes per lock and unlock, about 2 us: serializes what it measures
          on hot locks, and a successful trylock is not seen"}
@@ -285,7 +285,7 @@
   summary: "Time spent in hard interrupt handlers"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry", "raw_tracepoint:irq_handler_exit", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -306,7 +306,7 @@
   summary: "Automatic NUMA balancing decisions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stick_numa(task_struct *, int, task_struct *, int)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_stick_numa", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]

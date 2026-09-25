@@ -50,6 +50,7 @@ use super::insn::{self, helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
+use super::Support;
 
 // ------------------------------------------------------------------ the ELF
 
@@ -1090,6 +1091,74 @@ fn load_for_multi(instructions: &[Insn]) -> Result<OwnedFd, String> {
     })
 }
 
+/// Whether this kernel makes a uprobe-multi link for this process: the
+/// `uprobe_multi` requirement, and the first half of `uprobe`.
+///
+/// Asked of the kernel rather than read off its version. The smallest program
+/// is loaded for `BPF_TRACE_UPROBE_MULTI` and linked to a file that does not
+/// exist: a kernel that knows the link looks the path up and answers `ENOENT`,
+/// one older than 6.6 does not know the attach type and answers `EINVAL` --
+/// which is exactly what the first real site used to be told, after the target
+/// was launched. Nothing is registered either way, because there is no file.
+pub fn uprobe_multi_support() -> &'static Support {
+    static SUPPORT: std::sync::OnceLock<Support> = std::sync::OnceLock::new();
+    SUPPORT.get_or_init(|| {
+        let smallest = [Insn::mov64_imm(0, 0), Insn::exit()];
+        let program = match syscall::prog_load_for(
+            syscall::BPF_PROG_TYPE_KPROBE,
+            BPF_TRACE_UPROBE_MULTI,
+            &smallest,
+            "omn_umulti_probe",
+            LICENSE,
+        ) {
+            Ok(program) => program,
+            Err(error) if error.is_permission() => {
+                return Support::Unchecked(
+                    "whether this kernel makes a uprobe-multi link cannot be asked without \
+                     loading a program, which needs CAP_BPF and CAP_PERFMON"
+                        .to_owned(),
+                )
+            }
+            Err(error) => {
+                return Support::No(format!(
+                    "this kernel refused a program loaded for a uprobe-multi link ({}), so it \
+                     has no uprobe-multi link, which Linux 6.6 introduced",
+                    error.error
+                ))
+            }
+        };
+        let nowhere = Path::new("/proc/self/omn-uprobe-multi-probe");
+        match syscall::link_uprobe_multi(
+            program.as_raw_fd(),
+            nowhere,
+            0,
+            None,
+            std::process::id() as i32,
+        ) {
+            Ok(_) => Support::Yes,
+            Err(error) => match error.raw_os_error() {
+                Some(libc::ENOENT) | Some(libc::EBADF) => Support::Yes,
+                Some(libc::EINVAL) => Support::No(format!(
+                    "this kernel refused a uprobe-multi link ({error}), which Linux 6.6 \
+                     introduced"
+                )),
+                Some(libc::EOPNOTSUPP) => Support::No(format!(
+                    "this kernel knows the uprobe-multi link and was built without uprobes \
+                     ({error})"
+                )),
+                Some(libc::EPERM) | Some(libc::EACCES) => Support::Unchecked(format!(
+                    "the kernel refused to link a uprobe-multi program on privilege grounds \
+                     ({error}), so whether it could is not known"
+                )),
+                _ => Support::Unchecked(format!(
+                    "a uprobe-multi link to a file that does not exist was refused with \
+                     {error}, which says nothing about whether one to a real file would be"
+                )),
+            },
+        }
+    })
+}
+
 /// Links a loaded program to one offset of a file, for one process, with the
 /// site's semaphore handed to the kernel to maintain.
 fn link_multi(program: &OwnedFd, site: &Site, pid: i32) -> io::Result<OwnedFd> {
@@ -1189,6 +1258,17 @@ impl UsdtProgram {
                         ))
                     }
                 }
+            }
+            // Asked before the attach, so that a refusal leads with what is
+            // missing. The attach's own refusal on privilege grounds is the
+            // shared advice to grant CAP_BPF and CAP_PERFMON -- to a binary
+            // that, here, carries both (P3 in `docs/portability.md`).
+            if let Err(pmu) = attach::uprobe_pmu_permitted() {
+                return Err(format!(
+                    "{}: this kernel has no uprobe-multi link (Linux 6.6), and the uprobe PMU \
+                     it falls back to {pmu}",
+                    where_(),
+                ));
             }
             // The older route follows one thread, not a process: the kernel's
             // filter compares memory maps, so every thread of the process is

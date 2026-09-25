@@ -202,13 +202,77 @@ pub fn probe_type_support(kind: &str) -> Option<Support> {
     }
     let read = match kind {
         "kprobe" => kprobe_type(),
-        "uprobe" => uprobe_type(),
+        "uprobe" => return Some(uprobe_support().clone()),
+        "uprobe_multi" => return Some(super::usdt::uprobe_multi_support().clone()),
         _ => return None,
     };
     Some(match read {
         Ok(_) => Support::Yes,
         Err(reason) => Support::No(reason),
     })
+}
+
+/// Whether this process can put a uprobe anywhere: the `uprobe` requirement.
+///
+/// There are two routes and they need different things. A uprobe-multi link
+/// (Linux 6.6) needs the program's own privileges, `CAP_BPF` and
+/// `CAP_PERFMON`; the `uprobe` PMU the older kernels leave needs
+/// `CAP_SYS_ADMIN`, which this project does not ask for. Until the twelfth
+/// wave this answered whether the PMU existed, which is neither question: on
+/// 5.15 and 6.1 with the two capabilities every USDT source was listed usable,
+/// the link was refused, the fallback was refused, and the target had already
+/// been launched (P3 in `docs/portability.md`).
+pub fn uprobe_support() -> &'static Support {
+    static SUPPORT: std::sync::OnceLock<Support> = std::sync::OnceLock::new();
+    SUPPORT.get_or_init(|| {
+        let multi = match super::usdt::uprobe_multi_support() {
+            Support::Yes => return Support::Yes,
+            Support::No(reason) | Support::Unchecked(reason) => reason.clone(),
+        };
+        match uprobe_pmu_permitted() {
+            Ok(()) => Support::Yes,
+            Err(pmu) => Support::No(format!(
+                "{multi}; and the uprobe PMU it would fall back to {pmu}"
+            )),
+        }
+    })
+}
+
+/// Whether the `uprobe` PMU lets this process open an event at all, asked
+/// with a path that does not exist.
+///
+/// The kernel checks the privilege before it looks the path up, so a refusal
+/// on privilege grounds is `EACCES` and anything else -- `ENOENT` for the
+/// missing file, above all -- means the privilege check passed. Nothing is
+/// registered either way: there is no file to put a breakpoint in.
+pub fn uprobe_pmu_permitted() -> Result<(), String> {
+    let kind = uprobe_type()?;
+    let path = CString::new("/proc/self/omn-uprobe-permission-probe")
+        .expect("a literal has no interior NUL");
+    let mut attr = sys::bindings::perf_event_attr {
+        type_: kind,
+        size: std::mem::size_of::<sys::bindings::perf_event_attr>() as u32,
+        ..Default::default()
+    };
+    attr.set_disabled(1);
+    attr.__bindgen_anon_3.uprobe_path = path.as_ptr() as u64;
+    attr.__bindgen_anon_4.probe_offset = 0;
+    let flags = u64::from(sys::bindings::PERF_FLAG_FD_CLOEXEC);
+    // SAFETY: `attr` is a valid perf_event_attr and `path` outlives the call.
+    let fd = unsafe { sys::perf_event_open(&mut attr, 0, -1, -1, flags as libc::c_ulong) };
+    if fd >= 0 {
+        // SAFETY: a descriptor the kernel just returned, closed here.
+        drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) => Err(format!(
+            "refuses this process ({error}): the kernel opens a `uprobe` PMU event only for \
+             CAP_SYS_ADMIN, which CAP_BPF and CAP_PERFMON do not include"
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn dynamic_pmu_type(pmu: &str, kind: &str) -> Result<u32, String> {
@@ -712,7 +776,16 @@ mod tests {
             let published = fs::read_to_string(Path::new(pmu).join("type"))
                 .ok()
                 .and_then(|text| text.trim().parse::<u32>().ok());
-            let support = probe_type_support(kind).expect("a probe for a kind this module knows");
+            // `uprobe` as a requirement asks whether this process can place
+            // one, which is more than the PMU's existence (see
+            // `uprobe_support`); the type number is what is checked here.
+            let support = match kind {
+                "kprobe" => probe_type_support(kind).expect("a probe for a kind this module knows"),
+                _ => match uprobe_type() {
+                    Ok(_) => Support::Yes,
+                    Err(reason) => Support::No(reason),
+                },
+            };
             match (published, support) {
                 (Some(kind_number), Support::Yes) => {
                     let read = if kind == "kprobe" {
@@ -736,6 +809,24 @@ mod tests {
             }
         }
         assert!(probe_type_support("something_else").is_none());
+    }
+
+    /// `uprobe` is yes when either route is open to this process, and a no
+    /// names both, because either is what the reader can change: a kernel of
+    /// 6.6 or later, or a privilege this project does not ask for.
+    #[test]
+    fn a_uprobe_refusal_names_both_routes() {
+        let multi = super::super::usdt::uprobe_multi_support();
+        let pmu = uprobe_pmu_permitted();
+        match uprobe_support() {
+            Support::Yes => assert!(*multi == Support::Yes || pmu.is_ok(), "{multi:?} {pmu:?}"),
+            Support::No(reason) => {
+                assert!(*multi != Support::Yes && pmu.is_err(), "{multi:?} {pmu:?}");
+                assert!(reason.contains("uprobe-multi"), "{reason}");
+                assert!(reason.contains("uprobe PMU"), "{reason}");
+            }
+            Support::Unchecked(reason) => panic!("`uprobe` is always answered: {reason}"),
+        }
     }
 
     /// The retprobe bit is the kernel's to state, and it states it. A constant

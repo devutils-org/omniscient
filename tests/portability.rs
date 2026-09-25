@@ -215,7 +215,22 @@ fn parse_listing(text: &str) -> (Here, Option<String>, Vec<Backend>) {
             }
         } else if let Some(rest) = trimmed.strip_prefix("needs ") {
             let rest = rest.trim_start();
-            let (needs, answer) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            // A requirement may carry a prototype, which has spaces in it --
+            // `raw_tracepoint:kfree(long unsigned int, void *)` -- so it ends at
+            // the first space outside parentheses, not at the first space.
+            let mut depth = 0usize;
+            let end = rest
+                .char_indices()
+                .find(|&(_, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    depth == 0 && c.is_whitespace()
+                })
+                .map_or(rest.len(), |(at, _)| at);
+            let (needs, answer) = rest.split_at(end);
             let answer = answer.trim();
             let (state, detail) = if answer == "available" {
                 (State::Available, String::new())
@@ -987,7 +1002,9 @@ fn uprobe_multi_by_kernel(sweep: &Sweep) -> Vec<String> {
             {
                 continue;
             }
-            let fell_back = run.text().contains("uprobe-multi");
+            // The fallback's own words, not the phrase: a caveat that says a
+            // source needs uprobe-multi is printed on every run of it.
+            let fell_back = run.text().contains("refused a uprobe-multi link");
             if kernel < (6, 6) && !fell_back {
                 out.push(format!(
                     "{} ({}): attached through USDT on {}.{} without saying it fell back from \
@@ -1444,6 +1461,10 @@ fn a_usdt_source_below_six_six_must_say_it_fell_back() {
     // And the same words on 6.6 are the defect the other way.
     cell.cell.kernel_release = "6.6.0-test".into();
     assert!(violations(&cell, &[]).contains_key("uprobe-multi is 6.6"));
+    // A caveat naming uprobe-multi is not a fallback.
+    source(&mut cell, "runtime.custom").runs[0].stderr =
+        "caveat: Linux 6.6 or later: every site is linked with a uprobe-multi link".into();
+    assert!(violations(&cell, &[]).is_empty());
 }
 
 #[test]
@@ -1456,6 +1477,7 @@ sched.lock — Kernel lock contention
     1. bpf:raw_tp             cost med    collector written
        needs    bpf                                    missing: needs CAP_BPF (`unprivileged_bpf_disabled` is 2, so bpf() needs CAP_BPF). Grant them
        needs    kernel>=6.1                            available
+       needs    raw_tracepoint:contention_end(void *, int) missing: this kernel declares `contention_end(void *)`
     2. bpf:tp                 cost med    no collector yet
        needs    tracepoint:lock:contention_begin       missing: tracefs is not mounted
        needs    symbols:x                              unverified: no probe is written for `symbols:x` yet
@@ -1467,9 +1489,15 @@ sched.lock — Kernel lock contention
     assert_eq!(backends.len(), 2);
     assert!(backends[0].collector && !backends[1].collector);
     // A reason with a full stop in it is a reason, not a backend.
-    assert_eq!(backends[0].requires.len(), 2);
+    assert_eq!(backends[0].requires.len(), 3);
     assert_eq!(backends[0].requires[0].state, State::Missing);
     assert!(backends[0].requires[0].detail.ends_with("Grant them"));
+    // A prototype has spaces in it, and is still one requirement.
+    assert_eq!(
+        backends[0].requires[2].needs,
+        "raw_tracepoint:contention_end(void *, int)"
+    );
+    assert_eq!(backends[0].requires[2].state, State::Missing);
     assert_eq!(backends[1].requires[0].state, State::Missing);
     assert_eq!(backends[1].requires[0].detail, "tracefs is not mounted");
     assert_eq!(backends[1].requires[1].state, State::Unverified);
@@ -1524,164 +1552,24 @@ fn kernel_releases_parse_the_way_the_cells_write_them() {
 fn everywhere(_: &Sweep) -> bool {
     true
 }
+fn on_5_15_with_capabilities(sweep: &Sweep) -> bool {
+    sweep.kernel().is_some_and(|k| k < (6, 1)) && sweep.cell.config == "caps"
+}
 fn in_a_guest(sweep: &Sweep) -> bool {
     sweep.cell.name.starts_with(|c: char| c.is_ascii_digit())
-}
-fn up_to_6_6(sweep: &Sweep) -> bool {
-    sweep.kernel().is_some_and(|k| k <= (6, 6))
-}
-fn below_the_floor(sweep: &Sweep) -> bool {
-    sweep.kernel().is_some_and(|k| k < (6, 1))
-}
-fn below_6_6(sweep: &Sweep) -> bool {
-    sweep.kernel().is_some_and(|k| k < (6, 6))
-}
-fn below_6_6_with_capabilities(sweep: &Sweep) -> bool {
-    below_6_6(sweep) && sweep.cell.config == "caps"
-}
-fn without_btf(sweep: &Sweep) -> bool {
-    sweep.cell.btf_hidden
-}
-/// Without capabilities, and with `perf_event_paranoid` above 0 -- the value
-/// the cell's own resolved file recorded. At -1, as on the development host,
-/// any process may count a cpu, and P9 cannot happen.
-fn without_capabilities_or_cpu_counting(sweep: &Sweep) -> bool {
-    let paranoid = &sweep.cell.environment["perf_event_paranoid"];
-    let paranoid = paranoid
-        .as_i64()
-        .or_else(|| paranoid.as_str().and_then(|s| s.trim().parse().ok()));
-    sweep.cell.config == "nocaps" && paranoid.is_some_and(|p| p > 0)
-}
-fn a_guest_up_to_6_6(sweep: &Sweep) -> bool {
-    in_a_guest(sweep) && up_to_6_6(sweep)
 }
 
 /// `docs/portability.md`, "What the cells found", has each label: what the
 /// cells showed, why, and the request filed for it.
 const KNOWN_DEFECTS: &[Known] = &[
     Known {
-        finding: "P1 (a tracepoint's prototype is checked at attach, not by the probe)",
-        applies: up_to_6_6,
-        sources: &["proc.exit", "mem.reclaim"],
-        targets: &["system"],
-        says: "this kernel declares",
-    },
-    Known {
-        finding: "P1 (a tracepoint's prototype is checked at attach, not by the probe)",
-        applies: below_the_floor,
-        // `net.request` reaches `sched_switch`'s three-argument form before it
-        // reaches the uprobe-multi link P5 is about.
-        sources: &["io.latency", "mem.compaction", "mem.kmalloc", "net.request"],
-        targets: &["launch", "system"],
-        says: "this kernel declares",
-    },
-    Known {
-        finding: "P2 (a BTF field is looked up at attach, not by the probe)",
-        applies: up_to_6_6,
-        sources: &["net.drops", "net.tcp.lifetime", "net.tcp.retransmit"],
-        targets: &["system"],
-        says: "no member named `sk_ino`",
-    },
-    Known {
-        finding: "P3 (below 6.6 a USDT site needs CAP_SYS_ADMIN, and the probe says usable)",
-        applies: below_6_6_with_capabilities,
-        sources: &["runtime.gc", "runtime.alloc", "runtime.custom"],
-        targets: &["launch"],
-        says: "which needs CAP_SYS_ADMIN",
-    },
-    Known {
-        finding: "P4 (the USDT backends need BTF and do not require it)",
-        applies: without_btf,
-        sources: &["runtime.gc", "runtime.alloc", "runtime.custom"],
-        targets: &["launch"],
-        says: "cannot read /sys/kernel/btf/vmlinux",
-    },
-    Known {
-        finding: "P5 (net.request has no route below 6.6)",
-        applies: below_6_6,
-        sources: &["net.request"],
-        targets: &["launch"],
-        says: "refused to link the program",
-    },
-    Known {
-        finding: "P6 (NVML loadable, no driver loaded)",
-        applies: in_a_guest,
-        sources: &[
-            "gpu.engine_busy",
-            "gpu.freq",
-            "gpu.mem",
-            "gpu.power",
-            "gpu.temp",
-        ],
-        targets: &["launch", "system"],
-        says: "Driver Not Loaded",
-    },
-    Known {
         finding: "P7 (the resolver selects a collector that refuses the mode)",
         applies: everywhere,
-        sources: &["cpu.oncpu_time"],
-        targets: &["launch"],
-        says: "re-reads a total",
-    },
-    Known {
-        finding: "P7 (the resolver selects a collector that refuses the mode)",
-        applies: everywhere,
-        sources: &["power.cstate"],
-        targets: &["system"],
-        says: "an idle transition is an event",
-    },
-    Known {
-        finding: "P7 (the resolver selects a collector that refuses the mode)",
-        applies: everywhere,
-        sources: &["mem.faults"],
-        targets: &["launch"],
-        says: "`count` mode does not sample page faults",
-    },
-    Known {
-        finding: "P7 (the resolver selects a collector that refuses the mode)",
-        applies: everywhere,
+        // `--system` reaches the same refusal since stream D serves a machine
+        // (P8's `sched` half): the sweep's first mode is `count` for both.
         sources: &["sched.switches"],
-        targets: &["launch"],
+        targets: &["launch", "system"],
         says: "`count` mode for `pmu:sw`",
-    },
-    Known {
-        finding: "P8 (a system target the catalog declares and the collector refuses)",
-        applies: everywhere,
-        sources: &["cpu.profile"],
-        targets: &["system"],
-        says: "profiling a whole machine needs one sampling event per cpu",
-    },
-    Known {
-        finding: "P8 (a system target the catalog declares and the collector refuses)",
-        applies: everywhere,
-        sources: &["mem.faults"],
-        targets: &["system"],
-        says: "sampling page faults machine-wide",
-    },
-    Known {
-        finding: "P8 (a system target the catalog declares and the collector refuses)",
-        applies: everywhere,
-        sources: &["sched.switches"],
-        targets: &["system"],
-        says: "counting the switches of a whole machine",
-    },
-    Known {
-        finding: "P9 (a per-task probe answers for a per-cpu event)",
-        applies: without_capabilities_or_cpu_counting,
-        sources: &[
-            "cpu.branch_misses",
-            "cpu.cache_misses",
-            "cpu.context_switches",
-            "cpu.cycles",
-            "cpu.instructions",
-            "cpu.ipc",
-            "cpu.migrations",
-            "mem.cache_l1",
-            "mem.cache_llc",
-            "mem.cache_tlb",
-        ],
-        targets: &["system"],
-        says: "perf_event_paranoid",
     },
     Known {
         finding: "P10 (the guest's own shape: one root cgroup, no cpufreq)",
@@ -1691,17 +1579,10 @@ const KNOWN_DEFECTS: &[Known] = &[
         says: "is the hierarchy root",
     },
     Known {
-        finding: "P10 (the guest's own shape: one root cgroup, no cpufreq)",
-        applies: a_guest_up_to_6_6,
-        sources: &["mem.swap"],
-        targets: &["launch"],
-        says: "carries no `pswpin`/`pswpout`",
-    },
-    Known {
-        finding: "P10 (the guest's own shape: one root cgroup, no cpufreq)",
-        applies: in_a_guest,
-        sources: &["power.freq"],
+        finding: "P11 (a per-cpu profile's ring is refused on 5.15 under the two capabilities)",
+        applies: on_5_15_with_capabilities,
+        sources: &["cpu.profile"],
         targets: &["system"],
-        says: "no cpufreq driver",
+        says: "mmap of 8 ring pages: Operation not permitted",
     },
 ];

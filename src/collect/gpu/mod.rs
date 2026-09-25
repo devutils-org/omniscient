@@ -88,13 +88,45 @@ pub fn probe(requirement: &str) -> Option<Probe> {
     Some(loadable(requirement, library))
 }
 
+/// Whether NVML initialises here and sees a device: the `nvml` requirement.
+///
+/// Loading the library is not the question. A container given the userspace
+/// library and no driver, a guest that sees the host's files, a host after a
+/// driver upgrade and before its reboot: each loads `libnvidia-ml.so` and then
+/// fails `nvmlInit` with "Driver Not Loaded" or a version mismatch, and until
+/// the twelfth wave every `vendor:nvml` source was listed usable there and
+/// refused at start (P6 in `docs/portability.md`). So the probe initialises it,
+/// counts the devices and shuts it down, once per process: `nvmlInit` costs
+/// 3 to 5 ms, and it is paid only by a process that asks about a GPU source.
 fn nvml_probe() -> Probe {
-    match nvml::Nvml::present() {
-        Ok(_) => Probe::Available,
-        Err(reason) => Probe::Missing(format!(
-            "the NVIDIA management library is not loadable on this machine ({reason})"
-        )),
-    }
+    static ANSWER: std::sync::OnceLock<Probe> = std::sync::OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            if let Err(reason) = nvml::Nvml::present() {
+                return Probe::Missing(format!(
+                    "the NVIDIA management library is not loadable on this machine ({reason})"
+                ));
+            }
+            let library = match nvml::Nvml::open() {
+                Ok(library) => library,
+                Err(reason) => {
+                    return Probe::Missing(format!(
+                        "libnvidia-ml loads and does not initialise, so no NVIDIA driver is \
+                         serving it: {reason}"
+                    ))
+                }
+            };
+            match library.device_count() {
+                Ok(0) => Probe::Missing(
+                    "libnvidia-ml initialises and sees no device on this machine".to_owned(),
+                ),
+                Ok(_) => Probe::Available,
+                Err(error) => Probe::Missing(format!(
+                    "libnvidia-ml initialises and cannot count its devices: {error}"
+                )),
+            }
+        })
+        .clone()
 }
 
 fn loadable(requirement: &str, library: &str) -> Probe {
@@ -150,6 +182,21 @@ mod tests {
         if let Probe::Missing(reason) = &probe {
             assert!(reason.contains("libnvidia-ml"), "{reason}");
         }
+    }
+
+    /// Available means NVML initialised and counted a device, which is the
+    /// first thing every `vendor:nvml` collector does. Checked against the
+    /// library itself rather than against the probe's own code path: where
+    /// the probe says yes, an independent `Nvml::open` must succeed and see a
+    /// device, and where it says no, one of them must fail.
+    #[test]
+    fn the_nvml_probe_says_yes_exactly_when_a_collector_could_start() {
+        let probe = probe("nvml").expect("`nvml` is this family's requirement");
+        let starts = nvml::Nvml::open()
+            .ok()
+            .and_then(|library| library.device_count().ok())
+            .is_some_and(|count| count > 0);
+        assert_eq!(probe.is_available(), starts, "{probe}");
     }
 
     #[test]

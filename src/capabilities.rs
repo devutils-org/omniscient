@@ -479,6 +479,9 @@ impl Capabilities {
         if self.environment.cgroup2 == Access::Absent {
             return Probe::Missing("cgroup v2 is not mounted at /sys/fs/cgroup".into());
         }
+        if let Some((file, key)) = file.split_once(':') {
+            return probe_cgroup_key(file, key);
+        }
         let root = PathBuf::from("/sys/fs/cgroup");
         if access(&root.join(file)).is_readable() {
             return Probe::Available;
@@ -573,8 +576,17 @@ impl Capabilities {
         // A raw tracepoint is looked for in the kernel's own BTF rather than in
         // tracefs, because that is how this tool attaches to one: through
         // `BPF_RAW_TRACEPOINT_OPEN`, which takes a name and needs no tracefs.
+        // With a prototype -- `raw_tracepoint:sched_process_exit(task_struct *,
+        // bool)` -- the probe also compares it with the kernel's, which is the
+        // check the program makes at attach.
         if let Some(event) = requirement.strip_prefix("raw_tracepoint:") {
             return Probe::from(crate::bpf::raw_tracepoint_support(event));
+        }
+
+        // A member of a kernel struct a program reads, as `struct.member`,
+        // looked up in BTF the way the program looks it up when it is built.
+        if let Some(field) = requirement.strip_prefix("btf_member:") {
+            return Probe::from(crate::bpf::btf_member_support(field));
         }
 
         // Netlink families: the question is whether this kernel exposes the
@@ -649,6 +661,50 @@ impl Capabilities {
                 ),
             },
             other => Probe::Unknown(format!("no probe is written for `{other}` yet")),
+        }
+    }
+}
+
+/// Whether a cgroup's flat-keyed file carries a key: `cgroup2:memory.stat:pswpout`.
+///
+/// Which keys `memory.stat` has is the kernel's choice and changes between
+/// releases -- 7.2 counts `pswpin`/`pswpout` per cgroup and 6.6 does not -- so
+/// a requirement on the file alone is answered yes by a kernel whose collector
+/// then refuses (P10 in `docs/portability.md`). The file is read where this
+/// process lives, walking up to the root until one is there: the keys a kernel
+/// writes do not depend on which cgroup it writes them for, and the nearest one
+/// is the one most like a target's.
+fn probe_cgroup_key(file: &str, key: &str) -> Probe {
+    let root = Path::new("/sys/fs/cgroup");
+    let own = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+        })
+        .unwrap_or_else(|| "/".to_owned());
+    let mut directory = root.join(own.trim_start_matches('/'));
+    loop {
+        let path = directory.join(file);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let present = text
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(key));
+            return if present {
+                Probe::Available
+            } else {
+                Probe::Missing(format!(
+                    "{} carries no `{key}`, so this kernel does not publish it per cgroup",
+                    path.display()
+                ))
+            };
+        }
+        if directory == root || !directory.pop() || !directory.starts_with(root) {
+            return Probe::Unknown(format!(
+                "no `{file}` is readable from this process's cgroup up to {}, so whether it \
+                 carries `{key}` cannot be checked",
+                root.display()
+            ));
         }
     }
 }
@@ -1504,6 +1560,49 @@ mod tests {
         // or a sandbox refuses it, and then the answer says which.
         let probe = capabilities.probe("sock_diag", None);
         assert!(!probe.is_unknown(), "{probe}");
+    }
+
+    /// A key of `memory.stat` is answered from the file the kernel writes for
+    /// this process's own cgroup: a key read independently out of that file is
+    /// available, and one no kernel writes is missing and says which file was
+    /// read.
+    #[test]
+    fn a_cgroup_key_is_answered_from_the_file_the_kernel_writes() {
+        let capabilities = Capabilities::detect();
+        if capabilities.environment().cgroup2 == Access::Absent {
+            eprintln!("skipped: no cgroup v2 hierarchy here");
+            return;
+        }
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let own = own
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .unwrap_or("/");
+        let mut directory = Path::new("/sys/fs/cgroup").join(own.trim_start_matches('/'));
+        let text = loop {
+            if let Ok(text) = std::fs::read_to_string(directory.join("memory.stat")) {
+                break Some(text);
+            }
+            if !directory.pop() || !directory.starts_with("/sys/fs/cgroup") {
+                break None;
+            }
+        };
+        let absent = capabilities.probe("cgroup2:memory.stat:definitely_not_a_key", None);
+        let Some(text) = text else {
+            assert!(absent.is_unknown(), "{absent}");
+            return;
+        };
+        let first = text
+            .split_whitespace()
+            .next()
+            .expect("memory.stat is not empty");
+        let present = capabilities.probe(&format!("cgroup2:memory.stat:{first}"), None);
+        assert!(
+            present.is_available(),
+            "`{first}` is in the file: {present}"
+        );
+        assert!(absent.is_missing(), "{absent}");
+        assert!(absent.to_string().contains("memory.stat"), "{absent}");
     }
 
     #[test]

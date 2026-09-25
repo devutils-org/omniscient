@@ -12,7 +12,7 @@
     # the runtime carries the probes is a fact about the target, read from its
     # ELF notes at attach and refused there by name -- the same reason
     # `runtime.jit` requires `/tmp` rather than the map.
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: low}
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf"], cost: low}
   modes: [trace]
   emits: [hist, timeline, raw, topk, summary]
   targets: {pid: native, launch: native}
@@ -75,7 +75,7 @@
   summary: "Runtime-level allocation activity (objects, not the C heap under it)"
   unit: bytes
   backends:
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: med}
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf"], cost: med}
   modes: [trace, poll]
   emits: [hist, topk, stack, timeline, summary]
   targets: {pid: native, launch: native}
@@ -101,9 +101,9 @@
   summary: "User-declared probe on an arbitrary symbol or USDT marker"
   unit: count
   backends:
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf"], cost: med,
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf"], cost: med,
        filter_fields: [comm, provider, probe, object]}
-    - {id: "bpf:uprobe", requires: ["uprobe", "bpf"], cost: high,
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "btf"], cost: high,
        filter_fields: [comm],
        degraded: "~1-2 us per hit: only viable on low-rate call sites"}
   modes: [trace, count]
@@ -130,7 +130,8 @@
        The kernel raises it through the link, in the target's image of the file,
        from before a launched program's first instruction. On a kernel older
        than 6.6 the sites go through the uprobe PMU instead, which needs
-       CAP_SYS_ADMIN and maintains no semaphore, and the run says so."
+       CAP_SYS_ADMIN and maintains no semaphore: without that privilege
+       `uprobe` is missing there, and with it the run says it fell back."
     - "Each hit is a uprobe trap into the kernel, measured at about 740 ns
        against about 70 ns for a preload shim writing the same event into its
        shared ring (finding 47). USDT is how a
