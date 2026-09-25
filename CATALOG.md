@@ -88,6 +88,8 @@ backends:                        # ordered, first viable one wins
   - id: fs:proc
     requires: [/proc/diskstats]
     cost: free
+    targets: {system: native}    # only where the chain disagrees
+    filter_fields: [dev]         # only where the chain disagrees
     degraded: "aggregated per device, no per-request latency"
 modes:  [trace, count]
 emits:  [hist, raw, rate, topk]
@@ -106,6 +108,29 @@ caveats:
 
 `targets`: `native` (filtered at the backend level), `bpf_only` (filtered inside
 the program), `no` (invalid combination, must fail validation).
+
+A backend may carry its own `targets` and `filter_fields`. Absent, it serves
+and carries whatever the entry declares, which is the common case. Present, the
+map speaks only for that backend and is not widened by the entry's: a target
+kind it does not mention is one it cannot serve, and a field it does not list is
+one its events never carry. The entry describes the union of what the chain can
+do, and a backend that only attributes per cgroup must not be handed a
+system-wide request because a sibling could serve one; a predicate over a field
+the selected backend never emits would empty the series rather than narrow it.
+The loader refuses a backend that claims a target or a field the entry does not
+offer, and an entry that offers one no backend in its chain serves.
+
+`requires` lists what the backend needs, each string answered by
+`Capabilities::probe` in `src/capabilities.rs` as available, missing or unknown.
+The classes it answers include a path (`/proc/diskstats`, with `[pid]`
+substituted), `kernel>=<version>`, `cgroup2:<file>`, `tracepoint:<sys>:<event>`
+(the event's `id` file must be readable, not only its directory),
+`raw_tracepoint:<event>` (looked up in the kernel's BTF), `pmu:<event>`,
+`kprobe` and `uprobe` (the dynamic PMUs), and **`fentry:<function>`**: the
+running kernel's BTF declares a `FUNC` of that name and, where this process may
+load a tracing program, the smallest one loads against it (`src/bpf/fentry.rs`).
+A string no probe answers -- `usdt:libc` today -- reads unknown, and unknown
+never counts as available.
 
 Two fields a backend may carry beside `cost`, and each is a statement about what
 its events mean rather than about how it is reached:
@@ -251,7 +276,7 @@ its events mean rather than about how it is reached:
 | `net.backlog` | accept/SYN queue drops | `fs:proc` netstat (LINUX_MIB) | poll | system | free | medium |
 | `net.qdisc` | TX scheduling latency | `bpf:tp` qdisc:qdisc_dequeue | trace | system | low | low |
 | `net.softirq` | network processing time | `bpf:tp` irq:softirq_entry/exit | trace | cpu, system | low-med | low |
-| `net.hwts` | NIC hardware timestamps | `SO_TIMESTAMPING` + PHC | trace | pid (socket opt) | free | high |
+| `net.hwts` | NIC hardware timestamps | `SO_TIMESTAMPING` + PHC (per packet, no collector yet) · `netlink:ethtool` + PTP clock (what an interface can stamp, how far its clock is from ours) | trace, poll, snapshot | pid (socket opt), iface, system | free | high |
 | `net.xdp` | in-driver counters | `bpf` XDP | count | iface | free | medium |
 | `net.capture` | raw packets | `af_packet` TPACKETv3 | trace | iface | high | high |
 | `net.iface` | errors, drops, pause frames | `netlink` ethtool -S | poll | iface | free | medium |
@@ -264,6 +289,10 @@ its events mean rather than about how it is reached:
   socket.
 - `net.hwts` is the only way to settle "is it the network or is it us": it splits
   latency into NIC / kernel / application segments.
+  That is the per-packet `SO_TIMESTAMPING` backend, which has no collector
+  yet. What runs is `netlink:ethtool`, per interface, in `poll` or `snapshot`:
+  whether a latency measured elsewhere is the card's word or the kernel's guess.
+  It refuses `trace`, which would mean a stamp per packet.
 - `net.capture`: watch buffer drops. A capture that loses packets under load
   silently produces wrong conclusions.
 - Multi-host introduces clock drift between machines, a different class of
@@ -412,11 +441,20 @@ validator must reject the combination rather than silently degrade.
 
 | Mode | Meaning | Valid emits |
 |---|---|---|
-| `count` | counter aggregated over the duration | `rate`, `summary` |
+| `count` | counter aggregated over the duration | `rate`, `summary`, `raw` |
 | `sample@freq` | periodic sampling | `stack`, `topk`, `hist`, `raw` |
-| `trace` | every event | `raw`, `hist`, `topk`, `timeline` |
+| `trace` | every event | `raw`, `hist`, `topk`, `timeline`, `stack`, `rate`, `summary` |
 | `poll@interval` | periodic re-read | `raw`, `timeline`, `summary` |
-| `snapshot` | a single point-in-time read | `summary` |
+| `snapshot` | a single point-in-time read | `summary`, `raw` |
+
+The table is `ModeKind::valid_emits` in `src/request.rs`, which is what the
+validator checks.
+
+**`count` has `raw` because a counted window *is* one event**: the counter, its
+value, and the window the hardware says it was enabled for (`enabled_ns`,
+`running_ns`). Without it a derived metric's terms -- the two counts behind
+`cpu.ipc` -- and the counter's own window, the honest denominator for a rate,
+never reach the user.
 
 Invalid combinations must be rejected at validation time with an explicit
 message: sampling a procfs file, counting a tracepoint without tracing it, asking
@@ -437,7 +475,8 @@ loses are the ones from the moments that stalled -- the slow ones. `sample` and
 
 ```
 --duration 30s              session duration
---budget 2%                 overhead budget; the resolver degrades and says so
+--budget 2%                 overhead ceiling, enforced by the runner: over it, a
+                            cheaper backend of the chain or a stop, and it says which
 --filter "bytes > 4096"     pushed into the kernel when possible, else userspace
 --stack fp|dwarf|lbr|none   unwind mode
 --emit hist|raw|rate|topk|stack|timeline

@@ -51,7 +51,9 @@
 # residue gets its meaning: the loop's cycles over `wall x frequency` is the
 # share of the window the loop had its core, and measured under a load average
 # of thirty it fell to 0.30 while its IPC did not move at all. Two runs because
-# one run observes one target.
+# a run used to observe one target. It now observes one workload beside any
+# number of machine targets (`system`, `cpu`, `iface`), so the loop's counters
+# could join this session as requests on its pid.
 #
 # **Evidence: TEMPORAL.** The frequency and the counters are tied together by
 # a core number and by overlapping in time, and nothing propagated from one to
@@ -78,7 +80,7 @@ duration: 2s
 requests:
   # The program's half: retired instructions on the core. The target is the
   # core rather than a process because the frequency belongs to the core, and
-  # one run observes one target.
+  # the core's counters are what it is read against.
   - label: instructions
     source: cpu.instructions
     target:

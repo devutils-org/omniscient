@@ -256,7 +256,14 @@ Now, and not before: we have three real join types to generalize from.
 ### Exit criteria
 
 - [ ] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead.
-- [ ] Exceeding the budget produces an **announced** degradation, not a loss.
+- [x] Exceeding the budget produces an **announced** degradation, not a loss.
+      *The runner checks every 100 ms and, over the ceiling, moves the
+      collection onto the next cheaper backend of its chain that this machine
+      serves (`Ladder` in `src/main.rs`), after draining the outgoing
+      collector's events into the run; the note says when and which way it
+      moved (`degrade` in `src/collect/mod.rs`). With nothing cheaper, the run
+      stops and names the ceiling. `tests/budget.rs`,
+      `a_run_over_its_ceiling_moves_onto_a_cheaper_backend_and_says_when`.*
 - [x] A collector can be added and removed mid-session. *A request's `window`,
       tenth wave: one phase of a program counted within +0.17 %, and nothing of
       the other. The join engine's view of a detached source is filed.*

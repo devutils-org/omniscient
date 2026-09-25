@@ -192,16 +192,23 @@ compiler would say:
 Named because a gap that is not written down gets rediscovered by each family
 in turn:
 
-- **fentry and USDT.** `src/bpf/attach.rs` now has the classic tracepoint,
-  kprobe and uprobe paths, through `perf_event_open` and `PERF_EVENT_IOC_SET_BPF`.
-  What is still missing is BTF-typed attach (`BPF_PROG_TYPE_TRACING` with an
-  `attach_btf_id`) and reading a target's ELF notes to find its USDT probes.
-  `io`, `net` and `runtime` need both.
 - **Per-cpu ring consumption in parallel.** One ring, drained on the tick loop,
   is enough at the volumes seen so far. A syscall tracer will not agree.
 
-Two things this section used to list are here now, and are worth knowing about
+Four things this section used to list are here now, and are worth knowing about
 rather than rediscovering:
+
+- **fentry.** BTF-typed attach, landed in the eighth wave: `src/bpf/fentry.rs`
+  loads a `BPF_PROG_TYPE_TRACING` program with `expected_attach_type` and the
+  function's `attach_btf_id`, and attaches it through `BPF_RAW_TRACEPOINT_OPEN`
+  with no name. The requirement class is `fentry:<function>`: the running
+  kernel's BTF declares a `FUNC` of that name, and, where this process may
+  load a tracing program, the smallest one loads against it.
+  `attach::probe_type_support` answers it, beside `kprobe` and `uprobe`.
+- **USDT.** Also the eighth wave: `src/bpf/usdt.rs` reads a target's
+  `.note.stapsdt` notes for each probe's location, semaphore and argument
+  descriptors, and attaches a uprobe at the right offset. `runtime`, the
+  `net.request` collector and `sched.mutex`'s glibc backend use it.
 
 - **Stack capture.** `bpf_get_stackid` into a `BPF_MAP_TYPE_STACK_TRACE`, with
   the id in the *key* of the totals map so that two blocks of the same task from
