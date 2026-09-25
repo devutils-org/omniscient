@@ -7200,3 +7200,153 @@ load put on the target's threads) and
 `triage::a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on`
 (the escalation named the lock layer after the shed). The first is stream D's
 file this wave, the second stream R's; both were told.
+
+---
+
+## Needs from another stream — the twelfth wave, stream W (what the resolver promises)
+
+Stream W's deliverable is `docs/fixes/resolver.md`. Five requests, each for a
+file W does not own; nothing here blocks the stream, and each says what is
+left undone until it lands.
+
+### To stream V, for `catalog/cpu.yaml` and `catalog/power.yaml`: P7's data
+
+The resolver now passes over a backend whose own `modes` leave the request's
+out, with `` `fs:proc` serves `poll` mode, not `trace` `` in the chain, and the
+loader checks a backend's `modes` against its entry's. The rule has no data
+yet, because backend lines are V's. Wanted, one key each:
+
+```yaml
+# cpu.oncpu_time
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free, modes: [poll],
+       targets: {cgroup: native, container: native}, filter_fields: [],
+       degraded: "aggregated per cgroup, no stacks and no per-thread attribution"}
+    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: free, modes: [poll],
+       targets: {pid: native, tid: native, launch: native},
+       degraded: "tick granularity, no per-site attribution"}
+# power.cstate
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpuidle"], cost: free, modes: [poll],
+       degraded: "residency totals only: no transition timeline"}
+```
+
+`tests/scenario_cpu.rs::a_backend_that_cannot_serve_the_mode_is_passed_over_before_the_launch`
+runs against the embedded catalog once the `cpu.oncpu_time` line is there, and
+against a copy carrying exactly that line until then. Meanwhile `cpu.oncpu_time
+-m trace` is refused by its factory, before the launch (exit 3), rather than at
+attach after it. `sched.switches -m count` is the fourth P7 cell; it is below,
+for D.
+
+### To stream D, for `src/collect/sched/switches.rs` (or V's `catalog/sched.yaml`): `sched.switches -m count`
+
+`pmu:sw` refuses `count` at start. Either the collector counts, the way
+`mem.faults` now does -- `crate::collect::cpu::counters::Prepare::new(&counters::SCHED_SWITCHES, Mode::Count)?.attach(target)`
+(the spec is in `src/collect/cpu/counters.rs` already, W's file, unused until then),
+one inherited software counter per thread read at the end, with no second
+party -- or the catalog says it does not: `modes: [trace]` on that backend
+line (V's). The first is the better answer; the second is one line. P8's
+`sched` half (`--system` refused) is D's already this wave, and
+`crate::perf::ThreadSampler::open_cpus(&spec, &cpus, ring_pages)`, which
+`cpu.profile` and `mem.faults` now use for a machine or a core target, is the
+shape: one event per cpu, over every task, refused in `per_cpu_refusal`'s words.
+
+### To stream D, for `src/bpf/proc_syscall.rs`: the program's own count of what its comparison skipped
+
+`proc.syscall`'s `bpf:raw_tp` is the one backend whose program evaluates a
+predicate (`filter_in_program: [syscall]`), and the resolved file now says
+`kernel` for exactly that. The program keeps no count of the calls its
+`jne` skipped, so the witness in `tests/scenario_proc.rs` is the complement:
+the collector's own removal count, zero for the pushed-down predicate and the
+whole start-up for one that is not. Wanted, beside `DROP_PENDING` and
+`DROP_ROWS`:
+
+```rust
+const SKIPPED_BY_PREDICATE: u32 = 2; // counted at the `done` jump of the syscall comparison
+pub fn skipped(&self) -> u64;        // SyscallProgram, read at stop like `dropped()`
+```
+
+and the collector's note saying it: *"the program skipped N calls to other
+syscalls without timing them"*. Then the scenario asserts that count too.
+
+### To stream R, for `src/render.rs` (and later `src/collect/mod.rs`): say who applied a predicate
+
+`resolve::FilterPlacement` keeps its two variants, because the runner decides
+on them whether to filter (`apply_filter`) and `render.rs` matches them
+exhaustively; what changed is the payload, a `resolve::Placed { by:
+AppliedBy, reason }` whose `by` is `Program`, `Collector` or `Runner`. The
+resolved file says `"placement": "kernel"` only for `Program` and adds
+`"applied_by"`. `render.rs` still prints `filter  pushed into the kernel:`
+for the `Kernel` variant, so `Placed`'s `Display` prefixes a collector's with
+`no;` to keep that line true. Wanted, in `push_resolution`:
+
+```rust
+if let Some(placement) = &resolved.filter {
+    let placed = placement.placed();
+    let heading = match placed.by {
+        resolve::AppliedBy::Program => "in the program",
+        resolve::AppliedBy::Collector => "applied by the collector, after delivery",
+        resolve::AppliedBy::Runner => "applied after reading",
+    };
+    let _ = writeln!(out, "    filter  {heading}: {}", placed.reason);
+}
+```
+
+after which the `no;` prefix in `impl Display for Placed` goes. Stream M's
+request is also landed on W's side: `resolve::probe_all(&capabilities,
+backend, None)` is public with exactly the signature M's `Listed` asked for,
+and `Cost::worst_case_percent` is in `src/catalog.rs` for `main.rs` to call
+instead of its own copy.
+
+### To whoever owns `catalog/cpu.yaml` and `catalog/mem.yaml` (V): the cgroup half of P8
+
+The matrix runs a launched program and `--system`, so it did not see it: the
+counting sources, `cpu.profile` and `mem.faults` declare `cgroup: native` and
+`container: native`, and their collectors refuse both (*"counts a task or a
+cpu"*, *"is not built"*). `perf::Scope::CgroupOnCpu` exists, so the collectors
+can be written (W's, next wave); until then those two `targets` keys promise a
+target nothing serves, which is P8's shape one kind over.
+
+### To stream V, for `tests/portability.rs`: three entries retired, and P9's is now a per-request answer
+
+Measured on `here` (caps) and `6.6.157-nocaps` with stream W's binary
+(`docs/fixes/resolver.md`, "The matrix cells"): the judge reports
+*"recorded as refusing here and it attached"* for **P7 `mem.faults` launch**,
+**P8 `cpu.profile` system** and **P8 `mem.faults` system** -- remove the three.
+**P9**'s ten sources on `--system` are now refused by the resolver before
+anything starts (*"has no viable backend on this machine: pmu: per-cpu perf
+events (the target observes whole cpus): missing: ... perf_event_paranoid at 0
+or below (it is 2 here) or CAP_PERFMON"*). The entry still matches, because
+the listing knows no target; it is an exact per-request refusal now, not an
+"available but it does not attach", and the judge can classify a refusal that
+names the missing requirement before the start the way it does any other
+unavailable source.
+
+### To the coordinator, for `tests/cli.rs` (nobody's): a test that asserts P8
+
+`a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason`
+asserts that `mem.faults --system -m sample@997hz` is refused with
+*"per-cpu events"* and *"names no process"* -- the defect P8 recorded. It is
+served now (one event per cpu), so the test is red on this branch. Wanted: the
+same refusal asked of the target that is still refused, and the machine served
+where it can be:
+
+```rust
+let output = run(&["mem.faults", "--cgroup", "/sys/fs/cgroup", "--mode", "sample@997hz",
+                   "--emit", "raw", "--duration", "200ms"]);
+assert!(!output.status.success());
+let complaint = stderr(&output);
+assert!(complaint.contains("mem.faults") && complaint.contains("cgroup"), "{complaint}");
+```
+
+(`tests/scenario_cpu.rs::a_trace_of_the_machines_faults_holds_every_fault_a_thread_counted`
+is the ground truth for the machine.)
+
+### For the flaky tally: three seen at stream W's check, passing alone
+
+In `tests/scenario_mem.rs`, in one `cargo test --workspace --no-fail-fast` at
+load 10-12 with four streams building, each passing alone at once:
+`a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` (288 160 TLB misses
+with THP `always`), `a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel_counted`
+(no reclaim episode for 37 700 reclaimed pages), and
+`a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory`
+(13 of 40 small-walk loads timed). `both_huge_page_backends_read_the_same_promotion_counter`
+failed in the same run and is in the tally already.
