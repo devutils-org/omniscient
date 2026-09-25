@@ -233,14 +233,13 @@ because a plan kept in two documents drifted in both.
 
 The eleventh wave -- the escalation, the engine's debts, the silent
 degradations, the drains and the portability matrix -- is merged, and
-`docs/briefs/wave-11-escalation.md` keeps its brief. **The twelfth wave
-(`BRIEF.md`) is nearly merged**: the flight recorder (R), phase 11's MCP surface
-(M), the kernel-side attributions and drains (D -- finding 48 closed: an
-interrupt's wakeup is the interrupt's), and what the resolver promises (W --
-P7 to P9, and a filter placed in the kernel only where a program compares it)
-are on `main`, and the suite after them is green apart from the flaky tally
-(1900 passed). The probe side of the matrix (V, P1 to P6 and P10) is the one
-stream still running.
+`docs/briefs/wave-11-escalation.md` keeps its brief. **The twelfth wave is merged**, all five streams, and
+`docs/briefs/wave-12-recorder.md` keeps its brief: the flight recorder (R),
+phase 11's MCP surface (M), the kernel-side attributions and drains (D --
+finding 48 closed), what the resolver promises (W -- P7 to P9), and what a
+probe asks (V -- P1 to P6 and P10). What is left of the matrix's classes is
+two known defects and a new one (P11, `cpu.profile --system` on 5.15), and a
+matrix rerun on an idle machine for the cells swept before the fixes.
 
 **Found at the eleventh wave's merge:** `cross_compute`'s lossy-profile
 decomposition failed deterministically on `main`. The tool was right and the
@@ -252,7 +251,8 @@ profile keyed by `task` cannot say *which* task lost which samples, though each
 ring belongs to one -- losses per ring carried into `Collection`, a change to
 `src/emit.rs` and the collector layer, after the flight recorder.
 
-**After the twelfth wave, in order:**
+**After the twelfth wave, in order** -- `docs/open-requests.md` is the list the
+next brief is written from, and `docs/flaky.md` the tests it assigns:
 
 0. **The flight recorder landed** in the twelfth wave (`docs/recorder.md`): a
    session's `record:` block or `--until`, a trigger in the filter grammar, a

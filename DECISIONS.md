@@ -332,6 +332,22 @@ the program says it did before them.
 | A system or core target on a perf backend | **Probed per cpu by the resolver**, as a requirement of its own in the resolved file; the machine is sampled with one event per cpu, not inherited, and the idle task's samples are counted and left out. | The listing's per-task probe cannot answer for a per-cpu event (P9), and a sampler that follows no process could not serve the machine at all (P8). |
 
 `docs/families/kernel.md` and `docs/fixes/resolver.md` have the measurements.
+
+---
+
+## Settled in the twelfth wave: what a probe asks
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A tracepoint's prototype | **Written in the catalog as well as in the program**, and the two change in the same commit. | The probe has to answer before anything is loaded, so it cannot ask the program; a mismatch shows at once on the development machine (the source reads missing), and a test catches a malformed one. Three of the matrix's classes passed on 7.2 and failed on 6.6 for want of it (P1). |
+| `uprobe` and `uprobe_multi` | **`uprobe` means this process can place one**, not that the PMU exists; **`uprobe_multi` is asked of the kernel** with a link to a file that does not exist, not read off the version. Without the capabilities it cannot be asked, and reads unknown, never available. | A PMU that exists and an open that returns `EACCES` are different answers (P3, P5). |
+| A GPU library | **The probe initialises it** and counts devices: 3 to 5 ms, once per process. | Loading `libnvidia-ml.so` is not the question the collector's first call asks; a library without its driver loaded and then refused (P6). |
+| A key a kernel may not write | **A requirement of its own**, `cgroup2:<file>:<key>`, read from the nearest cgroup that has the file. | Which keys a kernel writes does not depend on the cgroup; `mem.swap` read available on kernels that write no `pswpout` (P10). |
+| A guest's single root cgroup | **Not a probe defect** (`mem.cgroup`). | The probe cannot know the target's cgroup before the launch, and the refusal after it is exact. |
+
+`docs/portability.md`, "The twelfth wave", says which class was verified on a
+matrix cell and which needs the matrix run again on an idle machine
+(`power.cstate`, and the capability-less cells swept before W's and D's fixes).
 ---
 
 ## Open
