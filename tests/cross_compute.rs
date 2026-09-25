@@ -962,17 +962,40 @@ fn a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone() {
     assert_eq!(short["dropped"].as_u64(), Some(dropped), "{short}");
     assert_eq!(short["throttled"].as_u64(), Some(throttled), "{short}");
 
-    // The samples the mark says were dropped are time the task spent holding
-    // its cpu. Counted back in, they must still fit in the run's window with
-    // the rest -- a mark that overstated the loss would push the parts past it.
-    let with_dropped = lossy_table.parts_ns() + lossy_table.dropped_ns();
+    // The samples the mark says were dropped are time some sampled task spent
+    // holding its cpu. Counted back in, they must still fit in the room the
+    // sampled tasks' windows leave -- a mark that overstated the loss would
+    // push them past it.
+    //
+    // Which task a drop belonged to is not in the output: the profile follows
+    // the processes the target starts (the workload's `{ ... } &` half is one),
+    // each with a ring of its own, and the mark is run-wide by design
+    // (`emit::Shortfall::records`). So the drops are weighed against every
+    // sampled task's room at once: the decomposed task's window less its
+    // parts, and each other task's window less what its own samples hold.
+    // When the target was the only task sampled, that is the old bound
+    // exactly: every drop was its time.
+    let others_ns: Vec<f64> = outputs(profile, "topk")
+        .flat_map(|output| output["series"].as_array().into_iter().flatten())
+        .filter(|series| series["key"] != format!("task:{}", lossy.task()).as_str())
+        .map(|series| series["events"].as_f64().unwrap_or(0.0) * lossy_table.period_ns)
+        .collect();
+    let own_room =
+        lossy_table.whole_high_ns + lossy_table.runnable_ns + lossy_table.on_cpu_slack_ns()
+            - lossy_table.parts_ns();
+    let room = own_room
+        + others_ns
+            .iter()
+            .map(|held| (lossy_table.whole_high_ns - held).max(0.0))
+            .sum::<f64>();
     assert!(
-        with_dropped - lossy_table.runnable_ns - lossy_table.on_cpu_slack_ns()
-            <= lossy_table.whole_high_ns,
-        "with the {dropped} dropped samples counted, the parts are {:.1} ms against a window of \
-         {:.1} ms:\n{}",
-        with_dropped / 1e6,
-        lossy_table.whole_high_ns / 1e6,
+        lossy_table.dropped_ns() <= room,
+        "the {dropped} dropped samples stand for {:.1} ms, and the {} sampled tasks' windows \
+         leave room for {:.1} ms ({:.1} ms of it the decomposed task's):\n{}",
+        lossy_table.dropped_ns() / 1e6,
+        others_ns.len() + 1,
+        room / 1e6,
+        own_room / 1e6,
         lossy_table.render(&lossy)
     );
 
