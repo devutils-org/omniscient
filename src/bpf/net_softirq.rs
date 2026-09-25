@@ -35,7 +35,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash};
+use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::net_program::{bucket_low_ns, count_drop, expect_signature, load, push_log2_bucket};
 use super::syscall::{self, BPF_MAP_TYPE_PERCPU_ARRAY};
 
@@ -67,6 +67,9 @@ const ROW_VALUE: i16 = -56;
 const ROW_KEY: i16 = -32;
 const AT_KEY: i16 = -20;
 const DROP_KEY: i16 = -16;
+/// The row map of this interval, as the generation slot named it, kept in
+/// this slot once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -64;
 
 /// The layout of a row key.
 const KEY_CPU: i16 = 0;
@@ -246,7 +249,11 @@ fn exit_instructions(
     push_log2_bucket(&mut program, 9);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one handler in each. See `map::Rows`. r8 and r9 survive the lookup.
+    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -267,7 +274,7 @@ fn exit_instructions(
     program.push(Insn::mov64_reg(1, 8));
     program.push(Insn::sub64_reg(1, 9));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -279,6 +286,11 @@ fn exit_instructions(
     // A lost row is counted once. Without this jump control would fall into
     // the block below and count the same handler as an unpaired exit as well,
     // which would report one loss as two different things.
+    program.jump_to("done", Insn::ja());
+
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
+    count_drop(&mut program, counters_fd, DROP_KEY, DROP_ROWS, "done");
     program.jump_to("done", Insn::ja());
 
     program.label("unpaired");
@@ -298,7 +310,7 @@ fn exit_instructions(
 /// Dropping it detaches both: the links, the programs and the maps are file
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct SoftIrqProgram {
-    rows: Hash,
+    rows: Rows,
     counters: Counters,
     _at: OwnedFd,
     entry_program: OwnedFd,
@@ -344,7 +356,7 @@ impl SoftIrqProgram {
         // at most one open handler per (cpu, vector) and no atomic is needed.
         let at = syscall::map_create(BPF_MAP_TYPE_PERCPU_ARRAY, 4, 8, VECTORS, "omn_sirq_at")
             .map_err(|error| map_failure("softirq entry map", error))?;
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sirq_hist")
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sirq_hist")
             .map_err(|error| map_failure("softirq histogram map", error))?;
         let counters = Counters::create(COUNTER_SLOTS, "omn_sirq_lost")
             .map_err(|error| map_failure("softirq counters", error))?;
@@ -593,6 +605,7 @@ mod tests {
             (ROW_KEY, ROW_KEY_BYTES as i16, "row key"),
             (AT_KEY, 4, "at key"),
             (DROP_KEY, 4, "drop key"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -606,6 +619,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The row map is found through the generation slot once per run, and the
+    /// lookup and the insert both use what it found -- the property that makes
+    /// the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = exit_instructions(btf, &[2, 3], 3, 4, 5).expect("an exit program");
+        crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 
     /// Every byte of the row value is written by the program before the value

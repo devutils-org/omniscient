@@ -3982,3 +3982,130 @@ fn a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone() 
         "the join is reported, with KEY evidence: {joins}"
     );
 }
+
+/// Every packet a program sent through a queueing discipline is in a row or a
+/// counted loss, on the collector's own 100 ms tick -- the drain race stream K
+/// closed in `sched`, `proc` and `mem`, closed here by moving `net_qdisc.rs`
+/// onto `map::Rows`.
+///
+/// Four senders in a namespace of their own push small datagrams through a
+/// `netem` with no delay on a dummy device for a second and a half -- named
+/// `omnq0`, because `a_queue_that_delays_every_packet_is_measured_as_that_delay`
+/// may be running beside it on a `dummy0` of its own, and a raw tracepoint sees
+/// every namespace's -- each
+/// counting what the kernel accepted. `netem` queues every packet -- a `pfifo`
+/// would not: an empty one lets a packet bypass it, and the tracepoints never
+/// see it -- so each accepted datagram is one enqueue and one dequeue, and the
+/// dequeues land in rows drained fifteen times while they are written. Exact,
+/// not close: the senders' count is theirs, and a packet in neither a row nor
+/// `losses` is the defect.
+#[test]
+fn every_packet_through_a_discipline_is_in_a_row_or_a_counted_loss_on_a_short_tick() {
+    if !can_build_a_network() {
+        eprintln!(
+            "skipped: this scenario needs iproute2 and an unprivileged user namespace to build a \
+             device with a queueing discipline; loopback is `noqueue` on every machine"
+        );
+        return;
+    }
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|outcome| outcome.status.success())
+    {
+        eprintln!("skipped: this machine has no `python3`, which the sending workload is in");
+        return;
+    }
+    let measuring = Command::new(BINARY)
+        .args([
+            "net.qdisc",
+            "--system",
+            "-d",
+            "3s",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    let workload = workload_in_a_namespace(
+        "set -e
+         ip link add omnq0 type dummy
+         tc qdisc add dev omnq0 root netem limit 1000000
+         ip addr add 10.99.0.1/24 dev omnq0
+         ip link set omnq0 up
+         ip neigh add 10.99.0.2 lladdr 02:00:00:00:00:02 dev omnq0
+         sleep 0.5
+         python3 -c 'import os, socket, time
+reader, writer = os.pipe()
+for _ in range(4):
+    if os.fork() == 0:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sent, until = 0, time.monotonic() + 1.5
+        while time.monotonic() < until:
+            for _ in range(100):
+                try:
+                    s.sendto(b\"x\" * 16, (\"10.99.0.2\", 9999))
+                    sent += 1
+                except OSError:
+                    pass
+        os.write(writer, (str(sent) + \"\\n\").encode())
+        os._exit(0)
+for _ in range(4):
+    os.wait()
+os.close(writer)
+print(\"omn-sent\", sum(int(line) for line in os.fdopen(reader).read().split()))'",
+    );
+    let built = workload
+        .wait_with_output()
+        .expect("the workload should run");
+    let outcome = measuring.wait_with_output().expect("omn should finish");
+    if unprivileged(&stderr(&outcome)) {
+        eprintln!(
+            "skipped: net.qdisc needs CAP_BPF and CAP_PERFMON, which this machine does not grant"
+        );
+        return;
+    }
+    if !built.status.success() {
+        eprintln!(
+            "skipped: this machine would not build the device the scenario measures: {}",
+            stderr(&built)
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
+    let sent: u64 = String::from_utf8_lossy(&built.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("omn-sent "))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the senders say what they sent: {built:?}"));
+    let run = results(&outcome);
+    let counted: u64 = raw_events(&run, "net.qdisc")
+        .iter()
+        .map(attrs)
+        .filter(|attributes| attributes["iface"].as_str() == Some("omnq0"))
+        .map(|attributes| attributes["count"].as_u64().expect("a count"))
+        .sum();
+    let losses = &labelled(&run, "net.qdisc")["losses"];
+    let lost: u64 = ["dropped", "undecoded", "throttled"]
+        .iter()
+        .filter_map(|field| losses[*field].as_u64())
+        .sum();
+    eprintln!("sent {sent}, counted {counted}, lost {lost}");
+    assert!(sent > 10_000, "the senders sent only {sent} datagrams");
+    assert!(
+        counted <= sent,
+        "{counted} dequeues counted for {sent} datagrams sent: one was counted twice"
+    );
+    assert!(
+        counted + lost >= sent,
+        "{sent} datagrams went through the discipline, {counted} are in rows and {lost} are \
+         counted as lost: {} vanished without a trace; {losses}",
+        sent - counted - lost
+    );
+}

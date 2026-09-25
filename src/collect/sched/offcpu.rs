@@ -32,6 +32,7 @@ use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
+use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
 use crate::stack::{Frame, RawStack, Symbolizer};
 
@@ -58,6 +59,11 @@ pub struct Prepare {
     /// 1s --emit summary` did not finish in ninety seconds, and finishes in
     /// 1.2 with this.
     pub wants_stacks: bool,
+    /// The request's predicate, applied here per drained row: the resolver
+    /// credits a `bpf` backend with filtering in the kernel and then leaves its
+    /// events alone, so a predicate this collector ignored would run nowhere
+    /// (stream S's finding, `docs/fixes/silent.md`).
+    pub filter: Option<FilterExpr>,
 }
 
 impl Prepared for Prepare {
@@ -79,7 +85,9 @@ impl Prepared for Prepare {
                 )
             })? as u32),
         };
-        Ok(Box::new(OffCpuCollector::new(filter, self.wants_stacks)))
+        let mut collector = OffCpuCollector::new(filter, self.wants_stacks);
+        collector.predicate = self.filter;
+        Ok(Box::new(collector))
     }
 }
 
@@ -119,6 +127,10 @@ pub struct OffCpuCollector {
     blocks_without_a_wakeup: u64,
     /// Whether the frames behind a stack id will be read by anyone.
     wants_stacks: bool,
+    /// The request's predicate, and the blocks it kept and removed.
+    predicate: Option<FilterExpr>,
+    filtered_in: u64,
+    filtered_out: u64,
 }
 
 impl OffCpuCollector {
@@ -140,6 +152,9 @@ impl OffCpuCollector {
             crowded_out: 0,
             blocks_without_a_wakeup: 0,
             wants_stacks,
+            predicate: None,
+            filtered_in: 0,
+            filtered_out: 0,
         }
     }
 
@@ -184,7 +199,7 @@ impl OffCpuCollector {
             if let Some(id) = self.resolve_stack(&entry) {
                 attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
             }
-            events.push(Event {
+            let event = Event {
                 ts_ns: closed_ns,
                 ts_err_ns: 0,
                 kind: "sched.offcpu".to_owned(),
@@ -194,7 +209,15 @@ impl OffCpuCollector {
                 attrs,
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
-            });
+            };
+            if let Some(predicate) = &self.predicate {
+                if !crate::filter::matches(predicate, &event) {
+                    self.filtered_out += entry.blocks;
+                    continue;
+                }
+                self.filtered_in += entry.blocks;
+            }
+            events.push(event);
         }
     }
 
@@ -455,6 +478,13 @@ impl Collector for OffCpuCollector {
                 OffCpuProgram::STACK_SLOTS,
             ));
         }
+        if self.filtered_in > 0 || self.filtered_out > 0 {
+            notes.push(format!(
+                "the filter kept {} blocks and removed {}; it ran here, over the drained rows, \
+                 not in the kernel",
+                self.filtered_in, self.filtered_out,
+            ));
+        }
         if self.evicted_stacks > 0 {
             notes.push(format!(
                 "{} blocks named a stack the kernel had already evicted from its stack map, so \
@@ -481,6 +511,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             wants_stacks: false,
+            filter: None,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -493,6 +524,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             wants_stacks: false,
+            filter: None,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to attribute blocked time to");

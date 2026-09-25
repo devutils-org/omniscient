@@ -20,6 +20,7 @@ use crate::bpf::{Migration, MigrationProgram};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
+use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
 
 /// How often the counts are drained.
@@ -31,15 +32,22 @@ use crate::request::{Mode, Target};
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(250);
 
 /// Holds the request until the target exists.
-pub struct Prepare(pub Mode);
+pub struct Prepare {
+    pub mode: Mode,
+    /// The request's predicate, applied here per drained row: the resolver
+    /// credits a `bpf` backend with filtering in the kernel and then leaves its
+    /// events alone, so a predicate this collector ignored would run nowhere
+    /// (stream S's finding, `docs/fixes/silent.md`).
+    pub filter: Option<FilterExpr>,
+}
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        if !matches!(self.0, Mode::Trace | Mode::Count) {
+        if !matches!(self.mode, Mode::Trace | Mode::Count) {
             return Err(format!(
                 "`{}` mode cannot count migrations: a migration is an instant, and sampling \
                  instants at a frequency counts the samples rather than the migrations",
-                self.0
+                self.mode
             ));
         }
         let filter = match target {
@@ -52,7 +60,9 @@ impl Prepared for Prepare {
                 )
             })? as u32),
         };
-        Ok(Box::new(MigrationCollector::new(filter, self.0)))
+        let mut collector = MigrationCollector::new(filter, self.mode);
+        collector.predicate = self.filter;
+        Ok(Box::new(collector))
     }
 }
 
@@ -84,6 +94,10 @@ pub struct MigrationCollector {
     run_opened_ns: u64,
     /// The totals a `count` run accumulates, by the pair that keys a series.
     counted: BTreeMap<(u32, u32), Migration>,
+    /// The request's predicate, and the migrations it kept and removed.
+    predicate: Option<FilterExpr>,
+    filtered_in: u64,
+    filtered_out: u64,
 }
 
 impl MigrationCollector {
@@ -99,7 +113,43 @@ impl MigrationCollector {
             window_opened_ns: 0,
             run_opened_ns: 0,
             counted: BTreeMap::new(),
+            predicate: None,
+            filtered_in: 0,
+            filtered_out: 0,
         }
+    }
+
+    /// One row as the event it becomes.
+    fn event(&self, row: &Migration, ts_ns: u64, window_ns: u64, seq: u64) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: "sched.migrations".to_owned(),
+            keys: vec![
+                // The migrated task is the series. Not the cpu: the cpu gained
+                // a task and the task lost its caches, and it is the second
+                // that anyone is measuring.
+                KeyValue::task(row.tid as i32),
+                KeyValue::cpu(row.dest_cpu),
+            ],
+            attrs: attributes(row, window_ns),
+            collector_id: self.id.clone(),
+            seq,
+        }
+    }
+
+    /// Whether the predicate keeps a row, counting what it keeps and removes.
+    fn keeps(&mut self, row: &Migration, window_ns: u64) -> bool {
+        let Some(predicate) = &self.predicate else {
+            return true;
+        };
+        let kept = crate::filter::matches(predicate, &self.event(row, 0, window_ns, 0));
+        if kept {
+            self.filtered_in += row.count;
+        } else {
+            self.filtered_out += row.count;
+        }
+        kept
     }
 
     /// Whether this run reports one measurement at the end rather than a
@@ -139,6 +189,9 @@ impl MigrationCollector {
             // but what comes out is added to the window's total rather than
             // published as a slice of it.
             for row in rows {
+                if !self.keeps(&row, window_ns) {
+                    continue;
+                }
                 let key = (row.tid, row.dest_cpu);
                 self.counted
                     .entry(key)
@@ -151,22 +204,13 @@ impl MigrationCollector {
             return;
         }
 
-        for (index, row) in rows.into_iter().enumerate() {
-            events.push(Event {
-                ts_ns: closed_ns,
-                ts_err_ns: 0,
-                kind: "sched.migrations".to_owned(),
-                keys: vec![
-                    // The migrated task is the series. Not the cpu: the cpu
-                    // gained a task and the task lost its caches, and it is the
-                    // second that anyone is measuring.
-                    KeyValue::task(row.tid as i32),
-                    KeyValue::cpu(row.dest_cpu),
-                ],
-                attrs: attributes(&row, window_ns),
-                collector_id: self.id.clone(),
-                seq: seq + index as u64,
-            });
+        let mut index = 0;
+        for row in rows {
+            if !self.keeps(&row, window_ns) {
+                continue;
+            }
+            events.push(self.event(&row, closed_ns, window_ns, seq + index));
+            index += 1;
         }
     }
 
@@ -255,19 +299,12 @@ impl Collector for MigrationCollector {
             let closed_ns = monotonic_ns();
             let window_ns = closed_ns.saturating_sub(self.run_opened_ns);
             let seq = u64::MAX / 2;
+            let counted = std::mem::take(&mut self.counted);
             trailing.extend(
-                std::mem::take(&mut self.counted)
-                    .into_values()
+                counted
+                    .values()
                     .enumerate()
-                    .map(|(index, row)| Event {
-                        ts_ns: closed_ns,
-                        ts_err_ns: 0,
-                        kind: "sched.migrations".to_owned(),
-                        keys: vec![KeyValue::task(row.tid as i32), KeyValue::cpu(row.dest_cpu)],
-                        attrs: attributes(&row, window_ns),
-                        collector_id: self.id.clone(),
-                        seq: seq + index as u64,
-                    }),
+                    .map(|(index, row)| self.event(row, closed_ns, window_ns, seq + index as u64)),
             );
         }
         trailing
@@ -282,15 +319,23 @@ impl Collector for MigrationCollector {
     }
 
     fn notes(&self) -> Vec<String> {
-        if !self.counting() {
-            return Vec::new();
+        let mut notes = Vec::new();
+        if self.filtered_in > 0 || self.filtered_out > 0 {
+            notes.push(format!(
+                "the filter kept {} migrations and removed {}; it ran here, over the drained \
+                 rows, not in the kernel",
+                self.filtered_in, self.filtered_out,
+            ));
         }
-        vec![
-            "`count` reports one total per (task, cpu) over the whole window, so there is no \
-             series here and `rate` over it is the window's mean; `--mode trace` is the one \
-             that reports a count per drain"
-                .to_owned(),
-        ]
+        if self.counting() {
+            notes.push(
+                "`count` reports one total per (task, cpu) over the whole window, so there is \
+                 no series here and `rate` over it is the window's mean; `--mode trace` is the \
+                 one that reports a count per drain"
+                    .to_owned(),
+            );
+        }
+        notes
     }
 }
 
@@ -312,9 +357,12 @@ mod tests {
     /// the sampler looked rather than how often the task moved.
     #[test]
     fn a_sampled_mode_is_refused_with_the_reason() {
-        let prepared = Box::new(Prepare(Mode::Sample {
-            freq: "997hz".parse().expect("a frequency"),
-        }));
+        let prepared = Box::new(Prepare {
+            mode: Mode::Sample {
+                freq: "997hz".parse().expect("a frequency"),
+            },
+            filter: None,
+        });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
         };
@@ -337,7 +385,9 @@ mod tests {
             // A target with no process is the only thing that may be refused
             // here, and `--system` is not one.
             assert!(
-                Box::new(Prepare(mode)).attach(&Target::System).is_ok(),
+                Box::new(Prepare { mode, filter: None })
+                    .attach(&Target::System)
+                    .is_ok(),
                 "`{mode}` is declared and refused"
             );
         }
@@ -345,8 +395,11 @@ mod tests {
 
     #[test]
     fn a_target_without_a_process_is_refused_by_name() {
-        let Err(error) = Box::new(Prepare(Mode::Trace)).attach(&Target::Iface("eth0".to_owned()))
-        else {
+        let Err(error) = Box::new(Prepare {
+            mode: Mode::Trace,
+            filter: None,
+        })
+        .attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to migrate");
         };
         assert!(

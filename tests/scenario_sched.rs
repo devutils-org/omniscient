@@ -347,10 +347,17 @@ fn one_known_number_of_round_trips_is_found_by_four_sources() {
     assert_eq!(exit_code(&output), 0, "{text}");
     let results = results(&output);
 
-    let switches = events_seen(labelled(&results, "switches-out"));
+    // The driver's switches, not the run's: `sched.switches` follows every
+    // task of the program now, the responder too, and a switch count holds
+    // the preemptions a loaded machine adds besides the blocks the loop made
+    // (2643 of the driver's under a full suite, for 2000). Every round trip
+    // blocks the driver once, which is the floor; counting each switch twice
+    // is what the ceiling stops.
+    let switches = driver_switches(&results);
     assert!(
-        close_to(switches, ROUND_TRIPS),
-        "{ROUND_TRIPS} round trips are {ROUND_TRIPS} switches out of the cpu, saw {switches}"
+        switches as f64 >= ROUND_TRIPS as f64 * (1.0 - TOLERANCE) && switches <= 2 * ROUND_TRIPS,
+        "{ROUND_TRIPS} round trips are {ROUND_TRIPS} switches of the driver out of the cpu \
+         and the preemptions besides, saw {switches}"
     );
 
     // Not the event count: `sched.offcpu` aggregates in the kernel, so its
@@ -411,7 +418,7 @@ fn perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides() {
     assert_eq!(exit_code(&output), 0, "{text}");
     let results = results(&output);
 
-    let switches = events_seen(labelled(&results, "switches-out"));
+    let switches = driver_switches(&results);
     let blocks = total_attribute(labelled(&results, "blocks"), "blocks");
     // The slack is the handful of blocks still in flight when the run ends,
     // which have no duration yet and are therefore in no total.
@@ -423,9 +430,30 @@ fn perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides() {
     // And both are still the number the workload chose, which is what stops
     // this from being two mechanisms agreeing about nothing.
     assert!(
-        close_to(switches, ROUND_TRIPS) && close_to(blocks, ROUND_TRIPS),
+        switches as f64 >= ROUND_TRIPS as f64 * (1.0 - TOLERANCE) && close_to(blocks, ROUND_TRIPS),
         "{ROUND_TRIPS} round trips: perf saw {switches} switches, the tracepoint {blocks} blocks"
     );
+}
+
+/// The driver's switches in `examples/sched-round-trips.yml`: the series of
+/// the task `sched.offcpu` saw block, which is the driver alone -- its target
+/// is the launched shell's process, and the responder is a process of its own
+/// that `sched.switches`, following what the shell starts, counts beside it.
+fn driver_switches(results: &[Value]) -> u64 {
+    let mut blocked = std::collections::BTreeMap::<u64, u64>::new();
+    for event in raw_events(labelled(results, "blocks")) {
+        let tid = event["tid"].as_u64().expect("a block names its task");
+        *blocked.entry(tid).or_default() += event["blocks"].as_u64().unwrap_or(0);
+    }
+    let (driver, _) = blocked
+        .into_iter()
+        .max_by_key(|(_, blocks)| *blocks)
+        .expect("the driver blocked");
+    outputs(labelled(results, "switches-out"), "summary")
+        .flat_map(|output| output["series"].as_array().expect("series").clone())
+        .find(|series| series["key"] == format!("task:{driver}"))
+        .and_then(|series| series["count"].as_u64())
+        .unwrap_or(0)
 }
 
 /// The workload phase two needs: one whose time is half on the cpu and half
@@ -3377,5 +3405,587 @@ fn a_targets_blocking_stack_is_named_while_another_process_floods_the_stack_map(
     assert!(
         !text.contains("their stack not kept"),
         "a narrowed run lost the target's stacks to another process's:\n{text}"
+    );
+}
+
+// ================================================= finding 48: a waker is a task
+
+/// The half-blocked pair of `examples/sched-half-blocked.yml`, with the two
+/// pids said by the workload itself on stderr rather than inferred from the
+/// wakeups: the driver is the launched shell (`$$`), the responder the
+/// subshell it put in the background (`$!`).
+const PAIR_SCRIPT: &str = r#"D=$(mktemp -d); mkfifo "$D/a" "$D/b"
+{ exec 4<"$D/a" 5>"$D/b"
+  while read -r _ <&4; do
+    j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+    echo y >&5
+  done; } &
+echo "omn-pair driver=$$ responder=$!" >&2
+exec 3>"$D/a" 6<"$D/b"
+i=0
+while [ $i -lt 600 ]; do
+  j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
+  echo x >&3; read -r _ <&6
+  i=$((i + 1))
+done
+exec 3>&- 6<&-; rm -rf "$D""#;
+
+/// The cpu the pair and the load share: the last one this test may use.
+fn shared_cpu() -> usize {
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::cpu_set_t>();
+    assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut set) }, 0);
+    (0..libc::CPU_SETSIZE as usize)
+        .rev()
+        .find(|cpu| unsafe { libc::CPU_ISSET(*cpu, &set) })
+        .expect("a cpu this test may run on")
+}
+
+fn pin_to(cpu: usize) {
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::CPU_SET(cpu, &mut set) };
+    let size = std::mem::size_of::<libc::cpu_set_t>();
+    assert_eq!(unsafe { libc::sched_setaffinity(0, size, &set) }, 0);
+}
+
+/// Interrupt load on one cpu for as long as `running` holds, and the tids of
+/// the threads it runs: the load finding 48 was reproduced with, made to land
+/// where the pair is. A thread sleeping 50 us at a time is woken by its
+/// hrtimer's hard interrupt on its own cpu; a direct read is completed by the
+/// disk's interrupt, which a per-cpu queue delivers to the reading cpu; a
+/// loopback datagram is delivered by the network softirq. None of these
+/// threads is ever woken by the pair -- they share nothing with it but a cpu.
+fn interrupt_load(
+    cpu: usize,
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (Vec<std::thread::JoinHandle<()>>, Vec<u64>) {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::Ordering;
+    let (tids, tid_of) = std::sync::mpsc::channel::<u64>();
+    let mut threads = Vec::new();
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+        .expect("a timeout");
+    let address = receiver.local_addr().expect("an address");
+    let (flag, said) = (running.clone(), tids.clone());
+    threads.push(std::thread::spawn(move || {
+        said.send(unsafe { libc::gettid() } as u64).unwrap();
+        let mut buffer = [0u8; 64];
+        while flag.load(Ordering::Relaxed) {
+            let _ = receiver.recv(&mut buffer);
+        }
+    }));
+    let (flag, said) = (running.clone(), tids.clone());
+    threads.push(std::thread::spawn(move || {
+        pin_to(cpu);
+        said.send(unsafe { libc::gettid() } as u64).unwrap();
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+        while flag.load(Ordering::Relaxed) {
+            let _ = sender.send_to(&[7u8; 64], address);
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }));
+
+    // A direct read needs a real block device under it, which the target
+    // directory has and /tmp may not.
+    let path = scratch("finding-48-direct");
+    std::fs::write(&path, vec![0u8; 1 << 20]).expect("a file to read back");
+    let flag = running;
+    threads.push(std::thread::spawn(move || {
+        pin_to(cpu);
+        tids.send(unsafe { libc::gettid() } as u64).unwrap();
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(&path)
+        else {
+            return;
+        };
+        let layout = std::alloc::Layout::from_size_align(4096, 4096).expect("a page");
+        let page = unsafe { std::alloc::alloc(layout) };
+        let mut offset = 0i64;
+        while flag.load(Ordering::Relaxed) {
+            use std::os::fd::AsRawFd;
+            let read = unsafe { libc::pread(file.as_raw_fd(), page.cast(), 4096, offset) };
+            if read < 0 {
+                break;
+            }
+            offset = (offset + 4096) % (1 << 20);
+        }
+        unsafe { std::alloc::dealloc(page, layout) };
+    }));
+    let load = (0..threads.len()).map(|_| tid_of.recv().unwrap()).collect();
+    (threads, load)
+}
+
+/// Finding 48, against its reproduction. The half-blocked pair runs pinned to
+/// one cpu beside a load pinned to the same cpu that raises interrupts, and a
+/// wakeup made from one of them used to be credited to whichever task it
+/// landed on. Measured once with the preempt count left unread: 1954 wakeups
+/// of the load's threads and 15 310 of third parties in all (a kworker's
+/// 12 417 among them) credited to the driver in one run; read, 0 and 10.
+///
+/// What the workload knows about itself: the driver wakes the responder once
+/// per round trip and the responder wakes the driver once, 600 each; and the
+/// load's threads share nothing with the pair but the cpu, so the driver never
+/// wakes one of them. Every wakeup of a load thread credited to the driver is
+/// an interrupt it was only the landing place of, and over several runs there
+/// is none, while the pair keeps its 600 each and every wakeup the program saw
+/// from an interrupt names no task as its waker and was kept as the target's
+/// wakee.
+#[test]
+fn a_wakeup_from_an_interrupt_is_not_credited_to_the_task_it_landed_on() {
+    const RUNS: usize = 3;
+    if !have("taskset") {
+        eprintln!("skipped: the pair is pinned with `taskset`, which this machine does not have");
+        return;
+    }
+    let cpu = shared_cpu();
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (load, load_tids) = interrupt_load(cpu, running.clone());
+    let cpu_list = cpu.to_string();
+    let mut seen = Vec::new();
+    for run in 0..RUNS {
+        let output = omn(&[
+            "sched.wakeup",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "taskset",
+            "-c",
+            &cpu_list,
+            "/bin/sh",
+            "-c",
+            PAIR_SCRIPT,
+        ]);
+        let text = spoken(&output);
+        if unprivileged(&text) {
+            running.store(false, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        let said = text
+            .lines()
+            .find_map(|line| line.strip_prefix("omn-pair "))
+            .unwrap_or_else(|| panic!("the workload says its pair:\n{text}"));
+        let pid = |name: &str| -> u64 {
+            said.split_whitespace()
+                .find_map(|field| field.strip_prefix(&format!("{name}=")))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| panic!("`{name}` in `{said}`"))
+        };
+        let (driver, responder) = (pid("driver"), pid("responder"));
+
+        let results = results(&output);
+        let events = raw_events(&results[0]);
+        let number = |event: &std::collections::BTreeMap<String, Value>, name: &str| {
+            event[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("`{name}` in {event:?}"))
+        };
+        let (mut to_responder, mut to_driver, mut to_the_load) = (0u64, 0u64, 0u64);
+        let (mut third_parties, mut from_interrupts) = (0u64, 0u64);
+        let mut strangers = std::collections::BTreeMap::<String, u64>::new();
+        for event in &events {
+            let (waker, wakee) = (number(event, "waker_pid"), number(event, "wakee_pid"));
+            if event["waker_context"] != "task" {
+                from_interrupts += 1;
+                assert_eq!(
+                    (number(event, "waker_tid"), waker),
+                    (0, 0),
+                    "an interrupt's wakeup names no task as its waker: {event:?}"
+                );
+                assert_eq!(
+                    wakee, driver,
+                    "an interrupt's wakeup is kept only as the target's wakee: {event:?}"
+                );
+                continue;
+            }
+            if waker == driver && wakee == responder {
+                to_responder += 1;
+            } else if waker == responder && wakee == driver {
+                to_driver += 1;
+            } else if waker == driver && wakee != driver {
+                third_parties += 1;
+                if load_tids.contains(&number(event, "wakee_tid")) {
+                    to_the_load += 1;
+                }
+                let name = format!("{wakee}:{}", event["comm"].as_str().unwrap_or("?"));
+                *strangers.entry(name).or_default() += 1;
+            }
+        }
+        seen.push(format!(
+            "run {run}: {to_responder} to the responder, {to_driver} to the driver, \
+             {to_the_load} to the load, {third_parties} to third parties in all \
+             {strangers:?}, {from_interrupts} from interrupts"
+        ));
+        assert!(
+            close_to(to_responder, HALF_BLOCKED_ROUND_TRIPS)
+                && close_to(to_driver, HALF_BLOCKED_ROUND_TRIPS),
+            "{HALF_BLOCKED_ROUND_TRIPS} round trips wake each of the pair once: {seen:?}"
+        );
+        assert_eq!(
+            to_the_load, 0,
+            "the load shares a cpu with the driver and nothing else; a wakeup of it credited \
+             to the driver is an interrupt the driver was only the landing place of: {seen:?}"
+        );
+    }
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    for thread in load {
+        let _ = thread.join();
+    }
+    eprintln!("{}", seen.join("\n"));
+}
+
+/// The other half of finding 48: an interrupt's wakeup is recognised, not only
+/// kept away from the wrong task. A `nanosleep` ends when its hrtimer expires,
+/// and an hrtimer expires in the timer's hard interrupt, so each of a known
+/// number of sleeps is ended by an interrupt -- whatever task it landed on.
+#[test]
+fn a_sleep_is_ended_by_the_timer_interrupt_and_not_by_the_task_it_landed_on() {
+    const SLEEPS: u64 = 20;
+    if !have("python3") {
+        eprintln!("skipped: the sleeper is a python3 loop, and this machine has no python3");
+        return;
+    }
+    let script = format!("import time\nfor _ in range({SLEEPS}): time.sleep(0.002)");
+    let output = omn(&[
+        "sched.wakeup",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &script,
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let events = raw_events(&results[0]);
+    let by_timer: Vec<_> = events
+        .iter()
+        .filter(|event| event["waker_context"] == "hardirq")
+        .collect();
+    assert!(
+        by_timer.len() as u64 >= SLEEPS,
+        "{SLEEPS} sleeps end in {SLEEPS} timer interrupts, saw {} of {} wakeups:\n{text}",
+        by_timer.len(),
+        events.len()
+    );
+    for event in by_timer {
+        assert_eq!(
+            event["waker_tid"], 0,
+            "an interrupt names no task: {event:?}"
+        );
+    }
+    assert!(
+        text.contains("issued from an interrupt"),
+        "the run says what an interrupt's waker is:\n{text}"
+    );
+}
+
+/// Stream S's finding for this source: a predicate the resolver credits to
+/// the kernel ran nowhere. It runs over each drained wakeup now, and says so.
+#[test]
+fn a_wakeup_filter_that_matches_nothing_keeps_nothing_and_says_what_it_removed() {
+    let output = omn(&[
+        "sched.wakeup",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--filter",
+        "comm == \"nosuchcomm\"",
+        "--",
+        "/bin/sh",
+        "-c",
+        "sleep 0.02; sleep 0.02",
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    assert!(
+        raw_events(&results[0]).is_empty(),
+        "a filter nothing matches keeps nothing:\n{text}"
+    );
+    assert!(
+        text.contains("the filter kept 0 wakeups and removed"),
+        "the run says what the filter removed:\n{text}"
+    );
+}
+
+// ====================================== sched.switches: every thread followed
+
+/// Threads in the switch fixture, and the sleeps each one takes.
+const SWITCH_THREADS: usize = 4;
+const SWITCH_SLEEPS: u64 = 100;
+
+/// A program whose threads each sleep a known number of times and then report
+/// the kernel's own count of their switches, read from inside the thread.
+const SWITCH_FIXTURE_SOURCE: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+
+#define THREADS 4
+#define SLEEPS 100
+
+static void *sleeper(void *unused) {
+    (void)unused;
+    for (int i = 0; i < SLEEPS; i++) usleep(500);
+    /* Read last: every switch before this is in the kernel's count. */
+    FILE *status = fopen("/proc/thread-self/status", "r");
+    char line[256];
+    unsigned long voluntary = 0, involuntary = 0;
+    while (status && fgets(line, sizeof line, status)) {
+        sscanf(line, "voluntary_ctxt_switches: %lu", &voluntary);
+        sscanf(line, "nonvoluntary_ctxt_switches: %lu", &involuntary);
+    }
+    if (status) fclose(status);
+    fprintf(stderr, "omn-switches tid=%ld switches=%lu\n", (long)syscall(SYS_gettid),
+            voluntary + involuntary);
+    return 0;
+}
+
+int main(void) {
+    pthread_t threads[THREADS];
+    for (int i = 0; i < THREADS; i++) pthread_create(&threads[i], 0, sleeper, 0);
+    for (int i = 0; i < THREADS; i++) pthread_join(threads[i], 0);
+    return 0;
+}
+"#;
+
+/// Ground truth for `sched.switches` following threads: each of the fixture's
+/// threads counts its own switches in the kernel's `/proc` counters and says
+/// the number, and the tool's series for that thread is that number -- up to
+/// the edges, the status read itself and the thread's exit, a switch or two
+/// the kernel's count read too early to hold. Before the switch to
+/// `perf::ThreadSampler` the event was not inherited, and no thread the
+/// program started had a series at all.
+#[test]
+fn every_thread_a_program_starts_has_its_switches_counted() {
+    const EDGES: u64 = 4;
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    let fixture = match BUILT
+        .get_or_init(|| build_c("switchers", SWITCH_FIXTURE_SOURCE))
+        .clone()
+    {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let fixture = fixture.to_string_lossy().into_owned();
+    let output = omn(&[
+        "sched.switches",
+        "-m",
+        "trace",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        &fixture,
+    ]);
+    let text = spoken(&output);
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let said: Vec<(String, u64)> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("omn-switches "))
+        .map(|line| {
+            let field = |name: &str| {
+                line.split_whitespace()
+                    .find_map(|field| field.strip_prefix(name))
+                    .unwrap_or_else(|| panic!("`{name}` in `{line}`"))
+                    .to_owned()
+            };
+            (
+                format!("task:{}", field("tid=")),
+                field("switches=").parse().expect("a count"),
+            )
+        })
+        .collect();
+    assert_eq!(said.len(), SWITCH_THREADS, "every thread reports:\n{text}");
+
+    let results = results(&output);
+    let series: std::collections::BTreeMap<String, u64> = outputs(&results[0], "summary")
+        .flat_map(|output| output["series"].as_array().expect("series").clone())
+        .filter_map(|series| {
+            Some((
+                series["key"].as_str()?.to_owned(),
+                series["count"].as_u64()?,
+            ))
+        })
+        .collect();
+    for (task, kernel) in &said {
+        assert!(
+            *kernel >= SWITCH_SLEEPS,
+            "{SWITCH_SLEEPS} sleeps are at least {SWITCH_SLEEPS} switches, and {task} counted \
+             {kernel}"
+        );
+        let measured = series.get(task).copied().unwrap_or(0);
+        assert!(
+            measured >= *kernel && measured <= kernel + EDGES,
+            "{task} counted {kernel} switches of its own and the tool saw {measured}: \
+             {series:?}\n{text}"
+        );
+    }
+    assert_eq!(
+        dropped(&results[0]),
+        0,
+        "a lost switch cannot be checked against a known number:\n{text}"
+    );
+}
+
+/// P8's `sched` half: the catalog declares `system: native` for
+/// `sched.switches`, and the machine is now served, one event per cpu. Ground
+/// truth is a launched sleeper beside the machine-wide run: the machine's
+/// count holds at least the sleeper's own switches, under the sleeper's pid.
+#[test]
+fn a_machine_wide_switch_count_holds_a_known_sleepers_switches() {
+    const SLEEPS: u64 = 50;
+    let sleeper = Command::new("/bin/sh")
+        .args(["-c", "while :; do sleep 0.004; done"])
+        .spawn()
+        .expect("a shell");
+    let pid = sleeper.id();
+    let output = omn(&[
+        "sched.switches",
+        "--system",
+        "-d",
+        "150ms",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+    ]);
+    // Killed only after the run, so it was sleeping for the whole window
+    // however long `omn` took to start on a loaded machine.
+    let mut sleeper = sleeper;
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    let text = spoken(&output);
+    if text.contains("CAP_PERFMON") || text.contains("perf_event_paranoid") {
+        eprintln!("skipped: a per-cpu switch event needs CAP_PERFMON here:\n{text}");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let events = raw_events(&results[0]);
+    let mine = events
+        .iter()
+        .filter(|event| event.get("pid").and_then(Value::as_u64) == Some(u64::from(pid)))
+        .count() as u64;
+    // 150 ms of a loop of 4 ms sleeps, each a fork and a wait of the shell:
+    // at least one switch of the shell per `sleep` it waited for, of which the
+    // window holds a fifth or more.
+    assert!(
+        mine >= SLEEPS / 5,
+        "the shell waited for {} `sleep`s in the window, each a switch, and the machine-wide \
+         count holds {mine} of its switches out of {}",
+        SLEEPS / 5,
+        events.len()
+    );
+}
+
+/// Stream S's finding for `sched.offcpu` and `sched.migrations`: a predicate
+/// the resolver credits to the kernel ran nowhere, and a machine-wide run
+/// narrowed to a name nothing has reported every task on the machine. It runs
+/// over each drained row now: nothing passes a name nothing has, the run says
+/// what it removed, and the name the launched shell has keeps its blocks.
+#[test]
+fn a_filter_over_the_drained_sources_keeps_what_it_names_and_says_what_it_removed() {
+    for (source, removed) in [
+        ("sched.offcpu", "the filter kept 0 blocks and removed"),
+        (
+            "sched.migrations",
+            "the filter kept 0 migrations and removed",
+        ),
+    ] {
+        let output = omn(&[
+            source,
+            "--system",
+            "-d",
+            "300ms",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--filter",
+            "comm == \"nosuchcomm\"",
+        ]);
+        let text = spoken(&output);
+        if unprivileged(&text) {
+            eprintln!("skipped: {source} needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        let results = results(&output);
+        assert!(
+            raw_events(&results[0]).is_empty(),
+            "{source}: a filter nothing matches keeps nothing:\n{text}"
+        );
+        // A machine that neither blocked nor migrated for 300 ms does not
+        // exist, so there was something to remove.
+        assert!(
+            text.contains(removed),
+            "{source} says what its filter removed:\n{text}"
+        );
+    }
+
+    let output = omn(&[
+        "sched.offcpu",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--filter",
+        "comm == \"sh\"",
+        "--",
+        "/bin/sh",
+        "-c",
+        "sleep 0.05; sleep 0.05; true",
+    ]);
+    let text = spoken(&output);
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let blocks: u64 = raw_events(&results[0])
+        .iter()
+        .map(|event| event["blocks"].as_u64().unwrap_or(0))
+        .sum();
+    assert!(
+        blocks >= 2,
+        "the shell waits for each of its two children, so the name it has keeps at least two \
+         blocks, and kept {blocks}:\n{text}"
     );
 }

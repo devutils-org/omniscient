@@ -12,6 +12,16 @@
 //! on which cpu the wakeup was issued. That is the raw material of the `WAKEUP`
 //! join: the only way to carry latency across a block without instrumenting the
 //! application.
+//!
+//! "The context of the task doing the waking" is not always a task's. A wakeup
+//! issued from a hard interrupt, a softirq or an NMI runs on whatever task the
+//! interrupt landed on, and `bpf_get_current_pid_tgid` then names a task that
+//! had nothing to do with it (finding 48: a busy machine's disk, network and
+//! timer wakeups were credited to a half-blocked workload by the thousand). So
+//! the program reads the cpu's preempt count, and a wakeup issued with an
+//! interrupt bit set is recorded with the interrupt as its waker -- tid and pid
+//! 0, the context in the record -- and kept for a target only when its wakee is
+//! the target's.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -38,9 +48,62 @@ pub struct Wakeup {
     pub wakee_pid: u32,
     /// The cpu the wakeup was issued on, which is the waker's.
     pub cpu: u32,
-    pad: u32,
+    /// The interrupt bits of the cpu's preempt count when the wakeup was
+    /// issued -- NMI, hard interrupt and *serving* a softirq -- or 0 in a
+    /// task's context. Read through `context()`.
+    context: u32,
     comm: [u8; 16],
 }
+
+/// Where a wakeup was issued from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakerContext {
+    /// A task's own context: the waker is the task that was running.
+    Task,
+    /// Serving a softirq, either at an interrupt's exit or when a task
+    /// re-enabled bottom halves; the task it ran on is not the waker.
+    Softirq,
+    /// A hard interrupt handler.
+    Hardirq,
+    /// A non-maskable interrupt.
+    Nmi,
+}
+
+impl WakerContext {
+    /// Whether the waker is an interrupt rather than a task.
+    pub fn is_interrupt(self) -> bool {
+        self != Self::Task
+    }
+
+    /// The name the event carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Softirq => "softirq",
+            Self::Hardirq => "hardirq",
+            Self::Nmi => "nmi",
+        }
+    }
+}
+
+/// The bits of `preempt_count` that say a cpu is in an interrupt, as
+/// `include/linux/preempt.h` lays them out: `NMI_MASK` (bits 20-23),
+/// `HARDIRQ_MASK` (bits 16-19), and of the softirq byte only
+/// `SOFTIRQ_OFFSET` (bit 8), which is set while a softirq is *served*. The rest
+/// of that byte counts `local_bh_disable`, which a task in its own context
+/// holds around a socket lock, and a wakeup made there is the task's.
+const NMI_MASK: u32 = 0x00f0_0000;
+const HARDIRQ_MASK: u32 = 0x000f_0000;
+const SOFTIRQ_OFFSET: u32 = 0x0000_0100;
+const INTERRUPT_BITS: u32 = NMI_MASK | HARDIRQ_MASK | SOFTIRQ_OFFSET;
+
+/// `bpf_this_cpu_ptr`, which turns a per-cpu variable's address into this
+/// cpu's copy of it. Not in `insn::helper`, which nobody owns this wave.
+const THIS_CPU_PTR: i32 = 154;
+
+/// `BPF_PSEUDO_BTF_ID`: a 64-bit immediate load the kernel resolves to the
+/// address of the kernel variable whose BTF id is in `imm`.
+const PSEUDO_BTF_ID: u8 = 3;
 
 /// The size of the record the program writes. Stated once, used by the program
 /// and checked against the struct.
@@ -71,10 +134,95 @@ impl Wakeup {
             wakee_tid: word(16),
             wakee_pid: word(20),
             cpu: word(24),
-            pad: 0,
+            context: word(28),
             comm,
         })
     }
+
+    /// Where the wakeup was issued from. Anything but `Task` has a waker of
+    /// tid and pid 0: the interrupt, not the task it interrupted.
+    pub fn context(&self) -> WakerContext {
+        if self.context & NMI_MASK != 0 {
+            WakerContext::Nmi
+        } else if self.context & HARDIRQ_MASK != 0 {
+            WakerContext::Hardirq
+        } else if self.context & SOFTIRQ_OFFSET != 0 {
+            WakerContext::Softirq
+        } else {
+            WakerContext::Task
+        }
+    }
+}
+
+/// Where this kernel keeps the cpu's preempt count: a per-cpu variable's BTF
+/// id, and the offset of the count inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreemptCount {
+    btf_id: u32,
+    offset: i32,
+}
+
+impl PreemptCount {
+    /// Finds it on x86, in either of the two layouts the kernels this tool
+    /// runs on have used: `__preempt_count` on its own (up to 6.1, and again
+    /// since `pcpu_hot` was taken apart), or the `preempt_count` member of
+    /// `pcpu_hot` (6.2 to 6.14). Another architecture keeps it in the task's
+    /// `thread_info`, which this does not read, and gets `None`.
+    pub fn locate(btf: &Btf) -> Option<Self> {
+        let types = std::fs::read("/sys/kernel/btf/vmlinux").ok()?;
+        if let Some(btf_id) = var_id(&types, "__preempt_count") {
+            return Some(Self { btf_id, offset: 0 });
+        }
+        let btf_id = var_id(&types, "pcpu_hot")?;
+        let offset = btf.member_offset("pcpu_hot", "preempt_count").ok()?;
+        Some(Self { btf_id, offset })
+    }
+}
+
+/// The type id of the `VAR` named `name` in a BTF blob.
+///
+/// `btf::Btf` indexes every type by name and says only whether one exists; the
+/// id is what a `BPF_PSEUDO_BTF_ID` load needs, and `btf.rs` is not this
+/// stream's, so the walk is repeated here (filed for `Btf::var_id`). Same
+/// layout, same per-kind sizes, native endian.
+fn var_id(blob: &[u8], name: &str) -> Option<u32> {
+    const KIND_VAR: u32 = 14;
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_ne_bytes(blob.get(at..at + 4)?.try_into().ok()?))
+    };
+    if blob.len() < 24 || u16::from_ne_bytes([blob[0], blob[1]]) != 0xeb9f {
+        return None;
+    }
+    let header = word(4)? as usize;
+    let types = header + word(8)? as usize;
+    let end = types + word(12)? as usize;
+    let strings = header + word(16)? as usize;
+    let named = |offset: usize| -> bool {
+        let start = strings + offset;
+        let Some(tail) = blob.get(start..) else {
+            return false;
+        };
+        tail.len() > name.len() && &tail[..name.len()] == name.as_bytes() && tail[name.len()] == 0
+    };
+    let (mut at, mut id) = (types, 1u32);
+    while at + 12 <= end {
+        let info = word(at + 4)?;
+        let (kind, vlen) = ((info >> 24) & 0x1f, (info & 0xffff) as usize);
+        if kind == KIND_VAR && named(word(at)? as usize) {
+            return Some(id);
+        }
+        let extra = match kind {
+            1 | 14 | 17 => 4,     // INT, VAR, DECL_TAG
+            3 => 12,              // ARRAY
+            4 | 5 => vlen * 12,   // STRUCT, UNION
+            6 | 13 => vlen * 8,   // ENUM, FUNC_PROTO
+            15 | 19 => vlen * 12, // DATASEC, ENUM64
+            _ => 0,
+        };
+        at += 12 + extra;
+        id += 1;
+    }
+    None
 }
 
 /// Stack offsets, negative from the frame pointer, matching `Wakeup`.
@@ -84,7 +232,7 @@ const WAKER_PID: i16 = EVENT + 12;
 const WAKEE_TID: i16 = EVENT + 16;
 const WAKEE_PID: i16 = EVENT + 20;
 const CPU: i16 = EVENT + 24;
-const PAD: i16 = EVENT + 28;
+const CONTEXT: i16 = EVENT + 28;
 const COMM: i16 = EVENT + 32;
 /// The one-word key of the drop counter, below the record.
 const DROP_KEY: i16 = EVENT - 8;
@@ -97,6 +245,7 @@ const DROP_KEY: i16 = EVENT - 8;
 /// something on a path that fires tens of thousands of times a second.
 fn instructions(
     btf: &Btf,
+    preempt: Option<PreemptCount>,
     target_tgid: Option<u32>,
     ring_fd: i32,
     drops_fd: i32,
@@ -123,9 +272,36 @@ fn instructions(
 
     program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
     program.push(Insn::stx(BPF_W, R10, CPU, 0));
-    // Every byte of the record is written before it is published; a padding
-    // word left uninitialised is stack garbage from whatever ran before.
-    program.push(Insn::st_imm(BPF_W, R10, PAD, 0));
+
+    // In an interrupt the current task is only where the interrupt landed.
+    // The waker becomes the interrupt -- tid and pid 0, which also no target
+    // filter below can match, so such a wakeup is kept only for its wakee.
+    match preempt {
+        Some(preempt) => {
+            program.push(Insn {
+                code: 0x18, // BPF_LD | BPF_DW | BPF_IMM
+                regs: 1 | (PSEUDO_BTF_ID << 4),
+                off: 0,
+                imm: preempt.btf_id as i32,
+            });
+            // The second slot's immediate is the BTF object's fd: 0 is vmlinux.
+            program.push(Insn::default());
+            program.push(Insn::call(THIS_CPU_PTR));
+            // `bpf_this_cpu_ptr` never returns null for a per-cpu variable.
+            program.push(Insn::ldx(BPF_W, 1, 0, preempt.offset as i16));
+            program.push(Insn::and64_imm(1, INTERRUPT_BITS as i32));
+            program.push(Insn::stx(BPF_W, R10, CONTEXT, 1));
+            program.jump_to("in_a_task", Insn::jeq_imm(1, 0, 0));
+            program.push(Insn::st_imm(BPF_W, R10, WAKER_TID, 0));
+            program.push(Insn::st_imm(BPF_W, R10, WAKER_PID, 0));
+            program.label("in_a_task");
+        }
+        // Every byte of the record is written before it is published; a word
+        // left uninitialised is stack garbage from whatever ran before.
+        None => {
+            program.push(Insn::st_imm(BPF_W, R10, CONTEXT, 0));
+        }
+    }
 
     for (into, size, field_offset) in [
         (WAKEE_TID, 4, pid_offset),
@@ -142,7 +318,8 @@ fn instructions(
 
     // A run observes one process, so a wakeup is kept when either end of it
     // belongs to that process: the wakeups it receives are its blocked time
-    // ending, the ones it sends are the blocked time it ends for others.
+    // ending, the ones it sends are the blocked time it ends for others. An
+    // interrupt's wakeup has a waker of 0 by now and is kept only as received.
     if let Some(tgid) = target_tgid {
         program.push(Insn::ldx(BPF_W, 1, R10, WAKEE_PID));
         program.jump_to("emit", Insn::jeq_imm(1, tgid as i32, 0));
@@ -189,6 +366,8 @@ fn instructions(
 /// Dropping it detaches: the link, the program and the maps are file
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct WakeupProgram {
+    /// Whether the program can tell an interrupt's wakeup from a task's.
+    interrupts_told_apart: bool,
     ring: RingBuffer,
     drops: Counters,
     program: OwnedFd,
@@ -223,7 +402,14 @@ impl WakeupProgram {
         let drops = Counters::create(1, "omn_wake_drop")
             .map_err(|error| map_failure("drop counter", error))?;
 
-        let instructions = instructions(btf, target_tgid, ring_map.as_raw_fd(), drops.as_raw_fd())?;
+        let preempt = PreemptCount::locate(btf);
+        let instructions = instructions(
+            btf,
+            preempt,
+            target_tgid,
+            ring_map.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -245,11 +431,19 @@ impl WakeupProgram {
             .map_err(|error| format!("cannot map the wakeup ring buffer: {error}"))?;
 
         Ok(Self {
+            interrupts_told_apart: preempt.is_some(),
             ring,
             drops,
             program,
             _link: link,
         })
+    }
+
+    /// Whether a wakeup issued from an interrupt is recorded as the
+    /// interrupt's. `false` on a kernel whose preempt count this program cannot
+    /// find, where such a wakeup is credited to the interrupted task as before.
+    pub fn interrupts_told_apart(&self) -> bool {
+        self.interrupts_told_apart
     }
 
     /// Hands every complete wakeup to `handle`, and counts the records that
@@ -287,6 +481,7 @@ mod tests {
             (WAKEE_TID, offset_of!(Wakeup, wakee_tid), "wakee_tid"),
             (WAKEE_PID, offset_of!(Wakeup, wakee_pid), "wakee_pid"),
             (CPU, offset_of!(Wakeup, cpu), "cpu"),
+            (CONTEXT, offset_of!(Wakeup, context), "context"),
             (COMM, offset_of!(Wakeup, comm), "comm"),
         ] {
             assert_eq!(
@@ -332,7 +527,8 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        let program = instructions(&btf, Some(1), 3, 4).expect("a program");
+        let program =
+            instructions(&btf, PreemptCount::locate(&btf), Some(1), 3, 4).expect("a program");
         let called = helpers_called(&program);
         assert!(
             called.contains(&helper::KTIME_GET_NS),
@@ -352,7 +548,8 @@ mod tests {
     #[test]
     fn the_program_calls_only_the_helpers_it_needs() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let program = instructions(&btf, Some(1), 3, 4).expect("a program");
+        let program =
+            instructions(&btf, PreemptCount::locate(&btf), Some(1), 3, 4).expect("a program");
         let called = helpers_called(&program);
         let expected = [
             helper::KTIME_GET_NS,
@@ -361,6 +558,7 @@ mod tests {
             helper::PROBE_READ_KERNEL,
             helper::RINGBUF_OUTPUT,
             helper::MAP_LOOKUP_ELEM,
+            THIS_CPU_PTR,
         ];
         for helper in &called {
             assert!(
@@ -384,12 +582,14 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let machine_wide = instructions(&btf, None, 3, 4).expect("a program");
+        let machine_wide =
+            instructions(&btf, PreemptCount::locate(&btf), None, 3, 4).expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered = instructions(&btf, Some(4242), 3, 4).expect("a program");
+        let filtered =
+            instructions(&btf, PreemptCount::locate(&btf), Some(4242), 3, 4).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             2,
@@ -403,7 +603,8 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let program = instructions(&btf, None, 3, 4).expect("a program");
+        let program =
+            instructions(&btf, PreemptCount::locate(&btf), None, 3, 4).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -425,8 +626,10 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        let filtered = instructions(&btf, Some(4242), 3, 4).expect("a program");
-        let machine_wide = instructions(&btf, None, 3, 4).expect("a program");
+        let filtered =
+            instructions(&btf, PreemptCount::locate(&btf), Some(4242), 3, 4).expect("a program");
+        let machine_wide =
+            instructions(&btf, PreemptCount::locate(&btf), None, 3, 4).expect("a program");
         assert!(
             filtered.len() > machine_wide.len(),
             "the filtered program carries the comparisons the machine-wide one does not"
@@ -439,6 +642,86 @@ mod tests {
         assert!(
             filtered.iter().any(|insn| insn.imm == 4242),
             "the target pid is written into the instruction stream"
+        );
+    }
+
+    /// The context word is the preempt count's interrupt bits, and only the
+    /// served-softirq bit of the softirq byte counts: a task holding
+    /// `local_bh_disable` (bits 9 and up of that byte) is in its own context.
+    #[test]
+    fn the_context_is_read_off_the_interrupt_bits_alone() {
+        let with = |context: u32| {
+            let mut bytes = [0u8; RECORD_BYTES];
+            bytes[28..32].copy_from_slice(&context.to_ne_bytes());
+            Wakeup::from_bytes(&bytes).expect("a full record").context()
+        };
+        assert_eq!(with(0), WakerContext::Task);
+        assert_eq!(with(0x200), WakerContext::Task, "bottom halves disabled");
+        assert_eq!(with(0x100), WakerContext::Softirq);
+        assert_eq!(
+            with(0x1_0100),
+            WakerContext::Hardirq,
+            "a hard irq over a softirq"
+        );
+        assert_eq!(with(0x10_0000), WakerContext::Nmi);
+        // The program masks before it stores, so these never reach a record;
+        // the mask itself is what keeps them out.
+        assert_eq!(
+            0x8000_0001 & INTERRUPT_BITS,
+            0,
+            "need-resched and preempt depth"
+        );
+    }
+
+    /// The id walk agrees with the index `btf.rs` keeps: it finds a variable
+    /// the kernel declares, and nothing for a name that is a type but not a
+    /// variable, or no name at all.
+    #[test]
+    fn a_variables_id_is_found_and_a_types_is_not() {
+        let Ok(blob) = std::fs::read("/sys/kernel/btf/vmlinux") else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        assert!(
+            var_id(&blob, "task_struct").is_none(),
+            "a struct is not a VAR"
+        );
+        assert!(var_id(&blob, "no_such_variable_anywhere").is_none());
+        // `runqueues` is a per-cpu VAR on every kernel with BTF.
+        let id = var_id(&blob, "runqueues").expect("the scheduler's per-cpu run queues");
+        assert!(id > 0);
+    }
+
+    /// On x86 the program reads the preempt count and, in an interrupt,
+    /// replaces the waker before any comparison against the target -- so an
+    /// interrupt's wakeup can only be kept as its wakee's.
+    #[test]
+    fn an_interrupts_waker_is_replaced_before_the_target_is_compared() {
+        let Ok(btf) = Btf::from_kernel() else { return };
+        let Some(preempt) = PreemptCount::locate(&btf) else {
+            if cfg!(target_arch = "x86_64") {
+                panic!("an x86 kernel with BTF declares `__preempt_count` or `pcpu_hot`");
+            }
+            eprintln!("skipped: this kernel's preempt count is not a per-cpu variable");
+            return;
+        };
+        let program = instructions(&btf, Some(preempt), Some(4242), 3, 4).expect("a program");
+        let load = program
+            .iter()
+            .position(|insn| insn.code == 0x18 && insn.regs >> 4 == PSEUDO_BTF_ID)
+            .expect("the preempt count is loaded by its BTF id");
+        assert_eq!(program[load].imm as u32, preempt.btf_id);
+        let zeroed = program
+            .iter()
+            .position(|insn| insn.code == 0x62 && insn.off == WAKER_PID && insn.imm == 0)
+            .expect("an interrupt's waker pid is written as 0");
+        let compared = program
+            .iter()
+            .position(|insn| insn.imm == 4242)
+            .expect("the target is compared");
+        assert!(
+            load < zeroed && zeroed < compared,
+            "{load} {zeroed} {compared}"
         );
     }
 }

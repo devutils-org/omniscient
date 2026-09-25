@@ -42,7 +42,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{self, helper, read_field, read_pointer, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters, Hash, TaskStorage};
+use super::map::{map_failure, row_map, select_rows, Counters, Rows, TaskStorage};
 use super::mem_program::{check_signature, comm, count_drop, load, long, read_comm, word};
 use super::syscall;
 use super::DrainLosses;
@@ -88,6 +88,9 @@ const SCRATCH: i16 = -112;
 /// The number of pages the file currently spans, for the created-or-filled
 /// test and for clamping a lookup to the file.
 const FILE_PAGES: i16 = -120;
+/// The row map of this interval, as the generation slot named it, kept in
+/// this slot once per run; see `map::select_rows`.
+const ROWS_SLOT: i16 = -128;
 /// A thread's previous lookup, as byte offsets within its slot of the `last`
 /// task storage.
 ///
@@ -322,7 +325,12 @@ fn file_identity(program: &mut Program, at: &Offsets, host: u8) {
 /// `add` names the value fields this event adds to and the register or
 /// constant each adds; a field not named starts at zero in a new row.
 fn upsert(program: &mut Program, rows_fd: i32, drops_fd: i32, add: &[(i16, Addend)]) {
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    // The row map of this interval, taken once: a drain may swap it at any
+    // instruction, and a lookup and an insert that named two maps would put
+    // one occurrence in each. See `map::Rows`. The addends are in r6 to r9,
+    // which the lookup leaves alone.
+    select_rows(program, rows_fd, ROWS_SLOT, "no_rows");
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
@@ -368,7 +376,7 @@ fn upsert(program: &mut Program, rows_fd: i32, drops_fd: i32, add: &[(i16, Adden
     // Once per row, not per page: the name does not change, and this is the
     // hot path.
     read_comm(program, ROW_VALUE + VALUE_COMM);
-    program.extend(Insn::load_map_fd(1, rows_fd));
+    program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
     program.push(Insn::mov64_reg(3, R10));
@@ -376,6 +384,11 @@ fn upsert(program: &mut Program, rows_fd: i32, drops_fd: i32, add: &[(i16, Adden
     program.push(Insn::mov64_imm(4, 0));
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS, "done");
+    program.jump_to("done", Insn::ja());
+
+    // The slot held no map, which it always does; counted rather than assumed.
+    program.label("no_rows");
     count_drop(program, drops_fd, DROP_KEY, DROP_ROWS, "done");
     program.jump_to("done", Insn::ja());
 
@@ -588,7 +601,7 @@ fn add_instructions(
 /// Dropping it detaches both: the links, the programs and the maps are file
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct PageCacheProgram {
-    rows: Hash,
+    rows: Rows,
     /// Held so the storage outlives the programs that write into it.
     _last: TaskStorage,
     drops: Counters,
@@ -607,7 +620,7 @@ impl PageCacheProgram {
                  file's length by 4096 to tell a page a read filled from one a write created"
             ));
         }
-        let rows = Hash::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_pc_rows")
+        let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_pc_rows")
             .map_err(|error| map_failure("page cache row map", error))?;
         let last = TaskStorage::create(LAST_VALUE_BYTES, "omn_pc_last")
             .map_err(|error| map_failure("page cache per-thread storage", error))?;
@@ -778,6 +791,7 @@ mod tests {
             (DROP_KEY, 4, "drop key"),
             (SCRATCH, 8, "scratch"),
             (FILE_PAGES, 8, "file pages"),
+            (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -806,6 +820,7 @@ mod tests {
             (DROP_KEY, 4),
             (SCRATCH, 8),
             (FILE_PAGES, 8),
+            (ROWS_SLOT, 8),
         ];
         for built in [
             add_instructions(btf, Narrowing::default(), 3, 4).expect("the fill program"),
@@ -831,6 +846,20 @@ mod tests {
                     insn.off
                 );
             }
+        }
+    }
+
+    /// Both programs find the row map through the generation slot once per
+    /// run, and the lookup and the insert both use what they found -- the
+    /// property that makes the drain's swap safe; see `map::Rows`.
+    #[test]
+    fn the_row_map_is_taken_from_the_slot_once_per_run() {
+        let Some(btf) = kernel_btf() else { return };
+        for built in [
+            add_instructions(btf, Narrowing::default(), 3, 4).expect("the fill program"),
+            get_pages_instructions(btf, Narrowing::default(), 3, 5, 4).expect("the lookup program"),
+        ] {
+            crate::bpf::map::assert_rows_taken_once(&built, 3);
         }
     }
 
