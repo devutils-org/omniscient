@@ -64,6 +64,36 @@ impl FilterExpr {
         }
     }
 
+    /// The parts of the top-level conjunction, in order: `a && (b || c) && d`
+    /// is `a`, `b || c` and `d`. A predicate that is not a conjunction is one
+    /// part.
+    pub fn conjuncts(&self) -> Vec<&FilterExpr> {
+        match self {
+            FilterExpr::And(left, right) => {
+                let mut parts = left.conjuncts();
+                parts.extend(right.conjuncts());
+                parts
+            }
+            other => vec![other],
+        }
+    }
+
+    /// The field of a comparison a program can carry as a constant: `field ==
+    /// value` with one value. `None` for anything else -- an inequality, a
+    /// range, a pattern, a list, a negation, a disjunction -- because a
+    /// program that compares one register against one immediate is what
+    /// "pushed down" means for every program this build writes.
+    pub fn constant_equality(&self) -> Option<&str> {
+        match self {
+            FilterExpr::Compare {
+                field,
+                operator: CompareOp::Eq,
+                value: Value::Int { .. } | Value::Str(_),
+            } => Some(field.as_str()),
+            _ => None,
+        }
+    }
+
     fn precedence(&self) -> u8 {
         match self {
             FilterExpr::Or(..) => 1,
@@ -568,6 +598,30 @@ fn word_value(word: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two questions the resolver asks of a predicate to place it: its
+    /// top-level parts, and which of them compare one field with one value.
+    #[test]
+    fn a_conjunction_is_read_part_by_part_and_only_one_value_equality_is_constant() {
+        let predicate: FilterExpr = "syscall == 'read' && (comm == 'a' || comm == 'b') && pid == 7"
+            .parse()
+            .unwrap();
+        let parts = predicate.conjuncts();
+        assert_eq!(parts.len(), 3);
+        let constant: Vec<Option<&str>> =
+            parts.iter().map(|part| part.constant_equality()).collect();
+        assert_eq!(constant, vec![Some("syscall"), None, Some("pid")]);
+        for shape in [
+            "syscall != 'read'",
+            "syscall in (read, write)",
+            "bytes > 4",
+            "!(pid == 1)",
+        ] {
+            let expression: FilterExpr = shape.parse().unwrap();
+            assert_eq!(expression.conjuncts().len(), 1, "{shape}");
+            assert_eq!(expression.constant_equality(), None, "{shape}");
+        }
+    }
 
     fn parse(text: &str) -> FilterExpr {
         text.parse().expect("filter should parse")

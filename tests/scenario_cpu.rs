@@ -106,6 +106,15 @@ fn workload_runs_only_when_this_binary_was_launched_as_a_workload() {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
+        // Touches `number` fresh pages from one thread and writes what that
+        // thread's own fault counter moved by, between two clock readings
+        // that bracket it: the witness a machine-wide fault sampler is held
+        // to, for this task and this interval.
+        "faults" => {
+            let report = std::env::var(REPORT_VAR).expect("a report path");
+            std::fs::write(report, fault_some_pages(number as usize))
+                .expect("the report is written");
+        }
         other => panic!("no workload called `{other}`"),
     }
 }
@@ -170,6 +179,61 @@ fn burn(cpu: Duration) {
     while consumed() < until {
         std::hint::spin_loop();
     }
+}
+
+/// This thread's page faults so far, minor and major, by the kernel's count.
+fn thread_faults() -> u64 {
+    // SAFETY: `usage` is a valid struct for the kernel to write into.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
+    (usage.ru_minflt + usage.ru_majflt) as u64
+}
+
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the kernel to write into.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// Writes one byte into each of `pages` fresh anonymous pages and says, as
+/// `tid from_ns to_ns base len faults`, what this thread's fault counter
+/// moved by while it did.
+fn fault_some_pages(pages: usize) -> String {
+    let page = 4096;
+    // SAFETY: an anonymous mapping of our own, unmapped below.
+    let block = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            pages * page,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(block, libc::MAP_FAILED, "the mapping must succeed");
+    let from_ns = monotonic_ns();
+    let before = thread_faults();
+    for index in 0..pages {
+        // SAFETY: inside the mapping, one byte per page.
+        unsafe { block.cast::<u8>().add(index * page).write_volatile(1) };
+    }
+    let faults = thread_faults() - before;
+    let to_ns = monotonic_ns();
+    // SAFETY: a read-only query of this thread's own id.
+    let tid = unsafe { libc::gettid() };
+    let line = format!(
+        "{tid} {from_ns} {to_ns} {} {} {faults}",
+        block as u64,
+        pages * page
+    );
+    // SAFETY: unmapping what was mapped above, after the last write to it.
+    unsafe { libc::munmap(block, pages * page) };
+    line
 }
 
 /// This thread's cpu time so far, by the kernel's own clock for it.
@@ -2185,6 +2249,391 @@ fn a_profile_samples_every_thread_for_the_cpu_it_used() {
         );
     }
     assert_eq!(result["losses"]["dropped"], 0, "{}", result["losses"]);
+}
+
+// ---------------------------------------------------------------------------
+// What the resolver promises (the twelfth wave, stream W)
+// ---------------------------------------------------------------------------
+//
+// P7 to P9 of `docs/portability.md`: a mode and a target the resolver credited
+// a backend with, which its collector then refused -- after the target had
+// been launched. `docs/fixes/resolver.md` has each.
+
+/// Runs `omn` beside a workload this test starts once the run is attached, and
+/// hands back the run's document and what the workload reported -- or the
+/// reason the machine could not, for a skip that says it.
+///
+/// A machine-wide run cannot launch its workload, so the workload is started
+/// here, after a margin long enough for one event per cpu to be opened. It has
+/// to end inside the window, or the comparison is with a truncated run: that
+/// is checked, and a machine too loaded to give the workload its cpu inside
+/// the window is a skip with the numbers.
+fn beside_the_machine(
+    args: &[&str],
+    workload: &str,
+) -> Result<(serde_json::Value, String), String> {
+    let report = std::env::temp_dir().join(format!(
+        "omn-cpu-machine-{}-{}",
+        std::process::id(),
+        workload.replace(':', "-")
+    ));
+    let _ = std::fs::remove_file(&report);
+    let run = Command::new(BINARY)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(Duration::from_millis(800));
+    let started = Instant::now();
+    let status = Command::new(std::env::current_exe().expect("this test binary has a path"))
+        .args([
+            "--exact",
+            "--test-threads",
+            "1",
+            "workload_runs_only_when_this_binary_was_launched_as_a_workload",
+        ])
+        .env(WORKLOAD_VAR, workload)
+        .env(REPORT_VAR, &report)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the workload runs");
+    let took = started.elapsed();
+    assert!(status.success(), "the workload `{workload}` failed");
+    let mut run = run;
+    let still_running = run.try_wait().expect("the run can be waited on").is_none();
+    let output = run.wait_with_output().expect("omn should finish");
+    let written = std::fs::read_to_string(&report).unwrap_or_default();
+    let _ = std::fs::remove_file(&report);
+    match into_outcome(output) {
+        Outcome::Refused { code, message } => {
+            assert!(machine_cannot_serve(&message), "exit {code}: {message}");
+            Err(message)
+        }
+        Outcome::Measured { .. } if !still_running => Err(format!(
+            "the workload took {took:?} after an 800ms margin and the run's window ended \
+             first: this machine is too loaded to give it its cpu inside the window"
+        )),
+        Outcome::Measured { document, .. } => Ok((document, written)),
+    }
+}
+
+/// P8, `cpu.profile`: the machine is a target the catalog declares, and a
+/// profile of it is one cpu-clock event per cpu over every task.
+///
+/// Ground truth is the three-thread workload's own clocks: each thread burns
+/// two hundred milliseconds of its own cpu and writes how much it used, and a
+/// machine-wide profile at 997 Hz has to hold about one sample per 1.003 ms of
+/// that, for each of them -- the same prediction, and the same thirty per cent
+/// plus a sample either side, as the per-process profile above. The machine is
+/// busy with other things meanwhile, which is the point: the samples of other
+/// tasks must not be credited to these.
+#[test]
+fn a_profile_of_the_machine_finds_each_thread_for_the_cpu_it_used() {
+    let _load = may_load_the_machine();
+    const HZ: f64 = 997.0;
+    let (document, written) = match beside_the_machine(
+        &[
+            "cpu.profile",
+            "--system",
+            "--mode",
+            "sample@997hz",
+            "--emit",
+            "raw",
+            "--stack",
+            "none",
+            "-d",
+            "4s",
+            "--format",
+            "json",
+        ],
+        "threads:200",
+    ) {
+        Ok(measured) => measured,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let threads: Vec<(u64, f64)> = written
+        .lines()
+        .filter_map(|line| {
+            let (tid, ns) = line.split_once(' ')?;
+            Some((tid.parse().ok()?, ns.parse().ok()?))
+        })
+        .collect();
+    assert_eq!(
+        threads.len(),
+        3,
+        "the workload runs three threads: {written}"
+    );
+    let result = &document["results"][0];
+    let notes = result["degradations"].to_string();
+    assert!(notes.contains("one event per cpu"), "{notes}");
+    let events = result["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events");
+    for (tid, cpu_ns) in &threads {
+        let samples = events
+            .iter()
+            .filter(|event| event["keys"][0]["task"]["tid"].as_u64() == Some(*tid))
+            .count() as f64;
+        let expected = HZ * cpu_ns / 1e9;
+        assert!(
+            (samples - expected).abs() - 1.0 < 0.3 * expected,
+            "thread {tid} used {:.0} ms of cpu by its own clock, about {expected:.0} samples at \
+             {HZ} Hz, and the machine's profile holds {samples} of it: {notes}",
+            cpu_ns / 1e6
+        );
+    }
+    assert_eq!(result["losses"]["dropped"], 0, "{}", result["losses"]);
+}
+
+/// P8, `mem.faults`: sampling the machine's page faults is one event per cpu,
+/// and a fault a program counted is in it.
+///
+/// The workload touches four thousand fresh pages from one thread, between two
+/// clock readings, and writes what that thread's own fault counter
+/// (`getrusage(RUSAGE_THREAD)`) moved by. Every fault the kernel charged to the
+/// thread in that interval is one the machine-wide trace has to hold, at that
+/// thread and inside that interval; the counter and the event are not the
+/// same hook in the fault path, so a fault the kernel retried counts twice in
+/// the event and once in the counter, which is the one per cent of slack.
+#[test]
+fn a_trace_of_the_machines_faults_holds_every_fault_a_thread_counted() {
+    let _load = may_load_the_machine();
+    let (document, written) = match beside_the_machine(
+        &[
+            "mem.faults",
+            "--system",
+            "--mode",
+            "trace",
+            "--emit",
+            "raw",
+            "-d",
+            "3s",
+            "--format",
+            "json",
+        ],
+        "faults:4096",
+    ) {
+        Ok(measured) => measured,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let fields: Vec<u64> = written
+        .split_whitespace()
+        .filter_map(|field| field.parse().ok())
+        .collect();
+    let [tid, from_ns, to_ns, base, len, faults] = fields[..] else {
+        panic!("the workload reports six numbers: {written}");
+    };
+    assert!(
+        faults > 0,
+        "touching 4096 fresh pages faulted nothing: {written}"
+    );
+    let result = &document["results"][0];
+    let events = result["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events");
+    let mine: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["keys"][0]["task"]["tid"].as_u64() == Some(tid))
+        .filter(|event| {
+            event["ts_ns"]
+                .as_u64()
+                .is_some_and(|ts| (from_ns..=to_ns).contains(&ts))
+        })
+        .collect();
+    let in_the_block = mine
+        .iter()
+        .filter(|event| {
+            attr_u64(event, "addr").is_some_and(|addr| (base..base + len).contains(&addr))
+        })
+        .count() as u64;
+    let traced = mine.len() as u64;
+    let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    assert!(
+        traced + dropped >= faults && traced <= faults + faults / 100 + 2,
+        "thread {tid} counted {faults} faults of its own while it touched the block, and the \
+         machine's trace holds {traced} of that thread in that interval ({dropped} dropped)"
+    );
+    assert!(
+        in_the_block <= traced && in_the_block + dropped + 2 >= faults,
+        "{in_the_block} of the {traced} faults are inside the block that was touched"
+    );
+}
+
+/// The value of an attribute an event carries, as a number.
+fn attr_u64(event: &serde_json::Value, name: &str) -> Option<u64> {
+    event["attrs"]
+        .as_array()?
+        .iter()
+        .find(|attr| attr["name"] == name)
+        .and_then(|attr| {
+            attr["value"]
+                .as_u64()
+                .or_else(|| attr["value"]["uint"].as_u64())
+        })
+}
+
+/// P7: a backend that cannot serve the request's mode is passed over, with the
+/// reason in the chain, before anything is launched.
+///
+/// `cpu.oncpu_time -m trace` reached `fs:proc`, which re-reads a total, and
+/// the launched program ran before the collector refused. The rule is the
+/// resolver's and the data is a backend's `modes` in the catalog, which is
+/// stream V's file this wave: the test runs against the embedded catalog when
+/// that line is there, and otherwise against a copy with exactly the line
+/// `docs/fixes/resolver.md` asks for -- so it is the resolver that is checked,
+/// on the real binary, either way.
+#[test]
+fn a_backend_that_cannot_serve_the_mode_is_passed_over_before_the_launch() {
+    const PLAIN: &str = r#"    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: free,"#;
+    let dir = std::env::temp_dir().join(format!("omn-cpu-modes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch catalog");
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+    let mut patched = false;
+    for file in std::fs::read_dir(&source).expect("the catalog directory") {
+        let path = file.expect("a catalog file").path();
+        let mut text = std::fs::read_to_string(&path).expect("readable");
+        if path.file_name().is_some_and(|name| name == "cpu.yaml") && text.contains(PLAIN) {
+            let at = text.find("- id: cpu.oncpu_time").expect("the entry");
+            let line = at + text[at..].find(PLAIN).expect("its fs:proc backend");
+            text.replace_range(line..line + PLAIN.len(), &format!("{PLAIN} modes: [poll],"));
+            patched = true;
+        }
+        std::fs::write(dir.join(path.file_name().expect("a name")), text).expect("copied");
+    }
+    let marker = dir.join("launched");
+    let request = |extra: &[&str]| {
+        let mut command = Command::new(BINARY);
+        if patched {
+            command.env("OMN_CATALOG_DIR", &dir);
+        }
+        command
+            .args(["cpu.oncpu_time", "--mode", "trace", "--emit", "summary"])
+            .args(extra)
+            .args(["--", "/bin/sh", "-c", "touch \"$0\""])
+            .arg(&marker)
+            .output()
+            .expect("omn should run")
+    };
+
+    let resolved = request(&["--dump-resolved"]);
+    let text = String::from_utf8_lossy(&resolved.stdout);
+    let refused = String::from_utf8_lossy(&resolved.stderr);
+    if resolved.status.success() {
+        let record: serde_json::Value = serde_json::from_str(&text).expect("one json document");
+        assert_ne!(record["backend"]["id"], "fs:proc", "{record}");
+        let file = record["chain"]
+            .as_array()
+            .expect("a chain")
+            .iter()
+            .find(|considered| considered["id"] == "fs:proc")
+            .expect("fs:proc is in the chain");
+        assert!(
+            file.to_string().contains("serves `poll` mode, not `trace`"),
+            "the chain says why the file was passed over: {file}"
+        );
+    } else {
+        assert!(
+            refused.contains("fs:proc") && refused.contains("not `trace`"),
+            "{refused}"
+        );
+    }
+
+    let run = request(&[]);
+    let message = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "no collector traces this: {message}");
+    assert!(
+        !marker.exists(),
+        "the program was launched before the request was refused: {message}"
+    );
+    assert!(
+        !message.contains("re-reads a total"),
+        "the refusal is the file's collector's, reached after the resolver chose it: {message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P9: a system target asks whether this process may observe a whole cpu,
+/// which the `pmu:` probe -- opening the event over this process -- never did.
+///
+/// The requirement is in the resolved file with its answer, which is compared
+/// with the kernel's own: a counter opened on cpu 0 by a copy of the binary
+/// that carries no capability. Where that copy may (`perf_event_paranoid` at 0
+/// or below), there is no refusal to create here, and the skip says the value.
+#[test]
+fn a_system_target_asks_whether_this_process_may_count_a_cpu() {
+    let dump = |binary: &str| {
+        Command::new(binary)
+            .args([
+                "cpu.cycles",
+                "--system",
+                "-m",
+                "count",
+                "-e",
+                "summary",
+                "--dump-resolved",
+            ])
+            .output()
+            .expect("omn should run")
+    };
+    let output = dump(BINARY);
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(machine_cannot_serve(&message), "{message}");
+        eprintln!("skipped: {message}");
+        return;
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    let asked = record["backend"]["requirements"]
+        .as_array()
+        .expect("requirements")
+        .iter()
+        .any(|requirement| {
+            requirement["needs"]
+                .as_str()
+                .is_some_and(|needs| needs.starts_with("per-cpu perf events"))
+        });
+    assert!(asked, "a system target asks per cpu: {record}");
+
+    let copy = std::env::temp_dir().join(format!("omn-uncapped-{}", std::process::id()));
+    std::fs::copy(BINARY, &copy).expect("a copy of the binary carries no capability");
+    let uncapped = dump(copy.to_str().expect("a path"));
+    let _ = std::fs::remove_file(&copy);
+    let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if paranoid.parse::<i32>().is_ok_and(|level| level <= 0) {
+        assert!(
+            uncapped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&uncapped.stderr)
+        );
+        eprintln!(
+            "skipped: perf_event_paranoid is {paranoid} here, so any process may count a cpu \
+             and the refusal P9 is about cannot be created; the matrix's nocaps cells (2) are \
+             where it is checked"
+        );
+        return;
+    }
+    let message = String::from_utf8_lossy(&uncapped.stderr);
+    assert!(
+        !uncapped.status.success(),
+        "an uncapped copy at paranoid {paranoid} resolved"
+    );
+    assert!(
+        message.contains("per-cpu perf events") && message.contains("perf_event_paranoid"),
+        "the resolver refuses it, naming the sysctl: {message}"
+    );
 }
 
 // ---------------------------------------------------------------------------

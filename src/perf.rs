@@ -867,10 +867,10 @@ fn open_fd(spec: &SampleSpec, scope: Scope) -> io::Result<RawFd> {
     let (pid, cpu, flags) = scope.arguments();
     let fd = unsafe { sys::perf_event_open(&mut attr, pid, cpu, -1, flags) };
     if fd < 0 {
-        return Err(io::Error::other(format!(
-            "perf_event_open: {}",
-            io::Error::last_os_error()
-        )));
+        // The kind is kept, so that a caller can still tell a refusal from a
+        // missing counter: `per_cpu_refusal` reads it.
+        let os = io::Error::last_os_error();
+        return Err(io::Error::new(os.kind(), format!("perf_event_open: {os}")));
     }
     Ok(fd)
 }
@@ -1627,6 +1627,8 @@ fn add_readings(left: &[Reading], right: &[Reading]) -> Vec<Reading> {
 /// of its own.
 pub struct ThreadSampler {
     rings: Vec<SampledEvent>,
+    /// The cpu each ring is pinned to, in the order of `rings`.
+    ring_cpus: Vec<u32>,
     tids: Vec<i32>,
     unlisted: usize,
 }
@@ -1653,6 +1655,7 @@ impl ThreadSampler {
             ..*spec
         };
         let mut rings = Vec::with_capacity(cpus.len());
+        let mut ring_cpus = Vec::with_capacity(cpus.len());
         let mut followed = std::collections::BTreeSet::new();
         let mut first_error = None;
         for &cpu in cpus {
@@ -1675,7 +1678,10 @@ impl ThreadSampler {
                     Err(error) => return Err(error),
                 }
             }
-            rings.extend(ring);
+            if let Some(ring) = ring {
+                rings.push(ring);
+                ring_cpus.push(cpu);
+            }
         }
         if rings.is_empty() {
             return Err(first_error.unwrap_or_else(|| {
@@ -1684,7 +1690,39 @@ impl ThreadSampler {
         }
         Ok(Self {
             rings,
+            ring_cpus,
             tids: followed.into_iter().collect(),
+            unlisted: 0,
+        })
+    }
+
+    /// Opens `spec` over every task on each of `cpus`: one event and one ring
+    /// per cpu, which is what sampling a machine or a set of cores is.
+    ///
+    /// Not inherited: an event that observes a cpu already sees every task
+    /// that runs there, including the ones started after it. Every cpu has to
+    /// open, and the first refusal is the whole answer, in the words of
+    /// [`per_cpu_refusal`] -- a profile of the cores that happened to open
+    /// would describe a machine with fewer cores, and a per-task event in
+    /// their place would answer a different question under the same name.
+    pub fn open_cpus(spec: &SampleSpec, cpus: &[u32], ring_pages: usize) -> Result<Self, String> {
+        if cpus.is_empty() {
+            return Err("no cpu to sample".to_owned());
+        }
+        let spec = SampleSpec {
+            inherit: false,
+            ..*spec
+        };
+        let mut rings = Vec::with_capacity(cpus.len());
+        for &cpu in cpus {
+            let event = SampledEvent::open(&spec, Scope::Cpu(cpu), ring_pages)
+                .map_err(|error| per_cpu_refusal(cpu, &error))?;
+            rings.push(event);
+        }
+        Ok(Self {
+            rings,
+            ring_cpus: cpus.to_vec(),
+            tids: Vec::new(),
             unlisted: 0,
         })
     }
@@ -1736,9 +1774,14 @@ impl ThreadSampler {
     /// since they carry no time of their own.
     pub fn drain(&mut self, mut handle: impl FnMut(Record)) {
         let mut samples = Vec::new();
-        for ring in &mut self.rings {
+        for (ring, &cpu) in self.rings.iter_mut().zip(&self.ring_cpus) {
             ring.drain(|record| match record {
-                Record::Sample(sample) => samples.push(sample),
+                // The ring is pinned, so the cpu is known without asking the
+                // kernel to write it into every record.
+                Record::Sample(mut sample) => {
+                    sample.cpu.get_or_insert(cpu);
+                    samples.push(sample)
+                }
                 other => handle(other),
             });
         }
@@ -2055,24 +2098,49 @@ fn paranoid() -> Option<i32> {
 /// falling back to a per-task count, would answer a different question under
 /// the same name.
 pub fn per_cpu_refusal(cpu: u32, error: &io::Error) -> String {
-    match error.raw_os_error() {
-        Some(libc::EACCES) | Some(libc::EPERM) => {
-            let level = match paranoid() {
-                Some(level) => format!("it is {level} here"),
-                None => "it could not be read here".to_owned(),
-            };
-            format!(
-                "counting cpu {cpu} observes every task on it, which needs \
-                 /proc/sys/kernel/perf_event_paranoid at 0 or below ({level}) or CAP_PERFMON on \
-                 this binary; a per-task count is not the same measurement and is not \
-                 substituted"
-            )
-        }
-        _ => format!(
+    let refused = matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM))
+        || error.kind() == io::ErrorKind::PermissionDenied;
+    if !refused {
+        return format!(
             "perf_event_open on cpu {cpu} was refused ({error}); this cpu is online, so it is \
              the counter rather than the core that is not there"
-        ),
+        );
     }
+    let level = match paranoid() {
+        Some(level) => format!("it is {level} here"),
+        None => "it could not be read here".to_owned(),
+    };
+    format!(
+        "counting cpu {cpu} observes every task on it, which needs \
+         /proc/sys/kernel/perf_event_paranoid at 0 or below ({level}) or CAP_PERFMON on \
+         this binary; a per-task count is not the same measurement and is not substituted"
+    )
+}
+
+/// Whether this process may open an event that observes a whole cpu.
+///
+/// The question a system or core target asks of every `pmu:` backend, and
+/// not the one the catalog's `pmu:` probe answers: that probe opens the event
+/// over this process, which `perf_event_paranoid` at 2 allows and a cpu event
+/// it does not. The kernel's check (`perf_allow_cpu`) is the same whichever
+/// event is opened, so a disabled software clock on the first online cpu is
+/// the whole answer, opened and closed at once. The refusal is
+/// [`per_cpu_refusal`]'s, which names the sysctl and the capability that grant
+/// it.
+pub fn per_cpu_support() -> Result<(), String> {
+    let cpu = online_cpus()
+        .ok()
+        .and_then(|cpus| cpus.first().copied())
+        .unwrap_or(0);
+    let spec = SampleSpec::software(
+        sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
+        1_000_000,
+        Callchain::Off,
+    );
+    let fd = open_fd(&spec, Scope::Cpu(cpu)).map_err(|error| per_cpu_refusal(cpu, &error))?;
+    // SAFETY: a descriptor this function opened and nothing else holds.
+    unsafe { libc::close(fd) };
+    Ok(())
 }
 
 /// One counter group per cpu, opened and released together.

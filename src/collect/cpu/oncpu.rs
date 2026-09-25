@@ -74,22 +74,35 @@ impl Times {
 /// Holds the mode until the target exists.
 pub struct Prepare(pub Mode);
 
+impl Prepare {
+    /// Refuses a mode a total cannot serve before anything is launched: a
+    /// factory's refusal is the build's answer to the request as written, and
+    /// reached with nothing started. At attach it came after the launch --
+    /// P7 of `docs/portability.md`.
+    pub fn new(mode: Mode) -> Result<Self, String> {
+        match mode {
+            Mode::Poll { .. } => Ok(Self(mode)),
+            other => Err(refusal(other)),
+        }
+    }
+}
+
+/// `trace` is the other mode the catalog declares, and it belongs to the
+/// backend above this one: watching `sched_switch` is what turns a total into
+/// a series of slices with the stack that ran. Counting ticks and calling it a
+/// trace would answer the shallower question under the deeper name.
+fn refusal(mode: Mode) -> String {
+    format!(
+        "`cpu.oncpu_time` through `/proc` re-reads a total, which is `--mode poll`; `{mode}` \
+         needs the `bpf:tp` backend, which follows sched_switch and is not built yet"
+    )
+}
+
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         let interval = match self.0 {
             Mode::Poll { interval } => interval,
-            // `trace` is the other mode the catalog declares, and it belongs to
-            // the backend above this one: watching `sched_switch` is what turns
-            // a total into a series of slices with the stack that ran. Counting
-            // ticks and calling it a trace would answer the shallower question
-            // under the deeper name.
-            other => {
-                return Err(format!(
-                    "`cpu.oncpu_time` through `/proc` re-reads a total, which is `--mode poll`; \
-                     `{other}` needs the `bpf:tp` backend, which follows sched_switch and is \
-                     not built yet"
-                ))
-            }
+            other => return Err(refusal(other)),
         };
         let (pid, path) = match target {
             Target::Tid(tids) => {
