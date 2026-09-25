@@ -7300,6 +7300,10 @@ layer's first budget check does not come in 10 s. Worth reading
 `Spending`'s weighing of a request attached mid-run for why, since a real run
 on a saturated machine would keep a layer over its ceiling as long.
 
+And the flight recorder's own
+`recorder::a_recording_is_held_to_its_budget_over_a_rolling_span_not_the_whole_run`,
+in the last full run of the twelfth wave, passing alone at once.
+
 ### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
 
 `sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57
