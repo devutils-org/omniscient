@@ -143,15 +143,18 @@ Validation is machine-independent (`src/validate.rs` says so), so it runs on
 the library, in process, and its rejections come back as fields -- request,
 message, hint -- rather than as stderr.
 
-### The sweep is read from text, strictly, until the JSON carries it
+### The sweep is read from the binary's JSON, strictly
 
-`omn list --format json` is the catalog without the `HERE` column; the sweep
-exists only in the text table. `mcp/src/binary.rs::parse_sweep` reads it under
-checks that make a drift loud rather than wrong: the header names the columns,
-every row is a catalog id in catalog order, every `HERE` is `yes`, `?` or `no`,
-and the tallies equal the footer the binary printed. A mismatch is a refusal,
-never a guess -- including a binary and a server built from different
-catalogs. The JSON that would retire the parse is filed for stream R.
+Until the twelfth wave's flight-recorder stream, `omn list --format json` was
+the catalog without the `HERE` column, and this server read the sweep out of
+the text table. It carries the sweep now -- each source's availability and
+each backend's requirements with what their probes answered -- and
+`mcp/src/binary.rs::parse_sweep` reads that: every row a catalog id in
+catalog order, every availability one of the three, the probes passed on as
+the binary wrote them. A mismatch is a refusal, never a guess, including a
+binary and a server built from different catalogs. The protocol test still
+checks the totals against the text table's footer, which is a reference the
+server no longer reads.
 
 ### `run_session` exists, opt-in, bounded, and never launches
 
@@ -223,7 +226,7 @@ account.
 | `a_lossy_run_answers_with_its_shortfall` | `cross-compute-lossy-profile` (100 kHz, past `kernel.perf_event_max_sample_rate`) | the run was lossy (on the development machine: 29310 dropped, 45 throttled, 53.5 % unaccounted for); narrowed to one label with its raw events cut to one, the answer still carries the dropped and throttled counts, the reasons, and every `short` mark unchanged; `list_runs` marks it; narrowing says it left the joins out. Skips loudly, with the sample-rate limit, if the profile lost nothing |
 | `identity_and_temporal_never_read_alike` | `join-between-residency` (`between`, TEMPORAL) and `vertical-one-request` (IDENTITY rows) | every `evidence` has an `evidence_means` naming the same level; TEMPORAL is rank 1 and says hypothesis, IDENTITY rank 4, and no field of the two is equal. The IDENTITY half skips loudly without the vertical server `make` builds |
 | `a_timestamp_from_another_clock_keeps_its_error` | `runtime-jit` (node writing its perf map; every line known only to within the gap between two reads) | every `ts_err_ns` unchanged, and `timestamp_error.worst_ts_err_ns` is the file's largest (about 8.6 ms here). Skips loudly without node |
-| `the_sweep_is_the_one_the_binary_that_runs_gives` | `omn list` | totals equal to the binary's own footer; the capabilities equal to `getcap`'s reading; and the separation: the same binary copied without its capabilities answers fewer available sources, and its `missing` names both capabilities |
+| `the_sweep_is_the_one_the_binary_that_runs_gives` | `omn list` | totals, read from `omn list --format json`, equal to the text table's own footer; the capabilities equal to `getcap`'s reading; and the separation: the same binary copied without its capabilities answers fewer available sources, and its `missing` names both capabilities |
 | `a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing` | a session whose program would `touch` a marker | the marker does not exist after planning; backend, rank, cost band, degradations and chain equal `omn --dump-resolved`'s; the band says it is a declaration and cites finding 47; `run_session` is announced as refusing it; an invalid session is rejected by field with its label, and the machine is not asked |
 | `a_call_that_would_change_the_machine_is_refused` | the same marker, through `run_session` | refused without `--allow-run`; with it, refused for the launch; a duration over the bound and a missing budget refused; run names and resource URIs that climb out of `--dir` refused; no marker, no run directory |
 | `a_bounded_run_over_an_existing_process_reads_back_what_the_process_reports` | a python process holding 17 extra descriptors that counts its own (`FDS 20`) and spins | `run_session` with `proc.fd` on its pid, 1 s, 5 %: the summary's min and max are the process's own count, it stopped because the duration elapsed, the cost is measured; reading the run again gives the files unchanged |

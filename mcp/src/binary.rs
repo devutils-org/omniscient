@@ -144,13 +144,13 @@ impl Binary {
     /// `omn list`'s capability sweep, one row per catalog source.
     pub fn sweep(&self, catalog: &Catalog) -> Result<Value, String> {
         let output = self.invoke(
-            &["list".into(), "--color".into(), "never".into()],
+            &["list".into(), "--format".into(), "json".into()],
             None,
             Duration::from_secs(30),
         )?;
         if output.status != Some(0) {
             return Err(format!(
-                "`omn list` exited {:?}: {}",
+                "`omn list --format json` exited {:?}: {}",
                 output.status,
                 output.stderr.trim()
             ));
@@ -276,54 +276,30 @@ pub fn file_capabilities(path: &Path) -> FileCaps {
     }
 }
 
-/// Reads `omn list`'s table, strictly.
+/// Reads `omn list --format json`'s sweep, strictly.
 ///
-/// The table is text because `omn list --format json` does not carry the
-/// sweep (filed for the stream that owns `src/main.rs`). Text is read here
-/// only under checks that make a drift loud rather than wrong: the header
-/// names the columns, every row is a catalog source in catalog order, every
-/// HERE is one of the three markers, and the tallies match the footer the
-/// binary printed. Anything else is refused, never guessed.
+/// Every row has to be a catalog source, in catalog order, and every `here`
+/// one of the three answers; anything else is refused, never guessed. Each
+/// backend's probes are passed on as the binary wrote them.
 pub fn parse_sweep(text: &str, catalog: &Catalog) -> Result<Value, String> {
-    let mut lines = text.lines();
-    let header = lines.next().ok_or("`omn list` printed nothing")?;
-    let column = |name: &str| {
-        header
-            .find(name)
-            .ok_or_else(|| format!("`omn list`'s header has no {name} column: `{header}`"))
-    };
-    let (here_at, collector_at, summary_at) =
-        (column("HERE")?, column("COLLECTOR")?, column("SUMMARY")?);
-    if !header.starts_with("SOURCE") || !(here_at < collector_at && collector_at < summary_at) {
-        return Err(format!(
-            "`omn list`'s header is not the one this server reads: `{header}`"
-        ));
-    }
-
+    let listed: Vec<Value> = serde_json::from_str(text)
+        .map_err(|error| format!("`omn list --format json` is not a list of sources: {error}"))?;
     let mut rows = Vec::new();
     let mut tally = (0usize, 0usize, 0usize);
-    let expected: Vec<&str> = catalog.ids().collect();
-    for line in lines.by_ref() {
-        if line.trim().is_empty() {
-            break;
-        }
-        let id = line.split_whitespace().next().unwrap_or_default();
-        let field = |from: usize, to: usize| {
-            line.get(from..to)
-                .map(str::trim)
-                .ok_or_else(|| format!("row `{line}` is shorter than the header"))
-        };
-        let here = field(here_at, collector_at)?;
-        let collector = field(collector_at, summary_at)?;
-        let (state, meaning) = match here {
-            "yes" => {
+    for item in &listed {
+        let id = item["id"]
+            .as_str()
+            .ok_or_else(|| format!("a listed source has no id: {item}"))?;
+        let here = &item["here"];
+        let (state, meaning) = match here["availability"].as_str() {
+            Some("ready") => {
                 tally.0 += 1;
                 (
                     "available",
                     "a backend whose every requirement was checked and found",
                 )
             }
-            "?" => {
+            Some("unverified") => {
                 tally.1 += 1;
                 (
                     "unverified",
@@ -331,54 +307,38 @@ pub fn parse_sweep(text: &str, catalog: &Catalog) -> Result<Value, String> {
                      same as available, and never counted as it",
                 )
             }
-            "no" => {
+            Some("unavailable") => {
                 tally.2 += 1;
                 (
                     "unavailable",
                     "every backend is missing something on this machine",
                 )
             }
-            other => return Err(format!("`{id}` has HERE `{other}`, not yes, ? or no")),
+            _ => {
+                return Err(format!(
+                    "`{id}` has an availability this server does not know: {here}"
+                ))
+            }
         };
         rows.push(json!({
             "source": id,
             "here": state,
             "here_means": meaning,
-            "collector": collector,
+            "backend": here["backend"],
+            "probes": item["probes"],
         }));
     }
     let ids: Vec<&str> = rows
         .iter()
         .map(|row| row["source"].as_str().unwrap_or_default())
         .collect();
+    let expected: Vec<&str> = catalog.ids().collect();
     if ids != expected {
         return Err(format!(
             "`omn list` names {} sources and this server's catalog {}; the binary and the \
              server were not built from the same catalog",
             ids.len(),
             expected.len()
-        ));
-    }
-
-    let footer: Vec<&str> = lines.filter(|line| !line.trim().is_empty()).collect();
-    let counts = footer
-        .first()
-        .map(|line| {
-            line.split(|c: char| !c.is_ascii_digit())
-                .filter(|part| !part.is_empty())
-                .filter_map(|part| part.parse::<usize>().ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if counts.get(0..4) != Some(&[rows.len(), tally.0, tally.1, tally.2][..]) {
-        return Err(format!(
-            "`omn list`'s footer `{}` does not match its own rows ({} sources: {} yes, {} ?, {} \
-             no)",
-            footer.first().unwrap_or(&""),
-            rows.len(),
-            tally.0,
-            tally.1,
-            tally.2
         ));
     }
     Ok(json!({
@@ -389,6 +349,5 @@ pub fn parse_sweep(text: &str, catalog: &Catalog) -> Result<Value, String> {
             "unverified": tally.1,
             "unavailable": tally.2,
         },
-        "said_by_omn": footer,
     }))
 }
