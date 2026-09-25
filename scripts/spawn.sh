@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh escalation
-#   cd ../omniscient-escalation && claude "$(cat ../omniscient-escalation.prompt)"
+#   scripts/spawn.sh recorder
+#   cd ../omniscient-recorder && claude "$(cat ../omniscient-recorder.prompt)"
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
 #
-# This wave is one milestone and three sets of debts: the escalation, and the
-# requests the tenth wave filed against the engine, the silent degradations and
-# the drains. The lock is a named file list per stream. The shared layers not
-# listed below belong to nobody, and the coordinator is working in them on main
-# while the streams run. The two session indexes, examples/README.md and
-# GUIDE.md, belong to the coordinator and are held to the sessions on disk by a
-# test, so a session added without a row is a red suite rather than a gap.
+# This wave is two milestones and two sets of debts: the flight recorder, phase
+# 11's MCP surface, the probes the portability matrix caught answering
+# available for sources that do not attach, and the kernel-side attributions
+# and drains the eleventh wave filed. The lock is a named file list per stream.
+# The shared layers not listed below belong to nobody. The two session indexes,
+# examples/README.md and GUIDE.md, belong to the coordinator and are held to
+# the sessions on disk by a test, so a session added without a row is a red
+# suite rather than a gap.
 #
 # The prompt is written beside the worktree, so the agent starts in one line:
 #
@@ -23,97 +24,89 @@
 set -euo pipefail
 
 declare -A OWNS=(
-    [escalation]="src/triage/** src/cli.rs src/request.rs src/session.rs src/collect/mod.rs src/collect/launch.rs src/collect/task.rs tests/triage.rs tests/runner.rs tests/budget.rs examples/triage-*.yml examples/attach-*.yml man/omn.1"
-    [debts]="src/join.rs src/emit.rs src/encode.rs src/render.rs src/main.rs tests/join_engine.rs tests/aggregation.rs tests/encoders.rs tests/vertical.rs examples/join-*.yml examples/vertical-one-request.yml"
-    [silent]="src/filter.rs src/resolve.rs src/perf.rs src/collect/cpu/** src/collect/proc/** src/collect/mem/page_faults.rs catalog/cpu.yaml catalog/proc.yaml catalog/mem.yaml tests/scenario_cpu.rs tests/scenario_proc.rs tests/scenario_mem.rs tests/family_cpu.rs tests/family_proc.rs examples/cpu-*.yml examples/proc-*.yml"
-    [matrix]="scripts/matrix.sh scripts/vm/** tests/portability.rs .github/**"
-    [drains]="src/bpf/map.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/proc_syscall.rs src/bpf/sched_*.rs src/bpf/migrate.rs src/bpf/mem_alloc.rs src/bpf/mem_stall.rs src/collect/sched/** tests/scenario_sched.rs tests/family_sched.rs"
+    [recorder]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/session.rs src/request.rs src/cli.rs src/main.rs src/emit.rs src/encode.rs src/render.rs src/triage/** tests/recorder.rs tests/runner.rs tests/budget.rs tests/triage.rs examples/record-*.yml man/omn.1"
+    [probes]="src/capabilities.rs src/catalog.rs src/validate.rs src/resolve.rs src/filter.rs src/perf.rs src/bpf/mod.rs src/bpf/request*.rs src/bpf/btf.rs src/bpf/attach.rs src/bpf/usdt.rs catalog/*.yaml src/collect/cpu/** src/collect/proc/** src/collect/gpu/** src/collect/power/** src/collect/runtime/** src/collect/mem/page_faults.rs tests/portability.rs tests/scenario_cpu.rs tests/scenario_proc.rs tests/scenario_gpu.rs tests/scenario_power.rs tests/scenario_runtime.rs tests/family_cpu.rs tests/family_proc.rs tests/vertical.rs scripts/matrix.sh scripts/vm/** .github/**"
+    [kernel]="src/bpf/wakeup.rs src/bpf/map.rs src/bpf/fentry.rs src/bpf/io_*.rs src/bpf/net_*.rs src/bpf/sched_*.rs src/bpf/mem_*.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/migrate.rs src/bpf/proc_syscall.rs src/collect/sched/** src/collect/io/** src/collect/net/** src/collect/mem/** (except page_faults.rs) tests/scenario_sched.rs tests/family_sched.rs tests/scenario_io.rs tests/scenario_net.rs tests/scenario_mem.rs"
+    [mcp]="mcp/** (a new workspace member) the members line of Cargo.toml, Cargo.lock"
 )
 declare -A TITLE=(
-    [escalation]="Stream E -- the escalation"
-    [debts]="Stream J -- the engine's debts"
-    [silent]="Stream S -- the silent degradations"
-    [matrix]="Stream P -- the portability matrix"
-    [drains]="Stream K -- drains that lose nothing"
+    [recorder]="Stream R -- the flight recorder"
+    [probes]="Stream V -- the probes tell the truth"
+    [kernel]="Stream D -- the kernel's attributions and drains"
+    [mcp]="Stream M -- a model reads it"
 )
 declare -A LOG=(
-    [escalation]="docs/triage.md"
-    [debts]="docs/families/join.md"
-    [silent]="docs/fixes/silent.md"
-    [matrix]="docs/portability.md"
-    [drains]="docs/families/drains.md"
+    [recorder]="docs/recorder.md"
+    [probes]="docs/portability.md"
+    [kernel]="docs/families/kernel.md"
+    [mcp]="docs/mcp.md"
 )
 declare -A SCENARIO=(
-    [escalation]="tests/triage.rs, tests/runner.rs and tests/budget.rs"
-    [debts]="tests/join_engine.rs, tests/aggregation.rs, tests/encoders.rs and tests/vertical.rs"
-    [silent]="tests/scenario_cpu.rs, tests/scenario_proc.rs and tests/scenario_mem.rs"
-    [matrix]="tests/portability.rs"
-    [drains]="tests/scenario_sched.rs and tests/family_sched.rs"
+    [recorder]="tests/recorder.rs, tests/runner.rs, tests/budget.rs and tests/triage.rs"
+    [probes]="tests/portability.rs and the scenario_* and family_* files you own"
+    [kernel]="tests/scenario_sched.rs, tests/family_sched.rs, tests/scenario_io.rs, tests/scenario_net.rs and tests/scenario_mem.rs"
+    [mcp]="the tests under mcp/tests/ (cargo test -p omn-mcp)"
 )
 
-ESCALATION_WORK='ROADMAP.md phase 10, item 3: once triage names a suspect, attach that layer'"'"'s
-detailed collectors mid-run, detach the rest, and hold the budget. Triage exists
-(src/triage/) and so does a request window (hot attach); what is missing is a
-window decided during the run from the cheap pass'"'"'s own numbers. The mechanism
-is your decision -- have the runner ask a trait between rounds, the way it asks
-Cheaper, and keep triage out of the collector layer. Scenarios: what it
-escalated to and why, the budget held and measured, a detailed layer this
-machine cannot serve reported with reasons, and joins across the switch kept
-honest. Ground truth: a program cpu-bound for a second then lock-bound for a
-second escalates to the lock layer and its waits match its own clock. Also:
---window on the command line (stream H'"'"'s filed request). Not the flight
-recorder -- that is the next wave.'
+RECORDER_WORK='STATE.md "What remains" item 1, as DECISIONS.md settled it: a session whose
+duration is until a predicate fires, with a retention bound and one document
+per trigger -- a trigger and a retention bound, not a new kind of program. The
+mechanism is your decision; write it down for DECISIONS.md in your handoff. One
+document covers one window (the span the retention held when it fired) and
+carries its trigger, predicate and firing value; eviction is a counted loss
+through Shortfall; one clock; the predicate uses src/filter.rs grammar over
+what a round read (V owns filter.rs -- file what you need); the budget holds
+over a run with no end; a bound on documents and on the maximum duration.
+Also stream E'"'"'s filed request: a held request that does not resolve is a
+layer this machine cannot serve, not a failed run (collect::Unserved). Ground
+truth: a workload that idles, bursts a known amount at a moment it reports on
+its own clock, twice -- exactly two documents, each window holding its burst,
+evictions counted against what the workload says it did.'
 
-DEBTS_WORK='Four requests the tenth wave filed against src/join.rs and src/emit.rs, under
-"the tenth wave" in docs/open-findings.md, with signatures: apply_within and
-Correlation::outside_window for a join across a detached source (and main.rs
-passing the windows); the window on Results; Part::via so net_rx and net_tx are
-rated KEY rather than IDENTITY (the two vertical lines and the tests/vertical.rs
-assertion that flip with it are yours); a filtered part that matched nothing is
-a zero, not a missing row. Ground truth for the first: the ignored scenario in
-tests/runner.rs (40 matched, 25 outside the window, not 67 matched) -- you do
-not own that file, so your handoff says it is ready and the coordinator
-un-ignores it at the merge.'
+PROBES_WORK='The portability matrix (docs/portability.md) found ten classes, P1-P10, where a
+probe answers available and the attach then refuses -- each filed under "the
+eleventh wave, stream P" in docs/open-findings.md with what is wanted. Fix each
+in the probe or the catalog so the answer is missing WITH the reason the attach
+used to give, and remove its KNOWN_DEFECTS entry in tests/portability.rs. P8'"'"'s
+sched half is stream D'"'"'s. Also stream S'"'"'s request to src/catalog.rs: which
+fields each backend filters in the program, so resolve::placement says Kernel
+only for those. And the suite without capabilities: the four tests of stream P'"'"'s
+"five tests" list that are in your files, and tests/vertical.rs'"'"'s skip reason.
+Ground truth is the matrix: rerun scripts/matrix.sh on the cells a fix touches
+(about 9 GB of disk free; the cache is target/matrix/) and each goes from
+failing to passing, while the 7.2 cell keeps attaching what it attached. You
+touch the catalog loader and the resolver, which are shared layers.'
 
-SILENT_WORK='Five places where the tool accepts a request and answers a different question
-without saying so, filed under "the tenth wave, stream X" and "stream H": a
-pushed-down proc.syscall number filter that drops every call; proc.exec
-accepting a filter and applying none; --backend force: walking past missing
-probes to fail at attach; mem.faults declaring count and refusing it; and a
-per-task counter attached late counting one thread (open one per entry of
-/proc/<pid>/task). Check cpu.profile, sched.switches and mem.faults for the
-same, and answer stream T'"'"'s request for a profile that follows threads. Each
-fix makes the answer right or the refusal say why. Ground truth: each filed
-command as a scenario failing on main; for the counter, the ignored test in
-tests/runner.rs, which you do not own -- say in your handoff that it is ready.'
+KERNEL_WORK='What the eleventh wave filed against kernel programs nobody owned. (1) Finding
+48: a wakeup made from a hard or soft interrupt is credited to the interrupted
+task -- read the preempt count and, in interrupt context, record the waker as
+the interrupt and keep the event only when its wakee is the target'"'"'s. (2) The
+drain race in io_pagecache.rs, net_qdisc.rs and net_softirq.rs: onto map::Rows
+as stream K filed it, with assert_rows_taken_once and the stack-region entry.
+(3) fentry::HistogramProgram'"'"'s last drain sleeps 1 ms as a grace period a
+preemptible kernel does not honour. (4) sched.switches follows threads on
+perf::ThreadSampler (perf.rs is V'"'"'s: use it, do not change it), and the sched
+half of P8. (5) mem.latency -e stack fails one run in ten with latency_cycles
+not numeric, and scenario_mem.rs'"'"'s capability-less test from stream P'"'"'s list.
+Ground truth: finding 48'"'"'s reproduction (the half-blocked workload beside
+interrupt load) over several runs; a known number of events drained on a short
+tick, every one in a row or a counted loss; N threads switching a known number
+of times.'
 
-MATRIX_WORK='ROADMAP.md'"'"'s test strategy rows nobody built: a VM kernel matrix (the 6.1
-floor, an LTS, the host'"'"'s 7.2, and no BTF) and the degradation runs (no
-privileges, no BTF, no tracefs). Boot the host-built tool under prebuilt kernels
-in KVM (virtme-ng via pipx; /dev/kvm works here) -- do not build kernels: about
-9 GB of disk is free, and the cache lives under target/matrix/. Hide
-/sys/kernel/btf/vmlinux or tracefs inside a guest instead of finding such a
-kernel. Each cell is the capability sweep: every source available, missing or
-unknown with its reason, and AVAILABLE MEANS IT ATTACHES -- run each available
-source briefly and fail on a refusal at attach. What differs by kernel differs
-for the catalog'"'"'s reason (uprobe-multi is 6.6). tests/portability.rs checks the
-cells'"'"' documents cheaply; the VM runs are #[ignore] behind scripts/matrix.sh,
-like the bench. Also a GitHub Actions workflow under .github/: fmt, clippy, the
-suite on a hosted runner, failing on any skip that is not an expected one. Do
-not push. The Makefile is the coordinator'"'"'s: put a make target in your handoff.'
-
-DRAINS_WORK='A drained program'"'"'s drain takes a row with lookup-and-delete while the program
-is about to add to it, and the addition lands in a freed element -- measured by
-the eighth wave, still open. fentry::HistogramProgram solves it with two row
-maps and a generation word; put that scheme in src/bpf/map.rs once and move
-runqlat, proc_syscall and every other drained program in your files onto it,
-keeping each program'"'"'s public methods unchanged (stream S owns the proc
-collectors). Ground truth: a known number of events drained on a short tick,
-every one in a row or a counted loss, over several runs. Second task:
-a_blocking_stack_names_the_call_that_blocked failed in two of three full runs
-and passes alone -- find whether it is the machine or the symbolizer racing the
-exit, and fix the tool or make the scenario assert what it can promise. Every
-row program you touch gets a stack-region and a byte-coverage test (finding 46).'
+MCP_WORK='ROADMAP.md phase 11: an MCP server over stdio, a new workspace member mcp/
+building omn-mcp over the omn library, exposing what exists -- the catalog, a
+run'"'"'s resolved file and results document, the capability sweep -- and not a
+report generator. Nothing in src/ is yours: if the library lacks an entry point,
+file it and read the file formats. It reads and does not run (boundary 5): a
+tool may validate and resolve a session and say what it would cost and degrade;
+decide whether one that runs a bounded session through the omn binary exists,
+and write down why. Every number handed out carries what it is missing --
+Shortfall, losses, evidence level, ts_err_ns, degradations; IDENTITY and
+TEMPORAL must never read alike. Keep to the dependencies the workspace has.
+Ground truth: run example sessions with omn -f, point the server at the output,
+and check with a protocol client in mcp/tests/ that every number, loss,
+shortfall and evidence level comes back unchanged; a lossy run'"'"'s answer
+carries its shortfall; a call that would change the machine is refused.'
 
 stream="${1:-}"
 if [[ -z "$stream" || -z "${OWNS[$stream]:-}" ]]; then
@@ -133,11 +126,10 @@ else
 fi
 
 case "$stream" in
-    escalation) WORK="$ESCALATION_WORK" ;;
-    debts) WORK="$DEBTS_WORK" ;;
-    silent) WORK="$SILENT_WORK" ;;
-    drains) WORK="$DRAINS_WORK" ;;
-    matrix) WORK="$MATRIX_WORK" ;;
+    recorder) WORK="$RECORDER_WORK" ;;
+    probes) WORK="$PROBES_WORK" ;;
+    kernel) WORK="$KERNEL_WORK" ;;
+    mcp) WORK="$MCP_WORK" ;;
 esac
 
 prompt_file="${worktree}.prompt"

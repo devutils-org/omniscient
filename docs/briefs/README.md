@@ -25,6 +25,7 @@ table below says which.
 | 8 | `wave-8-engine.md` | layer: the join engine, the run model, and the two attach kinds left | 89 sources from 81, `between` and a decomposition whose residue sits inside its own resolution; one cross-file change that three programs without a layout test could not refuse |
 | 9 | `wave-9-vertical.md` | the milestone plus breadth: the vertical case, and three streams on six sources nothing blocks | phase 4 done within what needs no root; 96 of 101 sources; the first wave held to a testing rule, and the first merge green on its first run |
 | 10 | `wave-10-depth.md` | roadmap task: the last of phases 4, 6 and 8, and phase 10 up to the escalation | the network rows injected without root, hot attach, the bench harness (run pending on a quiet machine), triage above the engine; the coordinator closed the ninth wave's requests and the kernel's skipped runs on `main` meanwhile, and the merge went green on its first full run |
+| 11 | `wave-11-escalation.md` | milestone plus the debts the tenth wave filed, grouped by the files they land in; a fifth stream added mid-wave | the escalation (phase 10 done), the engine's debts, five silent degradations closed, drains that lose nothing, and the portability matrix: 22 cells on four kernels, ten classes of "available but does not attach" (P1-P10) |
 
 The four scenario classes are in `wave-4-scenarios.md` and explained for a
 reader in `GUIDE.md`. They are: the capability sweep, the backend comparison,
