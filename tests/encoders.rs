@@ -743,17 +743,25 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
     // The step. Before the allocation the process holds whatever the
     // interpreter needs; after it, 64 MiB more. Both halves are asserted,
     // because a series that was 64 MiB high all along measured nothing.
-    let before: Vec<f64> = counters
-        .iter()
-        .filter(|(at, _)| *at < AFTER_MS * 1000.0)
-        .map(|(_, value)| *value)
-        .collect();
-    let after: Vec<f64> = counters
-        .iter()
-        .filter(|(at, _)| *at > (AFTER_MS + 100.0) * 1000.0)
-        .map(|(_, value)| *value)
-        .collect();
-    assert!(!before.is_empty() && !after.is_empty(), "{counters:?}");
+    //
+    // The split is found in the series, at its largest rise, rather than at a
+    // fixed moment: the interpreter's start is inside the trace, and under
+    // load it can take longer than any margin chosen for a quiet machine, so a
+    // point "400 ms in" may still be before the allocation. What is known
+    // independently of the machine's load is the order -- the program sleeps
+    // 300 ms before it allocates -- so the rise cannot come earlier than that,
+    // to within one poll of the axis's origin.
+    let values: Vec<f64> = counters.iter().map(|(_, value)| *value).collect();
+    let step = (1..values.len())
+        .max_by(|&left, &right| {
+            (values[left] - values[left - 1]).total_cmp(&(values[right] - values[right - 1]))
+        })
+        .expect("more than ten points");
+    let (before, after) = values.split_at(step);
+    assert!(
+        before.len() >= 2 && after.len() >= 2,
+        "the step is at an edge of the trace, so one side of it was never polled: {counters:?}"
+    );
     let peak_before = before.iter().cloned().fold(f64::MIN, f64::max);
     let floor_after = after.iter().cloned().fold(f64::MAX, f64::min);
     assert!(
@@ -764,6 +772,13 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
     assert!(
         peak_before < ALLOCATED,
         "the process was already holding the allocation before it was made: {peak_before}"
+    );
+    const POLL_MS: f64 = 25.0;
+    let step_at_ms = counters[step].0 / 1000.0;
+    assert!(
+        step_at_ms >= AFTER_MS - POLL_MS,
+        "the trace puts the allocation {step_at_ms:.1} ms in, and the program slept \
+         {AFTER_MS} ms before making it: {counters:?}"
     );
 
     // Provenance, which a trace viewer has nowhere to draw and a reader of the
