@@ -218,8 +218,8 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **done.** The harness has every task the phase lists, and it has measured: 94 (source, backend) pairs alone on this machine, every workload admitted by a gate that judges what a median resolves and refuses a busy machine (`docs/bench.md`). The resolver's seven choices between served backends were confirmed. What the table corrects is the cost bands: an in-kernel collector's cost is in the target's dilation, not the tool's cpu (`proc.syscall`: 0.42 % against +296 %), and the preload shim cost an allocation-bound program about 150 times -- two system calls a record -- until it was moved onto a shared ring, which brought a record to about 70 ns. Finding 47 files each. |
 | 9 — breadth | nearly done; **96 of 101 sources, 106 of 205 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
-| 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. What is left is the escalation, which hot attach now makes possible. |
-| 11 — a model reads it | not started, and deliberately last. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
+| 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. Since the eleventh wave **the escalation** closes it: a session's `escalate:` block attaches the layer the cheap pass names mid-run, detaches the rest and holds the budget; a program cpu-bound then lock-bound gets the lock layer 0.4 to 0.5 s after the switch (`docs/triage.md`). **Done.** |
+| 11 — a model reads it | **in progress** (the twelfth wave, stream M), now that phase 10 is done. An MCP surface over the resolved file, the results and the catalog — a second surface on objects that already exist, not a report generator. Before phase 10 it would flatten the evidence ladder into prose. |
 
 ---
 
@@ -229,27 +229,30 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 `BRIEF.md` is the wave being run; there is no second brief for the one after it,
 because a plan kept in two documents drifted in both.
 
-The tenth wave -- the network rows, hot attach, the bench and triage -- is
-merged, and `docs/briefs/wave-10-depth.md` keeps its brief. **The eleventh
-wave (`BRIEF.md`) is running** the escalation and the three sets of debts the
-tenth filed: the engine's (a join across a detached source, the window on
-`Results`, rows rated by the key that carried them, a filtered zero), the
-silent degradations the bench found, and the drains that race their programs.
+The eleventh wave -- the escalation, the engine's debts, the silent
+degradations, the drains and the portability matrix -- is merged, and
+`docs/briefs/wave-11-escalation.md` keeps its brief. **The twelfth wave
+(`BRIEF.md`) is running**: the flight recorder (R), the probes the matrix
+caught answering available for sources that do not attach (V, P1-P10), the
+kernel-side attributions and drains nobody owned (D, finding 48 among them),
+and phase 11's MCP surface (M).
 
-**Measured between the waves:** the bench's table, in `docs/bench.md`, heap rows
-included, and finding 47 is what the table corrects.
+**Found at the eleventh wave's merge:** `cross_compute`'s lossy-profile
+decomposition fails deterministically on `main` -- the dropped samples, counted
+back in, push the parts past the run's window -- which points at the profile's
+loss count after it began following threads. It is being fixed before stream V,
+which owns `src/perf.rs`, starts.
 
-**After the eleventh wave, in order:**
+**After the twelfth wave, in order:**
 
-1. **The flight recorder** -- a session whose duration is *until a predicate
-   fires*, with a retention bound and one document per trigger, a mode of a
-   session as `DECISIONS.md` settled. It is the runner's next piece, and the
-   escalation holds the runner this wave.
-2. **Phase 11**, an MCP surface over the resolved file, the results and the
-   catalog, once phase 10's escalation has landed and not before.
-3. **Finding 47**: the cost bands and the budget read the target's dilation for
+1. **Finding 47**: the cost bands and the budget read the target's dilation for
    in-kernel collectors. (The shim's half is done: a shared ring, about 70 ns a
-   record; the reader's speed is its next limit.)
+   record; the reader's speed is its next limit.) It waits for the runner,
+   which the flight recorder holds this wave.
+2. **The bench's second table**, on a quiet machine, after the wave: the
+   drains and the thread-following profile changed what several rows cost.
+3. **The CI's first push**, once V's changes make the capability-less suite
+   green; `docs/portability.md` says what the first run will show.
 4. **`dm-delay`**, the one injection left that needs root, on a machine where
    root is available.
 
