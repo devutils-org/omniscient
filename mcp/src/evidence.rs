@@ -7,59 +7,28 @@
 //! document says `evidence`, the answer says beside it what that level is, where
 //! it stands on the ladder, and what it does not establish.
 //!
-//! The match below is exhaustive over `omn::join::Evidence`, so a level added to
-//! the engine does not compile here until someone has said what it means.
+//! What each level means is said in `omn::join::Evidence` itself, whose match is
+//! exhaustive, so a level added to the engine does not compile until someone
+//! has said what it means -- and every surface says the same thing.
 
 use omn::join::Evidence;
 use serde_json::{json, Map, Value};
 
 /// Every level, weakest first.
-pub const LADDER: [Evidence; 4] = [
-    Evidence::Temporal,
-    Evidence::Wakeup,
-    Evidence::Key,
-    Evidence::Identity,
-];
+pub const LADDER: [Evidence; 4] = Evidence::LADDER;
 
 /// The key added beside an `evidence` field. Never present in a document omn
 /// writes; the server refuses to overwrite one if it ever is.
 pub const ANNOTATION: &str = "evidence_means";
 
-/// What a level establishes.
+/// What a level establishes; the engine says it, beside the level.
 pub fn establishes(level: Evidence) -> &'static str {
-    match level {
-        Evidence::Temporal => {
-            "the two sides overlapped in time, and nothing else ties them: a hypothesis, nothing more"
-        }
-        Evidence::Wakeup => {
-            "a wakeup chain links them: the one kind of tie that crosses a block"
-        }
-        Evidence::Key => "both sides carry the same typed key (a task, a device, a request pointer)",
-        Evidence::Identity => {
-            "the downstream event carries an identity the upstream one propagated and it read back"
-        }
-    }
+    level.establishes()
 }
 
 /// What a level does not establish, which is the half a summary drops.
 pub fn does_not_establish(level: Evidence) -> &'static str {
-    match level {
-        Evidence::Temporal => {
-            "that one side caused, served or contains the other: anything else that ran in the \
-             same interval fits the same way"
-        }
-        Evidence::Wakeup => {
-            "what the waker was doing on behalf of the woken task beyond releasing it"
-        }
-        Evidence::Key => {
-            "that the two events belong to the same unit of work: a key is shared by every \
-             event of that task or device, and a recycled key by events of different units"
-        }
-        Evidence::Identity => {
-            "anything outside the propagated identity: the row is exact about whose it is, not \
-             about why it took what it took"
-        }
-    }
+    level.does_not_establish()
 }
 
 /// Position on the ladder, 1 being the weakest.

@@ -69,12 +69,65 @@ pub enum Evidence {
 }
 
 impl Evidence {
+    /// Every level, weakest first.
+    pub const LADDER: [Evidence; 4] = [
+        Evidence::Temporal,
+        Evidence::Wakeup,
+        Evidence::Key,
+        Evidence::Identity,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Evidence::Temporal => "TEMPORAL",
             Evidence::Wakeup => "WAKEUP",
             Evidence::Key => "KEY",
             Evidence::Identity => "IDENTITY",
+        }
+    }
+
+    /// What a level establishes about the two sides it ties.
+    ///
+    /// Said here, beside the level, so that every surface that shows one --
+    /// the text renderer, `omn-mcp` -- says the same thing, and a level added
+    /// to the ladder does not compile until someone has said what it means.
+    pub fn establishes(self) -> &'static str {
+        match self {
+            Evidence::Temporal => {
+                "the two sides overlapped in time, and nothing else ties them: a hypothesis, \
+                 nothing more"
+            }
+            Evidence::Wakeup => {
+                "a wakeup chain links them: the one kind of tie that crosses a block"
+            }
+            Evidence::Key => {
+                "both sides carry the same typed key (a task, a device, a request pointer)"
+            }
+            Evidence::Identity => {
+                "the downstream event carries an identity the upstream one propagated and it \
+                 read back"
+            }
+        }
+    }
+
+    /// What a level does not establish, which is the half a summary drops.
+    pub fn does_not_establish(self) -> &'static str {
+        match self {
+            Evidence::Temporal => {
+                "that one side caused, served or contains the other: anything else that ran in \
+                 the same interval fits the same way"
+            }
+            Evidence::Wakeup => {
+                "what the waker was doing on behalf of the woken task beyond releasing it"
+            }
+            Evidence::Key => {
+                "that the two events belong to the same unit of work: a key is shared by every \
+                 event of that task or device, and a recycled key by events of different units"
+            }
+            Evidence::Identity => {
+                "anything outside the propagated identity: the row is exact about whose it is, \
+                 not about why it took what it took"
+            }
         }
     }
 }
@@ -2543,6 +2596,22 @@ fn period_label(period_ns: f64) -> String {
 mod tests {
     use super::*;
     use crate::event::{Attr, CollectorId};
+
+    #[test]
+    fn the_ladder_is_in_order_and_every_level_says_what_it_does_not_establish() {
+        let mut sorted = Evidence::LADDER;
+        sorted.sort();
+        assert_eq!(sorted, Evidence::LADDER, "the ladder is weakest first");
+        for level in Evidence::LADDER {
+            assert!(!level.establishes().is_empty(), "{level}");
+            assert!(!level.does_not_establish().is_empty(), "{level}");
+        }
+        assert!(Evidence::Temporal.establishes().contains("hypothesis"));
+        assert_ne!(
+            Evidence::Temporal.establishes(),
+            Evidence::Identity.establishes()
+        );
+    }
 
     fn allocation(ts_ns: u64, base: u64, len: u64, op: &str) -> Event {
         Event {
