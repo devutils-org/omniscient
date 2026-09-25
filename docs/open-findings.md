@@ -7262,6 +7262,11 @@ and the match on `Evidence` is exhaustive, so a new level does not compile in
 `impl Evidence { pub fn establishes(self) -> &'static str; pub fn does_not_establish(self) -> &'static str }`,
 which the text renderer could print too.
 
+And one more, in `make check` after stream M's merge, passing alone at once:
+`collect::tests::an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on`
+(`asked about the held one, once`: the held layer was never weighed inside the
+test's window -- the escalation's budget check, stream R's file).
+
 ### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
 
 `sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57
