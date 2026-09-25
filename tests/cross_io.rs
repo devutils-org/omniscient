@@ -683,9 +683,9 @@ fn losses_line(results: &[&Value]) -> String {
 
 /// The session that sees the block half, machine-wide and narrowed by `comm`.
 ///
-/// Machine-wide because one run observes one target and `io.queue` has no
-/// other; narrowed by `comm` because the block collectors apply that filter and
-/// say how much it removed.
+/// Machine-wide because `io.queue` serves no process target (the catalog gives
+/// it `system` and `cgroup`), and narrowed by `comm` because the block
+/// collectors apply that filter and say how much it removed.
 fn block_half(name: &str, comm: &str) -> PathBuf {
     session_file(
         name,
@@ -1507,31 +1507,30 @@ fn the_crossing_sessions_run_and_say_what_they_found() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     std::fs::create_dir_all(root.join("target")).expect("the target directory");
 
-    let [one_read, stale] = std::thread::scope(|scope| {
-        let handles = ["cross-io-one-read.yml", "cross-io-stale-pointer.yml"].map(|name| {
-            scope.spawn(move || {
-                let session = root.join("examples").join(name);
-                let workload = workload_of(&session);
-                let child = spawn(&["-f", &session.to_string_lossy(), "--format", "json"]);
-                std::thread::sleep(LEAD_IN);
-                let ran = Command::new("sh")
-                    .arg("-c")
-                    .arg(&workload)
-                    .current_dir(root)
-                    .output()
-                    .expect("sh runs");
-                assert!(
-                    ran.status.success(),
-                    "the workload in {name} failed: {}",
-                    String::from_utf8_lossy(&ran.stderr)
-                );
-                let output = child.wait_with_output().expect("omn should finish");
-                assert!(output.status.success(), "{name}: {}", stderr(&output));
-                json(&output)
-            })
+    // One session after the other: both are machine-wide over the block layer,
+    // and run side by side each is the other's neighbour.
+    let [(one_read, one_read_started), (stale, _)] =
+        ["cross-io-one-read.yml", "cross-io-stale-pointer.yml"].map(|name| {
+            let session = root.join("examples").join(name);
+            let workload = workload_of(&session);
+            let child = spawn(&["-f", &session.to_string_lossy(), "--format", "json"]);
+            std::thread::sleep(LEAD_IN);
+            let started = monotonic_ns();
+            let ran = Command::new("sh")
+                .arg("-c")
+                .arg(&workload)
+                .current_dir(root)
+                .output()
+                .expect("sh runs");
+            assert!(
+                ran.status.success(),
+                "the workload in {name} failed: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            let output = child.wait_with_output().expect("omn should finish");
+            assert!(output.status.success(), "{name}: {}", stderr(&output));
+            (json(&output), started)
         });
-        handles.map(|handle| handle.join().expect("a session finishes"))
-    });
 
     let halves = join(&one_read, "queue-then-device");
     let released = join(&one_read, "what-released-the-reader");
@@ -1547,7 +1546,26 @@ fn the_crossing_sessions_run_and_say_what_they_found() {
     // one run beside another suite matched 142. The lower bound is the
     // reader's only when nothing was dropped.
     let lost = dropped(result(&one_read, "queue")) + dropped(result(&one_read, "device"));
-    if lost == 0 {
+    // And only when every program set was attached before the first read:
+    // `LEAD_IN` is a guess at how long three sets take to load, and under load
+    // it can be short, in which case the first reads were issued while nothing
+    // watched them -- neither matched nor lost. The run says when each one
+    // opened, on the clock the test read before it started the workload.
+    let last_attached = one_read["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter_map(|result| result["window"]["opened_ns"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let late_ms = last_attached.saturating_sub(one_read_started) as f64 / 1e6;
+    if lost == 0 && last_attached > one_read_started {
+        eprintln!(
+            "not asserted: the lower bound on cross-io-one-read's join, which matched {matched} \
+             of 2000 -- its last program set opened {late_ms:.1} ms after the workload began, \
+             so the first reads were issued while nothing watched them"
+        );
+    } else if lost == 0 {
         assert!(
             matched >= 1980,
             "the one-liner issues 2000 direct reads and the scoped join matched {matched}, with \
