@@ -93,6 +93,33 @@ in green for hours while asking for an emit its source did not declare.
 measuring a process-wide count — descriptors, threads, context switches — cannot
 get an exact delta there. Measure a launched process instead.
 
+**A scenario that passes on a quiet machine can still be wrong about the
+workload.** The flaky tally grew by two or three tests a wave until the twelfth
+wave read all twenty-seven (`docs/flaky.md`). Almost all fell into three
+patterns: counting everything the target took part in rather than what the
+workload made, a fixed sleep standing in for an event, and a bound that ignores
+a loss the run itself reported. So, before a scenario lands:
+
+1. **Filter to the workload.** Count only events whose key is a task, a socket
+   (the 4-tuple and the netns) or a file the workload made. Where a count over
+   the target cannot be avoided, assert its floor from the workload and compare
+   the rest against the kernel's per-task account of the same quantity
+   (`schedstat`, `/proc/<pid>/status`, a counter in a private namespace). Never
+   assert a share of a wall-clock window.
+2. **No sleep as synchronisation.** A "wait until" is an event the workload or
+   `omn` announces: a readiness line, a counter in a shared page, a
+   `CLOCK_MONOTONIC` stamp the workload prints. A duration says how long
+   something runs, never when it has started.
+3. **The slack is the run's own report.** A bound carries the run's counted
+   `dropped`, `late_ticks` and skipped runs, plus the reference's resolution. A
+   constant allowance names what it measures and where it was measured.
+4. **Separation, not calibration.** A cost, a latency or a ratio is two runs
+   that differ in one variable and separate, scaled by what each run actually
+   did. A number only a quiet machine reaches belongs in `docs/bench.md`.
+5. **Rehearse under load once.** A new scenario passes beside the full suite,
+   or `stress-ng --cpu N --io 4 --vm 2`, before it merges. If it fails only
+   there, it is one of the four above or a finding, never a tally entry.
+
 ## The invariants
 
 In `CLAUDE.md`, enforced by tests or by the catalog loader. If a change fights
