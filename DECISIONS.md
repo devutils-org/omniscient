@@ -270,6 +270,19 @@ waits land within what the program timed itself.
 
 `docs/families/join.md`, `docs/families/drains.md`, `docs/fixes/silent.md` and
 `docs/portability.md` have the measurements behind each line.
+
+---
+
+## Settled in the twelfth wave: what a model is handed
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Who answers a machine question asked through MCP | **The `omn` binary that would run the session.** `omn-mcp` probes nothing and holds no capability; every machine-dependent answer names the binary and the capabilities on it. Validation, which is machine-independent, runs on the library. | A probe answers for the process that asks. A copy of `omn` without its capabilities answered 52 usable sources against 93, silently -- the relink failure, one binary over. |
+| Whether a model may run a session | **Only when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **never a session that launches a program**. | Asking for a measurement is what phase 11 grants; running a program a model chose is changing the machine (boundary 5). The opt-in has `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
+| What an answer is | **The documents as written, regrouped per request**, with each request's losses, shortfalls, degradations, unverified requirements and timestamp error restated first, and two additions only: `evidence_means` beside every evidence level, and `elided` where raw events were cut, counted in `missing`. | Every field a shaped answer leaves out is a place a shortfall falls through; and `IDENTITY` and `TEMPORAL` are one word each, so what each establishes is written beside it. |
+
+`docs/mcp.md` has the protocol, the checks (1346 numbers matched key by key
+against the files, a lossy run's shortfall carried unchanged) and the refusals.
 ---
 
 ## Open
