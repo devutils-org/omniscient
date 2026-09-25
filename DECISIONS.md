@@ -261,7 +261,7 @@ Enforced by `src/triage/objective.rs` and its tests, not by this file.
 | Who decides | **The runner asks a trait between rounds** (`collect::Escalate`: decide, shed, close), after the round's reads, and applies detaches before attaches; `src/triage/` answers. | The collector layer stays ignorant of triage, the way it is of the catalog behind `Cheaper`; and detaching first means a run never pays for two detailed layers at once. |
 | The surface | **A session's `escalate:` block**, not a subcommand. | The session is the record of what was asked, and `-o`, `--budget`, `cost.json` and the resolved file come with `omn -f` for free. |
 | When a layer is escalated to | **The same state of the main thread named in two readings in a row** (200 ms each), a state being named at more than half of a reading and more than any other. | A reading that straddles a phase change must not attach a layer for the phase that just ended. |
-| One window per request | **A layer let go is not attached again.** | A collection has one window; a request that comes and goes is the flight recorder's, which is next. |
+| One window per request | **A layer let go is not attached again.** | A collection has one window; a request that comes and goes is the flight recorder's (settled below, in the twelfth wave). |
 
 `docs/triage.md`, "The escalation", has the measurements: a program cpu-bound
 then lock-bound gets the lock layer 0.4 to 0.5 s after the switch, and its
@@ -294,6 +294,29 @@ waits land within what the program timed itself.
 
 `docs/mcp.md` has the protocol, the checks (1346 numbers matched key by key
 against the files, a lossy run's shortfall carried unchanged) and the refusals.
+
+---
+
+## Settled in the twelfth wave: the flight recorder
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The surface | **A session's `record:` block** (`--until` on the command line), beside `duration:`, not `duration: until <predicate>`. | The session is the record of what was asked, and a recording has four more things to say than a duration can hold. `duration` stays what it was -- the longest the run lasts -- which is the bound a recording needs anyway. |
+| The bounds | **`retain`, `documents` and `duration` are required, refused when absent; `after` defaults to zero.** | A run with no fixed end is bounded only by what it is told. `after` is not a bound: zero is "the document ends at the round that fired". Nothing is defaulted, so the resolved file has nothing to confess. |
+| The predicate | **The filter grammar, over the events one round of the `on` request read, after the request's own filter**, with `value` naming the collector's measured attribute. Fields: `value`, `kind`, the backend's `filter_fields`. | The vocabulary that exists; `value` is rewritten to the collector's attribute in the runner (`read_value_as`), so `src/filter.rs` needed nothing. |
+| When it fires | **On the round its predicate becomes true**: a round with a match after one without. A match while a document is open is counted in it (`fired_again`) and writes nothing. | A level held across many rounds is one event of interest. Re-arming on any non-matching round, empty ones included, treats a polled level and a stream of discrete events alike. |
+| The window | **`[fire - retain, cut]`, `cut` the first round at or after `fire + after`**, never before the run's open. Windows of two documents may overlap; each is what the retention held. | "The span the retention held when it fired", plus the after-span a burst needs to be in the document whole. The backward reach is exact -- `fired_ns - opened_ns == retain` is asserted. |
+| Eviction | **By event timestamp, in the runner's buffers, at most every `retain/16`** (a document is cut from the exact window whatever this is); counted per request, in events and rounds, **only for what no document held**. | A count nobody is shown is a silent loss. An event evicted after a document held it is not a loss. |
+| Eviction as a loss | **`Losses::evicted` and `Shortfall::evicted`**, on each document's loss line and beside its distributions -- **without the `>=` mark** (`Shortfall::bounds_below`). | What was evicted is older than the window; every event inside the window is there, so the window's numbers are not lower bounds. They are the window's and not the run's, and the shortfall sentence says exactly that. |
+| A document's losses | **The difference since the previous document's cut** (`Losses::since`), plus what was evicted since it. | A ring's drops cannot be placed in time; the delta since the last document is an upper bound for this one's window and is never counted twice. |
+| The budget | **Weighed over a rolling span, the longer of `retain` and 2 s**, from the latest budget check at or before its start (`Spending::baseline`). | A share of a run that idled an hour is a share of that hour: the burst after it would be under any ceiling. Measured below. |
+| Delivery | **A sink the runner calls as each document is cut**; `main` encodes and writes it at once. | A flight recorder's documents are wanted precisely when the run does not end cleanly. |
+| What is not allowed beside it | escalation, windows, decompositions, `count` and `snapshot` modes. | Each would make a document's span disagree with a part of it. |
+
+`docs/recorder.md` has the ground truth: a program that bursts 300 descriptors
+twice gets exactly two documents, each window holding its burst, with the
+retention bound exact to the nanosecond and the evictions counted against what
+the program says it did before them.
 ---
 
 ## Open

@@ -251,6 +251,9 @@ ring belongs to one -- losses per ring carried into `Collection`, a change to
 
 **After the twelfth wave, in order:**
 
+0. **The flight recorder landed** in the twelfth wave (`docs/recorder.md`): a
+   session's `record:` block or `--until`, a trigger in the filter grammar, a
+   retention bound, one document per firing, eviction counted as a loss.
 1. **Finding 47**: the cost bands and the budget read the target's dilation for
    in-kernel collectors. (The shim's half is done: a shared ring, about 70 ns a
    record; the reader's speed is its next limit.) It waits for the runner,

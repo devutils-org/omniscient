@@ -383,6 +383,18 @@ counts what happened while it was attached and nothing outside it.
 | `attach-one-phase.yml` | Does a source attached for one phase of a program count that phase and nothing of the other? |
 | `attach-escalate-phases.yml` | Can a run decide which layer to pay for from its own cheap numbers? A program cpu-bound then lock-bound gets the profile, then the futex waits, one layer at a time. |
 
+## record
+
+`STATE.md`'s flight recorder: a session whose duration is *until a predicate
+fires*, which keeps a bounded span of what it read and writes one document per
+firing. Each session checks the documents against what the workload says it
+did, and a trigger that never fires against the run's own bounds.
+
+| Session | The question it answers |
+|---|---|
+| `record-descriptor-bursts.yml` | Can a run wait for something to happen and keep only what led up to it? A program that opens 300 descriptors twice gets exactly two documents, each holding one burst and the second before it. |
+| `record-until-it-never-fires.yml` | What does a recording whose trigger never fires leave behind? No document, the run ended at its longest, and what it read counted as in none. |
+
 ## triage
 
 `ROADMAP.md` phase 10: the layer above the engine, which asks it a question
