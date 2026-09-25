@@ -142,10 +142,10 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
-    - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free,
+    - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free, modes: [poll],
        targets: {cgroup: native, container: native}, filter_fields: [],
        degraded: "aggregated per cgroup, no stacks and no per-thread attribution"}
-    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: free,
+    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], modes: [poll], cost: free,
        targets: {pid: native, tid: native, launch: native},
        degraded: "tick granularity, no per-site attribution"}
   modes: [trace, poll]

@@ -7529,3 +7529,72 @@ with THP `always`), `a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel
 `a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory`
 (13 of 40 small-walk loads timed). `both_huge_page_backends_read_the_same_promotion_counter`
 failed in the same run and is in the tally already.
+
+## Needs from another stream — the twelfth wave, stream V (the probes tell the truth)
+
+Stream V's deliverable is `docs/portability.md`, "The twelfth wave". The
+probe-side classes P1-P6 and P10 are fixed in the probes and the catalog; what
+follows is what the fixes leave to other files.
+
+### To whoever owns the raw-tracepoint programs (`src/bpf/{io,io_*,mem_*,net_*,sched_*,proc_*,runqlat,offcpu,migrate,request}.rs`, stream D this wave): a prototype is now written twice
+
+A `raw_tracepoint:` requirement may carry the prototype its program reads --
+`raw_tracepoint:sched_process_exit(task_struct *, bool)` -- and the probe
+compares it with the kernel's BTF, in the words `check_signature` uses. The
+program's own constant and the catalog's string must agree: a program that
+changes the shape it accepts changes its requirement in the same commit, and a
+program that learns a second shape lists it, `name(a, b)|(a, b, c)`, as
+`net.drops` and `net.tcp.retransmit` do. A mismatch on the development machine
+shows at once -- the source reads *missing* there -- but only there.
+
+Two widenings the matrix measured and nobody is asked for yet, each of which
+would make an LTS kernel serve a source it now refuses by name:
+
+- `sock.sk_ino` is absent from 6.6 and older (`btf_member:sock.sk_ino`
+  missing): `net.drops`, `net.tcp.lifetime` and `net.tcp.retransmit` could read
+  the inode through `sk_socket->file->f_inode` there.
+- 6.6's `mm_vmscan_direct_reclaim_begin(int, gfp_t)` and
+  `sched_process_exit(task_struct *)`, and 5.15's `kmalloc` (five arguments),
+  `block_rq_complete(request *, int, unsigned int)` and `mm_compaction_begin`
+  (four integers), are each one slot moved from the shape the program reads.
+
+### To the coordinator: `CATALOG.md` §1, four requirement notations
+
+- `raw_tracepoint:<name>(<arg>, ...)[|(<arg>, ...)]` -- existence and
+  prototype, spelled as `Btf::tracepoint_signature` spells it (no `struct`, no
+  qualifier). A bare name still asks for existence alone.
+- `btf_member:<struct>.<member>` -- a member a program reads, looked up the way
+  the program looks it up.
+- `uprobe_multi` -- a `BPF_TRACE_UPROBE_MULTI` link can be made (Linux 6.6),
+  asked of the kernel. `uprobe` now means *this process can place a uprobe*:
+  that link, or the `uprobe` PMU with `CAP_SYS_ADMIN`.
+- `cgroup2:<file>:<key>` -- a flat-keyed cgroup file carries a key, read where
+  this process lives.
+
+### To stream D (`src/collect/sched/switches.rs` and `tests/scenario_sched.rs`): P7's `sched.switches -m count`, left as it is
+
+Stream W offered two answers: the collector counts, or `modes: [trace]` on the
+`pmu:sw` line. The second was tried here and taken back:
+`scenario_sched::a_declared_mode_the_build_refuses_says_what_is_missing`
+asserts the collector's own refusal (*"counting support"*, *"--mode trace"*),
+which the resolver's earlier one replaces. Either the collector counts, or the
+line takes `modes: [trace]` in the same commit as that test's new wording
+(*"`pmu:sw` serves `trace` mode, not `count`"*). P7's `sched.switches` entry
+stays in `KNOWN_DEFECTS` until one lands.
+
+### To stream W, next wave (`catalog/cpu.yaml`, `catalog/mem.yaml`, `catalog/sched.yaml`): the `cgroup` and `container` targets nothing serves
+
+Not taken this wave: the counting sources, `cpu.profile`, `mem.faults` and
+`sched.switches` still declare `cgroup: native` and `container: native`.
+Removing them changes what `tests/scenario_cpu.rs` and `tests/family_cpu.rs`
+exercise on `--cgroup`, and W's note says the collectors come next wave over
+`perf::Scope::CgroupOnCpu`. Whoever writes them, or decides they will not be
+written, changes those `targets` keys in the same commit; V's catalog lines are
+open to it.
+
+### Done: `insn.rs`'s new instructions in two of V's files
+
+`src/bpf/usdt.rs` (`mod local`) and `src/bpf/request_net.rs` (`or64_imm`) kept
+local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and `Insn::ld_imm64`
+are on `main` since stream D's merge. Both now call the shared instructions,
+and `mod local` is gone.

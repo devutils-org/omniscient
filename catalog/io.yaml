@@ -12,7 +12,7 @@
     # kernel's own BTF. The classic path below reads the same two out of
     # tracefs, which is mounted and unreadable on a stock machine.
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "raw_tracepoint:block_rq_complete", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "raw_tracepoint:block_rq_complete(request *, blk_status_t, unsigned int)", "kernel>=5.8"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: low
     - id: "bpf:tp"
@@ -44,7 +44,7 @@
   unit: ns
   backends:
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:block_rq_insert", "raw_tracepoint:block_rq_issue", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:block_rq_insert(request *)", "raw_tracepoint:block_rq_issue(request *)", "kernel>=5.8"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: low
     - id: "bpf:tp"
@@ -138,7 +138,7 @@
   summary: "Request size distribution"
   unit: bytes
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [hist, topk, raw, summary]
@@ -260,7 +260,7 @@
     # is a miss count with nothing to be a share of. Counted in the kernel per
     # task and file; `docs/families/io.md` has why these two and not the fault
     # tracepoints.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages(address_space *, long unsigned int, long unsigned int)", "raw_tracepoint:mm_filemap_add_to_page_cache(folio *)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, summary, raw]
@@ -293,7 +293,7 @@
   summary: "Readahead: pages filled ahead of what reads looked up"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages", "raw_tracepoint:mm_filemap_add_to_page_cache", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_filemap_get_pages(address_space *, long unsigned int, long unsigned int)", "raw_tracepoint:mm_filemap_add_to_page_cache(folio *)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:filemap:mm_filemap_get_pages", "tracepoint:filemap:mm_filemap_add_to_page_cache", "bpf"], cost: low, equivalent: true}
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:page_cache_ra_unbounded"], cost: low, equivalent: true}
   modes: [trace, count]
@@ -323,7 +323,7 @@
   summary: "Deferred writeback"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:writeback_start", "raw_tracepoint:writeback_written", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:writeback_start(bdi_writeback *, wb_writeback_work *)", "raw_tracepoint:writeback_written(bdi_writeback *, wb_writeback_work *)", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:writeback:writeback_start", "tracepoint:writeback:writeback_written", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary, timeline]

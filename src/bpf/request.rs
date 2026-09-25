@@ -1099,6 +1099,19 @@ impl RequestProgram {
                     Some(libc::EPERM) | Some(libc::EACCES) => {
                         super::permission_advice(&format!("attaching to `{}`", site.qualified()))
                     }
+                    // What a kernel older than 6.6 answers: it does not know the
+                    // attach type. The catalog requires `uprobe_multi`, so this
+                    // is reached only by a forced backend, and it says why
+                    // rather than printing the errno alone (P5 in
+                    // `docs/portability.md`).
+                    Some(libc::EINVAL) => format!(
+                        "`{}` in {}: the kernel refused to link the program to {:#x} ({error}): \
+                         this source links every site with a uprobe-multi link, which Linux \
+                         6.6 introduced, and has no older route",
+                        site.qualified(),
+                        site.object.display(),
+                        site.offset
+                    ),
                     _ => format!(
                         "`{}` in {}: the kernel refused to link the program to {:#x}: {error}",
                         site.qualified(),

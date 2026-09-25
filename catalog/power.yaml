@@ -53,7 +53,7 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "kernel>=5.8"], cost: free}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free, equivalent: true}
-    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpufreq"], cost: free,
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpufreq"], cost: free,
        degraded: "which frequency sysfs gives depends on the driver: cpuinfo_avg_freq is the
                   effective one, scaling_cur_freq may be the requested one. Every event names the
                   file it read and whether that is effective or requested"}
@@ -81,7 +81,7 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low, equivalent: true}
-    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpuidle"], cost: free,
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpuidle"], cost: free, modes: [poll],
        degraded: "residency totals only: no transition timeline"}
   modes: [trace, poll]
   emits: [timeline, hist, summary, raw]

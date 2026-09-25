@@ -37,7 +37,7 @@
   unit: ns
   backends:
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "btf_member:sock.sk_ino", "kernel>=5.8"]
       join: {key: "sock:cookie", match: eq, ttl: 300s}
       cost: low
     - id: "bpf:tp"
@@ -84,7 +84,7 @@
   summary: "TCP retransmissions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "btf_member:sock.sk_ino", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -98,7 +98,7 @@
   summary: "Dropped packets with drop reason"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "btf_member:sock.sk_ino", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -216,7 +216,7 @@
   backends:
     # Bucketed in the kernel and drained on a tick: one event is one bucket of
     # one window, standing for every packet in it.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue", "raw_tracepoint:qdisc_dequeue", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:qdisc_enqueue(Qdisc *, netdev_queue *, sk_buff *)", "raw_tracepoint:qdisc_dequeue(Qdisc *, netdev_queue *, int, sk_buff *)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:qdisc:qdisc_enqueue", "tracepoint:qdisc:qdisc_dequeue", "bpf"], cost: low, equivalent: true, drained: true}
   modes: [trace]
   emits: [hist, raw, summary, timeline]
@@ -238,7 +238,7 @@
   unit: ns
   backends:
     # A count and an exact total per (cpu, vector, bucket), drained on a tick.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry", "raw_tracepoint:softirq_exit", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
@@ -391,8 +391,8 @@
     # Neither runs in the serving thread, so both are read by the socket's
     # cookie -- see `src/bpf/request_net.rs`. Those four functions are the
     # first backend's; the second follows the thread and not the socket.
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf", "raw_tracepoint:sched_switch", "raw_tracepoint:sched_waking", "fentry:tcp_data_ready", "fentry:tcp_event_new_data_sent", "fentry:sk_wait_data", "fentry:sk_stream_wait_memory"], cost: low}
-    - {id: "bpf:usdt:threads", requires: ["uprobe", "bpf", "btf", "raw_tracepoint:sched_switch", "raw_tracepoint:sched_waking"], cost: low,
+    - {id: "bpf:usdt", requires: ["uprobe_multi", "bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_waking(task_struct *)", "fentry:tcp_data_ready", "fentry:tcp_event_new_data_sent", "fentry:sk_wait_data", "fentry:sk_stream_wait_memory"], cost: low}
+    - {id: "bpf:usdt:threads", requires: ["uprobe_multi", "bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_waking(task_struct *)"], cost: low,
        degraded: "no `net_rx` or `net_tx`: the socket the probes name is not followed, and a sleep on it is counted in `sleep_ns`"}
   modes: [trace]
   emits: [raw, summary, hist, topk]
@@ -407,6 +407,10 @@
        refused with the probes it does carry. Nothing is guessed from the
        connection: a keep-alive connection is not one request, and a request is
        not over at its first send."
+    - "Linux 6.6 or later. Every site is linked with a uprobe-multi link, which
+       follows the process and keeps the probes' semaphores raised, and this
+       source has no older route: below 6.6 `uprobe_multi` is missing, and
+       names the kernel's refusal."
     - "A request is followed in the task that declared it. A server that hands
        a request to another thread must declare it again there, with the same
        id; the time between the two declarations is in neither."

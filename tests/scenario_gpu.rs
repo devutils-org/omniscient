@@ -1860,11 +1860,38 @@ fn what_this_machine_cannot_check_about_gpu_job_is_named_with_its_numbers() {
         "this machine cannot serve `gpu.job` and the refusal names neither the tracepoints nor \
          the filesystem they would be read through:\n{complaint}"
     );
-    assert!(
-        !complaint.contains("CAP_BPF"),
-        "the eBPF capabilities are not what is missing here, and a refusal that names them \
-         sends the reader to a setcap that will not help:\n{complaint}"
+    // Whether the capabilities are missing too is this binary's state, not the
+    // machine's: `make` grants them and a plain `cargo build` or the CI's
+    // unprivileged cell does not. The listing says which, and the refusal is
+    // held to it -- naming them when `bpf` is missing is right, and naming them
+    // when it is available sends the reader to a setcap that will not help.
+    let listing = stdout(&omn(&["list", "gpu.job"]));
+    let bpf_available = listing.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Some("needs")
+            && words.next() == Some("bpf")
+            && words.next() == Some("available")
+    });
+    eprintln!(
+        "gpu.job: `bpf` is {} for this binary",
+        if bpf_available {
+            "available"
+        } else {
+            "missing"
+        }
     );
+    if bpf_available {
+        assert!(
+            !complaint.contains("CAP_BPF"),
+            "the eBPF capabilities are not what is missing here, and a refusal that names them \
+             sends the reader to a setcap that will not help:\n{complaint}"
+        );
+    } else {
+        assert!(
+            complaint.contains("CAP_BPF"),
+            "this binary cannot load a program, and the refusal does not say so:\n{complaint}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

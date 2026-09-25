@@ -115,7 +115,7 @@
   summary: "Kernel page allocations and frees"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_page_alloc", "raw_tracepoint:mm_page_free", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_page_alloc(page *, unsigned int, gfp_t, int)", "raw_tracepoint:mm_page_free(page *, unsigned int)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:mm_page_alloc", "tracepoint:kmem:mm_page_free", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -129,7 +129,7 @@
   summary: "Kernel slab allocations"
   unit: bytes
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc", "raw_tracepoint:kfree", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc(long unsigned int, void *, size_t, size_t, gfp_t, int)", "raw_tracepoint:kfree(long unsigned int, void *)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -398,7 +398,7 @@
   summary: "Direct reclaim"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin", "raw_tracepoint:mm_vmscan_direct_reclaim_end", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin(gfp_t, int, mem_cgroup *)", "raw_tracepoint:mm_vmscan_direct_reclaim_end(long unsigned int, mem_cgroup *)", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_begin", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -412,7 +412,7 @@
   summary: "Memory compaction"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin", "raw_tracepoint:mm_compaction_end", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin(compact_control *, long unsigned int, long unsigned int, bool)", "raw_tracepoint:mm_compaction_end(compact_control *, long unsigned int, long unsigned int, bool, int)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "tracepoint:compaction:mm_compaction_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
@@ -456,7 +456,7 @@
   unit: bytes
   backends:
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, targets: {system: native}}
-    - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current"], cost: free, equivalent: true,
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current", "cgroup2:memory.stat:pswpout"], cost: free, equivalent: true,
        targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]

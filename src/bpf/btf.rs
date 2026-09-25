@@ -162,6 +162,17 @@ impl Btf {
         self.by_name.contains_key(name)
     }
 
+    /// The type id of the `VAR` named `name`, for a `BPF_PSEUDO_BTF_ID` load:
+    /// a program that reads a kernel variable -- `__preempt_count`, `pcpu_hot`
+    /// -- names it by this id and the kernel resolves the address at load.
+    pub fn var_id(&self, name: &str) -> Option<u32> {
+        self.by_name
+            .get(name)?
+            .iter()
+            .find(|index| self.types[**index].kind == KIND_VAR)
+            .map(|index| *index as u32)
+    }
+
     /// The byte offset of `member` within `struct_name`, descending into the
     /// anonymous structs and unions the kernel uses to overlay one object on
     /// another.
@@ -623,6 +634,41 @@ mod tests {
         let btf = Btf::parse(blob).expect("a well-formed blob");
         assert_eq!(btf.member_offset("task_like", "pid"), Ok(0));
         assert_eq!(btf.member_offset("task_like", "comm"), Ok(4));
+    }
+
+    /// The id is the one the kernel resolves a `BPF_PSEUDO_BTF_ID` load by,
+    /// which is the type's position in the blob. Checked against `bpftool`'s
+    /// numbering of the running kernel's `runqueues` (vmlinux BTF carries per-cpu variables only), when `bpftool` is here to
+    /// ask, since this reader numbering its own types proves nothing.
+    #[test]
+    fn a_variable_is_found_by_the_id_the_kernel_numbers_it_with() {
+        let Ok(btf) = Btf::from_kernel() else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        assert!(
+            btf.var_id("task_struct").is_none(),
+            "a struct is not a variable"
+        );
+        let id = btf
+            .var_id("runqueues")
+            .expect("every SMP kernel has `runqueues`");
+        let Ok(dump) = std::process::Command::new("bpftool")
+            .args(["btf", "dump", "file", VMLINUX_BTF])
+            .output()
+        else {
+            eprintln!("skipped the cross-check: no bpftool on this machine");
+            return;
+        };
+        let dump = String::from_utf8_lossy(&dump.stdout);
+        let expected: Option<u32> = dump
+            .lines()
+            .find(|line| line.contains("VAR 'runqueues'"))
+            .and_then(|line| line.trim_start_matches('[').split(']').next()?.parse().ok());
+        match expected {
+            Some(expected) => assert_eq!(id, expected),
+            None => eprintln!("skipped the cross-check: bpftool could not dump the BTF"),
+        }
     }
 
     /// A type this parser does not index still has to be stepped over by

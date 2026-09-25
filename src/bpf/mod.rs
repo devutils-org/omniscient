@@ -145,14 +145,31 @@ pub fn load_support() -> &'static Support {
     })
 }
 
-/// Whether a raw tracepoint of this name exists on the running kernel.
+/// Whether a raw tracepoint exists on the running kernel, and -- when the
+/// requirement names one -- whether it has the prototype its program reads.
 ///
 /// Every tracepoint the kernel defines carries a `btf_trace_<name>` type in its
 /// BTF, so the question is answered from a file any user can read, without
 /// tracefs and without loading anything.
-pub fn raw_tracepoint_support(name: &str) -> Support {
+///
+/// The requirement is `name` or `name(arg, ...)`, and a program written for
+/// more than one shape lists each: `name(a, b)|(a, b, c)`. The arguments are
+/// spelled the way `Btf::tracepoint_signature` spells them -- no `struct`, no
+/// qualifier -- because that is what the programs compare against at attach.
+/// Existence alone was the question until the portability matrix booted 6.6
+/// and 5.15: `sched_process_exit` exists on both and takes one argument
+/// there, so the probe said yes, the resolver chose the backend, the target
+/// launched, and the attach then refused it (P1 in `docs/portability.md`).
+pub fn raw_tracepoint_support(requirement: &str) -> Support {
+    let (name, prototypes) = match parse_raw_tracepoint(requirement) {
+        Ok(parsed) => parsed,
+        Err(reason) => return Support::Unchecked(reason),
+    };
     match kernel_btf() {
         Ok(btf) if btf.has_type(&format!("btf_trace_{name}")) => {
+            if let Some(refusal) = prototype_mismatch(btf, name, &prototypes) {
+                return Support::No(refusal);
+            }
             if VERIFY_ATTACH.load(Ordering::Relaxed) {
                 raw_tracepoint_attaches(name)
             } else {
@@ -164,6 +181,95 @@ pub fn raw_tracepoint_support(name: &str) -> Support {
         )),
         Err(reason) => Support::Unchecked(format!(
             "whether `{name}` exists cannot be checked: {reason}"
+        )),
+    }
+}
+
+/// Splits `name(a, b)|(c)` into the name and the prototypes, each a list of
+/// argument types. A bare name has none, and asks for existence only.
+fn parse_raw_tracepoint(requirement: &str) -> Result<(&str, Vec<Vec<String>>), String> {
+    let Some(open) = requirement.find('(') else {
+        return Ok((requirement.trim(), Vec::new()));
+    };
+    let name = requirement[..open].trim();
+    let mut prototypes = Vec::new();
+    for shape in requirement[open..].split('|') {
+        let Some(inner) = shape
+            .trim()
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+        else {
+            return Err(format!(
+                "`raw_tracepoint:{requirement}` is neither `name(arg, ...)` nor \
+                 `name(arg, ...)|(arg, ...)`, so its prototype cannot be compared"
+            ));
+        };
+        prototypes.push(
+            inner
+                .split(',')
+                .map(str::trim)
+                .filter(|argument| !argument.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
+    Ok((name, prototypes))
+}
+
+/// The refusal a program gives at attach when the kernel's prototype is none
+/// of the ones the requirement names; `None` when it is one of them, or when
+/// the requirement names none.
+///
+/// Worded as the programs word it (`check_signature` in the families' files),
+/// so that what `omn list` says is what the attach used to say, one step
+/// earlier and before anything is launched.
+fn prototype_mismatch(btf: &Btf, name: &str, prototypes: &[Vec<String>]) -> Option<String> {
+    if prototypes.is_empty() {
+        return None;
+    }
+    let declared = match btf.tracepoint_signature(name) {
+        Ok(declared) => declared,
+        Err(reason) => return Some(reason),
+    };
+    if prototypes.contains(&declared) {
+        return None;
+    }
+    Some(format!(
+        "this kernel declares `{name}({})`, and this program is written for {}: it reads its \
+         arguments out of fixed slots, and against another prototype those slots hold \
+         something else",
+        declared.join(", "),
+        prototypes
+            .iter()
+            .map(|shape| format!("`{name}({})`", shape.join(", ")))
+            .collect::<Vec<_>>()
+            .join(" or "),
+    ))
+}
+
+/// Whether a struct in the running kernel's BTF has a member, directly or in
+/// an anonymous struct or union inside it. The requirement `btf_member:` asks
+/// it as `struct.member`.
+///
+/// A program's field offsets are looked up when it is built, and a member one
+/// kernel has and another does not is a refusal at attach: `sock.sk_ino` is
+/// absent from 6.6 and older, and three `net` programs read it (P2 in
+/// `docs/portability.md`). The lookup is the one the program makes --
+/// `Btf::member_offset` -- so the probe cannot answer a narrower question than
+/// the attach asks, and its refusal is the attach's own words.
+pub fn btf_member_support(struct_dot_member: &str) -> Support {
+    let Some((structure, member)) = struct_dot_member.split_once('.') else {
+        return Support::Unchecked(format!(
+            "`btf_member:{struct_dot_member}` is not `struct.member`"
+        ));
+    };
+    match kernel_btf() {
+        Ok(btf) => match btf.member_offset(structure, member) {
+            Ok(_) => Support::Yes,
+            Err(reason) => Support::No(reason),
+        },
+        Err(reason) => Support::Unchecked(format!(
+            "whether `{structure}` has a member `{member}` cannot be checked: {reason}"
         )),
     }
 }
@@ -276,6 +382,110 @@ mod tests {
             raw_tracepoint_support("sched_waking"),
             Support::Yes
         ));
+    }
+
+    /// The four-argument `sched_switch` is every kernel's since 5.18, and the
+    /// three-argument one is 5.15's: the probe must tell them apart, and say
+    /// both shapes when it refuses, the way the programs' own check does.
+    #[test]
+    fn a_prototype_the_kernel_declares_is_available_and_another_is_refused_naming_both() {
+        let Ok(btf) = kernel_btf() else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        let declared = btf
+            .tracepoint_signature("sched_switch")
+            .expect("sched_switch is a raw tracepoint everywhere")
+            .join(", ");
+        assert_eq!(
+            raw_tracepoint_support(&format!("sched_switch({declared})")),
+            Support::Yes
+        );
+        let Support::No(refusal) = raw_tracepoint_support("sched_switch(bool, int)") else {
+            panic!("a two-argument sched_switch is no kernel's");
+        };
+        assert!(
+            refusal.contains(&format!("declares `sched_switch({declared})`")),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("written for `sched_switch(bool, int)`"),
+            "{refusal}"
+        );
+        // One of several shapes is enough, in either position.
+        assert_eq!(
+            raw_tracepoint_support(&format!("sched_switch(bool, int)|({declared})")),
+            Support::Yes
+        );
+        // A bare name still asks for existence alone.
+        assert_eq!(raw_tracepoint_support("sched_switch"), Support::Yes);
+        // A tracepoint the kernel does not have is missing whatever its shape.
+        assert!(matches!(
+            raw_tracepoint_support("definitely_not_a_tracepoint(int)"),
+            Support::No(_)
+        ));
+    }
+
+    /// A catalog typo in a prototype must not read as a kernel that lacks it:
+    /// it is a requirement nobody can check.
+    #[test]
+    fn a_malformed_prototype_is_unchecked_rather_than_missing() {
+        assert!(matches!(
+            raw_tracepoint_support("sched_switch(bool"),
+            Support::Unchecked(_)
+        ));
+        assert!(matches!(
+            raw_tracepoint_support("sched_switch(bool)|bool"),
+            Support::Unchecked(_)
+        ));
+    }
+
+    /// Every prototype the catalog writes parses, on any machine: the kernel
+    /// decides whether it matches, and a requirement that cannot be read
+    /// would be unknown on every kernel.
+    #[test]
+    fn every_prototype_in_the_catalog_is_well_formed() {
+        let catalog = crate::catalog::Catalog::embedded().expect("the embedded catalog loads");
+        let mut prototypes = 0;
+        for entry in catalog.entries() {
+            for backend in &entry.backends {
+                for requirement in &backend.requires {
+                    let Some(event) = requirement.strip_prefix("raw_tracepoint:") else {
+                        continue;
+                    };
+                    let (name, shapes) = parse_raw_tracepoint(event)
+                        .unwrap_or_else(|reason| panic!("{} {}: {reason}", entry.id, backend.id));
+                    assert!(
+                        !name.is_empty() && !name.contains(' '),
+                        "{} {}: `{event}` names no tracepoint",
+                        entry.id,
+                        backend.id
+                    );
+                    prototypes += shapes.len();
+                }
+            }
+        }
+        assert!(
+            prototypes > 30,
+            "only {prototypes} prototypes in the catalog"
+        );
+    }
+
+    /// The member lookup is the programs' own: a member `sock` has on every
+    /// kernel is there, one it has on none is refused in the words the attach
+    /// used, and a malformed requirement is unchecked.
+    #[test]
+    fn a_btf_member_is_found_refused_or_unchecked() {
+        if kernel_btf().is_err() {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        }
+        assert_eq!(btf_member_support("sock.__sk_common"), Support::Yes);
+        let Support::No(refusal) = btf_member_support("sock.definitely_not_a_member") else {
+            panic!("no kernel's `sock` has that member");
+        };
+        assert!(refusal.contains("no member named"), "{refusal}");
+        assert!(matches!(btf_member_support("sock"), Support::Unchecked(_)));
     }
 
     /// The refusal has to send the reader somewhere. A bare "permission denied"
