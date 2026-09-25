@@ -178,6 +178,10 @@ Most run anywhere. These do not, and they say so rather than printing a zero.
 - **`CATALOG.md`** — the five axes and what each one means.
 - **`man/omn.1`** — `make man`.
 - **`STATE.md`** — what works today, measured, and what is left.
+- **`docs/portability.md`** — the same tool on other kernels. `make matrix`
+  boots it under 5.15, 6.1, 6.6 and 7.2 in KVM, with and without capabilities,
+  BTF and tracefs, and runs every source each guest calls available;
+  `scripts/matrix.sh here` is this machine alone, in about two minutes.
 
 ---
 

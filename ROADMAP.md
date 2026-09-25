@@ -452,10 +452,10 @@ it has no "obviously wrong" output.
 | Level | Method |
 |---|---|
 | Ground truth | synthetic workloads with known behavior (`usleep`, `dm-delay`, `tc netem`, fixed-size IO) |
-| Cost regression | the phase 8 harness, in CI |
-| Portability | a VM kernel matrix: floor, LTS, recent, no BTF |
+| Cost regression | the phase 8 harness, in CI (built, and run by hand on a quiet machine; not in CI, since its variance gate exists to refuse a loaded one) |
+| Portability | a VM kernel matrix: floor, LTS, recent, no BTF (built in the eleventh wave: `scripts/matrix.sh`, `docs/portability.md`) |
 | Join robustness | injection of disorder, losses, recycled pointers |
-| Degradation | run without privileges, without BTF, without tracefs — check that it degrades **while saying so** |
+| Degradation | run without privileges, without BTF, without tracefs — check that it degrades **while saying so** (built with the matrix, one configuration each; the CI is the unprivileged cell) |
 
 ---
 

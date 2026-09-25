@@ -256,6 +256,20 @@ Enforced by `src/triage/objective.rs` and its tests, not by this file.
 then lock-bound gets the lock layer 0.4 to 0.5 s after the switch, and its
 waits land within what the program timed itself.
 
+
+---
+
+## Settled in the eleventh wave: what the engine, the drains and the pin answer
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A key a source never produced | **A zero only from a source that watched the whole run and lost nothing**; `not read`, with the reason, from one that lost events, was narrowed by a window, or cannot say when it watched. A filtered part the filter emptied is a zero with its note. | A source that looked and found nothing has measured a zero; one that may have lost that very key has not, and unknown never counts as available. The old answer read `0` with no note either way. |
+| How a drained program hands its rows over | **Two row maps behind a one-slot map-of-maps, a swap, and an explicit grace period** (`membarrier(MEMBARRIER_CMD_GLOBAL)`, 5 to 18 ms here) before the retired map is emptied; a kernel that withdraws the command is refused at load. | The kernel's own map-of-maps update returned in 20 to 30 us, which is not every running program, and raw-tracepoint programs are preemptible on this kernel: a sleep is a bet and the grace period is not. |
+| A pinned backend with no collector in this build | **The build's answer (exit 3)**, even when that backend's probes are missing on this machine too. A pinned backend whose probes are missing and whose collector exists is refused by the resolver before the launch (exit 1). | The build's gap holds on every machine; reporting the machine's instead sends a reader after privileges for a collector nobody wrote. |
+| How portability is checked | **Prebuilt kernels booted in KVM** (virtme-ng, the host's root filesystem), each configuration made inside the guest (no capabilities, root, BTF hidden, tracefs hidden), every source listed *and run*. Known defects are recorded in `tests/portability.rs` and fail when they stop matching. | Building kernels costs disk and hours this machine does not have; hiding a file reproduces the configuration exactly. A defect list that must stay true cannot drift into a list of excuses. |
+
+`docs/families/join.md`, `docs/families/drains.md`, `docs/fixes/silent.md` and
+`docs/portability.md` have the measurements behind each line.
 ---
 
 ## Open
