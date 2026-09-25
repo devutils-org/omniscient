@@ -240,10 +240,14 @@ kernel-side attributions and drains nobody owned (D, finding 48 among them),
 and phase 11's MCP surface (M).
 
 **Found at the eleventh wave's merge:** `cross_compute`'s lossy-profile
-decomposition fails deterministically on `main` -- the dropped samples, counted
-back in, push the parts past the run's window -- which points at the profile's
-loss count after it began following threads. It is being fixed before stream V,
-which owns `src/perf.rs`, starts.
+decomposition failed deterministically on `main`. The tool was right and the
+test was not: since `cpu.profile` follows the processes the target starts, its
+dropped-sample count is run-wide across every sampled task's ring, and the test
+credited all of it to the one task it decomposes. The test now weighs the drops
+against every sampled task's room (`docs/fixes/silent.md`). What it leaves: a
+profile keyed by `task` cannot say *which* task lost which samples, though each
+ring belongs to one -- losses per ring carried into `Collection`, a change to
+`src/emit.rs` and the collector layer, after the flight recorder.
 
 **After the twelfth wave, in order:**
 
