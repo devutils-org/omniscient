@@ -97,14 +97,6 @@ const HARDIRQ_MASK: u32 = 0x000f_0000;
 const SOFTIRQ_OFFSET: u32 = 0x0000_0100;
 const INTERRUPT_BITS: u32 = NMI_MASK | HARDIRQ_MASK | SOFTIRQ_OFFSET;
 
-/// `bpf_this_cpu_ptr`, which turns a per-cpu variable's address into this
-/// cpu's copy of it. Not in `insn::helper`, which nobody owns this wave.
-const THIS_CPU_PTR: i32 = 154;
-
-/// `BPF_PSEUDO_BTF_ID`: a 64-bit immediate load the kernel resolves to the
-/// address of the kernel variable whose BTF id is in `imm`.
-const PSEUDO_BTF_ID: u8 = 3;
-
 /// The size of the record the program writes. Stated once, used by the program
 /// and checked against the struct.
 const RECORD_BYTES: usize = 48;
@@ -278,15 +270,8 @@ fn instructions(
     // filter below can match, so such a wakeup is kept only for its wakee.
     match preempt {
         Some(preempt) => {
-            program.push(Insn {
-                code: 0x18, // BPF_LD | BPF_DW | BPF_IMM
-                regs: 1 | (PSEUDO_BTF_ID << 4),
-                off: 0,
-                imm: preempt.btf_id as i32,
-            });
-            // The second slot's immediate is the BTF object's fd: 0 is vmlinux.
-            program.push(Insn::default());
-            program.push(Insn::call(THIS_CPU_PTR));
+            program.extend(Insn::load_btf_id(1, preempt.btf_id));
+            program.push(Insn::call(helper::THIS_CPU_PTR));
             // `bpf_this_cpu_ptr` never returns null for a per-cpu variable.
             program.push(Insn::ldx(BPF_W, 1, 0, preempt.offset as i16));
             program.push(Insn::and64_imm(1, INTERRUPT_BITS as i32));
@@ -558,7 +543,7 @@ mod tests {
             helper::PROBE_READ_KERNEL,
             helper::RINGBUF_OUTPUT,
             helper::MAP_LOOKUP_ELEM,
-            THIS_CPU_PTR,
+            helper::THIS_CPU_PTR,
         ];
         for helper in &called {
             assert!(
@@ -708,7 +693,9 @@ mod tests {
         let program = instructions(&btf, Some(preempt), Some(4242), 3, 4).expect("a program");
         let load = program
             .iter()
-            .position(|insn| insn.code == 0x18 && insn.regs >> 4 == PSEUDO_BTF_ID)
+            .position(|insn| {
+                insn.code == 0x18 && insn.regs >> 4 == crate::bpf::insn::BPF_PSEUDO_BTF_ID
+            })
             .expect("the preempt count is loaded by its BTF id");
         assert_eq!(program[load].imm as u32, preempt.btf_id);
         let zeroed = program

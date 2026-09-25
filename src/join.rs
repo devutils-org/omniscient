@@ -1089,6 +1089,11 @@ fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlati
     let depth = rule.depth();
     let mut states: States<i32> = States::new(rule);
     let (mut matched, mut unmatched) = (0u64, 0u64);
+    // Which interrupt last woke each task, for the tasks an interrupt woke: a
+    // waker of zero is an interrupt when its event says so, and the idle task
+    // only otherwise. Kept beside the states because a chain that reaches a
+    // task through its own waker needs the same answer for that hop.
+    let mut interrupted: BTreeMap<i32, String> = BTreeMap::new();
 
     for event in events {
         watch.advance(event.ts_ns, &mut states);
@@ -1105,10 +1110,18 @@ fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlati
             }
             if opens(rule, event) {
                 let waker = waker_of(rule, event, attr)?;
+                match event.attr("waker_context") {
+                    Some(AttrValue::Text(context)) if waker == IDLE && context != "task" => {
+                        interrupted.insert(wakee, context.clone());
+                    }
+                    _ => {
+                        interrupted.remove(&wakee);
+                    }
+                }
                 // Resolved now rather than when the work arrives: the chain is
                 // true at the instant of the wakeup, and a hop taken later
                 // would read whoever woke the waker since.
-                let chain = Chain::resolve(&states.open, wakee, waker, depth);
+                let chain = Chain::resolve(&states.open, &interrupted, wakee, waker, depth);
                 states.insert(
                     wakee,
                     OpenState {
@@ -1324,15 +1337,25 @@ struct Chain {
     cycle: bool,
     /// The task woke itself, so nothing released it.
     self_woken: bool,
+    /// The interrupt the chain starts at, when its oldest waker is zero and
+    /// the wakeup said it came from an interrupt rather than the idle task.
+    interrupt: Option<String>,
 }
 
 impl Chain {
-    fn resolve(open: &BTreeMap<i32, OpenState>, wakee: i32, waker: i32, depth: usize) -> Self {
+    fn resolve(
+        open: &BTreeMap<i32, OpenState>,
+        interrupted: &BTreeMap<i32, String>,
+        wakee: i32,
+        waker: i32,
+        depth: usize,
+    ) -> Self {
         let mut chain = Chain {
             hops: vec![wakee],
             truncated: false,
             cycle: false,
             self_woken: waker == wakee,
+            interrupt: None,
         };
         if chain.self_woken {
             return chain;
@@ -1350,10 +1373,19 @@ impl Chain {
                 chain.cycle = true;
                 break;
             }
-            chain.hops.push(task);
             if task == IDLE {
+                // The task this hop reached from -- the one before it -- was
+                // woken by zero, and its wakeup says whether that was an
+                // interrupt.
+                let woken = *chain
+                    .hops
+                    .last()
+                    .expect("the wakee is always the first hop");
+                chain.interrupt = interrupted.get(&woken).cloned();
+                chain.hops.push(task);
                 break;
             }
+            chain.hops.push(task);
             next = match open.get(&task).map(|state| &state.extent) {
                 Some(Extent::Waker(waker)) => Some(*waker),
                 _ => None,
@@ -1369,7 +1401,10 @@ impl Chain {
             .hops
             .iter()
             .rev()
-            .map(|tid| task_name(*tid))
+            .map(|tid| match (&self.interrupt, *tid) {
+                (Some(context), IDLE) => format!("interrupt ({context})"),
+                _ => task_name(*tid),
+            })
             .collect::<Vec<_>>()
             .join(" -> ");
         if self.truncated {
@@ -3272,6 +3307,34 @@ mod tests {
     #[test]
     fn a_waker_of_zero_is_named_as_the_idle_task() {
         let events = vec![woken(10, 8, 0), switched(20, 8)];
+        let correlation = apply(&wakeup_rule(), &events).unwrap();
+        assert_eq!(correlation.top[0].key, "task:0 (idle) -> task:8");
+    }
+
+    /// A waker of zero whose wakeup came from an interrupt is that interrupt,
+    /// not the idle task -- directly, and at the far end of a longer chain;
+    /// and a waker of zero the program says was a task stays the idle task.
+    #[test]
+    fn a_waker_of_zero_from_an_interrupt_is_named_as_the_interrupt() {
+        let from_irq = |ts: u64, wakee: i32, context: &str| {
+            let mut event = woken(ts, wakee, 0);
+            event.attrs.push(Attr::text("waker_context", context));
+            event
+        };
+        let events = vec![from_irq(10, 8, "hardirq"), switched(20, 8)];
+        let correlation = apply(&wakeup_rule(), &events).unwrap();
+        assert_eq!(correlation.top[0].key, "interrupt (hardirq) -> task:8");
+
+        let mut rule = wakeup_rule();
+        rule.depth = Some(4);
+        let events = vec![from_irq(10, 5, "softirq"), woken(11, 6, 5), switched(20, 6)];
+        let correlation = apply(&rule, &events).unwrap();
+        assert_eq!(
+            correlation.top[0].key,
+            "interrupt (softirq) -> task:5 -> task:6"
+        );
+
+        let events = vec![from_irq(10, 8, "task"), switched(20, 8)];
         let correlation = apply(&wakeup_rule(), &events).unwrap();
         assert_eq!(correlation.top[0].key, "task:0 (idle) -> task:8");
     }
