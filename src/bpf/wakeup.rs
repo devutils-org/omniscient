@@ -161,60 +161,13 @@ impl PreemptCount {
     /// `pcpu_hot` (6.2 to 6.14). Another architecture keeps it in the task's
     /// `thread_info`, which this does not read, and gets `None`.
     pub fn locate(btf: &Btf) -> Option<Self> {
-        let types = std::fs::read("/sys/kernel/btf/vmlinux").ok()?;
-        if let Some(btf_id) = var_id(&types, "__preempt_count") {
+        if let Some(btf_id) = btf.var_id("__preempt_count") {
             return Some(Self { btf_id, offset: 0 });
         }
-        let btf_id = var_id(&types, "pcpu_hot")?;
+        let btf_id = btf.var_id("pcpu_hot")?;
         let offset = btf.member_offset("pcpu_hot", "preempt_count").ok()?;
         Some(Self { btf_id, offset })
     }
-}
-
-/// The type id of the `VAR` named `name` in a BTF blob.
-///
-/// `btf::Btf` indexes every type by name and says only whether one exists; the
-/// id is what a `BPF_PSEUDO_BTF_ID` load needs, and `btf.rs` is not this
-/// stream's, so the walk is repeated here (filed for `Btf::var_id`). Same
-/// layout, same per-kind sizes, native endian.
-fn var_id(blob: &[u8], name: &str) -> Option<u32> {
-    const KIND_VAR: u32 = 14;
-    let word = |at: usize| -> Option<u32> {
-        Some(u32::from_ne_bytes(blob.get(at..at + 4)?.try_into().ok()?))
-    };
-    if blob.len() < 24 || u16::from_ne_bytes([blob[0], blob[1]]) != 0xeb9f {
-        return None;
-    }
-    let header = word(4)? as usize;
-    let types = header + word(8)? as usize;
-    let end = types + word(12)? as usize;
-    let strings = header + word(16)? as usize;
-    let named = |offset: usize| -> bool {
-        let start = strings + offset;
-        let Some(tail) = blob.get(start..) else {
-            return false;
-        };
-        tail.len() > name.len() && &tail[..name.len()] == name.as_bytes() && tail[name.len()] == 0
-    };
-    let (mut at, mut id) = (types, 1u32);
-    while at + 12 <= end {
-        let info = word(at + 4)?;
-        let (kind, vlen) = ((info >> 24) & 0x1f, (info & 0xffff) as usize);
-        if kind == KIND_VAR && named(word(at)? as usize) {
-            return Some(id);
-        }
-        let extra = match kind {
-            1 | 14 | 17 => 4,     // INT, VAR, DECL_TAG
-            3 => 12,              // ARRAY
-            4 | 5 => vlen * 12,   // STRUCT, UNION
-            6 | 13 => vlen * 8,   // ENUM, FUNC_PROTO
-            15 | 19 => vlen * 12, // DATASEC, ENUM64
-            _ => 0,
-        };
-        at += 12 + extra;
-        id += 1;
-    }
-    None
 }
 
 /// Stack offsets, negative from the frame pointer, matching `Wakeup`.
@@ -658,23 +611,77 @@ mod tests {
         );
     }
 
-    /// The id walk agrees with the index `btf.rs` keeps: it finds a variable
-    /// the kernel declares, and nothing for a name that is a type but not a
-    /// variable, or no name at all.
+    /// `Btf::var_id` finds a variable the kernel declares, and nothing for a
+    /// name that is a type but not a variable, or no name at all -- and gives
+    /// the same id as a walk of the blob written apart from `btf.rs`.
     #[test]
     fn a_variables_id_is_found_and_a_types_is_not() {
-        let Ok(blob) = std::fs::read("/sys/kernel/btf/vmlinux") else {
+        let (Ok(blob), Ok(btf)) = (std::fs::read("/sys/kernel/btf/vmlinux"), Btf::from_kernel())
+        else {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        assert!(
-            var_id(&blob, "task_struct").is_none(),
-            "a struct is not a VAR"
-        );
-        assert!(var_id(&blob, "no_such_variable_anywhere").is_none());
+        assert!(btf.var_id("task_struct").is_none(), "a struct is not a VAR");
+        assert!(btf.var_id("no_such_variable_anywhere").is_none());
         // `runqueues` is a per-cpu VAR on every kernel with BTF.
-        let id = var_id(&blob, "runqueues").expect("the scheduler's per-cpu run queues");
-        assert!(id > 0);
+        let id = btf
+            .var_id("runqueues")
+            .expect("the scheduler's per-cpu run queues");
+        assert_eq!(
+            Some(id),
+            var_id(&blob, "runqueues"),
+            "the two readings disagree"
+        );
+        for name in ["__preempt_count", "pcpu_hot"] {
+            assert_eq!(btf.var_id(name), var_id(&blob, name), "{name}");
+        }
+    }
+
+    /// The type id of the `VAR` named `name` in a BTF blob.
+    ///
+    /// Kept in the tests as a second reading of the blob, written apart from
+    /// `btf.rs`, to check `Btf::var_id` against: same layout, same per-kind sizes,
+    /// native endian.
+    fn var_id(blob: &[u8], name: &str) -> Option<u32> {
+        const KIND_VAR: u32 = 14;
+        let word = |at: usize| -> Option<u32> {
+            Some(u32::from_ne_bytes(blob.get(at..at + 4)?.try_into().ok()?))
+        };
+        if blob.len() < 24 || u16::from_ne_bytes([blob[0], blob[1]]) != 0xeb9f {
+            return None;
+        }
+        let header = word(4)? as usize;
+        let types = header + word(8)? as usize;
+        let end = types + word(12)? as usize;
+        let strings = header + word(16)? as usize;
+        let named = |offset: usize| -> bool {
+            let start = strings + offset;
+            let Some(tail) = blob.get(start..) else {
+                return false;
+            };
+            tail.len() > name.len()
+                && &tail[..name.len()] == name.as_bytes()
+                && tail[name.len()] == 0
+        };
+        let (mut at, mut id) = (types, 1u32);
+        while at + 12 <= end {
+            let info = word(at + 4)?;
+            let (kind, vlen) = ((info >> 24) & 0x1f, (info & 0xffff) as usize);
+            if kind == KIND_VAR && named(word(at)? as usize) {
+                return Some(id);
+            }
+            let extra = match kind {
+                1 | 14 | 17 => 4,     // INT, VAR, DECL_TAG
+                3 => 12,              // ARRAY
+                4 | 5 => vlen * 12,   // STRUCT, UNION
+                6 | 13 => vlen * 8,   // ENUM, FUNC_PROTO
+                15 | 19 => vlen * 12, // DATASEC, ENUM64
+                _ => 0,
+            };
+            at += 12 + extra;
+            id += 1;
+        }
+        None
     }
 
     /// On x86 the program reads the preempt count and, in an interrupt,
