@@ -776,9 +776,14 @@ fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_se
 /// and labelling the result "system" is the failure this refusal exists for.
 #[test]
 fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
+    // The machine itself is served since the twelfth wave, one sampling event
+    // per cpu (`scenario_cpu`'s machine-wide fault trace is its ground truth);
+    // a cgroup is the target this collector still cannot follow, and it has
+    // to say so by name rather than sample something else.
     let output = run(&[
         "mem.faults",
-        "--system",
+        "--cgroup",
+        "/sys/fs/cgroup",
         "--mode",
         "sample@997hz",
         "--emit",
@@ -788,10 +793,9 @@ fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
     ]);
     assert!(!output.status.success());
     let complaint = stderr(&output);
-    assert!(complaint.contains("mem.faults"), "{complaint}");
     assert!(
-        complaint.contains("per-cpu events") && complaint.contains("names no process"),
-        "the refusal should say what a system-wide sampler would need: {complaint}"
+        complaint.contains("mem.faults") && complaint.contains("cgroup"),
+        "the refusal should name the source and the target it cannot follow: {complaint}"
     );
 }
 
