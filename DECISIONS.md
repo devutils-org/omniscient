@@ -317,6 +317,21 @@ against the files, a lossy run's shortfall carried unchanged) and the refusals.
 twice gets exactly two documents, each window holding its burst, with the
 retention bound exact to the nanosecond and the evictions counted against what
 the program says it did before them.
+
+---
+
+## Settled in the twelfth wave: who a kernel event belongs to, and what the resolver promises
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A wakeup issued in interrupt context | **Its waker is the interrupt** (tid 0 and a `waker_context`), and a target keeps it only as its wakee. The served-softirq bit decides, not the whole softirq byte. | The task an interrupt lands on did not wake anyone: crediting it put 1954 wakeups of an interrupt load on a pinned driver, none after. Bottom halves disabled is still the task's own context. |
+| A `sched` source on a process target | **Observes the process, threads included, not the processes it starts**; `sched.switches` counts its children's samples and leaves them out, like the other `sched` programs. | What lets their events be joined per task; following the whole tree broke `cross_compute`'s join. |
+| A two-map drain | **Waits for a grace period before it reads the map it retired**; none relies on an interval or a sleep, `fentry`'s histograms included. | The eleventh wave measured that neither the kernel's swap nor a sleep is one here. |
+| A backend's modes | **A backend may declare the modes it serves**, replacing the entry's for that backend; the loader checks a non-empty subset that leaves no entry mode unserved, and the resolver passes over a backend whose modes leave the request's out, with the reason in the chain. | A mode is a property of a mechanism -- a file holding a total cannot trace -- so it is catalog data, not a collector's refusal after the launch (P7). |
+| Where a predicate runs | **`kernel` only for what a program compares**: `filter_in_program` per backend, and a predicate every part of which is a one-value `==` over those fields. Everything applied after delivery is `userspace`, and the resolved file says who applied it (`applied_by`). | `kernel` is a promise about cost, and every `bpf` backend used to be credited with it. |
+| A system or core target on a perf backend | **Probed per cpu by the resolver**, as a requirement of its own in the resolved file; the machine is sampled with one event per cpu, not inherited, and the idle task's samples are counted and left out. | The listing's per-task probe cannot answer for a per-cpu event (P9), and a sampler that follows no process could not serve the machine at all (P8). |
+
+`docs/families/kernel.md` and `docs/fixes/resolver.md` have the measurements.
 ---
 
 ## Open

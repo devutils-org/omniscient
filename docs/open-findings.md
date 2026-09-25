@@ -7275,6 +7275,12 @@ own suites beside it, each passing alone at once:
 and `vertical::the_tool_decomposes_each_request_against_its_own_life` (the last
 already named in `docs/scenarios/vertical.md`).
 
+And at the merges of streams R, D and W, each passing alone at once:
+`scenario_mem::two_processes_on_one_line_take_it_from_each_other_and_on_two_lines_do_not`
+and `perf::tests::closing_a_group_gives_its_descriptors_back` (it counts the
+whole process's perf descriptors while other unit tests open theirs in
+parallel, which is `docs/contributing.md`'s second trap).
+
 ### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
 
 `sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57
