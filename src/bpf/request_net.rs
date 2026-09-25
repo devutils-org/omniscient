@@ -139,7 +139,6 @@ const BPF_NOEXIST: i32 = 1;
 
 // ------------------------------------------------------------- instructions
 
-const BPF_ALU64_OR_K: u8 = 0x07 | 0x40;
 const BPF_STX_ATOMIC_DW: u8 = 0x03 | 0x18 | 0xc0;
 const BPF_FETCH: i32 = 0x01;
 const BPF_ADD: i32 = 0x00;
@@ -153,11 +152,6 @@ fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
         off,
         imm,
     }
-}
-
-/// `dst |= imm`
-fn or64_imm(dst: u8, imm: i32) -> Insn {
-    insn(BPF_ALU64_OR_K, dst, 0, 0, imm)
 }
 
 /// `src = atomic_fetch_add((u64 *)(dst + off), src)`: an atomic read when
@@ -179,7 +173,7 @@ fn cmpxchg(dst: u8, off: i16, src: u8) -> Insn {
 /// `field |= flag`, a four-byte field at `off` from `base`.
 fn set_flag(program: &mut Program, base: u8, off: i16, flag: u32) {
     program.push(Insn::ldx(BPF_W, 1, base, off));
-    program.push(or64_imm(1, flag as i32));
+    program.push(Insn::or64_imm(1, flag as i32));
     program.push(Insn::stx(BPF_W, base, off, 1));
 }
 

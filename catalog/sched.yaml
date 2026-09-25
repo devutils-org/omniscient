@@ -157,7 +157,10 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
+    # A cgroup-scoped perf event is not written: the collector follows a
+    # thread or serves the machine, and refuses a cgroup or a container.
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
+       targets: {system: native, pid: native, tid: native, cpu: native, launch: native},
        degraded: "one sample per switch for the observed task, with no second party:
                   it says a switch happened and when, never what ran next or why
                   the task left the cpu"}

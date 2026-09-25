@@ -734,66 +734,6 @@ pub fn sites(object: &Object) -> Result<Vec<Site>, String> {
 
 // ------------------------------------------------------------- the program
 
-/// The instructions `insn.rs` does not encode yet, and a helper it does not
-/// name. Written out here rather than there because that file is not this
-/// stream's; `docs/open-findings.md` asks for them to move.
-mod local {
-    use super::Insn;
-
-    const BPF_ALU64_K: u8 = 0x07;
-    const BPF_OR: u8 = 0x40;
-    const BPF_ARSH: u8 = 0xc0;
-
-    /// `bpf_probe_read_user(dst, size, unsafe_ptr)`, number 112.
-    pub use crate::bpf::insn::helper::PROBE_READ_USER;
-
-    fn alu64_imm(operation: u8, dst: u8, imm: i32) -> Insn {
-        Insn {
-            code: BPF_ALU64_K | operation,
-            regs: dst & 0xf,
-            off: 0,
-            imm,
-        }
-    }
-
-    // The two shifts `insn.rs` carries, delegated rather than written a second
-    // time. `arsh`, `or` and the wide load below have this file as their only
-    // caller and stay beside it.
-    pub fn lsh64_imm(dst: u8, imm: i32) -> Insn {
-        Insn::lsh64_imm(dst, imm)
-    }
-
-    pub fn rsh64_imm(dst: u8, imm: i32) -> Insn {
-        Insn::rsh64_imm(dst, imm)
-    }
-
-    pub fn arsh64_imm(dst: u8, imm: i32) -> Insn {
-        alu64_imm(BPF_ARSH, dst, imm)
-    }
-
-    pub fn or64_imm(dst: u8, imm: i32) -> Insn {
-        alu64_imm(BPF_OR, dst, imm)
-    }
-
-    /// `dst = imm64`, in the two slots the encoding takes.
-    pub fn ld_imm64(dst: u8, value: i64) -> [Insn; 2] {
-        [
-            Insn {
-                code: 0x18,
-                regs: dst & 0xf,
-                off: 0,
-                imm: value as i32,
-            },
-            Insn {
-                code: 0,
-                regs: 0,
-                off: 0,
-                imm: (value >> 32) as i32,
-            },
-        ]
-    }
-}
-
 /// One probe hit, as the program writes it and userspace reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
@@ -894,11 +834,11 @@ fn extend(program: &mut Program, size: u8, signed: bool) {
         return;
     }
     let shift = 64 - 8 * i32::from(size);
-    program.push(local::lsh64_imm(1, shift));
+    program.push(Insn::lsh64_imm(1, shift));
     program.push(if signed {
-        local::arsh64_imm(1, shift)
+        Insn::arsh64_imm(1, shift)
     } else {
-        local::rsh64_imm(1, shift)
+        Insn::rsh64_imm(1, shift)
     });
 }
 
@@ -979,12 +919,12 @@ fn instructions(
             } => {
                 program.push(Insn::ldx(BPF_DW, 1, 6, register_offset(btf, member)?));
                 if *shift > 0 {
-                    program.push(local::rsh64_imm(1, 8 * i32::from(*shift)));
+                    program.push(Insn::rsh64_imm(1, 8 * i32::from(*shift)));
                 }
                 extend(&mut program, arg.size.min(*width), arg.signed);
             }
             Operand::Immediate(value) => {
-                program.extend(local::ld_imm64(1, *value));
+                program.extend(Insn::ld_imm64(1, *value));
                 extend(&mut program, arg.size, arg.signed);
             }
             Operand::Memory { base, offset } => {
@@ -992,7 +932,7 @@ fn instructions(
                 if let Ok(small) = i32::try_from(*offset) {
                     program.push(Insn::add64_imm(3, small));
                 } else {
-                    program.extend(local::ld_imm64(2, *offset));
+                    program.extend(Insn::ld_imm64(2, *offset));
                     program.push(Insn {
                         // `r3 += r2`
                         code: 0x0f,
@@ -1007,16 +947,16 @@ fn instructions(
                 program.push(Insn::mov64_reg(1, R10));
                 program.push(Insn::add64_imm(1, SCRATCH as i32));
                 program.push(Insn::mov64_imm(2, i32::from(arg.size)));
-                program.push(Insn::call(local::PROBE_READ_USER));
+                program.push(Insn::call(helper::PROBE_READ_USER));
                 program.jump_to(read_ok, Insn::jeq_imm(0, 0, 0));
-                program.push(local::or64_imm(8, 1 << slot));
+                program.push(Insn::or64_imm(8, 1 << slot));
                 program.label(read_ok);
                 program.push(Insn::ldx(BPF_DW, 1, R10, SCRATCH));
                 extend(&mut program, arg.size, arg.signed);
             }
             Operand::Unreadable(_) => {
                 program.push(Insn::mov64_imm(1, 0));
-                program.push(local::or64_imm(8, 1 << slot));
+                program.push(Insn::or64_imm(8, 1 << slot));
             }
         }
         program.push(Insn::stx(BPF_DW, R10, into, 1));
@@ -1664,7 +1604,7 @@ mod tests {
             .any(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT));
         assert!(!counting
             .iter()
-            .any(|insn| insn.code == 0x85 && insn.imm == local::PROBE_READ_USER));
+            .any(|insn| insn.code == 0x85 && insn.imm == helper::PROBE_READ_USER));
         // The user-memory read is the one helper this program cannot do
         // without, and the kernel-memory one would read the wrong space.
         let calls: Vec<i32> = program
@@ -1672,7 +1612,7 @@ mod tests {
             .filter(|insn| insn.code == 0x85)
             .map(|insn| insn.imm)
             .collect();
-        assert!(calls.contains(&local::PROBE_READ_USER));
+        assert!(calls.contains(&helper::PROBE_READ_USER));
         assert!(!calls.contains(&helper::PROBE_READ_KERNEL));
         assert!(calls.contains(&helper::KTIME_GET_NS));
     }

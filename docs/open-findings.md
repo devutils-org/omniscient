@@ -7529,6 +7529,7 @@ with THP `always`), `a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel
 `a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory`
 (13 of 40 small-walk loads timed). `both_huge_page_backends_read_the_same_promotion_counter`
 failed in the same run and is in the tally already.
+
 ## Needs from another stream — the twelfth wave, stream V (the probes tell the truth)
 
 Stream V's deliverable is `docs/portability.md`, "The twelfth wave". The
@@ -7591,9 +7592,9 @@ exercise on `--cgroup`, and W's note says the collectors come next wave over
 written, changes those `targets` keys in the same commit; V's catalog lines are
 open to it.
 
-### To the coordinator: `insn.rs`'s new instructions in two of V's files
+### Done: `insn.rs`'s new instructions in two of V's files
 
-`src/bpf/usdt.rs` (`mod local`) and `src/bpf/request_net.rs` (`or64_imm`)
-keep local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and
-`Insn::ld_imm64` now are on `main`. This branch has merged `main`, so they can
-go; they were not removed this wave, to keep this commit's diff to the probes.
+`src/bpf/usdt.rs` (`mod local`) and `src/bpf/request_net.rs` (`or64_imm`) kept
+local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and `Insn::ld_imm64`
+are on `main` since stream D's merge. Both now call the shared instructions,
+and `mod local` is gone.
