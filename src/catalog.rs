@@ -101,6 +101,12 @@ impl Entry {
             .unwrap_or(&self.filter_fields)
     }
 
+    /// The modes one backend of this chain serves: its own list when it
+    /// declares one, the entry's otherwise.
+    pub fn backend_modes<'a>(&'a self, backend: &'a Backend) -> &'a [ModeKind] {
+        backend.modes.as_deref().unwrap_or(&self.modes)
+    }
+
     /// The backends of this chain that carry a filterable field, in chain
     /// order. What a rejection names when the selected one does not.
     pub fn backends_carrying(&self, field: &str) -> Vec<&str> {
@@ -201,6 +207,29 @@ pub struct Backend {
     /// empties a series rather than narrowing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_fields: Option<Vec<String>>,
+    /// The fields whose comparison the backend's program carries, so that an
+    /// event the predicate rejects is dropped in the kernel and never paid for.
+    ///
+    /// Empty means none: whatever the backend applies, it applies after the
+    /// event has been delivered. What a field here promises is the shape a
+    /// program compares against a constant -- a conjunction of `==` with one
+    /// value, one comparison per field -- and nothing wider: `syscall ==
+    /// 'read'` runs in the program, `syscall in (read, write)` and `syscall !=
+    /// 'read'` do not. The resolver says `kernel` for a predicate only when
+    /// every part of it is that shape over these fields. The loader checks the
+    /// list is a subset of what the backend carries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter_in_program: Vec<String>,
+    /// The modes *this* backend serves, when the chain does not agree.
+    ///
+    /// Absent means every mode the entry declares. Present, it replaces the
+    /// entry's list for this backend: `/proc/[pid]/stat` holds a total and can
+    /// be polled, and cannot be traced, so a `trace` request must not be
+    /// handed to it because a sibling could serve one. The resolver passes
+    /// over a backend whose modes leave the request's out, with that reason in
+    /// the chain, and the loader checks the list is a subset of the entry's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<Vec<ModeKind>>,
 }
 
 /// How two events are tied together into one measurement.
@@ -304,6 +333,27 @@ pub enum Cost {
 }
 
 impl Cost {
+    /// The top of the overhead band this cost stands for, as a percentage of
+    /// the target's own cpu. `extreme` is "over 10x" and no percentage bounds
+    /// it.
+    ///
+    /// `free` is documented as "a counter read, about zero", which as a number
+    /// has to be *something*: at exactly zero the claim could never be met by
+    /// a real measurement, so every `free` backend would read as having broken
+    /// its own promise the moment the promise became checkable. A tenth of a
+    /// percent is the reading that makes "about zero" an assertion rather than
+    /// a figure of speech. Held here, once, for the runner's budget and for
+    /// `omn-mcp`, which each had a copy.
+    pub fn worst_case_percent(self) -> f64 {
+        match self {
+            Cost::Free => 0.1,
+            Cost::Low => 1.0,
+            Cost::Med => 5.0,
+            Cost::High => 20.0,
+            Cost::Extreme => f64::INFINITY,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Cost::Free => "free",
@@ -447,6 +497,18 @@ fn check_backend_filter_fields(entry: &Entry) -> Result<(), ParseError> {
         }
     }
 
+    for backend in &entry.backends {
+        for field in &backend.filter_in_program {
+            if !entry.backend_filter_fields(backend).contains(field) {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: backend `{}` says its program filters on `{field}`, \
+                     which it does not carry, so no predicate could ever be pushed down on it",
+                    entry.id, backend.id
+                )));
+            }
+        }
+    }
+
     for field in &entry.filter_fields {
         if entry.backends_carrying(field).is_empty() {
             return Err(ParseError::new(format!(
@@ -456,6 +518,49 @@ fn check_backend_filter_fields(entry: &Entry) -> Result<(), ParseError> {
                 entry.id
             )));
         }
+    }
+    Ok(())
+}
+
+/// The per-backend `modes` lists, in the same two directions as the targets:
+/// a backend cannot serve a mode the entry refuses, and a mode the entry
+/// declares has to be served by some backend, or a request the validator
+/// accepts resolves onto nothing.
+fn check_backend_modes(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        let Some(modes) = &backend.modes else {
+            continue;
+        };
+        if modes.is_empty() {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}`: backend `{}` declares an empty `modes` list, so no request \
+                 could ever reach it; leave the key out to mean the entry's modes",
+                entry.id, backend.id
+            )));
+        }
+        for mode in modes {
+            if !entry.modes.contains(mode) {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: backend `{}` serves `{mode}`, which the entry itself \
+                     does not declare, so no request could ever reach it",
+                    entry.id, backend.id
+                )));
+            }
+        }
+    }
+    for mode in &entry.modes {
+        if entry
+            .backends
+            .iter()
+            .any(|backend| entry.backend_modes(backend).contains(mode))
+        {
+            continue;
+        }
+        return Err(ParseError::new(format!(
+            "catalog entry `{}` declares `{mode}` mode, but no backend in its chain serves it: \
+             the request would be accepted and then resolve onto nothing",
+            entry.id
+        )));
     }
     Ok(())
 }
@@ -598,6 +703,7 @@ impl Catalog {
             }
             check_backend_targets(entry)?;
             check_backend_filter_fields(entry)?;
+            check_backend_modes(entry)?;
         }
         let catalog = Self { entries };
         for entry in &catalog.entries {
@@ -757,6 +863,54 @@ mod tests {
             offcpu.target_support(TargetKind::Launch),
             offcpu.target_support(TargetKind::Pid)
         );
+    }
+
+    /// `filter_in_program` is a subset of what the backend carries, and a
+    /// backend's `modes` a non-empty subset of the entry's that leaves no
+    /// declared mode unserved: each is a promise nothing could ever keep
+    /// otherwise.
+    #[test]
+    fn a_backend_promising_a_field_or_a_mode_its_entry_cannot_have_is_refused() {
+        let embedded = catalog();
+        let base = embedded
+            .get(&"proc.syscall".parse().unwrap())
+            .unwrap()
+            .clone();
+
+        let mut entry = base.clone();
+        entry.backends[0].filter_in_program = vec!["filename".to_owned()];
+        let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+        assert!(error.contains("does not carry"), "{error}");
+
+        let mut entry = base.clone();
+        entry.backends[0].modes = Some(vec![ModeKind::Sample]);
+        let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+        assert!(error.contains("does not declare"), "{error}");
+
+        let mut entry = base.clone();
+        entry.backends[0].modes = Some(Vec::new());
+        let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+        assert!(error.contains("empty `modes`"), "{error}");
+
+        let mut entry = base;
+        for backend in &mut entry.backends {
+            backend.modes = Some(vec![ModeKind::Trace]);
+        }
+        let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+        assert!(
+            error.contains("no backend in its chain serves it"),
+            "{error}"
+        );
+    }
+
+    /// The bands are ordered as the costs are, and `extreme` has no ceiling.
+    #[test]
+    fn a_cost_bands_worst_case_rises_with_the_cost() {
+        let costs = [Cost::Free, Cost::Low, Cost::Med, Cost::High, Cost::Extreme];
+        for pair in costs.windows(2) {
+            assert!(pair[0].worst_case_percent() < pair[1].worst_case_percent());
+        }
+        assert!(Cost::Extreme.worst_case_percent().is_infinite());
     }
 
     #[test]

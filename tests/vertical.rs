@@ -163,6 +163,27 @@ fn machine_cannot_serve(message: &str) -> bool {
         || message.contains("O_DIRECT")
 }
 
+/// Why the machine declined, for a skip line: the refusal itself, not the
+/// first line of stderr.
+///
+/// The first line is often a note -- `note: mode defaulted to trace, the only
+/// one net.request supports` -- and a skip that gives it as its reason says
+/// nothing about why, which is what `.github/scripts/skip-gate.sh` refuses. The
+/// refusal is the `error:` line and the indented lines under it, where the
+/// resolver puts each backend's missing requirement.
+fn refusal(stderr: &str) -> String {
+    let mut lines = stderr
+        .lines()
+        .skip_while(|line| !line.starts_with("error:"));
+    let Some(first) = lines.next() else {
+        return stderr.trim().to_owned();
+    };
+    std::iter::once(first)
+        .chain(lines.take_while(|line| line.starts_with(' ')))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run() -> Option<&'static Run> {
     static RUN: OnceLock<Result<Run, String>> = OnceLock::new();
     let outcome = RUN.get_or_init(|| {
@@ -178,7 +199,7 @@ fn run() -> Option<&'static Run> {
             if machine_cannot_serve(&stderr) {
                 return Err(format!(
                     "this machine cannot serve the session: {}",
-                    stderr.lines().next().unwrap_or_default()
+                    refusal(&stderr)
                 ));
             }
             panic!("the vertical session failed:\n{stdout}\n{stderr}");
@@ -918,7 +939,7 @@ fn without_the_socket_a_wait_on_it_is_a_sleep_and_the_run_says_so() {
     ]);
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
     if !output.status.success() && machine_cannot_serve(&stderr) {
-        eprintln!("SKIPPED: {}", stderr.lines().next().unwrap_or_default());
+        eprintln!("SKIPPED: {}", refusal(&stderr));
         return;
     }
     assert!(output.status.success(), "{stderr}");
@@ -994,7 +1015,7 @@ fn a_probe_behind_a_semaphore_is_raised_and_followed() {
     ]);
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
     if !output.status.success() && machine_cannot_serve(&stderr) {
-        eprintln!("SKIPPED: {}", stderr.lines().next().unwrap_or_default());
+        eprintln!("SKIPPED: {}", refusal(&stderr));
         return;
     }
     assert!(output.status.success(), "{stderr}");
@@ -1018,6 +1039,13 @@ fn a_program_that_declares_no_request_is_refused_by_name() {
     let output = omn(&["net.request", "--emit", "raw", "--", "/bin/true"]);
     let stderr = text(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
+    // The probes are looked for once the resolver has chosen a backend. A
+    // machine that cannot load the program refuses before that, for its own
+    // reason, and that refusal is the right answer there -- not this one.
+    if machine_cannot_serve(&stderr) && !stderr.contains("request__start") {
+        eprintln!("SKIPPED: {}", refusal(&stderr));
+        return;
+    }
     assert!(
         stderr.contains("request__start") && stderr.contains("request__done"),
         "the refusal names the two probes a program must declare: {stderr}"
@@ -1101,7 +1129,7 @@ fn a_request_that_never_ends_is_counted_and_named_and_does_not_leak() {
     let output = omn(&["-f", "examples/vertical-abandoned.yml", "--format", "json"]);
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
     if !output.status.success() && machine_cannot_serve(&stderr) {
-        eprintln!("SKIPPED: {}", stderr.lines().next().unwrap_or_default());
+        eprintln!("SKIPPED: {}", refusal(&stderr));
         return;
     }
     assert!(output.status.success(), "{stderr}");

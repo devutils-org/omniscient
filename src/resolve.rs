@@ -12,10 +12,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::fmt;
+
 use crate::capabilities::{Capabilities, Environment, Probe};
 use crate::catalog::{Backend, Catalog, Cost, Entry, TargetSupport};
 use crate::error::{one_of, ParseError};
-use crate::request::{Request, Target, TargetKind};
+use crate::filter::FilterExpr;
+use crate::request::{ModeKind, Request, Target, TargetKind};
 
 /// A request plus every decision made about it. The lockfile of a measurement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,13 +89,127 @@ pub enum Verdict {
 }
 
 /// Where the filter predicates end up running.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "placement", content = "reason")]
+///
+/// The two variants are what the runner reads: `Userspace` is a predicate it
+/// applies itself, over the events a collector handed up, and `Kernel` is one
+/// it leaves alone because it was applied before the events reached it.
+/// *Where* that was is [`Placed::by`], and it is what the resolved file says:
+/// `"placement": "kernel"` only when the program itself evaluated every part
+/// of the predicate ([`AppliedBy::Program`]), and `"userspace"` both when the
+/// collector applied it to what the program delivered
+/// ([`AppliedBy::Collector`]) and when the runner applies it after reading
+/// ([`AppliedBy::Runner`]). Until the twelfth wave every `bpf` backend was
+/// written down as `kernel`, and one comparison of one source ran there.
+#[derive(Debug, Clone, PartialEq)]
 pub enum FilterPlacement {
-    /// Pushed down, so filtered-out events never cost anything.
-    Kernel(String),
-    /// Evaluated after the fact: every event is paid for, then discarded.
-    Userspace(String),
+    /// Applied before the runner sees an event.
+    Kernel(Placed),
+    /// Evaluated by the runner after the fact: every event is paid for, then
+    /// discarded.
+    Userspace(Placed),
+}
+
+impl FilterPlacement {
+    /// Where the predicate is evaluated, and why.
+    pub fn placed(&self) -> &Placed {
+        match self {
+            FilterPlacement::Kernel(placed) | FilterPlacement::Userspace(placed) => placed,
+        }
+    }
+
+    /// Whether every part of the predicate ran in the kernel, so that an event
+    /// it rejected was never paid for.
+    pub fn in_program(&self) -> bool {
+        self.placed().by == AppliedBy::Program
+    }
+}
+
+/// Who evaluated a predicate, and the sentence that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    pub by: AppliedBy,
+    pub reason: String,
+}
+
+/// The three places a predicate can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedBy {
+    /// Compared in the program: a rejected event is dropped in the kernel.
+    Program,
+    /// Applied by the collector to what the program delivered: every event it
+    /// removes was delivered, and paid for, first.
+    Collector,
+    /// Applied by the runner to the events a collector handed up.
+    Runner,
+}
+
+/// The sentence, as the runner's rendering prints it after its own heading.
+///
+/// That heading is `pushed into the kernel:` for everything the runner does not
+/// filter itself, so a predicate the collector applied is prefixed with the
+/// answer to it rather than printed under a heading that says the opposite.
+impl fmt::Display for Placed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.by {
+            AppliedBy::Collector => write!(f, "no; {}", self.reason),
+            AppliedBy::Program | AppliedBy::Runner => f.write_str(&self.reason),
+        }
+    }
+}
+
+/// The resolved file's shape: `placement` is where the cost was paid, and
+/// `applied_by` who applied it.
+#[derive(Serialize, Deserialize)]
+struct PlacementRecord {
+    placement: PlacementKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_by: Option<AppliedBy>,
+    reason: String,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PlacementKind {
+    Kernel,
+    Userspace,
+}
+
+impl Serialize for FilterPlacement {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let placed = self.placed();
+        PlacementRecord {
+            placement: if placed.by == AppliedBy::Program {
+                PlacementKind::Kernel
+            } else {
+                PlacementKind::Userspace
+            },
+            applied_by: Some(placed.by),
+            reason: placed.reason.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterPlacement {
+    /// A file written before `applied_by` existed said `kernel` for every
+    /// `bpf` backend, and its runner left those events alone; it is read back
+    /// as the program's, which keeps that behaviour, and as nothing more.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let record = PlacementRecord::deserialize(deserializer)?;
+        let by = record.applied_by.unwrap_or(match record.placement {
+            PlacementKind::Kernel => AppliedBy::Program,
+            PlacementKind::Userspace => AppliedBy::Runner,
+        });
+        let placed = Placed {
+            by,
+            reason: record.reason,
+        };
+        Ok(match by {
+            AppliedBy::Runner => FilterPlacement::Userspace(placed),
+            AppliedBy::Program | AppliedBy::Collector => FilterPlacement::Kernel(placed),
+        })
+    }
 }
 
 /// Why a request could not be resolved at all.
@@ -196,8 +313,6 @@ pub fn resolve(
             source_id: request.source.to_string(),
         })?;
 
-    let pid = first_pid(&request.target);
-
     if let Some(pinned) = &request.backend {
         let backend =
             entry
@@ -237,8 +352,11 @@ pub fn resolve(
         if let Some(reason) = cannot_serve_target(entry, backend, request.target.kind()) {
             return Err(refuse(vec![reason]));
         }
+        if let Some(reason) = cannot_serve_mode(entry, backend, request.mode.kind()) {
+            return Err(refuse(vec![reason]));
+        }
         check_filter_fields(entry, backend, request)?;
-        let requirements = probe_all(capabilities, backend, pid);
+        let requirements = probe_all(capabilities, backend, Some(&request.target));
         let missing: Vec<String> = requirements
             .iter()
             .filter(|requirement| requirement.probe.is_missing())
@@ -267,7 +385,9 @@ pub fn resolve(
     let mut unimplemented_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
 
     for (index, backend) in entry.backends.iter().enumerate() {
-        if let Some(reason) = cannot_serve_target(entry, backend, request.target.kind()) {
+        let unfit = cannot_serve_target(entry, backend, request.target.kind())
+            .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()));
+        if let Some(reason) = unfit {
             chain.push(ConsideredBackend {
                 id: backend.id.clone(),
                 verdict: Verdict::Rejected(vec![reason]),
@@ -275,7 +395,7 @@ pub fn resolve(
             continue;
         }
 
-        let requirements = probe_all(capabilities, backend, pid);
+        let requirements = probe_all(capabilities, backend, Some(&request.target));
         let missing: Vec<String> = requirements
             .iter()
             .filter(|requirement| requirement.probe.is_missing())
@@ -440,7 +560,10 @@ fn build(
             id: backend.id.clone(),
             verdict: Verdict::Selected,
         }],
-        filter: request.filter.as_ref().map(|_| placement(backend, entry)),
+        filter: request
+            .filter
+            .as_ref()
+            .map(|predicate| placement(backend, entry, predicate)),
         degradations,
         unverified,
         environment: capabilities.environment().clone(),
@@ -488,6 +611,32 @@ fn served_instead(entry: &Entry, backend: &Backend) -> String {
     }
 }
 
+/// Why a backend cannot serve the request's mode, or `None` when it can.
+///
+/// The entry's `modes` are what the chain can do between them; a backend that
+/// declares its own serves only those. Handing a `trace` request to a file
+/// that holds a total is P7 of `docs/portability.md`: the collector refused it
+/// at attach, after the resolver had walked past the backend that could have
+/// traced and the target had been launched.
+fn cannot_serve_mode(entry: &Entry, backend: &Backend, mode: ModeKind) -> Option<String> {
+    let serves = entry.backend_modes(backend);
+    if serves.contains(&mode) {
+        return None;
+    }
+    Some(format!(
+        "`{}` serves {} mode, not `{mode}`",
+        backend.id,
+        one_of(
+            serves
+                .iter()
+                .map(|mode| format!("`{mode}`"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+        )
+    ))
+}
+
 /// Refuses a predicate over a field the selected backend never puts on an
 /// event.
 ///
@@ -526,30 +675,152 @@ fn check_filter_fields(
     Ok(())
 }
 
-/// Decides where a filter runs, from what the backend can do.
-fn placement(backend: &Backend, entry: &Entry) -> FilterPlacement {
-    if backend.id.starts_with("bpf") {
-        FilterPlacement::Kernel(format!(
-            "`{}` evaluates predicates in the program, so filtered-out events are never paid for",
-            backend.id
-        ))
-    } else {
-        FilterPlacement::Userspace(format!(
-            "`{}` returns whole records, so `{}` is filtered after reading: every event costs its full price before being discarded",
-            backend.id, entry.id
-        ))
+/// The comparisons of a predicate the backend's program carries: the parts of
+/// its top-level conjunction that compare a field of `filter_in_program` with
+/// one value, one per field. See [`Backend::filter_in_program`].
+pub fn pushed_down<'a>(backend: &Backend, predicate: &'a FilterExpr) -> Vec<&'a FilterExpr> {
+    let mut fields: Vec<&str> = Vec::new();
+    let mut pushed = Vec::new();
+    for part in predicate.conjuncts() {
+        let Some(field) = part.constant_equality() else {
+            continue;
+        };
+        if backend.filter_in_program.iter().any(|known| known == field) && !fields.contains(&field)
+        {
+            fields.push(field);
+            pushed.push(part);
+        }
     }
+    pushed
 }
 
-fn probe_all(capabilities: &Capabilities, backend: &Backend, pid: Option<i32>) -> Vec<Requirement> {
-    backend
+/// Decides where a filter runs, from what the backend's program carries.
+///
+/// `kernel` only when every part of the predicate is a comparison the program
+/// makes ([`pushed_down`]): that is the claim that an event it rejects is
+/// never paid for, and it is checked against the collector's own count in
+/// `tests/scenario_proc.rs`. An eBPF backend whose program carries less hands
+/// the predicate to its collector, which applies it to what was delivered --
+/// userspace, whatever the backend's id says. Any other backend returns whole
+/// records and the runner filters them.
+fn placement(backend: &Backend, entry: &Entry, predicate: &FilterExpr) -> FilterPlacement {
+    let pushed = pushed_down(backend, predicate);
+    let parts = predicate.conjuncts().len();
+    let listed = |parts: &[&FilterExpr]| {
+        one_of(
+            parts
+                .iter()
+                .map(|part| format!("`{part}`"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str),
+        )
+    };
+    if pushed.len() == parts {
+        return FilterPlacement::Kernel(Placed {
+            by: AppliedBy::Program,
+            reason: format!(
+                "`{}` compares {} in the program, so an event the predicate rejects is dropped \
+                 in the kernel and never paid for",
+                backend.id,
+                listed(&pushed)
+            ),
+        });
+    }
+    if backend.id.starts_with("bpf") {
+        let narrowed = if pushed.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} narrows the program first, and only that part is free",
+                listed(&pushed)
+            )
+        };
+        let carried = if backend.filter_in_program.is_empty() {
+            format!(
+                "`{}`'s program compares no field of a predicate",
+                backend.id
+            )
+        } else {
+            format!(
+                "`{}`'s program compares only {}, with `==` and one value",
+                backend.id,
+                one_of(
+                    backend
+                        .filter_in_program
+                        .iter()
+                        .map(|field| format!("`{field}`"))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .map(String::as_str)
+                )
+            )
+        };
+        return FilterPlacement::Kernel(Placed {
+            by: AppliedBy::Collector,
+            reason: format!(
+                "{carried}, so the collector applies the predicate to what the program \
+                 delivered: every event it removes was paid for first{narrowed}"
+            ),
+        });
+    }
+    FilterPlacement::Userspace(Placed {
+        by: AppliedBy::Runner,
+        reason: format!(
+            "`{}` returns whole records, so `{}` is filtered after reading: every event costs \
+             its full price before being discarded",
+            backend.id, entry.id
+        ),
+    })
+}
+
+/// What a request asks of a perf backend beyond what its `pmu:` probes
+/// answered: those open the event over this process, and a system or core
+/// target is one event per cpu, which the kernel guards separately. P9 of
+/// `docs/portability.md`: without the capability, `perf_event_paranoid` at 2
+/// lets a process count itself and no cpu, and ten sources resolved for
+/// `--system` and refused at attach.
+pub const PER_CPU_EVENTS: &str = "per-cpu perf events (the target observes whole cpus)";
+
+/// Answers every requirement of one backend on this machine, for a target
+/// when there is one.
+///
+/// Without a target it is what `omn list` shows: each requirement asked about
+/// this process, which is weaker than a request -- a system target adds
+/// [`PER_CPU_EVENTS`] to a perf backend, and a `/proc/[pid]/...` path is
+/// checked against the target's pid rather than this one.
+pub fn probe_all(
+    capabilities: &Capabilities,
+    backend: &Backend,
+    target: Option<&Target>,
+) -> Vec<Requirement> {
+    let pid = target.and_then(first_pid);
+    let mut requirements: Vec<Requirement> = backend
         .requires
         .iter()
         .map(|needs| Requirement {
             needs: needs.clone(),
             probe: capabilities.probe(needs, pid),
         })
-        .collect()
+        .collect();
+    // A package counter (`pmu:power/energy-pkg/`) is already probed the only
+    // way it opens, on a cpu; every other `pmu:` requirement was asked about
+    // this process.
+    let per_task = backend.requires.iter().any(|needs| {
+        needs
+            .strip_prefix("pmu:")
+            .is_some_and(|event| !event.contains('/') || event.starts_with("cpu/"))
+    });
+    if per_task && matches!(target, Some(Target::System | Target::Cpu(_))) {
+        requirements.push(Requirement {
+            needs: PER_CPU_EVENTS.to_owned(),
+            probe: match crate::perf::per_cpu_support() {
+                Ok(()) => Probe::Available,
+                Err(reason) => Probe::Missing(reason),
+            },
+        });
+    }
+    requirements
 }
 
 /// The pid a `/proc/[pid]/...` requirement should be checked against.
@@ -856,6 +1127,249 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// P7 of `docs/portability.md`: a backend that holds a total cannot be
+    /// handed a `trace` request because a sibling could serve one. It is
+    /// passed over with the reason in the chain, and the walk goes on to the
+    /// backend that traces -- here one no collector is written for, so the
+    /// runner refuses it before the launch as the build's gap, which is the
+    /// true answer, rather than the file's collector refusing it after.
+    #[test]
+    fn a_backend_whose_modes_leave_the_requests_out_is_passed_over_with_the_reason() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"cpu.oncpu_time".parse().unwrap())
+            .expect("cpu.oncpu_time is in the catalog")
+            .clone();
+        for backend in &mut entry.backends {
+            if backend.id.starts_with("fs:") {
+                backend.modes = Some(vec![ModeKind::Poll]);
+            }
+        }
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture(
+            "cpu.oncpu_time",
+            Target::Pid(vec![std::process::id() as i32]),
+        );
+        request.mode = crate::request::Mode::Trace;
+        request.emit = vec!["summary".parse().unwrap()];
+
+        let refusal = |chain: &[ConsideredBackend]| {
+            chain
+                .iter()
+                .find(|considered| considered.id == "fs:proc")
+                .map(|considered| considered.verdict.clone())
+        };
+        match resolve(&catalog, &capabilities, &request) {
+            Ok(resolved) => {
+                assert_ne!(resolved.backend.id, "fs:proc", "{:?}", resolved.chain);
+                match refusal(&resolved.chain) {
+                    Some(Verdict::Rejected(reasons)) => assert!(
+                        reasons
+                            .iter()
+                            .any(|reason| reason.contains("serves `poll` mode, not `trace`")),
+                        "{reasons:?}"
+                    ),
+                    other => panic!("fs:proc has to be rejected for the mode: {other:?}"),
+                }
+            }
+            Err(ResolveError::NoViableBackend { rejections, .. }) => assert!(
+                rejections
+                    .iter()
+                    .any(|line| line.contains("fs:proc") && line.contains("not `trace`")),
+                "{rejections:?}"
+            ),
+            Err(other) => panic!("unexpected: {other}"),
+        }
+
+        // And the same request with the mode the file serves still reaches it.
+        request.mode = crate::request::Mode::Poll {
+            interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
+        };
+        let resolved = resolve(&catalog, &capabilities, &request).expect("a poll resolves");
+        assert!(
+            !matches!(refusal(&resolved.chain), Some(Verdict::Rejected(_))),
+            "{:?}",
+            resolved.chain
+        );
+    }
+
+    /// A pin skips the walk and not the mode: forced onto a backend that does
+    /// not serve the request's mode, the request is refused before anything
+    /// runs, with that reason.
+    #[test]
+    fn a_pinned_backend_that_does_not_serve_the_mode_is_refused_with_the_reason() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"cpu.oncpu_time".parse().unwrap())
+            .unwrap()
+            .clone();
+        let file = entry
+            .backends
+            .iter_mut()
+            .find(|backend| backend.id == "fs:proc")
+            .expect("cpu.oncpu_time reads /proc");
+        file.modes = Some(vec![ModeKind::Poll]);
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let mut request = fixture(
+            "cpu.oncpu_time",
+            Target::Pid(vec![std::process::id() as i32]),
+        );
+        request.mode = crate::request::Mode::Trace;
+        request.backend = Some("force:fs:proc".parse().unwrap());
+        match resolve(&catalog, &Capabilities::detect(), &request) {
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                let text = rejections.join("\n");
+                assert!(text.contains("pinned"), "{text}");
+                assert!(text.contains("not `trace`"), "{text}");
+            }
+            other => panic!("a pin past the mode must be refused, got {other:?}"),
+        }
+    }
+
+    fn backend_of<'a>(catalog: &'a Catalog, source: &str, id: &str) -> (&'a Entry, &'a Backend) {
+        let entry = catalog.get(&source.parse().unwrap()).unwrap();
+        (entry, entry.backend(id).unwrap())
+    }
+
+    /// Stream S's request: `kernel` only for a predicate the program carries.
+    /// `proc.syscall`'s program compares the syscall number and nothing else,
+    /// with `==` and one value; every other shape over the same field, and
+    /// every other field, is applied by the collector to what the program
+    /// delivered.
+    #[test]
+    fn only_a_predicate_the_program_carries_is_placed_in_the_kernel() {
+        let catalog = Catalog::embedded().unwrap();
+        let (entry, backend) = backend_of(&catalog, "proc.syscall", "bpf:raw_tp");
+        assert_eq!(backend.filter_in_program, vec!["syscall".to_owned()]);
+        let place = |text: &str| placement(backend, entry, &text.parse().unwrap());
+
+        for pushed in ["syscall == 'getppid'", "syscall == 110"] {
+            let placed = place(pushed);
+            assert!(placed.in_program(), "{pushed}: {placed:?}");
+            assert!(matches!(placed, FilterPlacement::Kernel(_)), "{pushed}");
+        }
+        for not_pushed in [
+            "syscall in (getppid)",
+            "syscall != 'getppid'",
+            "comm == 'python3'",
+            "syscall == 'getppid' || comm == 'sh'",
+            "!(syscall == 'getppid')",
+            "syscall == 'getppid' && syscall == 'read'",
+        ] {
+            let placed = place(not_pushed);
+            assert_eq!(
+                placed.placed().by,
+                AppliedBy::Collector,
+                "{not_pushed}: {placed:?}"
+            );
+            // The runner leaves them alone: the collector applied them.
+            assert!(matches!(placed, FilterPlacement::Kernel(_)), "{not_pushed}");
+        }
+        let partial = place("syscall == 'getppid' && comm == 'python3'");
+        assert_eq!(partial.placed().by, AppliedBy::Collector);
+        assert!(
+            partial
+                .placed()
+                .reason
+                .contains("narrows the program first"),
+            "{partial:?}"
+        );
+
+        // A backend with no program comparisons says so, and a file is the
+        // runner's.
+        let (entry, backend) = backend_of(&catalog, "proc.exec", "bpf:raw_tp");
+        let placed = placement(backend, entry, &"comm == 'sh'".parse().unwrap());
+        assert_eq!(placed.placed().by, AppliedBy::Collector);
+        assert!(
+            placed.placed().reason.contains("compares no field"),
+            "{placed:?}"
+        );
+        let (entry, backend) = backend_of(&catalog, "mem.rss", "fs:proc:statm");
+        let placed = placement(backend, entry, &"comm == 'omn'".parse().unwrap());
+        assert!(
+            matches!(placed, FilterPlacement::Userspace(_)),
+            "{placed:?}"
+        );
+    }
+
+    /// The resolved file says `kernel` for the program's, `userspace` for the
+    /// collector's and the runner's, and reads each back as it was -- the
+    /// runner's decision to filter or not rides on the variant, so a file
+    /// that came back as the other one would filter twice or not at all.
+    #[test]
+    fn a_placement_is_written_where_it_ran_and_read_back_as_it_was() {
+        let catalog = Catalog::embedded().unwrap();
+        let (entry, backend) = backend_of(&catalog, "proc.syscall", "bpf:raw_tp");
+        let (file_entry, file) = backend_of(&catalog, "mem.rss", "fs:proc:statm");
+        let cases = [
+            (
+                placement(backend, entry, &"syscall == 'read'".parse().unwrap()),
+                "kernel",
+                "program",
+            ),
+            (
+                placement(backend, entry, &"comm == 'sh'".parse().unwrap()),
+                "userspace",
+                "collector",
+            ),
+            (
+                placement(file, file_entry, &"comm == 'sh'".parse().unwrap()),
+                "userspace",
+                "runner",
+            ),
+        ];
+        for (placed, written, by) in cases {
+            let json = serde_json::to_value(&placed).unwrap();
+            assert_eq!(json["placement"], written, "{json}");
+            assert_eq!(json["applied_by"], by, "{json}");
+            assert_eq!(
+                serde_json::from_value::<FilterPlacement>(json).unwrap(),
+                placed
+            );
+        }
+        // A file from before `applied_by` keeps its runner's behaviour.
+        let old: FilterPlacement =
+            serde_json::from_str(r#"{"placement": "kernel", "reason": "old"}"#).unwrap();
+        assert!(matches!(old, FilterPlacement::Kernel(_)));
+        let old: FilterPlacement =
+            serde_json::from_str(r#"{"placement": "userspace", "reason": "old"}"#).unwrap();
+        assert!(matches!(old, FilterPlacement::Userspace(_)));
+    }
+
+    /// P9: a `pmu:` probe opens its event over this process, and a system or
+    /// core target is one event per cpu, which the kernel guards on its own.
+    /// So those targets carry one more requirement, answered by opening an
+    /// event on a cpu -- and a process target does not.
+    #[test]
+    fn a_perf_backend_asked_about_whole_cpus_is_probed_for_whole_cpus() {
+        let catalog = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let (_, backend) = backend_of(&catalog, "cpu.cycles", "pmu");
+        let asks = |target: Option<&Target>| {
+            probe_all(&capabilities, backend, target)
+                .into_iter()
+                .find(|requirement| requirement.needs == PER_CPU_EVENTS)
+        };
+        assert!(asks(Some(&Target::Pid(vec![1]))).is_none());
+        assert!(asks(None).is_none(), "the listing asks about this process");
+        for target in [Target::System, Target::Cpu("0".parse().unwrap())] {
+            let requirement = asks(Some(&target)).expect("a machine target asks per cpu");
+            match crate::perf::per_cpu_support() {
+                Ok(()) => assert_eq!(requirement.probe, Probe::Available),
+                Err(reason) => {
+                    assert_eq!(requirement.probe, Probe::Missing(reason.clone()));
+                    assert!(reason.contains("perf_event_paranoid"), "{reason}");
+                }
+            }
+        }
+        // An eBPF backend opens no perf event over a cpu.
+        let (_, bpf) = backend_of(&catalog, "proc.exec", "bpf:raw_tp");
+        assert!(probe_all(&capabilities, bpf, Some(&Target::System))
+            .iter()
+            .all(|requirement| requirement.needs != PER_CPU_EVENTS));
     }
 
     #[test]

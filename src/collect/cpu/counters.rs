@@ -237,6 +237,23 @@ pub const PAGE_FAULTS: Spec = Spec {
     value: Value::Count,
 };
 
+/// `sched.switches` on `pmu:sw`, counted rather than sampled: the same
+/// software counter `cpu.context_switches` reads, handed over by that family's
+/// collector for `--mode count` the way [`PAGE_FAULTS`] is by `mem.faults`'s.
+/// Here for stream D to call (`docs/open-findings.md`, the twelfth wave,
+/// stream W): P7 of `docs/portability.md` is `sched.switches -m count`
+/// refused at start.
+#[allow(dead_code)]
+pub const SCHED_SWITCHES: Spec = Spec {
+    source: "sched.switches",
+    backend: "pmu:sw",
+    counters: &[Counter::software(
+        "context_switches",
+        perf::PERF_COUNT_SW_CONTEXT_SWITCHES,
+    )],
+    value: Value::Count,
+};
+
 /// The source and backend a counting spec serves, or nothing when the pair is
 /// not one of them.
 pub fn spec_for(source: &str, backend: &str) -> Option<&'static Spec> {

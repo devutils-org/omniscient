@@ -1355,6 +1355,14 @@ fn skipped_without_bpf(output: &Output) -> bool {
     false
 }
 
+/// Whether the resolver refused a request because no eBPF backend of the
+/// source can load here -- the capability-less machine's answer, which the
+/// resolver prints only when a probe refused every backend.
+fn machine_cannot_trace(output: &Output) -> bool {
+    let message = stderr(output);
+    message.contains("has no viable backend on this machine") && message.contains("CAP_BPF")
+}
+
 /// Class ground truth, `proc.exec`: a program this test ran, exactly as many
 /// times as it ran it, under a path nothing else on the machine has.
 ///
@@ -1583,6 +1591,10 @@ fn the_syscall_filter_the_resolved_file_claims_is_the_one_that_ran() {
         "syscall == 'getppid'",
         "--dump-resolved",
     ]);
+    if !resolved.status.success() && machine_cannot_trace(&resolved) {
+        eprintln!("skipped: {}", stderr(&resolved).trim());
+        return;
+    }
     assert!(resolved.status.success(), "{}", stderr(&resolved));
     let record: serde_json::Value =
         serde_json::from_str(&stdout(&resolved)).expect("one json document");
@@ -1624,6 +1636,148 @@ fn the_syscall_filter_the_resolved_file_claims_is_the_one_that_ran() {
              did not run where the resolved file says it did"
         );
     }
+}
+
+/// Where a predicate ran, said by the resolved file and checked against the
+/// run's own account: one predicate the program carries and one it does not,
+/// over the same field and with the same answer.
+///
+/// The workload makes a number of `getppid` calls this test chose, among the
+/// thousands of other syscalls a Python start-up makes. `syscall ==
+/// 'getppid'` is a comparison `proc.syscall`'s program makes against the
+/// syscall number, so the resolved file says `kernel`, and the collector --
+/// which applies the whole predicate again to what was drained -- has nothing
+/// left to remove: the others were dropped in the kernel and never paid for.
+/// `syscall in (getppid)` means the same thing, and is not a shape the program
+/// carries, so the resolved file says `userspace` and the collector's own count
+/// of what it removed is the whole start-up. Both find the calls the workload
+/// made. A resolved file that said `kernel` for the second, or `userspace` for
+/// the first, is contradicted by that count.
+///
+/// The program keeps no count of what its own comparison skipped (filed for
+/// `src/bpf/proc_syscall.rs`, `docs/fixes/resolver.md`), so the collector's
+/// count of what reached it and was removed is the witness: zero for the
+/// predicate the program carried, every other syscall for the one it did not.
+#[test]
+fn a_predicate_the_program_carries_is_placed_in_the_kernel_and_one_it_does_not_is_not() {
+    needs_python!();
+    const CALLS: u64 = 2000;
+    let workload = format!(
+        "import os, sys\nfor _ in range({CALLS}):\n    os.getppid()\n\
+         sys.stderr.write('CALLS {CALLS}\\n')\n"
+    );
+    let removed_here = |notes: &str| -> Option<(u64, u64)> {
+        let rest = notes.split("the predicate removed ").nth(1)?;
+        let (removed, rest) = rest.split_once(" calls here and kept ")?;
+        let kept = rest.split(|c: char| !c.is_ascii_digit()).next()?;
+        Some((removed.parse().ok()?, kept.parse().ok()?))
+    };
+
+    let mut seen = Vec::new();
+    for (predicate, placement, applied_by) in [
+        ("syscall == 'getppid'", "kernel", "program"),
+        ("syscall in (getppid)", "userspace", "collector"),
+    ] {
+        let resolved = omn(&[
+            "proc.syscall",
+            "--mode",
+            "trace",
+            "--emit",
+            "raw",
+            "--filter",
+            predicate,
+            "--dump-resolved",
+            "--",
+            "python3",
+            "-c",
+            &workload,
+        ]);
+        if !resolved.status.success() && machine_cannot_trace(&resolved) {
+            eprintln!("skipped: {}", stderr(&resolved).trim());
+            return;
+        }
+        assert!(resolved.status.success(), "{}", stderr(&resolved));
+        let record: serde_json::Value =
+            serde_json::from_str(&stdout(&resolved)).expect("one json document");
+        assert_eq!(
+            record["filter"]["placement"], placement,
+            "{predicate}: {record}"
+        );
+        assert_eq!(
+            record["filter"]["applied_by"], applied_by,
+            "{predicate}: {record}"
+        );
+
+        let output = omn(&[
+            "proc.syscall",
+            "--mode",
+            "trace",
+            "--emit",
+            "raw",
+            "--filter",
+            predicate,
+            "--format",
+            "json",
+            "--",
+            "python3",
+            "-c",
+            &workload,
+        ]);
+        if skipped_without_bpf(&output) {
+            return;
+        }
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            reported(&output, "CALLS "),
+            CALLS,
+            "the workload says what it did"
+        );
+        let doc = document(&output);
+        let result = &doc["results"][0];
+        let counted: f64 = events(result)
+            .iter()
+            .inspect(|event| {
+                assert_eq!(
+                    attr_text(event, "syscall").as_deref(),
+                    Some("getppid"),
+                    "{event}"
+                )
+            })
+            .filter_map(|event| attr_f64(event, "count"))
+            .sum();
+        let notes = result["degradations"].to_string();
+        let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
+        assert!(
+            counted as u64 + dropped >= CALLS && counted as u64 <= CALLS + 16,
+            "`{predicate}`: the workload made {CALLS} getppid calls and {counted} were \
+             counted, {dropped} dropped"
+        );
+        seen.push((predicate, removed_here(&notes), notes));
+    }
+
+    let (pushed, pushed_removed, pushed_notes) = &seen[0];
+    assert!(
+        pushed_notes.contains("pushed into the program"),
+        "`{pushed}`: the run has to say the program carried it: {pushed_notes}"
+    );
+    assert_eq!(
+        *pushed_removed, None,
+        "`{pushed}` ran in the program, so nothing that reached the collector was removed \
+         there: {pushed_notes}"
+    );
+    let (listed, listed_removed, listed_notes) = &seen[1];
+    let (removed, kept) = listed_removed.unwrap_or_else(|| {
+        panic!("`{listed}` ran in userspace and has to say what it removed there: {listed_notes}")
+    });
+    assert!(
+        removed >= 100,
+        "`{listed}` was applied after the program delivered every syscall of a Python \
+         start-up, and only {removed} were removed: {listed_notes}"
+    );
+    assert!(
+        kept >= CALLS,
+        "and it kept the {CALLS} calls the workload made, not {kept}: {listed_notes}"
+    );
 }
 
 /// Class the loss path: what the ring could not hold is counted, and the count
@@ -1884,6 +2038,13 @@ fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
         "a misspelled syscall must not be served: {}",
         stdout(&output)
     );
+    // The name is looked up by the collector, which a machine that cannot
+    // load the program never reaches: it refuses first, for its own reason,
+    // and that refusal is the right one there.
+    if machine_cannot_trace(&output) && !stderr(&output).contains("wriet") {
+        eprintln!("skipped: {}", stderr(&output).trim());
+        return;
+    }
     assert!(
         stderr(&output).contains("wriet"),
         "and the refusal has to name it: {}",

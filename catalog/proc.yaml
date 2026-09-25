@@ -5,7 +5,8 @@
   summary: "Per-syscall latency and count"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: high, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: high, drained: true,
+       filter_in_program: [syscall]}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]

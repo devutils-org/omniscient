@@ -54,7 +54,7 @@ pub fn factories() -> Vec<Factory> {
                 Ok(Box::new(util::Prepare(resolved.request.mode)))
             }),
             Factory::new("cpu.oncpu_time", "fs:proc", |resolved| {
-                Ok(Box::new(oncpu::Prepare(resolved.request.mode)))
+                Ok(Box::new(oncpu::Prepare::new(resolved.request.mode)?))
             }),
             Factory::new("cpu.pressure", "fs:proc", |resolved| {
                 Ok(Box::new(pressure::Prepare(resolved.request.mode)))

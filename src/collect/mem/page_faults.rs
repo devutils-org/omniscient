@@ -68,9 +68,25 @@ impl Prepared for Prepare {
             )?;
             return Box::new(counted).attach(target);
         }
+        // A machine or a set of cores is sampled by one event per cpu, over
+        // every task that runs there: the kernel's own shape for the
+        // question, and the one the catalog's `system: native` promises.
+        let cpus = match target {
+            crate::request::Target::System => Some(
+                crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
+            ),
+            crate::request::Target::Cpu(set) => Some(set.cpus().to_vec()),
+            _ => None,
+        };
+        if let Some(cpus) = cpus {
+            let mut collector = PageFaultCollector::new(-1, self.0);
+            collector.cpus = Some(cpus);
+            return Ok(Box::new(collector));
+        }
         let pid = target.first_pid().ok_or_else(|| {
             format!(
-                "sampling page faults machine-wide needs per-cpu events and the privileges for them; a {} target names no process to sample",
+                "sampling the page faults of a {} target is not built: faults are sampled per                  process, per core or for the whole machine",
                 target.kind()
             )
         })?;
@@ -95,6 +111,9 @@ pub struct PageFaultCollector {
     losses: Losses,
     /// Whether every thread of `pid` is followed rather than `pid` alone.
     whole_process: bool,
+    /// The cpus sampled, for a machine or a core target: every task that runs
+    /// on them, one event per cpu. `None` samples `pid`.
+    cpus: Option<Vec<u32>>,
     /// The tasks faults were sampled from, for the note that says how many.
     sampled_tasks: std::collections::BTreeSet<i32>,
     /// What was opened, read at `start` because `stop` closes it before the
@@ -113,6 +132,7 @@ impl PageFaultCollector {
             comms: Comms::new(),
             losses: Losses::default(),
             whole_process: true,
+            cpus: None,
             sampled_tasks: std::collections::BTreeSet::new(),
             followed: (0, 0),
         }
@@ -217,6 +237,12 @@ impl Collector for PageFaultCollector {
             period,
             Callchain::Off,
         );
+        if let Some(cpus) = &self.cpus {
+            let event = ThreadSampler::open_cpus(&spec, cpus, RING_PAGES)?;
+            event.enable().map_err(|error| error.to_string())?;
+            self.event = Some(event);
+            return Ok(());
+        }
         let opened = if self.whole_process {
             ThreadSampler::open_process(&spec, self.pid, RING_PAGES)
         } else {
@@ -269,6 +295,21 @@ impl Collector for PageFaultCollector {
     /// one thread, and what they may have missed.
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        if let Some(cpus) = &self.cpus {
+            notes.push(format!(
+                "every task on {} cpu{} was sampled, one event per cpu; faults came from {} \
+                 task{}",
+                cpus.len(),
+                if cpus.len() == 1 { "" } else { "s" },
+                self.sampled_tasks.len(),
+                if self.sampled_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+            return notes;
+        }
         let (threads, unlisted) = self.followed;
         if threads > 1 {
             notes.push(format!(

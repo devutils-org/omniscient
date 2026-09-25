@@ -37,7 +37,7 @@ use perf_event_open_sys::bindings as perf;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Callchain, Found, Record, SampleSpec, TaskSampler};
+use crate::perf::{Callchain, Found, Record, SampleSpec, TaskSampler, ThreadSampler};
 use crate::request::{Mode, Target};
 use crate::stack::Unwinder;
 
@@ -76,10 +76,28 @@ pub struct Prepare {
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        // A machine or a set of cores is one cpu-clock event per cpu, over
+        // every task that runs there. The unfinished-period loss that keeps a
+        // process profile off inherited per-cpu events does not arise: the
+        // cpu's clock runs whoever is on it, so no period is left unfinished
+        // by a task moving on.
+        let cpus = match target {
+            Target::System => Some(
+                crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
+            ),
+            Target::Cpu(set) => Some(set.cpus().to_vec()),
+            _ => None,
+        };
+        if let Some(cpus) = cpus {
+            let mut collector = ProfileCollector::new(-1, self.mode, self.callchain, false);
+            collector.cpus = Some(cpus);
+            return Ok(Box::new(collector));
+        }
         let pid = target.first_pid().ok_or_else(|| {
             format!(
-                "profiling a whole machine needs one sampling event per cpu and the privileges \
-                 for them; a {} target names no process to follow",
+                "profiling a {} target is not built: a profile follows a process, a core or \
+                 the whole machine, and this target names none of them",
                 target.kind()
             )
         })?;
@@ -94,12 +112,54 @@ impl Prepared for Prepare {
     }
 }
 
+/// What the samples come from: a process's tasks, each with its own event, or
+/// every task on a set of cpus, one event per cpu.
+enum Sampler {
+    Tasks(TaskSampler),
+    Cpus(ThreadSampler),
+}
+
+impl Sampler {
+    fn drain(&mut self, handle: impl FnMut(Record)) {
+        match self {
+            Sampler::Tasks(sampler) => sampler.drain(handle),
+            Sampler::Cpus(sampler) => sampler.drain(handle),
+        }
+    }
+
+    fn disable(&mut self) -> std::io::Result<()> {
+        match self {
+            Sampler::Tasks(sampler) => sampler.disable(),
+            Sampler::Cpus(sampler) => sampler.disable(),
+        }
+    }
+
+    fn undecoded(&self) -> u64 {
+        match self {
+            Sampler::Tasks(sampler) => sampler.undecoded(),
+            Sampler::Cpus(sampler) => sampler.undecoded(),
+        }
+    }
+}
+
 pub struct ProfileCollector {
     id: CollectorId,
     pid: i32,
     mode: Mode,
     callchain: Callchain,
-    event: Option<TaskSampler>,
+    event: Option<Sampler>,
+    /// The cpus sampled, for a machine or a core target. `None` follows `pid`.
+    cpus: Option<Vec<u32>>,
+    /// Samples a cpu took while it ran nothing: the idle task is not a
+    /// program, and its stacks are not on-cpu work, so they are counted here
+    /// and left out.
+    idle: u64,
+    /// The processes that had a sample since the last tick, whose mappings
+    /// are re-read: over a machine, re-reading every process ever sampled on
+    /// every tick would cost more than the profile.
+    recent: BTreeSet<u32>,
+    /// Every process a sample came from.
+    processes: BTreeSet<u32>,
     /// One per process samples arrived from, by pid, re-read every tick. A
     /// symbolizer reads its process's `/proc/<pid>/maps`, and those are gone
     /// the moment it exits -- but for a launched program they are also not yet
@@ -142,6 +202,10 @@ impl ProfileCollector {
             mode,
             callchain,
             event: None,
+            cpus: None,
+            idle: 0,
+            recent: BTreeSet::new(),
+            processes: BTreeSet::new(),
             unwinders,
             stack_ids: BTreeMap::new(),
             stack_origins: Vec::new(),
@@ -164,32 +228,49 @@ impl ProfileCollector {
         let stack_ids = &mut self.stack_ids;
         let stack_origins = &mut self.stack_origins;
         let seen = &mut self.sampled_tasks;
+        let recent = &mut self.recent;
+        let processes = &mut self.processes;
+        let idle = &mut self.idle;
         let mut index = seq;
         let mut dropped = 0u64;
         let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
+            Record::Sample(sample) if sample.pid == 0 && sample.tid == 0 => *idle += 1,
             Record::Sample(sample) => {
                 seen.insert(sample.tid as i32);
+                recent.insert(sample.pid);
+                processes.insert(sample.pid);
                 let mut attrs = vec![Attr::uint("count", 1), Attr::uint("ip", sample.ip)];
                 // Symbolized here, while the target is alive, and stored once:
                 // the event carries the identity and the table travels beside
                 // the results.
-                let unwinder = unwinders
-                    .entry(sample.pid)
-                    .or_insert_with(|| Unwinder::for_process(sample.pid as i32));
-                if let Some(stack) = unwinder.record(&sample) {
+                // Only a sample with a stack needs its process's mappings:
+                // over a machine, reading every process's maps for samples
+                // that carry one address each would cost more than they do.
+                let stack = sample.callchain.as_ref().and_then(|_| {
+                    unwinders
+                        .entry(sample.pid)
+                        .or_insert_with(|| Unwinder::for_process(sample.pid as i32))
+                        .record(&sample)
+                });
+                if let Some(stack) = stack {
                     let run_id = *stack_ids.entry((sample.pid, stack.0)).or_insert_with(|| {
                         stack_origins.push((sample.pid, stack.0));
                         stack_origins.len() as u64 - 1
                     });
                     attrs.push(Attr::uint(STACK_ID_ATTR, run_id));
                 }
+                let mut keys = vec![KeyValue::task(sample.tid as i32)];
+                if let Some(cpu) = sample.cpu {
+                    keys.push(KeyValue::cpu(cpu));
+                    attrs.push(Attr::uint("cpu", u64::from(cpu)));
+                }
                 events.push(Event {
                     ts_ns: sample.time_ns,
                     ts_err_ns: 0,
                     kind: "cpu.profile".to_owned(),
-                    keys: vec![KeyValue::task(sample.tid as i32)],
+                    keys,
                     attrs,
                     collector_id: id.clone(),
                     seq: index,
@@ -252,6 +333,13 @@ impl Collector for ProfileCollector {
 
         let spec =
             SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
+        if let Some(cpus) = &self.cpus {
+            let event = ThreadSampler::open_cpus(&spec, cpus, ROOT_RING_PAGES)?;
+            event.enable().map_err(|error| error.to_string())?;
+            self.unwinding = event.callchain() != Callchain::Off;
+            self.event = Some(Sampler::Cpus(event));
+            return Ok(());
+        }
         let mut event = TaskSampler::open(
             &spec,
             self.pid,
@@ -271,7 +359,7 @@ impl Collector for ProfileCollector {
         // the notes are gathered afterwards.
         self.at_open = event.at_open();
         self.unwinding = event.callchain() != Callchain::Off;
-        self.event = Some(event);
+        self.event = Some(Sampler::Tasks(event));
         Ok(())
     }
 
@@ -279,10 +367,18 @@ impl Collector for ProfileCollector {
         // Before the drain, so that the stacks interned from this tick's
         // samples are symbolized against mappings read while the target was
         // alive rather than against whatever was there when it was launched.
-        for unwinder in self.unwinders.values_mut() {
-            unwinder.refresh_symbols();
+        if self.cpus.is_some() {
+            for pid in std::mem::take(&mut self.recent) {
+                if let Some(unwinder) = self.unwinders.get_mut(&pid) {
+                    unwinder.refresh_symbols();
+                }
+            }
+        } else {
+            for unwinder in self.unwinders.values_mut() {
+                unwinder.refresh_symbols();
+            }
         }
-        if let Some(event) = self.event.as_mut() {
+        if let Some(Sampler::Tasks(event)) = self.event.as_mut() {
             for task in event.discover() {
                 self.found_late += 1;
                 self.unsampled_ns += cpu_before(task);
@@ -345,6 +441,24 @@ impl Collector for ProfileCollector {
             if !notes.contains(&note) {
                 notes.push(note);
             }
+        }
+        if let Some(cpus) = &self.cpus {
+            notes.push(format!(
+                "every task on {} cpu{} was sampled, one event per cpu; samples came from {} \
+                 task{} in {} process{}, and {} landed in the idle task and are not in the \
+                 profile",
+                cpus.len(),
+                if cpus.len() == 1 { "" } else { "s" },
+                self.sampled_tasks.len(),
+                if self.sampled_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                self.processes.len(),
+                if self.processes.len() == 1 { "" } else { "es" },
+                self.idle,
+            ));
         }
         if self.at_open > 1 {
             notes.push(format!(
@@ -500,21 +614,91 @@ mod tests {
         );
     }
 
-    /// A per-task event needs a task. A target that names none is refused with
-    /// the reason, rather than served this process's own profile.
+    /// A profile follows a process, a core or the machine. A target that is
+    /// none of them -- a cgroup, for which this build opens no event -- is
+    /// refused by name, rather than served this process's own profile.
     #[test]
-    fn a_target_without_a_process_is_refused_by_name() {
+    fn a_target_that_is_not_a_process_a_core_or_the_machine_is_refused_by_name() {
         let prepare = Box::new(Prepare {
             mode: Mode::Sample {
                 freq: Mode::DEFAULT_SAMPLE_FREQ,
             },
             callchain: Callchain::FramePointers,
         });
-        let Err(error) = prepare.attach(&Target::System) else {
-            panic!("a system target names no process for a per-task event");
+        let Err(error) = prepare.attach(&Target::Cgroup("/sys/fs/cgroup".into())) else {
+            panic!("a cgroup target names no process and no cpu");
         };
-        assert!(error.contains("system"), "{error}");
-        assert!(error.contains("names no process"), "{error}");
+        assert!(error.contains("cgroup"), "{error}");
+        assert!(error.contains("not built"), "{error}");
+    }
+
+    /// The machine is one cpu-clock event per online cpu, over every task:
+    /// this thread, burning its own cpu, is found in it for about the time it
+    /// burned. Opening a cpu needs `perf_event_paranoid` at 0 or `CAP_PERFMON`,
+    /// which a unit test binary never carries, so the refusal is accepted when
+    /// it names them -- `tests/scenario_cpu.rs` checks the same through the
+    /// binary that does.
+    #[test]
+    fn a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned() {
+        let prepare = Box::new(Prepare {
+            mode: Mode::Sample {
+                freq: crate::scalar::Frequency::from_hz(997),
+            },
+            callchain: Callchain::Off,
+        });
+        let mut collector = prepare
+            .attach(&Target::System)
+            .expect("the machine is a target");
+        if let Err(error) = collector.start() {
+            assert!(error.contains("perf_event_paranoid"), "{error}");
+            eprintln!("skipped: {error}");
+            return;
+        }
+        // SAFETY: a read-only query of this thread's own id.
+        let tid = unsafe { libc::gettid() };
+        let cpu_ns = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: `now` is a valid timespec for the kernel to write into.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+            now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+        };
+        let before = cpu_ns();
+        let mut spin = 0u64;
+        while cpu_ns() - before < 200_000_000 {
+            spin = spin.wrapping_mul(6364136223846793005).wrapping_add(1);
+        }
+        assert!(spin != 1, "the loop must not be optimised away");
+        let burned = (cpu_ns() - before) as f64;
+        let mut events = collector.sample(0).unwrap();
+        events.extend(collector.stop());
+        let mine = events
+            .iter()
+            .filter(|event| event.key(crate::request::KeyKind::Task) == Some(&KeyValue::task(tid)))
+            .count() as f64;
+        let expected = 997.0 * burned / 1e9;
+        assert!(
+            (mine - expected).abs() - 1.0 < 0.3 * expected,
+            "this thread burned {:.0} ms of cpu, about {expected:.0} samples at 997 Hz, and the \
+             machine's profile holds {mine} of it",
+            burned / 1e6
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.key(crate::request::KeyKind::Cpu).is_some()),
+            "every sample of a per-cpu event names its cpu"
+        );
+        assert!(
+            collector
+                .notes()
+                .iter()
+                .any(|note| note.contains("one event per cpu")),
+            "{:?}",
+            collector.notes()
+        );
     }
 
     /// Every other mode is refused by name with the one that works, rather than

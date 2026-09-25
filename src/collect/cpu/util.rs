@@ -313,7 +313,18 @@ impl UtilCollector {
         let share = |ticks: u64| ticks as f64 / total as f64;
 
         let mut attrs = vec![
-            Attr::float("busy", 1.0 - share(delta.idle) - share(delta.iowait)),
+            // In ticks before the division, not as `1 - idle - iowait` in
+            // floating point: on a core that was idle apart from some iowait,
+            // the three shares do not cancel, and a busy of -2.8e-17 is a
+            // negative utilisation the checks downstream rightly refuse.
+            Attr::float(
+                "busy",
+                share(
+                    total
+                        .saturating_sub(delta.idle)
+                        .saturating_sub(delta.iowait),
+                ),
+            ),
             Attr::float("user", share(delta.user)),
             Attr::float("nice", share(delta.nice)),
             Attr::float("system", share(delta.system)),
@@ -452,6 +463,23 @@ mod tests {
         assert_eq!(event.attr("busy").unwrap().as_f64().unwrap(), 0.5);
         assert_eq!(event.attr("iowait").unwrap().as_f64().unwrap(), 0.5);
         assert_eq!(event.attr("idle").unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    /// A core that was idle apart from some iowait did no work, and says zero
+    /// exactly. Computed as `1 - idle - iowait` in floating point, seven
+    /// ticks of idle and three of iowait read as a busy of 5.6e-17 -- and one
+    /// neighbour on the disk made that a negative utilisation somewhere else.
+    #[test]
+    fn a_core_that_only_idled_and_waited_is_exactly_not_busy() {
+        assert_ne!(
+            1.0 - 7.0 / 10.0 - 3.0 / 10.0,
+            0.0,
+            "the case this test is about: the shares do not cancel in floating point"
+        );
+        let mut collector = polling();
+        seed(&mut collector, Times::default());
+        let events = collector.event_from(MACHINE, times([0, 0, 0, 7, 3, 0, 0, 0]), 1, 0);
+        assert_eq!(events[0].attr("busy").unwrap().as_f64().unwrap(), 0.0);
     }
 
     #[test]
