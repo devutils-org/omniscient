@@ -113,6 +113,9 @@ struct Detailed {
     index: usize,
     layer: Layer,
     label: String,
+    /// Set when this machine could not serve it, with the resolver's reason:
+    /// it has no index in the run and is never attached.
+    unserved: Option<String>,
 }
 
 /// One reading of the cheap pass: where the main thread's time went over an
@@ -232,17 +235,41 @@ impl Policy {
     /// The policy for a run of these requests, or why the escalation cannot
     /// decide anything from them.
     pub fn for_run(resolved: &[ResolvedRequest]) -> Result<Policy, Refusal> {
-        let held: Vec<(usize, &ResolvedRequest, Layer, Option<Objective>)> = resolved
+        Self::for_run_with(resolved, &[])
+    }
+
+    /// The same, told of held requests this machine could not serve: they
+    /// are layers it lacks, reported with the resolver's reason if their
+    /// layer is named, and never attached.
+    pub fn for_run_with(
+        resolved: &[ResolvedRequest],
+        unserved: &[crate::collect::Unserved],
+    ) -> Result<Policy, Refusal> {
+        let held: Vec<(usize, &crate::request::Request, Layer, Option<Objective>)> = resolved
             .iter()
             .enumerate()
             .filter_map(|(index, one)| {
                 let held = one.request.window?.on?;
-                Some((index, one, held.layer, held.objective))
+                Some((index, &one.request, held.layer, held.objective))
+            })
+            .collect();
+        let lacking: Vec<(&crate::request::Request, Layer, Option<Objective>, &str)> = unserved
+            .iter()
+            .filter_map(|one| {
+                let held = one.request.window?.on?;
+                Some((
+                    &one.request,
+                    held.layer,
+                    held.objective,
+                    one.reason.as_str(),
+                ))
             })
             .collect();
         let objective = held
             .iter()
-            .find_map(|(_, _, _, objective)| *objective)
+            .map(|(_, _, _, objective)| *objective)
+            .chain(lacking.iter().map(|(_, _, objective, _)| *objective))
+            .find_map(|objective| objective)
             .map_or_else(
                 || decides_for(None),
                 |objective| decides_for(Some(objective)),
@@ -251,9 +278,9 @@ impl Policy {
 
         let workload = &held
             .first()
+            .map(|(_, request, _, _)| *request)
+            .or_else(|| lacking.first().map(|(request, _, _, _)| *request))
             .ok_or_else(|| Refusal("no request is held for the escalation".to_owned()))?
-            .1
-            .request
             .target;
         match workload {
             Target::Launch(_) => {}
@@ -295,17 +322,26 @@ impl Policy {
             }
         };
 
+        let label = |request: &crate::request::Request| {
+            request
+                .label
+                .clone()
+                .unwrap_or_else(|| request.source.to_string())
+        };
         let detailed = held
             .iter()
-            .map(|(index, one, layer, _)| Detailed {
+            .map(|(index, request, layer, _)| Detailed {
                 index: *index,
                 layer: *layer,
-                label: one
-                    .request
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| one.request.source.to_string()),
+                label: label(request),
+                unserved: None,
             })
+            .chain(lacking.iter().map(|(request, layer, _, reason)| Detailed {
+                index: usize::MAX,
+                layer: *layer,
+                label: label(request),
+                unserved: Some(format!("this machine cannot serve it: {reason}")),
+            }))
             .collect();
         Ok(Policy {
             objective,
@@ -369,6 +405,12 @@ impl Policy {
             unserved: Vec::new(),
         };
         for one in &self.detailed {
+            if let Some(why) = &one.unserved {
+                if one.layer == layer {
+                    decision.unserved.push(format!("`{}`: {why}", one.label));
+                }
+                continue;
+            }
             let standing = run.standing.get(one.index);
             if one.layer != layer {
                 if standing == Some(&Standing::Attached) {
@@ -596,6 +638,64 @@ mod tests {
         assert_eq!(
             decides_for(Some(Objective::Latency)),
             Ok(Objective::Latency)
+        );
+    }
+
+    /// A held request this machine could not serve is a layer it lacks: when
+    /// the cheap pass names that layer, the escalation attaches what it can
+    /// of it and says which could not be served, in the resolver's words.
+    #[test]
+    fn a_named_layer_this_machine_cannot_serve_is_reported_with_the_resolver_s_reason() {
+        let mut policy = Policy {
+            objective: Objective::Latency,
+            blocked: 0,
+            on_cpu: 1,
+            detailed: vec![
+                Detailed {
+                    index: 2,
+                    layer: Layer::Cpu,
+                    label: "profile".to_owned(),
+                    unserved: None,
+                },
+                Detailed {
+                    index: usize::MAX,
+                    layer: Layer::Cpu,
+                    label: "flow".to_owned(),
+                    unserved: Some(
+                        "this machine cannot serve it: no `intel_pt` performance unit".to_owned(),
+                    ),
+                },
+            ],
+            consumed: vec![0; 3],
+            last_ns: None,
+            streak: (None, 0),
+            current: None,
+            decisions: Vec::new(),
+            readings: 0,
+            shed: Vec::new(),
+        };
+        let events = vec![Vec::new(), Vec::new(), Vec::new()];
+        let standing = vec![Standing::Attached, Standing::Attached, Standing::Waiting];
+        let bound = vec![Target::Pid(vec![1]); 3];
+        let run = Progress {
+            opened_ns: 0,
+            now_ns: 1_000_000_000,
+            events: &events,
+            standing: &standing,
+            bound: &bound,
+        };
+        let switches = policy.escalate(&run, Layer::Cpu, "on a cpu".to_owned());
+        assert_eq!(
+            switches.len(),
+            1,
+            "the served request is attached, and only it"
+        );
+        assert_eq!(switches[0].index, 2);
+        let notes = policy.close(&run);
+        let summary = &notes[0].1;
+        assert!(
+            summary.contains("not served") && summary.contains("intel_pt"),
+            "{summary}"
         );
     }
 }

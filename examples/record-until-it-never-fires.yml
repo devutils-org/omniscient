@@ -1,0 +1,28 @@
+# A recording whose trigger never fires ends at its longest, with nothing.
+#
+#   omn -f examples/record-until-it-never-fires.yml
+#
+# The machine's cpu pressure is polled every 100 ms for five seconds, and a
+# document would be written the first time a round read a stall share above
+# 100 % -- which, being a share, no round will. So the run lasts its
+# five seconds, the longest a recording may, writes no document, and says so
+# on stderr: the trigger never fired, and what it read over the whole run is
+# counted as in no document rather than gone without a number.
+#
+# A recording with no `duration` is refused before anything is attached: its
+# end would otherwise be a trigger that may never fire, which is this.
+name: a trigger that never fires
+format: text
+duration: 5s
+
+requests:
+  - label: pressure
+    source: cpu.pressure
+    target: system
+    mode: poll@100ms
+    emit: [summary]
+
+record:
+  trigger: "value > 100"
+  retain: 1s
+  documents: 1

@@ -71,6 +71,7 @@ pub fn load(path: &Path, forced: Option<InputFormat>) -> Result<(Session, Origin
     session.apply_defaults();
     session
         .check_escalation()
+        .and_then(|()| session.check_recording())
         .map_err(|error| ParseError::new(format!("{origin}: {error}")))?;
     Ok((session, origin))
 }
@@ -260,5 +261,99 @@ requests:
         let text = "requests: [{source: io.latency, target: system, mode: trace, emitt: [hist]}]";
         let error = InputFormat::Yaml.parse::<Session>(text).unwrap_err();
         assert!(error.message().contains("emitt"), "{error}");
+    }
+
+    const RECORDING: &str = r#"
+duration: 30s
+requests:
+  - label: descriptors
+    source: proc.fd
+    target: {launch: [./bursts]}
+    mode: poll@50ms
+    emit: [timeline]
+record:
+  trigger: "value >= 64"
+  on: descriptors
+  retain: 1s
+  after: 200ms
+  documents: 2
+"#;
+
+    /// A recording is part of the session, so it survives the dump in every
+    /// format: the file that was run is the file that is kept.
+    #[test]
+    fn a_recording_survives_a_round_trip_through_every_format() {
+        let session = parse(InputFormat::Yaml, RECORDING);
+        session
+            .check_recording()
+            .expect("a whole recording is accepted");
+        let record = session.record.as_ref().expect("the block is read");
+        assert_eq!(record.trigger.as_ref().unwrap().to_string(), "value >= 64");
+        assert_eq!(record.retain_ns(), 1_000_000_000);
+        assert_eq!(record.after_ns(), 200_000_000);
+        assert_eq!(session.recorded_index().unwrap(), 0);
+        for format in [OutputFormat::Yaml, OutputFormat::Json, OutputFormat::Toml] {
+            let text = format.serialize_document(&session).expect("serializing");
+            let input = match format {
+                OutputFormat::Yaml => InputFormat::Yaml,
+                OutputFormat::Json => InputFormat::Json,
+                OutputFormat::Toml => InputFormat::Toml,
+                _ => unreachable!(),
+            };
+            assert_eq!(parse(input, &text), session, "{format} changed it:\n{text}");
+        }
+    }
+
+    /// Each bound is required, and each refusal says what the bound is for.
+    #[test]
+    fn a_recording_without_one_of_its_bounds_is_refused_by_name() {
+        let refused = |from: &str, to: &str| {
+            let text = RECORDING.replace(from, to);
+            let session = parse(InputFormat::Yaml, &text);
+            session
+                .check_recording()
+                .expect_err(&format!("`{from}` -> `{to}` should be refused"))
+                .message()
+                .to_owned()
+        };
+        assert!(refused("  retain: 1s\n", "").contains("needs `retain`"));
+        assert!(refused("  documents: 2\n", "").contains("needs `documents`"));
+        assert!(refused("  documents: 2\n", "  documents: 0\n").contains("needs `documents`"));
+        assert!(refused("duration: 30s\n", "").contains("needs `duration`"));
+        assert!(refused("  trigger: \"value >= 64\"\n", "").contains("names none"));
+        assert!(refused("retain: 1s", "retain: 30s").contains("not shorter than the run"));
+        assert!(refused("on: descriptors", "on: nothing").contains("names no request"));
+        assert!(refused("mode: poll@50ms", "mode: count").contains("`count` mode"));
+        assert!(
+            refused("emit: [timeline]", "emit: [timeline]\n    window: 1s..")
+                .contains("watched for the whole run")
+        );
+    }
+
+    /// A malformed trigger is refused where it is written, by the filter
+    /// grammar's own parser.
+    #[test]
+    fn a_trigger_the_filter_grammar_cannot_read_is_refused_at_parse() {
+        let text = RECORDING.replace("value >= 64", "value = 64");
+        let error = InputFormat::Yaml.parse::<Session>(&text).unwrap_err();
+        assert!(error.message().contains("`==`"), "{error}");
+    }
+
+    /// The trigger reads `value`, `kind` and the fields the source declares,
+    /// and nothing else: a field no event carries would never fire.
+    #[test]
+    fn a_trigger_over_a_field_the_source_does_not_emit_is_refused() {
+        let catalog = crate::catalog::Catalog::embedded().unwrap();
+        let session = parse(InputFormat::Yaml, RECORDING);
+        session
+            .check_trigger_fields(&catalog, None)
+            .expect("`value` is readable");
+        let text = RECORDING.replace("value >= 64", "bytes > 4096");
+        let session = parse(InputFormat::Yaml, &text);
+        let error = session.check_trigger_fields(&catalog, None).unwrap_err();
+        assert!(
+            error.message().contains("`bytes`") && error.message().contains("`value`"),
+            "{error}"
+        );
     }
 }

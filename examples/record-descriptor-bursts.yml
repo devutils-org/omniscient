@@ -1,0 +1,53 @@
+# A flight recorder: a run whose duration is until a predicate fires.
+#
+#   omn -f examples/record-descriptor-bursts.yml -o /tmp/bursts
+#
+# The program idles two seconds, opens 300 descriptors, holds them for 400 ms
+# and closes them, twice. `proc.fd` counts them fifty times a second, and the
+# run keeps only the last second of what it read: everything older is evicted,
+# and counted. Each time the count crosses 150 -- the round on which the
+# predicate *becomes* true, not every round it stays true -- the run cuts the
+# second before it and the 600 ms after it into a document of its own and
+# goes on. So this writes exactly two, `trigger-1.json` and `trigger-2.json`,
+# each holding one burst whole and the idle before it, beside
+# `recording.json`, which names every trigger, the value that fired it and
+# what was read and let go between them.
+#
+# The bounds are required, not defaulted: `retain` is how far back a
+# document reaches, `documents` the most it writes, and `duration` the longest
+# the run may last -- the program's exit ends it too, but nothing says a
+# program exits. `value` in the trigger is the source's own measured value,
+# whatever its collector calls it; the other fields a trigger may read are
+# the ones the catalog lets the source be filtered on.
+#
+# `tests/recorder.rs` runs the same shape against a workload that stamps each
+# burst on its own clock, and checks each window against those stamps.
+name: two bursts, two documents
+format: json
+duration: 30s
+
+requests:
+  - label: descriptors
+    source: proc.fd
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import os, time
+          for burst in range(2):
+              time.sleep(2)
+              held = [os.open('/dev/null', os.O_RDONLY) for _ in range(300)]
+              time.sleep(0.4)
+              for fd in held:
+                  os.close(fd)
+          time.sleep(0.5)
+    mode: poll@20ms
+    emit: [summary, timeline]
+
+record:
+  trigger: "value >= 150"
+  on: descriptors
+  retain: 1s
+  after: 600ms
+  documents: 5

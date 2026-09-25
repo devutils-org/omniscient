@@ -1246,6 +1246,60 @@ pub struct Session {
     /// request's window is `on <layer>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalate: Option<Escalation>,
+    /// The flight recorder: a run whose duration is *until a predicate
+    /// fires*, which keeps only what its retention bound holds and writes one
+    /// document per firing. Absent is an ordinary run, with one document at
+    /// its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Recording>,
+}
+
+/// A session's recording: the trigger, and the three bounds that make a run
+/// with no fixed end still a bounded one.
+///
+/// Every bound is `Option` so that its absence is refused in this project's
+/// words by [`Session::check_recording`] rather than in serde's: a recording
+/// with no retention would keep everything, one with no bound on documents
+/// could write forever, and "missing field `documents`" says neither.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recording {
+    /// When a document is written: the filter grammar, over the events one
+    /// round of the `on` request read. `value` names that request's measured
+    /// value, whatever its collector calls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<FilterExpr>,
+    /// The request whose rounds the trigger reads, by label or by source.
+    /// May be left out when the session has one request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// How far back a document reaches when the trigger fires: what the
+    /// run keeps, and everything older is evicted and counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain: Option<Duration>,
+    /// How long the run goes on recording into a document after its trigger
+    /// fired, before the document is written. Zero when absent: the document
+    /// ends at the round that fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Duration>,
+    /// The most documents this run writes; the run ends with the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documents: Option<u32>,
+}
+
+impl Recording {
+    /// The name the trigger reads a request's measured value by.
+    pub const VALUE: &'static str = "value";
+
+    /// The retention bound, in nanoseconds. Only meaningful once
+    /// [`Session::check_recording`] has accepted the session.
+    pub fn retain_ns(&self) -> u64 {
+        self.retain.map_or(0, Duration::as_nanos)
+    }
+
+    pub fn after_ns(&self) -> u64 {
+        self.after.map_or(0, Duration::as_nanos)
+    }
 }
 
 /// A session's escalation: the objective its decisions are for.
@@ -1274,6 +1328,7 @@ impl Session {
             joins: Vec::new(),
             decompose: Vec::new(),
             escalate: None,
+            record: None,
         }
     }
 
@@ -1341,6 +1396,221 @@ impl Session {
                 self.nothing_reads_across_a_held_window()
             }
         }
+    }
+
+    /// Refuses a recording that cannot mean anything as written, before
+    /// anything is resolved or launched.
+    ///
+    /// The bounds are required rather than defaulted. A run with no fixed end
+    /// is only bounded by what it is told: without a retention it keeps
+    /// everything, without a bound on documents it can write forever, and
+    /// without a longest duration it can run forever -- a launched program's
+    /// exit ends it too, but nothing says the program will exit. What needs
+    /// the catalog, whether the trigger reads fields the source emits, is
+    /// asked by [`Session::check_trigger_fields`].
+    pub fn check_recording(&self) -> Result<(), ParseError> {
+        let Some(record) = &self.record else {
+            return Ok(());
+        };
+        let refuse = |reason: String| Err(ParseError::new(format!("record: {reason}")));
+        if record.trigger.is_none() {
+            return refuse(
+                "a recording writes a document when its `trigger` fires, and this one names \
+                 none: give it a predicate in the filter grammar over what one round of a \
+                 request read, such as `trigger: \"value >= 64\"`"
+                    .to_owned(),
+            );
+        }
+        let Some(retain) = record.retain.filter(|retain| retain.as_nanos() > 0) else {
+            return refuse(
+                "a recording needs `retain`, how far back a document reaches: without it the \
+                 run would keep everything it read for as long as it runs, which is not a \
+                 bound. Such as `retain: 2s`"
+                    .to_owned(),
+            );
+        };
+        if record.documents.is_none_or(|documents| documents == 0) {
+            return refuse(
+                "a recording needs `documents`, the most it writes, at least one: without it a \
+                 trigger that keeps firing writes for as long as the run lasts"
+                    .to_owned(),
+            );
+        }
+        let Some(longest) = self
+            .requests
+            .iter()
+            .filter_map(|request| request.duration)
+            .max()
+        else {
+            return refuse(
+                "a recording needs `duration`, the longest it may run: its end is otherwise a \
+                 trigger that may never fire, and a launched program's exit is not a bound, \
+                 since nothing says the program exits"
+                    .to_owned(),
+            );
+        };
+        if retain >= longest {
+            return refuse(format!(
+                "`retain: {retain}` is not shorter than the run's longest, `{longest}`: nothing \
+                 would ever be evicted, and a document would be the whole run so far -- which \
+                 is an ordinary run with `duration: {longest}`"
+            ));
+        }
+        if let Some(after) = record.after.filter(|after| *after >= longest) {
+            return refuse(format!(
+                "`after: {after}` is not shorter than the run's longest, `{longest}`: no \
+                 document could be written after its trigger"
+            ));
+        }
+        if self.escalate.is_some() {
+            return refuse(
+                "a session either records or escalates: an escalation attaches and detaches \
+                 layers over the run, and a recording's documents are windows cut from it by \
+                 time, so a document would hold a layer for part of its window and say nothing \
+                 of which part"
+                    .to_owned(),
+            );
+        }
+        if !self.decompose.is_empty() {
+            return refuse(
+                "a decomposition splits the program's life into its parts, and a document is \
+                 one window of that life, not all of it: the whole it would be weighed against \
+                 is not in the document. Decompose an ordinary run"
+                    .to_owned(),
+            );
+        }
+        for request in &self.requests {
+            let name = request
+                .label
+                .clone()
+                .unwrap_or_else(|| request.source.to_string());
+            if let Some(window) = request.window {
+                return refuse(format!(
+                    "`{name}` has `window: {window}`, and a request in a recording is watched \
+                     for the whole run: a document is a window already, cut where the trigger \
+                     fired, and a second window inside it would leave the document's span and \
+                     the request's disagreeing"
+                ));
+            }
+            if matches!(request.mode, Mode::Count | Mode::Snapshot) {
+                return refuse(format!(
+                    "`{name}` is in `{}` mode, which is one reading at the end of the run or at \
+                     its start: a recording keeps a series and cuts documents out of it, and a \
+                     single reading has no series to retain. Use `poll`, `sample` or `trace`",
+                    request.mode.kind()
+                ));
+            }
+        }
+        self.recorded_index().map(|_| ())
+    }
+
+    /// Which request the recording's trigger reads, by its `on`.
+    pub fn recorded_index(&self) -> Result<usize, ParseError> {
+        let on = self.record.as_ref().and_then(|record| record.on.as_deref());
+        let names = || {
+            let names: Vec<String> = self
+                .requests
+                .iter()
+                .map(|request| {
+                    format!(
+                        "`{}`",
+                        request.label.as_deref().unwrap_or(request.source.as_str())
+                    )
+                })
+                .collect();
+            one_of(names.iter().map(String::as_str))
+        };
+        let Some(on) = on else {
+            return match self.requests.len() {
+                1 => Ok(0),
+                _ => Err(ParseError::new(format!(
+                    "record: this session has {} requests, and the trigger reads one of them: \
+                     name it with `on`, one of {}",
+                    self.requests.len(),
+                    names()
+                ))),
+            };
+        };
+        let by_label: Vec<usize> = (0..self.requests.len())
+            .filter(|index| self.requests[*index].label.as_deref() == Some(on))
+            .collect();
+        let found: Vec<usize> = if by_label.is_empty() {
+            (0..self.requests.len())
+                .filter(|index| {
+                    self.requests[*index].label.is_none()
+                        && self.requests[*index].source.as_str() == on
+                })
+                .collect()
+        } else {
+            by_label
+        };
+        match found.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(ParseError::new(format!(
+                "record: `on: {on}` names no request of this session: one of {}",
+                names()
+            ))),
+            _ => Err(ParseError::new(format!(
+                "record: `on: {on}` names {} requests of this session, and the trigger reads \
+                 one: give them labels",
+                found.len()
+            ))),
+        }
+    }
+
+    /// Refuses a trigger that reads a field its request does not emit.
+    ///
+    /// The fields a trigger may read are the ones the catalog declares for
+    /// the source's filter, `kind`, and `value`, which is the request's
+    /// measured value by whatever name its collector gives it. A field outside
+    /// those is false on every event, so the trigger would never fire and the
+    /// run would end at its longest with no document, looking exactly like a
+    /// workload that never did the thing -- which is why it is refused.
+    ///
+    /// `backend` is the one the resolver chose, when it has: a field can be
+    /// real through one mechanism and impossible through another, and the
+    /// trigger reads what this run's backend carries.
+    pub fn check_trigger_fields(
+        &self,
+        catalog: &crate::catalog::Catalog,
+        backend: Option<&str>,
+    ) -> Result<(), ParseError> {
+        let Some(trigger) = self
+            .record
+            .as_ref()
+            .and_then(|record| record.trigger.as_ref())
+        else {
+            return Ok(());
+        };
+        let request = &self.requests[self.recorded_index()?];
+        let Some(entry) = catalog.get(&request.source) else {
+            return Ok(());
+        };
+        let carried = match backend.and_then(|id| entry.backends.iter().find(|one| one.id == id)) {
+            Some(backend) => entry.backend_filter_fields(backend),
+            None => &entry.filter_fields,
+        };
+        let declared: Vec<&str> = carried.iter().map(String::as_str).collect();
+        let unknown: Vec<&str> = trigger
+            .fields()
+            .into_iter()
+            .filter(|field| {
+                *field != Recording::VALUE && *field != "kind" && !declared.contains(field)
+            })
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let mut readable = vec![format!("`{}`", Recording::VALUE), "`kind`".to_owned()];
+        readable.extend(declared.iter().map(|field| format!("`{field}`")));
+        Err(ParseError::new(format!(
+            "record: the trigger reads `{}`, which `{}`{} does not emit, so it could never fire \
+             and the run would end at its longest with no document. It can read {}",
+            unknown.join("`, `"),
+            request.source,
+            backend.map_or_else(String::new, |id| format!(" through `{id}`")),
+            readable.join(", ")
+        )))
     }
 
     /// Refuses a decomposition that reads a source the escalation attaches and

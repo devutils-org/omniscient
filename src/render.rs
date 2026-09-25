@@ -44,6 +44,30 @@ pub fn session(
     if let Some(budget) = session.budget {
         let _ = writeln!(out, "  budget    {budget}");
     }
+    if let Some(record) = &session.record {
+        let unset = || "(not set: refused)".to_owned();
+        let _ = writeln!(
+            out,
+            "  record    until `{}` on {}, retain {}, after {}, at most {} document(s)",
+            record
+                .trigger
+                .as_ref()
+                .map_or_else(unset, ToString::to_string),
+            record
+                .on
+                .as_deref()
+                .map_or_else(|| "its one request".to_owned(), |on| format!("`{on}`")),
+            record
+                .retain
+                .map_or_else(unset, |retain| retain.to_string()),
+            record
+                .after
+                .map_or_else(|| "0s".to_owned(), |after| after.to_string()),
+            record
+                .documents
+                .map_or_else(unset, |documents| documents.to_string()),
+        );
+    }
 
     for (index, request) in session.requests.iter().enumerate() {
         let label = request
