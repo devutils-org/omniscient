@@ -1,13 +1,14 @@
 # `cpu`
 
-Fourteen sources, thirteen of which are `perf_event_open` events. This note
+Fourteen sources, ten of which are `perf_event_open` events. This note
 records what is implemented, what was measured to check it, and what the family
 still needs from the shared layer.
 
 ## What runs today
 
-Ten of the fourteen sources. The first seven are counters, read once when the
-window closes; the last three are files, read at every tick.
+Thirteen of the fourteen sources; `cpu.flow` is the one left. The first eight
+are counters, read once when the window closes; `cpu.profile` samples; the last
+four are files, read at every tick.
 
 | Source | Backend | Mode | The number |
 |---|---|---|---|
@@ -18,6 +19,9 @@ window closes; the last three are files, read at every tick.
 | `cpu.cache_misses` | `pmu` | count | last-level cache misses |
 | `cpu.context_switches` | `pmu:sw` | count | switches away from the task |
 | `cpu.migrations` | `pmu:sw` | count | moves between cpus |
+| `cpu.topdown` | `pmu` | count | where the issue slots went: retiring, bad speculation, front end, back end |
+| `cpu.profile` | `pmu:sw` | sample | where the samples landed, with call stacks |
+| `cpu.oncpu_time` | `fs:proc` | poll | a task's cpu time, from `/proc/<pid>/stat`, at tick granularity |
 | `cpu.util` | `fs:proc` | poll, snapshot | the machine's time by state, from `/proc/stat` |
 | `cpu.pressure` | `fs:proc` | poll, snapshot | time spent waiting for a cpu, from PSI |
 | `cpu.throttle` | `fs:cgroup` | poll, snapshot | time a cgroup was stopped by its quota |
@@ -186,17 +190,22 @@ tests now tell them apart by the message and fail loudly on the second.
 
 ## Not implemented yet, and why
 
-- `cpu.profile`, and `sample` mode generally, need the sampling path and stack
-  capture (see `STATE.md`). Sampling a hardware counter without stacks would
-  produce addresses nobody can read.
-- `cpu.topdown` needs `pmu:slots` and `pmu:topdown-*`, which are raw event
-  encodings per microarchitecture. `src/capabilities.rs` answers **unverified**
-  for them today, which is correct: nothing has been checked. Hard-coding one
-  vendor's event numbers is the bug this family is most likely to ship.
+- `cpu.profile` samples through `pmu:sw` only. Its `pmu` backend, sampling
+  the hardware cycle counter, has no collector.
+- `cpu.topdown` is written and collectable, and out of reach on the development
+  machine. Its five events, `slots` and the four `topdown-*`, are read from what
+  the kernel publishes under `/sys/bus/event_source/devices/cpu/events`, which
+  is how "map per CPU family, never hard-code event names" is honoured, and the
+  probe answers `missing` by name on a machine that does not publish them. The
+  method needs a pipeline that counts issue slots -- Intel from Icelake, AMD
+  from Zen 4 -- and the development machine is a Zen 2, so the half of the
+  ground-truth test that runs here is the refusal.
 - `cpu.flow` (Intel PT, CoreSight) needs the AUX buffer, and the decoder is a
   separate deliverable. Capture without decoding is still worth having, but it
   is not worth half a decoder.
-- `cpu.oncpu_time` is `bpf:tp` first, and the eBPF layer is Wave 2.
+- `cpu.oncpu_time` is served by its `fs:proc` backend, in `poll`, at the
+  kernel's tick granularity. Its `bpf:raw_tp` and `bpf:tp` backends, and with
+  them `trace`, have no collector yet.
 - `cpu.util`'s cgroup backend, and `cpu.pressure`'s, read the same quantities
   inside one cgroup. They are a small addition once a cgroup target resolves to
   a directory, which `cpu.throttle` already does.
@@ -206,27 +215,22 @@ tests now tell them apart by the message and fail loudly on the second.
 
 ## Needs from the shared layer
 
-1. **A `cpu` correlation key.** `/proc/stat` has a line per cpu and the catalog
-   accepts a `--cpu` target for `cpu.util`, but the events would all land in one
-   series: the key vocabulary has `task`, `proc`, `file`, `sock`, `blk`, `mem`,
-   `gpu` and `cgroup`, and nothing for a cpu. A mean across cpus describes no
-   cpu, so the target is refused with that reason instead. The same gap makes a
-   machine-wide series print as `<unkeyed>`.
-2. **Per-cpu counting.** `Prepared::attach` now takes the target whole, so a
-   system or cgroup target reaches a collector. A counter still cannot serve
-   one: counting every cpu means one event per cpu -- `Scope::Cpu` in
-   `src/perf.rs`, which nothing uses yet -- and the privileges for it. The
-   refusal names that today rather than counting one process and calling it the
-   machine.
-3. **An exit code for "valid, but this mechanism is not built".** A mode a
+1. **Per-cpu counting is built, and what it costs is a privilege.**
+   `perf::PerCpuGroups` opens one group per cpu, `collect/cpu/percpu.rs`
+   reports one event each, keyed on `KeyValue::Cpu`, and `--system` is every
+   online cpu. Counting a cpu counts other users' work, so the refusal names
+   `perf_event_paranoid` or `CAP_PERFMON`, and a per-task count is never
+   substituted for one. (The `cpu` correlation key this list used to ask for
+   exists too: `cpu.util --cpu` produces one event per core keyed on it.)
+2. **An exit code for "valid, but this mechanism is not built".** A mode a
    collector cannot serve comes back as `CollectError::Start`, which exits 1
    like a genuine failure. `NoCollector` already exits 3, and the sample-mode
    refusal belongs in the same class.
-4. **A rate over the counter's own window.** `emit::rate` divides by the run's
+3. **A rate over the counter's own window.** `emit::rate` divides by the run's
    wall clock. A counted source knows exactly how long it was enabled, and that
    number is already on the event as `enabled_ns`.
-5. **Stack capture** (G6) and the `hist` and `topk` emits (G5), for
+4. **Stack capture** (G6) and the `hist` and `topk` emits (G5), for
    `cpu.profile` and for the `sample` mode of every counter here.
-6. **A probe class for raw PMU event encodings**, for `cpu.topdown` and for the
-   uncore events `mem` needs. Until then those requirements are unverified,
+5. **A probe class for raw PMU event encodings**, for the uncore events `mem`
+   needs. Until then those requirements are unverified,
    which is the correct answer but not a useful one.

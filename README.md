@@ -170,10 +170,12 @@ kind of incomparable.
 
 `text` for a terminal, `json` / `yaml` / `toml` for tooling and for the resolved
 file, `ndjson` for a record stream. The profile and trace formats — `folded`,
-`speedscope`, `pprof`, `chrome` — are declared with the emits they can carry and
-report that their encoder is not written rather than approximating something
-else. A result format only accepts the emits it can express: `--emit hist
---format folded` is refused, not guessed at.
+`speedscope`, `pprof`, `chrome` — are declared with the emits they can carry,
+and every declared format has its encoder. A format is declared before it is
+written, so that the surface is stable, and one whose encoder has not landed
+says so rather than approximating something else. A result format only accepts
+the emits it can express: `--emit hist --format folded` is refused, not guessed
+at.
 
 ## Boundaries
 

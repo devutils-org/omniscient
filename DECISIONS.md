@@ -17,7 +17,7 @@ paid for across every collector written since. That is the point of the file.
 | Scope | Single machine | Inter-machine clock drift is a different class of problem from local correlation. Fleet scope is not refused, it is deferred. |
 | Request surfaces | CLI and session file, one model | Both build the same `Request`. `--dump-request` prints a runnable session file, which is what keeps the two from drifting; an end-to-end test asserts the round trip. |
 | Input formats | YAML, JSON, TOML | Inferred from the extension, forced with `--input-format`, and `-` reads standard input. One serde model behind all three, so the choice is about what writes the file, never about what can be expressed. |
-| Output formats | text, json, yaml, toml now; ndjson, folded, speedscope, pprof, chrome declared | Documents (a request, a listing) and results (a histogram, a profile) are different payloads. Result formats are declared with the emits they can carry and reported as not yet implemented rather than silently approximated. |
+| Output formats | text, json, yaml, toml, ndjson, folded, speedscope, pprof, chrome, every one with its encoder | Documents (a request, a listing) and results (a histogram, a profile) are different payloads. Result formats are declared with the emits they can carry. A format is declared before its encoder is written, so the surface is stable, and one in that state is reported as not yet implemented rather than silently approximated (`OutputFormat::status` in `src/format.rs`); none is today. |
 | Catalog location | `catalog/*.yaml`, compiled into the binary | A build always carries a complete catalog. `--catalog DIR` and `OMN_CATALOG_DIR` load from disk for iteration. |
 | Defaulting policy | Default only where the catalog leaves one option | If a source declares a single mode, a single emit for that mode, or a single target kind, omitting the flag picks it and the choice is printed. Where the catalog offers several, the flag is required. Choosing between two legitimate answers is how a tool reports one number while the user reads another. |
 
@@ -59,9 +59,20 @@ neither source could give alone, and settled a few more things on the way.
 
 The first correlation reported ~515 faults for an 8 MiB allocation, where 4 KiB
 pages would need 2048. The kernel's own counter agreed with ours, and a sweep
-showed why: with multi-size transparent huge pages the fault count is nearly
-flat across sizes — 263 faults for 1 MiB, 528 for 32 MiB, from 4 KiB per fault
-up to 62 KiB. The collector is faithful; the metric is not what it looks like.
+showed the fault count nearly flat across sizes — 263 faults for 1 MiB, 528 for
+32 MiB, from 4 KiB per fault up to 62 KiB. The collector is faithful; the metric
+is not what it looks like.
+
+The explanation first written here, multi-size transparent huge pages, was a
+hypothesis nobody measured, and it is wrong on the development machine: every
+multi-size size is `never` there. What predicts the counts -- twenty of
+twenty-one runs at seven sizes exactly, the last off by the interpreter's first
+fault -- is THP `always` giving one fault per aligned 2 MiB page a mapping
+wholly covers plus one per 4 KiB page outside them. So a count depends on how a
+range is backed and on where it lands: the same 8 MiB mapping costs 515 faults,
+or 4 when it lands on four aligned huge pages, which it did on five runs of
+twelve. The table is in `docs/scenarios/cross-memory.md`; the THP mode is in the
+environment capture for exactly this reason.
 
 A derived "resident bytes" column had already been written from `faults x page
 size`. It was wrong by a factor of four on this machine, and it is gone. Fault
