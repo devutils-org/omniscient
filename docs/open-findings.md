@@ -7200,3 +7200,7 @@ load put on the target's threads) and
 `triage::a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on`
 (the escalation named the lock layer after the shed). The first is stream D's
 file this wave, the second stream R's; both were told.
+
+And one more, seen by the lossy-profile fix's full run under the same load and
+passing alone: `scenario_net::a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone`
+(stream D's file this wave).
