@@ -14,6 +14,10 @@
 # which is that count times a period, is short by the same samples. Its residue
 # turns positive, and the mark is what accounts for it: add the dropped samples
 # back and the residue closes, to within the throttled windows nobody counted.
+# The count is the run's, not the task's: the profile follows the processes the
+# target starts, each with a ring of its own, and the mark sums every ring. So
+# the drops close the residue of all the sampled tasks together, and a
+# decomposition of one task can bound its share of them but not name it.
 #
 # And the row is short of something specific, which is not the kernel's own
 # on-cpu figure. A `cpu-clock` sample fires on the time a task holds its cpu,
