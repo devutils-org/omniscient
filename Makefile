@@ -86,13 +86,21 @@ release:
 # So it succeeds silently when sudo is already available, and otherwise prints
 # the one command to run. To stop needing it at all, one narrowly scoped line
 # under `visudo -f /etc/sudoers.d/omniscient`, permitting exactly this command
-# on exactly this path:
+# on exactly these paths -- the checkout and the per-stream worktrees beside it,
+# since a sudoers `*` does not cross a `/`:
 #
-#   <user> ALL=(root) NOPASSWD: /usr/sbin/setcap $(CAPS) <absolute path to $(BINARY)>
+#   <user> ALL=(root) NOPASSWD: /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/debug/omn
+#
+# The comma is escaped because sudoers reads a bare one as the end of the
+# command, and the path is absolute because sudo matches arguments literally
+# (`docs/open-findings.md` finding 10). The recipe asks with the absolute path
+# first, then with the relative one, which is what an older rule permits: a
+# rule on `target/debug/omn` matches that name under any directory at all.
 caps:
 	@if getcap $(BINARY) 2>/dev/null | grep -q $(CAPCHECK); then \
 	    echo "capabilities already on $(BINARY)"; \
-	elif sudo -n setcap $(CAPS) $(BINARY) 2>/dev/null; then \
+	elif sudo -n setcap $(CAPS) $(abspath $(BINARY)) 2>/dev/null \
+	    || sudo -n setcap $(CAPS) $(BINARY) 2>/dev/null; then \
 	    echo "granted $(CAPS) to $(BINARY)"; \
 	else \
 	    echo "note: $(BINARY) has no capabilities, so the eBPF and per-cpu perf"; \
