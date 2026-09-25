@@ -327,3 +327,36 @@ began failing alone: at 100 kHz the profile went from **0 dropped of about
 ring the program had. The coordinator gave the target's own task its 256 pages
 back (`TaskSampler::open` takes the root's ring apart from the others'), and
 kept 32 for every other thread: 0 dropped again on the same run, twice.
+
+## After the merge: a run-wide mark weighed against one task
+
+`cross_compute::a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone`
+failed alone on every run after this stream merged: "with the 19 835 dropped
+samples counted, the parts are 644.8 ms against a window of 622.0 ms". The
+tool was not overstating anything. The workload is a shell with a
+`{ ... } &` half, which is a second process, and the profile now follows the
+processes a target starts, each with a ring of its own:
+
+```
+     1. task:56238 >= 21321 count  over 21321 events
+     2. task:56263 >=  2917 count  over 2917 events
+    >= short by at least 20628 of 44866 events
+```
+
+Before this stream only the first task was sampled, so every drop was its
+time, and the test added all of them to its on-cpu row. Now the drops are
+spread over two rings and the mark is run-wide by design
+(`emit::Shortfall::records`: a fraction per series would attribute every drop
+to each). The test now weighs the drops against the room every sampled task's
+window leaves -- the decomposed task's window less its parts, and each other
+task's window less what its own samples hold -- which is the old bound exactly
+when the target is the only task sampled. Three runs alone pass.
+
+What is left, and not done here: each ring belongs to one task, so for a
+profile keyed by `task` the tool does know which task a drop belonged to.
+Carrying losses per ring into `Collection` would let the mark on a per-task
+series say that task's own shortfall rather than the run's -- a change to
+`src/emit.rs` and the collector layer, not to this stream's files.
+`examples/cross-compute-lossy-profile.yml`'s comment ("add the dropped samples
+back and the residue closes") is true of the run and no longer of the one
+task's row.
