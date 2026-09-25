@@ -7010,3 +7010,178 @@ the interrupted task as its waker -- read `preempt_count` (the per-cpu
 `HARDIRQ_MASK | SOFTIRQ_MASK`, record the waker as the interrupt (tid 0 with a
 flag) and keep the event only when its wakee is the target's. The `wakeup` join
 already has a vocabulary for a chain that starts in the kernel.
+
+---
+
+## Needs from another stream — the eleventh wave, stream P (the portability matrix)
+
+Stream P's deliverable is `docs/portability.md`. The matrix -- four kernels
+(5.15, 6.1, 6.6, 7.2) under five configurations, and the host -- found ten
+classes of source that `omn list` calls usable and that refuse when run. Every
+refusal names its reason; what is wrong is that the probe or the resolver said
+yes first, and for a launched target the program was already started. Each is
+recorded in `KNOWN_DEFECTS` in `tests/portability.rs`, which fails when an
+entry stops matching: whoever fixes one removes its entry there (or asks the
+coordinator to). `scripts/matrix.sh check` re-judges the cells on disk without
+booting anything; `scripts/matrix.sh v6.6.157 --configs caps` re-measures one.
+
+### To whoever owns `src/bpf/mod.rs` (nobody this wave): P1, check the prototype in the probe
+
+`raw_tracepoint_support(name)` answers whether `btf_trace_<name>` exists. The
+programs then compare `Btf::tracepoint_signature(name)` with the prototype they
+were written for and refuse at attach -- `proc.exit` and `mem.reclaim` on 6.6
+and below, `io.latency`, `mem.kmalloc`, `mem.compaction` and `net.request`'s
+`sched_switch` on 5.15. The check exists; the probe does not call it. Wanted,
+with the expected prototype as data rather than code:
+
+```rust
+// A requirement may carry the prototype its program is written for:
+//   raw_tracepoint:sched_process_exit(task_struct *, bool)
+// and the probe compares it with the kernel's.
+pub fn raw_tracepoint_support(requirement: &str) -> Support; // `name` or `name(arg, ...)`
+```
+
+and the catalog entries of the programs that check a signature at attach
+(`src/bpf/{io,io_writeback,net_program,runqlat,mem_program,migrate,sched_lock,request}.rs`)
+writing that prototype into their `raw_tracepoint:` requirement. On 5.15 this
+is also what makes the floor hold for sources whose tracepoints exist below it.
+
+### To whoever owns `catalog/net.yaml` and `src/capabilities.rs`: P2, a field the program reads
+
+`net.drops`, `net.tcp.lifetime` and `net.tcp.retransmit` read `sock.sk_ino`,
+which 6.6 does not have (*"this kernel's `sock` has no member named
+`sk_ino`"*). A requirement class answered from BTF, and the three `bpf:raw_tp`
+backends requiring it:
+
+```rust
+// in Capabilities::probe
+if let Some(field) = requirement.strip_prefix("btf_member:") { // "sock.sk_ino"
+    return Probe::from(crate::bpf::btf_member_support(field));
+}
+pub fn btf_member_support(struct_dot_member: &str) -> Support; // src/bpf/mod.rs
+```
+
+(or a fallback that reads the inode through `sk_socket->file->f_inode`, which
+is `src/bpf/net_*.rs`'s choice).
+
+### To whoever owns `src/capabilities.rs` and `src/bpf/mod.rs`: P3, the `uprobe` requirement below 6.6
+
+Under `cap_bpf,cap_perfmon` on 5.15 and 6.1, every USDT source is listed usable
+and refuses: the uprobe-multi link is refused, the fallback opens the `uprobe`
+PMU, and that needs `CAP_SYS_ADMIN`. `uprobe` is answered by the PMU's
+existence. Wanted: `uprobe` available only when a uprobe-multi link can be made
+(Linux 6.6) or the process has `CAP_SYS_ADMIN`, and otherwise missing with
+*"this kernel has no uprobe-multi link (Linux 6.6), and the uprobe PMU it would
+fall back to needs CAP_SYS_ADMIN"*. And `permission_advice` should not be the
+refusal's first sentence there: it tells a binary carrying `CAP_BPF` and
+`CAP_PERFMON` to be granted them.
+
+### To whoever owns `catalog/runtime.yaml`: P4, the USDT backends need BTF
+
+`bpf:usdt` requires `uprobe` and `bpf`; `UsdtProgram::load` starts with
+`kernel_btf()?`. With `/sys/kernel/btf/vmlinux` absent, `runtime.gc`,
+`runtime.alloc` and `runtime.custom` are listed usable and refuse with *"cannot
+read /sys/kernel/btf/vmlinux"*. Add `btf` to their `bpf:usdt` (and
+`bpf:uprobe`) requirements, as `net.request`'s already has.
+
+### To whoever owns `src/bpf/request.rs` and `catalog/net.yaml`: P5, `net.request` below 6.6
+
+`net.request` links every site with `BPF_TRACE_UPROBE_MULTI` and has no
+fallback, so on 6.1 -- as root too -- it fails with *"the kernel refused to link
+the program to 0x387e: Invalid argument"*. Either the same fallback
+`src/bpf/usdt.rs` has, or a requirement that says so (`kernel>=6.6` on its two
+backends, with the reason in a caveat) and a refusal that names 6.6 rather than
+`EINVAL`.
+
+### To whoever owns `catalog/gpu.yaml` or `src/collect/gpu/mod.rs`: P6, a library without its driver
+
+The guests see the host's `libnvidia-ml.so` and no GPU: every `vendor:nvml`
+source is listed usable and refuses with *"nvmlInit failed: Driver Not
+Loaded"*. `nvml_probe` answers "the library loads". A container with the
+userspace library, or a host after a driver upgrade, is the same state. Either
+the probe calls `nvmlInit_v2` (and `nvmlShutdown`) and reports NVML's own error,
+or -- data only -- the `vendor:nvml` backends also require
+`/proc/driver/nvidia/version`, which exists exactly when the kernel driver is
+loaded.
+
+### To whoever owns `src/resolve.rs` and `src/collect/mod.rs` (stream S this wave): P7, a collector that refuses the mode
+
+The resolver walks past an unimplemented backend to a fallback whose collector
+does not serve the requested mode, which then refuses at start, in every cell:
+`cpu.oncpu_time -m trace` onto `fs:proc`, `power.cstate -m trace` onto
+`fs:sys`, `mem.faults -m count` onto `pmu:sw` (your item 4), `sched.switches
+-m count` onto `pmu:sw`. Wanted: a factory declares what it serves, and the
+resolver treats a backend whose factory does not serve the request's mode as
+`unimplemented` for that request, with the reason in the chain:
+
+```rust
+Factory::new("power.cstate", "fs:sys", ...).modes(&[ModeKind::Poll])
+```
+
+### To whoever owns `src/collect/cpu/profile.rs`, `src/collect/mem/page_faults.rs` (stream S) and `src/collect/sched/` (stream K): P8, `system: native` refused
+
+The three catalogs declare `system: native`; the three collectors need a pid
+and refuse *"profiling a whole machine needs one sampling event per cpu and the
+privileges for them"* -- on a binary that has `CAP_PERFMON`. One event per cpu
+(`perf_event_open(pid = -1, cpu = n)`), or `system` taken out of the three
+entries' `targets`. The same `Factory` declaration as P7 (`.targets(...)`)
+would let the resolver refuse it before the launch.
+
+### To whoever owns `src/resolve.rs` (stream S): P9, a per-task probe for a per-cpu event
+
+Without capabilities and with `perf_event_paranoid` at 2, a process may count
+itself and not a cpu. The `pmu:` probe opens a per-task event, so ten counting
+sources are listed usable and `--system` refuses (correctly worded) at start.
+The source is usable, the request is not: the resolver has the target, and a
+`pmu:` requirement probed with `cpu = 0, pid = -1` for a system target would
+refuse it with the reason before anything runs.
+
+### To whoever owns `catalog/power.yaml` and `catalog/mem.yaml`: P10, two requirements that name the wrong thing
+
+- `power.freq`'s `fs:sys` requires `/sys/devices/system/cpu/cpufreq`, which
+  exists in a guest with no cpufreq driver; the collector reads
+  `/sys/devices/system/cpu/cpu0/cpufreq`. Require that path.
+- `mem.swap`'s `fs:cgroup` reads `pswpin`/`pswpout` from `memory.stat`, which
+  6.6 does not publish and 7.2 does; the entry requires nothing that says so.
+
+(`mem.cgroup` refusing the root cgroup is exact and is the guest's shape, not a
+defect; it is recorded for the guest cells only.)
+
+### To the owners of five tests: they fail without capabilities, and the CI runs without them
+
+Rehearsed here with the binary stripped of its capabilities (both hard links:
+`target/debug/omn` and cargo's `deps/omn-*`), the suite gives 1772 passed and
+these five failed -- each asserts what a privileged machine answers instead of
+skipping, or accepting the unprivileged answer, where the capability is
+missing:
+
+| Test | File | Owner this wave |
+|---|---|---|
+| `a_program_that_declares_no_request_is_refused_by_name` | `tests/vertical.rs` | J |
+| `every_mode_and_emit_of_the_kernel_sources_is_served_or_refused_by_the_right_code` | `tests/scenario_mem.rs` | S |
+| `the_combinations_these_sources_do_not_have_are_refused_with_the_reason` | `tests/scenario_proc.rs` | S |
+| `the_syscall_filter_the_resolved_file_claims_is_the_one_that_ran` | `tests/scenario_proc.rs` | S |
+| `what_this_machine_cannot_check_about_gpu_job_is_named_with_its_numbers` | `tests/scenario_gpu.rs` | nobody |
+
+And one skip that gives no reason: `tests/vertical.rs` prints
+`stderr.lines().next()` as its skip reason (lines 921, 997, 1104), which on
+this machine is `note: mode defaulted to trace, the only one net.request
+supports`. Printing the first line that starts with `error:` -- or the whole
+refusal -- says why. `.github/scripts/skip-gate.sh` fails the CI on it, as it
+should.
+
+### For the flaky tally: two seen under the eleventh wave's load, passing alone
+
+- `every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code`
+  (`tests/scenario_mem.rs`): `mem.latency sample stack` joined the exit-1
+  refusals in two full runs on stream P's branch, which touches no `src/`
+  file; passed alone.
+- `the_page_cache_sessions_say_what_their_headers_predict`
+  (`tests/scenario_io.rs`): once in a full run; passed alone.
+
+### To the coordinator: `make matrix`, and when to push the workflow
+
+The recipe is in `docs/portability.md`, "Running it". `.github/workflows/ci.yml`
+has never run: the first push will show the runner's kernel, whether its skips
+all match `.github/expected-skips.txt`, and whether its cell meets a defect
+`KNOWN_DEFECTS` does not record for a `ci-*` cell. Each is a one-line change.

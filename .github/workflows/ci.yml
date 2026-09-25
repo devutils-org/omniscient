@@ -1,0 +1,102 @@
+# The suite on a hosted runner: fmt, clippy, every test, and one cell of the
+# portability matrix. docs/portability.md says what this cell is and is not.
+#
+# The runner is deliberately the unprivileged cell: a distribution kernel, no
+# file capabilities, no GPU. The eBPF and per-cpu perf tests skip there, loudly,
+# as they are written to -- and a skip is not a pass, so the last step fails the
+# job on any skip whose reason is not one this cell is expected to have
+# (.github/expected-skips.txt).
+#
+# `make` is not used for the build, because its capability step runs
+# `sudo -n setcap`, and a hosted runner's sudo needs no password: the build
+# would grant the capabilities this cell exists to go without. The two C
+# fixtures `make` builds beside the tool are built by their own targets, which
+# grant nothing.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: "1"
+
+jobs:
+  suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # What the tests launch: a C compiler and <sys/sdt.h> for the USDT and
+      # vertical-case fixtures, python3 and node for the runtime workloads,
+      # iproute2 for the network scenarios. A skip because one of these is
+      # missing is the workflow's fault, and the gate refuses it.
+      - name: Workloads the tests launch
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends \
+            build-essential systemtap-sdt-dev python3 nodejs iproute2 util-linux jq
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build, without capabilities
+        run: |
+          cargo build --workspace
+          make vertical-server triage-fixture
+          if getcap target/debug/omn | grep -q cap_; then
+            echo "::error::target/debug/omn carries capabilities; this cell is the one without"
+            exit 1
+          fi
+
+      # The cell as the tool sees it, first, so a surprising skip can be read
+      # against the machine that produced it.
+      - name: This machine
+        run: |
+          uname -a
+          echo "perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid)"
+          echo "unprivileged_bpf_disabled $(cat /proc/sys/kernel/unprivileged_bpf_disabled)"
+          ls -l /sys/kernel/btf/vmlinux || true
+          ls -ld /sys/kernel/tracing || true
+          target/debug/omn list | tail -n 3
+
+      # One cell of the portability matrix, swept before the suite so the
+      # suite's own `tests/portability.rs` judges it.
+      - name: The matrix cell of this runner
+        run: |
+          OMN_MATRIX_CELL="ci-$(uname -r | cut -d- -f1)-nocaps" OMN_MATRIX_CONFIG=nocaps \
+            cargo test --test portability sweep_this_machine -- --ignored --exact --nocapture
+
+      - name: Suite
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast -- --nocapture 2>&1 | tee target/test.log
+
+      - name: Every skip is an expected one
+        if: always()
+        run: .github/scripts/skip-gate.sh target/test.log .github/expected-skips.txt
+
+      - name: Keep the cell and the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-cell-and-log
+          path: |
+            target/matrix/cells
+            target/test.log
+          if-no-files-found: warn
