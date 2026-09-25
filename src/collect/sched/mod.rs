@@ -34,7 +34,11 @@ use super::Factory;
 pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("sched.wakeup", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(wakeup::Prepare(resolved.request.mode)))
+            Ok(Box::new(wakeup::Prepare {
+                mode: resolved.request.mode,
+                // Applied per drained wakeup; see `wakeup::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("sched.offcpu", "bpf:raw_tp", |resolved| {
             Ok(Box::new(offcpu::Prepare {
@@ -43,6 +47,8 @@ pub fn factories() -> Vec<Factory> {
                 // machine-wide run meets every process; the emit layer keeps
                 // the table only when `stack` was asked for.
                 wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
+                // Applied per drained row; see `offcpu::Prepare`.
+                filter: resolved.request.filter.clone(),
             }))
         }),
         Factory::new("sched.runqlat", "bpf:raw_tp", |resolved| {
@@ -55,7 +61,11 @@ pub fn factories() -> Vec<Factory> {
             }))
         }),
         Factory::new("sched.migrations", "bpf:raw_tp", |resolved| {
-            Ok(Box::new(migrations::Prepare(resolved.request.mode)))
+            Ok(Box::new(migrations::Prepare {
+                mode: resolved.request.mode,
+                // Applied per drained row; see `migrations::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("sched.lock", "bpf:raw_tp", |resolved| {
             Ok(Box::new(lock::Prepare {

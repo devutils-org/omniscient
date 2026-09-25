@@ -39,7 +39,7 @@ pub const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(100);
 
 /// The loaded programs, whichever source they belong to.
 pub trait Rows {
-    /// The rows of the interval before the last one; with `last`, of both.
+    /// The rows counted since the last drain; `last` marks the end of the run.
     fn drain(&self, last: bool) -> Result<Drained, String>;
     /// Stamps left at the end, as `(in flight, orphaned)`.
     fn still_pending(&self) -> (usize, usize);
@@ -159,7 +159,7 @@ impl HistogramCollector {
             }
         };
         // The interval the rows were counted over, which the program knows:
-        // they were written one drain ago, not since the last one.
+        // from the last drain's flip to this one's.
         let window_ns = closed_ns.saturating_sub(opened_ns);
         if drain_losses.vanished > 0 {
             self.losses.undecoded += drain_losses.vanished;

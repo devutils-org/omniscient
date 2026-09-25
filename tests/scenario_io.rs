@@ -4479,3 +4479,234 @@ fn the_page_cache_sessions_say_what_their_headers_predict() {
         "the sequential file must come out ahead of its reads: the largest total was {rates}"
     );
 }
+
+// ============================================ the drain race, on a short tick
+
+/// Eight threads reading one cached page at a time as fast as they can for a
+/// given time, each counting its own reads; the sum is printed at the end.
+/// One page-aligned 4 KiB `pread` of a cached file is one
+/// `mm_filemap_get_pages` call over one page, so the program's own count is
+/// the number of lookups `io.pagecache` must find.
+const PAGE_READER_SOURCE: &str = r#"
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+#define THREADS 8
+#define PAGES 64
+
+static double run_for;
+static int fd;
+static unsigned long long reads[THREADS];
+
+static double now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void *reader(void *slot) {
+    unsigned long long *mine = slot;
+    char page[4096];
+    double until = now() + run_for;
+    unsigned long long at = (unsigned long long)(mine - reads);
+    while (now() < until) {
+        for (int i = 0; i < 256; i++) {
+            if (pread(fd, page, sizeof page, (off_t)((at++ % PAGES) * 4096)) != 4096) abort();
+        }
+        *mine += 256;
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    run_for = atof(argv[2]);
+    fd = open(argv[1], O_RDONLY);
+    if (fd < 0) return 2;
+    pthread_t threads[THREADS];
+    for (int i = 0; i < THREADS; i++) pthread_create(&threads[i], NULL, reader, &reads[i]);
+    unsigned long long total = 0;
+    for (int i = 0; i < THREADS; i++) {
+        pthread_join(threads[i], NULL);
+        total += reads[i];
+    }
+    fprintf(stderr, "omn-reads calls=%llu\n", total);
+    return 0;
+}
+"#;
+
+/// Builds a C fixture beside the scratch files, renamed into place so a
+/// half-written binary is never at the path a test launches.
+fn build_c(name: &str, source: &str) -> Result<PathBuf, String> {
+    let path = scratch(name);
+    let dir = path.parent().expect("a directory").to_owned();
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let source_path = scratch(&format!("{name}.c"));
+    std::fs::write(&source_path, source).map_err(|error| error.to_string())?;
+    let partial = scratch(&format!("{name}.{}", std::process::id()));
+    let built = Command::new("cc")
+        .args(["-O1", "-pthread", "-o"])
+        .arg(&partial)
+        .arg(&source_path)
+        .output()
+        .map_err(|error| format!("no C compiler (`cc`) to build the fixture with: {error}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "the `{name}` fixture did not build:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        ));
+    }
+    std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+/// Every lookup a program made is in a row or in a counted loss, over several
+/// runs on the collector's own 100 ms tick -- the drain never takes a row out
+/// from under the increment about to land in it.
+///
+/// The race stream K measured on `proc.syscall` (seventeen to twenty-five of
+/// twenty million calls gone per run, `docs/families/drains.md`) was in
+/// `io_pagecache.rs` too, until it moved onto `map::Rows`. Eight threads at
+/// millions of lookups a second into eight rows, drained fifteen times a run,
+/// is its shape. Exact, not close: the program's count is its own, the rows are
+/// narrowed to its file, and a lookup that is neither in a row nor in `losses`
+/// is the defect.
+#[test]
+fn every_lookup_a_program_made_is_in_a_row_or_a_counted_loss_on_a_short_tick() {
+    const RUNS: usize = 3;
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let fixture = match build_c("page-reader", PAGE_READER_SOURCE) {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let file = scratch("page-reader.data");
+    std::fs::write(&file, vec![7u8; 64 * 4096]).expect("the file the fixture reads");
+    // Read once here so every page is cached before the run starts.
+    let _ = std::fs::read(&file).expect("the file reads back");
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&file).expect("the file").ino()
+    };
+    let mut seen = Vec::new();
+    for run in 0..RUNS {
+        let output = run_on_launch(
+            "page-reader",
+            &[("cache", "io.pagecache", "trace", "raw")],
+            &[
+                fixture.to_str().expect("a path"),
+                file.to_str().expect("a path"),
+                "1.5",
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let made: u64 = stderr(&output)
+            .lines()
+            .find_map(|line| line.strip_prefix("omn-reads calls="))
+            .and_then(|count| count.trim().parse().ok())
+            .unwrap_or_else(|| panic!("the fixture says its reads:\n{}", stderr(&output)));
+        let document = json(&output);
+        let result = result(&document, "cache");
+        let counted: u64 = raw_with_keys(result)
+            .iter()
+            .filter(|(_, event)| attr_u64(event, "ino") == ino)
+            .map(|(_, event)| attr_u64(event, "lookup_calls"))
+            .sum();
+        let losses = losses(result);
+        let lost: u64 = ["dropped", "undecoded", "throttled"]
+            .iter()
+            .filter_map(|field| losses[*field].as_u64())
+            .sum();
+        seen.push(format!(
+            "run {run}: made {made}, counted {counted}, lost {lost}"
+        ));
+        assert!(
+            counted <= made,
+            "{counted} lookups counted for {made} made -- an increment landed in another row's \
+             element: {seen:?} {losses}"
+        );
+        assert!(
+            counted + lost >= made,
+            "the program made {made} lookups, {counted} are in rows and {lost} are counted as \
+             lost: {} vanished without a trace: {seen:?} {losses}",
+            made - counted - lost
+        );
+    }
+    eprintln!("{}", seen.join("\n"));
+}
+
+/// The same count through fentry: every `pread64` the page reader made is in
+/// an `io.syscall` row or a counted loss, over several runs on the
+/// collector's own tick -- including the calls closed between the last drain's
+/// flip and the end of the run, which the old last drain took after sleeping a
+/// millisecond as its grace period. It drains through `membarrier` now.
+#[test]
+fn every_call_through_fentry_is_in_a_row_or_a_counted_loss_to_the_last_drain() {
+    const RUNS: usize = 3;
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let fixture = match build_c("page-reader", PAGE_READER_SOURCE) {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let file = scratch("page-reader-fentry.data");
+    std::fs::write(&file, vec![7u8; 64 * 4096]).expect("the file the fixture reads");
+    let mut seen = Vec::new();
+    for run in 0..RUNS {
+        let output = run_on_launch(
+            "page-reader-fentry",
+            &[("calls", "io.syscall", "trace", "raw")],
+            &[
+                fixture.to_str().expect("a path"),
+                file.to_str().expect("a path"),
+                "1.0",
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let made: u64 = stderr(&output)
+            .lines()
+            .find_map(|line| line.strip_prefix("omn-reads calls="))
+            .and_then(|count| count.trim().parse().ok())
+            .unwrap_or_else(|| panic!("the fixture says its reads:\n{}", stderr(&output)));
+        let document = json(&output);
+        let result = result(&document, "calls");
+        let counted: u64 = raw_with_keys(result)
+            .iter()
+            .filter(|(_, event)| attr_text(event, "syscall") == "pread64")
+            .map(|(_, event)| attr_u64(event, "count"))
+            .sum();
+        let losses = losses(result);
+        let lost: u64 = ["dropped", "undecoded", "throttled"]
+            .iter()
+            .filter_map(|field| losses[*field].as_u64())
+            .sum();
+        seen.push(format!(
+            "run {run}: made {made}, counted {counted}, lost {lost}"
+        ));
+        assert!(
+            counted <= made,
+            "{counted} calls counted for {made} made: {seen:?} {losses}"
+        );
+        assert!(
+            counted + lost >= made,
+            "the program made {made} calls, {counted} are in rows and {lost} are counted as \
+             lost: {} vanished without a trace: {seen:?} {losses}",
+            made - counted - lost
+        );
+    }
+    eprintln!("{}", seen.join("\n"));
+}

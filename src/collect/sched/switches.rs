@@ -16,74 +16,117 @@ use perf_event_open_sys::bindings as perf;
 use crate::collect::task::{Comms, Tgids};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Record, SampledEvent, Scope};
+use crate::perf::{Callchain, Record, SampleSpec, ThreadSampler};
 use crate::request::{Mode, Target};
 
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 
-/// Switches are far rarer than page faults, so a smaller ring is enough.
+/// Switches are far rarer than page faults, so a smaller ring is enough. Per
+/// cpu: every task followed on a cpu shares that cpu's ring.
 const RING_PAGES: usize = 64;
+
+/// What the events are opened on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Followed {
+    /// Every thread the process has when the run starts, each inherited into
+    /// what it starts afterwards, and the samples kept for the process's own
+    /// threads: an inherited event also follows a child process, and the
+    /// family's other sources observe the target's process, not its tree.
+    Process(i32),
+    /// The one task a `--tid` target named (0: the calling thread).
+    Task(i32),
+    /// Every task on these cpus: `pid = -1`, one event per cpu.
+    Cpus(Vec<u32>),
+}
 
 pub struct Prepare(pub Mode);
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
-        let pid = target.first_pid().ok_or_else(|| {
-            format!(
-                "counting the switches of a whole machine needs per-cpu events and the \
-                 privileges for them; a {} target names no process to follow",
-                target.kind()
-            )
-        })?;
-        Ok(Box::new(SwitchCollector::new(pid, self.0).following(
+        let followed = match target {
+            Target::System => Followed::Cpus(
+                crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot list the online cpus: {error}"))?,
+            ),
+            Target::Cpu(set) => Followed::Cpus(set.cpus().to_vec()),
             // A `--tid` target is the one task that was asked for; anything
             // else names a process, which is a task and whatever it starts.
-            !matches!(target, Target::Tid(_)),
-        )))
+            Target::Tid(tids) => Followed::Task(tids[0]),
+            other => Followed::Process(other.first_pid().ok_or_else(|| {
+                format!(
+                    "a switch event follows tasks or cpus, and a {} target names neither; \
+                     name its processes with --pid, or watch the machine with --system",
+                    other.kind()
+                )
+            })?),
+        };
+        let mut collector = SwitchCollector::new(0, self.0);
+        collector.followed = followed;
+        Ok(Box::new(collector))
     }
 }
 
 pub struct SwitchCollector {
     id: CollectorId,
-    pid: i32,
+    followed: Followed,
     mode: Mode,
-    event: Option<SampledEvent>,
+    event: Option<ThreadSampler>,
     /// `comm` and `pid` are declared filter fields on this source, and the
-    /// samples name a thread: a per-task perf event opened over a process is
-    /// still one task, but the tid on the sample is what the attributes have
-    /// to be about.
+    /// samples name a thread, so the attributes are looked up per thread.
     comms: Comms,
     tgids: Tgids,
     losses: Losses,
-    /// Whether the target names more than the one task this event can follow.
-    more_than_one_task: bool,
     /// The tasks samples actually arrived from.
     sampled_tasks: BTreeSet<i32>,
-    /// What the open event does and does not see, read at `start` and kept:
-    /// `stop` closes the event and the notes are gathered afterwards.
-    disclosure: Option<&'static str>,
+    /// Threads an event was opened on, and threads that appeared while they
+    /// were being opened, read at `start` and kept: `stop` closes the events
+    /// and the notes are gathered afterwards.
+    opened: (usize, usize),
+    /// Switches of tasks outside the target that the inherited events
+    /// followed anyway -- a child process, or a thread of the named task --
+    /// and the tasks they came from.
+    outside: u64,
+    outside_tasks: BTreeSet<i32>,
 }
 
 impl SwitchCollector {
+    /// A collector over the process `pid` (0: the calling thread).
     pub fn new(pid: i32, mode: Mode) -> Self {
         Self {
             id: CollectorId::new("sched.switches/pmu:sw"),
-            pid,
+            followed: if pid == 0 {
+                Followed::Task(0)
+            } else {
+                Followed::Process(pid)
+            },
             mode,
             event: None,
             comms: Comms::new(),
             tgids: Tgids::new(),
             losses: Losses::default(),
-            more_than_one_task: false,
             sampled_tasks: BTreeSet::new(),
-            disclosure: None,
+            opened: (0, 0),
+            outside: 0,
+            outside_tasks: BTreeSet::new(),
         }
     }
 
-    /// Records whether the target is more than the task this event follows.
-    fn following(mut self, more_than_one_task: bool) -> Self {
-        self.more_than_one_task = more_than_one_task;
-        self
+    /// Whether a sample is of a task the target names.
+    fn keeps(followed: &Followed, pid: u32, tid: u32) -> bool {
+        match followed {
+            Followed::Process(target) => pid as i32 == *target,
+            Followed::Task(0) | Followed::Cpus(_) => true,
+            Followed::Task(target) => tid as i32 == *target,
+        }
+    }
+
+    fn open(&self, spec: &SampleSpec) -> std::io::Result<ThreadSampler> {
+        match &self.followed {
+            Followed::Process(pid) => ThreadSampler::open_process(spec, *pid, RING_PAGES),
+            Followed::Task(tid) => crate::perf::online_cpus()
+                .and_then(|cpus| ThreadSampler::open(spec, &[*tid], &cpus, RING_PAGES)),
+            Followed::Cpus(cpus) => ThreadSampler::open(spec, &[-1], cpus, RING_PAGES),
+        }
     }
 
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
@@ -94,11 +137,17 @@ impl SwitchCollector {
         let comms = &mut self.comms;
         let tgids = &mut self.tgids;
         let seen = &mut self.sampled_tasks;
+        let followed = &self.followed;
+        let (outside, outside_tasks) = (&mut self.outside, &mut self.outside_tasks);
         let mut index = seq;
         let mut dropped = 0u64;
         let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
+            Record::Sample(sample) if !Self::keeps(followed, sample.pid, sample.tid) => {
+                *outside += 1;
+                outside_tasks.insert(sample.tid as i32);
+            }
             Record::Sample(sample) => {
                 seen.insert(sample.tid as i32);
                 events.push(Event {
@@ -116,11 +165,21 @@ impl SwitchCollector {
                             Attr::uint("ip", sample.ip),
                             Attr::uint("tid", u64::from(sample.tid)),
                         ];
-                        if let Some(pid) = tgids.get(tid) {
-                            attrs.push(Attr::uint("pid", pid as u64));
+                        // The sample carries its process; a lookup in /proc
+                        // is the fallback for a kernel that wrote none.
+                        match sample.pid {
+                            0 if tid != 0 => {
+                                if let Some(pid) = tgids.get(tid) {
+                                    attrs.push(Attr::uint("pid", pid as u64));
+                                }
+                            }
+                            pid => attrs.push(Attr::uint("pid", u64::from(pid))),
                         }
                         if let Some(comm) = comms.get(tid) {
                             attrs.push(Attr::text("comm", comm));
+                        }
+                        if let Some(cpu) = sample.cpu {
+                            attrs.push(Attr::uint("cpu", u64::from(cpu)));
                         }
                         attrs
                     },
@@ -184,21 +243,25 @@ impl Collector for SwitchCollector {
             other => return Err(format!("`{other}` mode does not observe context switches")),
         };
 
-        let event = SampledEvent::open_software(
+        let spec = SampleSpec::software(
             perf::PERF_COUNT_SW_CONTEXT_SWITCHES as u64,
             period,
-            Scope::Process(self.pid),
-            RING_PAGES,
-        )
-        .map_err(|error| {
+            Callchain::Off,
+        );
+        let event = self.open(&spec).map_err(|error| {
+            let what = match &self.followed {
+                Followed::Process(pid) => format!("process {pid}"),
+                Followed::Task(tid) => format!("task {tid}"),
+                Followed::Cpus(cpus) => format!("{} cpus", cpus.len()),
+            };
             format!(
-                "perf_event_open for context switches on pid {} was refused ({error}); \
-                 check /proc/sys/kernel/perf_event_paranoid",
-                self.pid
+                "perf_event_open for context switches on {what} was refused ({error}); \
+                 check /proc/sys/kernel/perf_event_paranoid, and for a cpu or the machine, \
+                 CAP_PERFMON"
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
-        self.disclosure = Some(event.sampled_threads());
+        self.opened = (event.threads().len(), event.unlisted());
         self.event = Some(event);
         Ok(())
     }
@@ -230,20 +293,48 @@ impl Collector for SwitchCollector {
         self.losses.clone()
     }
 
-    /// The same limit `cpu.profile` states, for the same reason: this event is
-    /// not inherited either, so a process whose switching happens in its
-    /// threads or its children is counted as the one task that was opened on.
+    /// What the events followed, when it is more than a launched program's
+    /// one thread, and what they may have missed -- `mem.faults`'s wording,
+    /// over the same `ThreadSampler`.
     fn notes(&self) -> Vec<String> {
-        let Some(limit) = self.disclosure.filter(|_| self.more_than_one_task) else {
-            return Vec::new();
+        let mut notes = Vec::new();
+        if self.outside > 0 {
+            notes.push(format!(
+                "{} switches of {} task{} outside the target -- a process it started, or \
+                 another thread of a named task -- were followed by the inherited events and \
+                 left out: this family's sources observe the target's process, its threads \
+                 included, and not the processes it starts",
+                self.outside,
+                self.outside_tasks.len(),
+                if self.outside_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            ));
+        }
+        let Followed::Process(pid) = self.followed else {
+            return notes;
         };
+        let (threads, unlisted) = self.opened;
         let tasks = self.sampled_tasks.len();
-        vec![format!(
-            "a sampling event is not inherited, so these switches are {limit}; they came from \
-             {tasks} task{}, and switches of a thread or a child process the target started are \
-             in no number here",
-            if tasks == 1 { "" } else { "s" }
-        )]
+        if threads > 1 {
+            notes.push(format!(
+                "process {pid} was already running {threads} threads when counting began, so \
+                 each has an event of its own and each follows what it starts; switches came \
+                 from {tasks} task{}",
+                if tasks == 1 { "" } else { "s" }
+            ));
+        }
+        if unlisted > 0 {
+            notes.push(format!(
+                "{unlisted} thread{} of process {pid} appeared while the events were being \
+                 opened; each is counted if the thread that started it already had its event, \
+                 and not otherwise, and which it was cannot be told from here",
+                if unlisted == 1 { "" } else { "s" },
+            ));
+        }
+        notes
     }
 }
 
@@ -346,16 +437,22 @@ mod tests {
         }
     }
 
-    /// The perf event follows a task. A target that names none is refused with
-    /// the reason and the target's own name, rather than being served a
-    /// machine-wide number that would read as this process's.
+    /// The events follow tasks or cpus. A target that names neither is
+    /// refused with the reason and the target's own name; the machine and a
+    /// cpu set are served, one event per cpu.
     #[test]
-    fn a_target_without_a_process_is_refused_by_name() {
-        let Err(error) = Box::new(Prepare(Mode::Trace)).attach(&Target::System) else {
-            panic!("a system target names no process for a per-task event");
+    fn a_target_without_a_task_or_a_cpu_is_refused_by_name() {
+        let Err(error) = Box::new(Prepare(Mode::Trace)).attach(&Target::Iface("lo".into())) else {
+            panic!("an interface names no task and no cpu");
         };
-        assert!(error.contains("system"), "{error}");
-        assert!(error.contains("names no process"), "{error}");
+        assert!(error.contains("iface"), "{error}");
+        assert!(error.contains("--system"), "{error}");
+        for target in [
+            Target::System,
+            Target::Cpu("0".parse().expect("a cpu list")),
+        ] {
+            assert!(Box::new(Prepare(Mode::Trace)).attach(&target).is_ok());
+        }
     }
 
     #[test]

@@ -344,14 +344,19 @@ const MEMBARRIER_CMD_GLOBAL: libc::c_long = 1;
 /// Whether this kernel will wait for a grace period on request. A query, so
 /// that a machine that cannot is refused when the program loads rather than
 /// failing on its first drain.
-fn grace_periods_offered() -> bool {
+pub(crate) fn grace_periods_offered() -> bool {
     let offered = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_QUERY, 0, 0) };
     offered >= 0 && offered & MEMBARRIER_CMD_GLOBAL != 0
 }
 
 /// Returns once every RCU read-side section that had begun has ended -- which
 /// is every eBPF program that was running on any cpu when it was called.
-fn grace_period() -> io::Result<()> {
+///
+/// Public for the two-map drains that keep their own word rather than a
+/// [`Rows`] slot (`fentry::HistogramProgram`), and for the two-phase drain
+/// stream K proposed, where a round retires every drained source first and
+/// waits once.
+pub fn grace_period() -> io::Result<()> {
     let result = unsafe { libc::syscall(libc::SYS_membarrier, MEMBARRIER_CMD_GLOBAL, 0, 0) };
     if result < 0 {
         return Err(io::Error::last_os_error());

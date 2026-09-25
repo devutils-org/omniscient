@@ -1153,12 +1153,23 @@ pub struct HistogramSpec<'a> {
 /// next. Measured: a hundred thousand reads, 55192 counted, 44807 dropped, one
 /// gone without a trace.
 ///
-/// So a one-word array says which map is being written, and a drain empties
-/// the other one and then flips the word. A map is only ever drained after it
-/// has been out of use for a whole interval, which is a hundred thousand times
-/// longer than the few instructions between an exit half reading the word and
-/// writing the row. The price is that a row reaches userspace one interval
-/// late, and the event says which interval it belongs to.
+/// So a one-word array says which map is being written. A drain points the
+/// word at the other map, which is empty, **waits for a grace period**, and
+/// then empties the map it retired: every exit half runs inside an RCU
+/// read-side section (the trampoline takes `rcu_read_lock()` around it), so
+/// once `membarrier(MEMBARRIER_CMD_GLOBAL)` -- `synchronize_rcu()` from
+/// userspace -- has returned, no exit half that read the old word is still
+/// running, and the retired map is written by no one. `map::Rows` is the same
+/// scheme with the word made a map-of-maps; see it for why the kernel's own
+/// map update is not the grace period.
+///
+/// Until the twelfth wave the drain emptied the map retired *a tick ago* and
+/// the last drain slept a millisecond: a bet that an exit half runs for
+/// microseconds, which a preemptible kernel does not keep -- stream K saw
+/// thousands of recursion misses on `sys_exit` under eight busy threads, each
+/// a run preempted mid-program. The wait costs 5 to 18 ms per drain on this
+/// machine, in the drain's thread; in exchange no row is a tick late and the
+/// last drain is no special case.
 pub struct HistogramProgram {
     pending: Hash,
     rows: [Hash; 2],
@@ -1166,9 +1177,8 @@ pub struct HistogramProgram {
     drops: Counters,
     /// Which map the programs are writing now.
     writing: std::cell::Cell<usize>,
-    /// When the current map started being written, and when the other one did.
+    /// When the current map started being written.
     flipped_at: std::cell::Cell<u64>,
-    previous_flip: std::cell::Cell<u64>,
     links: Vec<Link>,
 }
 
@@ -1180,8 +1190,7 @@ pub struct DrainLosses {
 }
 
 /// One drain: the rows, what the drain itself lost, and the interval the rows
-/// were counted over -- which is not the interval since the last drain, because
-/// the rows drained now were written during the one before it.
+/// were counted over -- from the drain before this one to this one's flip.
 #[derive(Debug, Default)]
 pub struct Drained {
     pub rows: Vec<Row>,
@@ -1230,6 +1239,14 @@ fn write_word(map: &OwnedFd, value: u32) -> io::Result<()> {
 
 impl HistogramProgram {
     pub fn load(spec: HistogramSpec<'_>) -> Result<Self, String> {
+        if !crate::bpf::map::grace_periods_offered() {
+            return Err(
+                "this kernel offers no way to wait for a grace period from userspace \
+                 (`membarrier(MEMBARRIER_CMD_GLOBAL)` is withdrawn under `nohz_full`), and \
+                 without one a drain would race the programs writing the map it reads"
+                    .to_owned(),
+            );
+        }
         let pending = Hash::create(
             PEND_KEY_BYTES,
             PEND_VALUE_BYTES,
@@ -1310,40 +1327,34 @@ impl HistogramProgram {
             drops,
             writing: std::cell::Cell::new(0),
             flipped_at: std::cell::Cell::new(now),
-            previous_flip: std::cell::Cell::new(now),
             links,
         })
     }
 
-    /// Takes the rows of the interval before the last one, and starts a new
+    /// Takes every row counted since the last drain, and starts a new
     /// interval.
     ///
-    /// With `last`, it is the end of the run: the programs are pointed away
-    /// from the map being written, given a moment to finish the calls they
-    /// were closing, and both maps are emptied.
-    pub fn drain(&self, last: bool) -> Result<Drained, String> {
-        let idle = 1 - self.writing.get();
-        let mut drained = Drained {
-            opened_ns: self.previous_flip.get(),
-            closed_ns: self.flipped_at.get(),
-            ..Default::default()
-        };
-        self.take(idle, &mut drained)?;
-        // The idle map is empty now and becomes the one written.
+    /// Every drain is whole: the programs are pointed at the empty map, a
+    /// grace period is waited for, and only then is the retired map read -- so
+    /// a call is in this drain or in the next one, never lost between them and
+    /// never a tick late. `last` is kept for the callers, and asks for nothing
+    /// more: the last drain is an ordinary one.
+    pub fn drain(&self, _last: bool) -> Result<Drained, String> {
+        let retired = self.writing.get();
+        let idle = 1 - retired;
         write_word(&self.generation, idle as u32)
             .map_err(|error| format!("cannot flip the histogram's generation: {error}"))?;
         let now = crate::clock::monotonic_ns();
-        self.previous_flip.set(self.flipped_at.get());
+        crate::bpf::map::grace_period()
+            .map_err(|error| format!("cannot wait for the histogram's grace period: {error}"))?;
+        let mut drained = Drained {
+            opened_ns: self.flipped_at.get(),
+            closed_ns: now,
+            ..Default::default()
+        };
         self.flipped_at.set(now);
         self.writing.set(idle);
-        if last {
-            // A call that read the generation before the flip may still be
-            // adding to the map just retired. A tracing program runs for
-            // microseconds; a millisecond is a thousand of them.
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            self.take(1 - idle, &mut drained)?;
-            drained.closed_ns = now;
-        }
+        self.take(retired, &mut drained)?;
         Ok(drained)
     }
 
