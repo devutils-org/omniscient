@@ -76,6 +76,9 @@ const BPF_EXIT: u8 = 0x90;
 /// `src_reg` value that marks the 64-bit immediate as a map file descriptor,
 /// which the kernel replaces with the map's address when the program loads.
 const BPF_PSEUDO_MAP_FD: u8 = 1;
+/// The source register of a 64-bit load the kernel resolves to the address of
+/// the kernel variable whose BTF id is in the immediate.
+pub const BPF_PSEUDO_BTF_ID: u8 = 3;
 
 /// The helpers this layer calls, by their number in `bpf_func_id`.
 pub mod helper {
@@ -118,6 +121,9 @@ pub mod helper {
     /// `bpf_get_current_task_btf()`: the current task as a pointer whose type
     /// the verifier knows, which is what the storage helpers take.
     pub const GET_CURRENT_TASK_BTF: i32 = 158;
+    /// `bpf_this_cpu_ptr(percpu_ptr)`: this cpu's copy of a per-cpu kernel
+    /// variable, whose address a [`Insn::load_btf_id`] put in `r1`.
+    pub const THIS_CPU_PTR: i32 = 154;
 }
 
 /// The frame pointer. Read-only, and the only way to address the stack.
@@ -277,6 +283,22 @@ impl Insn {
     pub fn load_map_fd(dst: u8, map_fd: i32) -> [Self; 2] {
         [
             Self::new(BPF_LD | BPF_DW | BPF_IMM, dst, BPF_PSEUDO_MAP_FD, 0, map_fd),
+            Self::default(),
+        ]
+    }
+
+    /// `dst = &<kernel variable>`, the variable named by its id in vmlinux's
+    /// BTF: the kernel resolves it at load, so the program carries no address.
+    /// The second slot's immediate is the BTF object's fd, and 0 is vmlinux.
+    pub fn load_btf_id(dst: u8, btf_id: u32) -> [Self; 2] {
+        [
+            Self::new(
+                BPF_LD | BPF_DW | BPF_IMM,
+                dst,
+                BPF_PSEUDO_BTF_ID,
+                0,
+                btf_id as i32,
+            ),
             Self::default(),
         ]
     }
@@ -609,6 +631,15 @@ mod tests {
             (0xffff_fffe, 0xffff_ffff)
         );
         assert_eq!(high.code, 0, "the second slot carries only the high half");
+
+        let [load, vmlinux] = Insn::load_btf_id(1, 4242);
+        assert_eq!(load.code, 0x18, "a 64-bit immediate load");
+        assert_eq!(load.regs, 1 | (3 << 4), "into r1, from BPF_PSEUDO_BTF_ID");
+        assert_eq!(
+            (load.imm, vmlinux.imm),
+            (4242, 0),
+            "the id, then vmlinux's fd"
+        );
     }
 
     #[test]
