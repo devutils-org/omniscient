@@ -208,8 +208,9 @@ has no viable backend on this machine ...)`. On a machine that serves
   holds the JSON's tallies to the text footer. `mcp/src/binary.rs::parse_sweep`
   can go.
 - **`--duration` over a recording** (the coordinator's forwarded request
-  (b): stream M's `omn-mcp` passes `--duration` to `run_session`): `--duration` on `-f` replaces the recording's longest
-  duration, as it replaces every request's, and the recording's bounds are
+  (b): stream M's `omn-mcp` passes `--duration` to `run_session`):
+  `--duration` on `-f` replaces the recording's longest duration, as it
+  replaces every request's, and the recording's bounds are
   checked again against it -- a `retain` the new duration no longer exceeds is
   refused, exit 2, before anything runs. So a session "until a predicate fires"
   given `--duration 10s` records for at most ten seconds, still ending earlier
