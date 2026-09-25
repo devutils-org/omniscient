@@ -7185,3 +7185,18 @@ The recipe is in `docs/portability.md`, "Running it". `.github/workflows/ci.yml`
 has never run: the first push will show the runner's kernel, whether its skips
 all match `.github/expected-skips.txt`, and whether its cell meets a defect
 `KNOWN_DEFECTS` does not record for a `ci-*` cell. Each is a one-line change.
+
+---
+
+## The twelfth wave, from the coordinator
+
+### For the flaky tally: two seen at the eleventh wave's merge, passing alone
+
+Seen in the merge's `cargo test --workspace --no-fail-fast`, with three stream
+agents building beside it, and each passed alone at once:
+`scenario_sched::one_known_number_of_round_trips_is_found_by_four_sources`
+(2643 switches out of the cpu for 2000 round trips -- every other switch the
+load put on the target's threads) and
+`triage::a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on`
+(the escalation named the lock layer after the shed). The first is stream D's
+file this wave, the second stream R's; both were told.
