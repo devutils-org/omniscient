@@ -7267,6 +7267,14 @@ And one more, in `make check` after stream M's merge, passing alone at once:
 (`asked about the held one, once`: the held layer was never weighed inside the
 test's window -- the escalation's budget check, stream R's file).
 
+And four more, in one `--no-fail-fast` run with three streams running their
+own suites beside it, each passing alone at once:
+`cross_compute::every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it`,
+`scenario_sched::perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides`,
+`cross_memory::the_resident_size_is_live_plus_retained_plus_a_residue_that_is_printed`
+and `vertical::the_tool_decomposes_each_request_against_its_own_life` (the last
+already named in `docs/scenarios/vertical.md`).
+
 ### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
 
 `sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57

@@ -53,9 +53,11 @@ const BPF_X: u8 = 0x08;
 /// ALU operations.
 const BPF_ADD: u8 = 0x00;
 const BPF_SUB: u8 = 0x10;
+const BPF_OR: u8 = 0x40;
 const BPF_AND: u8 = 0x50;
 const BPF_LSH: u8 = 0x60;
 const BPF_RSH: u8 = 0x70;
+const BPF_ARSH: u8 = 0xc0;
 const BPF_MOV: u8 = 0xb0;
 
 /// Jump operations.
@@ -177,6 +179,16 @@ impl Insn {
         Self::new(BPF_ALU64 | BPF_RSH | BPF_K, dst, 0, 0, imm)
     }
 
+    /// `dst >>= imm`, keeping the sign.
+    pub fn arsh64_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU64 | BPF_ARSH | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst |= imm`
+    pub fn or64_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU64 | BPF_OR | BPF_K, dst, 0, 0, imm)
+    }
+
     /// `dst = *(size *)(src + off)`
     pub fn ldx(size: u8, dst: u8, src: u8, off: i16) -> Self {
         Self::new(BPF_LDX | size | BPF_MEM, dst, src, off, 0)
@@ -266,6 +278,15 @@ impl Insn {
         [
             Self::new(BPF_LD | BPF_DW | BPF_IMM, dst, BPF_PSEUDO_MAP_FD, 0, map_fd),
             Self::default(),
+        ]
+    }
+
+    /// `dst = value`, a full 64-bit constant, in the two slots the encoding
+    /// takes: the low half in the first, the high half in the second.
+    pub fn ld_imm64(dst: u8, value: i64) -> [Self; 2] {
+        [
+            Self::new(BPF_LD | BPF_DW | BPF_IMM, dst, 0, 0, value as i32),
+            Self::new(0, 0, 0, 0, (value >> 32) as i32),
         ]
     }
 }
@@ -564,6 +585,20 @@ pub fn bucket_low_ns(bucket: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The opcodes are the kernel's (`include/uapi/linux/bpf_common.h` and
+    /// `bpf.h`), written out as the numbers the verifier reads rather than
+    /// rebuilt from this file's own constants.
+    #[test]
+    fn the_shared_alu_encodings_are_the_kernels_numbers() {
+        assert_eq!(Insn::or64_imm(3, 0x10).code, 0x47, "BPF_ALU64 | BPF_OR | BPF_K");
+        assert_eq!(Insn::arsh64_imm(3, 8).code, 0xc7, "BPF_ALU64 | BPF_ARSH | BPF_K");
+        let [low, high] = Insn::ld_imm64(2, -2);
+        assert_eq!(low.code, 0x18, "BPF_LD | BPF_DW | BPF_IMM");
+        assert_eq!(low.regs, 2, "the destination, and no pseudo source");
+        assert_eq!((low.imm as u32, high.imm as u32), (0xffff_fffe, 0xffff_ffff));
+        assert_eq!(high.code, 0, "the second slot carries only the high half");
+    }
 
     #[test]
     fn registers_pack_into_one_byte() {
