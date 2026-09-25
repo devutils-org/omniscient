@@ -7204,3 +7204,60 @@ file this wave, the second stream R's; both were told.
 And one more, seen by the lossy-profile fix's full run under the same load and
 passing alone: `scenario_net::a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone`
 (stream D's file this wave).
+
+---
+
+## Needs from another stream — the twelfth wave, stream M (a model reads it)
+
+`omn-mcp` (`mcp/`, `docs/mcp.md`) probes nothing itself: a probe answers for
+the process that asks, and the same library linked into the server, without
+`CAP_BPF` and `CAP_PERFMON` and without the shim beside it, answers a sweep
+forty-two sources worse on the development machine (52 usable against 93) --
+silently. So it asks the
+`omn` binary. Two of the things it asks come back only as text or only as a
+private function, and each is worked around under a check that makes a drift
+loud; neither blocks the stream.
+
+### To stream R, for `src/main.rs`: `omn list --format json` carries the sweep
+
+The JSON listing is the catalog without the `HERE` column, so the one
+machine-readable projection of the capability sweep does not exist.
+`omn-mcp` reads the text table meanwhile, strictly (header columns, every row
+a catalog id in catalog order, `yes`/`?`/`no` only, tallies equal to the
+footer; anything else refused), in `mcp/src/binary.rs::parse_sweep`. Wanted,
+in the JSON branch of `list`:
+
+```rust
+#[derive(Serialize)]
+struct Listed<'a> {
+    #[serde(flatten)]
+    entry: &'a Entry,
+    /// `resolve::availability(entry, &capabilities)`, which already derives
+    /// `Serialize` as {"availability": "ready"|"unverified"|"unavailable", "backend": id}.
+    here: resolve::Availability,
+    /// Per backend, in chain order: `resolve::probe_all(capabilities, backend, None)`.
+    probes: Vec<(String, Vec<resolve::Requirement>)>,
+}
+```
+
+(`probe_all` is private to `src/resolve.rs`, which is V's: it would need `pub`.)
+Once it lands, `parse_sweep` is deleted and the test
+`the_sweep_is_the_one_the_binary_that_runs_gives` keeps checking the totals.
+
+### To stream V, for `src/catalog.rs`: the worst case of a cost band, in one place
+
+`worst_case_percent(Cost) -> f64` is private to `src/main.rs`, and
+`plan_session` states the band's worst case beside the backend it would
+select, so `mcp/src/session.rs::band` holds a second copy of the four numbers.
+Wanted: `impl Cost { pub fn worst_case_percent(self) -> f64 }` in
+`src/catalog.rs`, which `main.rs` (R) and `omn-mcp` then both call.
+
+### To nobody (unowned `src/join.rs`): what an evidence level means, in one place
+
+`mcp/src/evidence.rs` says beside every `evidence` field what the level
+establishes and what it does not -- the reason `IDENTITY` and `TEMPORAL` do
+not read alike to a model. The sentences come from `join.rs`'s doc comments,
+and the match on `Evidence` is exhaustive, so a new level does not compile in
+`omn-mcp` until it is described. Wanted when someone owns `join.rs`:
+`impl Evidence { pub fn establishes(self) -> &'static str; pub fn does_not_establish(self) -> &'static str }`,
+which the text renderer could print too.

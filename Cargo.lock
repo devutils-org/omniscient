@@ -195,6 +195,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omn-mcp"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "omn",
+ "serde_json",
+]
+
+[[package]]
 name = "omn-preload"
 version = "0.1.0"
 dependencies = [

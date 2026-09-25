@@ -1,0 +1,18 @@
+[package]
+name = "omn-mcp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "An MCP server over what omn already writes: the catalog, a run's resolved file and results, the capability sweep"
+license = "Apache-2.0"
+
+[[bin]]
+name = "omn-mcp"
+path = "src/main.rs"
+
+# Only what the workspace already carries. JSON-RPC over stdio is a line of
+# JSON in and a line of JSON out, and `serde_json` is enough for that.
+[dependencies]
+omn = { path = ".." }
+libc = "0.2"
+serde_json = "1"
