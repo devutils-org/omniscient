@@ -7185,3 +7185,84 @@ The recipe is in `docs/portability.md`, "Running it". `.github/workflows/ci.yml`
 has never run: the first push will show the runner's kernel, whether its skips
 all match `.github/expected-skips.txt`, and whether its cell meets a defect
 `KNOWN_DEFECTS` does not record for a `ci-*` cell. Each is a one-line change.
+
+---
+
+## Needs from another stream — the twelfth wave, stream D (the kernel's attributions and drains)
+
+Stream D's deliverable is `docs/families/kernel.md`. Finding 48 is closed in
+`src/bpf/wakeup.rs`; the three drains stream K filed are on `map::Rows`;
+`fentry`'s histograms wait for a grace period; `sched.switches` follows
+threads and serves the machine; stream S's filters run in `sched.wakeup`,
+`sched.offcpu` and `sched.migrations`. What it needs from files it does not
+own:
+
+### To stream V (`src/bpf/btf.rs`): the id of a variable
+
+`wakeup.rs` loads `__preempt_count` (or `pcpu_hot`) by its BTF id with
+`BPF_PSEUDO_BTF_ID`, and `Btf` answers only whether a name exists. The walk
+over the type section is repeated in `wakeup.rs::var_id` until this exists:
+
+```rust
+/// The type id of the `VAR` named `name`, for a `BPF_PSEUDO_BTF_ID` load.
+pub fn var_id(&self, name: &str) -> Option<u32>;   // by_name's index is the id
+```
+
+`PreemptCount::locate` then calls it and the local walk is deleted.
+
+### To whoever owns `src/bpf/insn.rs` (nobody this wave): one helper, one load
+
+`wakeup.rs` defines both locally:
+
+```rust
+pub const THIS_CPU_PTR: i32 = 154;                       // in `helper`
+/// `dst = &<kernel variable>`: the kernel resolves the BTF id at load.
+pub fn load_btf_id(dst: u8, btf_id: u32) -> [Insn; 2];   // src_reg = BPF_PSEUDO_BTF_ID (3)
+```
+
+### To stream V (`catalog/sched.yaml`): two entries say what is no longer true
+
+- `sched.wakeup`'s last caveat says a wakeup from an interrupt "is credited to
+  whatever was interrupted" and "a waker of pid 0 is the idle task". Now:
+  "A wakeup issued from a hard interrupt, a served softirq or an NMI has the
+  interrupt as its waker -- `waker_tid` 0 and `waker_context` naming which --
+  and a target keeps it only as its wakee. A softirq served in a task's own
+  `local_bh_enable` (loopback delivery in the sender's `sendmsg`) is recorded
+  as a softirq, though the sender caused it. A waker of 0 with
+  `waker_context: task` is the idle task."
+- `sched.switches` declares `cgroup: native` and `container: native`; the
+  `pmu:sw` collector refuses both by name (a cgroup-scoped perf event is not
+  written). `system`, `cpu`, `pid`, `tid` and `launch` are served now. Either
+  `cgroup` and `container` out of `targets`, or the `Factory` `.targets(...)`
+  declaration P7 proposed.
+
+### To stream V (`tests/portability.rs`): P8's `sched.switches` entry
+
+`KNOWN_DEFECTS` records `sched.switches` on `system` refused ("counting the
+switches of a whole machine"). It is served now, one event per cpu; the entry
+stops matching once the cells are re-measured. (P7's `count` entry for it
+stands: `count` mode is still refused.)
+
+### To whoever owns `src/join.rs`: a waker of 0 is not always the idle task
+
+`task_name(0)` renders `task:0 (idle)`. A `sched.wakeup` event now carries
+`waker_context`, and a waker of 0 with any context but `task` is an
+interrupt. Wanted: the chain's first hop named `interrupt (hardirq)`,
+`(softirq)` or `(nmi)` when the `from` event says so, `task:0 (idle)`
+otherwise.
+
+### To stream R (`src/emit.rs`): `mem.latency -e stack`, confirmed
+
+`emit::stack` calls `value_of` where the other reducing emits call
+`measured`; the IBS collector leaves `latency_cycles` out of an untimed load,
+as it should. Reproduced once in fifteen runs here. Nothing to change in
+`src/collect/mem/`.
+
+### For the flaky tally: seen in one `--no-fail-fast` run at load 12, not this stream's
+
+- `collect::tests::an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on`
+  (`src/collect/mod.rs:4968`, "asked about the held one, once": `[]` for `[1]`).
+- `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`
+  (`tests/encoders.rs:759`).
+- `perf::tests::closing_a_group_gives_its_descriptors_back` (in `make check`;
+  passed alone at once).
