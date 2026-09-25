@@ -4499,6 +4499,28 @@ mod tests {
         move || (monotonic_ns() >= deadline_ns).then(|| "the deadline".to_owned())
     }
 
+    /// Ends a run 300 ms after the escalation was first asked to shed, so a
+    /// test sees the run go on past the question; and at 10 s whatever
+    /// happened, so a run never asked still ends.
+    ///
+    /// A fixed wall deadline was a guess at how long the held layer takes to
+    /// be weighed, and on a machine running the full suite this thread gets a
+    /// fraction of the wall clock: the run ended before the question was put.
+    fn after_the_shed(
+        asked: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+    ) -> impl FnMut() -> Option<String> {
+        let cap_ns = monotonic_ns() + 10_000_000_000;
+        let mut asked_at: Option<u64> = None;
+        move || {
+            let now = monotonic_ns();
+            if asked_at.is_none() && !asked.borrow().is_empty() {
+                asked_at = Some(now);
+            }
+            let past = asked_at.is_some_and(|at| now >= at + 300_000_000);
+            (past || now >= cap_ns).then(|| "the deadline".to_owned())
+        }
+    }
+
     /// What a run says it spent is the cpu it actually burned.
     ///
     /// Ground truth is a known quantity of work injected into the collector and
@@ -5598,7 +5620,8 @@ mod tests {
         script: Vec<(u64, Vec<Switch>)>,
         seen: Vec<Vec<Standing>>,
         sheds: bool,
-        shed_asked: Vec<usize>,
+        /// Shared, so a test's stop condition can wait for the question.
+        shed_asked: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
     }
 
     impl Escalate for Scripted {
@@ -5612,7 +5635,7 @@ mod tests {
         }
 
         fn shed(&mut self, index: usize, over: &str) -> Option<String> {
-            self.shed_asked.push(index);
+            self.shed_asked.borrow_mut().push(index);
             self.sheds.then(|| format!("scripted to shed: {over}"))
         }
 
@@ -5662,7 +5685,7 @@ mod tests {
             ],
             seen: Vec::new(),
             sheds: false,
-            shed_asked: Vec::new(),
+            shed_asked: Default::default(),
         };
         let opened_ns = spending.opened_ns;
         let deadline_ns = opened_ns + RUN_MS * 1_000_000;
@@ -5749,7 +5772,7 @@ mod tests {
             script: Vec::new(),
             seen: Vec::new(),
             sheds: false,
-            shed_asked: Vec::new(),
+            shed_asked: Default::default(),
         };
         let deadline_ns = spending.opened_ns + RUN_MS * 1_000_000;
         let driven = drive(
@@ -5805,13 +5828,13 @@ mod tests {
                 weighed("50%"),
             ]);
             spending.sheddable = vec![false, true];
+            let asked: std::rc::Rc<std::cell::RefCell<Vec<usize>>> = Default::default();
             let mut script = Scripted {
                 script: vec![(0, vec![switch(1, true)])],
                 seen: Vec::new(),
                 sheds,
-                shed_asked: Vec::new(),
+                shed_asked: asked.clone(),
             };
-            let deadline_ns = spending.opened_ns + 700_000_000;
             let driven = drive(
                 &mut slots,
                 &mut paces,
@@ -5821,13 +5844,18 @@ mod tests {
                 &mut spending,
                 Some(&mut script),
                 None,
-                until(deadline_ns),
+                after_the_shed(asked.clone()),
             );
             assert!(
                 spun_ns.get() > 0,
                 "the escalated layer ran and cost something"
             );
-            assert_eq!(script.shed_asked, vec![1], "asked about the held one, once");
+            assert_eq!(
+                *asked.borrow(),
+                vec![1],
+                "asked about the held one, once; the run stopped because {}",
+                driven.stopped_because
+            );
             (driven, slots)
         };
 

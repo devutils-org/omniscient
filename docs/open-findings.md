@@ -7284,6 +7284,22 @@ parallel, which is `docs/contributing.md`'s second trap).
 And `scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not`,
 in the suite after R, D and W merged, passing alone at once.
 
+### The escalation's budget test waits for the question now, and what is left of it
+
+`collect::tests::an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on`
+failed twice in full runs, the second with no stream agent loading the
+machine: `asked about the held one, once`, `[]` for `[1]`. It gave the run a
+fixed 700 ms of wall clock, and the held layer is weighed only after it has
+run for one budget check interval, on a thread that under the suite gets a
+fraction of the wall clock. It now ends 300 ms after the shed is asked, with a
+10 s cap (`docs/contributing.md`'s second rule). Passing three times alone,
+three times alone beside one spinning thread per core, and in three of five
+runs of the whole `collect` module beside them. In the other two the cap was
+reached with the layer never weighed: under that saturation the escalated
+layer's first budget check does not come in 10 s. Worth reading
+`Spending`'s weighing of a request attached mid-run for why, since a real run
+on a saturated machine would keep a layer over its ceiling as long.
+
 ### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
 
 `sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57
