@@ -7261,3 +7261,16 @@ and the match on `Evidence` is exhaustive, so a new level does not compile in
 `omn-mcp` until it is described. Wanted when someone owns `join.rs`:
 `impl Evidence { pub fn establishes(self) -> &'static str; pub fn does_not_establish(self) -> &'static str }`,
 which the text renderer could print too.
+
+### Finding 19 measured again: closed, and the per-binary cache it proposed is not needed
+
+`sched.offcpu --system --duration 1s --emit stack`, which took 1 minute 57
+seconds when finding 19 was filed, takes **1.20 to 1.28 s** on `main` now --
+with an idle machine (98 stacks) and beside sixty Python processes blocking in
+a loop (123 to 204 stacks). The cache by binary the finding proposed was
+written and measured, with the cache on and with its bound set to zero, and
+the two runs are the same to within their spread (1.21 and 1.23 s against 1.20
+and 1.28 s), so it was not landed: what fixed the finding was reading the
+kernel's table once per run and walking user stacks only, both landed earlier.
+The other two ideas -- resolving only the ids that survive, and a named bound
+-- have nothing left to buy here.
