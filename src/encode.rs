@@ -101,6 +101,161 @@ pub fn run_output_bytes(format: OutputFormat, output: &RunOutput) -> Result<Vec<
     }
 }
 
+/// One document of a recording, as the structured formats carry it: the
+/// trigger that wrote it beside the run output of its window, so the file
+/// stands on its own.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Triggered<'a> {
+    pub trigger: &'a crate::collect::Fired,
+    #[serde(flatten)]
+    pub run: &'a RunOutput,
+}
+
+/// Encodes one document of a recording.
+///
+/// The formats that describe documents carry the trigger inline: text as a
+/// header above the window's results, `ndjson` as its first line, JSON, YAML
+/// and TOML as a `trigger` field beside `results`. The four profile formats
+/// have nowhere to put it -- a flame graph has frames, not fields -- and
+/// carry the window alone; the recording's own record, `recording.json`,
+/// names every trigger beside the document it wrote.
+pub fn triggered_bytes(
+    format: OutputFormat,
+    fired: &crate::collect::Fired,
+    run: &RunOutput,
+) -> Result<Vec<u8>, ParseError> {
+    match format {
+        OutputFormat::Text => {
+            let mut text = trigger_text(fired);
+            text.push('\n');
+            text.push_str(&run_output(format, run)?);
+            Ok(text.into_bytes())
+        }
+        OutputFormat::Ndjson => {
+            let line = serde_json::to_string(&serde_json::json!({ "trigger": fired }))
+                .map_err(|error| ParseError::new(format!("cannot encode the trigger: {error}")))?;
+            let mut text = format!("{line}\n");
+            text.push_str(&run_output(format, run)?);
+            Ok(text.into_bytes())
+        }
+        format if format.renders_documents() => format
+            .serialize_document(&Triggered {
+                trigger: fired,
+                run,
+            })
+            .map(String::into_bytes),
+        format => run_output_bytes(format, run),
+    }
+}
+
+/// The header of a triggered document, in text.
+pub fn trigger_text(fired: &crate::collect::Fired) -> String {
+    let at = |ns: u64| ns.saturating_sub(fired.run_opened_ns) as f64 / 1e9;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "document {} of at most {}: `{}` fired on `{}` at {:.3} s into the run",
+        fired.number,
+        fired.of_at_most,
+        fired.predicate,
+        fired.on,
+        at(fired.fired_ns)
+    );
+    let fields: Vec<String> = fired
+        .fields
+        .iter()
+        .map(|(field, value)| match value.as_f64() {
+            Some(number) => format!("{field} = {number}"),
+            None => format!("{field} = {value:?}"),
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "  fired by the event at CLOCK_MONOTONIC {} ns{}",
+        fired.event_ts_ns,
+        if fired.fields.is_empty() {
+            String::new()
+        } else {
+            format!(", with {}", fields.join(", "))
+        }
+    );
+    let _ = writeln!(
+        out,
+        "  window {:.3} s to {:.3} s into the run (CLOCK_MONOTONIC {} to {} ns): retain {}, after {}",
+        at(fired.opened_ns),
+        at(fired.closed_ns),
+        fired.opened_ns,
+        fired.closed_ns,
+        crate::scalar::Duration::from_nanos(fired.retain_ns),
+        crate::scalar::Duration::from_nanos(fired.after_ns),
+    );
+    if let Some(why) = &fired.cut_short {
+        let _ = writeln!(out, "  cut short: {why}");
+    }
+    if fired.fired_again > 0 {
+        let _ = writeln!(
+            out,
+            "  fired again {} time(s) while this document was open: those rounds are in it",
+            fired.fired_again
+        );
+    }
+    for evicted in fired
+        .evicted
+        .iter()
+        .filter(|one| one.events > 0 || one.rounds > 0)
+    {
+        let _ = writeln!(
+            out,
+            "  evicted before it: `{}`, {} event(s) over {} round(s), read and in no document",
+            evicted.request, evicted.events, evicted.rounds
+        );
+    }
+    out
+}
+
+/// What a recording did, in text: for the end of a run, on stderr.
+pub fn recorded_text(recorded: &crate::collect::Recorded) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "recording: {} document(s) of at most {}, trigger `{}` on `{}`, retain {}; {}",
+        recorded.documents.len(),
+        recorded.documents_at_most,
+        recorded.predicate,
+        recorded.on,
+        crate::scalar::Duration::from_nanos(recorded.retain_ns),
+        recorded.stopped_because
+    );
+    if recorded.documents.is_empty() {
+        let _ = writeln!(
+            out,
+            "recording: the trigger never fired in the {:.3} s the run lasted, so no document \
+             was written",
+            recorded.closed_ns.saturating_sub(recorded.opened_ns) as f64 / 1e9
+        );
+    }
+    for unrecorded in recorded
+        .unrecorded
+        .iter()
+        .filter(|one| one.events > 0 || one.rounds > 0)
+    {
+        let _ = writeln!(
+            out,
+            "recording: `{}` read {} event(s) over {} round(s) after the last document{}, and \
+             they are in none",
+            unrecorded.request,
+            unrecorded.events,
+            unrecorded.rounds,
+            if recorded.documents.is_empty() {
+                " -- that is, over the whole run"
+            } else {
+                ""
+            }
+        );
+    }
+    out
+}
+
 /// Encodes a join's result in the session's output format.
 pub fn correlation(format: OutputFormat, correlation: &Correlation) -> Result<String, ParseError> {
     match format {
@@ -801,10 +956,16 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
 /// losing only `throttled` is a kernel that declined to deliver. Printing the
 /// non-zero ones alone would make the vocabulary itself depend on the run.
 fn loss_headline(losses: &Losses) -> String {
-    format!(
+    let mut line = format!(
         "LOSS: {} dropped, {} failed reads, {} late ticks, {} undecoded, {} throttled",
         losses.dropped, losses.failed_reads, losses.late_ticks, losses.undecoded, losses.throttled
-    )
+    );
+    // Only a recording evicts, and a sixth zero on every other run would be
+    // a word about a mode it is not in.
+    if losses.evicted > 0 {
+        let _ = write!(line, ", {} evicted by the retention", losses.evicted);
+    }
+    line
 }
 
 fn text(results: &Results) -> String {
@@ -1023,10 +1184,12 @@ fn text(results: &Results) -> String {
                 // ranking measured and left out, this is what nothing measured.
                 if let Some(short) = series.iter().find_map(|one| one.short.as_ref()) {
                     push_shortfall(&mut out, Some(short));
-                    let _ = writeln!(
-                        out,
-                        "    the totals are lower bounds, so the order above can be wrong"
-                    );
+                    if short.bounds_below() {
+                        let _ = writeln!(
+                            out,
+                            "    the totals are lower bounds, so the order above can be wrong"
+                        );
+                    }
                 }
             }
             Output::Stack {
@@ -1306,8 +1469,8 @@ fn speedscope_unit(unit: Unit) -> &'static str {
 /// is the one nobody reads it on.
 fn bound(short: Option<&Shortfall>) -> &'static str {
     match short {
-        Some(_) => Shortfall::MARK,
-        None => "",
+        Some(short) if short.bounds_below() => Shortfall::MARK,
+        _ => "",
     }
 }
 
@@ -1315,8 +1478,8 @@ fn bound(short: Option<&Shortfall>) -> &'static str {
 /// `n>=102`. A count is written with its comparison rather than beside it.
 fn comparison(short: Option<&Shortfall>) -> &'static str {
     match short {
-        Some(_) => Shortfall::MARK,
-        None => "=",
+        Some(short) if short.bounds_below() => Shortfall::MARK,
+        _ => "=",
     }
 }
 
@@ -1327,8 +1490,14 @@ fn comparison(short: Option<&Shortfall>) -> &'static str {
 /// every series carries the same one, so printing it beside each of forty
 /// would be saying one fact forty times.
 fn push_shortfall(out: &mut String, short: Option<&Shortfall>) {
-    if let Some(short) = short {
-        let _ = writeln!(out, "    {} {}", Shortfall::MARK, short.note);
+    match short {
+        Some(short) if short.bounds_below() => {
+            let _ = writeln!(out, "    {} {}", Shortfall::MARK, short.note);
+        }
+        Some(short) => {
+            let _ = writeln!(out, "    evicted: {}", short.note);
+        }
+        None => {}
     }
 }
 

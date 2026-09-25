@@ -1499,6 +1499,74 @@ fn a_layer_this_run_cannot_serve_is_reported_and_the_cheap_answer_stands() {
     );
 }
 
+/// A held request this machine cannot serve at all -- the resolver finds no
+/// backend for it -- is a layer this machine lacks, not a failed run: the
+/// session runs, the request is set aside with the resolver's reason, and when
+/// the cheap pass names its layer the escalation attaches what it can of it
+/// and says what it could not, in the resolver's words.
+///
+/// `cpu.flow` is Intel PT or CoreSight, and this machine is AMD: every
+/// backend of its chain is rejected by a probe. On a machine that has one the
+/// property cannot be created here, and the test says so.
+#[test]
+fn a_held_request_that_does_not_resolve_is_a_layer_this_machine_lacks_not_a_failed_run() {
+    let _machine = one_at_a_time();
+    let probe = omn(&[
+        "cpu.flow",
+        "-m",
+        "trace",
+        "--pid",
+        "1",
+        "-d",
+        "1s",
+        "-e",
+        "raw",
+        "--dump-resolved",
+    ]);
+    if probe.status.success() {
+        eprintln!(
+            "skipped: this machine serves `cpu.flow`, so no held request of it can be one it \
+             lacks; it would have checked that an unresolvable held request does not fail the \
+             run"
+        );
+        return;
+    }
+    let Some((program, _)) = phases("unresolved", 900, 300) else {
+        return;
+    };
+    let flow = "  - {label: flow, source: cpu.flow, target: *program, mode: trace, emit: [raw], \
+                window: on cpu}\n";
+    let session = escalation_session(&program, &format!("{PROFILE}{flow}"));
+    let Some(run) = escalate(
+        "unresolved",
+        &session,
+        &[],
+        "that a held request the resolver cannot serve is set aside and reported",
+    ) else {
+        return;
+    };
+    assert!(
+        run.text
+            .contains("`flow` is held for the escalation and this machine cannot serve it"),
+        "the run says, before it starts, what it set aside:\n{}",
+        run.text
+    );
+    let notes = run.notes("blocked").join("\n");
+    assert!(
+        notes.contains("`cpu` at")
+            && notes.contains("not served")
+            && notes.contains("`flow`: this machine cannot serve it")
+            && notes.contains("no viable backend"),
+        "the cpu layer is named, its profile attached, and the flow it could not serve said \
+         with the resolver's reason:\n{notes}"
+    );
+    assert!(
+        run.attached("profile").is_some(),
+        "what the machine can serve of the layer is attached:\n{}",
+        run.text
+    );
+}
+
 /// A run that escalated and a run that did not are different documents. A
 /// program over before two readings could name anything attaches no detailed
 /// source, and every held request says it measured nothing -- rather than

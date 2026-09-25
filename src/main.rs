@@ -184,6 +184,14 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
             // silent degradation this project refuses everywhere else, so it is
             // an override now and the run says which requests it moved.
             let overridden = override_session_wide(&mut session, &args);
+            // `--duration` on a recording replaces its longest duration, and
+            // the bounds are asked again against the one that will run: a
+            // retention the new duration no longer exceeds is refused as it
+            // would be in the file.
+            if let Err(error) = session.check_recording() {
+                eprintln!("error: {error}");
+                return Ok(ExitCode::from(EXIT_REJECTED));
+            }
             (session, overridden)
         }
         None => cli::to_session(&args, &catalog)?,
@@ -205,9 +213,22 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     // against the same view of the machine, so a session cannot straddle two.
     let capabilities = Capabilities::detect();
     let mut resolutions = Vec::new();
+    let mut unserved: Vec<collect::Unserved> = Vec::new();
     for request in &session.requests {
+        // A request held for the escalation (`window: on <layer>`) that this
+        // machine cannot serve is not a reason to refuse the run: the session
+        // asked for it only in case its layer were named, and the cheap pass
+        // does not need it. It is set aside with the resolver's reason, and
+        // the escalation says so if it names that layer.
+        let held = request.window.is_some_and(|window| window.on.is_some());
         match resolve::resolve(&catalog, &capabilities, request) {
             Ok(resolved) => resolutions.push(resolved),
+            Err(error @ resolve::ResolveError::NoViableBackend { .. }) if held => {
+                unserved.push(collect::Unserved {
+                    request: request.clone(),
+                    reason: error.to_string(),
+                });
+            }
             Err(error) => {
                 eprintln!("error: {error}");
                 // The hint used to say "the request is valid; it is this
@@ -234,6 +255,33 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         eprintln!("note: {note}");
     }
 
+    // Only after resolution can the trigger be checked against what the
+    // chosen backend carries -- and still before anything is launched.
+    if let Err(error) = session.check_trigger_fields(
+        &catalog,
+        session
+            .record
+            .as_ref()
+            .and_then(|_| session.recorded_index().ok())
+            .and_then(|index| resolutions.get(index))
+            .map(|resolved| resolved.backend.id.as_str()),
+    ) {
+        eprintln!("error: {error}");
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+
+    for one in &unserved {
+        eprintln!(
+            "note: `{}` is held for the escalation and this machine cannot serve it, so it is \
+             set aside and never attached: {}",
+            one.request
+                .label
+                .clone()
+                .unwrap_or_else(|| one.request.source.to_string()),
+            one.reason
+        );
+    }
+
     if args.dump_resolved {
         print_resolved(session.format, &resolutions)?;
         return Ok(ExitCode::SUCCESS);
@@ -244,6 +292,24 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // Every request held for the escalation may be one this machine cannot
+    // serve; a run with nothing left to run is still refused, by the resolver.
+    if resolutions.is_empty() {
+        eprintln!("error: no request of this session can be served on this machine");
+        return Ok(ExitCode::from(exit_for(omn::collect::Whose::Machine)));
+    }
+
+    if session.record.is_some() {
+        return record(
+            &catalog,
+            &capabilities,
+            &session,
+            &report,
+            &defaulted,
+            &resolutions,
+        );
+    }
+
     measure(
         &catalog,
         &capabilities,
@@ -251,6 +317,7 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         &report,
         &defaulted,
         &resolutions,
+        &unserved,
     )
 }
 
@@ -535,6 +602,10 @@ struct MeasuredCost {
     stopped_because: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
+    /// Set for a recording, whose budget is weighed over a rolling span
+    /// rather than the whole window: that span, in nanoseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weighed_over_ns: Option<u64>,
 }
 
 impl MeasuredCost {
@@ -570,6 +641,25 @@ impl MeasuredCost {
     /// What the ceiling made of it, when there was one.
     fn verdict(&self) -> Option<String> {
         let budget = self.budget_percent?;
+        if let Some(rolling_ns) = self.weighed_over_ns {
+            let over = span(rolling_ns);
+            return Some(match (self.within_budget, self.measured_percent) {
+                (Some(false), _) => format!(
+                    "[{}] --budget {budget}% was exceeded over a {over} span, which is what a \
+                     recording is weighed over: {}",
+                    self.source, self.stopped_because
+                ),
+                (_, Some(percent)) => format!(
+                    "[{}] --budget {budget}% held over every {over} span the run checked; \
+                     {percent:.2} % over the whole window",
+                    self.source
+                ),
+                (_, None) => format!(
+                    "[{}] --budget {budget}% could not be checked: {}",
+                    self.source, self.overhead.observed_from
+                ),
+            });
+        }
         Some(match (self.within_budget, self.measured_percent) {
             (Some(true), Some(percent)) => format!(
                 "[{}] --budget {budget}% held: {percent:.2} % measured",
@@ -721,7 +811,52 @@ fn measure(
     report: &Report,
     defaulted: &Defaulted,
     resolved: &[ResolvedRequest],
+    unserved: &[collect::Unserved],
 ) -> anyhow::Result<ExitCode> {
+    announce(session, report, defaulted);
+
+    let mut ladder = Ladder::new(catalog, capabilities, resolved);
+    let collections = match collect::run_all_within_unserved(resolved, &mut ladder, unserved) {
+        Ok(collections) => collections,
+        Err(error) => return Ok(refused_at_collect(&error, resolved)),
+    };
+    let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
+
+    // Bytes rather than a `String`, because one of the nine formats is not
+    // text: a `pprof` profile is a gzipped protobuf. Everything else is UTF-8
+    // and reaches stdout unchanged.
+    let output = encode::run_output_bytes(session.format, &run)?;
+    let unshowable = session.format.is_binary() && std::io::stdout().is_terminal();
+    if unshowable && session.out.is_none() {
+        anyhow::bail!(
+            "`{}` is {}, which no terminal can show: redirect it to a file or pass --out <dir>",
+            session.format,
+            session.format.describe()
+        );
+    }
+    if !unshowable {
+        std::io::stdout().write_all(&output)?;
+    }
+
+    report_costs(&costs, &run);
+    for caveat in report.caveats() {
+        eprintln!("caveat: {caveat}");
+    }
+
+    if let Some(directory) = &session.out {
+        write_artifacts(directory, session.format, &served_by, &costs, &output)?;
+        eprintln!(
+            "\nwrote results, the resolved requests and what they cost to {}",
+            directory.display()
+        );
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What is said on stderr before any run: the defaults taken, the
+/// validator's warnings, and a stdout the program would share.
+fn announce(session: &Session, report: &Report, defaulted: &Defaulted) {
     for note in defaulted.iter() {
         eprintln!("note: {note}");
     }
@@ -731,13 +866,218 @@ fn measure(
     if let Some(warning) = shared_stdout_warning(session) {
         eprintln!("warning: {warning}");
     }
+}
 
-    let mut ladder = Ladder::new(catalog, capabilities, resolved);
-    let collections = match collect::run_all_within(resolved, &mut ladder) {
-        Ok(collections) => collections,
-        Err(error) => return Ok(refused_at_collect(&error, resolved)),
+/// What the measurement cost, on every run rather than only on the ones that
+/// asked. A tool that reports what a program spends and never its own price
+/// is asking to be trusted about the one number it never shows.
+fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
+    for cost in costs {
+        eprintln!("cost: {}", cost.line());
+        if let Some(verdict) = cost.verdict() {
+            eprintln!("budget: {verdict}");
+        }
+    }
+    if let Some(comparison) = compare_backends(costs, &run.results) {
+        eprint!("{comparison}");
+    }
+}
+
+/// A recording: a session whose duration is until its trigger fires, as many
+/// times as its bound on documents allows, writing one document per firing as
+/// it fires.
+///
+/// Each document is the run output of one window -- the retention's span when
+/// the trigger fired -- with the trigger beside it, written the moment it is
+/// cut: a recorder whose documents waited for the end of the run would lose
+/// every one of them to a crash, which is when they are wanted. With `-o DIR`
+/// they are `trigger-<n>.<ext>` beside `resolved.json`, `cost.json` and
+/// `recording.json`, the record of every trigger and of what was read and is
+/// in no document; without it they go to stdout one after another, which only
+/// a stream of text or `ndjson` can carry.
+fn record(
+    catalog: &Catalog,
+    capabilities: &Capabilities,
+    session: &Session,
+    report: &Report,
+    defaulted: &Defaulted,
+    resolved: &[ResolvedRequest],
+) -> anyhow::Result<ExitCode> {
+    use std::cell::RefCell;
+
+    let Some(asked) = session.record.as_ref() else {
+        anyhow::bail!("a recording needs a `record:` block");
     };
+    let one_stream = matches!(session.format, OutputFormat::Text | OutputFormat::Ndjson);
+    if session.out.is_none() && !one_stream {
+        eprintln!(
+            "error: a recording writes one document per trigger, and `{}` is one document to a \
+             stream: pass `-o DIR` to write each as its own file, or use `text` or `ndjson` on \
+             stdout",
+            session.format
+        );
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+    let on = match session.recorded_index() {
+        Ok(on) => on,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Ok(ExitCode::from(EXIT_REJECTED));
+        }
+    };
+    let Some(trigger) = asked.trigger.clone() else {
+        anyhow::bail!("a recording needs a trigger");
+    };
+    announce(session, report, defaulted);
+    if let Some(directory) = &session.out {
+        std::fs::create_dir_all(directory)?;
+    }
 
+    // The ladder is the budget's, and the documents need it too: which
+    // backend was serving when a document was cut is its record. One of the
+    // two at a time, never both, so a cell is enough.
+    let ladder = RefCell::new(Ladder::new(catalog, capabilities, resolved));
+    let mut sink = |document: collect::Document| -> Result<(), String> {
+        let number = document.trigger.number;
+        let (run, _, _) = assemble(
+            catalog,
+            session,
+            &ladder.borrow(),
+            resolved,
+            document.collections,
+        )
+        .map_err(|error| error.to_string())?;
+        let bytes = encode::triggered_bytes(session.format, &document.trigger, &run)
+            .map_err(|error| error.to_string())?;
+        match &session.out {
+            Some(directory) => {
+                let path =
+                    directory.join(format!("trigger-{number}.{}", session.format.extension()));
+                std::fs::write(&path, &bytes)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                eprintln!(
+                    "recording: document {number} written to {}, `{}` fired on `{}`",
+                    path.display(),
+                    document.trigger.predicate,
+                    document.trigger.on
+                );
+            }
+            None => {
+                let mut stdout = std::io::stdout();
+                stdout
+                    .write_all(&bytes)
+                    .and_then(|()| stdout.flush())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    };
+    let mut recorder = collect::Recorder {
+        on,
+        trigger,
+        retain_ns: asked.retain_ns(),
+        after_ns: asked.after_ns(),
+        documents: asked.documents.unwrap_or(1),
+        sink: &mut sink,
+    };
+    let mut cheaper = Shared(&ladder);
+    let (collections, recorded) =
+        match collect::record_within(resolved, &mut cheaper, &mut recorder) {
+            Ok(done) => done,
+            Err(error) => return Ok(refused_at_collect(&error, resolved)),
+        };
+    drop(recorder);
+
+    let costs: Vec<MeasuredCost> = collections
+        .iter()
+        .enumerate()
+        .map(|(index, collection)| {
+            let serving = ladder
+                .borrow()
+                .record(index, served_last(collection), &resolved[index]);
+            let mut cost = measured_cost(catalog, &serving, collection);
+            // Weighed over a rolling span, so the whole window's figure is
+            // not what held or broke the budget: the run's own stop is.
+            cost.weighed_over_ns = Some(recorded.budget_interval_ns);
+            if cost.budget_percent.is_some() {
+                cost.within_budget = Some(!over_budget(&recorded.stopped_because, &cost.source));
+            }
+            cost
+        })
+        .collect();
+    for cost in &costs {
+        eprintln!("cost: {}", cost.line());
+        if let Some(verdict) = cost.verdict() {
+            eprintln!("budget: {verdict}");
+        }
+    }
+    eprint!("{}", encode::recorded_text(&recorded));
+    for caveat in report.caveats() {
+        eprintln!("caveat: {caveat}");
+    }
+
+    if let Some(directory) = &session.out {
+        let served_by: Vec<ResolvedRequest> = collections
+            .iter()
+            .enumerate()
+            .map(|(index, collection)| {
+                ladder
+                    .borrow()
+                    .record(index, served_last(collection), &resolved[index])
+            })
+            .collect();
+        std::fs::write(
+            directory.join("resolved.json"),
+            serde_json::to_string_pretty(&served_by)?,
+        )?;
+        std::fs::write(
+            directory.join("cost.json"),
+            serde_json::to_string_pretty(&costs)?,
+        )?;
+        std::fs::write(
+            directory.join("recording.json"),
+            serde_json::to_string_pretty(&recorded)?,
+        )?;
+        eprintln!(
+            "\nwrote {} document(s), the resolved requests, what they cost and the recording's \
+             record to {}",
+            recorded.documents.len(),
+            directory.display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Whether a recording ended because `source` was over its rolling budget.
+fn over_budget(stopped_because: &str, source: &str) -> bool {
+    stopped_because.starts_with(&format!("`{source}` spent"))
+        && stopped_because.contains(collect::ROLLING_BUDGET)
+}
+
+/// The budget's ladder, shared with a recording's documents.
+struct Shared<'l, 'a>(&'l std::cell::RefCell<Ladder<'a>>);
+
+impl collect::Cheaper for Shared<'_, '_> {
+    fn next(
+        &mut self,
+        index: usize,
+        spent: &collect::Overhead,
+        ceiling: f64,
+    ) -> Option<ResolvedRequest> {
+        self.0.borrow_mut().next(index, spent, ceiling)
+    }
+}
+
+/// Turns a run's collections into its output: every request's results, the
+/// joins across them and the decompositions, with what each cost and the
+/// request that was serving it when it ended.
+fn assemble(
+    catalog: &Catalog,
+    session: &Session,
+    ladder: &Ladder<'_>,
+    resolved: &[ResolvedRequest],
+    collections: Vec<collect::Collection>,
+) -> anyhow::Result<(encode::RunOutput, Vec<MeasuredCost>, Vec<ResolvedRequest>)> {
     // Every source's events go into one stream for the joins: they were
     // collected over one window against one target, which is what makes them
     // comparable in the first place.
@@ -805,49 +1145,7 @@ fn measure(
             &merged,
         ));
     }
-
-    // Bytes rather than a `String`, because one of the nine formats is not
-    // text: a `pprof` profile is a gzipped protobuf. Everything else is UTF-8
-    // and reaches stdout unchanged.
-    let output = encode::run_output_bytes(session.format, &run)?;
-    let unshowable = session.format.is_binary() && std::io::stdout().is_terminal();
-    if unshowable && session.out.is_none() {
-        anyhow::bail!(
-            "`{}` is {}, which no terminal can show: redirect it to a file or pass --out <dir>",
-            session.format,
-            session.format.describe()
-        );
-    }
-    if !unshowable {
-        std::io::stdout().write_all(&output)?;
-    }
-
-    // What the measurement cost, on every run rather than only on the ones that
-    // asked. A tool that reports what a program spends and never its own price
-    // is asking to be trusted about the one number it never shows.
-    for cost in &costs {
-        eprintln!("cost: {}", cost.line());
-        if let Some(verdict) = cost.verdict() {
-            eprintln!("budget: {verdict}");
-        }
-    }
-    if let Some(comparison) = compare_backends(&costs, &run.results) {
-        eprint!("{comparison}");
-    }
-
-    for caveat in report.caveats() {
-        eprintln!("caveat: {caveat}");
-    }
-
-    if let Some(directory) = &session.out {
-        write_artifacts(directory, session.format, &served_by, &costs, &output)?;
-        eprintln!(
-            "\nwrote results, the resolved requests and what they cost to {}",
-            directory.display()
-        );
-    }
-
-    Ok(ExitCode::SUCCESS)
+    Ok((run, costs, served_by))
 }
 
 /// The backend a collection ended on, which is the one its numbers came from.
@@ -891,6 +1189,7 @@ fn measured_cost(
         overhead: collection.overhead.clone(),
         stopped_because: collection.stopped_because.clone(),
         notes: collection.notes.clone(),
+        weighed_over_ns: None,
     }
 }
 
@@ -1127,13 +1426,63 @@ fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
                     None => catalog.family(name),
                 },
             };
-            print!("{}", format.serialize_document(&selected)?);
+            // The same sweep the text table's `HERE` and `COLLECTOR` columns
+            // show, so a program reading the listing has what a person does:
+            // what this machine serves, through which backend, what each
+            // backend's requirements answered, and what this build collects.
+            let coverage = collect::coverage();
+            let listed: Vec<Listed<'_>> = selected
+                .into_iter()
+                .map(|entry| Listed {
+                    here: resolve::availability(entry, &capabilities),
+                    probes: entry
+                        .backends
+                        .iter()
+                        .map(|backend| BackendProbes {
+                            backend: backend.id.clone(),
+                            collector: coverage
+                                .get(entry.id.as_str())
+                                .is_some_and(|built| built.contains(&backend.id.as_str())),
+                            requirements: backend
+                                .requires
+                                .iter()
+                                .map(|needs| resolve::Requirement {
+                                    needs: needs.clone(),
+                                    probe: capabilities.probe(needs, None),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    entry,
+                })
+                .collect();
+            print!("{}", format.serialize_document(&listed)?);
         }
         format => anyhow::bail!(
             "`{format}` describes results; the catalog lists as text, json, yaml or toml"
         ),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// One catalog entry as `omn list` gives it to a program: the entry, and
+/// what this machine and this build make of it.
+#[derive(Serialize)]
+struct Listed<'a> {
+    #[serde(flatten)]
+    entry: &'a omn::catalog::Entry,
+    /// What the text table's `HERE` column says, with the backend it names.
+    here: resolve::Availability,
+    /// Every backend of the chain in order, with what each requirement's
+    /// probe answered here and whether this build has a collector for it.
+    probes: Vec<BackendProbes>,
+}
+
+#[derive(Serialize)]
+struct BackendProbes {
+    backend: String,
+    collector: bool,
+    requirements: Vec<resolve::Requirement>,
 }
 
 /// The machine-readable view of one output format.

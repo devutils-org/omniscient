@@ -194,6 +194,48 @@ pub struct TraceArgs {
     #[arg(long, value_name = "START..STOP", conflicts_with = "file")]
     pub window: Option<crate::request::Window>,
 
+    /// Record until a predicate fires: the run keeps only what `--retain`
+    /// holds, and writes one document each time this predicate, in the
+    /// filter grammar, becomes true over a round of the request. `value` is
+    /// the request's measured value. Needs --retain, --documents and
+    /// --duration, the longest the recording may run.
+    #[arg(
+        long,
+        value_name = "EXPR",
+        allow_hyphen_values = true,
+        conflicts_with = "file"
+    )]
+    pub until: Option<FilterExpr>,
+
+    /// How far back a recorded document reaches from its trigger; what is
+    /// older is evicted and counted.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        requires = "until",
+        conflicts_with = "file"
+    )]
+    pub retain: Option<Duration>,
+
+    /// How long a recorded document goes on after its trigger before it is
+    /// written. Zero when absent.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        requires = "until",
+        conflicts_with = "file"
+    )]
+    pub after: Option<Duration>,
+
+    /// The most documents a recording writes; the run ends with the last.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        requires = "until",
+        conflicts_with = "file"
+    )]
+    pub documents: Option<u32>,
+
     /// Where results and the resolved file are written.
     #[arg(short = 'o', long, value_name = "DIR")]
     pub out: Option<PathBuf>,
@@ -503,12 +545,24 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         window: args.window,
     };
 
-    let session = Session::single(request, args.format, args.out.clone());
+    let mut session = Session::single(request, args.format, args.out.clone());
     // `--window on <layer>` parses, because the two surfaces share one
     // parser; it cannot mean anything on one request, which has no cheap
     // pass beside it to decide from, and is refused here in the words a
     // session file gets.
     session.check_escalation()?;
+    // A recording on the command line is a session's `record:` block on its
+    // one request, refused in the same words.
+    if let Some(trigger) = &args.until {
+        session.record = Some(crate::request::Recording {
+            trigger: Some(trigger.clone()),
+            on: None,
+            retain: args.retain,
+            after: args.after,
+            documents: args.documents,
+        });
+        session.check_recording()?;
+    }
     Ok((session, defaulted))
 }
 

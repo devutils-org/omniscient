@@ -285,6 +285,29 @@ words. A collection's
 span and its rates are over its window, and a late attach is named in its notes
 with what the attach itself took while the program ran.
 .TP
+.BI \-\-until " EXPR"
+Record until a predicate fires, as a session's
+.B record:
+block does on its one request: the run keeps only what
+.B \-\-retain
+holds, and writes one document each time
+.I EXPR
+\(em the filter grammar, over one round of the request \(em becomes true.
+.B value
+in it is the request's measured value. Needs
+.BR \-\-retain ", " \-\-documents " and " \-\-duration ,
+each refused when absent. \fBRECORDING\fR has the rest.
+.TP
+.BI \-\-retain " DURATION"
+How far back a recorded document reaches from its trigger.
+.TP
+.BI \-\-after " DURATION"
+How long a recorded document goes on after its trigger before it is written;
+zero when absent.
+.TP
+.BI \-\-documents " COUNT"
+The most documents a recording writes. The run ends with the last.
+.TP
 .BI \-\-stack " MODE"
 .BR fp ", " dwarf ", " lbr " or " none .
 .B dwarf
@@ -418,6 +441,24 @@ A held request is attached at most once: a request has one window. A join or a
 decomposition that reads a held source is refused until the join engine knows
 when a source was watching; join the cheap pass instead. \fBTRIAGE\fR says how
 the escalation decides.
+.SS Recording
+A session with a \fBrecord:\fR block is a flight recorder: a run whose
+duration is until a predicate fires. \fBRECORDING\fR says what it does.
+.PP
+.RS
+.EX
+duration: 30s
+requests:
+  \- {label: descriptors, source: proc.fd, target: {launch: [./prog]},
+     mode: poll@20ms, emit: [summary]}
+record:
+  trigger: "value >= 150"
+  on: descriptors
+  retain: 1s
+  after: 600ms
+  documents: 5
+.EE
+.RE
 .SS Joins
 A join is declared beside its sources and matches their events by a key.
 .TP
@@ -473,6 +514,45 @@ sampled, polled, traced, counted \(em and its resolution. The residue is
 \fIwhole \- parts\fR, signed and never rounded away: negative is something
 counted twice, positive is a state no row covers, and one inside its own
 resolution is the decomposition holding.
+.SH RECORDING
+A recording keeps only the last \fBretain\fR of what its requests read;
+everything older is evicted, and counted. After every round of the request
+named by \fBon\fR (which may be left out when the session has one), the
+\fBtrigger\fR is evaluated over the events that round read. It fires on the
+round in which it becomes true, and again only after a round in which it was
+not, so a level held for a second writes one document and not fifty. When it
+fires the run goes on for \fBafter\fR, then cuts a document: the window from
+\fBretain\fR before the trigger to that round, every request's events inside
+it, and the trigger itself \(em the predicate, the request, the monotonic
+time of the round and of the event that fired it, the value it fired with.
+Then it goes on recording. It ends at its \fBdocuments\fR, at its
+\fBduration\fR, or when a launched program exits; a document still open
+then is cut short and says so.
+.PP
+The trigger reads \fBvalue\fR, \fBkind\fR, and the fields the catalog lets
+the source be filtered on through the backend the resolver chose; any other
+field is refused before the launch, since it could never fire. The three
+bounds are required: without \fBretain\fR the run would keep everything,
+without \fBdocuments\fR it could write forever, and without \fBduration\fR
+its end would be a trigger that may never fire. A request in \fBcount\fR or
+\fBsnapshot\fR mode, a \fBwindow\fR, an \fBescalate:\fR block and a
+decomposition are each refused beside a recording, with the reason.
+.PP
+With \fB\-o\fR \fIDIR\fR each document is \fIDIR\fR/trigger\-\fIN\fR.\fIext\fR,
+written the moment it is cut. Without it the documents go to standard output
+one after another, which only \fBtext\fR and \fBndjson\fR can carry; any
+other format is refused there. Each document counts, per request, what was
+evicted since the one before it: read, paid for, and in no document. The
+count is a loss, and is on the document's loss line and beside its
+distributions \(em without the \fB>=\fR mark, since everything inside the
+window is there.
+.PP
+The budget is weighed over a rolling span rather than the whole run: the
+longer of \fBretain\fR and two seconds. A recorder that idled for an hour
+has not banked an hour of budget for what it does next.
+.PP
+\fB\-\-duration\fR on \fB\-f\fR replaces a recording's longest duration,
+and the bounds are checked again against it.
 .SH EVIDENCE
 Every correlated result carries the grounds it was obtained on, because a
 correlation backed by a propagated identity and one backed by two things
@@ -646,6 +726,11 @@ degraded, and the machine's kernel, governor, THP mode, SMT state and
 clocksource. Two measurements taken through different backends are not
 comparable, and this is what says which was used.
 .TP
+.IR <out>/trigger\-N.<ext> ", " <out>/recording.json
+A recording's documents, one per trigger, and its record: every trigger with
+its window, why the run ended, and what was read after the last document and
+is in none.
+.TP
 .I <out>/cost.json
 What the measurement itself cost: the CPU time this tool burned, the CPU time
 the target burned over the same window and where that number was read, what
@@ -702,6 +787,13 @@ omn saturate \-\-objective energy \-\- ./build.sh
 A run that decides which layer to pay for, from its own cheap numbers:
 .EX
 omn \-f examples/attach\-escalate\-phases.yml \-\-budget 5%
+.EE
+.TP
+A flight recorder: a document each time a program's descriptors pass 150:
+.EX
+omn \-f examples/record\-descriptor\-bursts.yml \-o /tmp/bursts
+omn proc.fd \-m poll@20ms \-e summary \-d 1h \-\-until 'value >= 150' \\
+    \-\-retain 1s \-\-documents 5 \-\-pid 4242
 .EE
 .TP
 Which function a change made slower:

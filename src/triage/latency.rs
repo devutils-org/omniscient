@@ -213,6 +213,7 @@ impl Ask {
                 top: 16,
             }],
             escalate: None,
+            record: None,
         }
     }
 }

@@ -194,6 +194,7 @@ impl Ask {
             joins: Vec::new(),
             decompose: Vec::new(),
             escalate: None,
+            record: None,
         }
     }
 }

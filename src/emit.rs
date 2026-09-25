@@ -383,6 +383,15 @@ pub struct Shortfall {
     /// dropped rows carried weights nobody up here ever saw.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_record: bool,
+    /// Events a recording read and evicted for its retention bound before
+    /// this window opened, and put in no document.
+    ///
+    /// The one count here that does *not* make a value a lower bound: the
+    /// window's events are all present, and what was evicted is older than
+    /// it. It is here because it is what the run saw and let go, and a
+    /// distribution cut out of a longer run says so beside its numbers.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub evicted: u64,
     /// The whole statement, in one sentence, so that a consumer of the
     /// structured output has it without deriving it from the fields above.
     pub note: String,
@@ -404,26 +413,50 @@ impl Shortfall {
     /// learn to skip, and then the one run that needed it is the one nobody
     /// reads it on.
     pub fn of(losses: &Losses, records: u64, per_record: bool) -> Option<Self> {
-        if losses.dropped == 0 && losses.throttled == 0 {
+        if losses.dropped == 0 && losses.throttled == 0 && losses.evicted == 0 {
             return None;
         }
         let fraction =
             (losses.dropped > 0).then(|| losses.dropped as f64 / (losses.dropped + records) as f64);
-        let note = Self::describe(
-            losses.dropped,
-            losses.throttled,
-            records,
-            fraction,
-            per_record,
-        );
+        let mut note = if losses.dropped == 0 && losses.throttled == 0 {
+            String::new()
+        } else {
+            Self::describe(
+                losses.dropped,
+                losses.throttled,
+                records,
+                fraction,
+                per_record,
+            )
+        };
+        if losses.evicted > 0 {
+            if !note.is_empty() {
+                note.push_str(". And ");
+            }
+            let _ = write!(
+                note,
+                "{} earlier events were read and evicted by the recording's retention before \
+                 this window opened, and are in no document: this is the distribution of the \
+                 window, which holds every event it saw, and not of the run",
+                losses.evicted
+            );
+        }
         Some(Self {
             dropped: losses.dropped,
             throttled: losses.throttled,
             records,
             fraction,
             per_record,
+            evicted: losses.evicted,
             note,
         })
+    }
+
+    /// Whether this shortfall makes a value a lower bound: something inside
+    /// the span was lost. An eviction alone does not -- it is older than the
+    /// window -- and carries its sentence without the mark.
+    pub fn bounds_below(&self) -> bool {
+        self.dropped > 0 || self.throttled > 0
     }
 
     fn describe(
@@ -486,6 +519,10 @@ impl Shortfall {
         );
         note
     }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One key's values reduced to the shape of the whole run.
@@ -797,7 +834,19 @@ pub fn aggregate(
                 }
             }
             Emit::TopK(k) => topk_by(&collection.events, axes, value_attr, *k, short.as_ref())?,
-            Emit::Stack => stack(&collection.events, value_attr, short.as_ref())?,
+            Emit::Stack => {
+                let (output, unmeasured) =
+                    stack_counting(&collection.events, value_attr, short.as_ref())?;
+                if unmeasured > 0 {
+                    degradations.push(format!(
+                        "{unmeasured} of {} events carried no `{value_attr}`: the collector saw \
+                         them happen and could not measure them, so they are in no stack's \
+                         events or total -- counted here rather than refused",
+                        collection.events.len()
+                    ));
+                }
+                output
+            }
         });
     }
 
@@ -1190,17 +1239,40 @@ fn topk_by(
 /// A deep stack is a long string; the same stack seen ten thousand times is one
 /// `u64` compared ten thousand times, and the frames are looked up once in
 /// [`Results::stacks`].
+#[cfg(test)]
 fn stack(events: &[Event], attr: &str, short: Option<&Shortfall>) -> Result<Output, EmitError> {
+    stack_counting(events, attr, short).map(|(output, _)| output)
+}
+
+/// The same, with how many events carried no value for the weight.
+///
+/// An event without the attribute is one the collector saw and could not
+/// measure -- an IBS op the cpu did not time has no `latency_cycles` -- and
+/// it is counted and left out, as every other reducing emit leaves it out
+/// through [`measured`]. It used to be a refusal, which made `mem.latency
+/// -e stack` exit 1 about one run in ten, on the runs whose sample happened
+/// to include one. An attribute that is there and not a number is still a
+/// refusal: that is a collector bug.
+fn stack_counting(
+    events: &[Event],
+    attr: &str,
+    short: Option<&Shortfall>,
+) -> Result<(Output, usize), EmitError> {
     let mut by_stack: BTreeMap<u64, (usize, f64)> = BTreeMap::new();
     let mut unattributed = 0;
+    let mut unmeasured = 0;
     for event in events {
         let Some(id) = stack_id(event) else {
             unattributed += 1;
             continue;
         };
+        let Some(value) = measured(event, attr)? else {
+            unmeasured += 1;
+            continue;
+        };
         let entry = by_stack.entry(id).or_insert((0, 0.0));
         entry.0 += 1;
-        entry.1 += value_of(event, attr)?;
+        entry.1 += value;
     }
 
     let mut stacks: Vec<StackCount> = by_stack
@@ -1219,11 +1291,14 @@ fn stack(events: &[Event], attr: &str, short: Option<&Shortfall>) -> Result<Outp
             .then_with(|| left.stack.cmp(&right.stack))
     });
 
-    Ok(Output::Stack {
-        short: short.cloned(),
-        stacks,
-        unattributed,
-    })
+    Ok((
+        Output::Stack {
+            short: short.cloned(),
+            stacks,
+            unattributed,
+        },
+        unmeasured,
+    ))
 }
 
 /// Whether a row in this run stands for more than one measurement.
@@ -2141,5 +2216,41 @@ mod tests {
             panic!("stack produces a stack");
         };
         assert_eq!(unattributed, 1);
+    }
+
+    /// A stacked event the collector could not measure is counted and left
+    /// out, not a refusal of the whole emit: an IBS op the cpu did not time
+    /// carries a stack and no `latency_cycles`.
+    #[test]
+    fn a_stacked_event_without_its_weight_is_counted_and_left_out() {
+        let with = |value: Option<u64>| {
+            let mut attrs = vec![Attr::uint(STACK_ID_ATTR, 7)];
+            if let Some(value) = value {
+                attrs.push(Attr::uint("latency_cycles", value));
+            }
+            Event {
+                ts_ns: 1,
+                ts_err_ns: 0,
+                kind: "mem.latency".to_owned(),
+                keys: Vec::new(),
+                attrs,
+                collector_id: crate::event::CollectorId::new("ibs"),
+                seq: 0,
+            }
+        };
+        let events = vec![with(Some(40)), with(None), with(Some(2))];
+        let (output, unmeasured) = stack_counting(&events, "latency_cycles", None).unwrap();
+        assert_eq!(unmeasured, 1);
+        let Output::Stack { stacks, .. } = output else {
+            panic!("stack produces a stack");
+        };
+        assert_eq!((stacks[0].events, stacks[0].total), (2, 42.0));
+
+        let mut malformed = with(None);
+        malformed.attrs.push(crate::event::Attr {
+            name: "latency_cycles".to_owned(),
+            value: crate::event::AttrValue::Text("x".to_owned()),
+        });
+        assert!(stack_counting(&[malformed], "latency_cycles", None).is_err());
     }
 }

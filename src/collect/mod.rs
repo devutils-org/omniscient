@@ -165,6 +165,12 @@ pub enum CollectError {
     /// the launch, for the reason a window is.
     #[error("the escalation cannot run: {reason}")]
     Escalation { reason: String },
+    /// A recording this runner cannot hold as it was handed over. The session
+    /// refuses every one of these in its own words before anything is
+    /// resolved; this is the same refusal for a caller that built the
+    /// requests itself.
+    #[error("the recording cannot run: {reason}")]
+    Recording { reason: String },
 }
 
 impl CollectError {
@@ -214,7 +220,8 @@ impl CollectError {
             CollectError::ConflictingEnvironment { .. } => Whose::Build,
             CollectError::NoStopCondition
             | CollectError::MixedTargets { .. }
-            | CollectError::Escalation { .. } => Whose::Request,
+            | CollectError::Escalation { .. }
+            | CollectError::Recording { .. } => Whose::Request,
             CollectError::Launch { .. } => Whose::Machine,
             CollectError::Several { refusals } => refusals
                 .iter()
@@ -391,6 +398,16 @@ pub struct Losses {
     /// `kernel.perf_event_max_sample_rate` is what decides this, and a run
     /// with a non-zero count here is not comparable to one without.
     pub throttled: u64,
+    /// Events a recording read and evicted for its retention bound, before
+    /// any document held them: observed, paid for, and in no document.
+    ///
+    /// Only a recording evicts, and only its documents carry this: each one
+    /// counts what was evicted since the document before it. It does not make
+    /// the document's distribution a lower bound -- every event of the
+    /// document's window is in it -- but it is what the run saw and let go,
+    /// and a count nobody is shown is a silent loss.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub evicted: u64,
     /// The reasons behind the counts above, with how often each occurred.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reasons: BTreeMap<String, u64>,
@@ -429,6 +446,32 @@ impl Losses {
             && self.late_ticks == 0
             && self.undecoded == 0
             && self.throttled == 0
+            && self.evicted == 0
+    }
+
+    /// What was lost since `earlier`, a reading of the same account taken
+    /// before: the counts and the reasons by difference. The overrun's
+    /// magnitudes cannot be taken apart, so the later ones are kept whole,
+    /// which never understates the worst round.
+    pub fn since(&self, earlier: &Losses) -> Losses {
+        let mut reasons = BTreeMap::new();
+        for (reason, count) in &self.reasons {
+            let before = earlier.reasons.get(reason).copied().unwrap_or(0);
+            if *count > before {
+                reasons.insert(reason.clone(), count - before);
+            }
+        }
+        let late_ticks = self.late_ticks.saturating_sub(earlier.late_ticks);
+        Losses {
+            dropped: self.dropped.saturating_sub(earlier.dropped),
+            failed_reads: self.failed_reads.saturating_sub(earlier.failed_reads),
+            late_ticks,
+            undecoded: self.undecoded.saturating_sub(earlier.undecoded),
+            throttled: self.throttled.saturating_sub(earlier.throttled),
+            evicted: self.evicted.saturating_sub(earlier.evicted),
+            reasons,
+            overrun: self.overrun.filter(|_| late_ticks > 0),
+        }
     }
 
     pub fn note(&mut self, reason: impl Into<String>) {
@@ -493,6 +536,7 @@ impl Losses {
         self.late_ticks += other.late_ticks;
         self.undecoded += other.undecoded;
         self.throttled += other.throttled;
+        self.evicted += other.evicted;
         self.overrun = match (self.overrun, other.overrun) {
             (Some(mine), Some(theirs)) => Some(Overrun {
                 // The two halves of one collection are driven at one cadence,
@@ -883,6 +927,149 @@ pub struct Switch {
     pub why: String,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// A request held for the escalation that this machine cannot serve: the
+/// resolver found no backend for it.
+///
+/// Not a reason to refuse the run. The session asked for it only in case its
+/// layer were named, and the cheap pass does not need it; the resolver's
+/// reason is what the escalation says if it does name that layer, and until
+/// then the run goes on as if the request were a layer this machine lacks --
+/// which it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unserved {
+    pub request: crate::request::Request,
+    /// Why the resolver could not serve it, in its own words.
+    pub reason: String,
+}
+
+/// What a recording asks of the runner: a trigger, a retention bound, and
+/// where each document goes as it is cut.
+///
+/// A recording is a mode of a run, not a second runner. The run is the one
+/// [`run_all_within`] drives -- the same collectors, the same rounds, the same
+/// budget -- with three differences: it keeps only what the retention holds,
+/// evicting and counting the rest; it reads one request's rounds against a
+/// predicate; and when the predicate fires it hands the retained window out
+/// as a [`Document`] and goes on. Its buffers are the events a round has
+/// already read into memory, so nothing new is kept in the kernel.
+pub struct Recorder<'a> {
+    /// The request whose rounds the trigger reads.
+    pub on: usize,
+    /// The predicate, in the filter grammar. `value` in it is read as the
+    /// `on` request's measured value, whatever its collector names it.
+    pub trigger: crate::filter::FilterExpr,
+    /// How far back a document reaches from its trigger.
+    pub retain_ns: u64,
+    /// How long a document goes on recording after its trigger.
+    pub after_ns: u64,
+    /// The most documents the run writes; it ends with the last.
+    pub documents: u32,
+    /// Where each document goes, as soon as it is cut. An error ends the
+    /// run, with the reason: a recorder that cannot write what it recorded
+    /// is not recording.
+    pub sink: &'a mut dyn FnMut(Document) -> Result<(), String>,
+}
+
+/// One document of a recording: the window the retention held when the
+/// trigger fired, and the trigger itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Document {
+    pub trigger: Fired,
+    /// One collection per request, each holding the events of this window
+    /// only, with `window` saying where it was.
+    pub collections: Vec<Collection>,
+}
+
+/// Why a document was written: which predicate fired, on what, when, with
+/// which value, and the window it covers.
+///
+/// Every timestamp is `CLOCK_MONOTONIC`, the clock of every event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fired {
+    /// Which document of the run this is, from one.
+    pub number: u32,
+    /// The most the run was allowed to write.
+    pub of_at_most: u32,
+    /// The predicate that fired, as the session wrote it.
+    pub predicate: String,
+    /// The request it read, by label or by source.
+    pub on: String,
+    /// When the round that fired had read, which is when the run knew.
+    pub fired_ns: u64,
+    /// The event that made the predicate true, on its own timestamp.
+    pub event_ts_ns: u64,
+    /// The name the `on` request's collector gives its value, which is what
+    /// `value` in the predicate read.
+    pub value_attr: String,
+    /// That event's value, the one that fired it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// Every field the predicate reads, as that event carried it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, crate::event::AttrValue>,
+    /// When the run opened, which the window is inside.
+    pub run_opened_ns: u64,
+    /// Where the window opens: `retain` before the trigger, or the run's
+    /// open when the run was younger than that.
+    pub opened_ns: u64,
+    /// Where it closes: the round the document was cut at, `after` past the
+    /// trigger or the end of the run, whichever came first.
+    pub closed_ns: u64,
+    pub retain_ns: u64,
+    pub after_ns: u64,
+    /// Set when the run ended before `after` had passed, with why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_short: Option<String>,
+    /// Rounds in which the predicate became true again while this document
+    /// was open. Their events are in it; they wrote no document of their own.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fired_again: u64,
+    /// What the retention evicted since the document before this one, per
+    /// request: read by the run and in no document.
+    pub evicted: Vec<Evicted>,
+}
+
+/// What a recording read and let go for one request, in no document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evicted {
+    /// The request, by label or by source.
+    pub request: String,
+    /// Its events.
+    pub events: u64,
+    /// The rounds that read them: a poll's reads, a stream's drains.
+    pub rounds: u64,
+}
+
+/// What a recording did over the whole of its run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Recorded {
+    pub predicate: String,
+    pub on: String,
+    pub retain_ns: u64,
+    pub after_ns: u64,
+    pub documents_at_most: u32,
+    /// Every document written, in order: the trigger half of each.
+    pub documents: Vec<Fired>,
+    /// Why the run ended: its longest duration, its bound on documents,
+    /// the program's exit.
+    pub stopped_because: String,
+    /// When it opened and closed, on `CLOCK_MONOTONIC`.
+    pub opened_ns: u64,
+    pub closed_ns: u64,
+    /// The span the budget is weighed over while a recording runs, instead
+    /// of the whole run: a recorder that idled for an hour must not have
+    /// banked an hour of budget for its burst.
+    pub budget_interval_ns: u64,
+    /// What was read after the last document -- or over the whole run, when
+    /// there was none -- and is in no document: evicted, or still retained
+    /// when the run ended.
+    pub unrecorded: Vec<Evicted>,
+}
+
 /// One source of events.
 pub trait Collector {
     fn id(&self) -> &CollectorId;
@@ -1125,14 +1312,88 @@ pub fn run_all_within(
     resolved: &[ResolvedRequest],
     cheaper: &mut dyn Cheaper,
 ) -> Result<Vec<Collection>, CollectError> {
-    let mut escalation = escalation_for(resolved)?;
-    run_all_escalating(
+    run_all_within_unserved(resolved, cheaper, &[])
+}
+
+/// The same run, told which of the session's held requests this machine
+/// could not serve.
+///
+/// They are not in `resolved` and are never attached; the escalation is
+/// told of them, and if it names their layer it says that the layer could
+/// not be served and why, in the resolver's words. A held request that does
+/// not resolve is a layer this machine cannot serve, not a failed run.
+pub fn run_all_within_unserved(
+    resolved: &[ResolvedRequest],
+    cheaper: &mut dyn Cheaper,
+    unserved: &[Unserved],
+) -> Result<Vec<Collection>, CollectError> {
+    let mut escalation = escalation_for(resolved, unserved)?;
+    run_core(
         resolved,
         cheaper,
         escalation
             .as_deref_mut()
             .map(|escalation| escalation as &mut dyn Escalate),
+        None,
     )
+    .map(|(collections, _)| collections)
+}
+
+/// A recording: the same run, with no fixed end but its longest duration,
+/// keeping only what `recorder.retain_ns` holds and handing a [`Document`]
+/// to `recorder.sink` each time its trigger fires.
+///
+/// Returns the run's collections as an ordinary run would -- what they cost,
+/// what they lost, what their collectors noted -- holding the events still
+/// retained at the end, and what the recording did.
+pub fn record_within(
+    resolved: &[ResolvedRequest],
+    cheaper: &mut dyn Cheaper,
+    recorder: &mut Recorder<'_>,
+) -> Result<(Vec<Collection>, Recorded), CollectError> {
+    recording_holds(resolved, recorder)?;
+    run_core(resolved, cheaper, None, Some(recorder))
+        .map(|(collections, recorded)| (collections, recorded.unwrap_or_default()))
+}
+
+/// Refuses a recording the runner cannot hold, for a caller that built its
+/// requests without a session. `Session::check_recording` says the same
+/// things first, before anything is resolved.
+fn recording_holds(
+    resolved: &[ResolvedRequest],
+    recorder: &Recorder<'_>,
+) -> Result<(), CollectError> {
+    let refuse = |reason: String| Err(CollectError::Recording { reason });
+    if recorder.on >= resolved.len() {
+        return refuse(format!(
+            "its trigger reads request {} of a run of {}",
+            recorder.on,
+            resolved.len()
+        ));
+    }
+    if recorder.retain_ns == 0 || recorder.documents == 0 {
+        return refuse(
+            "it needs a retention bound and a bound on documents, both above zero".to_owned(),
+        );
+    }
+    if !resolved.iter().any(|one| one.request.duration.is_some()) {
+        return refuse("it needs a longest duration, and no request has one".to_owned());
+    }
+    for one in resolved {
+        if one.request.window.is_some() {
+            return refuse(format!(
+                "`{}` has a window, and a request in a recording is watched for the whole run",
+                one.request.source
+            ));
+        }
+        if matches!(one.request.mode, Mode::Count | Mode::Snapshot) {
+            return refuse(format!(
+                "`{}` is a single reading, and a recording retains a series",
+                one.request.source
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Where a session's escalation is answered from: the one line of the
@@ -1143,14 +1404,18 @@ pub fn run_all_within(
 /// families. A session holds a request for the escalation with a window
 /// written `on <layer>`, and one that holds none is run without asking
 /// anything.
-fn escalation_for(resolved: &[ResolvedRequest]) -> Result<Option<Box<dyn Escalate>>, CollectError> {
+fn escalation_for(
+    resolved: &[ResolvedRequest],
+    unserved: &[Unserved],
+) -> Result<Option<Box<dyn Escalate>>, CollectError> {
     if !resolved
         .iter()
         .any(|one| one.request.window.is_some_and(|window| window.on.is_some()))
+        && unserved.is_empty()
     {
         return Ok(None);
     }
-    crate::triage::escalate::Policy::for_run(resolved)
+    crate::triage::escalate::Policy::for_run_with(resolved, unserved)
         .map(|policy| Some(Box::new(policy) as Box<dyn Escalate>))
         .map_err(|refusal| CollectError::Escalation {
             reason: refusal.to_string(),
@@ -1165,6 +1430,17 @@ pub fn run_all_escalating(
     cheaper: &mut dyn Cheaper,
     escalation: Option<&mut dyn Escalate>,
 ) -> Result<Vec<Collection>, CollectError> {
+    run_core(resolved, cheaper, escalation, None).map(|(collections, _)| collections)
+}
+
+/// The one runner behind every entry point: an ordinary run, an escalating
+/// one, and a recording.
+fn run_core(
+    resolved: &[ResolvedRequest],
+    cheaper: &mut dyn Cheaper,
+    escalation: Option<&mut dyn Escalate>,
+    recorder: Option<&mut Recorder<'_>>,
+) -> Result<(Vec<Collection>, Option<Recorded>), CollectError> {
     assert!(!resolved.is_empty(), "a run needs at least one request");
     let workload = workload_of(resolved)?;
     // Whether each request is about the workload, which decides what it is
@@ -1404,6 +1680,16 @@ pub fn run_all_escalating(
     spending.sheddable = plans.iter().map(|plan| plan.held).collect();
     let started_ns = spending.opened_ns;
     let wake = child.as_ref().and_then(|child| child.exit_fd());
+    // A recording weighs its budget over a rolling span rather than the
+    // whole run, which has no fixed end to be a share of.
+    let budget_interval_ns = recorder.as_ref().map(|recorder| {
+        recorder
+            .retain_ns
+            .max(RECORDING_BUDGET_FLOOR.as_nanos() as u64)
+    });
+    spending.rolling_ns = budget_interval_ns;
+    let mut recording =
+        recorder.map(|recorder| Recording::new(recorder, resolved, &slots, started_ns));
     let Driven {
         mut events,
         mut losses,
@@ -1419,6 +1705,7 @@ pub fn run_all_escalating(
         wake,
         &mut spending,
         escalation,
+        recording.as_mut(),
         || {
             if let Some(child) = child.as_mut() {
                 if let Some(status) = child.finished() {
@@ -1509,7 +1796,10 @@ pub fn run_all_escalating(
     // Read once the child has been reaped: `getrusage(RUSAGE_CHILDREN)` is what
     // `time` prints, and it only prints it after the wait.
     let overheads = spending.close();
-    Ok(slots
+    let recorded = recording.map(|recording| {
+        recording.recorded(&stopped_because, closed_ns, budget_interval_ns.unwrap_or(0))
+    });
+    let collections = slots
         .iter()
         .enumerate()
         .map(|(index, slot)| {
@@ -1557,7 +1847,8 @@ pub fn run_all_escalating(
                 window: watched[index],
             }
         })
-        .collect())
+        .collect();
+    Ok((collections, recorded))
 }
 
 /// Whether a request's window is one its collector and its mode can honour.
@@ -1882,6 +2173,14 @@ struct Spending<'a> {
     /// Collections found over budget with nowhere cheaper to go that the
     /// escalation may shed, with the reason the run would otherwise stop for.
     over: Vec<(usize, String)>,
+    /// Set for a run with no fixed end: each collection is weighed over the
+    /// last this many nanoseconds rather than since the run opened. A share
+    /// of a run that idled for an hour is a share of that hour, and a burst
+    /// would be under any ceiling against it.
+    rolling_ns: Option<u64>,
+    /// Where each account stood at every check within the rolling span, the
+    /// oldest first: the baseline a rolling weighing is against.
+    snapshots: Vec<std::collections::VecDeque<Since>>,
 }
 
 impl<'a> Spending<'a> {
@@ -1937,7 +2236,39 @@ impl<'a> Spending<'a> {
             frozen: vec![None; count],
             sheddable: vec![false; count],
             over: Vec::new(),
+            rolling_ns: None,
+            snapshots: vec![std::collections::VecDeque::new(); count],
         }
+    }
+
+    /// What collection `index` is weighed from now: the whole run, or since
+    /// it last moved -- or, in a rolling run, the oldest reading of its
+    /// account inside the rolling span, whichever is later. Records this
+    /// reading for the checks to come.
+    fn baseline(&mut self, index: usize, now: Since) -> Since {
+        let since = self.since[index];
+        let Some(rolling_ns) = self.rolling_ns else {
+            return since;
+        };
+        // The latest reading at or before the horizon is the baseline, so
+        // the span weighed is the rolling one or a check interval more; none
+        // that old yet is the run's first span, weighed from its start.
+        let horizon_ns = now.wall_opened_ns.saturating_sub(rolling_ns);
+        let snapshots = &mut self.snapshots[index];
+        while snapshots.len() >= 2 && snapshots[1].wall_opened_ns <= horizon_ns {
+            snapshots.pop_front();
+        }
+        let baseline = match snapshots.front() {
+            Some(oldest)
+                if oldest.wall_opened_ns <= horizon_ns
+                    && oldest.wall_opened_ns >= since.wall_opened_ns =>
+            {
+                *oldest
+            }
+            _ => since,
+        };
+        snapshots.push_back(now);
+        baseline
     }
 
     /// Whether anything here has a ceiling at all. A run with no budget is
@@ -2026,13 +2357,17 @@ impl<'a> Spending<'a> {
                 continue;
             }
             let observed_cpu_ns = self.meters[index].read();
-            let spent = self.spent(
+            let baseline = self.baseline(
                 index,
-                self.since[index],
-                self_cpu_ns,
-                observed_cpu_ns,
-                entered_ns,
+                Since {
+                    self_cpu_ns,
+                    observed_cpu_ns: observed_cpu_ns.unwrap_or(0),
+                    inside_ns: self.inside_ns[index],
+                    total_inside_ns: self.inside_ns.iter().sum(),
+                    wall_opened_ns: entered_ns,
+                },
             );
+            let spent = self.spent(index, baseline, self_cpu_ns, observed_cpu_ns, entered_ns);
             // No denominator yet is not "within budget": it is "not knowable
             // yet", and a target that has burned no cpu at all has nothing for
             // an overhead to be a percentage of.
@@ -2048,10 +2383,19 @@ impl<'a> Spending<'a> {
             // window since it moved, so the reason has to say which window it
             // is talking about or it reads as disagreeing with the run's own
             // total.
-            let window = if self.served_by[index].len() > 1 {
-                format!(" since it was moved onto `{was}`")
-            } else {
-                String::new()
+            let window = match self.rolling_ns {
+                Some(rolling_ns) => format!(
+                    " over the last {}, {ROLLING_BUDGET}",
+                    span_ns(
+                        entered_ns
+                            .saturating_sub(baseline.wall_opened_ns)
+                            .min(rolling_ns)
+                    )
+                ),
+                None if self.served_by[index].len() > 1 => {
+                    format!(" since it was moved onto `{was}`")
+                }
+                None => String::new(),
             };
             match self.cheaper.next(index, &spent, ceiling) {
                 Some(next) => match self.degrade(index, next, slots, events, losses) {
@@ -2225,6 +2569,7 @@ impl Spending<'static> {
         spending.window_since = vec![None; count];
         spending.frozen = vec![None; count];
         spending.sheddable = vec![false; count];
+        spending.snapshots = vec![std::collections::VecDeque::new(); count];
         spending
     }
 
@@ -2402,6 +2747,7 @@ fn drive(
     wake: Option<RawFd>,
     spending: &mut Spending<'_>,
     mut escalation: Option<&mut dyn Escalate>,
+    mut recording: Option<&mut Recording<'_, '_>>,
     mut ended: impl FnMut() -> Option<String>,
 ) -> Driven {
     let count = slots.len();
@@ -2461,6 +2807,14 @@ fn drive(
         }
 
         let mut gone = None;
+        // Where each buffer stood before this round, and which requests read
+        // in it: what a recording's trigger reads is the round's own events.
+        let before: Vec<usize> = if recording.is_some() {
+            ledger.events.iter().map(Vec::len).collect()
+        } else {
+            Vec::new()
+        };
+        let mut read_now = vec![false; count];
         for (index, slot) in slots.iter_mut().enumerate() {
             let Slot::Attached(collector) = slot else {
                 continue;
@@ -2470,6 +2824,7 @@ fn drive(
             if ledger.finished[index].is_some() || round_started_ns < due {
                 continue;
             }
+            read_now[index] = true;
             if let Some(reason) = ledger.read(
                 index,
                 collector.as_mut(),
@@ -2518,6 +2873,16 @@ fn drive(
                 break "snapshot: a single read".to_owned();
             }
             break "every request's window had closed".to_owned();
+        }
+
+        // A recording reads the round before the stop condition is asked, so
+        // a trigger that fires on the run's last round still writes its
+        // document, and a document due now is cut from this round's reads.
+        if let Some(recording) = recording.as_deref_mut() {
+            if let Some(reason) = recording.round(&read_now, &before, &mut ledger, slots, spending)
+            {
+                break reason;
+            }
         }
 
         if let Some(reason) = ended() {
@@ -2582,6 +2947,11 @@ fn drive(
                 Slot::Detached(_) | Slot::Missed => None,
             })
             .min();
+        // A document due to be cut is a moment to wake for too.
+        let next_due_ns = match recording.as_deref().and_then(Recording::due_ns) {
+            Some(cut_ns) => Some(next_due_ns.map_or(cut_ns, |next| next.min(cut_ns))),
+            None => next_due_ns,
+        };
         if let Some(next_due_ns) = next_due_ns {
             let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
             if remaining_ns > 0 {
@@ -2589,6 +2959,10 @@ fn drive(
             }
         }
     };
+
+    if let Some(recording) = recording {
+        recording.end(&stopped_because, &mut ledger, slots, spending);
+    }
 
     // What the escalation has to say about each request, now that it has
     // seen the whole run.
@@ -2845,6 +3219,485 @@ impl Ledger {
     }
 }
 
+/// The span a recording's budget is weighed over, at the least: the retention
+/// bound when it is longer. Two seconds is twenty budget checks, which is
+/// enough for a percentage not to be one unlucky read, and short enough that a
+/// burst is weighed against its own seconds rather than the quiet before it.
+const RECORDING_BUDGET_FLOOR: StdDuration = StdDuration::from_secs(2);
+
+/// How a stop for a rolling budget names the span, so a caller reading the
+/// reason can tell it from a stop over the whole window.
+pub const ROLLING_BUDGET: &str = "the span a run with no fixed end is weighed over";
+
+/// How often a recording looks for events past its retention, as a fraction
+/// of the bound: evicting on every round of a busy stream would walk the whole
+/// buffer each time, and the buffer holds at most this fraction more than the
+/// bound. A document is cut from the exact window whatever this is.
+const EVICTION_FRACTION: u64 = 16;
+
+/// A document the trigger opened and `after` has not closed yet.
+struct Pending {
+    fired: Fired,
+    close_at_ns: u64,
+}
+
+/// A recording in progress: the runner's half of a [`Recorder`].
+///
+/// It keeps no events of its own. The ledger's are the buffer; this decides
+/// what they may keep, reads the trigger's request after each round, and cuts
+/// documents out of them.
+struct Recording<'r, 'a> {
+    asked: &'r mut Recorder<'a>,
+    /// The trigger with `value` read as the collector's own name for it.
+    trigger: crate::filter::FilterExpr,
+    predicate: String,
+    value_attr: String,
+    labels: Vec<String>,
+    run_opened_ns: u64,
+    /// True until the predicate matches, and again after a round in which it
+    /// did not: a trigger fires on the round its predicate becomes true, so a
+    /// level held for a second writes one document and not ten.
+    armed: bool,
+    pending: Option<Pending>,
+    written: Vec<Fired>,
+    /// How many events at the front of each buffer are in a document already,
+    /// so that evicting them is not a loss.
+    documented: Vec<usize>,
+    /// When the last document was cut: a round read at or before it is in
+    /// that document or was counted when it was evicted.
+    last_cut_ns: u64,
+    /// When each round of each request read, for as long as it is retained.
+    rounds: Vec<std::collections::VecDeque<u64>>,
+    evicted_events: Vec<u64>,
+    evicted_rounds: Vec<u64>,
+    last_evicted_ns: u64,
+    /// Each collection's losses at the last cut, runner's and collector's
+    /// together, which a document's are the difference from.
+    losses_at_cut: Vec<Losses>,
+    /// What was read after the last document and is in none, once the run
+    /// is over.
+    unrecorded: Vec<Evicted>,
+}
+
+impl<'r, 'a> Recording<'r, 'a> {
+    fn new(
+        asked: &'r mut Recorder<'a>,
+        resolved: &[ResolvedRequest],
+        slots: &[Slot],
+        run_opened_ns: u64,
+    ) -> Self {
+        let value_attr = match &slots[asked.on] {
+            Slot::Attached(collector) => collector.value_attr().to_owned(),
+            _ => String::new(),
+        };
+        let predicate = asked.trigger.to_string();
+        let trigger = read_value_as(&asked.trigger, &value_attr);
+        let count = resolved.len();
+        Recording {
+            asked,
+            trigger,
+            predicate,
+            value_attr,
+            labels: resolved
+                .iter()
+                .map(|one| {
+                    one.request
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| one.request.source.to_string())
+                })
+                .collect(),
+            run_opened_ns,
+            armed: true,
+            pending: None,
+            written: Vec::new(),
+            documented: vec![0; count],
+            last_cut_ns: run_opened_ns,
+            rounds: vec![std::collections::VecDeque::new(); count],
+            evicted_events: vec![0; count],
+            evicted_rounds: vec![0; count],
+            last_evicted_ns: run_opened_ns,
+            losses_at_cut: vec![Losses::default(); count],
+            unrecorded: Vec::new(),
+        }
+    }
+
+    /// When the open document is due to be cut, so the run wakes for it.
+    fn due_ns(&self) -> Option<u64> {
+        self.pending.as_ref().map(|pending| pending.close_at_ns)
+    }
+
+    /// After a round's reads: note which requests read, read the trigger's
+    /// new events, cut what is due, and evict what the retention no longer
+    /// holds. Returns why the run ends, once the recording has written all
+    /// it may or could not write what it cut.
+    fn round(
+        &mut self,
+        read: &[bool],
+        before: &[usize],
+        ledger: &mut Ledger,
+        slots: &[Slot],
+        spending: &Spending<'_>,
+    ) -> Option<String> {
+        let now_ns = monotonic_ns();
+        for (index, was_read) in read.iter().enumerate() {
+            if *was_read {
+                self.rounds[index].push_back(now_ns);
+            }
+        }
+
+        let on = self.asked.on;
+        if read[on] {
+            let fresh = &ledger.events[on][before[on].min(ledger.events[on].len())..];
+            let serving = &spending.serving[on];
+            let filtered_here = matches!(serving.filter, Some(FilterPlacement::Userspace(_)));
+            let matched = fresh.iter().find(|event| {
+                let kept = !filtered_here
+                    || serving
+                        .request
+                        .filter
+                        .as_ref()
+                        .is_none_or(|filter| crate::filter::matches(filter, event));
+                kept && crate::filter::matches(&self.trigger, event)
+            });
+            match matched {
+                None => self.armed = true,
+                Some(_) if !self.armed => {}
+                Some(event) => {
+                    self.armed = false;
+                    match self.pending.as_mut() {
+                        Some(pending) => pending.fired.fired_again += 1,
+                        None => {
+                            let fired = self.fire(now_ns, event);
+                            self.pending = Some(Pending {
+                                close_at_ns: now_ns + self.asked.after_ns,
+                                fired,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| now_ns >= pending.close_at_ns)
+        {
+            if let Some(reason) = self.cut(now_ns, None, ledger, slots, spending) {
+                return Some(reason);
+            }
+        }
+
+        let every_ns = (self.asked.retain_ns / EVICTION_FRACTION).max(1);
+        if now_ns.saturating_sub(self.last_evicted_ns) >= every_ns {
+            self.last_evicted_ns = now_ns;
+            let mut cutoff_ns = now_ns.saturating_sub(self.asked.retain_ns);
+            if let Some(pending) = &self.pending {
+                cutoff_ns = cutoff_ns.min(pending.fired.opened_ns);
+            }
+            for index in 0..ledger.events.len() {
+                self.evict_before(index, cutoff_ns, ledger);
+            }
+        }
+        None
+    }
+
+    /// The trigger half of a document, at the round that fired.
+    fn fire(&self, now_ns: u64, event: &Event) -> Fired {
+        let fields = self
+            .asked
+            .trigger
+            .fields()
+            .into_iter()
+            .filter_map(|field| {
+                let name = if field == Recording::VALUE_NAME {
+                    self.value_attr.as_str()
+                } else {
+                    field
+                };
+                let value = if name == "kind" {
+                    Some(crate::event::AttrValue::Text(event.kind.clone()))
+                } else {
+                    event.attr(name).cloned()
+                };
+                value.map(|value| (field.to_owned(), value))
+            })
+            .collect();
+        Fired {
+            number: self.written.len() as u32 + 1,
+            of_at_most: self.asked.documents,
+            predicate: self.predicate.clone(),
+            on: self.labels[self.asked.on].clone(),
+            fired_ns: now_ns,
+            event_ts_ns: event.ts_ns,
+            value_attr: self.value_attr.clone(),
+            value: event
+                .attr(&self.value_attr)
+                .and_then(|value| value.as_f64()),
+            fields,
+            run_opened_ns: self.run_opened_ns,
+            opened_ns: now_ns
+                .saturating_sub(self.asked.retain_ns)
+                .max(self.run_opened_ns),
+            closed_ns: now_ns,
+            retain_ns: self.asked.retain_ns,
+            after_ns: self.asked.after_ns,
+            cut_short: None,
+            fired_again: 0,
+            evicted: Vec::new(),
+        }
+    }
+
+    /// Evicts what is older than `cutoff_ns` from one request's buffer, and
+    /// counts what no document held.
+    fn evict_before(&mut self, index: usize, cutoff_ns: u64, ledger: &mut Ledger) {
+        let events = &mut ledger.events[index];
+        if events.iter().any(|event| event.ts_ns < cutoff_ns) {
+            let documented = self.documented[index];
+            let mut position = 0usize;
+            let mut kept_documented = 0usize;
+            let mut evicted = 0u64;
+            events.retain(|event| {
+                let was_documented = position < documented;
+                position += 1;
+                let keep = event.ts_ns >= cutoff_ns;
+                if keep && was_documented {
+                    kept_documented += 1;
+                }
+                if !keep && !was_documented {
+                    evicted += 1;
+                }
+                keep
+            });
+            self.documented[index] = kept_documented;
+            self.evicted_events[index] += evicted;
+        }
+        let rounds = &mut self.rounds[index];
+        while rounds.front().is_some_and(|at| *at < cutoff_ns) {
+            let at = rounds.pop_front().unwrap_or_default();
+            if at > self.last_cut_ns {
+                self.evicted_rounds[index] += 1;
+            }
+        }
+    }
+
+    /// Cuts the open document at `now_ns` and hands it out. Returns why the
+    /// run ends, when it does: the last document the bound allows, or one
+    /// that could not be written.
+    fn cut(
+        &mut self,
+        now_ns: u64,
+        cut_short: Option<String>,
+        ledger: &mut Ledger,
+        slots: &[Slot],
+        spending: &Spending<'_>,
+    ) -> Option<String> {
+        let mut fired = self.pending.take()?.fired;
+        fired.closed_ns = now_ns;
+        fired.cut_short = cut_short;
+        let opened_ns = fired.opened_ns;
+        for index in 0..ledger.events.len() {
+            self.evict_before(index, opened_ns, ledger);
+        }
+        fired.evicted = (0..ledger.events.len())
+            .map(|index| Evicted {
+                request: self.labels[index].clone(),
+                events: self.evicted_events[index],
+                rounds: self.evicted_rounds[index],
+            })
+            .collect();
+
+        let at_s = |ns: u64| ns.saturating_sub(self.run_opened_ns) as f64 / 1e9;
+        let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
+        let mut collections = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.iter().enumerate() {
+            let (value_attr, stacks, collector_notes, collector_losses) = match slot {
+                Slot::Attached(collector) => (
+                    collector.value_attr(),
+                    collector.stacks(),
+                    collector.notes(),
+                    collector.losses(),
+                ),
+                Slot::Detached(record) => (
+                    record.value_attr,
+                    record.stacks.clone(),
+                    record.notes.clone(),
+                    Losses::default(),
+                ),
+                Slot::Waiting(_) | Slot::Missed => {
+                    ("", BTreeMap::new(), Vec::new(), Losses::default())
+                }
+            };
+            let mut events: Vec<Event> = ledger.events[index]
+                .iter()
+                .filter(|event| event.ts_ns >= opened_ns && event.ts_ns <= now_ns)
+                .cloned()
+                .collect();
+            events.sort_by_key(|event| event.ts_ns);
+            let filtered = apply_filter(&spending.serving[index], &mut events);
+
+            let mut cumulative = ledger.losses[index].clone();
+            cumulative.absorb(collector_losses);
+            let mut losses = cumulative.since(&self.losses_at_cut[index]);
+            losses.evicted = self.evicted_events[index];
+            if losses.evicted > 0 {
+                losses.note(format!(
+                    "the retention held {}, so what this run read before {:.3} s -- and after \
+                     the document before this one -- was evicted: observed, and in no document",
+                    span_ns(fired.retain_ns),
+                    at_s(opened_ns),
+                ));
+            }
+            losses.summarize();
+            self.losses_at_cut[index] = cumulative;
+
+            let watched = ledger.watched[index];
+            let window = Watched {
+                run_opened_ns: self.run_opened_ns,
+                opened_ns: opened_ns.max(watched.opened_ns),
+                closed_ns: now_ns,
+                attached: watched.attached,
+                attach_ns: None,
+            };
+            let mut notes = spending.notes[index].clone();
+            notes.extend(collector_notes);
+            let observed_cpu_ns = spending.meters[index].read();
+            collections.push(Collection {
+                observed_ns: window.span_ns(),
+                value_attr: value_attr.to_owned(),
+                events,
+                losses,
+                stopped_because: format!(
+                    "the trigger `{}` fired on `{}` at {:.3} s into the run{}",
+                    fired.predicate,
+                    fired.on,
+                    at_s(fired.fired_ns),
+                    fired.value.map_or_else(String::new, |value| format!(
+                        ", with {} = {value}",
+                        fired.value_attr
+                    )),
+                ),
+                stacks,
+                notes,
+                filtered,
+                served_by: spending.served_by[index].clone(),
+                overhead: spending.spent(
+                    index,
+                    spending.whole_run(index),
+                    self_cpu_ns,
+                    observed_cpu_ns,
+                    now_ns,
+                ),
+                lifetime: None,
+                window,
+            });
+        }
+
+        // What this document holds is documented: evicting it later is not
+        // a loss, and what is evicted from here on is counted for the next.
+        for index in 0..ledger.events.len() {
+            self.documented[index] = ledger.events[index].len();
+            self.evicted_events[index] = 0;
+            self.evicted_rounds[index] = 0;
+        }
+        self.last_cut_ns = now_ns;
+        self.written.push(fired.clone());
+        let number = fired.number;
+        if let Err(why) = (self.asked.sink)(Document {
+            trigger: fired,
+            collections,
+        }) {
+            return Some(format!("document {number} could not be written: {why}"));
+        }
+        (self.written.len() as u32 >= self.asked.documents).then(|| {
+            format!(
+                "the recording wrote {} document(s), the most it was allowed",
+                self.written.len()
+            )
+        })
+    }
+
+    /// The run is over: cuts a document still open, short, and counts what
+    /// was read after the last document and is in none.
+    fn end(&mut self, why: &str, ledger: &mut Ledger, slots: &[Slot], spending: &Spending<'_>) {
+        if self.pending.is_some() {
+            let now_ns = monotonic_ns();
+            let cut_short = format!("the run ended before `after` had passed ({why})");
+            let _ = self.cut(now_ns, Some(cut_short), ledger, slots, spending);
+        }
+        self.unrecorded = (0..ledger.events.len())
+            .map(|index| {
+                let retained = ledger.events[index]
+                    .len()
+                    .saturating_sub(self.documented[index]) as u64;
+                let rounds = self.rounds[index]
+                    .iter()
+                    .filter(|at| **at > self.last_cut_ns)
+                    .count() as u64;
+                Evicted {
+                    request: self.labels[index].clone(),
+                    events: self.evicted_events[index] + retained,
+                    rounds: self.evicted_rounds[index] + rounds,
+                }
+            })
+            .collect();
+    }
+
+    fn recorded(&self, stopped_because: &str, closed_ns: u64, budget_interval_ns: u64) -> Recorded {
+        Recorded {
+            predicate: self.predicate.clone(),
+            on: self.labels[self.asked.on].clone(),
+            retain_ns: self.asked.retain_ns,
+            after_ns: self.asked.after_ns,
+            documents_at_most: self.asked.documents,
+            documents: self.written.clone(),
+            stopped_because: stopped_because.to_owned(),
+            opened_ns: self.run_opened_ns,
+            closed_ns,
+            budget_interval_ns,
+            unrecorded: self.unrecorded.clone(),
+        }
+    }
+}
+
+impl Recording<'_, '_> {
+    const VALUE_NAME: &'static str = crate::request::Recording::VALUE;
+}
+
+/// The trigger with `value` renamed to the attribute the collector measures
+/// in, so the filter grammar evaluates it as it would any field.
+fn read_value_as(
+    expression: &crate::filter::FilterExpr,
+    value_attr: &str,
+) -> crate::filter::FilterExpr {
+    use crate::filter::FilterExpr;
+    match expression {
+        FilterExpr::And(left, right) => FilterExpr::And(
+            Box::new(read_value_as(left, value_attr)),
+            Box::new(read_value_as(right, value_attr)),
+        ),
+        FilterExpr::Or(left, right) => FilterExpr::Or(
+            Box::new(read_value_as(left, value_attr)),
+            Box::new(read_value_as(right, value_attr)),
+        ),
+        FilterExpr::Not(inner) => FilterExpr::Not(Box::new(read_value_as(inner, value_attr))),
+        FilterExpr::Compare {
+            field,
+            operator,
+            value,
+        } => FilterExpr::Compare {
+            field: if field == crate::request::Recording::VALUE && !value_attr.is_empty() {
+                value_attr.to_owned()
+            } else {
+                field.clone()
+            },
+            operator: *operator,
+            value: value.clone(),
+        },
+    }
+}
+
 /// Sleeps for `ns`, or until `wake` becomes readable if that is sooner.
 ///
 /// A readable `wake` is not consumed: a pidfd stays readable once its process
@@ -3014,6 +3867,7 @@ mod tests {
             about_workload,
             wake,
             spending,
+            None,
             None,
             ended,
         );
@@ -4256,6 +5110,7 @@ mod tests {
             None,
             &mut spending,
             None,
+            None,
             until(deadline_ns),
         );
         assert_eq!(driven.stopped_because, "the deadline");
@@ -4360,6 +5215,7 @@ mod tests {
             None,
             &mut spending,
             None,
+            None,
             until(deadline_ns),
         );
         let overheads = spending.close();
@@ -4422,6 +5278,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             None,
             until(deadline_ns),
         );
@@ -4530,6 +5387,7 @@ mod tests {
             None,
             &mut spending,
             None,
+            None,
             until(deadline_ns),
         );
         assert_eq!(driven.losses[1].dropped, 7);
@@ -4560,6 +5418,7 @@ mod tests {
             &[true, true],
             None,
             &mut spending,
+            None,
             None,
             || None,
         );
@@ -4815,6 +5674,7 @@ mod tests {
             None,
             &mut spending,
             Some(&mut script),
+            None,
             until(deadline_ns),
         );
         let at = |ms: u64| opened_ns + ms * 1_000_000;
@@ -4900,6 +5760,7 @@ mod tests {
             None,
             &mut spending,
             Some(&mut script),
+            None,
             until(deadline_ns),
         );
         assert_eq!(driven.stopped_because, "the deadline");
@@ -4959,6 +5820,7 @@ mod tests {
                 None,
                 &mut spending,
                 Some(&mut script),
+                None,
                 until(deadline_ns),
             );
             assert!(
@@ -4984,5 +5846,263 @@ mod tests {
             "an escalation that does not shed leaves the run to end as any run over budget: {}",
             kept.stopped_because
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The recorder.
+    // -----------------------------------------------------------------------
+
+    /// A level that is high over known spans of its own clock, read once a
+    /// round: the workload whose bursts a recording has to find. It counts its
+    /// own reads, which is what the recording's arithmetic is checked against.
+    struct Level {
+        id: CollectorId,
+        opened_ns: u64,
+        /// Spans, in ms after `opened_ns`, where the level is high.
+        high_ms: Vec<(u64, u64)>,
+        reads: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Collector for Level {
+        fn id(&self) -> &CollectorId {
+            &self.id
+        }
+
+        fn value_attr(&self) -> &'static str {
+            "open"
+        }
+
+        fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+            let now_ns = monotonic_ns();
+            let at_ms = now_ns.saturating_sub(self.opened_ns) / 1_000_000;
+            let high = self
+                .high_ms
+                .iter()
+                .any(|(from, to)| (*from..*to).contains(&at_ms));
+            self.reads.set(self.reads.get() + 1);
+            Ok(vec![Event {
+                ts_ns: now_ns,
+                ts_err_ns: 0,
+                kind: "proc.fd".to_owned(),
+                keys: Vec::new(),
+                attrs: vec![crate::event::Attr::uint("open", if high { 70 } else { 6 })],
+                collector_id: self.id.clone(),
+                seq,
+            }])
+        }
+    }
+
+    struct RecordedRun {
+        documents: Vec<Document>,
+        recorded: Recorded,
+        reads: u64,
+        stopped_because: String,
+    }
+
+    /// Drives one `Level` under a recording for `run_ms`, polled every 10 ms.
+    fn record_level(
+        high_ms: Vec<(u64, u64)>,
+        run_ms: u64,
+        trigger: &str,
+        documents: u32,
+    ) -> RecordedRun {
+        let resolved = vec![windowed(None, poll_ms(10))];
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let opened_ns = monotonic_ns();
+        let mut slots = vec![Slot::Attached(Box::new(Level {
+            id: CollectorId::new("level"),
+            opened_ns,
+            high_ms,
+            reads: reads.clone(),
+        }) as Box<dyn Collector>)];
+        let mut paces = vec![Pace {
+            interval: StdDuration::from_millis(10),
+            snapshot: false,
+        }];
+        let plans = vec![Plan::default()];
+        let mut spending = Spending::unweighed(1);
+        spending.serving = resolved.clone();
+        let mut written = Vec::new();
+        let mut sink = |document: Document| -> Result<(), String> {
+            written.push(document);
+            Ok(())
+        };
+        let mut recorder = Recorder {
+            on: 0,
+            trigger: trigger.parse().unwrap(),
+            retain_ns: 100_000_000,
+            after_ns: 0,
+            documents,
+            sink: &mut sink,
+        };
+        let run_opened_ns = spending.opened_ns;
+        let mut recording = Recording::new(&mut recorder, &resolved, &slots, run_opened_ns);
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true],
+            None,
+            &mut spending,
+            None,
+            Some(&mut recording),
+            until(opened_ns + run_ms * 1_000_000),
+        );
+        let recorded = recording.recorded(&driven.stopped_because, monotonic_ns(), 0);
+        drop(recording);
+        drop(recorder);
+        RecordedRun {
+            documents: written,
+            recorded,
+            reads: reads.get(),
+            stopped_because: driven.stopped_because,
+        }
+    }
+
+    /// Two bursts, each held for several rounds, write exactly two documents:
+    /// a trigger fires on the round its predicate becomes true, not on every
+    /// round it stays true. Each window holds its burst, reaches back no
+    /// further than the retention, and every read the collector counted is
+    /// either in a document, evicted and counted, or reported unrecorded at
+    /// the end -- nothing is lost without a number.
+    #[test]
+    fn two_held_bursts_write_two_documents_and_every_read_is_accounted_for() {
+        let bursts = vec![(250, 330), (550, 630)];
+        let run = record_level(bursts.clone(), 800, "value >= 64", 5);
+        assert_eq!(
+            run.documents.len(),
+            2,
+            "two bursts of eight rounds each are two firings: {:?}",
+            run.recorded.documents
+        );
+        let mut accounted = run.recorded.unrecorded[0].events;
+        for (document, (from_ms, _)) in run.documents.iter().zip(&bursts) {
+            let fired = &document.trigger;
+            let collection = &document.collections[0];
+            let fired_at_ms = fired.fired_ns.saturating_sub(fired.run_opened_ns) / 1_000_000;
+            assert!(
+                fired_at_ms + 5 >= *from_ms,
+                "document {} fired at {fired_at_ms} ms, before its burst at {from_ms} ms",
+                fired.number
+            );
+            assert_eq!(
+                fired.value,
+                Some(70.0),
+                "the value that fired it is the burst's"
+            );
+            assert!(fired.opened_ns <= fired.event_ts_ns && fired.event_ts_ns <= fired.closed_ns);
+            assert!(
+                fired.closed_ns - fired.opened_ns <= 100_000_000,
+                "the window is the retention, 100 ms, at most: {fired:?}"
+            );
+            assert!(
+                collection
+                    .events
+                    .iter()
+                    .all(|event| fired.opened_ns <= event.ts_ns && event.ts_ns <= fired.closed_ns),
+                "a document holds its window and nothing outside it"
+            );
+            assert_eq!(collection.window.opened_ns, fired.opened_ns);
+            assert_eq!(collection.window.closed_ns, fired.closed_ns);
+            let lows = collection
+                .events
+                .iter()
+                .filter(|event| {
+                    event.attr("open").and_then(crate::event::AttrValue::as_f64) == Some(6.0)
+                })
+                .count();
+            assert!(
+                lows > 0,
+                "the window reaches back into the idle before the burst"
+            );
+            assert_eq!(
+                collection.losses.evicted, fired.evicted[0].events,
+                "what the trigger record says was evicted is what the document's losses count"
+            );
+            assert!(
+                fired.evicted[0].events > 0,
+                "the idle before each burst was evicted"
+            );
+            accounted += fired.evicted[0].events + collection.events.len() as u64;
+        }
+        assert_eq!(
+            accounted, run.reads,
+            "every read is in a document, evicted and counted, or unrecorded at the end"
+        );
+        assert!(
+            run.stopped_because.contains("deadline"),
+            "fewer firings than the bound: the run ends at its longest ({})",
+            run.stopped_because
+        );
+    }
+
+    /// The bound on documents ends the run, and says so.
+    #[test]
+    fn the_last_document_the_bound_allows_ends_the_run() {
+        let run = record_level(
+            vec![(150, 200), (300, 350), (450, 500)],
+            800,
+            "value >= 64",
+            2,
+        );
+        assert_eq!(run.documents.len(), 2);
+        assert!(
+            run.stopped_because
+                .contains("2 document(s), the most it was allowed"),
+            "{}",
+            run.stopped_because
+        );
+    }
+
+    /// A trigger that never fires ends at the longest duration with no
+    /// document, and what was read is counted as unrecorded rather than
+    /// silently gone.
+    #[test]
+    fn a_trigger_that_never_fires_writes_nothing_and_counts_what_it_read() {
+        let run = record_level(vec![(100, 200)], 400, "value >= 1000", 3);
+        assert!(run.documents.is_empty());
+        assert!(run.recorded.documents.is_empty());
+        assert_eq!(run.recorded.unrecorded[0].events, run.reads);
+        assert!(run.reads > 0);
+    }
+
+    /// `value` in a trigger is whatever the collector measures in, and every
+    /// other field is left as written.
+    #[test]
+    fn value_in_a_trigger_reads_the_collector_s_own_attribute() {
+        let trigger: crate::filter::FilterExpr = "value >= 64 && comm == 'x'".parse().unwrap();
+        let read = read_value_as(&trigger, "open");
+        let fields: Vec<&str> = read.fields().into_iter().collect();
+        assert_eq!(fields, ["comm", "open"]);
+    }
+
+    /// A rolling budget weighs an account from the oldest reading inside its
+    /// span, not from the run's open: a long quiet stretch does not dilute a
+    /// burst after it.
+    #[test]
+    fn a_rolling_budget_is_weighed_from_inside_its_span() {
+        let mut spending = Spending::unweighed(1);
+        spending.rolling_ns = Some(1_000);
+        spending.since[0] = Since {
+            wall_opened_ns: 0,
+            ..Since::default()
+        };
+        let at = |ns: u64| Since {
+            self_cpu_ns: ns,
+            wall_opened_ns: ns,
+            ..Since::default()
+        };
+        // Inside the first span the run's open is the baseline.
+        assert_eq!(spending.baseline(0, at(500)).wall_opened_ns, 0);
+        assert_eq!(spending.baseline(0, at(900)).wall_opened_ns, 0);
+        // Past it, the latest reading at or before the span's start.
+        assert_eq!(spending.baseline(0, at(1_600)).wall_opened_ns, 500);
+        assert_eq!(spending.baseline(0, at(5_000)).wall_opened_ns, 1_600);
+        // A collection moved onto another backend since is weighed from then.
+        spending.since[0] = at(4_500);
+        assert_eq!(spending.baseline(0, at(5_800)).wall_opened_ns, 4_500);
+        // Without a rolling span, the account's own start, always.
+        spending.rolling_ns = None;
+        assert_eq!(spending.baseline(0, at(9_000)).wall_opened_ns, 4_500);
     }
 }

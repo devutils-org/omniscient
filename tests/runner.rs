@@ -1782,3 +1782,50 @@ fn a_window_on_the_command_line_is_attached_and_detached_as_a_session_s_is() {
         stderr(&refused)
     );
 }
+
+/// `omn list --format json` carries the sweep the text table shows: each
+/// source's availability here and each backend's probes, so a program reading
+/// the listing is not left to parse a table meant for a person. The ground
+/// truth is the text table itself, from the same binary on the same machine:
+/// the tallies in its footer are the counts of the JSON's `here`.
+#[test]
+fn the_json_listing_carries_the_sweep_the_text_table_shows() {
+    let json = run(&["list", "--format", "json"]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    let listed: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    let listed = listed.as_array().expect("a list of sources");
+    let count = |state: &str| {
+        listed
+            .iter()
+            .filter(|entry| entry["here"]["availability"] == state)
+            .count()
+    };
+    for entry in listed {
+        let probes = entry["probes"].as_array().expect("probes per backend");
+        let chain = entry["backends"].as_array().expect("the chain");
+        assert_eq!(probes.len(), chain.len(), "{}", entry["id"]);
+        for (probed, backend) in probes.iter().zip(chain) {
+            assert_eq!(probed["backend"], backend["id"]);
+            assert_eq!(
+                probed["requirements"].as_array().map(Vec::len),
+                backend["requires"].as_array().map(Vec::len).or(Some(0)),
+                "every requirement is probed: {}",
+                entry["id"]
+            );
+        }
+    }
+    let text = run(&["list"]);
+    let table = String::from_utf8_lossy(&text.stdout);
+    let footer = table
+        .lines()
+        .find(|line| line.contains("usable here"))
+        .expect("the table's footer");
+    let expected = format!(
+        "{} sources: {} usable here, {} unverified, {} out of reach on this machine.",
+        listed.len(),
+        count("ready"),
+        count("unverified"),
+        count("unavailable")
+    );
+    assert_eq!(footer, expected, "the JSON sweep and the table agree");
+}
