@@ -458,3 +458,129 @@ in `docs/open-findings.md`:
 
 `tests/portability.rs` itself: 16 passed, 1 ignored (`sweep_this_machine`), in
 every run.
+
+---
+
+## The twelfth wave
+
+Stream V -- *the probes tell the truth*. The eleventh wave's matrix found that
+*available means it attaches* failed on the kernels nobody had tried; this
+wave's P1 to P6 and P10 are the classes where the probe, or the catalog line it
+answers, said yes first. Each is now answered **missing, with the reason the
+attach used to give**, before anything is launched.
+
+### What each class became
+
+| Class | The fix | Where |
+|---|---|---|
+| **P1** a tracepoint's prototype | A `raw_tracepoint:` requirement may carry the prototype its program reads, `name(arg, ...)`, or several, `name(a, b)|(a, b, c)`. The probe compares it with `Btf::tracepoint_signature` and refuses in `check_signature`'s words: *"this kernel declares `sched_process_exit(task_struct *)`, and this program is written for ..."*. A bare name still asks for existence alone. Forty-seven requirements carry their prototype. | `src/bpf/mod.rs` (`raw_tracepoint_support`, `parse_raw_tracepoint`, `prototype_mismatch`), `catalog/{io,mem,net,proc,sched}.yaml` |
+| **P2** a BTF field read at attach | `btf_member:struct.member`, answered by `Btf::member_offset` -- the lookup the program makes -- so the probe's refusal is the attach's: *"this kernel's `sock` has no member named `sk_ino`"*. On `net.drops`, `net.tcp.lifetime`, `net.tcp.retransmit`. | `src/bpf/mod.rs` (`btf_member_support`), `src/capabilities.rs`, `catalog/net.yaml` |
+| **P3** USDT below 6.6 under the two capabilities | `uprobe` now means *this process can place a uprobe*: a uprobe-multi link, or else the `uprobe` PMU, which needs `CAP_SYS_ADMIN` and is asked with a path that does not exist (the privilege is checked before the path). A no names both routes. The fallback in `usdt.rs` asks the PMU before attaching, so a forced run leads with what is missing instead of *"grant CAP_BPF and CAP_PERFMON"* to a binary that has both. | `src/bpf/attach.rs` (`uprobe_support`, `uprobe_pmu_permitted`), `src/bpf/usdt.rs` |
+| **P4** USDT needs BTF | `btf` on every `bpf:usdt` and `bpf:uprobe` line. | `catalog/{runtime,sched}.yaml` |
+| **P5** `net.request` below 6.6 | A new requirement `uprobe_multi`, asked of the kernel: the smallest program loaded for `BPF_TRACE_UPROBE_MULTI` and linked to a file that does not exist -- `ENOENT` from a kernel that knows the link, `EINVAL` from one older than 6.6. Both `net.request` backends require it, and a caveat says 6.6. A forced backend's `EINVAL` now names the link and 6.6 instead of the bare errno. | `src/bpf/usdt.rs` (`uprobe_multi_support`), `src/bpf/request.rs`, `catalog/net.yaml` |
+| **P6** NVML without its driver | `nvml` initialises the library, counts devices and shuts it down, once per process (3 to 5 ms, paid only by a process that asks about a GPU source): *"libnvidia-ml loads and does not initialise, so no NVIDIA driver is serving it: ... Driver Not Loaded"*. | `src/collect/gpu/mod.rs` |
+| **P10** the guest's shape | `mem.swap`'s `fs:cgroup` requires `cgroup2:memory.stat:pswpout` -- a new form, a key of a flat-keyed cgroup file, read where this process lives and walking up to the root. `power.freq` and `power.cstate` require `cpu0/cpufreq` and `cpu0/cpuidle`, the directories their collectors read. `mem.cgroup` on a launched program in a guest stays recorded: everything there lives in the root cgroup, which has no `memory.current`, and the refusal is exact -- that is the guest, not the probe. | `src/capabilities.rs` (`probe_cgroup_key`), `catalog/{mem,power}.yaml`, `tests/portability.rs` |
+
+Also taken, from stream W and stream D's requests: `modes: [poll]` on
+`cpu.oncpu_time`'s `fs:cgroup` and `fs:proc` and on `power.cstate`'s `fs:sys`
+(P7's data for W's resolver rule); `sched.wakeup`'s caveat rewritten in D's
+words; `sched.switches`'s `pmu:sw` declares the targets its collector serves,
+so a cgroup or a container is passed over before the start; `Btf::var_id`;
+`usdt.rs`'s `mod local` and `request_net.rs`'s `or64_imm` replaced by
+`insn.rs`'s shared instructions; and `KNOWN_DEFECTS` loses P1 to P6, P7's
+`cpu.oncpu_time`, `power.cstate` and `mem.faults`, all of P8 and P9, and
+P10's `mem.swap` and `power.freq`. The capability-less test of stream P's
+"five tests" list, in `tests/scenario_gpu.rs`, now holds the `gpu.job`
+refusal to the binary's own `bpf` answer: naming `CAP_BPF` exactly when the
+listing says `bpf` is missing.
+
+### How each is verified
+
+The cells under `target/matrix/cells` were swept at the end of this stream's
+work, with a binary that carried every fix above except `power.cstate`'s path.
+A second sweep was started and stopped by the user; it overwrote `here-caps`
+with the final binary and destroyed `5.15.221-nocaps` (its `sweep.json` is
+gone; its `guest.log` is qemu being killed). The matrix was **not** rerun
+after that, by instruction. So twenty-one cells are on disk, and:
+
+| Class | Verification |
+|---|---|
+| P1 | **On cells.** `proc.exit`, `mem.reclaim` missing on 5.15, 6.1 and 6.6 by prototype; `mem.kmalloc`, `mem.compaction`, `io.latency`'s `bpf:raw_tp` missing on 5.15; all attach on 7.2 and here. Unit tests on the parser, the comparison and every prototype in the catalog. |
+| P2 | **On cells.** `btf_member:sock.sk_ino` missing on 5.15, 6.1, 6.6 (and unverified in every `nobtf` cell); `net.drops` and `net.tcp.lifetime` attach on 7.2. |
+| P3 | **On cells.** 5.15 and 6.1 `caps`: `uprobe` missing, naming both routes; `root` and `notracefs` (both uid 0) there still attach through the PMU and say they fell back; 6.6 and 7.2 attach. |
+| P4 | **On cells.** `btf` missing on the USDT backends in every `nobtf` cell. |
+| P5 | **On cells.** `uprobe_multi` missing on 5.15 and 6.1, as root too; `net.request` attaches on 6.6 and 7.2. The forced-backend wording is code reading only. |
+| P6 | **On cells.** `nvml` missing in every guest; available and attaching in `here-caps`. Unit test: the probe says yes exactly when an independent `Nvml::open` counts a device. |
+| P10 `mem.swap` | **On cells.** `cgroup2:memory.stat:pswpout` missing on 5.15, 6.1, 6.6, available on 7.2. Unit test against this process's own `memory.stat`. |
+| P10 `power.freq` | **On cells.** `cpu0/cpufreq` missing in every guest; attaches here. |
+| P10 `power.cstate` | **Code reading only; needs a matrix rerun.** The cells were swept with the old requirement, `/sys/devices/system/cpu/cpuidle`, which exists in a guest; the collector reads `cpu<first>/cpuidle`, which does not. The three surviving `nocaps` cells (6.1, 6.6, 7.2) show exactly that refusal with no entry for it, so `every_cell_on_disk_holds_the_invariants` is red on them until they are swept again. The requirement now names the directory the refusal names; on this host it reads available and the source attaches. |
+| P7/P8/P9 entries retired | **On cells** (W and D's fixes, merged before this branch's sweep), except in `here-nocaps`, which is from 20:27, before either: its six violations are the stale cell, not a regression. |
+| `sched.switches` targets | **Unit-level only**: `omn trace sched.switches --cgroup /sys/fs/cgroup` now says *"`pmu:sw` cannot attribute per cgroup"* before the start. The matrix does not run a cgroup target. |
+
+**P11, new** (recorded, not fixed): on 5.15 under `caps`, `cpu.profile
+--system` is refused at the ring: *"perf_event_open on cpu 3 was refused (mmap
+of 8 ring pages: Operation not permitted)"*. Not investigated; the likely
+reading, unconfirmed, is that 5.15 charges the per-cpu rings against
+`perf_event_mlock_kb` and lets only `CAP_IPC_LOCK` exceed it. It is P8's
+machine target, served since this wave, meeting an older kernel, and the probe
+cannot see it without opening the events. For whoever owns `src/perf.rs`:
+confirm the cause, then either a probe of the per-cpu ring or a refusal that
+names it.
+
+**What clears the red test**: `scripts/matrix.sh here` without capabilities
+(about 90 s, no guest) for `here-nocaps`, and the `nocaps` cells of 5.15,
+6.1, 6.6 and 7.2 for `power.cstate` and the lost cell -- on an idle machine.
+`KNOWN_DEFECTS` then holds three entries: P7's `sched.switches` (waiting on
+stream D's collector or on `modes: [trace]` with its test's wording), P10's
+`mem.cgroup` (the guest's), and P11.
+
+### For `DECISIONS.md`
+
+- **A prototype is written in the catalog as well as in the program.** The
+  probe must answer before anything is loaded, so it cannot ask the program;
+  the price is that a program changing the shape it accepts changes its
+  requirement in the same commit. A mismatch shows on the development machine
+  at once (the source reads missing), and
+  `every_prototype_in_the_catalog_is_well_formed` catches a typo.
+- **`uprobe` means this process can place one**, not that the PMU exists; and
+  `uprobe_multi` is asked of the kernel with a link to a nonexistent file,
+  not read off the version. Without the capabilities the load cannot be asked,
+  so `uprobe_multi` is unknown there (never available), and `bpf` is what
+  reads missing.
+- **A GPU probe initialises its library.** Loading `libnvidia-ml.so` is not
+  the question a collector's first call asks; 3 to 5 ms once per process is
+  the price of the answer being the collector's.
+- **A kernel-dependent key is a requirement**, `cgroup2:<file>:<key>`, read
+  from the nearest cgroup that has the file: which keys a kernel writes does
+  not depend on which cgroup it writes them for.
+- **The guest's root cgroup is not a defect** (`mem.cgroup`): the probe cannot
+  know the target's cgroup before it is launched, and the refusal is exact.
+
+### Filed or left
+
+- Filed in `docs/open-findings.md` under this stream: the prototype contract
+  for the raw-tracepoint programs' owner, with the two widenings the matrix
+  measured (`sk_ino` through `sk_socket->file->f_inode`; the one-slot-moved
+  prototypes of 6.6 and 5.15); the four new notations for `CATALOG.md` §1;
+  P7's `sched.switches -m count` for stream D; and the `cgroup`/`container`
+  targets of the counting sources, `cpu.profile` and `mem.faults`, for
+  stream W next wave (not taken: the collectors over `perf::Scope::CgroupOnCpu`
+  are promised, and removing the keys changes what `tests/scenario_cpu.rs`
+  and `tests/family_cpu.rs` exercise).
+- Left for stream D: `src/bpf/wakeup.rs` keeps its own `var_id` walk;
+  `Btf::var_id` is here now, and `PreemptCount::locate` can call it and drop
+  the copy.
+- Left for the coordinator: P11 above, for `src/perf.rs`'s owner.
+
+**Index rows for sessions added**: none.
+
+### This wave's check
+
+One `make check` after merging `main`, with the capabilities on the binary:
+red in `tests/portability.rs` only, so one `cargo test --workspace
+--no-fail-fast` followed -- **1911 passed, 1 failed, 8 ignored**. The one
+failure is `every_cell_on_disk_holds_the_invariants`, on the stale cells
+described above (three `power.cstate` on the `nocaps` guests, six in
+`here-nocaps`), not in the flaky tally and not a flake: it is red until those
+cells are swept again. `cargo clippy --all-targets -- -D warnings` and
+`cargo fmt --check` clean. No other test failed, flaky or not.
