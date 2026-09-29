@@ -776,14 +776,14 @@ fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_se
 /// and labelling the result "system" is the failure this refusal exists for.
 #[test]
 fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
-    // The machine itself is served since the twelfth wave, one sampling event
-    // per cpu (`scenario_cpu`'s machine-wide fault trace is its ground truth);
-    // a cgroup is the target this collector still cannot follow, and it has
-    // to say so by name rather than sample something else.
+    // The machine is served since the twelfth wave and a cgroup since the
+    // thirteenth, one sampling event per cpu (`scenario_cpu` holds both to a
+    // workload). A container is the target nothing resolves to a cgroup yet,
+    // and the refusal has to say so by name rather than sample something else.
     let output = run(&[
         "mem.faults",
-        "--cgroup",
-        "/sys/fs/cgroup",
+        "--container",
+        "omn-no-such-container",
         "--mode",
         "sample@997hz",
         "--emit",
@@ -794,8 +794,10 @@ fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
     assert!(!output.status.success());
     let complaint = stderr(&output);
     assert!(
-        complaint.contains("mem.faults") && complaint.contains("cgroup"),
-        "the refusal should name the source and the target it cannot follow: {complaint}"
+        complaint.contains("mem.faults")
+            && complaint.contains("per container")
+            && complaint.contains("--cgroup"),
+        "the refusal should name the source, the target it cannot follow and what to pass instead: {complaint}"
     );
 }
 

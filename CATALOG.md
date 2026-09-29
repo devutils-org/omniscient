@@ -145,6 +145,14 @@ available on an older kernel and then refused at the attach:
 - `cgroup2:<file>` is a cgroup file readable where this process lives, and
   `cgroup2:<file>:<key>` a flat-keyed one that carries that key.
 
+Two more since the thirteenth wave. `writable:<path>`
+(with `[pid]` substituted) is a file this process may write, asked with
+`access(W_OK)` -- `mem.wss` writes `clear_refs`, and a file that reads fine can
+still refuse the write. And a qualified `pmu:<unit>/<event>/` answers
+*missing*, naming the unit or the event, when the machine does not publish it,
+not unknown: a runner without RAPL listed `power.energy` as assumed and refused
+it at the start.
+
 A string no probe answers -- `usdt:libc` today -- reads unknown, and unknown
 never counts as available.
 
@@ -457,7 +465,7 @@ validator must reject the combination rather than silently degrade.
 
 | Mode | Meaning | Valid emits |
 |---|---|---|
-| `count` | counter aggregated over the duration | `rate`, `summary`, `raw` |
+| `count` | counter aggregated over the duration | `rate`, `summary`, `raw`, `topk` |
 | `sample@freq` | periodic sampling | `stack`, `topk`, `hist`, `raw` |
 | `trace` | every event | `raw`, `hist`, `topk`, `timeline`, `stack`, `rate`, `summary` |
 | `poll@interval` | periodic re-read | `raw`, `timeline`, `summary` |
@@ -470,7 +478,11 @@ validator checks.
 value, and the window the hardware says it was enabled for (`enabled_ns`,
 `running_ns`). Without it a derived metric's terms -- the two counts behind
 `cpu.ipc` -- and the counter's own window, the honest denominator for a rate,
-never reach the user.
+never reach the user. **And `topk`**, for the same reason: a counted window is
+one event per series, and ranking them is `rate` without the division -- a
+counted run could otherwise say what its heaviest series' rate was and not
+which series was heaviest. `topk:N@<attr>` ranks over an attribute's values
+instead of the key's.
 
 Invalid combinations must be rejected at validation time with an explicit
 message: sampling a procfs file, counting a tracepoint without tracing it, asking

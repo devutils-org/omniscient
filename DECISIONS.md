@@ -365,6 +365,36 @@ and `docs/mcp.md` the launch rules and their refusals.
 
 ---
 
+## Settled in the thirteenth wave: what a run costs the target
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What a measurement costs | **What the tool spends plus what its collectors spend inside the target**, over the work the target did of its own (`observed − in-target`), which is the dilation the target would measure. A mechanism that runs in the target without an account is *unknown*, never zero; a ceiling over an unknown part is "not checked whole" (`within_budget: null`), not held. The tool's own share stays as `own_percent`. | Finding 47: `proc.syscall` in `count` was 0.42 % of the target's cpu in `cost.json` and +296 % in the target's own timed section, because the program runs in the target's context. |
+| Where an eBPF program's run time comes from | **The kernel's own `bpf_prog_info` counters**, read through `/proc/self/fdinfo` for the programs a request loaded, and only while the kernel is timing programs. This tool does not ask for `CAP_SYS_ADMIN` to turn that on: where `kernel.bpf_stats_enabled` is off, the cost is unknown and the record says how to make it known. | `BPF_ENABLE_STATS` needs `CAP_SYS_ADMIN`, a capability far wider than the two this tool asks for. |
+| Where the preload shim's cost comes from | **The shim times itself**, one call in 17, less the real function and the timing's own clock reads, and publishes it in the ring it shares with `omn`. | On the allocation workload its account is 62 to 64 ms against 64 to 65 ms the program lost (release shim); under a lock storm the rest of the loss is contention the shim amplifies, not its own cycles. |
+| How a cost band is chosen | **The larger of the tool's share and the target's dilation on the family's reference workload**; a fallback is never declared cheaper per event than what it falls back from. | A band set on the tool's cpu alone called `proc.syscall` cheap. |
+| What a counted rate divides by | **The counter's enabled time**, which for a per-task counter is the task's cpu, not the wall. | A counter that was not scheduled for part of the window did not count for that part. |
+| A collector that follows one process, asked for several | **Refused**, decided at the runner by whether preparing or attaching it narrowed the target, rather than by a list of collectors. | `--pid a,b` used to measure `a` alone and say nothing. |
+| What a shim stream may hold | **2^19 records a run**; past it the reader drops and counts. | The lock storm held 3.9 GiB of what it had read; bounded, `omn` peaked at 1.1 GiB and every record was seen or counted (524 288 and 3 475 712 of 4 000 000). |
+
+`docs/fixes/budget.md` has the measurements and the band table.
+
+---
+
+## Settled in the thirteenth wave: the targets perf serves
+
+| Decision | Choice | Reason |
+|---|---|---|
+| How a cgroup is counted | **Like a process**: one event, the sum over the cpus its tasks ran on, keyed on the cgroup, from one kernel-filtered event per cpu (`PERF_FLAG_PID_CGROUP`). A sampled source keeps each sample's cpu and task. | Its cpus are where its tasks happened to run, not what was asked about. |
+| A container | **Refused until something resolves it to a cgroup**: `container: no` on every entry whose collector serves a cgroup but cannot resolve a container. | The target kind falls back to `cgroup` in the catalog model, so removing the key alone would have served a container as if it were a cgroup path. |
+| Per-cpu ring sizes | **One size for every cpu**, halved for all when one is refused; a refusal at the floor names `perf_event_mlock_kb`, `RLIMIT_MEMLOCK` and `CAP_IPC_LOCK`. No probe. | P11: 5.15's default `RLIMIT_MEMLOCK` of 64 KiB, and cpu-by-cpu halving let the first cpus take the whole budget. The budget is per user, and only the mapping knows what the user's other sessions hold. |
+| The CI cell | **The kernel's own defaults without capabilities**: `perf_event_paranoid` 2, unprivileged user namespaces, a delegated cgroup -- not the hosted image's hardening (Ubuntu's paranoid 4, AppArmor's namespace restriction). | The first run met the image's hardening and failed 58 tests that assumed the kernel's defaults. A distribution's hardening is a cell of its own, still to add: it is what a user on a stock Ubuntu meets first. |
+| A mechanism this build lacks | **Refused at the factory, before the launch, with exit 3**, not by the validator. | A session asking for it stays valid for a build that has it. |
+
+`docs/portability.md`, "The thirteenth wave", has the cells.
+
+---
+
 ## Open
 
 Nothing is open. The last line, dynamic binary instrumentation, was settled in

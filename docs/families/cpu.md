@@ -12,13 +12,13 @@ four are files, read at every tick.
 
 | Source | Backend | Mode | The number |
 |---|---|---|---|
-| `cpu.cycles` | `pmu` | count | unhalted cycles |
-| `cpu.instructions` | `pmu` | count | retired instructions |
-| `cpu.ipc` | `pmu` | count | instructions over cycles, from one counter group |
-| `cpu.branch_misses` | `pmu` | count | mispredicted branches |
-| `cpu.cache_misses` | `pmu` | count | last-level cache misses |
-| `cpu.context_switches` | `pmu:sw` | count | switches away from the task |
-| `cpu.migrations` | `pmu:sw` | count | moves between cpus |
+| `cpu.cycles` | `pmu` | count, poll | unhalted cycles |
+| `cpu.instructions` | `pmu` | count, poll | retired instructions |
+| `cpu.ipc` | `pmu` | count, poll | instructions over cycles, from one counter group |
+| `cpu.branch_misses` | `pmu` | count, poll | mispredicted branches |
+| `cpu.cache_misses` | `pmu` | count, poll | last-level cache misses |
+| `cpu.context_switches` | `pmu:sw` | count, poll | switches away from the task |
+| `cpu.migrations` | `pmu:sw` | count, poll | moves between cpus |
 | `cpu.topdown` | `pmu` | count | where the issue slots went: retiring, bad speculation, front end, back end |
 | `cpu.profile` | `pmu:sw` | sample | where the samples landed, with call stacks |
 | `cpu.oncpu_time` | `fs:proc` | poll | a task's cpu time, from `/proc/<pid>/stat`, at tick granularity |
@@ -37,6 +37,20 @@ work per cycle  via pmu  (cpu.ipc)
 ```
 
 `examples/cpu-counters.yml` runs three of them over one program in one window.
+
+**Targets.** Every counter, `cpu.topdown`, `cpu.profile` and `mem.faults` serve
+a process, a thread, a launch, a cpu set, the machine and, since the thirteenth
+wave, **a cgroup**: one event per cpu that the kernel filters to the cgroup's
+tasks (`PERF_FLAG_PID_CGROUP`). A count is reported as the cgroup's sum over
+the cpus; a sample is keyed on its task, its cpu and the cgroup. The ground
+truth is a child inside the cgroup doing one unit of work while its parent does
+ten outside it, and the run counts the one and none of the ten. A container is
+refused (`container: no`), because nothing resolves a container to its cgroup
+yet, and the refusal says so: *"a container has to be resolved to its cgroup
+first"*, with `--cgroup` as what to pass.
+
+**`poll` on the counters** reads each counter at every tick instead of once at
+the end, so a counted source has a timeline.
 
 ## How the counters are read
 

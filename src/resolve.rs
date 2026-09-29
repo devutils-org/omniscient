@@ -144,17 +144,11 @@ pub enum AppliedBy {
     Runner,
 }
 
-/// The sentence, as the runner's rendering prints it after its own heading.
-///
-/// That heading is `pushed into the kernel:` for everything the runner does not
-/// filter itself, so a predicate the collector applied is prefixed with the
-/// answer to it rather than printed under a heading that says the opposite.
+/// The sentence alone: the rendering names who applied the predicate in its
+/// own heading, from `by`.
 impl fmt::Display for Placed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.by {
-            AppliedBy::Collector => write!(f, "no; {}", self.reason),
-            AppliedBy::Program | AppliedBy::Runner => f.write_str(&self.reason),
-        }
+        f.write_str(&self.reason)
     }
 }
 
