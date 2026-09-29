@@ -1560,15 +1560,6 @@ fn in_a_guest(sweep: &Sweep) -> bool {
 /// cells showed, why, and the request filed for it.
 const KNOWN_DEFECTS: &[Known] = &[
     Known {
-        finding: "P7 (the resolver selects a collector that refuses the mode)",
-        applies: everywhere,
-        // `--system` reaches the same refusal since stream D serves a machine
-        // (P8's `sched` half): the sweep's first mode is `count` for both.
-        sources: &["sched.switches"],
-        targets: &["launch", "system"],
-        says: "`count` mode for `pmu:sw`",
-    },
-    Known {
         finding: "P10 (the guest's own shape: one root cgroup, no cpufreq)",
         applies: in_a_guest,
         sources: &["mem.cgroup"],
