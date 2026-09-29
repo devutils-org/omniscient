@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh budget
-#   cd ../omniscient-budget && claude "$(cat ../omniscient-budget.prompt)"
+#   scripts/spawn.sh stock
+#   cd ../omniscient-stock && claude "$(cat ../omniscient-stock.prompt)"
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
 #
-# This wave has no milestone left to land: finding 47 and the losses per ring
-# (the runner), the targets the counting sources declare and nothing serves
-# (perf and the resolver), the cgroup the sched and proc programs declare (the
-# eBPF layer), the shapes older kernels write (the io, net and mem programs),
-# and the join engine nobody owned for two waves. A catalog entry belongs to
-# the stream that owns its collector, except each backend's `cost:` key, which
-# is stream R's. The two session indexes, examples/README.md and GUIDE.md,
+# This wave is the first product wave: the tool right on a stock machine
+# (perf_event_paranoid 2, a cloud VM with no hardware PMU), which the CI's two
+# runs showed and the development machine cannot, then installable and
+# demonstrable end to end. A catalog entry belongs to the stream that owns its
+# collector, whole. The two session indexes, examples/README.md and GUIDE.md,
 # belong to the coordinator and are held to the sessions on disk by a test, so
-# a session added without a row is a red suite rather than a gap.
+# a session added without a row is a red suite rather than a gap. The CI logs
+# the streams reproduce from are in ../omniscient-ci-logs/.
 #
 # The prompt is written beside the worktree, so the agent starts in one line:
 #
@@ -25,33 +24,33 @@
 set -euo pipefail
 
 declare -A OWNS=(
-    [budget]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/main.rs src/session.rs src/request.rs src/cli.rs src/emit.rs src/encode.rs src/render.rs src/triage/** src/bpf/syscall.rs shim/** src/collect/mem/heap/** the cost: key of every backend line in catalog/*.yaml scripts/bench.sh tests/budget.rs tests/runner.rs tests/triage.rs tests/recorder.rs tests/encoders.rs tests/aggregation.rs tests/bench_*.rs examples/record-*.yml man/omn.1"
-    [perf]="src/perf.rs src/resolve.rs src/catalog.rs (except the MatchKind enum, stream J's) src/validate.rs src/filter.rs src/capabilities.rs src/bpf/usdt.rs src/collect/cpu/** src/collect/mem/page_faults.rs src/collect/power/** src/collect/gpu/** src/collect/runtime/** the cpu.*, power.*, gpu.*, runtime.* and mem.faults entries of catalog/*.yaml (except their cost: keys) tests/scenario_{cpu,power,gpu,runtime}.rs tests/family_{cpu,power,gpu,runtime}.rs tests/portability.rs tests/catalog_model.rs scripts/matrix.sh scripts/vm/** .github/** examples/{cpu,power,gpu,runtime}-*.yml"
-    [sched]="src/bpf/insn.rs src/bpf/btf.rs src/bpf/attach.rs src/bpf/mod.rs src/bpf/map.rs src/bpf/ring.rs src/bpf/fentry.rs src/bpf/wakeup.rs src/bpf/sched_*.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/migrate.rs src/bpf/proc_*.rs src/collect/sched/** src/collect/proc/** the sched.* and proc.* entries of catalog/*.yaml (except their cost: keys) tests/scenario_{sched,proc}.rs tests/family_{sched,proc}.rs tests/raw_tracepoints.rs examples/{sched,proc}-*.yml (except sched-wakeup.yml)"
-    [devices]="src/bpf/io.rs src/bpf/io_*.rs src/bpf/net_*.rs src/bpf/mem_*.rs src/bpf/request.rs src/bpf/request_net.rs src/collect/io/** src/collect/net/** src/collect/mem/** (except page_faults.rs and heap/**) src/collect/psi.rs (new) the io.*, net.* and mem.* entries of catalog/*.yaml (except mem.faults, and their cost: keys) tests/scenario_{io,net,mem}.rs tests/family_{io,net,mem}.rs examples/{io,net,mem}-*.yml"
-    [join]="src/join.rs src/event.rs src/stack.rs src/clock.rs the MatchKind enum of src/catalog.rs and its parsing mcp/** tests/join_engine.rs tests/cross_*.rs tests/stack_capture.rs tests/vertical.rs examples/cross-*.yml examples/join-*.yml examples/vertical-*.yml examples/sched-wakeup.yml"
+    [stock]="src/perf.rs src/capabilities.rs src/resolve.rs src/validate.rs src/filter.rs src/collect/cpu/** src/collect/mem/page_faults.rs src/collect/power/** src/collect/gpu/** src/collect/runtime/** src/bpf/usdt.rs the cpu.*, power.*, gpu.*, runtime.* and mem.faults entries of catalog/*.yaml tests/scenario_{cpu,power,gpu,runtime}.rs tests/family_{cpu,power,gpu,runtime}.rs tests/portability.rs tests/catalog_model.rs scripts/matrix.sh scripts/vm/** .github/** (except workflows/release.yml) examples/{cpu,power,gpu,runtime}-*.yml"
+    [results]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/main.rs src/session.rs src/request.rs src/cli.rs src/catalog.rs src/emit.rs src/encode.rs src/render.rs src/triage/** src/bpf/syscall.rs shim/** src/collect/mem/heap/** tests/{budget,runner,triage,recorder,encoders,aggregation,cli}.rs tests/bench_*.rs examples/bench/** examples/{record,triage}-*.yml man/omn.1"
+    [kernel]="src/bpf/** (except syscall.rs and usdt.rs) src/collect/{sched,proc,io,net}/** src/collect/mem/** (except page_faults.rs and heap/**) src/collect/psi.rs the sched.*, proc.*, io.*, net.* and mem.* entries of catalog/*.yaml (except mem.faults) tests/scenario_{sched,proc,io,net,mem}.rs tests/family_{sched,proc,io,net,mem}.rs tests/raw_tracepoints.rs examples/{sched,proc,io,net,mem}-*.yml (except sched-wakeup.yml)"
+    [agent]="src/join.rs src/event.rs src/stack.rs src/clock.rs mcp/** tests/join_engine.rs tests/cross_*.rs tests/stack_capture.rs tests/vertical.rs examples/{cross,join,vertical}-*.yml examples/sched-wakeup.yml examples/mcp/** (new) docs/mcp.md"
+    [install]="Makefile scripts/release.sh (new) .github/workflows/release.yml (new) README.md DEMO.md"
 )
 declare -A TITLE=(
-    [budget]="Stream R -- what a run costs the target"
-    [perf]="Stream P -- the targets perf can serve"
-    [sched]="Stream S -- the scheduler and the processes, per cgroup"
-    [devices]="Stream N -- the older kernels serve what they can"
-    [join]="Stream J -- the engine says what it knows"
+    [stock]="Stream P -- the stock machine"
+    [results]="Stream R -- the results say it"
+    [kernel]="Stream K -- the kernel programs"
+    [agent]="Stream J -- an agent benchmarks a program"
+    [install]="Stream D -- it installs"
 )
-declare -A LETTER=([budget]=R [perf]=P [sched]=S [devices]=N [join]=J)
+declare -A LETTER=([stock]=P [results]=R [kernel]=K [agent]=J [install]=D)
 declare -A LOG=(
-    [budget]="docs/fixes/budget.md"
-    [perf]="docs/portability.md (a section \"The thirteenth wave\")"
-    [sched]="docs/families/kernel.md (a section \"The thirteenth wave\")"
-    [devices]="docs/families/devices.md"
-    [join]="docs/families/join.md (a section \"The thirteenth wave\")"
+    [stock]="docs/portability.md (a section \"The fourteenth wave\")"
+    [results]="docs/fixes/results.md"
+    [kernel]="docs/families/kernel.md (a section \"The fourteenth wave\")"
+    [agent]="docs/families/join.md (a section \"The fourteenth wave\") and docs/mcp.md"
+    [install]="docs/install.md (with a section \"For the coordinator\" at its end)"
 )
 declare -A SCENARIO=(
-    [budget]="tests/budget.rs, tests/runner.rs, tests/triage.rs, tests/recorder.rs and tests/encoders.rs"
-    [perf]="tests/scenario_cpu.rs, tests/family_cpu.rs, tests/portability.rs, tests/catalog_model.rs and the power, gpu and runtime scenario files"
-    [sched]="tests/scenario_sched.rs, tests/family_sched.rs, tests/scenario_proc.rs, tests/family_proc.rs and tests/raw_tracepoints.rs"
-    [devices]="tests/scenario_io.rs, tests/scenario_net.rs, tests/scenario_mem.rs and their family_ files"
-    [join]="tests/join_engine.rs, tests/cross_*.rs, tests/stack_capture.rs, tests/vertical.rs and cargo test -p omn-mcp"
+    [stock]="tests/scenario_cpu.rs, tests/family_cpu.rs, tests/portability.rs, tests/catalog_model.rs and the power, gpu and runtime scenario files"
+    [results]="tests/runner.rs, tests/budget.rs, tests/triage.rs, tests/recorder.rs, tests/encoders.rs, tests/aggregation.rs and tests/cli.rs"
+    [kernel]="the scenario_ and family_ files of sched, proc, io, net and mem, and tests/raw_tracepoints.rs"
+    [agent]="tests/join_engine.rs, tests/cross_*.rs, tests/stack_capture.rs, tests/vertical.rs and cargo test -p omn-mcp"
+    [install]="the install check your handoff describes, then tests/cli.rs"
 )
 
 stream="${1:-}"
@@ -93,7 +92,7 @@ You own, and may only edit:
 
 Everything else is read-only. Needing something from another stream's files is
 not a reason to edit them: write it under "## Needs from another stream" in
-docs/open-findings.md, under a heading naming your stream and the thirteenth
+docs/open-findings.md, under a heading naming your stream and the fourteenth
 wave, with the exact signature you want, and carry on. That file is append-only
 per stream -- wave three had six streams edit it freely and produced six
 conflicts on it.
@@ -104,7 +103,7 @@ survive a relink. Both failures are silent -- the tool reports fewer sources as
 available, which reads like the machine changed rather than the binary.
 
 HOW YOU TEST -- this is a rule, not advice, and CLAUDE.md "How much to test,
-and when" is the long version. The full suite is ~1800 tests and 5 to 10
+and when" is the long version. The full suite is ~2000 tests and 5 to 10
 minutes; five agents running it by reflex is what makes a wave slow.
 
   - While iterating: ONLY \`cargo test --lib <your module>\` and

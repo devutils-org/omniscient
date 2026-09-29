@@ -281,6 +281,12 @@ judge passing and `KNOWN_DEFECTS` down to P10's `mem.cgroup`. A counted window
 over a polled counter had lost its closing read on R's branch; found at the
 merge, fixed before it (`fix/counted-window`).
 
+**The fourteenth wave's brief is written** (`BRIEF.md`), not yet dispatched:
+the stock machine (P), the results' vocabulary and renderings (R), the kernel
+programs (K), an agent benchmarking a program through `omn-mcp` (J), and a
+release that installs (D). The CI logs it reproduces from are kept in
+`../omniscient-ci-logs/`, outside the repository.
+
 **After the thirteenth wave, in order:**
 
 1. **A product wave.** Every roadmap phase is done but phase 6's three filed
