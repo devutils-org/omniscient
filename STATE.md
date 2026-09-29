@@ -251,30 +251,53 @@ profile keyed by `task` cannot say *which* task lost which samples, though each
 ring belongs to one -- losses per ring carried into `Collection`, a change to
 `src/emit.rs` and the collector layer, after the flight recorder.
 
-**The thirteenth wave is dispatched** (`BRIEF.md`): what a run costs the
-target (R, finding 47 and the losses per ring), the targets perf can serve
-(P, P11 and the cgroups the counting sources declare), the scheduler and the
-processes per cgroup (S), the older kernels' shapes (N), and the join engine
-(J). `main` is pushed, so the CI runs from here on; the matrix cells were
-emptied and are swept again by P for its fixes and by the coordinator after
-the wave.
+**The thirteenth wave is merged**, all five streams, and
+`docs/briefs/wave-13-cost.md` keeps its brief:
 
-**After the twelfth wave, in order** -- `docs/open-requests.md` is the list the
-thirteenth brief is written from, and `docs/flaky.md` the tests it assigns:
+- **R, what a run costs the target** (`docs/fixes/budget.md`): finding 47 is
+  closed. `cost.json` and `--budget` weigh what a collector spends inside the
+  target -- the shim's own sampled time, the kernel's `bpf_prog_info` run time
+  when it is timing programs -- and say *unknown* where nothing accounts for
+  it, never zero; the bands follow the bench's dilation column. Losses per ring
+  reach the emit layer; the shim's stream is bounded at 2^19 records.
+- **P, the targets perf can serve** (`docs/portability.md`): P11 closed (5.15's
+  64 KiB `RLIMIT_MEMLOCK`); the counting sources, `cpu.profile` and
+  `mem.faults` serve a cgroup; the loader refuses a catalog that promises what
+  no mode produces; the CI answers its first run.
+- **S, the scheduler and the processes per cgroup** (`docs/families/kernel.md`):
+  every `sched` and `proc` program compares a cgroup and everything below it, a
+  thread target compares the thread, `sched.switches` counts.
+- **N, the older kernels** (`docs/families/devices.md`): the `io`, `net` and
+  `mem` programs read the shapes 5.15 and 6.6 write, verified on both.
+- **J, the engine's words** (`docs/families/join.md`): stacks demangled, `woke`
+  and `overlap` matches, a decomposition part a join defines, and
+  `omn-mcp --allow-launch`, so an agent can run the sessions its operator
+  wrote and nothing else.
 
-0. **The flight recorder landed** in the twelfth wave (`docs/recorder.md`): a
-   session's `record:` block or `--until`, a trigger in the filter grammar, a
-   retention bound, one document per firing, eviction counted as a loss.
-1. **Finding 47**: the cost bands and the budget read the target's dilation for
-   in-kernel collectors. (The shim's half is done: a shared ring, about 70 ns a
-   record; the reader's speed is its next limit.) It waits for the runner,
-   which the flight recorder holds this wave.
-2. **The bench's second table**, on a quiet machine, after the wave: the
-   drains and the thread-following profile changed what several rows cost.
-3. **The CI's first push**, once V's changes make the capability-less suite
-   green; `docs/portability.md` says what the first run will show.
-4. **`dm-delay`**, the one injection left that needs root, on a machine where
-   root is available.
+At the merge: 1994 tests green in one `--no-fail-fast` run, and the matrix
+swept alone afterwards -- thirteen cells (5.15, 6.1, 6.6 and 7.2 under the
+configurations the streams' fixes touched, `here-caps`, `here-nocaps`), every
+judge passing and `KNOWN_DEFECTS` down to P10's `mem.cgroup`. A counted window
+over a polled counter had lost its closing read on R's branch; found at the
+merge, fixed before it (`fix/counted-window`).
+
+**After the thirteenth wave, in order:**
+
+1. **A product wave.** Every roadmap phase is done but phase 6's three filed
+   edges, phase 9's last five sources and phase 4's `dm-delay`; what is missing
+   is what a user who is not the developer would need: the CI green on
+   a push (its first run with P's configuration is the next one), a cell at a
+   distribution's defaults (Ubuntu's `perf_event_paranoid` 4, where every perf
+   test must skip rather than fail), a release that installs, and one use case
+   polished end to end -- an agent benchmarking a program through `omn-mcp`.
+2. **The requests the thirteenth wave filed**, under its headings in
+   `docs/open-findings.md`: per-ring drops in `cpu.profile`, `KeyKind::Node`,
+   `Unit::Watts` and `KeyNotCarried` (each an enum arm R's matches must take),
+   a container resolved to its cgroup, a window that closes at each collector's
+   last read, and the read-ahead scenario's one lookup in 256. Refresh
+   `docs/open-requests.md` first: it is a snapshot from before the twelfth wave.
+3. **The bench's second table**, on a quiet machine: the bands changed.
+4. **`dm-delay`**, the one injection left that needs root.
 
 Below the milestones, and not scheduled:
 
@@ -282,9 +305,8 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **No decision is open.** `CAP_NET_RAW`, the closing read and dynamic binary
-  instrumentation were the last three, and the tenth wave settled all of them in
-  `DECISIONS.md`.
+- **One decision is open** (`DECISIONS.md`): whether `sched.switches` gets a
+  `sched_switch` program that serves every target, a cgroup included.
 
 The fifth wave closed 52 of the sixty-three defects the scenario wave found;
 the eleven that are left are named in `docs/fixes/`.
