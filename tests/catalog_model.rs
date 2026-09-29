@@ -250,6 +250,7 @@ fn the_resolver_never_selects_a_backend_that_cannot_serve_the_target() {
     let catalog = catalog();
     let capabilities = Capabilities::detect();
     let mut checked = 0;
+    let mut withheld = 0;
 
     for entry in catalog.entries() {
         for kind in entry.supported_targets() {
@@ -261,7 +262,10 @@ fn the_resolver_never_selects_a_backend_that_cannot_serve_the_target() {
                 Ok(resolved) => resolved,
                 // A machine that cannot serve any backend of a chain is a
                 // legitimate outcome here and says nothing about the model.
-                Err(ResolveError::NoViableBackend { .. }) => continue,
+                Err(ResolveError::NoViableBackend { .. }) => {
+                    withheld += 1;
+                    continue;
+                }
                 Err(other) => panic!("`{}` per {kind}: {other}", entry.id),
             };
             let backend = entry
@@ -279,11 +283,22 @@ fn the_resolver_never_selects_a_backend_that_cannot_serve_the_target() {
         }
     }
 
+    // The floor is on what was asked, not on what this machine serves: a
+    // machine that withholds every counter (`perf_event_paranoid` 4, the CI's
+    // first run) resolves fewer pairs, and each one it withholds is a
+    // resolver's answer, not a pair the sweep missed.
     assert!(
-        checked > 100,
-        "only {checked} source-and-target pairs were reachable, which is too few \
-         for this sweep to have covered the catalog"
+        checked + withheld > 100,
+        "only {} source-and-target pairs were asked, which is too few for this sweep to have \
+         covered the catalog",
+        checked + withheld
     );
+    assert!(
+        checked > 0,
+        "this machine served none of {withheld} source-and-target pairs, so the sweep says \
+         nothing about the resolver's choices"
+    );
+    eprintln!("checked {checked} pairs; {withheld} withheld by this machine");
 }
 
 /// A pin bypasses the resolver, so it bypasses the check above too. A pin
@@ -660,4 +675,75 @@ fn resolved_backend(args: &[&str]) -> String {
         .as_str()
         .expect("the record names the backend")
         .to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// The loader refuses what no build could keep
+// ---------------------------------------------------------------------------
+
+/// The embedded catalog, as entries a test may break one at a time.
+fn entries() -> Vec<omn::catalog::Entry> {
+    catalog().entries().to_vec()
+}
+
+fn refusal_of(entries: Vec<omn::catalog::Entry>) -> String {
+    match Catalog::from_entries(entries) {
+        Ok(_) => panic!("the loader accepted a catalog it should refuse"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// A copy of the catalog carrying each shape the loader refuses, refused with
+/// the reason: an emit no declared mode produces, `rate` or `stack` over a
+/// unit that does not add up, and a requirement written as a pattern. A
+/// catalog loaded with `--catalog <dir>` goes through the same loader.
+#[test]
+fn a_catalog_carrying_a_promise_no_build_can_keep_is_refused_when_it_is_loaded() {
+    let ipc = |entries: &mut Vec<omn::catalog::Entry>| -> usize {
+        entries
+            .iter()
+            .position(|entry| entry.id.as_str() == "cpu.ipc")
+            .expect("cpu.ipc is in the catalog")
+    };
+
+    let mut broken = entries();
+    let at = ipc(&mut broken);
+    broken[at].modes = vec![omn::request::ModeKind::Snapshot];
+    broken[at].emits = vec![omn::request::EmitKind::Timeline];
+    let refusal = refusal_of(broken);
+    assert!(
+        refusal.contains("cpu.ipc") && refusal.contains("none of the modes"),
+        "{refusal}"
+    );
+
+    for emit in [omn::request::EmitKind::Rate, omn::request::EmitKind::Stack] {
+        let mut broken = entries();
+        let at = ipc(&mut broken);
+        broken[at].emits.push(emit);
+        broken[at].modes.push(omn::request::ModeKind::Sample);
+        let refusal = refusal_of(broken);
+        assert!(
+            refusal.contains("cpu.ipc")
+                && refusal.contains(&format!("`{emit}` over a `ratio`"))
+                && refusal.contains("does not add up"),
+            "{refusal}"
+        );
+    }
+
+    let mut broken = entries();
+    let at = ipc(&mut broken);
+    broken[at].backends[0].requires = vec!["pmu:topdown-*".to_owned()];
+    let refusal = refusal_of(broken);
+    assert!(
+        refusal.contains("cpu.ipc") && refusal.contains("`pmu:topdown-*`, which is a pattern"),
+        "{refusal}"
+    );
+
+    // A raw tracepoint's prototype is not a pattern, though it has a `*` in it.
+    let mut kept = entries();
+    let at = ipc(&mut kept);
+    kept[at].backends[0]
+        .requires
+        .push("raw_tracepoint:sched_switch(bool, task_struct *, task_struct *)".to_owned());
+    assert!(Catalog::from_entries(kept).is_ok());
 }

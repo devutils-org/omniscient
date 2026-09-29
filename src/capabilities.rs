@@ -523,6 +523,14 @@ impl Capabilities {
             return probe_path(&path);
         }
 
+        // A control file is used by writing it, and some are write-only:
+        // `/proc/[pid]/clear_refs` is `--w-------`, and asked by reading it
+        // answered "not readable by uid 1000" about a file that uid may use.
+        // Finding 21 of `docs/open-findings.md`.
+        if let Some(path) = requirement.strip_prefix("writable:") {
+            return probe_writable(&substitute_pid(path, pid));
+        }
+
         if let Some(file) = requirement.strip_prefix("cgroup2:") {
             return self.probe_cgroup_file(file);
         }
@@ -767,6 +775,31 @@ fn probe_path(path: &Path) -> Probe {
     }
 }
 
+/// Whether this process may write `path`, asked of the kernel (`access(2)`
+/// with `W_OK`), and absent kept apart from forbidden.
+fn probe_writable(path: &Path) -> Probe {
+    let Ok(text) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return Probe::Missing(format!("{} is not a path", path.display()));
+    };
+    // SAFETY: a NUL-terminated path the kernel only reads.
+    if unsafe { libc::access(text.as_ptr(), libc::W_OK) } == 0 {
+        return Probe::Available;
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOENT) | Some(libc::ENOTDIR) => {
+            Probe::Missing(format!("{} does not exist", path.display()))
+        }
+        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::EROFS) => Probe::Missing(format!(
+            "{} exists but is not writable by uid {} ({error}): writing it needs its owner or \
+             root",
+            path.display(),
+            current_uid()
+        )),
+        _ => Probe::Missing(format!("{} cannot be written: {error}", path.display())),
+    }
+}
+
 const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
 
 // This file used to have a `tracefs_root` of its own, to build the path a
@@ -906,7 +939,27 @@ fn sysfs_event(name: &str) -> Option<(u32, u64)> {
 /// or does not. Saying which is more useful than "no probe written", because
 /// the reader learns it is the cpu and not the tool.
 fn sysfs_device_state(name: &str) -> Option<Probe> {
-    if name.contains('/') {
+    // The qualified form, `unit/event`: the unit's own directory answers
+    // whether it exists and publishes the event. Absent is missing, with whose
+    // it is; only a unit that publishes the event and whose encoding this tool
+    // could not build is left unknown. Finding 25 of `docs/open-findings.md`:
+    // `pmu:power/energy-pkg/` on a machine with no RAPL read "needs an event
+    // encoding this tool does not build yet", which is unknown, which is never
+    // available -- and never missing either, so the source was listed as
+    // assumed and refused at the start.
+    if let Some((unit, event)) = name.trim_end_matches('/').split_once('/') {
+        let directory = format!("{PMU_DEVICES}/{unit}");
+        if !std::path::Path::new(&directory).exists() {
+            return Some(Probe::Missing(format!(
+                "this machine publishes no `{unit}` performance unit under {PMU_DEVICES}"
+            )));
+        }
+        if !std::path::Path::new(&format!("{directory}/events/{event}")).exists() {
+            return Some(Probe::Missing(format!(
+                "the `{unit}` performance unit publishes no `{event}` event under \
+                 {directory}/events"
+            )));
+        }
         return None;
     }
     // `pebs:<event>` names an event of the cpu PMU on the hardware that has it.
@@ -1230,8 +1283,112 @@ fn available_cpus() -> usize {
         .unwrap_or(0)
 }
 
+/// Where the kernel lists the cpus it currently has.
+pub const ONLINE_CPUS: &str = "/sys/devices/system/cpu/online";
+
+/// The cpus this machine has right now, as the kernel numbers them.
+///
+/// Read rather than derived from a core count: the numbering has holes on a
+/// machine where a cpu was taken offline, and `nproc` would hand back a count
+/// that indexes cpus which do not exist. A per-cpu event opened on one of those
+/// fails with `ENODEV`, which reads like a permission problem and is not.
+pub fn online_cpus() -> std::io::Result<Vec<u32>> {
+    let list = std::fs::read_to_string(ONLINE_CPUS)?;
+    parse_cpu_list(&list).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{ONLINE_CPUS} does not read as a cpu list: `{}`",
+                list.trim()
+            ),
+        )
+    })
+}
+
+/// `0-3,8,10-11`, which is how the kernel writes every cpu list it publishes.
+pub fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
+    let mut cpus = Vec::new();
+    for part in list
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        match part.split_once('-') {
+            Some((first, last)) => {
+                let first: u32 = first.parse().ok()?;
+                let last: u32 = last.parse().ok()?;
+                if last < first {
+                    return None;
+                }
+                cpus.extend(first..=last);
+            }
+            None => cpus.push(part.parse().ok()?),
+        }
+    }
+    Some(cpus)
+}
+
 #[cfg(test)]
 mod tests {
+    /// `writable:` asks the question a control file is used by. This process's
+    /// own `clear_refs` is write-only for its owner, and is what the probe was
+    /// written for; a file nobody but root may write, and one that is not
+    /// there, are each missing, with which of the two it is.
+    #[test]
+    fn a_writable_requirement_asks_whether_the_file_may_be_written() {
+        let capabilities = super::Capabilities::detect();
+        let own = std::process::id() as i32;
+        assert_eq!(
+            capabilities.probe("writable:/proc/[pid]/clear_refs", Some(own)),
+            super::Probe::Available,
+            "this process may write its own clear_refs"
+        );
+        // Read-only by construction for everyone but root, which a test binary
+        // is not: the kernel's own version string.
+        if unsafe { libc::geteuid() } != 0 {
+            match capabilities.probe("writable:/proc/version", None) {
+                super::Probe::Missing(reason) => {
+                    assert!(reason.contains("not writable"), "{reason}")
+                }
+                other => panic!("/proc/version answered {other:?}"),
+            }
+        }
+        match capabilities.probe("writable:/proc/omn-no-such-file", None) {
+            super::Probe::Missing(reason) => assert!(reason.contains("does not exist"), "{reason}"),
+            other => panic!("an absent file answered {other:?}"),
+        }
+    }
+
+    /// A qualified `pmu:unit/event` whose unit or event this machine does not
+    /// publish is missing, naming which -- never unknown, which the resolver
+    /// would have walked past as "assumed" onto a start that fails.
+    #[test]
+    fn a_qualified_pmu_event_that_is_not_published_is_missing_by_name() {
+        match super::probe_pmu("omnnounit/energy-pkg/") {
+            super::Probe::Missing(reason) => {
+                assert!(
+                    reason.contains("no `omnnounit` performance unit"),
+                    "{reason}"
+                )
+            }
+            other => panic!("an absent unit answered {other:?}"),
+        }
+        if !std::path::Path::new(super::PMU_DEVICES)
+            .join("cpu")
+            .exists()
+        {
+            eprintln!("skipped: this machine publishes no `cpu` unit to ask about an event of");
+            return;
+        }
+        match super::probe_pmu("cpu/omn-no-such-event") {
+            super::Probe::Missing(reason) => assert!(
+                reason.contains("`cpu` performance unit publishes no `omn-no-such-event`"),
+                "{reason}"
+            ),
+            other => panic!("an absent event of a present unit answered {other:?}"),
+        }
+    }
+
     /// Why `omn` makes itself dumpable again at startup, proved without needing
     /// the capabilities that cause the problem.
     ///
