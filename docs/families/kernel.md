@@ -557,7 +557,7 @@ defect of this stream's:
 | Test | Why |
 |---|---|
 | `cli::the_session_indexes_hold_exactly_the_sessions_on_disk` | the index row for `sched-cgroup.yml`, below |
-| `cross_io::a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing` | the defect it pins is fixed; filed |
+| `cross_io::a_thread_target_on_the_scheduler_half_keeps_that_threads_events` | the defect it pins is fixed; filed |
 | `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned` | stream P's; passed alone at once |
 | `scenario_net::a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone` | the tally's #17; passed alone at once |
 

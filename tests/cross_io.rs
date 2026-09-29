@@ -1636,20 +1636,23 @@ fn the_scheduler_half_ignores_a_filter_and_says_nothing() {
     }
 }
 
-/// A `tid` target on the scheduler half keeps nothing for any thread but a
-/// process's first, and the run reports no loss.
+/// A `tid` target on the scheduler half keeps that thread's events, and no
+/// more of them than the process target keeps.
 ///
 /// The ground truth is a thread of this process -- never its first, since the
 /// harness runs tests on threads it spawns -- sleeping sixty times for ten
 /// milliseconds, so it is woken at least sixty times and blocked for at least
 /// 600 ms. A process target, run over the same window, is the positive control:
-/// it must see those wakeups, or the negative below says nothing.
+/// it must see those wakeups, or the assertion below says nothing.
 ///
-/// Held as a defect, like the one above. The collectors hand a thread id to a
-/// program that compares it against `tgid`; the two agree only for a thread
-/// whose id is its process's, which is the one case every earlier test used.
+/// This held defect 2 of `docs/scenarios/cross-io.md` until the thirteenth
+/// wave: the collectors handed a thread id to a program that compared it with
+/// `tgid`, which agree only for a process's first thread, so every other thread
+/// kept nothing and the run reported no loss. The programs compare the thread
+/// now (`scenario_sched::a_thread_target_keeps_that_thread_and_not_the_one_beside_it`
+/// is the ground truth beside this one).
 #[test]
-fn a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing() {
+fn a_thread_target_on_the_scheduler_half_keeps_that_threads_events() {
     if let Some(reason) = no_bpf_here() {
         eprintln!("skipped: {reason}");
         return;
@@ -1723,10 +1726,8 @@ fn a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing() {
             continue;
         }
         assert!(
-            through_thread == 0,
-            "{source} --tid now keeps the thread's own events: defect 2 of \
-             docs/scenarios/cross-io.md is fixed. Flip this assertion, and point `wakeup_half` \
-             in this file at the reader's thread"
+            through_thread > 0 && through_thread <= through_process,
+            "{source} --tid keeps the thread's own events, and no more than --pid keeps of it"
         );
     }
 }

@@ -395,11 +395,28 @@ and `docs/mcp.md` the launch rules and their refusals.
 
 ---
 
+## Settled in the thirteenth wave: whose events a kernel program keeps
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What `--cgroup` means | **The cgroup and everything below it**, compared in the kernel by the target's level and the task's ancestor at that level, the way `cgroup_is_descendant` does. Not served inside a cgroup namespace. | A service's or a session's tasks sit in cgroups below the path a reader names; a filter on a task's own cgroup would keep nothing and read as a quiet machine. Inside a namespace the depth read from the path is short by the namespace's own, and nothing a process can read corrects it. |
+| A thread and a process target | **A thread target compares the thread (`pid`), a process target the thread group (`tgid`)**, in one comparison every program uses (`insn::Whose`). | Each program had written its own against `tgid` alone, so `--tid` kept nothing for any thread but a process's first, and said nothing (`docs/scenarios/cross-io.md` defect 2). |
+| A source bucketed in the kernel | **Reports the mean per measurement, weighted by the count**, and buckets in the kernel's own key. | `sched.offcpu --emit hist` lost individual blocks to a key with no bucket; with the bucket in the key, nothing needs `TOTAL_OF_ATTR`. |
+
+`docs/families/kernel.md`, "The thirteenth wave — stream S", has the ground truth.
+
+---
+
 ## Open
 
-Nothing is open. The last line, dynamic binary instrumentation, was settled in
-the tenth wave, below. A new open line goes here with what it costs to leave it
-open, which is the habit that kept this section honest.
+- **Whether `sched.switches` gets a `sched_switch` program that serves every
+  target, a cgroup included.** Today it is served by `pmu:sw` alone, which
+  cannot follow a cgroup, so the entry no longer declares one. A program would
+  be first in the chain for every target, which changes what every existing
+  `sched.switches` run costs. Leaving it open costs one target on one source.
+
+A new open line goes here with what it costs to leave it open, which is the
+habit that kept this section honest.
 
 ---
 

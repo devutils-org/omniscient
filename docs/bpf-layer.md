@@ -69,6 +69,35 @@ Three rules that are not style:
    time. Mixing the two puts the stream in a different clock domain from every
    other collector and destroys every join with no error anywhere.
 
+## Whose events a program keeps
+
+Every program that narrows to a target asks one question, in one place:
+`insn::Whose` is the whole machine, a process (`tgid`), a thread (`pid`, the
+kernel's thread id) or a cgroup, and two instruction sequences in
+`src/bpf/insn.rs` compare it. Before the thirteenth wave each program wrote
+its own comparison against the thread group alone, so a `--tid` target kept
+nothing for any thread but a process's first, and every program refused
+`--cgroup`.
+
+- `push_current_filter` when the subject is the current task -- a syscall, a
+  lock wait, a signal's sender. One helper call.
+- `push_task_filter` when the subject is another task -- `sched_switch`'s
+  incoming task, `sched_waking`'s wakee, the task being migrated -- read
+  through the `TaskFields` offsets BTF gives. Keep the task pointer in `r6` to
+  `r9`: the reads are helper calls.
+
+A cgroup means **that cgroup and everything below it**, compared the way the
+kernel's `cgroup_is_descendant` does: by the target's level in the hierarchy
+and the task's ancestor at that level (`bpf_get_current_ancestor_cgroup_id`
+for the current task, `task->cgroups->dfl_cgrp`'s `ancestors` otherwise, in
+both the 6.1-and-later and the older layout). The two simpler helpers are not
+used: one sees only a task's own cgroup, and a `--cgroup user.slice` would miss
+every session below it; the other answers only for the current task. A pointer
+that reads as null along the walk skips the event: a filter that keeps what it
+cannot judge is not a filter. Inside a cgroup namespace the depth read from the
+path is wrong and nothing a process can read corrects it, so that case is not
+served.
+
 ## Streaming or counting
 
 Two shapes, and the choice is about volume rather than taste.

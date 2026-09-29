@@ -360,7 +360,11 @@ says why in its header.
 `the_scheduler_half_ignores_a_filter_and_says_nothing` holds it: it asserts the
 defect, so the day the filter is applied it fails and names what to flip.
 
-### 2. A thread target on the scheduler half keeps nothing, and reports no loss
+### 2. A thread target on the scheduler half kept nothing, and reported no loss — **fixed**
+
+**What closed it**: in the thirteenth wave the `sched` and `proc` programs compare
+the thread for a `tid` target and the thread group for a `pid` target
+(`src/bpf/insn.rs`, one comparison every program uses).
 
 ```console
 $ omn sched.wakeup --tid <a thread that is not its process's first> -m trace -e raw -d 2s
@@ -379,9 +383,9 @@ thread never blocked and was never woken.
 
 The block collectors do this right (`Submitter::Thread` compares the thread id),
 so the fix has a model beside it.
-`a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing` holds it
-with its positive control: the process target must see the thread's wakeups,
-or the test says it proved nothing.
+`a_thread_target_on_the_scheduler_half_keeps_that_threads_events` holds the
+fix with its positive control: the process target must see the thread's
+wakeups, or the test says it proved nothing.
 
 ### 3. `eq` on a scoped key was accepted at the same evidence as `scoped_eq` — **fixed**
 

@@ -299,6 +299,7 @@ Each is `omn -f examples/<file>`. The whole family is
 | `sched-mutex-uncontended.yml` | The same program with one thread: the same holds, and waits of nothing. |
 | `sched-mutex-with-heap.yml` | Lock waits and allocations of one program, through one shim. |
 | `sched-mutex-loss.yml` | Mutex records produced faster than the pipe drains, and every one accounted for. |
+| `sched-cgroup.yml` | A cgroup and everything below it: its blocked time, its run queue waits, and who woke it. |
 
 ## power
 
