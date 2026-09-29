@@ -7,7 +7,7 @@
 //! here carries the level it was obtained at.
 //!
 //! Rules are declarative, so a new boundary is a new rule rather than new
-//! engine code. Five matches exist and they differ only in what "the same
+//! engine code. Seven matches exist and they differ only in what "the same
 //! thing" means:
 //!
 //! - `eq` is an equal key, and it is the cheap one.
@@ -21,14 +21,22 @@
 //! - `wakeup` is the edge from whoever made a task runnable to what that task
 //!   then did. It is the only join that crosses a block, which is why it is the
 //!   only way to say that a request spent 41 ms waiting on somebody else.
+//! - `woke` is the same edge read the other way: a close -- a completion --
+//!   paired with the next wakeup of the task it names. `wakeup` answers "what
+//!   did this release"; `woke` answers "what released the task this completion
+//!   was for, and how long after it".
 //! - `between` is two things moving in the same interval: a polled total's
 //!   change between two readings, credited to the states that opened or closed
-//!   in between. Nothing ties the two sides but the clock, and it is the one
-//!   match that says `TEMPORAL` -- the level that exists so a reader can tell a
-//!   coincidence in time from a key, and that nothing produced until the
+//!   in between. Nothing ties the two sides but the clock, and it is one of the
+//!   two matches that say `TEMPORAL` -- the level that exists so a reader can
+//!   tell a coincidence in time from a key, and that nothing produced until the
 //!   seventh wave's crossings asked for it three times over.
+//! - `overlap` is the other: a downstream event's window lying across the
+//!   intervals of an upstream poll, credited to each by the share of it that
+//!   overlaps. A block of 250 ms across three 100 ms readings is split three
+//!   ways rather than credited to the reading it ended in.
 //!
-//! All five share one lifecycle: a `from` event opens a state, `to` events are
+//! All seven share one lifecycle: a `from` event opens a state, `to` events are
 //! attributed to it, and the state ends by being closed, replaced, expired past
 //! its window, evicted for space, or still open when the run ends. Every one of
 //! those endings is counted, because an open state that is never released is a
@@ -165,6 +173,24 @@ pub struct Rule {
     /// `waker_tid`, and a second producer of wakeup edges names its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waker: Option<String>,
+    /// The attribute of a `to` event naming the task a `woke` match pairs it
+    /// with: `wakee_tid` on `sched.wakeup`. The event's own `via` key when
+    /// absent, which is the same task for `sched.wakeup` -- it is keyed on the
+    /// woken task -- and named when a producer keys on the other end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woken: Option<String>,
+    /// The attribute of a `to` event holding how long it lasted, for an
+    /// `overlap` match: the event covers `[ts - span, ts]`. `total_ns` on
+    /// `sched.offcpu`. Absent, each `to` event is an instant and is credited
+    /// whole to the interval it falls in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<String>,
+    /// Which end of its `span` a `to` event is stamped at, for `overlap`: the
+    /// end, when absent, which is when most durations become known; `start`
+    /// for a source that stamps an event when the thing it times began, as
+    /// the drained `sched.futex` and `sched.offcpu` rows say they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamped: Option<Stamped>,
     /// How many wakeup edges to follow back from a woken task. One by default:
     /// the task that released this one.
     ///
@@ -177,9 +203,10 @@ pub struct Rule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<usize>,
     /// The attribute of a `to` reading whose change a `between` match credits:
-    /// `bytes` on `mem.rss`, `ns` on `cpu.oncpu_time`.
+    /// `bytes` on `mem.rss`, `ns` on `cpu.oncpu_time`. For `overlap`, the
+    /// amount of a `to` event that is shared out by overlap.
     ///
-    /// Required by `between` and meaningless to every other match, named for
+    /// Required by `between` and `overlap` and meaningless to the rest, named for
     /// the same reason `waker` is: a reading carries several numbers, and
     /// which of them is the total is the source's business, not the engine's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,6 +233,16 @@ impl Rule {
     fn depth(&self) -> usize {
         self.depth.unwrap_or(1).max(1)
     }
+}
+
+/// Which end of its duration an event's timestamp is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stamped {
+    /// The event is stamped when the thing it times ended: `[ts - span, ts]`.
+    End,
+    /// The event is stamped when the thing it times began: `[ts, ts + span]`.
+    Start,
 }
 
 /// What one reading of a polled number is.
@@ -286,6 +323,40 @@ pub enum JoinError {
     )]
     NoValueAttribute { id: String, to: String },
     #[error(
+        "rule `{id}` matches by `overlap` and names no value: say which attribute of a `{to}` \
+         event is the amount shared out by overlap, as in `value: total_ns`"
+    )]
+    NoShareValue { id: String, to: String },
+    #[error(
+        "rule `{id}` matches by `overlap` from `{from}`, which this session collects in \
+         `{mode}` mode: `overlap` reads each `from` event as a reading that covers the interval \
+         since the one before, and a `{mode}` event covers no interval. Collect `{from}` with \
+         `poll`, or match by a key"
+    )]
+    NotAnInterval {
+        id: String,
+        from: String,
+        mode: ModeKind,
+    },
+    #[error(
+        "rule `{id}` reads `{attr}` off a `{kind}` event as how long it lasted, and the event \
+         carries no such number"
+    )]
+    MissingSpan {
+        id: String,
+        attr: String,
+        kind: String,
+    },
+    #[error(
+        "rule `{id}` reads `{attr}` off a `{kind}` event as the task it woke, and the event \
+         carries no such attribute holding a task id"
+    )]
+    MissingWoken {
+        id: String,
+        attr: String,
+        kind: String,
+    },
+    #[error(
         "rule `{id}` matches by `between` onto `{to}`, which this session collects in `{mode}` \
          mode: `between` credits the change between two readings of a total, and a `{mode}` \
          event has no reading before it to differ from. Collect `{to}` with `poll` or \
@@ -313,13 +384,18 @@ pub enum JoinError {
         kind: String,
     },
     #[error(
-        "rule `{id}` matches by `wakeup` onto `{to}`, whose events are totals drained from the \
-         kernel: each stands for many occurrences, and a wakeup can release only one. Every \
-         block in a drain would be credited to whichever wakeup came last before it, and \
-         reported as WAKEUP. Join onto a source with one event per occurrence, such as \
-         `sched.switches`"
+        "rule `{id}` matches by `{match_kind}` onto `{to}`, whose events are totals drained \
+         from the kernel: each stands for many occurrences, and a wakeup edge ties one \
+         occurrence to one other. Every block in a drain would be credited to whichever wakeup \
+         came last before it, or every wakeup in one to a single completion, and reported as \
+         WAKEUP. Join onto a source with one event per occurrence, such as `sched.switches` or \
+         `sched.wakeup`"
     )]
-    DrainedTotal { id: String, to: String },
+    DrainedTotal {
+        id: String,
+        match_kind: MatchKind,
+        to: String,
+    },
     #[error(
         "rule `{id}` joins from `{from}`, which this session collects twice with different \
          windows ({windows}): a state opened by one request and an event outside the other's \
@@ -435,6 +511,24 @@ pub struct StateStats {
     /// being reused are different facts about the workload.
     #[serde(default)]
     pub replaced: u64,
+    /// The subset of `replaced` where the state that ended and the one that
+    /// replaced it had the same scope as well as the same identity: two lives
+    /// of one recycled pointer the key cannot tell apart.
+    ///
+    /// A block request's scope is `request.start_time_ns`, which the kernel
+    /// reads from a clock it caches for the length of the submitter's plug,
+    /// so every request one plug section creates carries the same stamp, and
+    /// a pointer freed and reissued inside one section keeps its whole key.
+    /// Nothing else the two collectors both read changes per request (the
+    /// tag is assigned at issue and cleared at completion, the internal tag is
+    /// unset under the default scheduler, the sector repeats on a rewrite).
+    /// What is left is order, and order is sound: a pointer is reissued only
+    /// after its completion, so the earlier life's completion arrives while
+    /// the earlier life is the one open. It stops being sound when a side lost
+    /// the event that would have opened the later life, and so a match with a
+    /// collapse behind it says `within_key: TEMPORAL`, with this count.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub scope_collapsed: u64,
     /// Evicted because they outlived the window.
     pub expired: u64,
     /// Evicted because the map was full. A non-zero count means attributions
@@ -484,7 +578,9 @@ pub struct Attribution {
     /// its wakeups did.
     pub outcome: Outcome,
     /// For `between`: the reading's change over this interval, and what
-    /// opened and closed while it happened.
+    /// opened and closed while it happened. For `overlap`, what of the `to`
+    /// side was credited to this interval; for `woke`, how long the closes
+    /// folded here waited for their wakeup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<Change>,
     /// For `wakeup`: how many wakeups released the task along this chain.
@@ -498,14 +594,20 @@ pub struct Attribution {
     pub wakeups: Option<u64>,
 }
 
-/// One interval of a `between` match.
+/// One interval of a `between` or `overlap` match, or one waker's pairs of a
+/// `woke` match.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Change {
-    /// The `to` total's change over the interval, signed.
+    /// The `to` total's change over the interval, signed. For `overlap`, the
+    /// share of the `to` events' `value` credited to this interval. For
+    /// `woke`, the time from each close to the wakeup that followed it,
+    /// summed, in nanoseconds.
     pub delta: f64,
-    /// States that opened in the interval.
+    /// States that opened in the interval; the closes folded, for `woke`;
+    /// zero for `overlap`, whose interval is a reading and opens nothing.
     pub opened: u64,
-    /// States that closed in the interval.
+    /// States that closed in the interval; the closes a wakeup followed, for
+    /// `woke`; zero for `overlap`.
     pub closed: u64,
 }
 
@@ -735,6 +837,14 @@ pub fn check(rule: &Rule) -> Result<(), JoinError> {
             id: rule.id.clone(),
             to: rule.to.clone(),
         }),
+        MatchKind::Woke if rule.via != KeyKind::Task => Err(unmatchable(
+            "`woke` pairs a close with the next wakeup of the task it names, so `task:tid` is \
+             the only key it can follow",
+        )),
+        MatchKind::Overlap if rule.value.is_none() => Err(JoinError::NoShareValue {
+            id: rule.id.clone(),
+            to: rule.to.clone(),
+        }),
         _ => Ok(()),
     }
 }
@@ -795,7 +905,25 @@ pub fn check_in(rule: &Rule, requests: &[Request], catalog: &Catalog) -> Result<
             }
             Ok(())
         }
-        MatchKind::Wakeup => {
+        MatchKind::Overlap => {
+            let from = requests
+                .iter()
+                .filter(|request| request.source.as_str() == rule.from);
+            for request in from {
+                match request.mode.kind() {
+                    ModeKind::Poll | ModeKind::Snapshot => {}
+                    mode => {
+                        return Err(JoinError::NotAnInterval {
+                            id: rule.id.clone(),
+                            from: rule.from.clone(),
+                            mode,
+                        })
+                    }
+                }
+            }
+            Ok(())
+        }
+        MatchKind::Wakeup | MatchKind::Woke => {
             let drained = rule
                 .to
                 .parse()
@@ -805,6 +933,7 @@ pub fn check_in(rule: &Rule, requests: &[Request], catalog: &Catalog) -> Result<
             if drained {
                 return Err(JoinError::DrainedTotal {
                     id: rule.id.clone(),
+                    match_kind: rule.match_kind,
                     to: rule.to.clone(),
                 });
             }
@@ -852,6 +981,8 @@ pub fn apply_within(
         MatchKind::Eq | MatchKind::ScopedEq => keyed(rule, &ordered, &mut watch),
         MatchKind::Wakeup => wakeup(rule, &ordered, &mut watch),
         MatchKind::Between => between(rule, &ordered, &mut watch),
+        MatchKind::Woke => woke(rule, &ordered, &mut watch).map(|(correlation, _)| correlation),
+        MatchKind::Overlap => overlap(rule, &ordered, &mut watch),
     }?;
     correlation.outside_window = watch.outside;
     Ok(correlation)
@@ -1020,6 +1151,11 @@ fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlatio
             }
             if opens(rule, event) {
                 let label = if scoped { key.to_string() } else { id.clone() };
+                let collapsed = scoped
+                    && states.open.get(&id).is_some_and(
+                        |open| matches!(open.extent, Extent::Scope(held) if held == scope(key)),
+                    );
+                states.stats.scope_collapsed += u64::from(collapsed);
                 states.insert(
                     id,
                     OpenState {
@@ -1145,6 +1281,7 @@ fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlati
             if stands_for_many(event) {
                 return Err(JoinError::DrainedTotal {
                     id: rule.id.clone(),
+                    match_kind: rule.match_kind,
                     to: rule.to.clone(),
                 });
             }
@@ -1322,6 +1459,369 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
     Ok(correlation)
 }
 
+/// One pair a `woke` match made: the event that opened the state, and how
+/// long after it the wakeup that ended it came.
+type Pair<'a> = (&'a Event, u64);
+
+/// The pairs a [`PAIRED`] part reads, as events of the part's own kind, with
+/// the join that made them -- or why they could not be made.
+type Paired<'r> = Result<(&'r Rule, Vec<Event>), String>;
+
+/// A close paired with the next wakeup of the task it names.
+///
+/// A `from` event -- a block completion, which names the task that submitted
+/// the request -- opens a state for that task, and the first `to` wakeup of
+/// the same task after it ends the state and is its match. The pair is the
+/// boundary a reader blocked on I/O crosses last: the device finished, and
+/// this is how long it was before the task waiting on it was made runnable,
+/// and by whom.
+///
+/// The other way round from [`wakeup`], which opens on the wakeup and credits
+/// what the woken task did next. Against `io.latency` that attributes each
+/// request to the wakeup that released its submitter *before* it was issued,
+/// which for reads one at a time is the previous read's delivery -- a true
+/// statement about the wrong pair.
+///
+/// So `matched` and `unmatched` count the `from` side here, which is the
+/// question: a completion that some wakeup of its task followed, and one that
+/// none did -- replaced by the task's next completion, expired past the
+/// rule's window, or still open at the end. The second is a finding rather
+/// than a loss: a reader that never went to sleep for its I/O was served from
+/// a cache, or spun. Wakeups of a task with no completion waiting are the
+/// rest of the scheduler's traffic, and not part of the question.
+///
+/// When the rule names a `waker`, each pair is labelled with who issued the
+/// wakeup, an interrupt named as the interrupt, and the pairs are folded by
+/// that label: which worker delivers the completions is what a reader ranks.
+fn woke<'a>(
+    rule: &Rule,
+    events: &[&'a Event],
+    watch: &mut Watch,
+) -> Result<(Correlation, Vec<Pair<'a>>), JoinError> {
+    let mut keyless = 0u64;
+    let mut states: States<i32> = States::new(rule);
+    // The event that opened each open state, for the pairs a decomposition
+    // reads: its keys are what the pair is credited to.
+    let mut opener: BTreeMap<i32, &'a Event> = BTreeMap::new();
+    let mut pairs: Vec<Pair<'a>> = Vec::new();
+    let mut matched = 0u64;
+
+    for event in events {
+        watch.advance(event.ts_ns, &mut states);
+        states.expire(event.ts_ns);
+
+        if event.kind == rule.from {
+            let Some(KeyValue::Task { tid }) = event.key(rule.via).cloned() else {
+                return Err(missing_key(rule, event));
+            };
+            if closes(rule, event) {
+                states.close(&tid, event.ts_ns);
+                opener.remove(&tid);
+                continue;
+            }
+            if opens(rule, event) {
+                states.insert(
+                    tid,
+                    OpenState {
+                        label: task_name(tid),
+                        extent: Extent::Key,
+                        opened_ns: event.ts_ns,
+                        matched: 0,
+                    },
+                );
+                opener.insert(tid, event);
+            }
+            continue;
+        }
+
+        if event.kind == rule.to {
+            if watch.outside(event.ts_ns) {
+                continue;
+            }
+            if stands_for_many(event) {
+                return Err(JoinError::DrainedTotal {
+                    id: rule.id.clone(),
+                    match_kind: rule.match_kind,
+                    to: rule.to.clone(),
+                });
+            }
+            let woken = match rule.woken.as_deref() {
+                Some(attr) => {
+                    Some(
+                        task_attr(event, attr).ok_or_else(|| JoinError::MissingWoken {
+                            id: rule.id.clone(),
+                            attr: attr.to_owned(),
+                            kind: event.kind.clone(),
+                        })?,
+                    )
+                }
+                None => match event.key(rule.via) {
+                    Some(KeyValue::Task { tid }) => Some(*tid),
+                    _ => None,
+                },
+            };
+            let Some(tid) = woken else {
+                keyless += 1;
+                continue;
+            };
+            let Some(mut state) = states.open.remove(&tid) else {
+                continue;
+            };
+            if let Some(attr) = rule.waker.as_deref() {
+                let waker = waker_of(rule, event, attr)?;
+                let by = match event.attr("waker_context") {
+                    Some(AttrValue::Text(context)) if waker == IDLE && context != "task" => {
+                        format!("interrupt ({context})")
+                    }
+                    _ => task_name(waker),
+                };
+                state.label = format!("{by} -> {}", task_name(tid));
+            }
+            state.matched = 1;
+            matched += 1;
+            states.stats.closed += 1;
+            if let Some(from) = opener.remove(&tid) {
+                pairs.push((from, event.ts_ns.saturating_sub(state.opened_ns)));
+            }
+            finish(
+                &mut states.finished,
+                state,
+                Some(event.ts_ns),
+                Outcome::Closed,
+            );
+        }
+    }
+
+    watch.finish(&mut states);
+    let unmatched = states.stats.opened - matched;
+    let mut correlation = assemble(rule, matched, unmatched, states);
+    correlation.keyless = keyless;
+    Ok((correlation, pairs))
+}
+
+/// Whether a drained row says it stands for more than one occurrence: the
+/// count, weight or blocks the draining collectors write beside a total.
+fn several(event: &Event) -> bool {
+    ["count", WEIGHT_ATTR, "blocks"].iter().any(|attr| {
+        event
+            .attr(attr)
+            .and_then(AttrValue::as_f64)
+            .is_some_and(|many| many > 1.0)
+    })
+}
+
+/// A task id read off an attribute, as `waker_of` reads one.
+fn task_attr(event: &Event, attr: &str) -> Option<i32> {
+    event.attr(attr).and_then(|value| match value {
+        AttrValue::Uint(tid) => i32::try_from(*tid).ok(),
+        AttrValue::Int(tid) => i32::try_from(*tid).ok(),
+        AttrValue::Float(_) | AttrValue::Text(_) => None,
+    })
+}
+
+/// One interval of an `overlap` match: a reading of the `from` side and what
+/// it covers.
+struct Covered {
+    start_ns: u64,
+    end_ns: u64,
+    credited: f64,
+    events: u64,
+}
+
+/// A downstream event's window across the intervals of an upstream poll,
+/// credited to each by the share of it that overlaps.
+///
+/// Each `from` reading covers the interval since the reading before it of the
+/// same `via` key -- or `[ts - interval_ns, ts]` when the reading says so
+/// itself -- and the first reading of a key with neither is a baseline. Each
+/// `to` event covers `[ts - span, ts]`, or is an instant when the rule names no
+/// `span`. A `to` event is attributed to every interval its window overlaps,
+/// with `value` times the share of its window that overlap is: a block of
+/// 250 ms across three readings 100 ms apart is 50, 100 and 100 ms to the
+/// three, not 250 ms to the one it ended in. What of a window lies outside
+/// every interval -- before the first reading, after the last -- is counted
+/// as uncredited rather than folded into its neighbour.
+///
+/// Always [`Evidence::Temporal`]. The share is exact about the clock and
+/// assumes nothing is spread evenly only where it is: an off-cpu interval is
+/// blocked from end to end, so splitting it by time is a measurement, where
+/// splitting a count of instructions by time is an assumption the evidence
+/// level has to carry.
+///
+/// Read after the fact rather than as the stream arrives, because an interval
+/// ends at the reading that closes it, and a window that began inside it has
+/// usually ended before that reading comes.
+fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
+    let Some(attr) = rule.value.as_deref() else {
+        return Err(JoinError::NoShareValue {
+            id: rule.id.clone(),
+            to: rule.to.clone(),
+        });
+    };
+    let mut readings = Readings {
+        value: attr.to_owned(),
+        reading: Reading::Delta,
+        baselines: 0,
+        credited: 0.0,
+        uncredited: 0.0,
+        before_first: 0,
+    };
+
+    // The intervals each key's readings cover, in the order they ended.
+    let mut last: BTreeMap<String, u64> = BTreeMap::new();
+    let mut intervals: BTreeMap<String, Vec<Covered>> = BTreeMap::new();
+    for event in events.iter().filter(|event| event.kind == rule.from) {
+        let Some(key) = event.key(rule.via) else {
+            return Err(missing_key(rule, event));
+        };
+        if !opens(rule, event) {
+            continue;
+        }
+        let key = key.to_string();
+        let stated = event
+            .attr("interval_ns")
+            .and_then(AttrValue::as_f64)
+            .map(|interval| event.ts_ns.saturating_sub(interval as u64));
+        let previous = last.insert(key.clone(), event.ts_ns);
+        let Some(start_ns) = stated.or(previous) else {
+            readings.baselines += 1;
+            continue;
+        };
+        if start_ns >= event.ts_ns {
+            continue;
+        }
+        intervals.entry(key).or_default().push(Covered {
+            start_ns,
+            end_ns: event.ts_ns,
+            credited: 0.0,
+            events: 0,
+        });
+    }
+    let longest: BTreeMap<String, u64> = intervals
+        .iter()
+        .map(|(key, list)| {
+            let longest = list
+                .iter()
+                .map(|covered| covered.end_ns - covered.start_ns)
+                .max()
+                .unwrap_or(0);
+            (key.clone(), longest)
+        })
+        .collect();
+
+    let (mut matched, mut unmatched, mut keyless) = (0u64, 0u64, 0u64);
+    for event in events.iter().filter(|event| event.kind == rule.to) {
+        if watch.outside(event.ts_ns) {
+            continue;
+        }
+        let Some(key) = event.key(rule.via) else {
+            keyless += 1;
+            continue;
+        };
+        let key = key.to_string();
+        let value = event
+            .attr(attr)
+            .and_then(AttrValue::as_f64)
+            .ok_or_else(|| JoinError::MissingValue {
+                id: rule.id.clone(),
+                attr: attr.to_owned(),
+                kind: event.kind.clone(),
+            })?;
+        let span = match rule.span.as_deref() {
+            Some(span) => event
+                .attr(span)
+                .and_then(AttrValue::as_f64)
+                .ok_or_else(|| JoinError::MissingSpan {
+                    id: rule.id.clone(),
+                    attr: span.to_owned(),
+                    kind: event.kind.clone(),
+                })?
+                .max(0.0) as u64,
+            None => 0,
+        };
+        // A row drained from the kernel that stands for several occurrences
+        // has no one window to place: its duration is a sum of waits that
+        // may lie anywhere in the drain's interval. It is counted as
+        // unmatched and its amount uncredited, rather than spread over an
+        // interval it may not have occupied.
+        if several(event) {
+            unmatched += 1;
+            readings.uncredited += value;
+            continue;
+        }
+        let (start_ns, end_ns) = match rule.stamped.unwrap_or(Stamped::End) {
+            Stamped::End => (event.ts_ns.saturating_sub(span), event.ts_ns),
+            Stamped::Start => (event.ts_ns, event.ts_ns.saturating_add(span)),
+        };
+
+        let mut share = 0.0;
+        if let (Some(list), Some(&longest)) = (intervals.get_mut(&key), longest.get(&key)) {
+            // Intervals are in the order they ended; the first that can reach
+            // this window ends after its start, and none that ends later than
+            // one interval past its end can begin inside it.
+            let first = list.partition_point(|covered| covered.end_ns < start_ns);
+            for covered in &mut list[first..] {
+                if covered.end_ns.saturating_sub(longest) > end_ns {
+                    break;
+                }
+                let part = if span == 0 {
+                    // An instant belongs to the interval that ends at or after
+                    // it and starts before it: `(start, end]`, the reading
+                    // that closed over it.
+                    f64::from(u8::from(
+                        covered.start_ns < end_ns && end_ns <= covered.end_ns,
+                    ))
+                } else {
+                    let lo = start_ns.max(covered.start_ns);
+                    let hi = end_ns.min(covered.end_ns);
+                    hi.saturating_sub(lo) as f64 / span as f64
+                };
+                if part > 0.0 {
+                    covered.credited += value * part;
+                    covered.events += 1;
+                    share += part;
+                }
+            }
+        }
+        if share > 0.0 {
+            matched += 1;
+        } else {
+            unmatched += 1;
+        }
+        readings.credited += value * share;
+        readings.uncredited += value * (1.0 - share).max(0.0);
+    }
+
+    let mut states: States<u8> = States::new(rule);
+    let mut attributed = Vec::new();
+    for (key, list) in intervals {
+        states.stats.peak_open += 1;
+        for covered in list {
+            states.stats.opened += 1;
+            states.stats.closed += 1;
+            attributed.push(Attribution {
+                key: key.clone(),
+                base: 0,
+                len: 0,
+                opened_ns: covered.start_ns,
+                closed_ns: Some(covered.end_ns),
+                matched: covered.events,
+                outcome: Outcome::Closed,
+                change: Some(Change {
+                    delta: covered.credited,
+                    opened: 0,
+                    closed: 0,
+                }),
+                wakeups: None,
+            });
+        }
+    }
+    let mut correlation = assemble_with(rule, matched, unmatched, states, attributed);
+    correlation.keyless = keyless;
+    correlation.readings = Some(readings);
+    Ok(correlation)
+}
+
 /// The idle task. A wakeup credited to it is an interrupt arriving on a cpu
 /// that had nothing to run, not one task releasing another.
 const IDLE: i32 = 0;
@@ -1450,11 +1950,13 @@ fn assemble_with<K: Ord + Clone>(
 ) -> Correlation {
     let (stats, mut finished) = states.finish();
     finished.extend(extra);
-    if rule.match_kind == MatchKind::Wakeup {
-        finished = by_chain(finished);
+    match rule.match_kind {
+        MatchKind::Wakeup => finished = by_chain(finished),
+        MatchKind::Woke => finished = by_waker(finished),
+        _ => {}
     }
     finished.retain(|attribution| attribution.matched > 0);
-    if rule.match_kind == MatchKind::Between {
+    if matches!(rule.match_kind, MatchKind::Between | MatchKind::Overlap) {
         // The heaviest interval is the one the total moved most in, either
         // way: a free that gave 32 MiB back is as much the answer as the
         // allocation that took it.
@@ -1486,9 +1988,15 @@ fn assemble_with<K: Ord + Clone>(
     // Only `eq` chooses among a key's successive states by the clock.
     // `scoped_eq` chooses by the scope, which is what it is for; `interval`
     // by the address, which is a key; `wakeup` by the task, and says WAKEUP.
-    let within_key =
-        (rule.match_kind == MatchKind::Eq && stats.replaced > 0 && evidence > Evidence::Temporal)
-            .then_some(Evidence::Temporal);
+    // And `scoped_eq` by the clock too, once two lives of one identity have
+    // shared a scope: the key can no longer tell them apart, and which of
+    // them an event landed on is the one open when it arrived.
+    let within_key = match rule.match_kind {
+        MatchKind::Eq => stats.replaced > 0 && evidence > Evidence::Temporal,
+        MatchKind::ScopedEq => stats.scope_collapsed > 0,
+        _ => false,
+    }
+    .then_some(Evidence::Temporal);
 
     Correlation {
         rule: rule.id.clone(),
@@ -1506,6 +2014,53 @@ fn assemble_with<K: Ord + Clone>(
         total_attributed,
         readings: None,
     }
+}
+
+/// Folds a `woke` join's pairs into one row per label -- per waker, when the
+/// rule names one.
+///
+/// Counted over the pairs, spanning the earliest close to the latest wakeup,
+/// and carrying in `change` what a reader of this match wants summed: the time
+/// from each close to the wakeup that followed it, in `delta`, over `opened`
+/// closes of which `closed` were woken -- the same number here, since a state
+/// that no wakeup ended is not folded.
+fn by_waker(finished: Vec<Attribution>) -> Vec<Attribution> {
+    let mut folded: BTreeMap<String, Attribution> = BTreeMap::new();
+    for attribution in finished.into_iter().filter(|a| a.matched > 0) {
+        let waited = attribution
+            .closed_ns
+            .map_or(0, |closed| closed.saturating_sub(attribution.opened_ns))
+            as f64;
+        match folded.get_mut(&attribution.key) {
+            None => {
+                let key = attribution.key.clone();
+                folded.insert(
+                    key,
+                    Attribution {
+                        wakeups: Some(1),
+                        change: Some(Change {
+                            delta: waited,
+                            opened: 1,
+                            closed: 1,
+                        }),
+                        ..attribution
+                    },
+                );
+            }
+            Some(row) => {
+                row.matched += attribution.matched;
+                row.wakeups = row.wakeups.map(|pairs| pairs + 1);
+                if let Some(change) = row.change.as_mut() {
+                    change.delta += waited;
+                    change.opened += 1;
+                    change.closed += 1;
+                }
+                row.opened_ns = row.opened_ns.min(attribution.opened_ns);
+                row.closed_ns = row.closed_ns.max(attribution.closed_ns);
+            }
+        }
+    }
+    folded.into_values().collect()
 }
 
 /// Folds a wakeup join's attributions into one row per chain.
@@ -1550,8 +2105,8 @@ fn by_chain(finished: Vec<Attribution>) -> Vec<Attribution> {
 /// something both happen to know.
 fn evidence(rule: &Rule) -> Evidence {
     match rule.match_kind {
-        MatchKind::Between => Evidence::Temporal,
-        MatchKind::Wakeup => Evidence::Wakeup,
+        MatchKind::Between | MatchKind::Overlap => Evidence::Temporal,
+        MatchKind::Wakeup | MatchKind::Woke => Evidence::Wakeup,
         // A bare equality on a recycled identity is the key `scoped_eq`
         // exists to correct. The pointer is shared, and which life of it an
         // event lands on is whichever held the address last -- two events at
@@ -1792,6 +2347,31 @@ impl Part {
 /// The `value` that means a sample count rather than an attribute.
 pub const SAMPLES: &str = "samples";
 
+/// The `value` that means a part is read from a join rather than a source:
+/// its `from` names one of the session's `joins`, and the row is the time
+/// between the two ends of every pair that join made, summed per key.
+///
+/// The row the I/O crossing could not declare: *completion -> wakeup* is not
+/// an attribute of any event, it is the distance between two events of two
+/// sources, and only a join knows which two belong together. Only `woke`
+/// makes pairs whose distance means something -- a close and the wakeup that
+/// ended it -- so it is the one match a part may read; an `eq` state never
+/// ends on its match, and the distance from an allocation to a fault inside
+/// it is not a duration of anything.
+///
+/// ```yaml
+/// joins:
+///   - {id: completion-released, from: io.latency, to: sched.wakeup, via: task,
+///      match: woke, woken: wakee_tid, waker: waker_tid}
+/// decompose:
+///   - id: one-read
+///     whole: {from: io.syscall, value: total_ns}
+///     parts:
+///       - {state: device, from: io.latency, value: latency_ns}
+///       - {state: completion -> wakeup, from: completion-released, value: paired}
+/// ```
+pub const PAIRED: &str = "paired";
+
 /// What kind of number a row is, which is what a reader needs before adding
 /// two of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1956,6 +2536,17 @@ pub fn check_decomposition(
     requests: &[Request],
     catalog: &Catalog,
 ) -> Result<(), JoinError> {
+    check_decomposition_in(decomposition, requests, &[], catalog)
+}
+
+/// [`check_decomposition`], knowing the session's joins, which a part read
+/// from a join ([`PAIRED`]) names.
+pub fn check_decomposition_in(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    joins: &[Rule],
+    catalog: &Catalog,
+) -> Result<(), JoinError> {
     let refuse = |reason: String| JoinError::Decomposition {
         id: decomposition.id.clone(),
         reason,
@@ -2024,16 +2615,29 @@ pub fn check_decomposition(
     };
 
     for part in &decomposition.parts {
-        let request = request_of(&part.from, &format!("`{}`", part.state))?;
         let what = format!("`{}`, from `{}`", part.state, part.from);
-        check_read(
-            decomposition,
-            request,
-            &part.value,
-            part.less.is_some(),
-            part.reading,
-            &what,
-        )?;
+        // A part read from a join is checked against the join's `from`
+        // source, which is whose keys its pairs carry and whose target they
+        // are about.
+        let (request, source) = if part.value == PAIRED {
+            let rule = paired_rule(decomposition, part, joins)?;
+            request_of(&rule.to, &format!("`{}`'s other end", part.state))?;
+            (
+                request_of(&rule.from, &format!("`{}`", part.state))?,
+                rule.from.as_str(),
+            )
+        } else {
+            let request = request_of(&part.from, &format!("`{}`", part.state))?;
+            check_read(
+                decomposition,
+                request,
+                &part.value,
+                part.less.is_some(),
+                part.reading,
+                &what,
+            )?;
+            (request, part.from.as_str())
+        };
 
         match &target {
             Some((reference, whose)) if *reference != &request.target => {
@@ -2047,7 +2651,11 @@ pub fn check_decomposition(
             None => target = Some((&request.target, what.clone())),
         }
 
-        let part_unit = unit_of(catalog, request, &part.value);
+        let part_unit = if part.value == PAIRED {
+            Unit::Ns
+        } else {
+            unit_of(catalog, request, &part.value)
+        };
         let (reference, whose) = &unit;
         if *reference != part_unit {
             return Err(refuse(format!(
@@ -2056,23 +2664,71 @@ pub fn check_decomposition(
             )));
         }
 
-        if let Some(entry) = part.from.parse().ok().and_then(|id| catalog.get(&id)) {
+        if let Some(entry) = source.parse().ok().and_then(|id| catalog.get(&id)) {
             if !entry.keys.contains(&decomposition.by) {
                 return Err(refuse(format!(
-                    "is read per `{}`, which `{}` does not carry",
-                    decomposition.by, part.from
+                    "is read per `{}`, which `{source}` does not carry",
+                    decomposition.by
                 )));
             }
             if let Some(via) = part.via.filter(|via| !entry.keys.contains(via)) {
                 return Err(refuse(format!(
-                    "reads {what} through `{via}`, which `{}` does not carry: a row cannot be \
-                     rated by a key its events never had",
-                    part.from
+                    "reads {what} through `{via}`, which `{source}` does not carry: a row cannot \
+                     be rated by a key its events never had"
                 )));
             }
         }
     }
     Ok(())
+}
+
+/// The join a [`PAIRED`] part reads, refused when it is not one a part can.
+fn paired_rule<'a>(
+    decomposition: &Decomposition,
+    part: &Part,
+    joins: &'a [Rule],
+) -> Result<&'a Rule, JoinError> {
+    let refuse = |reason: String| JoinError::Decomposition {
+        id: decomposition.id.clone(),
+        reason,
+    };
+    let Some(rule) = joins.iter().find(|rule| rule.id == part.from) else {
+        return Err(refuse(format!(
+            "reads `{}` as `paired`, the pairs of a join, and `{}` names no join {}",
+            part.state,
+            part.from,
+            if joins.is_empty() {
+                "this caller passed: it read the decomposition without the session's joins"
+                    .to_owned()
+            } else {
+                format!(
+                    "of this session's: it declares {}",
+                    joins
+                        .iter()
+                        .map(|rule| format!("`{}`", rule.id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        )));
+    };
+    if rule.match_kind != MatchKind::Woke {
+        return Err(refuse(format!(
+            "reads `{}` as the pairs of `{}`, which matches by `{}`: only `woke` ends a state on \
+             the event it is paired with, so only its pairs have a distance that is a duration. \
+             An `{}` state is still open after its match, and the time from it to one event it \
+             matched is not the time of anything",
+            part.state, rule.id, rule.match_kind, rule.match_kind
+        )));
+    }
+    if part.less.is_some() || part.reading.is_some() {
+        return Err(refuse(format!(
+            "reads `{}` as the pairs of `{}` and gives it `less` or `reading`: a pair's distance \
+             is one duration, with nothing in it to subtract and no reading to be a level of",
+            part.state, rule.id
+        )));
+    }
+    Ok(rule)
 }
 
 /// Whether one row's `value` can be read the way its request collects it.
@@ -2142,12 +2798,38 @@ pub fn decompose(
     results: &[Results],
     events: &[Event],
 ) -> DecompositionOutput {
+    decompose_with(decomposition, requests, results, events, &[])
+}
+
+/// [`decompose`], knowing the session's joins, which a part read from a join
+/// ([`PAIRED`]) names. The join is applied again here, over the same events
+/// and windows the run's own correlation saw, so the pairs are the ones that
+/// correlation counted.
+pub fn decompose_with(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    results: &[Results],
+    events: &[Event],
+    joins: &[Rule],
+) -> DecompositionOutput {
     let served = |source: &str| {
         requests
             .iter()
             .zip(results)
             .find(|(request, _)| request.source.as_str() == source)
     };
+    // The pairs every joined part reads, made before any readout borrows
+    // them: one event per pair, the `from` event's keys and the pair's
+    // distance as `paired`.
+    let windows = windows_of(results);
+    let pairs: Vec<Option<Paired>> = decomposition
+        .parts
+        .iter()
+        .map(|part| {
+            (part.value == PAIRED)
+                .then(|| paired_events(decomposition, part, joins, events, &windows))
+        })
+        .collect();
 
     // Each row's events, per key, in time order.
     let mut per_key: BTreeMap<String, ()> = BTreeMap::new();
@@ -2160,14 +2842,54 @@ pub fn decompose(
         .map(|result| result.window.closed_ns)
         .max()
         .unwrap_or(0);
-    for part in &decomposition.parts {
-        let mut readout = Readout::new(
-            &part.measure(),
-            decomposition.by,
-            served(&part.from),
-            events,
-            run_closed_ns,
-        );
+    for (part, pairs) in decomposition.parts.iter().zip(&pairs) {
+        let mut readout = match pairs {
+            None => Readout::new(
+                &part.measure(),
+                decomposition.by,
+                served(&part.from),
+                events,
+                run_closed_ns,
+            ),
+            Some(Ok((rule, paired))) => {
+                let mut readout = Readout::new(
+                    &part.measure(),
+                    decomposition.by,
+                    served(&rule.from),
+                    paired,
+                    run_closed_ns,
+                );
+                readout.unit = Unit::Ns;
+                readout.carried = true;
+                readout.paired = Some((
+                    evidence(rule),
+                    format!(
+                        "each `{}` to the next `{}` of its task, as `{}` paired them",
+                        rule.from, rule.to, rule.id
+                    ),
+                ));
+                // Either side's losses are the row's: a lost wakeup is a
+                // completion that pairs with a later one, or with none.
+                if let Some((_, other)) = served(&rule.to) {
+                    let records = events.iter().filter(|event| event.kind == rule.to).count();
+                    let short = Shortfall::of(&other.losses, records as u64, false);
+                    readout.absent_is_not_zero = readout.absent_is_not_zero.or_else(|| {
+                        absent_is_not_zero(&rule.to, other, short.as_ref(), run_closed_ns)
+                    });
+                    readout.short = readout.short.or(short);
+                } else {
+                    readout.collected = false;
+                }
+                readout
+            }
+            Some(Err(why)) => {
+                let mut readout =
+                    Readout::new(&part.measure(), decomposition.by, None, &[], run_closed_ns);
+                readout.unreadable = Some(why.clone());
+                readout.unit = Unit::Ns;
+                readout
+            }
+        };
         readout.via = part.via;
         per_key.extend(readout.keys().map(|key| (key, ())));
         read_parts.push(readout);
@@ -2291,6 +3013,61 @@ pub fn decompose(
     }
 }
 
+/// When each source of a run was watching, from its results, as `main.rs`
+/// reads them for the joins: two results of one source by their union.
+fn windows_of(results: &[Results]) -> BTreeMap<String, Watched> {
+    let mut windows: BTreeMap<String, Watched> = BTreeMap::new();
+    for result in results {
+        windows
+            .entry(result.source.clone())
+            .and_modify(|watched| match (watched.attached, result.window.attached) {
+                (_, false) => {}
+                (false, true) => *watched = result.window,
+                (true, true) => {
+                    watched.opened_ns = watched.opened_ns.min(result.window.opened_ns);
+                    watched.closed_ns = watched.closed_ns.max(result.window.closed_ns);
+                }
+            })
+            .or_insert(result.window);
+    }
+    // A run that never said when a source watched said nothing to narrow it.
+    windows.retain(|_, watched| *watched != Watched::default());
+    windows
+}
+
+/// The pairs a [`PAIRED`] part reads, as events of the part's own kind: the
+/// `from` event of each pair, carrying its keys, with the pair's distance as
+/// `paired`.
+fn paired_events<'r>(
+    decomposition: &Decomposition,
+    part: &Part,
+    joins: &'r [Rule],
+    events: &[Event],
+    windows: &BTreeMap<String, Watched>,
+) -> Paired<'r> {
+    let rule = paired_rule(decomposition, part, joins).map_err(|error| error.to_string())?;
+    let mut ordered: Vec<&Event> = events
+        .iter()
+        .filter(|event| event.kind == rule.from || event.kind == rule.to)
+        .collect();
+    ordered.sort_by_key(|event| (event.ts_ns, u8::from(event.kind != rule.from)));
+    let mut watch = Watch::of(rule, windows);
+    let (_, pairs) = woke(rule, &ordered, &mut watch)
+        .map_err(|error| format!("the join `{}` failed on this run: {error}", rule.id))?;
+    Ok((
+        rule,
+        pairs
+            .into_iter()
+            .map(|(from, distance)| {
+                let mut event = from.clone();
+                event.kind = part.from.clone();
+                event.attrs.push(crate::event::Attr::uint(PAIRED, distance));
+                event
+            })
+            .collect(),
+    ))
+}
+
 /// The whole of a decomposition whose whole is the launched program's life.
 ///
 /// Exact at the start, where this process wrote the gate, and bracketed at the
@@ -2380,6 +3157,12 @@ struct Readout<'a> {
     /// The key the value was carried through before it reached `by`; the row
     /// is rated the weaker of the two.
     via: Option<KeyKind>,
+    /// For a part read from a join: the join's evidence, which the row is
+    /// rated no better than, and the note that says what was summed.
+    paired: Option<(Evidence, String)>,
+    /// Why the row could not be read at all, when that is decided before any
+    /// event is: a join a part reads that failed on this run's events.
+    unreadable: Option<String>,
 }
 
 impl<'a> Readout<'a> {
@@ -2461,6 +3244,8 @@ impl<'a> Readout<'a> {
             collected: served.is_some(),
             by,
             via: None,
+            paired: None,
+            unreadable: None,
         }
     }
 
@@ -2470,7 +3255,9 @@ impl<'a> Readout<'a> {
 
     fn row(&self, state: &str, key: &str) -> Row {
         let events = self.events.get(key).map(Vec::as_slice).unwrap_or(&[]);
-        let missing = if !self.collected {
+        let missing = if let Some(why) = &self.unreadable {
+            Some(why.clone())
+        } else if !self.collected {
             Some(format!("the run collected no `{}`", self.source))
         } else if !self.carried {
             Some(match self.less.as_deref() {
@@ -2505,6 +3292,11 @@ impl<'a> Readout<'a> {
         };
         let (amount, note) = if missing.is_some() {
             (None, None)
+        } else if let (Some((_, note)), false) = (&self.paired, events.is_empty()) {
+            (
+                Some(read(&self.value)),
+                Some(format!("{note}, {} pairs", events.len())),
+            )
         } else if events.is_empty() {
             (
                 Some(0.0),
@@ -2556,9 +3348,14 @@ impl<'a> Readout<'a> {
             source: self.source.to_owned(),
             value: self.value.to_owned(),
             kind: self.kind,
-            evidence: Some(match self.via {
-                Some(via) => rate(self.by).min(rate(via)),
-                None => rate(self.by),
+            evidence: Some({
+                let by = match self.via {
+                    Some(via) => rate(self.by).min(rate(via)),
+                    None => rate(self.by),
+                };
+                self.paired
+                    .as_ref()
+                    .map_or(by, |(joined, _)| by.min(*joined))
             }),
             amount,
             resolution,
@@ -2688,6 +3485,9 @@ mod tests {
             opens: Some("op == 'alloc'".parse().unwrap()),
             closes: Some("op == 'free'".parse().unwrap()),
             waker: None,
+            woken: None,
+            span: None,
+            stamped: None,
             depth: None,
             value: None,
             reading: None,
@@ -3029,6 +3829,9 @@ mod tests {
             opens: None,
             closes: None,
             waker: None,
+            woken: None,
+            span: None,
+            stamped: None,
             depth: None,
             value: None,
             reading: None,
@@ -3116,6 +3919,9 @@ mod tests {
             opens: None,
             closes: None,
             waker: None,
+            woken: None,
+            span: None,
+            stamped: None,
             depth: None,
             value: None,
             reading: None,
@@ -3228,6 +4034,9 @@ mod tests {
             opens: None,
             closes: None,
             waker: Some("waker_tid".to_owned()),
+            woken: None,
+            span: None,
+            stamped: None,
             depth: None,
             value: None,
             reading: None,
@@ -3420,6 +4229,289 @@ mod tests {
 
     // -- between -----------------------------------------------------------
 
+    // -- woke ---------------------------------------------------------------
+
+    fn completed(ts_ns: u64, tid: i32) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: "io.latency".to_owned(),
+            keys: vec![KeyValue::task(tid)],
+            attrs: vec![Attr::uint("latency_ns", 1_000)],
+            collector_id: CollectorId::new("io"),
+            seq: 0,
+        }
+    }
+
+    fn woke_rule() -> Rule {
+        Rule {
+            id: "completion-released".to_owned(),
+            from: "io.latency".to_owned(),
+            to: "sched.wakeup".to_owned(),
+            match_kind: MatchKind::Woke,
+            woken: Some("wakee_tid".to_owned()),
+            waker: Some("waker_tid".to_owned()),
+            ..wakeup_rule()
+        }
+    }
+
+    /// The pairing the I/O crossing did in its test: a completion, and the
+    /// first wakeup of the task it was for -- not the wakeup before the
+    /// request, which is the previous read's delivery.
+    #[test]
+    fn a_completion_is_paired_with_the_next_wakeup_of_its_task_and_not_the_one_before() {
+        let mut interrupt = woken(33, 100, 0);
+        interrupt.attrs.push(Attr::text("waker_context", "softirq"));
+        let events = vec![
+            // The previous read's delivery, before this request completed.
+            woken(5, 100, 7),
+            completed(10, 100),
+            // Another task's wakeup, in between: not part of the question.
+            woken(12, 555, 7),
+            woken(14, 100, 7),
+            // A second wakeup of the same task: the pair is already made.
+            woken(15, 100, 8),
+            // A completion no wakeup follows: the reader never slept.
+            completed(20, 100),
+            completed(30, 100),
+            interrupt,
+        ];
+        let correlation = apply(&woke_rule(), &events).unwrap();
+
+        assert_eq!(correlation.evidence, Evidence::Wakeup);
+        assert_eq!(
+            correlation.matched, 2,
+            "two completions were followed by a wakeup"
+        );
+        assert_eq!(
+            correlation.unmatched, 1,
+            "the completion at 20 was replaced by the one at 30 with no wakeup between"
+        );
+        assert_eq!(correlation.states.opened, 3);
+        assert_eq!(correlation.states.replaced, 1);
+        states_balance(&correlation);
+
+        let by_worker = correlation
+            .top
+            .iter()
+            .find(|row| row.key == "task:7 -> task:100")
+            .expect("the worker that delivered the first completion");
+        assert_eq!(by_worker.matched, 1);
+        assert_eq!(
+            by_worker.change.as_ref().map(|change| change.delta),
+            Some(4.0),
+            "completion at 10, wakeup at 14"
+        );
+        let by_interrupt = correlation
+            .top
+            .iter()
+            .find(|row| row.key == "interrupt (softirq) -> task:100")
+            .expect("a wakeup from a softirq is named as the softirq");
+        assert_eq!(
+            by_interrupt.change.as_ref().map(|change| change.delta),
+            Some(3.0)
+        );
+    }
+
+    #[test]
+    fn a_woke_rule_on_a_key_that_is_not_a_task_is_refused_with_the_reason() {
+        let rule = Rule {
+            via: KeyKind::Blk,
+            ..woke_rule()
+        };
+        let error = apply(&rule, &[]).unwrap_err().to_string();
+        assert!(error.contains("`task:tid` is the only key"), "{error}");
+    }
+
+    #[test]
+    fn a_wakeup_that_does_not_name_its_wakee_fails_by_name() {
+        let rule = Rule {
+            woken: Some("woken_task".to_owned()),
+            ..woke_rule()
+        };
+        let events = vec![completed(10, 100), woken(14, 100, 7)];
+        let error = apply(&rule, &events).unwrap_err();
+        assert!(matches!(error, JoinError::MissingWoken { .. }), "{error}");
+        assert!(error.to_string().contains("woken_task"), "{error}");
+    }
+
+    // -- overlap ------------------------------------------------------------
+
+    fn polled(ts_ns: u64, tid: i32) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: "proc.threads".to_owned(),
+            keys: vec![KeyValue::task(tid)],
+            attrs: vec![Attr::uint("threads", 1)],
+            collector_id: CollectorId::new("threads"),
+            seq: 0,
+        }
+    }
+
+    fn blocked(ts_ns: u64, tid: i32, total_ns: u64) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: "sched.offcpu".to_owned(),
+            keys: vec![KeyValue::task(tid)],
+            attrs: vec![Attr::uint("total_ns", total_ns)],
+            collector_id: CollectorId::new("offcpu"),
+            seq: 0,
+        }
+    }
+
+    fn overlap_rule() -> Rule {
+        Rule {
+            id: "blocked-per-reading".to_owned(),
+            from: "proc.threads".to_owned(),
+            to: "sched.offcpu".to_owned(),
+            match_kind: MatchKind::Overlap,
+            waker: None,
+            value: Some("total_ns".to_owned()),
+            span: Some("total_ns".to_owned()),
+            ..wakeup_rule()
+        }
+    }
+
+    /// A block of 250 across readings 100 apart is split by the share of it
+    /// each reading's interval holds, and what lies before the first reading
+    /// is uncredited rather than given to it.
+    #[test]
+    fn a_window_across_several_readings_is_split_by_its_overlap_with_each() {
+        let events = vec![
+            polled(100, 7),
+            polled(200, 7),
+            polled(300, 7),
+            polled(400, 7),
+            // [120, 370]: 80 of (100, 200], 100 of (200, 300], 70 of (300, 400].
+            blocked(370, 7, 250),
+            // [50, 150]: 50 before the first reading, 50 in (100, 200].
+            blocked(150, 7, 100),
+            // Another task's block, which no reading of task 7 covers.
+            blocked(250, 8, 10),
+        ];
+        let correlation = apply(&overlap_rule(), &events).unwrap();
+        assert_eq!(correlation.evidence, Evidence::Temporal);
+        assert_eq!((correlation.matched, correlation.unmatched), (2, 1));
+        let credit = |start: u64| {
+            correlation
+                .top
+                .iter()
+                .find(|row| row.opened_ns == start)
+                .and_then(|row| row.change.as_ref())
+                .map(|change| change.delta)
+        };
+        assert_eq!(credit(100), Some(80.0 + 50.0));
+        assert_eq!(credit(200), Some(100.0));
+        assert_eq!(credit(300), Some(70.0));
+        let readings = correlation.readings.as_ref().unwrap();
+        assert_eq!(
+            readings.baselines, 1,
+            "the first reading of task 7 covers nothing"
+        );
+        assert_eq!(readings.credited, 300.0);
+        assert_eq!(readings.uncredited, 50.0 + 10.0);
+        states_balance(&correlation);
+    }
+
+    /// A reading that states its own interval covers it, first reading
+    /// included; an instant belongs to the interval that closed over it.
+    #[test]
+    fn a_reading_that_states_its_interval_covers_it_and_an_instant_lands_in_one() {
+        let mut first = polled(100, 7);
+        first.attrs.push(Attr::uint("interval_ns", 100));
+        let rule = Rule {
+            span: None,
+            stamped: None,
+            ..overlap_rule()
+        };
+        let events = vec![
+            first,
+            polled(200, 7),
+            blocked(100, 7, 5),
+            blocked(101, 7, 7),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        let readings = correlation.readings.as_ref().unwrap();
+        assert_eq!(readings.baselines, 0);
+        let credit = |start: u64| {
+            correlation
+                .top
+                .iter()
+                .find(|row| row.opened_ns == start)
+                .and_then(|row| row.change.as_ref())
+                .map(|change| change.delta)
+        };
+        assert_eq!(credit(0), Some(5.0), "an instant at 100 is in (0, 100]");
+        assert_eq!(credit(100), Some(7.0), "and one at 101 in (100, 200]");
+    }
+
+    #[test]
+    fn an_overlap_rule_that_names_no_value_or_a_missing_span_is_refused_by_name() {
+        let rule = Rule {
+            value: None,
+            ..overlap_rule()
+        };
+        let error = apply(&rule, &[]).unwrap_err();
+        assert!(matches!(error, JoinError::NoShareValue { .. }), "{error}");
+
+        let rule = Rule {
+            span: Some("offcpu_ns".to_owned()),
+            ..overlap_rule()
+        };
+        let events = vec![polled(100, 7), polled(200, 7), blocked(150, 7, 10)];
+        let error = apply(&rule, &events).unwrap_err();
+        assert!(matches!(error, JoinError::MissingSpan { .. }), "{error}");
+    }
+
+    #[test]
+    fn overlap_from_a_traced_source_is_refused_before_the_run() {
+        let requests = [
+            request("sched.offcpu", "trace"),
+            request("sched.offcpu", "trace"),
+        ];
+        let rule = Rule {
+            from: "sched.offcpu".to_owned(),
+            ..overlap_rule()
+        };
+        let error = check_in(&rule, &requests[..1], &catalog()).unwrap_err();
+        assert!(matches!(error, JoinError::NotAnInterval { .. }), "{error}");
+        let polled = [request("proc.threads", "poll@50ms")];
+        check_in(&overlap_rule(), &polled, &catalog()).expect("a poll covers intervals");
+    }
+
+    // -- a scope two lives share --------------------------------------------
+
+    /// Two lives of one pointer inside one plug section carry one key. The
+    /// engine pairs them by order, which is right while nothing is lost, and
+    /// says the crediting within the key was the clock's.
+    #[test]
+    fn two_lives_under_one_scope_are_paired_by_order_and_say_so() {
+        let events = vec![
+            block(10, "io.rq.issue", 0xa, 5),
+            block(20, "io.rq.complete", 0xa, 5),
+            // Reissued inside the same plug: the same start stamp.
+            block(30, "io.rq.issue", 0xa, 5),
+            block(40, "io.rq.complete", 0xa, 5),
+            // And once more under a new stamp: a different life, told apart.
+            block(50, "io.rq.issue", 0xa, 9),
+            block(60, "io.rq.complete", 0xa, 9),
+        ];
+        let correlation = apply(&scoped_rule(), &events).unwrap();
+        assert_eq!((correlation.matched, correlation.unmatched), (3, 0));
+        assert_eq!(correlation.states.replaced, 2);
+        assert_eq!(correlation.states.scope_collapsed, 1);
+        assert_eq!(correlation.evidence, Evidence::Key);
+        assert_eq!(correlation.within_key, Some(Evidence::Temporal));
+        let clean = apply(&scoped_rule(), &events[4..]).unwrap();
+        assert_eq!(clean.states.scope_collapsed, 0);
+        assert_eq!(
+            clean.within_key, None,
+            "no collapse, nothing left to the clock"
+        );
+    }
+
     fn resident(ts_ns: u64, tid: i32, bytes: u64) -> Event {
         Event {
             ts_ns,
@@ -3454,6 +4546,9 @@ mod tests {
             opens: Some("op == 'alloc'".parse().unwrap()),
             closes: Some("op == 'free'".parse().unwrap()),
             waker: None,
+            woken: None,
+            span: None,
+            stamped: None,
             depth: None,
             value: Some("bytes".to_owned()),
             reading: Some(Reading::Level),
@@ -3835,6 +4930,109 @@ mod tests {
         assert_eq!(table.whole.amount, Some(10_000_000.0));
         assert_eq!(table.residue, Some(-1_000_000.0), "negative: counted twice");
         assert_eq!(table.residue_resolution, Some(1_000_000.0));
+    }
+
+    /// The I/O crossing's table, declared: a part that is the distance
+    /// between the two ends of a join's pairs, rated no better than the join.
+    #[test]
+    fn a_part_read_from_a_join_is_the_distance_its_pairs_span() {
+        let spec = decomposition(
+            "{id: one-read, whole: {from: io.syscall, value: total_ns}, parts: [\
+               {state: device, from: io.latency, value: latency_ns},\
+               {state: completion -> wakeup, from: completion-released, value: paired}]}",
+        );
+        let requests = [
+            request("io.syscall", "trace"),
+            request("io.latency", "trace"),
+            request("sched.wakeup", "trace"),
+        ];
+        let joins = [woke_rule()];
+        check_decomposition_in(&spec, &requests, &joins, &catalog()).expect("a valid table");
+        let error = check_decomposition(&spec, &requests, &catalog()).unwrap_err();
+        assert!(
+            error.to_string().contains("without the session's joins"),
+            "{error}"
+        );
+
+        let results = [
+            result("io.syscall", Unit::Ns, 100),
+            result("io.latency", Unit::Ns, 100),
+            result("sched.wakeup", Unit::Count, 100),
+        ];
+        let events = vec![
+            total(9, "io.latency", 7, vec![Attr::uint("latency_ns", 5)]),
+            total(
+                12,
+                "sched.wakeup",
+                7,
+                vec![Attr::uint("wakee_tid", 7), Attr::uint("waker_tid", 3)],
+            ),
+            total(30, "io.latency", 7, vec![Attr::uint("latency_ns", 5)]),
+            total(
+                39,
+                "sched.wakeup",
+                7,
+                vec![Attr::uint("wakee_tid", 7), Attr::uint("waker_tid", 3)],
+            ),
+            total(50, "io.syscall", 7, vec![Attr::uint("total_ns", 50)]),
+        ];
+        let output = decompose_with(&spec, &requests, &results, &events, &joins);
+        let table = &output.tables[0];
+        assert_eq!(table.key, "task:7");
+        assert_eq!(table.rows[0].amount, Some(10.0));
+        let paired = &table.rows[1];
+        assert_eq!(paired.amount, Some(3.0 + 9.0), "12 - 9 and 39 - 30");
+        assert_eq!(paired.readings, 2);
+        assert_eq!(
+            paired.evidence,
+            Some(Evidence::Wakeup),
+            "a pair is no firmer than its join"
+        );
+        assert_eq!(paired.source, "completion-released");
+        assert!(
+            paired.note.as_deref().unwrap_or("").contains("2 pairs"),
+            "{paired:?}"
+        );
+        assert_eq!(table.residue, Some(50.0 - 10.0 - 12.0));
+
+        // Without the joins, the row says why it could not be read, and the
+        // rest of the table is still a table.
+        let output = decompose(&spec, &requests, &results, &events);
+        let row = &output.tables[0].rows[1];
+        assert_eq!(row.amount, None);
+        assert!(
+            row.missing
+                .as_deref()
+                .unwrap_or("")
+                .contains("names no join"),
+            "{row:?}"
+        );
+        assert_eq!(output.tables[0].rows[0].amount, Some(10.0));
+    }
+
+    #[test]
+    fn a_part_read_from_a_join_whose_pairs_span_nothing_is_refused_with_the_reason() {
+        let requests = [
+            request("io.syscall", "trace"),
+            request("io.latency", "trace"),
+            request("sched.wakeup", "trace"),
+        ];
+        let spec = decomposition(
+            "{id: t, whole: {from: io.syscall, value: total_ns}, parts: [\
+               {state: x, from: released, value: paired}]}",
+        );
+        let joins = [Rule {
+            id: "released".to_owned(),
+            from: "sched.wakeup".to_owned(),
+            to: "io.latency".to_owned(),
+            ..wakeup_rule()
+        }];
+        let error = check_decomposition_in(&spec, &requests, &joins, &catalog()).unwrap_err();
+        assert!(error.to_string().contains("only `woke`"), "{error}");
+        let error = check_decomposition_in(&spec, &requests, &[woke_rule()], &catalog())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("declares `completion-released`"), "{error}");
     }
 
     /// The memory crossing's decomposition: a level's change from first

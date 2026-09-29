@@ -254,8 +254,10 @@ fn physical_cores() -> Vec<Vec<usize>> {
 /// counters, by pid, because a counter on a core counts whatever ran there:
 /// on a shared machine with nowhere idle to go, a stranger time-shares the
 /// measured core and a core-wide count adds its instructions to the loop's.
-/// One run observes one target, which is why they are two runs;
-/// `docs/scenarios/cross-machine.md` has the request that would make them one.
+/// Two runs because a run used to observe one target. It now observes one
+/// workload beside any number of machine targets, so the loop's pid could
+/// join the core's session as two more requests; the test keeps its two
+/// sessions, whose windows it already holds against each other.
 #[derive(Debug, Clone, Copy)]
 struct Factors {
     /// The loop's own retired instructions and cycles, and the window they

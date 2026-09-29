@@ -147,11 +147,18 @@ pub struct Frame {
     /// was unmapped between the sample and the read looks like.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
-    /// The function the address fell in. `None` when the module carries no
-    /// symbol for it: a stripped library, or a kernel whose addresses this
+    /// The function the address fell in, in the language it was written in:
+    /// `chain::main`, `ns::Widget::spin(int)`. `None` when the module carries
+    /// no symbol for it: a stripped library, or a kernel whose addresses this
     /// process is not allowed to see.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+    /// The linker's name, when `symbol` is its demangled form: what `nm` and a
+    /// debugger's symbol lookup take, and the only spelling two builds of one
+    /// function are guaranteed to share. Absent when the symbol was never
+    /// mangled -- a C function, the kernel's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mangled: Option<String>,
     /// How far into the symbol the address is, or -- when there is no symbol
     /// but there is a module -- how far into that file.
     ///
@@ -175,7 +182,30 @@ impl Frame {
             context,
             module: None,
             symbol: None,
+            mangled: None,
             offset: 0,
+        }
+    }
+
+    /// A frame named by the linker's `name`, shown in its source spelling.
+    fn named(
+        addr: u64,
+        context: Context,
+        module: Option<String>,
+        name: String,
+        offset: u64,
+    ) -> Self {
+        let (symbol, mangled) = match demangle(&name) {
+            Some(readable) => (readable, Some(name)),
+            None => (name, None),
+        };
+        Self {
+            addr,
+            context,
+            module,
+            symbol: Some(symbol),
+            mangled,
+            offset,
         }
     }
 
@@ -206,6 +236,55 @@ impl fmt::Display for Frame {
             (None, Context::User) => Ok(()),
         }
     }
+}
+
+/// A linker's name in the spelling of the language it came from, or `None`
+/// when it is not a mangled name either scheme here reads whole.
+///
+/// Three schemes reach a profile on Linux: Rust's legacy one, which borrows
+/// the Itanium C++ prefix and ends in a hash (`_ZN5chain4main17h<16 hex>E`),
+/// Rust's v0 (`_R...`), and Itanium C++ (`_Z...`) itself. The two Rust ones
+/// are read by `rustc-demangle` and printed in its alternate form, without the
+/// hash or the crate disambiguator: `chain::main`, which is what the source
+/// says. The C++ one is read by `cpp_demangle`, which keeps the parameter
+/// types, because two overloads are two functions. Tried in that order since
+/// a legacy Rust name is also, character for character, a valid C++ one --
+/// `chain::main::h1f2e...` -- and only the Rust reading knows the last
+/// component is a hash.
+///
+/// A name neither reads is returned as `None` and shown as the linker wrote
+/// it, rather than half-read: a demangler that guesses at the part it does not
+/// know produces a confident wrong name, which is worse than an honest
+/// mangled one.
+pub fn demangle(name: &str) -> Option<String> {
+    let rust = name.starts_with("_R") || is_legacy_rust(name);
+    if rust {
+        if let Ok(readable) = rustc_demangle::try_demangle(name) {
+            return Some(format!("{readable:#}"));
+        }
+    }
+    if name.starts_with("_Z") {
+        let symbol = cpp_demangle::Symbol::new(name.as_bytes()).ok()?;
+        return symbol.demangle().ok();
+    }
+    None
+}
+
+/// Whether a `_ZN` name ends the way only Rust's legacy scheme ends it: a last
+/// component that is `h` and sixteen hex digits, possibly followed by the
+/// `.llvm.` suffix an LTO build appends.
+fn is_legacy_rust(name: &str) -> bool {
+    let Some(inner) = name.strip_prefix("_ZN") else {
+        return false;
+    };
+    let inner = inner.split('.').next().unwrap_or(inner);
+    let Some(body) = inner.strip_suffix('E') else {
+        return false;
+    };
+    let Some(hash) = body.len().checked_sub(19).map(|at| &body.as_bytes()[at..]) else {
+        return false;
+    };
+    hash.starts_with(b"17h") && hash[3..].iter().all(u8::is_ascii_hexdigit)
 }
 
 fn basename(path: &str) -> &str {
@@ -452,13 +531,7 @@ impl Symbolizer {
             .filter(|symbols| symbols.is_usable())
             .and_then(|symbols| symbols.lookup(addr));
         match named {
-            Some((symbol, offset)) => Frame {
-                addr,
-                context: Context::Kernel,
-                module: None,
-                symbol: Some(symbol),
-                offset,
-            },
+            Some((symbol, offset)) => Frame::named(addr, Context::Kernel, None, symbol, offset),
             None => Frame::unresolved(addr, Context::Kernel),
         }
     }
@@ -483,18 +556,15 @@ impl Symbolizer {
                 .and_then(|module| module.lookup(file_offset))
         });
         match symbol {
-            Some((symbol, symbol_offset)) => Frame {
-                addr,
-                context: Context::User,
-                module: Some(name),
-                symbol: Some(symbol),
-                offset: symbol_offset,
-            },
+            Some((symbol, symbol_offset)) => {
+                Frame::named(addr, Context::User, Some(name), symbol, symbol_offset)
+            }
             None => Frame {
                 addr,
                 context: Context::User,
                 module: Some(name),
                 symbol: None,
+                mangled: None,
                 offset: file_offset,
             },
         }
@@ -1226,6 +1296,62 @@ mod tests {
         assert_eq!(stack.depth(), 2);
     }
 
+    /// Each scheme read by the reader that knows it, and a name no scheme
+    /// reads left as the linker wrote it. The names are real: the v0 one is
+    /// what `rustc` 1.98 wrote for `chain::main2` in a crate called `m`, the
+    /// C++ one what `g++` wrote for `ns::Widget::spin(int)`.
+    #[test]
+    fn a_mangled_name_reads_as_the_source_wrote_it_and_nothing_else_is_guessed_at() {
+        assert_eq!(
+            demangle("_RNvNtCsev5TfigavrY_1m5chain5main2").as_deref(),
+            Some("m::chain::main2")
+        );
+        assert_eq!(
+            demangle("_ZN4core3ptr13drop_in_place17h0123456789abcdefE").as_deref(),
+            Some("core::ptr::drop_in_place"),
+            "a legacy Rust name loses its hash, which the source never had"
+        );
+        assert_eq!(
+            demangle("_ZN4core3ptr13drop_in_place17h0123456789abcdefE.llvm.4242").as_deref(),
+            Some("core::ptr::drop_in_place")
+        );
+        assert_eq!(
+            demangle("_ZN2ns6Widget4spinEi").as_deref(),
+            Some("ns::Widget::spin(int)"),
+            "a C++ name keeps its parameters: two overloads are two functions"
+        );
+        assert_eq!(
+            demangle("_ZN2ns6Widget4spinE").as_deref(),
+            Some("ns::Widget::spin"),
+            "a `_ZN` name with no hash is C++'s, and not read as Rust"
+        );
+        for plain in [
+            "main",
+            "schedule",
+            "__libc_start_call_main",
+            "_Zfoo",
+            "_R",
+            "",
+        ] {
+            assert_eq!(demangle(plain), None, "{plain:?}");
+        }
+
+        let frame = Frame::named(
+            0x1000,
+            Context::User,
+            Some("/tmp/w".to_owned()),
+            "_ZN2ns6Widget4spinEi".to_owned(),
+            4,
+        );
+        assert_eq!(frame.symbol.as_deref(), Some("ns::Widget::spin(int)"));
+        assert_eq!(frame.mangled.as_deref(), Some("_ZN2ns6Widget4spinEi"));
+        let plain = Frame::named(0x1000, Context::Kernel, None, "schedule".to_owned(), 0);
+        assert_eq!(
+            (plain.symbol.as_deref(), plain.mangled),
+            (Some("schedule"), None)
+        );
+    }
+
     #[test]
     fn a_stack_reads_root_first_the_way_a_person_reads_one() {
         let frame = |name: &str, context| Frame {
@@ -1233,6 +1359,7 @@ mod tests {
             context,
             module: Some("/usr/lib/libc.so.6".to_owned()),
             symbol: Some(name.to_owned()),
+            mangled: None,
             offset: 0x20,
         };
         let stack = Stack {
@@ -1261,6 +1388,7 @@ mod tests {
             context: Context::User,
             module: Some("/usr/lib/libfoo.so".to_owned()),
             symbol: None,
+            mangled: None,
             offset: 0x1234,
         };
         assert_eq!(frame.label(), "libfoo.so+0x1234");

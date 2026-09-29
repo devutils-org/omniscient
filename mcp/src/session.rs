@@ -19,24 +19,56 @@ use serde_json::{json, Value};
 
 use crate::binary::Binary;
 
-/// Where a session comes from: a file, or text handed over in the call.
+/// Where a session comes from: a file, text handed over in the call, or one
+/// of the sessions the person who started the server approved.
 pub enum Source {
     File(PathBuf),
-    Text { text: String, format: InputFormat },
+    Text {
+        text: String,
+        format: InputFormat,
+    },
+    /// A session file read from the `--allow-launch` directory, read once:
+    /// the text that was checked is the text that runs, from the file's own
+    /// directory, and nothing in the call can change it.
+    Approved {
+        name: String,
+        path: PathBuf,
+        text: String,
+        format: InputFormat,
+    },
 }
 
 impl Source {
-    pub fn from_arguments(arguments: &Value, cwd: &Path) -> Result<Self, String> {
+    /// The session a call names. `approved` names a file of the directory
+    /// passed with `--allow-launch`, and is refused when the server was
+    /// started without one.
+    pub fn from_arguments(
+        arguments: &Value,
+        cwd: &Path,
+        approved_dir: Option<&Path>,
+    ) -> Result<Self, String> {
         let path = arguments.get("path").and_then(Value::as_str);
         let text = arguments.get("session").and_then(Value::as_str);
+        let approved = arguments.get("approved").and_then(Value::as_str);
         let format = arguments.get("input_format").and_then(Value::as_str);
-        match (path, text) {
-            (Some(_), Some(_)) => Err("pass `path` or `session`, not both".into()),
-            (None, None) => Err(
-                "a session is needed: `path` to a session file, or `session` with its text".into(),
+        match (path, text, approved) {
+            (None, None, Some(name)) => match approved_dir {
+                Some(dir) => Source::approved(dir, name),
+                None => Err(format!(
+                    "refused: `{name}` names an approved session, and this server was started \
+                     without --allow-launch, so it approves none"
+                )),
+            },
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                Err("pass one of `path`, `session` or `approved`".into())
+            }
+            (None, None, None) => Err(
+                "a session is needed: `path` to a session file, `session` with its text, or \
+                 `approved` naming one of the sessions the server was started to allow"
+                    .into(),
             ),
-            (Some(path), None) => Ok(Source::File(cwd.join(path))),
-            (None, Some(text)) => {
+            (Some(path), None, None) => Ok(Source::File(cwd.join(path))),
+            (None, Some(text), None) => {
                 let format = match format.unwrap_or("yaml") {
                     "yaml" | "yml" => InputFormat::Yaml,
                     "json" => InputFormat::Json,
@@ -55,10 +87,107 @@ impl Source {
         }
     }
 
+    /// One of the approved sessions, by its name in `dir`.
+    ///
+    /// The name is a file of `dir` or of a directory under it, and nothing
+    /// else: an absolute path, a `..` anywhere in it, or a symbolic link --
+    /// the file's or a directory's on the way -- that resolves outside `dir`
+    /// is refused, because the directory is the whole of what its owner
+    /// approved.
+    pub fn approved(dir: &Path, name: &str) -> Result<Self, String> {
+        let refuse = |why: &str| {
+            Err(format!(
+                "refused: `{name}` is not an approved session: {why}. The approved sessions are \
+                 the files of {} (`list_approved` lists them)",
+                dir.display()
+            ))
+        };
+        let relative = Path::new(name);
+        if name.is_empty() || relative.is_absolute() {
+            return refuse("a name is relative to the approved directory");
+        }
+        if relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return refuse("a name may not leave the approved directory");
+        }
+        let root = dir
+            .canonicalize()
+            .map_err(|error| format!("the approved directory {}: {error}", dir.display()))?;
+        let path = match root.join(relative).canonicalize() {
+            Ok(path) => path,
+            Err(_) => return refuse("there is no such file"),
+        };
+        if !path.starts_with(&root) {
+            return refuse("it resolves outside the approved directory");
+        }
+        if !path.is_file() {
+            return refuse("it is not a file");
+        }
+        let Some(format) = InputFormat::from_path(&path) else {
+            return refuse("a session file is yaml, yml, json or toml");
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        Ok(Source::Approved {
+            name: name.to_owned(),
+            path,
+            text,
+            format,
+        })
+    }
+
+    /// Every approved session under `dir`, by name, and why any file there
+    /// is not one.
+    pub fn every_approved(dir: &Path) -> Vec<(String, Result<Self, String>)> {
+        let mut found = Vec::new();
+        let mut pending = vec![PathBuf::new()];
+        while let Some(relative) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(dir.join(&relative)) else {
+                continue;
+            };
+            let mut names: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|entry| relative.join(entry.file_name()))
+                .collect();
+            names.sort();
+            for name in names {
+                let full = dir.join(&name);
+                // A directory is walked only when it is one, not a link to
+                // one: a link out would list what nobody approved.
+                if full.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
+                    pending.push(name);
+                } else if InputFormat::from_path(&full).is_some() {
+                    let name = name.display().to_string();
+                    let source = Source::approved(dir, &name);
+                    found.push((name, source));
+                }
+            }
+        }
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found
+    }
+
+    /// Whether the session is one its launch targets are allowed from.
+    fn is_approved(&self) -> bool {
+        matches!(self, Source::Approved { .. })
+    }
+
+    /// Where `omn` runs from: an approved session's own directory, so that
+    /// a relative path in it means what its author meant.
+    fn working_directory(&self) -> Option<&Path> {
+        match self {
+            Source::Approved { path, .. } => path.parent(),
+            _ => None,
+        }
+    }
+
     /// Loads the session the way `omn` does: parsed, defaults pushed down into
     /// every request, the escalation block checked.
     pub fn load(&self) -> Result<Session, String> {
         let (text, format) = match self {
+            Source::Approved { text, format, .. } => (text.clone(), *format),
             Source::File(path) => {
                 let text = std::fs::read_to_string(path)
                     .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -84,7 +213,7 @@ impl Source {
     fn omn_arguments(&self) -> (Vec<String>, Option<String>) {
         match self {
             Source::File(path) => (vec!["-f".into(), path.display().to_string()], None),
-            Source::Text { text, format } => (
+            Source::Text { text, format } | Source::Approved { text, format, .. } => (
                 vec![
                     "-f".into(),
                     "-".into(),
@@ -143,7 +272,12 @@ pub fn band(cost: Cost) -> Value {
 }
 
 /// `plan_session`: would this run, what would serve it, what would it give up.
-pub fn plan(catalog: &Catalog, binary: &Binary, source: &Source) -> Result<Value, String> {
+pub fn plan(
+    catalog: &Catalog,
+    binary: &Binary,
+    source: &Source,
+    launch_allowed: bool,
+) -> Result<Value, String> {
     let session = source.load()?;
     let (valid, validation) = validation(catalog, &session);
     let mut answer = json!({
@@ -153,7 +287,7 @@ pub fn plan(catalog: &Catalog, binary: &Binary, source: &Source) -> Result<Value
             "target": request.target.kind().as_str(),
         })).collect::<Vec<_>>(),
         "validation": validation,
-        "through_run_session": match refuse_to_run(&session) {
+        "through_run_session": match refuse_to_run(&session, source, launch_allowed) {
             Some(reason) => json!({"allowed": false, "why": reason}),
             None => json!({
                 "allowed": true,
@@ -169,7 +303,12 @@ pub fn plan(catalog: &Catalog, binary: &Binary, source: &Source) -> Result<Value
 
     let (mut args, stdin) = source.omn_arguments();
     args.extend(["--dump-resolved".into(), "--format".into(), "json".into()]);
-    let output = binary.invoke(&args, stdin.as_deref(), StdDuration::from_secs(60))?;
+    let output = binary.invoke_in(
+        &args,
+        stdin.as_deref(),
+        StdDuration::from_secs(60),
+        source.working_directory(),
+    )?;
     let notes: Vec<&str> = output
         .stderr
         .lines()
@@ -237,6 +376,9 @@ pub fn plan(catalog: &Catalog, binary: &Binary, source: &Source) -> Result<Value
 #[derive(Debug, Clone, Copy)]
 pub struct RunLimit {
     pub longest: Duration,
+    /// The server was started with `--allow-launch`: an approved session
+    /// may launch its program.
+    pub launch_allowed: bool,
 }
 
 /// Why a session may not be run through this server, if it may not.
@@ -244,7 +386,11 @@ pub struct RunLimit {
 /// A launch target runs a program the session names -- any program, with this
 /// user's rights -- which is acting on the machine rather than observing it:
 /// boundary 5. Every other target kind names something that already exists.
-pub fn refuse_to_run(session: &Session) -> Option<String> {
+/// The one exception is a session the person who started the server wrote
+/// and put in the `--allow-launch` directory: its program, arguments and
+/// working directory are theirs, as the file states them, and what a model
+/// chooses is which of those sessions runs and when -- never what runs.
+pub fn refuse_to_run(session: &Session, source: &Source, launch_allowed: bool) -> Option<String> {
     let launching: Vec<String> = session
         .requests
         .iter()
@@ -256,19 +402,31 @@ pub fn refuse_to_run(session: &Session) -> Option<String> {
                 .unwrap_or_else(|| request.source.as_str().to_owned())
         })
         .collect();
-    (!launching.is_empty()).then(|| {
+    if launching.is_empty() || (source.is_approved() && launch_allowed) {
+        return None;
+    }
+    let what = format!(
+        "{} launch{} a program ({})",
+        if launching.len() == 1 {
+            "a request"
+        } else {
+            "requests"
+        },
+        if launching.len() == 1 { "es" } else { "" },
+        launching.join(", ")
+    );
+    Some(if source.is_approved() {
         format!(
-            "refused: {} launch{} a program ({}), and running a program a model named is \
-             changing the machine, not observing it. This server runs sessions over what \
-             already exists -- a pid, a tid, a cgroup, a cpu set, an interface, a container, \
-             the system -- and a launch is for a person to run with `omn -f`",
-            if launching.len() == 1 {
-                "a request"
-            } else {
-                "requests"
-            },
-            if launching.len() == 1 { "es" } else { "" },
-            launching.join(", ")
+            "refused: {what}, and this server was started without --allow-launch, so no session \
+             may launch one -- not even an approved one"
+        )
+    } else {
+        format!(
+            "refused: {what}, and running a program a caller named is changing the machine, not \
+             observing it. This server runs a launching session only when its file is in the \
+             directory the person who started the server passed with --allow-launch DIR, named \
+             by `approved`; sessions over what already exists -- a pid, a tid, a cgroup, a cpu \
+             set, an interface, a container, the system -- run from anywhere"
         )
     })
 }
@@ -299,7 +457,7 @@ pub fn run(
         .map_err(|error| format!("budget `{budget}`: {error}"))?;
 
     let session = source.load()?;
-    if let Some(reason) = refuse_to_run(&session) {
+    if let Some(reason) = refuse_to_run(&session, source, limit.launch_allowed) {
         return Err(reason);
     }
     let (valid, validation) = validation(catalog, &session);
@@ -323,12 +481,20 @@ pub fn run(
     // The duration is the run's own bound; this is the bound on the process,
     // for a run that does not end when it should.
     let bound = StdDuration::from_nanos(duration.as_nanos()) * 2 + StdDuration::from_secs(30);
-    let output = binary.invoke(&args, stdin.as_deref(), bound)?;
+    let output = binary.invoke_in(&args, stdin.as_deref(), bound, source.working_directory())?;
     let mut answer = json!({
         "exit": output.status,
         "said_by_omn": output.stderr.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>(),
         "answered_by": binary.answered_by(),
         "validation": validation,
+        "approved": match source {
+            Source::Approved { name, path, .. } => json!({
+                "name": name,
+                "file": path.display().to_string(),
+                "ran_from": source.working_directory().map(|dir| dir.display().to_string()),
+            }),
+            _ => Value::Null,
+        },
         "bounds": {
             "duration": duration.to_string(),
             "budget": budget.to_string(),

@@ -85,7 +85,22 @@ impl Binary {
         stdin: Option<&str>,
         bound: Duration,
     ) -> Result<Output, String> {
-        let mut child = Command::new(&self.path)
+        self.invoke_in(args, stdin, bound, None)
+    }
+
+    /// [`Binary::invoke`], from `cwd` when one is given.
+    pub fn invoke_in(
+        &self,
+        args: &[String],
+        stdin: Option<&str>,
+        bound: Duration,
+        cwd: Option<&Path>,
+    ) -> Result<Output, String> {
+        let mut command = Command::new(&self.path);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let mut child = command
             .args(args)
             .env("NO_COLOR", "1")
             .stdin(if stdin.is_some() {

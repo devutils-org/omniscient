@@ -49,9 +49,11 @@
 # checks every rung against them.
 #
 # **Why everything targets the system.** The limit is the cgroup's but the
-# consequence is the device's, and one run observes one target: a session that
-# asks for `system` beside a cgroup is refused. The reclaim events carry the
-# cgroup as a key, so they are scoped after the fact.
+# consequence is the device's. A run observes one workload -- the cgroup --
+# beside any number of machine targets, so the cgroup's own requests could sit
+# beside these; the session reads the device and the reclaim machine-wide
+# because that is where they happen, and the reclaim events carry the cgroup
+# as a key, so they are scoped after the fact.
 #
 # **One subtlety in the join.** `mem.reclaim` builds its histogram in the
 # kernel and emits one event per bucket per 100 ms window, stamped when the

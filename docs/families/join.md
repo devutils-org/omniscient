@@ -1,12 +1,373 @@
 # The join engine and the decomposition
 
-Two waves of stream J are recorded here, the newest first. The eleventh wave
-paid four debts the tenth wave found in the engine. Each was a place where the
-engine said more, or less, than it had measured. The eighth wave built the
-engine's third rung (`TEMPORAL`), the decomposition and the chains. Its record
-follows unchanged.
+Three waves of stream J are recorded here, the newest first. The thirteenth
+wave gave the engine the words and the match kinds the crossings asked for,
+and stacks in their source's names. The eleventh wave paid four debts the
+tenth wave found in the engine. Each was a place where the engine said more,
+or less, than it had measured. The eighth wave built the engine's third rung
+(`TEMPORAL`), the decomposition and the chains. Their records follow
+unchanged.
 
 ---
+
+# The thirteenth wave — the engine says what it knows
+
+| | |
+|---|---|
+| Delivered | `omn-mcp --allow-launch DIR` and `list_approved` (item 7, added mid-wave); `MatchKind::Woke` and `MatchKind::Overlap`; `Rule::woken`, `Rule::span`, `Rule::stamped`; a decomposition part a join defines (`value: paired`, `join::PAIRED`), with `join::check_decomposition_in` and `join::decompose_with`; `StateStats::scope_collapsed`, and `within_key: TEMPORAL` on a `scoped_eq` that saw one; `stack::demangle` and `Frame::mangled`, so every stack reads in its source's names |
+| Found landed, and given its ground truth | the evidence ladder in words (`0dbc3ad`) and the interrupt named as the interrupt (`d32dab8`), both twelfth wave |
+| Refused, new | `woke` on a key that is not `task`; `overlap` with no `value`, or from a source collected in `trace`, `sample` or `count` mode (before the run); a `to` event missing the rule's `woken` or `span` attribute (by name); a `paired` part naming no join, a join that is not `woke`, or given `less` or `reading` |
+| Tests | 10 unit tests in `src/join.rs`, 1 in `src/stack.rs`; scenarios: `tests/join_engine.rs` +2 and 3 strengthened, `tests/cross_io.rs` +1 and 2 strengthened, `tests/cross_compute.rs` 2 strengthened, `tests/stack_capture.rs` +2, `mcp/tests/protocol.rs` 1 widened to all four levels |
+| Sessions | new `examples/join-interrupt-or-task.yml`, `examples/join-overlap-waits.yml`; changed `sched-wakeup.yml` (its join), `cross-io-one-read.yml` (the `woke` join), `join-decompose-memory.yml` and `cross-compute-where-the-time-went.yml` (what the workload reports), and two comments |
+| Files | `src/join.rs`, `src/stack.rs`, the `MatchKind` enum of `src/catalog.rs`, `mcp/src/{main,server,session,binary}.rs`, `mcp/tests/protocol.rs`, `docs/mcp.md`, `tests/{join_engine,cross_io,cross_compute,cross_machine,stack_capture}.rs`, the sessions above; outside, declared below: `src/encode.rs` (four lines), `Cargo.toml` and `Cargo.lock` (two crates) |
+| Machine | 24 cpus, kernel 7.2.6, `CAP_BPF` and `CAP_PERFMON` on the binary, loaded by four other streams; no test here skipped on it |
+
+## 1. The evidence ladder in words — landed, now checked on every rung
+
+`Evidence::establishes` and `does_not_establish` landed in the twelfth wave
+(`0dbc3ad`), and `mcp/src/evidence.rs` already reads them: its own copy is
+gone. What was missing was the ground truth the brief asks for, which covered
+two rungs. `identity_and_temporal_never_read_alike` now runs one real session
+per rung and reads each back through `omn-mcp`:
+
+| Rung | Session | Join |
+|---|---|---|
+| TEMPORAL | `join-between-residency.yml` | `between` |
+| WAKEUP | `sched-wakeup.yml` | `wakeup`, now declared (below) |
+| KEY | `cross-memory-which-allocation.yml` | `interval` |
+| IDENTITY | `vertical-one-request.yml` | the rows read per `req` |
+
+Every `evidence` the documents carry must be annotated with exactly the
+engine's two sentences and its rank, and no two levels may share a rank or a
+sentence. Measured: `read back with its sentence: ["IDENTITY", "KEY",
+"TEMPORAL", "WAKEUP"]`. A rung the machine cannot produce (no `CAP_BPF`, no
+shim, the vertical server not built) is skipped by name and the rest run.
+
+The text renderer still prints the bare word. That is R's file: filed.
+
+## 2. A waker of 0 is not always the idle task — landed, now checked end to end
+
+The chain's rendering landed in the twelfth wave (`d32dab8`), tested on
+events built by hand. The ground truth is a real program:
+`examples/join-interrupt-or-task.yml` launches a python thread that sleeps
+twenty times (each `nanosleep` ended by its hrtimer's hard interrupt) and then
+reads a pipe twenty times, each read released by a helper thread's write after
+the helper's own sleep. It prints both thread ids. The join, two hops deep:
+
+```
+  heaviest wakeup chains
+    CHAIN                                         WAKEUPS   EVENTS  LAST
+    interrupt (hardirq) -> task:128611 -> task:128610       21       20  still open at the end
+    interrupt (hardirq) -> task:128610                 20       20  ran
+    interrupt (hardirq) -> task:128611                 20       19  still open at the end
+    task:128607 -> task:128610                          1        4  ran
+```
+
+`a_timer_is_named_as_an_interrupt_and_a_thread_as_a_task` holds it to the
+workload: at least twenty wakeups of the main thread named `interrupt
+(hardirq)` and nothing else, at least twenty through the helper, the far end of
+the helper's chain named as its own timer, and no chain calling a timer
+`task:0 (idle)` -- which is what all twenty of the first kind read as before.
+
+`examples/sched-wakeup.yml` declares its join now (`open-requests 280`), and
+its header no longer says an interrupt's wakeup "is credited to whatever was
+interrupted".
+
+## 3. The match kinds the crossings asked for
+
+### `woke` — a close paired with the next wakeup of its task (`open-requests 4968`)
+
+```yaml
+- {id: completion-released, from: io.latency, to: sched.wakeup, via: task,
+   match: woke, woken: wakee_tid, waker: waker_tid, window: 1s}
+```
+
+A `from` event opens a state for the task it names; the first `to` wakeup of
+that task ends it and is its match. `matched` and `unmatched` count the
+completions -- one some wakeup followed, one none did -- because that is the
+question, and a completion no wakeup followed is a reader that never slept, a
+finding rather than a loss. Wakeups of a task with nothing waiting are the
+rest of the scheduler's traffic and are not counted. With `waker`, each pair
+is labelled by who issued the wakeup (an interrupt as the interrupt) and the
+rows are folded by that label, each carrying in `change.delta` the summed time
+from its completions to their wakeups. Evidence `WAKEUP`.
+
+Ground truth, `every_completion_is_paired_with_the_wakeup_that_released_its_reader`:
+1000 one-page `O_DIRECT` reads timed on the reader's own clock. Every read
+blocks until its request completes, so each completion must pair with a wakeup
+inside the same read:
+
+```
+1000 reads, 1000 reached the device; 1000 woken inside their read by the
+reader's clock; the engine paired 1000, waiting 4229.1us in all against
+8320.2us between each completion and its read's return;
+by ["task:80140 -> task:160910 x1000"]
+```
+
+`task:80140` is a kworker: the completion is delivered by a worker, not by the
+interrupt, which the crossing had only guessed from `/proc` after the fact.
+The old `wakeup` join, still in `cross-io-one-read.yml` beside the new one,
+pairs each request with the previous read's delivery; the two tables side by
+side are the difference.
+
+### `overlap` — a window across a poll's intervals, `TEMPORAL` (`open-requests 5032`)
+
+```yaml
+- {id: waiting-per-interval, from: proc.threads, to: sched.futex, via: task,
+   match: overlap, value: total_ns, span: total_ns, stamped: start}
+```
+
+Each `from` reading covers the interval since the one before it of the same
+key, or `[ts - interval_ns, ts]` when it says so itself; the first reading
+with neither is a baseline. Each `to` event covers `[ts - span, ts]`, or
+`[ts, ts + span]` with `stamped: start` -- which `sched.futex` and
+`sched.offcpu` need, since they stamp a row when its first wait began -- or is
+an instant when there is no `span`. A `to` event is credited to every interval
+it overlaps, `value` times the share of it that overlaps; what lies outside
+every interval is uncredited, not given to a neighbour. A drained row that
+stands for several occurrences (`count`, `weight` or `blocks` above one) has no
+one span to lay out, and is counted unmatched with its value uncredited.
+
+Ground truth, `a_wait_across_several_readings_is_split_by_its_overlap_with_each`:
+a thread waits four times for 250 ms on a condition nobody signals and prints
+each wait's bracket on its own clock; the test computes each interval's share
+from the brackets alone.
+
+```
+  (…2911532380, …3011541444]   100.009 ms long  credited  100.009 ms  the brackets hold  100.009 ms
+  (…2511537077, …2611540600]   100.004 ms long  credited   99.969 ms  the brackets hold   99.991 ms
+  (…3211518789, …3311543232]   100.024 ms long  credited   59.963 ms  the brackets hold   59.973 ms
+  (…2211531876, …2311534670]   100.003 ms long  credited   40.430 ms  the brackets hold   40.439 ms
+```
+
+Every interval within 25 us of the brackets, against a 1 ms slack that names
+what it is (the interpreter's call on each side of the syscall, twice, plus
+the futex waits of the task no bracket holds, which the run reports). The
+separation a naive join fails -- a 250 ms wait credited whole to one 100 ms
+interval -- is asserted too.
+
+What was asked and is not here: **`via` absent, for machine-wide state**
+(`mem.pressure`). `Rule::via` is a required key and `src/validate.rs` checks
+both sides carry it; both halves are filed.
+
+### A part a join defines, and a traced span as the whole (`open-requests 4988`)
+
+```yaml
+decompose:
+  - id: one-read
+    whole: {from: io.syscall, value: total_ns}
+    parts:
+      - {state: device, from: io.latency, value: latency_ns}
+      - {state: completion -> wakeup, from: completion-released, value: paired}
+```
+
+`value: paired` reads a part from a join: its `from` names one of the
+session's `joins`, and the row is the distance between the two ends of every
+pair that join made, summed per key, rated no better than the join. Only
+`woke` can be read so, because only it ends a state on the event it is paired
+with; the others are refused with that reason. The whole is `io.syscall`'s
+`total_ns` for the task: since the eighth wave the syscall layer exists, and a
+per-task sum of the syscalls that enclose every segment is the traced span the
+crossing asked for. A per-span whole with the parts clipped to each span is
+not written; nothing measured here needs it.
+
+Measured on the same 1000 reads, through the library:
+
+```
+whole 23.59ms (brackets 24.06ms), device 10.92ms,
+completion -> wakeup 4229.1us (Some(Wakeup)), residue 8439379ns
+```
+
+held to containment: the syscalls lie inside the reader's brackets, and the
+device and the wakeup inside the syscalls, so the residue is never negative.
+The residue is the filesystem, the submission and the run queue after the
+wakeup.
+
+**It needs two call sites to reach `omn`**: `main.rs` and
+`triage/engine.rs` call `decompose` (R's), and `validate.rs` calls
+`check_decomposition` (P's), neither of which is given the session's joins.
+The library has `decompose_with` and `check_decomposition_in`; the three
+one-line changes are filed. Until they land, a session with a `paired` part is
+refused at validation with "it read the decomposition without the session's
+joins", and the test computes it through the library.
+
+### A block key the plug's clock cannot collapse (`open-requests 3713`)
+
+No third component exists that both collectors read and that changes per
+request -- the sixth wave's analysis stands: the tag is set at issue and
+cleared at completion, the internal tag is unset under `none`, the sector
+repeats on a rewrite, and `io_start_time_ns` comes from the same cached clock.
+So the answer is in the engine rather than the key. Two lives of one pointer
+under one scope are paired by order, which is sound -- a pointer is reissued
+only after its completion, so the earlier life's completion arrives while the
+earlier life is open -- and stops being sound only when a side lost the event
+that opened the later life. The engine now counts each such replacement in
+`states.scope_collapsed` and says `within_key: TEMPORAL` when there was one:
+the key tied the events, and which life an event landed on was the clock's.
+`no_completion_is_credited_to_a_request_that_had_already_finished` prints the
+count and holds the rating to it.
+
+## 4. Stacks a reader can read (`open-requests 710`)
+
+`stack::demangle` reads Rust's legacy and v0 schemes with `rustc-demangle`,
+in its alternate form (no hash, no crate disambiguator), and Itanium C++ with
+`cpp_demangle`, which keeps the parameter types. `Frame::symbol` is the
+demangled name and `Frame::mangled` the linker's, which `nm` lists. A name
+neither reads whole is shown as the linker wrote it. Every encoder takes the
+name from the frame, so `folded`, `speedscope`, `pprof` and the text all read
+in the source's spelling at once.
+
+Ground truth: a Rust fixture with modules and a method, and a C++ one with a
+namespace, a method and a reference parameter, both sampled while they spin:
+
+```
+Rust: 399 of 399 samples ran through <omnnamed::chain::inner::Spinner>::c, each reading
+  omnnamed::chain::outer::a -> omnnamed::chain::inner::b -> <omnnamed::chain::inner::Spinner>::c
+C++: 400 of 400 samples ran through omn::fixture::Spinner::c(long), each reading
+  omn::fixture::a(long) -> omn::fixture::b(omn::fixture::Spinner&, long) -> omn::fixture::Spinner::c(long)
+```
+
+with each frame's linker name found in the binary by `nm`. `rustc` 1.98
+mangles v0 by default, which is why the eleventh finding's example was
+`_RNvCsezHSzhuRag8_5chain4main`.
+
+**Two crates, and why.** `rustc-demangle` is the Rust project's own, has no
+dependencies, and is what `std`'s backtraces use; `cpp_demangle` is gimli's,
+depends on `cfg-if` only, and is what `backtrace` and `pprof` use. Both
+schemes are specified in full and each has corner cases a partial reader gets
+wrongly and confidently -- the finding's own reason for not writing half a
+demangler. Both were in the local registry; nothing was fetched.
+
+## 5. A NUMA node key (`open-requests 1469`) — filed
+
+`KeyValue` is J's and `KeyKind` is R's (`src/request.rs`), and
+`KeyValue::kind()` is exhaustive, so the value cannot land before the kind.
+The exact change for both files, and N's `mem.numa` line, is filed; the event
+half is ten lines at the merge.
+
+## 6. The tally's rows in stream J's files
+
+| Row | Test | What changed |
+|---|---|---|
+| #10 | `cross_compute::a_half_blocked_task_decomposes_into_what_the_kernel_says_it_did` | The 0.35..0.65 wall-clock share is gone. The workload now reads the responder's `schedstat` while it still waits on the fifo; the driver's blocked time less its queue wait, plus its `run_delay`, must hold the responder's on-cpu time less 5 us a round. Measured 185.5 ms against 183.2 ms quiet, 252.7 + 18.4 against 238.1 ms beside 24 spinning shells. `short.is_none()` is now `short.is_some() == (dropped > 0)`. |
+| #25 | `cross_io::the_crossing_sessions_run_and_say_what_they_found` | Landed by the coordinator (`863e537`): the sessions run in turn and a late attach is said rather than failed. |
+| #26 | `join_engine::the_resident_size_decomposes_…` | The workload prints when its last free returned (`FREED`), and the test prints the last reading's offset from it and the shim's drops before asserting: a last poll before the end state, or a dropped record, is said with its numbers instead of failing the byte counts. |
+| `5256` | the one-target comments | `tests/cross_io.rs` and `cross-machine-frequency.yml` were fixed by the coordinator; `tests/cross_machine.rs`, `cross-io-one-read.yml` and `cross-machine-reclaim-io.yml` said it still, and do not now. |
+
+Rehearsed beside 24 spinning shells, which found three more in these files,
+each the same shape -- a count against the workload's plan rather than what
+the run reports:
+
+- `join_engine::a_blocking_program_is_attributed_through_the_real_wakeup_collector`
+  and `cross_compute::every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it`
+  required `matched + unmatched` to be every switch, and a switch stamped
+  outside the wakeup source's window is counted in `outside_window` (616
+  against 600 + 16). Both add `keyless` and `outside_window`.
+- `join_engine::a_half_blocked_task_decomposes_as_the_kernel_says_…` and the
+  second cross_compute test required 600 wakeups of the driver for 600 round
+  trips. Under load an answer can reach the fifo before the driver has gone
+  to sleep for it, and nothing needs waking: 596 and 523 were measured. Both
+  are bracketed now by the driver's voluntary switches, the kernel's count of
+  its blocks.
+
+## 7. `omn-mcp` launches the sessions its operator wrote, and none other
+
+Added mid-wave by the coordinator, with the user's approval. `run_session`
+refused every session with a launch target (boundary 5), and the user wants an
+agent to be able to benchmark their program through `omn-mcp`. The relaxation
+keeps boundary 5's reason, which is that a model never chooses what code runs.
+
+- **`--allow-launch DIR`**, meaningful only beside `--allow-run` (the server
+  refuses to start otherwise). A launch target is accepted only from a session
+  file in `DIR` or a directory under it, named in the call by `approved:
+  NAME`. The file is read once, and the text that was checked is the text
+  `omn` runs, from the file's own directory: program, arguments and relative
+  paths are the file's, and a call carries only the duration and budget,
+  which bound the run as before. A name that is absolute, holds `..` or `.`,
+  or resolves outside `DIR` through a link is refused. A launching session
+  inline or by `path` is refused as before, and the refusal names
+  `--allow-launch`.
+- **`list_approved`** lists the approved sessions, each with what
+  `plan_session` says of it; a file there that is not approvable (a link out)
+  is listed with why rather than hidden.
+- **No benchmarking tool.** Repeated `run_session` calls on an approved
+  session: the server does not summarise, the bench's verdict needs a quiet
+  machine and a release binary the server cannot promise, and N documents keep
+  each run's losses and cost where a spread would drop them.
+  `docs/mcp.md` has the reasoning in full.
+
+Ground truth, `only_a_session_its_owner_approved_launches_a_program`: a python
+program that touches a marker, writes a file relative to where it runs, and
+says how many descriptors it holds. Approved, it runs: the marker exists, the
+relative file is in `DIR`, and the answer's `proc.fd` maximum is the
+program's own count, with its losses and measured cost. Inline, by a path
+outside `DIR`, by five escaping names and through a link out, it is refused
+and nothing is written; without `--allow-launch`, even the approved session is
+refused. `docs/mcp.md` has the flag, the rewritten section and the test row.
+
+## Declared: edits outside stream J's paths
+
+| File | Edit | Why |
+|---|---|---|
+| `src/encode.rs` | `MatchKind::Woke` and `MatchKind::Overlap` arms in `unmatched_reason` and `table_words`, four lines | A new variant of the enum J owns does not compile without them. The rendering the two kinds want is filed for R. |
+| `Cargo.toml`, `Cargo.lock` | `rustc-demangle = "0.1"`, `cpp_demangle = "0.5"` | Section 4. Nobody's file; the brief asks for the crate to be justified, which it is above. |
+
+## Handoff
+
+- **Done, with scenarios**: `omn-mcp`'s approved launches (item 7), `woke`, `overlap`, the scope collapse, demangled
+  stacks, and the ground truth of the two twelfth-wave landings. **Done in the
+  library, waiting on two call sites**: the `paired` part (R's `main.rs` and
+  `triage/engine.rs`, P's `validate.rs`). **Filed, not landed**: the NUMA key
+  (R's `KeyKind`), `overlap` with no key (P's validator), the renderer's
+  words for both new kinds and for the ladder (R).
+- **The index rows** for the two new sessions:
+
+  | Session | What it shows |
+  |---|---|
+  | `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
+  | `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
+
+- **For `CATALOG.md`** (the join notation): match kinds `woke` and
+  `overlap`; rule fields `woken`, `span` and `stamped: end|start`; the
+  decomposition value `paired`; `states.scope_collapsed`.
+- **For `DECISIONS.md`**:
+  - *It amends the twelfth wave's "whether a model may run a session" row*:
+    yes with `--allow-run`, and a session that launches a program only when it
+    is a file of the directory the person starting the server passed with
+    `--allow-launch DIR`, run as the file states it, from its own directory.
+    The model picks which approved session and when, never what runs.
+    Benchmarking is repeated `run_session` calls, not a tool of its own.
+  - *A block request's scope is not made unique; two lives under one scope are
+    paired by order and rated TEMPORAL within the key.* No component both block
+    collectors read changes per request, and order is exact while neither side
+    loses an event.
+  - *A part of a decomposition may be read from a join, and only from a
+    `woke` join*, the one whose pairs have a distance that is a duration.
+  - *Symbols are demangled by `rustc-demangle` and `cpp_demangle`*, and a
+    name neither reads whole is shown as the linker wrote it.
+- **The suite**, on this branch with the capabilities, beside four other
+  streams. Own files: `cargo test --lib join` (67), `--lib stack`, and
+  `tests/{join_engine, cross_io, cross_compute, cross_memory, cross_machine,
+  stack_capture, vertical}.rs` and `-p omn-mcp` all pass, and passed beside 24
+  spinning shells. `cargo clippy --all-targets -- -D warnings` (both packages)
+  and `cargo fmt --check` are clean. The last `make check` stopped at the
+  session-index test, red for the two sessions above as expected. The
+  `cargo test --workspace --no-fail-fast` after it: **1925 passed, 4 failed,
+  8 ignored** -- the index test, and three outside this stream's paths, each
+  passing when rerun alone once: `perf::tests::closing_a_group_gives_its_descriptors_back`
+  (in the tally's notes), `scenario_mem::a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory`
+  (12 of 30 loads answered by L1) and
+  `scenario_sched::perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides`
+  (tally notes, twelfth wave). An earlier `make check` stopped at
+  `collect::tests::weighing_a_run_costs_a_fraction_of_the_run` (tally #12),
+  which passed alone.
+- **Filed for other streams**: `docs/open-findings.md`, "the thirteenth wave,
+  stream J": R (`decompose_with` at two call sites; the text for `overlap`,
+  `woke` and the ladder; `KeyKind::Node`), P (`check_decomposition_in`; `via`
+  absent for `overlap`), N (`mem.numa` keyed by node, after R).
+
+---
+
 
 # The eleventh wave — the engine's debts
 

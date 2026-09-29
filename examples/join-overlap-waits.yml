@@ -1,0 +1,69 @@
+# How long was this thread waiting in each 100 ms of its life?
+#
+#   omn -f examples/join-overlap-waits.yml
+#
+# A poll says something about an interval: the 100 ms since the reading before.
+# A wait says something about a span: from the moment it began to the moment
+# it ended. When the two are laid side by side, a wait of 250 ms is not a
+# fact about the reading it ended in -- it is 80 ms of one interval, 100 of the
+# next and 70 of the one after -- and crediting it whole to any one of them
+# would claim a 100 ms interval held 250 ms of waiting.
+#
+# `overlap` does the laying out. Each `proc.threads` reading covers the
+# interval since the one before; each `sched.futex` wait covers its own span;
+# every wait is credited to each interval it overlaps by the share of it that
+# overlaps. The part of a wait before the first reading is credited to no
+# interval and says so. The evidence is TEMPORAL, and says so: the reading and
+# the wait share a task and a clock, and nothing else ties them. Splitting a
+# wait by time is exact about the wait -- a task waiting is waiting from end
+# to end -- and would be an assumption about anything whose rate varies
+# inside its span, which is why the level is carried beside every number.
+#
+# `sched.futex` stamps each row when its first wait began (its caveat says
+# so), hence `stamped: start`. A row that stands for several waits of one
+# bucket of one drain has no single span to lay out, and is counted as
+# unmatched rather than spread over an interval it may not have occupied.
+#
+# The workload waits four times for 250 ms on a condition nobody signals, and
+# says when each wait began and ended on its own `CLOCK_MONOTONIC`, prefixed
+# `omn-wait` on stderr. `tests/join_engine.rs` computes what each interval
+# should hold from those brackets and holds the tool to it.
+name: waiting, per interval
+format: text
+
+requests:
+  - label: readings
+    source: proc.threads
+    target: &waiter
+      launch:
+        - python3
+        - -c
+        - |
+          import sys, threading, time
+          nobody = threading.Event()
+          time.sleep(0.15)
+          for _ in range(4):
+              began = time.monotonic_ns()
+              nobody.wait(0.25)
+              ended = time.monotonic_ns()
+              print(f"omn-wait {threading.get_native_id()} {began} {ended}", file=sys.stderr)
+          time.sleep(0.15)
+    mode: poll@100ms
+    emit: [raw]
+
+  - label: waits
+    source: sched.futex
+    target: *waiter
+    mode: trace
+    emit: [raw]
+
+joins:
+  - id: waiting-per-interval
+    from: proc.threads
+    to: sched.futex
+    via: task
+    match: overlap
+    value: total_ns
+    span: total_ns
+    stamped: start
+    top: 40

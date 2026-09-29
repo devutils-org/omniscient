@@ -20,12 +20,14 @@
 # and then 2000 reads are 2000 requests.
 #
 # **Where this starts, said first.** A read enters at the syscall, goes through
-# the filesystem, and only then becomes a block request. Nothing in this build
-# sees the first two: `io.syscall` and `io.fs` need `fentry`, which is the next
-# wave's. So this session starts at the block layer, and the time between
-# `pread` being called and the request being issued is not in any number below.
-# `docs/scenarios/cross-io.md` shows how large that missing segment is, on the
-# reader's own clock, and prints it as a residue rather than leaving it out.
+# the filesystem, and only then becomes a block request. This session starts at
+# the block layer, and the time between `pread` being called and the request
+# being issued is not in any number below. `io.syscall`, served by `fentry`
+# since the eighth wave, is the whole that segment belongs to:
+# `tests/cross_io.rs` decomposes the reader's syscall time into the device, the
+# completion-to-wakeup pairs of the join below, and a residue, on the reader's
+# own pid. `docs/scenarios/cross-io.md` shows how large the missing segment is,
+# on the reader's own clock.
 #
 # What the session reaches, and on what evidence:
 #
@@ -33,11 +35,13 @@
 #   queue    insert -> issue         io.queue     }  one request, joined on
 #   device   issue  -> complete      io.latency   }  blk:rq@open_ts   KEY
 #   complete -> the reader woken     sched.wakeup    task:tid         WAKEUP
+#                                    (`woke`: each completion, the next wakeup
+#                                     of the task it names)
 #
-# **Why it is machine-wide.** One run observes one target, and `io.queue` has
-# only a `system` target: the insert happens in the submitter's context for a
-# read and in a kworker for a write, so a per-process queueing time would be the
-# reads only and would not say so. The block half is narrowed by `comm`, which
+# **Why it is machine-wide.** `io.queue` has only a `system` target, because
+# the insert happens in the submitter's context for a read and in a kworker for
+# a write, so a per-process queueing time would be the reads only and would not
+# say so. The block half is narrowed by `comm`, which
 # its collectors apply and report ("the filter kept N requests and removed M").
 #
 # **The wakeup half is not narrowed, on purpose.** `sched.wakeup` accepts
@@ -90,12 +94,26 @@ joins:
     match: scoped_eq
     window: 30s
 
-  # Boundary 8, seen from the side the engine can express: each completion is
-  # attributed to the wakeup that released its submitter before it issued the
-  # request -- which, for reads issued one at a time, is the previous read's
-  # completion being delivered. The engine has no match that pairs a completion
-  # with the *next* wakeup of the task it names; `docs/scenarios/cross-io.md`
-  # does that arithmetic per read, and `docs/open-findings.md` asks for it.
+  # Boundary 8. Each completion paired with the next wakeup of the task it
+  # names, and who issued that wakeup: for these reads a kworker delivering the
+  # completion, not the interrupt. Unmatched is a completion no wakeup
+  # followed -- a reader that never slept for its I/O -- which is a finding,
+  # not a loss. Each row carries in `change.delta` the time from the
+  # completions to their wakeups, summed.
+  - id: completion-released
+    from: io.latency
+    to: sched.wakeup
+    via: task
+    match: woke
+    woken: wakee_tid
+    waker: waker_tid
+    window: 1s
+
+  # The same boundary the other way round, which is what the engine could say
+  # before `woke`: each completion attributed to the wakeup that released its
+  # submitter before it issued the request -- which, for reads issued one at a
+  # time, is the previous read's completion being delivered. Kept beside the
+  # pairing above because the two tables side by side are the difference.
   - id: what-released-the-reader
     from: sched.wakeup
     to: io.latency

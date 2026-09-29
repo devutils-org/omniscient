@@ -277,6 +277,8 @@ struct Decomposition {
     runnable_ns: f64,
     waits: u64,
     off_cpu_ns: f64,
+    /// The part of `off_cpu_ns` spent queued after each wakeup.
+    queued_ns: f64,
     blocks: u64,
 }
 
@@ -309,6 +311,7 @@ impl Decomposition {
             runnable_ns: total(runnable, task, "total_ns") as f64,
             waits: total(runnable, task, "count"),
             off_cpu_ns: total(blocked, task, "total_ns") as f64,
+            queued_ns: total(blocked, task, "queued_ns") as f64,
             blocks: total(blocked, task, "blocks"),
         }
     }
@@ -580,18 +583,47 @@ fn a_half_blocked_task_decomposes_into_what_the_kernel_says_it_did() {
     decomposition.check_against_the_kernel(&run);
     decomposition.check_against_the_whole();
 
-    let blocked_share =
-        decomposition.off_cpu_ns / (decomposition.off_cpu_ns + decomposition.on_cpu_ns());
+    // Half blocked by construction, checked against the kernel rather than as
+    // a share of the wall clock: the responder spins only after the driver
+    // has written and before it answers, and in that time the driver is
+    // blocked on the fifo -- or, on a loaded machine, runnable and waiting
+    // for a cpu, preempted between its write and its read. So the driver's
+    // blocked time less its queue wait, plus every wait for a cpu the kernel
+    // counted for it, holds at least the responder's on-cpu time by the
+    // kernel's count, less the few microseconds a round the two can run at
+    // once (the driver's syscall around the write, the responder's around its
+    // answer). A share of the window moved with whatever else the machine
+    // ran; this does not.
+    let responder = run.truth("responder_oncpu_ns") as f64;
+    let blocked_less_queued = decomposition.off_cpu_ns - decomposition.queued_ns;
+    let waited_for_a_cpu = run.truth("runq_ns") as f64;
+    let per_round = ROUND_TRIPS as f64 * PER_WAIT_NS;
+    eprintln!(
+        "blocked less queued {:.1} ms, waiting for a cpu {:.1} ms, the responder on the cpu \
+         {:.1} ms",
+        blocked_less_queued / 1e6,
+        waited_for_a_cpu / 1e6,
+        responder / 1e6
+    );
+    let lost = losses(run.labelled("blocked"), "dropped");
     assert!(
-        (0.35..=0.65).contains(&blocked_share),
-        "the workload is half on the cpu and half blocked by construction, and came back {:.0} \
-         % blocked:\n{}",
-        100.0 * blocked_share,
+        lost > 0 || blocked_less_queued + waited_for_a_cpu >= responder - per_round,
+        "the driver was blocked {:.1} ms less {:.1} ms queued, and waited {:.1} ms for a cpu, \
+         while the responder, which runs only while the driver is not, was on the cpu {:.1} ms \
+         by the kernel's count:\n{}",
+        decomposition.off_cpu_ns / 1e6,
+        decomposition.queued_ns / 1e6,
+        waited_for_a_cpu / 1e6,
+        responder / 1e6,
         decomposition.render(&run)
     );
-    assert!(
-        decomposition.short.is_none(),
-        "a clean run gains no mark, or the mark becomes noise: {:?}",
+    // And the mark is there exactly when the profile lost samples: a clean
+    // run gains none, and a lossy one under load is marked, as it must be.
+    assert_eq!(
+        decomposition.short.is_some(),
+        decomposition.dropped > 0,
+        "the profile dropped {} samples and its mark is {:?}",
+        decomposition.dropped,
         decomposition.short
     );
 }
@@ -636,10 +668,16 @@ fn every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it() {
     assert_eq!(join["evidence"], "WAKEUP", "{join}");
     let matched = join["matched"].as_u64().expect("a count");
     let unmatched = join["unmatched"].as_u64().expect("a count");
+    // And the two the run counts apart: a switch with no task key, and one
+    // stamped outside the wakeup source's window, which on a loaded machine
+    // the run reports and which is not a switch nothing released.
+    let apart =
+        join["keyless"].as_u64().unwrap_or(0) + join["outside_window"].as_u64().unwrap_or(0);
     assert_eq!(
-        matched + unmatched,
+        matched + unmatched + apart,
         switches,
-        "every switch is either attributed or counted as unattributed"
+        "every switch is either attributed, counted as unattributed, or counted outside the \
+         wakeup source's window ({matched} + {unmatched} + {apart})"
     );
     // A switch before the first wakeup the run saw has no releaser: the gate
     // the program is held at, and nothing else.
@@ -657,16 +695,23 @@ fn every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it() {
         );
     }
 
-    // The responder released the driver once per round trip, and the wakeup
-    // source's own count per woken task says so without the join.
+    // Every block of the driver ends in a wakeup, and the wakeup source's own
+    // count per woken task says how many without the join. The reference is
+    // the kernel's count of the driver's blocks, its voluntary switches, not
+    // the 600 round trips: on a loaded machine an answer can arrive before
+    // the driver has gone to sleep for it, and then nothing needs waking --
+    // one run beside a spinning load counted 523.
     let wakeups = run.labelled("released-by");
     let driver_woken = series_of(wakeups, "topk", task)
         .and_then(|series| series["events"].as_u64())
         .unwrap_or(0);
+    let voluntary = run.truth("voluntary");
+    let lost = losses(wakeups, "dropped");
     assert!(
-        (ROUND_TRIPS..=ROUND_TRIPS + ROUND_TRIPS / 10).contains(&driver_woken),
-        "the driver is woken once per round trip and a few times by its children, saw \
-         {driver_woken}"
+        driver_woken.abs_diff(voluntary) <= voluntary / 100 + 3 + lost
+            && driver_woken <= ROUND_TRIPS + ROUND_TRIPS / 10,
+        "the driver blocked {voluntary} times by the kernel's count, and was woken \
+         {driver_woken} times, with {lost} wakeups counted lost"
     );
 }
 

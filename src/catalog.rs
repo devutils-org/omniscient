@@ -265,6 +265,14 @@ pub enum MatchKind {
     /// clock, so it is the one match whose evidence is TEMPORAL by
     /// construction.
     Between,
+    /// A close paired with the next wakeup of its task: a completion, and the
+    /// wakeup that released the task waiting on it. The other way round from
+    /// `wakeup`, which opens on the wakeup and credits what follows it.
+    Woke,
+    /// A downstream event's window overlapping an upstream reading's, on the
+    /// same key, credited by the share of it that overlaps. TEMPORAL by
+    /// construction, like `between`: nothing ties the two but the clock.
+    Overlap,
 }
 
 impl MatchKind {
@@ -275,6 +283,8 @@ impl MatchKind {
             MatchKind::Interval => "interval",
             MatchKind::Wakeup => "wakeup",
             MatchKind::Between => "between",
+            MatchKind::Woke => "woke",
+            MatchKind::Overlap => "overlap",
         }
     }
 }

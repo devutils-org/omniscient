@@ -21,7 +21,9 @@
 # live bytes and are not retained bytes: they are the residue. The program
 # prints how many there are (`ARENA <blocks> <bytes> <whole-page bytes>`), and
 # the difference between the freed bytes and the whole-page bytes is the part
-# of the residue it predicts.
+# of the residue it predicts. It prints when its last free returned, on its own
+# `CLOCK_MONOTONIC` (`FREED <ns>`), so a reader can tell a table whose last
+# reading came before the end state from one that measured it.
 #
 # Every row is `polled`, read as a level, and tied to the task by KEY: every
 # reading carries `task:tid`. None has a resolution the table can state in
@@ -88,6 +90,7 @@ requests:
           sys.stderr.write('ARENA %d %d %d\n' % (len(freed), len(freed) * (64 << 10), whole_pages(freed, 64 << 10)))
           for block in freed:
               libc.free(block)
+          sys.stderr.write('FREED %d\n' % time.monotonic_ns())
           time.sleep(0.4)
     mode: poll@100ms
     # Raw carries `live`, `rss` and `freed_span` beside the retained bytes;

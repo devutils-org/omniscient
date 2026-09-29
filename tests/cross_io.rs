@@ -1048,6 +1048,243 @@ fn every_read_decomposes_inside_the_readers_own_clock() {
 }
 
 // ---------------------------------------------------------------------------
+// C. The completion and the wakeup that released the reader, by the engine
+
+/// Boundary 8 of the crossing, joined by the engine: each completion paired
+/// with the next wakeup of the task it was for, and the distance a part of
+/// the read's decomposition.
+///
+/// The reader's own clock is the truth. Every one-page `O_DIRECT` read blocks
+/// until its request completes, so each request's completion is followed,
+/// inside the same read, by the wakeup that let the reader return: the pair
+/// the `woke` match makes must lie inside the read -- the wakeup no later
+/// than `returned` -- and there must be one per request, give or take what a
+/// source reported dropping. The engine used to have only `wakeup`, which pairs
+/// each request with the wakeup *before* it (the previous read's delivery).
+///
+/// The decomposition is checked for containment: the syscall time of the
+/// reader's `pread64`s, read off `io.syscall`, is inside its brackets, and the
+/// device time and the completion-to-wakeup time are inside the syscall, so
+/// the residue is never negative.
+#[test]
+fn every_completion_is_paired_with_the_wakeup_that_released_its_reader() {
+    skip_unless_served!();
+
+    const READS: usize = 1000;
+
+    let path = file_on_the_device("cross-io-woke.bin", READS);
+    let tid = this_thread();
+    name_this_thread("omnxw");
+    let pid = std::process::id();
+    let text = format!(
+        "name: completion-released\nformat: json\nduration: 4s\nrequests:\n\
+         \x20 - {{label: syscalls, source: io.syscall, target: {{pid: [{pid}]}}, mode: trace, \
+         emit: [raw], filter: \"syscall == 'pread64'\"}}\n\
+         \x20 - {{label: device, source: io.latency, target: {{pid: [{pid}]}}, mode: trace, \
+         emit: [raw]}}\n\
+         \x20 - {{label: wakeups, source: sched.wakeup, target: {{pid: [{pid}]}}, mode: trace, \
+         emit: [raw]}}\n\
+         joins:\n\
+         \x20 - {{id: completion-released, from: io.latency, to: sched.wakeup, via: task, \
+         match: woke, woken: wakee_tid, waker: waker_tid, window: 1s, top: 50}}\n"
+    );
+    let session_path = session_file("cross-io-woke", &text);
+
+    forget(&path);
+    let (outputs, reads) =
+        measure_while(&[&session_path], || timed_reads(&path, READS, true, 0, 0));
+    let reads = match reads {
+        Ok(reads) => reads,
+        Err(error) => {
+            eprintln!(
+                "skipped: {} refuses a one-page O_DIRECT read ({error})",
+                path.display()
+            );
+            return;
+        }
+    };
+    let output = &outputs[0];
+    assert!(output.status.success(), "{}", stderr(output));
+    let run: omn::encode::RunOutput = serde_json::from_str(&stdout(output))
+        .unwrap_or_else(|error| panic!("the run parses ({error})"));
+    let document = json(output);
+    let released = join(&document, "completion-released");
+    assert_eq!(released["evidence"], "WAKEUP");
+
+    // The reader's requests, completion times from the tool, and whether a
+    // wakeup of the reader lies after each completion and inside its read.
+    let requests: Vec<Request> = raw(result(&document, "device"))
+        .iter()
+        .filter(|event| uint(event, "tid") == tid as u64)
+        .map(|event| {
+            let completed = event["ts_ns"].as_u64().expect("a timestamp");
+            let device_ns = uint(event, "latency_ns");
+            Request {
+                issued: completed - device_ns,
+                completed,
+                queue: None,
+                device_ns,
+            }
+        })
+        .collect();
+    let wakeups = wakeups_of(&document, tid);
+    let (splits, strays) = split(&reads, requests, &wakeups);
+    assert!(
+        strays.is_empty(),
+        "{} requests outside every read",
+        strays.len()
+    );
+    let served = splits
+        .iter()
+        .filter(|split| split.request.is_some())
+        .count();
+    let woken_inside = splits
+        .iter()
+        .filter(|split| split.wake_ns.is_some())
+        .count();
+
+    let task = format!("task:{tid}");
+    let rows: Vec<&Value> = released["top"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|row| row["key"].as_str().is_some_and(|key| key.ends_with(&task)))
+        .collect();
+    let paired: u64 = rows
+        .iter()
+        .map(|row| row["matched"].as_u64().unwrap_or(0))
+        .sum();
+    let waited: f64 = rows
+        .iter()
+        .map(|row| row["change"]["delta"].as_f64().unwrap_or(0.0))
+        .sum();
+    let bracket: u64 = splits
+        .iter()
+        .filter_map(|split| {
+            split
+                .request
+                .as_ref()
+                .map(|request| split.read.returned - request.completed)
+        })
+        .sum();
+    eprintln!(
+        "{READS} reads, {served} reached the device; {woken_inside} woken inside their read by \
+         the reader's clock; the engine paired {paired}, waiting {} in all against {} between \
+         each completion and its read's return; by {:?}",
+        human(waited as u64),
+        human(bracket),
+        rows.iter()
+            .map(|row| format!("{} x{}", row["key"].as_str().unwrap_or("?"), row["matched"]))
+            .collect::<Vec<_>>()
+    );
+
+    // One pair per completion that a wakeup inside its read followed, and no
+    // more than there were requests.
+    assert!(
+        paired as usize <= served,
+        "{paired} pairs for {served} requests: a completion was paired twice"
+    );
+    let lossless =
+        dropped(result(&document, "device")) + dropped(result(&document, "wakeups")) == 0;
+    if lossless {
+        assert_eq!(
+            paired as usize, woken_inside,
+            "the reader's clock puts a wakeup after the completion and inside the read for \
+             {woken_inside} requests, and the engine paired {paired}"
+        );
+        assert!(
+            100 * woken_inside >= 99 * served,
+            "a one-page direct read blocks until its request completes, and only {woken_inside} \
+             of {served} requests were followed by a wakeup inside their read"
+        );
+    }
+    // Each pair lies inside its read: its wait ends before the read returned.
+    assert!(
+        waited <= bracket as f64,
+        "the engine's completion-to-wakeup time, {}, exceeds what the reader's own clock allows \
+         between the completions and the returns, {}",
+        human(waited as u64),
+        human(bracket)
+    );
+
+    // The decomposition, through the library: the part a join defines.
+    let spec: omn::request::Session = serde_norway::from_str(&format!(
+        "{text}decompose:\n\
+         \x20 - {{id: one-read, top: 100, whole: {{from: io.syscall, value: total_ns}}, parts: [\
+         {{state: device, from: io.latency, value: latency_ns}}, \
+         {{state: completion -> wakeup, from: completion-released, value: paired}}]}}\n"
+    ))
+    .expect("the session parses");
+    let catalog = omn::catalog::Catalog::embedded().expect("the catalog");
+    omn::join::check_decomposition_in(&spec.decompose[0], &spec.requests, &spec.joins, &catalog)
+        .expect("a decomposition this session can compute");
+    let events: Vec<omn::event::Event> = run
+        .results
+        .iter()
+        .flat_map(|results| &results.outputs)
+        .filter_map(|output| match output {
+            omn::emit::Output::Raw { events } => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let decomposed = omn::join::decompose_with(
+        &spec.decompose[0],
+        &spec.requests,
+        &run.results,
+        &events,
+        &spec.joins,
+    );
+    let table = decomposed
+        .tables
+        .iter()
+        .find(|table| table.key == task)
+        .expect("a table for the reader");
+    let whole = table.whole.amount.expect("the syscalls were read");
+    let brackets: u64 = reads.iter().map(|read| read.returned - read.called).sum();
+    let row = |state: &str| {
+        table
+            .rows
+            .iter()
+            .find(|row| row.state == state)
+            .unwrap_or_else(|| panic!("no `{state}` row"))
+    };
+    eprintln!(
+        "  whole {} (brackets {}), device {}, completion -> wakeup {} ({:?}), residue {}",
+        human(whole as u64),
+        human(brackets),
+        human(row("device").amount.unwrap_or(0.0) as u64),
+        human(row("completion -> wakeup").amount.unwrap_or(0.0) as u64),
+        row("completion -> wakeup").evidence,
+        table
+            .residue
+            .map_or("-".to_owned(), |residue| format!("{residue:.0}ns"))
+    );
+    assert_eq!(
+        row("completion -> wakeup").evidence,
+        Some(omn::join::Evidence::Wakeup)
+    );
+    assert!(
+        whole <= brackets as f64,
+        "the syscall time {} is longer than the reads by their own clock, {}",
+        human(whole as u64),
+        human(brackets)
+    );
+    if lossless && dropped(result(&document, "syscalls")) == 0 {
+        assert!(
+            (row("completion -> wakeup").amount.unwrap_or(0.0) - waited).abs() < 1.0,
+            "the part and the join disagree about the same pairs"
+        );
+        let residue = table.residue.expect("every row was read");
+        assert!(
+            residue >= 0.0,
+            "a residue of {residue:.0} ns: the device and the wakeup were counted outside the \
+             syscalls that contain them"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // B. The scoped key, against a bare pointer
 
 /// A completion is never credited to a request that had already finished.
@@ -1156,6 +1393,19 @@ fn no_completion_is_credited_to_a_request_that_had_already_finished() {
         );
     }
     assert_eq!(scoped["evidence"], "KEY");
+    // Two lives of one pointer inside one plug section share their whole key,
+    // because the kernel's start stamp is the plug's cached clock. The engine
+    // pairs them by order and says so: a join that saw a collapse says the
+    // crediting within the key was the clock's, and one that saw none says
+    // nothing.
+    let collapsed = scoped["states"]["scope_collapsed"].as_u64().unwrap_or(0);
+    eprintln!("the scoped join saw {collapsed} pointers reissued under the scope they already had");
+    assert_eq!(
+        scoped["within_key"].as_str() == Some("TEMPORAL"),
+        collapsed > 0,
+        "{collapsed} collapsed scopes, and the join says within_key {}",
+        scoped["within_key"]
+    );
     // Defect 3 of `docs/scenarios/cross-io.md`, fixed by the eighth wave's
     // stream J: a bare equality on the recycled pointer compares the address
     // alone, which establishes two events at one address around the same
@@ -1581,6 +1831,18 @@ fn the_crossing_sessions_run_and_say_what_they_found() {
     assert!(
         count(released, "matched") > 0,
         "no request of the reader followed a wakeup of it: {released}"
+    );
+    // The same boundary paired the right way round: each completion with the
+    // next wakeup of the reader. Two thousand direct reads each block until
+    // their request completes, so each completion the reader's requests made
+    // is followed by a wakeup of it; the pairs are bounded by the completions.
+    let paired = join(&one_read, "completion-released");
+    assert_eq!(paired["evidence"], "WAKEUP");
+    let completions = count(paired, "matched") + count(paired, "unmatched");
+    assert!(
+        count(paired, "matched") as usize <= 2000 && completions > 0,
+        "the reader's completions were paired {} times of {completions}: {paired}",
+        count(paired, "matched")
     );
     eprintln!(
         "cross-io-one-read: {matched} requests joined at KEY; chain {}",

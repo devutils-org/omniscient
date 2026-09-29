@@ -7618,3 +7618,106 @@ open to it.
 local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and `Insn::ld_imm64`
 are on `main` since stream D's merge. Both now call the shared instructions,
 and `mod local` is gone.
+
+---
+
+## Needs from another stream — the thirteenth wave, stream J (the engine says what it knows)
+
+Stream J's deliverable is `docs/families/join.md`, section "The thirteenth
+wave". The engine landed two match kinds (`woke`, `overlap`), a part a join
+defines (`value: paired`), a count of scopes two lives share, and demangled
+stacks. What it needs from files it does not own, with the signature each
+call site wants:
+
+### To stream R (`src/main.rs`, `src/triage/engine.rs`): pass the session's joins to the decomposition
+
+A part read from a join names the join by id, and `decompose` is not given the
+joins. The library has the entry point; the two callers keep the old one, so a
+session that declares a `paired` part is refused at validation (below) and, if
+it got past, would print the row as missing with the reason. One line each:
+
+```rust
+// src/main.rs, where run.decompositions is filled
+run.decompositions.push(join::decompose_with(
+    decomposition, &served, &run.results, &merged, &session.joins,
+));
+// src/triage/engine.rs, the same call
+output.decompositions.push(join::decompose_with(
+    decomposition, &requests, &output.results, &events, &session.joins,
+));
+```
+
+`decompose(d, r, res, ev)` is `decompose_with(d, r, res, ev, &[])` and stays.
+
+### To stream P (`src/validate.rs`): check a decomposition against the session's joins
+
+```rust
+crate::join::check_decomposition_in(decomposition, &session.requests, &session.joins, catalog)
+```
+
+in place of `check_decomposition(decomposition, &session.requests, catalog)`,
+which is `check_decomposition_in(.., &[], ..)` and refuses a `paired` part with
+"it read the decomposition without the session's joins". Until this lands,
+`tests/cross_io.rs` computes the I/O crossing's decomposition through the
+library, and no shipped session declares a `paired` part.
+
+### To stream R (`src/encode.rs`): the two new match kinds in the text renderer
+
+Declared in `docs/families/join.md`: stream J added the `Woke` and `Overlap`
+arms to `unmatched_reason` and `table_words` (four lines), because a new
+`MatchKind` variant does not compile without them. What the renderer does not
+yet print, and a reader of the text needs:
+
+- **`overlap`**: each row's `change.delta` (the share of the `to` side's
+  `value` credited to that interval), the interval's `opened_ns..closed_ns`,
+  and the correlation's `readings` (`credited`, `uncredited`, `baselines`) --
+  the shape `between_text` already prints for `between`. Today the table
+  lists `KEY EVENTS OUTCOME` and no amount.
+- **`woke`**: each row's `change.delta` (the summed completion-to-wakeup
+  time, ns) over `wakeups` pairs; and `unmatched` means completions no wakeup
+  followed, which `unmatched_reason` now says.
+- The CHAIN column is 40 wide and a two-hop chain with an interrupt at its far
+  end (`interrupt (hardirq) -> task:128611 -> task:128610`) overflows it.
+
+### To stream R (`src/render.rs` or `src/encode.rs`): print what a level establishes
+
+`omn::join::Evidence::establishes(self)` and `does_not_establish(self)` exist
+(twelfth wave, from stream M's request); `omn-mcp` reads them. The text renderer
+prints the bare word. Wanted: once per run, under the first join or
+decomposition that shows a level, `evidence TEMPORAL: <establishes>; it does
+not establish <does_not_establish>` for each level the run's tables use.
+
+### To stream R (`src/request.rs`): a NUMA node key (`open-requests 1469`, finding 22)
+
+`KeyValue` is J's and `KeyKind` is R's, and `KeyValue::kind()` is exhaustive,
+so the value cannot land before the kind. Wanted in `src/request.rs`:
+
+```rust
+/// `node:n`, a memory node as the kernel numbers them.
+Node,
+```
+
+in `KeyKind`, in `KeyKind::ALL` (thirteen entries), and `KeyKind::Node =>
+"node"` in `as_str` and wherever the kind is parsed. The event half is ready
+to land beside it, in `src/event.rs`:
+
+```rust
+/// A memory node, as the kernel numbers them.
+Node { node: u32 },
+pub fn node(node: u32) -> Self { KeyValue::Node { node } }
+KeyValue::Node { .. } => KeyKind::Node,          // in kind()
+KeyValue::Node { node } => write!(f, "node:{node}"), // in Display
+```
+
+and then stream N's `mem.numa` puts `KeyValue::node(n)` first on each event,
+with `node` in its catalog `keys`. The emit layer needs nothing.
+
+### To whoever owns the `overlap` of machine-wide state: a join with no key
+
+`overlap` was asked for with `via` optional, for machine state that carries no
+key (`mem.pressure`). `Rule::via` is a required `KeyKind`, and
+`src/validate.rs` checks both sides carry it (`entry.keys.contains(&rule.via)`).
+The engine half is J's: `via: Option<KeyKind>`, every `from` reading one series
+and every `to` event overlapped against it. The validator half is P's: skip the
+key check when `via` is absent, and refuse an absent `via` on every match but
+`overlap`. Not landed this wave; the task-keyed overlap is.
