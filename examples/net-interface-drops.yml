@@ -24,10 +24,11 @@
 #     wait'
 #
 # A thousand datagrams, so a thousand drops -- exactly, not approximately -- and
-# zero errors, because nothing was malformed. `raw` is where both of those are:
-# the aggregating emits of this source report errors, which is its measured
-# value, so `rate` answers `0 count/s` for a link that just lost a thousand
-# frames. That is recorded in `docs/scenarios/net.md` under "Defects found".
+# zero errors, because nothing was malformed. Each counter kind is its own
+# series -- `iface:veth0/drops` and `iface:veth0/errors` among them -- so `rate`
+# and `summary` answer for the drops as exactly as `raw` does. They used to
+# answer about errors alone, and read `0 count/s` for a link that had just lost
+# a thousand frames (net 5 in `docs/scenarios/net.md`).
 #
 # What this does *not* reach is a drop inside a queueing discipline. The obvious
 # way to make an interface lose packets -- `tc qdisc add dev lo root netem

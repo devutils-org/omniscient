@@ -8,8 +8,6 @@
 //! the long list `ethtool -S` prints -- need the ethtool netlink family, and
 //! the catalog says so rather than pretending this is the whole picture.
 
-use std::collections::BTreeMap;
-
 use super::procfs::{self, Deltas};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
@@ -25,6 +23,28 @@ const TX_DROPPED: usize = 11;
 const TX_FIFO: usize = 12;
 const COLLISIONS: usize = 13;
 const CARRIER: usize = 14;
+
+/// The kinds of counter a series is kept for, each a different failure, with
+/// the receive and transmit columns that make it up. `collisions` and
+/// `carrier` are transmit-side only: the file has no receive column for them.
+const KINDS: [(&str, Option<usize>, Option<usize>); 5] = [
+    ("errors", Some(RX_ERRORS), Some(TX_ERRORS)),
+    ("drops", Some(RX_DROPPED), Some(TX_DROPPED)),
+    ("fifo", Some(RX_FIFO), Some(TX_FIFO)),
+    ("collisions", None, Some(COLLISIONS)),
+    ("carrier", None, Some(CARRIER)),
+];
+
+/// The series one counter of one interface is kept under.
+///
+/// A series is a set of keys, and `iface` is the only key the entry declares,
+/// so the counter kind goes in the key's name: `veth0/drops`. An interface
+/// name cannot contain `/` -- the kernel refuses it -- so the split cannot be
+/// read two ways, and the bare name travels as the `iface` attribute, which is
+/// what the filter field matches.
+fn series(iface: &str, kind: &str) -> KeyValue {
+    KeyValue::iface(0, format!("{iface}/{kind}"))
+}
 
 pub struct Prepare(pub Mode);
 
@@ -47,11 +67,18 @@ impl Prepared for Prepare {
             only,
             deltas: Deltas::default(),
             losses: Losses::default(),
-            hidden: BTreeMap::new(),
         }))
     }
 }
 
+/// One event per interface and per counter kind.
+///
+/// It used to be one event per interface whose value was errors, with drops,
+/// fifo overruns, collisions and carrier losses as attributes beside it -- so
+/// `rate`, `timeline` and `summary` answered about errors alone, and a link
+/// that had just dropped a thousand frames read `0 count/s` (net 5 in
+/// `docs/scenarios/net.md`). Kept apart, as the catalog requires, and every
+/// one of them reachable by every emit.
 pub struct IfaceCollector {
     id: CollectorId,
     /// A poll and a count measure an interval; a snapshot cannot, and reports
@@ -60,32 +87,6 @@ pub struct IfaceCollector {
     only: Option<String>,
     deltas: Deltas,
     losses: Losses,
-    /// Per interface, the frames lost to something other than the measured
-    /// value, accumulated over the run.
-    ///
-    /// The series is errors, deliberately -- a bad frame and a full queue are
-    /// different failures and summing them would hide which happened -- and the
-    /// cost is that every emit but `raw` answers zero for a link that is losing
-    /// everything given to it. Until a series can be split by which counter it
-    /// came from, the total is carried here and stated in `notes`, so that a
-    /// rate of zero over a thousand dropped frames is a stated omission rather
-    /// than a silent one.
-    hidden: BTreeMap<String, Hidden>,
-}
-
-/// What an interface lost to counters the series does not carry.
-#[derive(Default, Clone, Copy)]
-struct Hidden {
-    drops: u64,
-    fifo: u64,
-    collisions: u64,
-    carrier: u64,
-}
-
-impl Hidden {
-    fn total(self) -> u64 {
-        self.drops + self.fifo + self.collisions + self.carrier
-    }
 }
 
 impl Collector for IfaceCollector {
@@ -93,12 +94,12 @@ impl Collector for IfaceCollector {
         &self.id
     }
 
-    /// A poll and a count measure errors over a window; a snapshot can only
+    /// A poll and a count measure frames over a window; a snapshot can only
     /// report what the counter stands at. Different numbers, different names.
     fn value_attr(&self) -> &'static str {
         match self.mode {
-            Mode::Snapshot => "errors_since_boot",
-            _ => "errors",
+            Mode::Snapshot => "frames_since_boot",
+            _ => "frames",
         }
     }
 
@@ -110,72 +111,58 @@ impl Collector for IfaceCollector {
 
         for interface in interfaces {
             if self.mode == Mode::Snapshot {
-                events.push(self.standing_event(&interface, ts_ns, index));
-                index += 1;
+                for event in self.standing_events(&interface, ts_ns, index) {
+                    events.push(event);
+                    index += 1;
+                }
                 continue;
             }
 
-            let mut delta = |column: usize, name: &str| {
+            let mut delta = |column: usize, side: &str, kind: &str| {
                 self.deltas.since(
-                    &format!("{}:{name}", interface.name),
+                    &format!("{}:{side}_{kind}", interface.name),
                     interface.column(column),
                     &mut self.losses,
                 )
             };
-
             // Every counter of an interface is read in the same tick, so if one
             // has no increment to report none of them do: this is the first
-            // sight of the interface.
-            let Some(rx_errors) = delta(RX_ERRORS, "rx_errors") else {
-                let _ = delta(RX_DROPPED, "rx_dropped");
-                let _ = delta(RX_FIFO, "rx_fifo");
-                let _ = delta(TX_ERRORS, "tx_errors");
-                let _ = delta(TX_DROPPED, "tx_dropped");
-                let _ = delta(TX_FIFO, "tx_fifo");
-                let _ = delta(COLLISIONS, "collisions");
-                let _ = delta(CARRIER, "carrier");
+            // sight of the interface, and every column becomes its baseline.
+            let mut increments = Vec::new();
+            let mut first_sight = false;
+            for (kind, rx, tx) in KINDS {
+                let rx = rx.map(|column| delta(column, "rx", kind));
+                let tx = tx.map(|column| delta(column, "tx", kind));
+                if rx == Some(None) || tx == Some(None) {
+                    first_sight = true;
+                }
+                increments.push((kind, rx.flatten(), tx.flatten()));
+            }
+            if first_sight {
                 continue;
-            };
-            let rx_dropped = delta(RX_DROPPED, "rx_dropped").unwrap_or(0);
-            let rx_fifo = delta(RX_FIFO, "rx_fifo").unwrap_or(0);
-            let tx_errors = delta(TX_ERRORS, "tx_errors").unwrap_or(0);
-            let tx_dropped = delta(TX_DROPPED, "tx_dropped").unwrap_or(0);
-            let tx_fifo = delta(TX_FIFO, "tx_fifo").unwrap_or(0);
-            let collisions = delta(COLLISIONS, "collisions").unwrap_or(0);
-            let carrier = delta(CARRIER, "carrier").unwrap_or(0);
+            }
 
-            // What this interval lost to counters the series does not carry,
-            // kept so that `notes` can say what a rate of zero is leaving out.
-            let hidden = self.hidden.entry(interface.name.clone()).or_default();
-            hidden.drops += rx_dropped + tx_dropped;
-            hidden.fifo += rx_fifo + tx_fifo;
-            hidden.collisions += collisions;
-            hidden.carrier += carrier;
-
-            events.push(Event {
-                ts_ns,
-                ts_err_ns: 0,
-                kind: "net.iface".to_owned(),
-                keys: vec![KeyValue::iface(0, interface.name.clone())],
-                attrs: vec![
-                    // The measured value is errors. Drops are a different
-                    // failure -- a full queue rather than a bad frame -- and
-                    // summing them would hide which one happened.
-                    Attr::uint("errors", rx_errors + tx_errors),
-                    Attr::uint("rx_errors", rx_errors),
-                    Attr::uint("tx_errors", tx_errors),
-                    Attr::uint("drops", rx_dropped + tx_dropped),
-                    Attr::uint("rx_dropped", rx_dropped),
-                    Attr::uint("tx_dropped", tx_dropped),
-                    Attr::uint("fifo", rx_fifo + tx_fifo),
-                    Attr::uint("collisions", collisions),
-                    Attr::uint("carrier", carrier),
-                    Attr::text("iface", interface.name),
-                ],
-                collector_id: self.id.clone(),
-                seq: index,
-            });
-            index += 1;
+            for (kind, rx, tx) in increments {
+                let mut attrs = vec![Attr::uint("frames", rx.unwrap_or(0) + tx.unwrap_or(0))];
+                if let Some(rx) = rx {
+                    attrs.push(Attr::uint("rx", rx));
+                }
+                if let Some(tx) = tx {
+                    attrs.push(Attr::uint("tx", tx));
+                }
+                attrs.push(Attr::text("counter", kind));
+                attrs.push(Attr::text("iface", interface.name.clone()));
+                events.push(Event {
+                    ts_ns,
+                    ts_err_ns: 0,
+                    kind: "net.iface".to_owned(),
+                    keys: vec![series(&interface.name, kind)],
+                    attrs,
+                    collector_id: self.id.clone(),
+                    seq: index,
+                });
+                index += 1;
+            }
         }
         Ok(events)
     }
@@ -191,39 +178,13 @@ impl Collector for IfaceCollector {
         self.sample(u64::MAX / 2).unwrap_or_default()
     }
 
-    /// What the series leaves out, named rather than left at zero.
-    ///
-    /// The measured value of this source is errors, so `rate`, `timeline` and
-    /// `summary` all answer about errors and a link losing every frame given to
-    /// it reads `0 count/s`. The frames are counted -- they are on every event,
-    /// and `raw` shows them -- but no emit that aggregates can reach them. A
-    /// run where that gap is non-empty says so here, which is the one place
-    /// every emit and every format carries.
     fn notes(&self) -> Vec<String> {
-        let mut notes = Vec::new();
-        for (iface, hidden) in &self.hidden {
-            if hidden.total() == 0 {
-                continue;
-            }
-            let mut kinds = Vec::new();
-            for (name, count) in [
-                ("drops", hidden.drops),
-                ("fifo overruns", hidden.fifo),
-                ("collisions", hidden.collisions),
-                ("carrier losses", hidden.carrier),
-            ] {
-                if count > 0 {
-                    kinds.push(format!("{count} {name}"));
-                }
-            }
-            notes.push(format!(
-                "`{iface}` also reported {} over this run; the measured value of `net.iface` is \
-                 errors, so every emit but `raw` answers about errors alone and these are not in \
-                 it",
-                kinds.join(", ")
-            ));
-        }
-        notes
+        vec![
+            "each interface is one series per counter kind -- `<iface>/errors`, `/drops`, \
+             `/fifo`, `/collisions`, `/carrier` -- because a bad frame and a full queue are \
+             different failures; `iface` on each event is the interface alone"
+                .to_owned(),
+        ]
     }
 
     fn losses(&self) -> Losses {
@@ -240,38 +201,40 @@ impl IfaceCollector {
     /// is an increment over a few hundred microseconds, which on anything short
     /// of a saturated link is zero. The totals since boot are a different number
     /// and carry different names, so a reader cannot mistake one for the other.
-    fn standing_event(&self, interface: &procfs::Interface, ts_ns: u64, seq: u64) -> Event {
-        let rx_errors = interface.column(RX_ERRORS);
-        let tx_errors = interface.column(TX_ERRORS);
-        let rx_dropped = interface.column(RX_DROPPED);
-        let tx_dropped = interface.column(TX_DROPPED);
-        Event {
-            ts_ns,
-            ts_err_ns: 0,
-            kind: "net.iface".to_owned(),
-            keys: vec![KeyValue::iface(0, interface.name.clone())],
-            attrs: vec![
-                Attr::uint("errors_since_boot", rx_errors + tx_errors),
-                Attr::uint("rx_errors_since_boot", rx_errors),
-                Attr::uint("tx_errors_since_boot", tx_errors),
-                Attr::uint("drops_since_boot", rx_dropped + tx_dropped),
-                Attr::uint("rx_dropped_since_boot", rx_dropped),
-                Attr::uint("tx_dropped_since_boot", tx_dropped),
-                Attr::uint(
-                    "fifo_since_boot",
-                    interface.column(RX_FIFO) + interface.column(TX_FIFO),
-                ),
-                Attr::uint("collisions_since_boot", interface.column(COLLISIONS)),
-                Attr::uint("carrier_since_boot", interface.column(CARRIER)),
-                Attr::text("iface", interface.name.clone()),
-                Attr::text(
+    fn standing_events(&self, interface: &procfs::Interface, ts_ns: u64, seq: u64) -> Vec<Event> {
+        KINDS
+            .iter()
+            .enumerate()
+            .map(|(offset, (kind, rx, tx))| {
+                let rx = rx.map(|column| interface.column(column));
+                let tx = tx.map(|column| interface.column(column));
+                let mut attrs = vec![Attr::uint(
+                    "frames_since_boot",
+                    rx.unwrap_or(0) + tx.unwrap_or(0),
+                )];
+                if let Some(rx) = rx {
+                    attrs.push(Attr::uint("rx_since_boot", rx));
+                }
+                if let Some(tx) = tx {
+                    attrs.push(Attr::uint("tx_since_boot", tx));
+                }
+                attrs.push(Attr::text("counter", *kind));
+                attrs.push(Attr::text("iface", interface.name.clone()));
+                attrs.push(Attr::text(
                     "basis",
                     "the counters as they stand: a snapshot observes no window of its own",
-                ),
-            ],
-            collector_id: self.id.clone(),
-            seq,
-        }
+                ));
+                Event {
+                    ts_ns,
+                    ts_err_ns: 0,
+                    kind: "net.iface".to_owned(),
+                    keys: vec![series(&interface.name, kind)],
+                    attrs,
+                    collector_id: self.id.clone(),
+                    seq: seq + offset as u64,
+                }
+            })
+            .collect()
     }
 }
 
@@ -285,6 +248,17 @@ mod tests {
         }
     }
 
+    fn of<'a>(events: &'a [Event], kind: &str) -> &'a Event {
+        events
+            .iter()
+            .find(|event| {
+                event
+                    .attr("counter")
+                    .is_some_and(|value| value.to_string() == kind)
+            })
+            .unwrap_or_else(|| panic!("no `{kind}` series"))
+    }
+
     #[test]
     fn a_healthy_loopback_reports_zero_of_everything() {
         let mut collector = Box::new(Prepare(polling()))
@@ -292,51 +266,70 @@ mod tests {
             .expect("loopback exists");
         collector.sample(0).unwrap();
         let events = collector.sample(0).unwrap();
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), KINDS.len(), "one series per counter kind");
         // Loopback cannot have link errors: there is no link.
-        for name in ["errors", "drops", "collisions", "carrier"] {
+        for (kind, _, _) in KINDS {
             assert_eq!(
-                events[0].attr(name).and_then(|value| value.as_f64()),
+                of(&events, kind)
+                    .attr("frames")
+                    .and_then(|value| value.as_f64()),
                 Some(0.0),
-                "loopback reported a non-zero `{name}`"
+                "loopback reported a non-zero `{kind}`"
             );
         }
     }
 
+    /// Each counter kind is its own series, so every emit that aggregates by
+    /// series reaches each of them -- and the key cannot be read two ways,
+    /// because an interface name cannot hold a `/`.
     #[test]
-    fn errors_and_drops_are_kept_apart() {
+    fn each_counter_kind_is_its_own_series() {
         let mut collector = Box::new(Prepare(polling()))
-            .attach(&Target::System)
-            .expect("system");
+            .attach(&Target::Iface("lo".to_owned()))
+            .expect("loopback exists");
         collector.sample(0).unwrap();
-        let events = collector.sample(0).unwrap();
-        let event = events.first().expect("at least the loopback");
-        assert!(event.attr("errors").is_some(), "a bad frame");
-        assert!(event.attr("drops").is_some(), "a full queue");
+        let events = collector.sample(1).unwrap();
+        let keys: std::collections::BTreeSet<String> = events
+            .iter()
+            .map(|event| event.keys[0].to_string())
+            .collect();
+        assert_eq!(keys.len(), KINDS.len(), "{keys:?}");
+        assert!(keys.contains("iface:lo/drops"), "{keys:?}");
+        for event in &events {
+            assert_eq!(
+                event
+                    .attr("iface")
+                    .map(|value| value.to_string())
+                    .as_deref(),
+                Some("lo")
+            );
+        }
+        assert!(
+            of(&events, "collisions").attr("rx").is_none(),
+            "the file has no receive column for collisions, and zero would claim one"
+        );
     }
 
     /// A snapshot of a counter source reports the counter, not an increment
     /// over the microseconds between its read and the run's close.
     ///
-    /// Loopback is the ground truth here: it has carried traffic since boot on
-    /// any machine that has run anything, so its receive counters are not zero
-    /// -- and a snapshot that answered with an increment would report zero for
-    /// all of them, which is the defect this replaces.
+    /// Loopback is the ground truth here: the reading has to be the file's,
+    /// byte for byte, and a snapshot that answered with an increment would
+    /// report zero, which is the defect this replaced.
     #[test]
     fn a_snapshot_reports_the_counters_as_they_stand() {
         let mut collector = Box::new(Prepare(Mode::Snapshot))
             .attach(&Target::Iface("lo".to_owned()))
             .expect("loopback exists");
         let events = collector.sample(0).expect("one read");
-        assert_eq!(events.len(), 1, "one interface, one reading");
-        // The first read is the reading: there is no baseline to wait for.
-        assert!(
-            events[0].attr("errors_since_boot").is_some(),
-            "a snapshot names what it reports: {:?}",
-            events[0].attrs
+        assert_eq!(
+            events.len(),
+            KINDS.len(),
+            "one interface, one reading per kind"
         );
+        let errors = of(&events, "errors");
         assert!(
-            events[0].attr("errors").is_none(),
+            errors.attr("frames").is_none(),
             "an interval's name on a number that is not one would be the lie this fixes"
         );
         assert!(
@@ -344,13 +337,12 @@ mod tests {
             "a snapshot has no window to close, and a closing read would replace its answer"
         );
 
-        // And the reading is the file's, byte for byte.
         let mut losses = Losses::default();
         let file = procfs::interfaces(Some("lo"), &mut losses).expect("/proc/net/dev");
         let standing = file[0].column(RX_ERRORS) + file[0].column(TX_ERRORS);
         assert_eq!(
-            events[0]
-                .attr("errors_since_boot")
+            errors
+                .attr("frames_since_boot")
                 .and_then(|value| value.as_f64()),
             Some(standing as f64)
         );

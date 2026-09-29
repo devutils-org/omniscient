@@ -212,6 +212,16 @@ impl Toucher {
                     -1,
                     0,
                 );
+                if block != libc::MAP_FAILED && working.is_some() {
+                    // A walker's pages are small pages, on purpose: the
+                    // referenced bit is set when the cpu walks the page tables,
+                    // and a working set of eight huge pages stays in the TLB,
+                    // so after a clear nothing walks them and nothing sets it
+                    // -- measured, 4096 bytes referenced of 16 MiB touched
+                    // twice. Four thousand small pages do not fit, so every
+                    // walk walks the tables.
+                    libc::madvise(block, bytes as usize, libc::MADV_NOHUGEPAGE);
+                }
                 if block != libc::MAP_FAILED {
                     // Every page written, not just mapped.
                     std::ptr::write_bytes(block.cast::<u8>(), fill, bytes as usize);
@@ -222,10 +232,16 @@ impl Toucher {
                     // over, and never look at the rest again. The write is
                     // volatile so that nothing here can be optimised into a
                     // loop that touches no memory at all.
+                    // Each completed walk is counted in the handshake page's
+                    // second word, so a test waits for walks rather than for
+                    // time: under load a child descheduled for most of a
+                    // fixed sleep walked fewer times than the sleep assumed.
                     Some(working) if block != libc::MAP_FAILED => loop {
                         for offset in (0..working as usize).step_by(page) {
                             block.cast::<u8>().add(offset).write_volatile(fill ^ 0xFF);
                         }
+                        let walks = handshake.cast::<u64>().add(1);
+                        walks.write_volatile(walks.read_volatile() + 1);
                     },
                     _ => {
                         libc::pause();
@@ -254,6 +270,27 @@ impl Toucher {
 
     pub fn pid(&self) -> i32 {
         self.pid
+    }
+
+    /// How many times a walker has walked its working set.
+    pub fn walks(&self) -> u64 {
+        // SAFETY: the second word of our own shared mapping, which only the
+        // child writes.
+        unsafe { self.handshake.cast::<u64>().add(1).read_volatile() }
+    }
+
+    /// Waits until a walker has walked its working set `more` times from now,
+    /// which is an event the child announces rather than a guessed duration.
+    pub fn wait_for_walks(&self, more: u64) {
+        let target = self.walks() + more;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self.walks() < target {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the walker did not walk {more} more times in 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Kills the child and waits for it, so that a cgroup holding it can be

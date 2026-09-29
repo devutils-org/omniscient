@@ -18,13 +18,19 @@
 //! not of the shape of a BPF map. The run says so in its own output, because
 //! every other source in this tool makes one event one measurement.
 //!
-//! **Frees are counted and not published**, and that is this file's one real
-//! compromise. Both tracepoints are attached, so the totals are known and
-//! reported; what cannot be done is publish them as events beside the
-//! allocations, because a series is grouped by key, `direction` is neither a key
-//! nor a declared filter field, and a histogram of allocations and frees
-//! together is a histogram of neither. `docs/families/mem.md` records the
-//! catalog change that would fix it.
+//! **A page free is an event when the request asks about direction.** Both
+//! tracepoints are attached, and every event carries `direction` -- `alloc` or
+//! `free` -- which is a filter field of `mem.page_alloc`. A request whose
+//! predicate names it gets the frees as events, selected by that predicate; one
+//! that does not gets allocations alone, because a histogram of allocations
+//! and frees together is a histogram of neither, and the run says how many
+//! frees it left out and how to ask for them.
+//!
+//! `mem.kmalloc` cannot do the same: `kfree` carries the pointer and the call
+//! site and nothing that says how large the object was, and an event of a
+//! source measured in bytes with no bytes is not one. `direction` is not a
+//! filter field there, so the validator refuses a predicate over it, and the
+//! run reports the count of frees.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
@@ -255,6 +261,18 @@ impl AllocationCollector {
         }
     }
 
+    /// Whether a free is an event in this run: a page free, asked about by a
+    /// predicate that names `direction`. Without one, frees are counted and
+    /// the run says so -- a default that merged them would be a histogram of
+    /// neither.
+    fn publishes_frees(&self) -> bool {
+        self.allocator == Allocator::Pages
+            && self
+                .predicate
+                .as_ref()
+                .is_some_and(|predicate| predicate.fields().contains("direction"))
+    }
+
     /// Whether this run reports one measurement at the end rather than a series.
     fn counting(&self) -> bool {
         self.mode == Mode::Count
@@ -298,7 +316,7 @@ impl AllocationCollector {
                     continue;
                 }
             }
-            if row.freeing {
+            if row.freeing && !self.publishes_frees() {
                 self.frees += row.count;
                 self.freed += row.total_size(allocator);
                 continue;
@@ -414,6 +432,7 @@ fn attributes(allocator: Allocator, row: &AllocRow, window_ns: u64) -> Vec<Attr>
         Attr::uint("tid", u64::from(row.tid)),
         Attr::uint("pid", u64::from(row.tgid)),
         Attr::text("comm", row.comm.clone()),
+        Attr::text("direction", if row.freeing { "free" } else { "alloc" }),
     ];
     match allocator {
         Allocator::Pages => {
@@ -528,10 +547,10 @@ impl Collector for AllocationCollector {
         if self.frees > 0 {
             notes.push(match self.allocator {
                 Allocator::Pages => format!(
-                    "{} page frees totalling {} pages happened in the same window and are not \
-                     events here: a series is grouped by key, `direction` is neither a key nor a \
-                     filter field, and a histogram of allocations and frees together is a \
-                     histogram of neither",
+                    "{} page frees totalling {} pages happened in the same window and are not in \
+                     these events, because a histogram of allocations and frees together is a \
+                     histogram of neither; a filter on `direction` (`direction == 'free'`) \
+                     makes them the events",
                     self.frees, self.freed,
                 ),
                 Allocator::Slab => format!(
@@ -592,6 +611,40 @@ mod tests {
 
     /// Every filter field the catalog offers must be on the events, or a
     /// predicate over it is false everywhere and silently empties the series.
+    #[test]
+    fn a_page_free_is_an_event_exactly_when_the_predicate_asks_about_direction() {
+        let with = |allocator, filter: Option<&str>| {
+            AllocationCollector::new(
+                allocator,
+                Mode::Trace,
+                None,
+                filter.map(|text| text.parse().expect("a predicate")),
+            )
+            .publishes_frees()
+        };
+        assert!(with(Allocator::Pages, Some("direction == 'free'")));
+        assert!(with(
+            Allocator::Pages,
+            Some("direction == 'free' && order > 0")
+        ));
+        assert!(
+            !with(Allocator::Pages, Some("comm == 'dd'")),
+            "a merge nobody asked for"
+        );
+        assert!(!with(Allocator::Pages, None));
+        assert!(
+            !with(Allocator::Slab, Some("direction == 'free'")),
+            "a kfree has no size, so it is never an event of a source in bytes"
+        );
+        // And the event says which side it is, so the predicate can select.
+        let mut free = page_row();
+        free.freeing = true;
+        let attrs = attributes(Allocator::Pages, &free, 1);
+        assert!(attrs
+            .iter()
+            .any(|attr| attr.name == "direction" && attr.value.to_string() == "free"));
+    }
+
     #[test]
     fn every_filter_field_the_catalog_declares_is_on_an_event() {
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");

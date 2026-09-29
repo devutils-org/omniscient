@@ -569,25 +569,36 @@ fn every_emit_a_mem_source_declares_can_be_produced_by_a_mode_it_declares() {
          Each of these is a promise in catalog/mem.yaml that no build can keep: the source \
          declares the emit, and every mode it declares refuses it with exit {EXIT_REJECTED}.\n\
          D3 was the two this file used to record -- `mem.sharing` declaring `summary` over its \
-         only mode `sample`, and `mem.swap` declaring `rate` over `poll` and `snapshot`.\n\
-         Both are out of the catalog; what is left here is: {unreachable:?}\n"
+         only mode `sample`, and `mem.swap` declaring `rate` over `poll` and `snapshot`, which \
+         `count` now serves.\n\
+         What is left here is: {unreachable:?}\n"
     );
 
     // And the two that were removed are now refused by the source rather than
     // by the matrix, which is the message that names the line of YAML to look
     // at. Against the old catalog both of these said `mode ... cannot produce`.
-    for (source, mode, emit, target) in [
-        ("mem.swap", "poll@50ms", "rate", "--system"),
-        ("mem.sharing", "sample@997hz", "summary", "--system"),
-    ] {
-        let refused = run(&[source, target, "-m", mode, "-e", emit, "-d", "100ms"]);
-        assert_eq!(code(&refused), EXIT_REJECTED, "{}", stderr(&refused));
-        assert!(
-            stderr(&refused).contains(&format!("`{source}` cannot emit `{emit}`")),
-            "`{source}` should refuse `{emit}` as its own, not as the matrix's: {}",
-            stderr(&refused)
-        );
-    }
+    // `mem.swap` answers `rate` now, over the counted window its `count`
+    // mode reports (open-requests 2619), and a poll still cannot.
+    let counted = run(&[
+        "mem.swap", "--system", "-m", "count", "-e", "rate", "-d", "100ms",
+    ]);
+    assert_eq!(code(&counted), 0, "{}", stderr(&counted));
+    let refused = run(&[
+        "mem.sharing",
+        "--system",
+        "-m",
+        "sample@997hz",
+        "-e",
+        "summary",
+        "-d",
+        "100ms",
+    ]);
+    assert_eq!(code(&refused), EXIT_REJECTED, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("`mem.sharing` cannot emit `summary`"),
+        "`mem.sharing` should refuse `summary` as its own, not as the matrix's: {}",
+        stderr(&refused)
+    );
 }
 
 /// The shapes the family can produce, all at once, over one program.
@@ -1186,8 +1197,16 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     const TRIES: usize = 5;
     let mut pairs = Vec::new();
     let mut partial = None;
+    // `/proc/meminfo` read either side of every round, so that each pair is
+    // bracketed by the kernel's own level around that pair and nothing else:
+    // the endpoints of the whole session were narrower than the level's
+    // excursion inside it (the flaky tally's #21).
+    let mut brackets = Vec::new();
     for _ in 0..TRIES {
+        let level_before = anon_huge_kilobytes();
         let at_one_instant = run_written_session(BOTH_HUGE_PAGE_BACKENDS_AT_ONCE);
+        let level_after = anon_huge_kilobytes();
+        brackets.push(level_before.zip(level_after));
         assert!(
             at_one_instant.status.success(),
             "{}",
@@ -1231,10 +1250,10 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
         .map(|pair| pair[0].0.abs_diff(pair[1].0))
         .max()
         .unwrap_or(0);
-    let (theirs, ours, partial_then) = *pairs
-        .iter()
-        .min_by_key(|(theirs, ours, _)| theirs.abs_diff(*ours))
+    let closest = (0..pairs.len())
+        .min_by_key(|at| pairs[*at].0.abs_diff(pairs[*at].1))
         .expect("five runs");
+    let (theirs, ours, partial_then) = pairs[closest];
 
     if partial == 0 {
         eprintln!(
@@ -1266,7 +1285,7 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     // what moved in between is carried as the slack -- the pattern the PSI
     // pair above uses for the same reason.
     let page_size = sysfs["hpage_bytes"].as_u64().expect("the huge page size") / 1024;
-    let (Some(before), Some(after)) = (before, after) else {
+    let (Some((before, after)), Some(_), Some(_)) = (brackets[closest], before, after) else {
         eprintln!("skipped the kernel cross-check: this kernel publishes no AnonHugePages line");
         return;
     };
@@ -1275,13 +1294,16 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     if drift > 64 {
         eprintln!(
             "skipped the kernel cross-check: AnonHugePages moved from {before} to {after} huge \
-             pages while the session ran, which is wider than the 8 % this is looking for. The \
-             tool said {theirs} and {ours}"
+             pages across the one round being checked, which is wider than the 8 % this is \
+             looking for. The tool said {theirs} and {ours}"
         );
         return;
     }
     let slack = drift + 4;
-    let (low, high) = (before.min(after) - slack, before.max(after) + slack);
+    let (low, high) = (
+        before.min(after).saturating_sub(slack),
+        before.max(after) + slack,
+    );
     for (backend, reported) in [("fs:sys", theirs), ("fs:proc", ours)] {
         assert!(
             (low..=high).contains(&reported),

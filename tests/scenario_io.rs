@@ -2429,9 +2429,23 @@ fn the_tracer_and_the_kernels_own_counter_see_the_same_requests() {
     // program for is counted as dropped, and was one page -- see
     // `a_known_number_of_direct_reads_is_found_one_for_one`.
     let dropped = losses(result)["dropped"].as_u64().expect("a drop count");
+    // Who the traced requests were credited to, for the failure that is still
+    // open (the flaky tally's #19, class d): a total miss, "0 bytes traced",
+    // whose cause the coordinator's measurement ruled one hypothesis out of.
+    // The counts say which task the reads went to when they did not go to the
+    // workload's thread.
+    let mut by_comm: BTreeMap<String, u64> = BTreeMap::new();
+    for attrs in &events {
+        let comm = attrs
+            .get("comm")
+            .and_then(|value| value.as_str())
+            .unwrap_or("(none)");
+        *by_comm.entry(comm.to_owned()).or_default() += 1;
+    }
     assert!(
         traced_bytes + dropped * PAGE as u64 >= (READS * PAGE) as u64,
-        "{} bytes traced for the {} the workload read, and {dropped} requests reported lost: {}",
+        "{} bytes traced for the {} the workload read, and {dropped} requests reported lost: \
+         {}; the traced requests by task: {by_comm:?}",
         traced_bytes,
         READS * PAGE,
         losses(result)
@@ -4439,11 +4453,26 @@ fn the_page_cache_sessions_say_what_their_headers_predict() {
     assert!(output.status.success(), "{}", stderr(&output));
     let document = json(&output);
     let heaviest = &output_of(result(&document, "cache"), "topk")["series"][0];
-    assert_eq!(
-        number(&heaviest["total"]),
-        4096.0,
-        "a 4096-page file read cold and then warm is 4096 misses: {heaviest}"
-    );
+    // Exact unless the run says it lost something: a skipped run of the
+    // program or a full ring is a miss nobody counted, reported in
+    // `losses.dropped` (the flaky tally's #18), and then only the ceiling
+    // holds.
+    let skipped = losses(result(&document, "cache"))["dropped"]
+        .as_u64()
+        .expect("a drop count") as f64;
+    let misses = number(&heaviest["total"]);
+    if skipped == 0.0 {
+        assert_eq!(
+            misses, 4096.0,
+            "a 4096-page file read cold and then warm is 4096 misses: {heaviest}"
+        );
+    } else {
+        assert!(
+            (0.0..=4096.0).contains(&misses),
+            "{skipped} losses reported, so fewer than 4096 misses may be counted, never more: \
+             {heaviest}"
+        );
+    }
     let file = heaviest["key"].as_str().expect("a series key");
     let ahead = series(output_of(result(&document, "ahead"), "rate"), file)
         .unwrap_or_else(|| panic!("io.readahead has a series for {file}"));
@@ -4453,14 +4482,36 @@ fn the_page_cache_sessions_say_what_their_headers_predict() {
     // unseen by the lookup tracepoint, and never negative.
     let windows = series(output_of(result(&document, "ahead"), "summary"), file)
         .unwrap_or_else(|| panic!("io.readahead summarises {file}"));
-    assert_eq!(
-        number(&windows["min"]),
-        -4096.0,
-        "the warm read looked up 4096 pages and filled none: {windows}"
-    );
+    let skipped_ahead = losses(result(&document, "ahead"))["dropped"]
+        .as_u64()
+        .expect("a drop count") as f64;
+    // A dropped record is a whole window of up to a read's worth of pages, not
+    // one page, so when the run reports any the exact figure is out of reach
+    // and only its sign and its floor are asserted -- measured once under the
+    // other streams' suites: 197 of 214 records lost to a full ring, and a
+    // warm window of -3584.
+    let warm = number(&windows["min"]);
+    if skipped_ahead == 0.0 {
+        assert_eq!(
+            warm, -4096.0,
+            "the warm read looked up 4096 pages and filled none: {windows}"
+        );
+    } else {
+        eprintln!(
+            "note: {skipped_ahead} readahead records were lost, so the warm window ({warm}) is \
+             bounded rather than exact"
+        );
+        assert!(
+            (-4096.0..0.0).contains(&warm),
+            "a warm read fills nothing, so its window is negative and no lower than the file: \
+             {windows}"
+        );
+    }
     let total = number(&ahead["total"]);
+    let exact = skipped_ahead == 0.0;
     assert!(
-        (-4096.0..=-4096.0 + FIRST_BATCHES_OF_SIXTEEN).contains(&total),
+        (!exact && total <= FIRST_BATCHES_OF_SIXTEEN)
+            || (-4096.0..=-4096.0 + FIRST_BATCHES_OF_SIXTEEN).contains(&total),
         "two whole reads of 4096 pages, one filling them, is -4096 and at most a cold read's \
          first batches above it: {ahead}, per window {windows}"
     );

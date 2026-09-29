@@ -361,12 +361,10 @@
     - "The procfs backend carries the counters every driver keeps. The long
        driver-specific list `ethtool -S` prints needs the ethtool netlink
        family, which is why that backend is first in the chain."
-    - "Counting them apart costs the aggregates: the event's value is the error
-       count, and drops, pause frames and the per-direction figures are
-       attributes beside it. So rate, timeline and summary answer about errors
-       alone, and a link dropping every frame it is given reads as zero through
-       all three. `raw` is where the other counters are, until the collector
-       emits one event per counter kind."
+    - "Apart, and all of them in every emit: each interface is one series per
+       counter kind, keyed `<iface>/errors`, `/drops`, `/fifo`, `/collisions`
+       and `/carrier`, whose value is frames. The `iface` field is the
+       interface alone, so a filter on it keeps every kind of that interface."
     - "These are counters, so a run reports the increment between two reads and
        its first read is a baseline that produces nothing."
 

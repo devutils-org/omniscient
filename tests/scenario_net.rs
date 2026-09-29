@@ -943,11 +943,12 @@ fn a_snapshot_beside_a_poll_is_still_a_single_read() {
             .expect("an event count")
     };
 
+    // One read of one interface, which is one event per counter kind -- the
+    // five series `net.iface` keeps apart.
     assert_eq!(
         seen("snapshotted"),
-        1,
-        "`snapshot` means one read, and the request beside it does not change that: \
-         {document}"
+        5,
+        "`snapshot` means one read, and the request beside it does not change that"
     );
     assert!(
         seen("polled") >= 5,
@@ -1562,18 +1563,35 @@ fn every_frame_a_down_peer_refuses_is_counted_as_a_drop_and_none_as_an_error() {
         .as_array()
         .expect("events")
     {
-        let attr = |name: &str| {
-            event["attrs"]
-                .as_array()
-                .expect("attributes")
+        let attrs = event["attrs"].as_array().expect("attributes");
+        let text = |name: &str| {
+            attrs
+                .iter()
+                .find(|attr| attr["name"] == name)
+                .and_then(|attr| attr["value"].as_str())
+                .unwrap_or_else(|| panic!("no `{name}` on {event}"))
+                .to_owned()
+        };
+        let number = |name: &str| {
+            attrs
                 .iter()
                 .find(|attr| attr["name"] == name)
                 .and_then(|attr| attr["value"].as_u64())
                 .unwrap_or_else(|| panic!("no `{name}` on {event}"))
         };
-        drops += attr("drops");
-        errors += attr("errors");
-        assert_eq!(attr("tx_dropped"), attr("drops") - attr("rx_dropped"));
+        assert_eq!(
+            text("iface"),
+            "veth0",
+            "the filter keeps veth0 alone: {event}"
+        );
+        match text("counter").as_str() {
+            "drops" => {
+                drops += number("frames");
+                assert_eq!(number("frames"), number("rx") + number("tx"));
+            }
+            "errors" => errors += number("frames"),
+            _ => {}
+        }
     }
 
     assert_eq!(
@@ -1587,36 +1605,17 @@ fn every_frame_a_down_peer_refuses_is_counted_as_a_drop_and_none_as_an_error() {
          as an error sends a reader looking for a cable"
     );
 
-    // And the finding the scenario also produces: the measured value of this
-    // source is errors, so every aggregating emit answers zero for a link that
-    // just lost a thousand frames. That is still true -- errors and drops are
-    // kept apart on purpose, and the catalog's caveat says so -- but it is no
-    // longer silent.
+    // And every aggregate reaches them now: each counter kind is its own
+    // series, so the rate over the drops series is the datagrams, exactly,
+    // and the errors series beside it is zero. It used to be one series whose
+    // value was errors, and a link that had just lost a thousand frames read
+    // `0 count/s` (net 5 in `docs/scenarios/net.md`).
     assert_eq!(
-        rate_total(result, "iface:veth0"),
-        0.0,
-        "the rate stopped reporting errors alone; if drops are now in it, update the \
-         \"Defects found\" section of docs/scenarios/net.md"
+        rate_total(result, "iface:veth0/drops"),
+        DATAGRAMS as f64,
+        "the rate over veth0's drops"
     );
-    let said = result["degradations"]
-        .as_array()
-        .map(|lines| {
-            lines
-                .iter()
-                .filter_map(|line| line.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    assert!(
-        said.contains("veth0") && said.contains(&format!("{DATAGRAMS} drops")),
-        "a rate of zero over {DATAGRAMS} dropped frames has to say what it is leaving out, and \
-         the run says:\n{said}"
-    );
-    assert!(
-        said.contains("every emit but `raw`"),
-        "the note has to say where the number it is leaving out can be read:\n{said}"
-    );
+    assert_eq!(rate_total(result, "iface:veth0/errors"), 0.0);
 }
 
 /// A snapshot of the accept queue reports the counters the kernel holds.
@@ -1807,11 +1806,12 @@ impl Drop for OwnedListener {
 /// select exactly one connection, and every event it keeps has to carry that
 /// port.
 ///
-/// The address does not work the same way, and that is a finding rather than a
-/// lesson. `daddr` carries the address *and* the port -- `127.0.0.1:40123` --
-/// so an equality against an address matches nothing, forever, and the run
-/// reports having kept zero of six hundred events without saying why. `=~`
-/// finds them. Recorded in `docs/scenarios/net.md`.
+/// The address has to work the same way. `daddr` used to carry the address
+/// *and* the port -- `127.0.0.1:40123` -- so an equality against an address
+/// matched nothing, forever, and the run reported having kept zero of six
+/// hundred events without saying why (net 6 in `docs/scenarios/net.md`). It is
+/// the address alone now, and the equality has to find at least the
+/// connection the port found.
 #[test]
 fn a_filter_on_a_declared_field_selects_the_connection_the_scenario_made() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -1868,23 +1868,27 @@ fn a_filter_on_a_declared_field_selects_the_connection_the_scenario_made() {
         );
     }
 
-    // The same connection, asked for by address. The attribute it compares
-    // against is `127.0.0.1:<port>`, so this can never match.
+    // The same connection, asked for by address: every loopback connection on
+    // the machine is in this set, so it contains at least the one above.
     let by_address = kept("daddr == '127.0.0.1'");
-    assert_eq!(
-        by_address["events_seen"].as_u64(),
-        Some(0),
-        "`daddr ==` started matching; if the attribute is now the address alone, update this \
-         assertion and the \"Defects found\" section of docs/scenarios/net.md"
-    );
-
-    // And the way that does work, which has to find at least the connection
-    // above, since every loopback connection on the machine is in this set.
-    let by_pattern = kept("daddr =~ '127.0.0.1'");
     assert!(
-        by_pattern["events_seen"].as_u64().unwrap_or(0) >= events.len() as u64,
-        "matching the address as a pattern found fewer connections than matching the port"
+        by_address["events_seen"].as_u64().unwrap_or(0) >= events.len() as u64,
+        "an equality against the address found fewer connections than the port did: {}",
+        by_address["events_seen"]
     );
+    for event in by_address["outputs"][0]["events"]
+        .as_array()
+        .expect("the events the filter kept")
+    {
+        let daddr = event["attrs"]
+            .as_array()
+            .expect("attributes")
+            .iter()
+            .find(|attr| attr["name"] == "daddr")
+            .and_then(|attr| attr["value"].as_str())
+            .expect("a destination address");
+        assert_eq!(daddr, "127.0.0.1", "the address alone, no port: {event}");
+    }
 
     drop(client);
     drop(server);
@@ -2181,22 +2185,41 @@ fn the_ebpf_leg_of_the_sweep_answers_with_every_emit_it_promised() {
     }
 }
 
-/// The three pairs the catalog implies and the mode x emit matrix refuses.
+/// The pairs the catalog implies and the mode x emit matrix refuses.
 ///
 /// An entry lists its modes and its emits as two flat lists, so it promises
 /// their cross product; the matrix is narrower than that, and the difference is
-/// a promise nobody can collect. These three are correct refusals -- a ranking
-/// over a window that produced one measurement per series, and a histogram of
-/// the same -- and they are pinned so that a fourth cannot arrive quietly.
+/// a promise nobody can collect. `net.softirq`'s histogram over a counted
+/// window is a correct refusal -- one measurement per series is no
+/// distribution -- and it is pinned so that another cannot arrive quietly.
+///
+/// Two more were recorded here while `count` could not rank: `topk` over
+/// `net.tcp.retransmit` and `net.drops` in `count`. Stream R's thirteenth wave
+/// lets it (`ModeKind::Count` admits `topk`), so the two are expected exactly
+/// when the build's own matrix still refuses them, and the test holds on both
+/// sides of that merge.
 #[test]
-fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_three_recorded() {
-    const RECORDED: &[(&str, &str, &str)] = &[
-        ("net.tcp.retransmit", "count", "topk"),
-        ("net.drops", "count", "topk"),
-        ("net.softirq", "count", "hist"),
-    ];
+fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_ones_recorded() {
+    use omn::catalog::Catalog;
+    let catalog = Catalog::embedded().expect("the embedded catalog");
+    let counting_ranks = catalog
+        .get(&"net.drops".parse().expect("a source id"))
+        .expect("net.drops is in the catalog")
+        .modes
+        .iter()
+        .find(|mode| mode.as_str() == "count")
+        .expect("net.drops counts")
+        .valid_emits()
+        .iter()
+        .any(|emit| emit.as_str() == "topk");
+    let mut recorded: Vec<(&str, &str, &str)> = Vec::new();
+    if !counting_ranks {
+        recorded.push(("net.tcp.retransmit", "count", "topk"));
+        recorded.push(("net.drops", "count", "topk"));
+    }
+    recorded.push(("net.softirq", "count", "hist"));
 
-    for (source, mode, emit) in RECORDED {
+    for (source, mode, emit) in &recorded {
         let outcome = omn(&[
             source,
             "--system",
@@ -2224,8 +2247,6 @@ fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_three_recorded()
     // And every other pair these five entries imply is one a request can
     // actually ask for. A new refusal appearing here is a promise the catalog
     // now makes and no request can collect.
-    use omn::catalog::Catalog;
-    let catalog = Catalog::embedded().expect("the embedded catalog");
     let mut refused = Vec::new();
     for id in [
         "net.tcp.lifetime",
@@ -2245,7 +2266,7 @@ fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_three_recorded()
             }
         }
     }
-    let recorded: Vec<(&str, String, String)> = RECORDED
+    let recorded: Vec<(&str, String, String)> = recorded
         .iter()
         .map(|(source, mode, emit)| (*source, (*mode).to_owned(), (*emit).to_owned()))
         .collect();
@@ -4090,8 +4111,13 @@ fn every_packet_through_a_discipline_is_in_a_row_or_a_counted_loss_on_a_short_ti
         .stderr(Stdio::piped())
         .spawn()
         .expect("omn should run");
+    // A device name of this process's own. The tracepoints see every
+    // namespace, and another checkout's suite running this same scenario at
+    // the same moment makes an `omnq0` of its own: measured, 708253 dequeues
+    // counted for 632000 sent, and alone it passes.
+    let device = format!("omnq{}", std::process::id() % 100_000);
     let workload = workload_in_a_namespace(
-        "set -e
+        &"set -e
          ip link add omnq0 type dummy
          tc qdisc add dev omnq0 root netem limit 1000000
          ip addr add 10.99.0.1/24 dev omnq0
@@ -4116,7 +4142,8 @@ for _ in range(4):
 for _ in range(4):
     os.wait()
 os.close(writer)
-print(\"omn-sent\", sum(int(line) for line in os.fdopen(reader).read().split()))'",
+print(\"omn-sent\", sum(int(line) for line in os.fdopen(reader).read().split()))'"
+            .replace("omnq0", &device),
     );
     let built = workload
         .wait_with_output()
@@ -4145,7 +4172,7 @@ print(\"omn-sent\", sum(int(line) for line in os.fdopen(reader).read().split()))
     let counted: u64 = raw_events(&run, "net.qdisc")
         .iter()
         .map(attrs)
-        .filter(|attributes| attributes["iface"].as_str() == Some("omnq0"))
+        .filter(|attributes| attributes["iface"].as_str() == Some(device.as_str()))
         .map(|attributes| attributes["count"].as_u64().expect("a count"))
         .sum();
     let losses = &labelled(&run, "net.qdisc")["losses"];

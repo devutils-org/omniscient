@@ -332,6 +332,11 @@
   filter_fields: [dev]
   determinism: low
   caveats:
+    - "`pages` is the flusher's budget spent -- what the filesystem reported to
+       writeback control -- not a count of pages written, and it is not all of
+       writeback: a sync of one file, an fsync and a direct write never go
+       through a flusher round. Measured on btrfs over 5 s: 66 953 pages of
+       rounds against the 264 948 the kernel's own `nr_written` counted."
     - "Writeback runs in a kworker: the originating task context is gone.
        Evidence is KEY (file:dev+ino), never IDENTITY."
 
