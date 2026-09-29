@@ -37,15 +37,20 @@ annotated in place with `evidence_means`.
 - `ts_err_ns`: a timestamp converted from another clock, known only to within it.
 - `missing` on every answer: what this answer itself leaves out.
 
-Nothing here changes the machine. `plan_session` says what a session would \
-cost and degrade without running it; `run_session` runs one only when the \
-person who started this server allowed it, never a session that launches a \
-program.";
+Nothing here changes the machine unless the person who started this server \
+said so. `plan_session` says what a session would cost and degrade without \
+running it; `run_session` runs one only with --allow-run, bounded by it. A \
+session that launches a program runs only if that person wrote it and put it in \
+the directory they passed with --allow-launch: `list_approved` lists those, and \
+`approved` names one. What such a session runs is the file's, never the call's.";
 
 pub struct Config {
     pub dir: PathBuf,
     pub omn: PathBuf,
     pub allow_run: Option<Duration>,
+    /// The directory of session files the person who started the server
+    /// approved, whose launch targets may run.
+    pub allow_launch: Option<PathBuf>,
 }
 
 impl Config {
@@ -53,6 +58,7 @@ impl Config {
         let mut dir = None;
         let mut omn = None;
         let mut allow_run = None;
+        let mut allow_launch = None;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| args.next().ok_or_else(|| format!("{flag} needs a value"));
             match arg.as_str() {
@@ -68,14 +74,31 @@ impl Config {
                     }
                     allow_run = Some(duration);
                 }
+                "--allow-launch" => {
+                    allow_launch = Some(PathBuf::from(value("--allow-launch")?));
+                }
                 "-h" | "--help" => return Err("omn-mcp".into()),
                 other => return Err(format!("unknown argument `{other}`")),
             }
         }
+        let allow_launch = match (allow_launch.map(absolute), allow_run) {
+            (Some(_), None) => {
+                return Err(
+                    "--allow-launch means something only with --allow-run: it says which \
+                     sessions may launch a program, and without --allow-run none runs at all"
+                        .into(),
+                )
+            }
+            (Some(dir), Some(_)) if !dir.is_dir() => {
+                return Err(format!("--allow-launch {}: not a directory", dir.display()))
+            }
+            (launch, _) => launch,
+        };
         Ok(Self {
             dir: absolute(dir.unwrap_or_else(|| PathBuf::from("."))),
             omn: omn.map(absolute).unwrap_or_else(Binary::beside_this_server),
             allow_run,
+            allow_launch,
         })
     }
 }
@@ -203,6 +226,7 @@ impl Server {
             "list_runs" => Ok(self.list_runs()),
             "read_run" => self.read_run(&arguments),
             "plan_session" => self.plan_session(&arguments),
+            "list_approved" => self.list_approved(),
             "run_session" => self.run_session(&arguments),
             other => return Err(RpcError::invalid_params(format!("no tool `{other}`"))),
         };
@@ -338,9 +362,52 @@ impl Server {
     }
 
     fn plan_session(&self, arguments: &Value) -> Result<Value, String> {
-        let source =
-            Source::from_arguments(arguments, &std::env::current_dir().unwrap_or_default())?;
-        session::plan(&self.catalog, &self.binary, &source)
+        let source = Source::from_arguments(
+            arguments,
+            &std::env::current_dir().unwrap_or_default(),
+            self.config.allow_launch.as_deref(),
+        )?;
+        session::plan(&self.catalog, &self.binary, &source, self.launch_allowed())
+    }
+
+    /// Whether an approved session may launch its program here.
+    fn launch_allowed(&self) -> bool {
+        self.config.allow_run.is_some() && self.config.allow_launch.is_some()
+    }
+
+    /// `list_approved`: the sessions of the `--allow-launch` directory, each
+    /// with what `plan_session` says of it.
+    fn list_approved(&self) -> Result<Value, String> {
+        let Some(dir) = self.config.allow_launch.as_deref() else {
+            return Err(
+                "refused: this server was started without --allow-launch, so it approves no \
+                 session; a session that launches a program is for a person to run with \
+                 `omn -f`, or to put in the directory they pass with --allow-launch DIR"
+                    .into(),
+            );
+        };
+        let sessions: Vec<Value> = Source::every_approved(dir)
+            .into_iter()
+            .map(|(name, source)| match source {
+                Ok(source) => {
+                    match session::plan(&self.catalog, &self.binary, &source, self.launch_allowed())
+                    {
+                        Ok(plan) => json!({"approved": name, "plan": plan}),
+                        Err(error) => json!({"approved": name, "unreadable": error}),
+                    }
+                }
+                Err(error) => json!({"approved": name, "refused": error}),
+            })
+            .collect();
+        Ok(json!({
+            "dir": dir.display().to_string(),
+            "sessions": sessions,
+            "missing": if sessions.is_empty() {
+                json!([format!("no session file (yaml, yml, json or toml) under {}", dir.display())])
+            } else {
+                json!([])
+            },
+        }))
     }
 
     fn run_session(&mut self, arguments: &Value) -> Result<Value, String> {
@@ -361,8 +428,11 @@ impl Server {
             .get("budget")
             .and_then(Value::as_str)
             .ok_or("`budget` is required: the overhead ceiling, as a percentage (`2%`)")?;
-        let source =
-            Source::from_arguments(arguments, &std::env::current_dir().unwrap_or_default())?;
+        let source = Source::from_arguments(
+            arguments,
+            &std::env::current_dir().unwrap_or_default(),
+            self.config.allow_launch.as_deref(),
+        )?;
         self.runs_started += 1;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -377,7 +447,10 @@ impl Server {
             &self.catalog,
             &self.binary,
             &source,
-            RunLimit { longest },
+            RunLimit {
+                longest,
+                launch_allowed: self.launch_allowed(),
+            },
             duration,
             budget,
             &out,
@@ -547,6 +620,10 @@ fn session_properties() -> Value {
             "enum": ["yaml", "json", "toml"],
             "description": "The format of `session`; yaml when absent",
         },
+        "approved": {
+            "type": "string",
+            "description": "One of the approved sessions, by the name `list_approved` gives it: a file of the directory the server was started with --allow-launch. The only kind of session that may launch a program",
+        },
     })
 }
 
@@ -615,9 +692,16 @@ fn tools() -> Vec<Value> {
             "annotations": read_only,
         }),
         json!({
+            "name": "list_approved",
+            "title": "The sessions that may launch a program",
+            "description": "The session files of the directory the person who started this server passed with --allow-launch, each with what `plan_session` says of it. These are the only sessions `run_session` lets launch a program, named by `approved`; what they run is the file's, and nothing in a call changes it.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": read_only,
+        }),
+        json!({
             "name": "run_session",
             "title": "Run one bounded session",
-            "description": "Runs a session through the omn binary for a bounded duration under a budget, and reads the run back. Only when the server was started with --allow-run, only up to the duration it allows, and never a session that launches a program: it observes targets that already exist.",
+            "description": "Runs a session through the omn binary for a bounded duration under a budget, and reads the run back. Only when the server was started with --allow-run, only up to the duration it allows. A session that launches a program runs only when it is `approved`: a file of the --allow-launch directory, run as the file states it, from its own directory. Every other session observes targets that already exist.",
             "inputSchema": {
                 "type": "object",
                 "properties": run_properties,

@@ -41,6 +41,7 @@ A client configuration, for any MCP client that launches a server by command
 | `--dir DIR` | where runs are read from (any directory `omn -o` wrote, up to three levels down), and where an allowed run writes, under `DIR/mcp-runs/` | the current directory |
 | `--omn PATH` | the `omn` binary that answers every question about this machine | `omn` beside `omn-mcp`, which is where `make` puts it |
 | `--allow-run DURATION` | enables `run_session`, each run at most `DURATION` | absent: `run_session` refuses every call and says how it could be enabled |
+| `--allow-launch DIR` | with `--allow-run` only: the session files in `DIR` (and the directories under it), which the person starting the server wrote, may launch their programs; `list_approved` lists them and `approved: NAME` names one | absent: no session launches anything. Given without `--allow-run`, the server refuses to start |
 
 The protocol is MCP's JSON-RPC 2.0, one message per line. Revisions
 `2025-06-18`, `2025-03-26` and `2024-11-05` are spoken; a client asking for
@@ -60,6 +61,7 @@ for the model that restate what each "missing" field means.
 | `list_runs` | the runs under `--dir`: their requests and backends, why each stopped, which are lossy or carry a shortfall | no, the files |
 | `read_run` | one run, regrouped per request (below) | no, the files |
 | `plan_session` | a session validated here and resolved by `omn --dump-resolved`: per request the backend that would serve it, its rank in the chain, its cost band, what it degrades, what could not be verified, where its filter would run, and whether `run_session` would take it -- or the rejection, with whose it is | yes, the resolution is asked of `omn` |
+| `list_approved` | the session files of `--allow-launch DIR`, each with what `plan_session` says of it; a file that is not one (a link out of the directory) is listed with why | yes, each plan is asked of `omn` |
 | `run_session` | one bounded run through `omn`, read back | yes, and only when allowed |
 
 A refusal is a tool result with `isError: true` and the reason as its text,
@@ -156,7 +158,7 @@ binary and a server built from different catalogs. The protocol test still
 checks the totals against the text table's footer, which is a reference the
 server no longer reads.
 
-### `run_session` exists, opt-in, bounded, and never launches
+### `run_session` exists, opt-in, bounded, and launches only what its owner wrote
 
 The brief left open whether a running tool exists at all. It does, under four
 conditions, and each is the reason it can exist without breaking boundary 5.
@@ -171,24 +173,60 @@ conditions, and each is the reason it can exist without breaking boundary 5.
    raise it -- and the run is passed `--duration` and `--budget`, which `omn`
    applies to every request and says so. The process is killed at twice the
    duration plus 30 s if it has not ended, and the answer says it was.
-3. **Never a launch target.** A session that launches a program runs whatever
-   the session names, with this user's rights. That is changing the machine,
-   not observing it, and it is the one thing a model must not be able to do
-   through this surface. Every other target kind -- a pid, a tid, a cgroup, a
-   cpu set, an interface, a container, the system -- names something that
-   already exists, and observing it is what `omn` does for a person. A launch
-   is for a person to run with `omn -f`; `plan_session` says ahead of time
-   which sessions `run_session` would refuse.
+3. **A launch only from a session its owner approved.** A session that
+   launches a program runs whatever the session names, with this user's
+   rights, and a model must never choose what code runs. Until the thirteenth
+   wave that meant no launch at all. Since then, the person starting the
+   server may pass `--allow-launch DIR` beside `--allow-run`: the session files
+   in `DIR` are theirs, and those -- and only those -- may launch. The model
+   chooses *which* approved session runs and *when* (`approved: NAME`), never
+   *what*: the file is read once, and the text that was checked is the text
+   `omn` runs, from the file's own directory, so its program, arguments and
+   relative paths are the file's; nothing in a call reaches them (a call
+   carries a duration and a budget, which only bound the run). A name is
+   refused when it is absolute, holds a `..` or a `.`, or resolves -- through a
+   link, the file's or a directory's -- outside `DIR`. A launching session
+   given inline or by `path` is refused as before, and the refusal says how to
+   allow it. Every other target kind -- a pid, a tid, a cgroup, a cpu set, an
+   interface, a container, the system -- names something that already exists
+   and runs from anywhere, as before.
 4. **It writes only under `--dir/mcp-runs/`,** and reads the run back through
    the same code as `read_run`, so what it answers is what is on disk.
 
 Why not drop it: a model that can only read what a person already ran cannot
 check its own hypothesis, and "ask for a measurement" is exactly what the
-roadmap grants. Why not let it launch: because "it reads; it does not run" is
-about the machine, and a launch is the machine running code a model chose. The
-observer effect remains -- a traced program runs differently, which the bench
-measured -- but that is true of every `omn` run and is what `cost.json`
-reports.
+roadmap grants. Why the launch is allowed now, and only so: benchmarking a
+program through an agent is running that program, and the person who wants it
+benchmarked is the one who can say which program and how. What boundary 5
+protects against is a model choosing the code; a directory of files the
+person wrote keeps that choice theirs. The observer effect remains -- a traced
+program runs differently, which the bench measured -- but that is true of
+every `omn` run and is what `cost.json` reports.
+
+### Benchmarking is repeated `run_session` calls, not a tool of its own
+
+Considered: one tool that runs an approved session N times, bounded and
+budgeted, and answers with each measurement's spread, judged the way the
+bench judges whether a median resolves (`docs/bench.md`). Not added, for
+three reasons.
+
+- **The server does not summarise.** Every answer here is a document `omn`
+  wrote, with what it is missing stated first. A spread computed by the
+  server is a number no document carries, and each run's own losses, cost and
+  degradations would have to be folded into it or dropped. N calls give N
+  documents, each read back whole; a model computes the spread from them, and
+  can see which run lost events.
+- **The bench's verdict needs what the server cannot promise.** Its gate
+  refuses a loaded machine and it wants a release binary; `scripts/bench.sh`
+  is not exposed, and a tool that borrowed its notion of "resolves" without its
+  gate would lend a quiet-machine verdict to a busy one.
+- **The bound stays per run.** `--allow-run` bounds one run; a tool of N runs
+  would need a second bound nobody asked for, and a stdio server held for N
+  times the duration.
+
+What a model does instead: `list_approved`, then `run_session` with
+`approved: NAME` as many times as it wants, each answer naming its run so
+`read_run` reads it again.
 
 ### Verbatim, regrouped, with two documented additions
 
@@ -224,11 +262,12 @@ account.
 | `every_number_of_a_run_comes_back_unchanged` | `join-decompose-compute` (six sources, a wakeup join, a decomposition) | every result, resolved request and cost equal to the files after removing the two additions, and the joins and decompositions too; 1346 numbers in the three files; the resources are the files byte for byte |
 | `an_answer_cut_short_says_how_short` | `join-between-residency` | `max_events: 2` keeps a verbatim prefix, `elided` counts the document's events, one `missing` line per cut |
 | `a_lossy_run_answers_with_its_shortfall` | `cross-compute-lossy-profile` (100 kHz, past `kernel.perf_event_max_sample_rate`) | the run was lossy (on the development machine: 29310 dropped, 45 throttled, 53.5 % unaccounted for); narrowed to one label with its raw events cut to one, the answer still carries the dropped and throttled counts, the reasons, and every `short` mark unchanged; `list_runs` marks it; narrowing says it left the joins out. Skips loudly, with the sample-rate limit, if the profile lost nothing |
-| `identity_and_temporal_never_read_alike` | `join-between-residency` (`between`, TEMPORAL) and `vertical-one-request` (IDENTITY rows) | every `evidence` has an `evidence_means` naming the same level; TEMPORAL is rank 1 and says hypothesis, IDENTITY rank 4, and no field of the two is equal. The IDENTITY half skips loudly without the vertical server `make` builds |
+| `identity_and_temporal_never_read_alike` | one session per rung: `join-between-residency` (TEMPORAL), `sched-wakeup` (WAKEUP), `cross-memory-which-allocation` (KEY), `vertical-one-request` (IDENTITY) | every `evidence` has an `evidence_means` naming the same level, with exactly `omn::join::Evidence`'s sentences and rank; each run carries the level it was chosen for; no two levels share a rank or a sentence. A rung the machine cannot produce skips loudly by name |
 | `a_timestamp_from_another_clock_keeps_its_error` | `runtime-jit` (node writing its perf map; every line known only to within the gap between two reads) | every `ts_err_ns` unchanged, and `timestamp_error.worst_ts_err_ns` is the file's largest (about 8.6 ms here). Skips loudly without node |
 | `the_sweep_is_the_one_the_binary_that_runs_gives` | `omn list` | totals, read from `omn list --format json`, equal to the text table's own footer; the capabilities equal to `getcap`'s reading; and the separation: the same binary copied without its capabilities answers fewer available sources, and its `missing` names both capabilities |
 | `a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing` | a session whose program would `touch` a marker | the marker does not exist after planning; backend, rank, cost band, degradations and chain equal `omn --dump-resolved`'s; the band says it is a declaration and cites finding 47; `run_session` is announced as refusing it; an invalid session is rejected by field with its label, and the machine is not asked |
 | `a_call_that_would_change_the_machine_is_refused` | the same marker, through `run_session` | refused without `--allow-run`; with it, refused for the launch; a duration over the bound and a missing budget refused; run names and resource URIs that climb out of `--dir` refused; no marker, no run directory |
+| `only_a_session_its_owner_approved_launches_a_program` | a python program that touches a marker, writes a file relative to where it runs, and says how many descriptors it holds (`FDS 20`) | `--allow-launch` without `--allow-run` refuses to start; without `--allow-launch` the approved session and `list_approved` are refused; with it, the same session inline, by a path outside `DIR`, and by `../outside.yml`, an absolute name, `./counted.yml`, an empty name and a link in `DIR` to a file outside are each refused, and no marker and no run exist; `list_approved` lists the session with its plan (`allowed: true`) and the link as refused; `run_session` with `approved: counted.yml` runs it: the marker exists, the relative file is in `DIR`, and the summary's max is the program's own count, with losses and measured cost |
 | `a_bounded_run_over_an_existing_process_reads_back_what_the_process_reports` | a python process holding 17 extra descriptors that counts its own (`FDS 20`) and spins | `run_session` with `proc.fd` on its pid, 1 s, 5 %: the summary's min and max are the process's own count, it stopped because the duration elapsed, the cost is measured; reading the run again gives the files unchanged |
 
 And seven unit tests: the ladder is `Evidence`'s own order and serialisation,
@@ -268,7 +307,8 @@ this one).
   the server's working directory, and a session's own relative paths (a
   workload script) are relative to where `omn` runs, which is the same
   directory. A client that starts the server elsewhere should pass absolute
-  paths.
+  paths. An `approved` session is the exception: it runs from its own
+  directory.
 - **Resources do not notify.** `listChanged` is false; `list_runs` is the way
   to see a run that appeared since.
 
@@ -286,7 +326,8 @@ they are. No row for `examples/README.md` or `GUIDE.md`.
 | Decision | Choice | Reason |
 |---|---|---|
 | Who answers a machine question asked through MCP | **The `omn` binary that would run the session.** The server probes nothing and holds no capability; every machine-dependent answer names the binary and the capabilities on it. Validation, which is machine-independent, runs on the library. | A probe answers for the process that asks. A copy of `omn` without its capabilities answered 52 usable sources against 93, silently -- the relink failure, one binary over. |
-| Whether a model may run a session | **Yes, when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **never a session that launches a program**. | Asking for a measurement is what phase 11 grants; running a program a model chose is changing the machine (boundary 5). The opt-in is `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
+| Whether a model may run a session | **Yes, when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **a session that launches a program only when it is a file of the directory that person passed with `--allow-launch DIR`**, run as the file states it, from its own directory (amended in the thirteenth wave; before it, never). | Asking for a measurement is what phase 11 grants; a model choosing the code that runs is changing the machine (boundary 5). A directory of files the person wrote keeps that choice theirs: the model picks which approved session and when, never what. The opt-in is `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
+| Whether benchmarking gets its own tool | **No: repeated `run_session` calls on an approved session.** | The server does not summarise, the bench's verdict needs a quiet machine and a release binary the server cannot promise, and N documents keep each run's losses and cost where a spread would drop them. |
 | What an answer is | **The documents as written, regrouped per request**, with each request's losses, shortfalls, degradations, unverified requirements and timestamp error restated first, and exactly two additions: `evidence_means` beside every evidence level and `elided` where raw events were cut, counted in `missing`. | Every field a shaped answer leaves out is a place a shortfall falls through. `IDENTITY` and `TEMPORAL` are one word each in a document; beside each, what it establishes and does not is what keeps them from reading alike. |
 
 ## Filed for another stream

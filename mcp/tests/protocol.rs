@@ -423,38 +423,77 @@ fn a_lossy_run_answers_with_its_shortfall() {
     );
 }
 
+/// Every evidence level a real session's joins produce, read back through
+/// the server with the engine's own sentence for it.
+///
+/// Four sessions, one per rung: `between` (TEMPORAL), a wakeup chain
+/// (WAKEUP), an allocation's range (KEY) and the vertical case's propagated
+/// request id (IDENTITY). Each level the documents carry must be annotated
+/// with exactly what `omn::join::Evidence` says of it, and no two levels may
+/// read alike. A rung this machine cannot produce -- no `CAP_BPF` for the
+/// wakeup chain, no preload shim for the allocations, the vertical server not
+/// built -- is skipped by name, and the rest still run.
 #[test]
 fn identity_and_temporal_never_read_alike() {
+    use omn::join::Evidence;
+
     let dir = scratch("evidence");
     run_example("join-between-residency", &dir.join("temporal"));
+    let mut runs = vec![("temporal", Evidence::Temporal)];
+    for (example, run, level) in [
+        ("sched-wakeup", "wakeup", Evidence::Wakeup),
+        ("cross-memory-which-allocation", "key", Evidence::Key),
+    ] {
+        let output = Command::new(omn())
+            .current_dir(repo())
+            .args([
+                "-f",
+                &format!("examples/{example}.yml"),
+                "--format",
+                "json",
+                "-o",
+            ])
+            .arg(dir.join(run))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        if output.status.success() {
+            runs.push((run, level));
+        } else {
+            eprintln!(
+                "SKIP ({level}): examples/{example}.yml cannot run here, so no {level} join is \
+                 read back:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
     let server = repo().join("target/omn-vertical/server");
-    let vertical = server.is_file();
-    if vertical {
+    if server.is_file() {
         run_example("vertical-one-request", &dir.join("identity"));
+        runs.push(("identity", Evidence::Identity));
     } else {
         eprintln!(
-            "SKIP (half): {} is not built, so no IDENTITY row can be produced here; `make` \
-             builds it. The TEMPORAL half still runs.",
+            "SKIP (IDENTITY): {} is not built, so no IDENTITY row can be produced here; `make` \
+             builds it",
             server.display()
         );
     }
 
     let mut client = Client::over(&dir);
     let mut seen = std::collections::BTreeMap::new();
-    for run in ["temporal", "identity"]
-        .iter()
-        .take(if vertical { 2 } else { 1 })
-    {
+    for (run, level) in &runs {
         let answer = client.call("read_run", json!({"run": run, "max_events": 0}));
         assert_run_unchanged(&answer, &dir.join(run));
+        let mut levels = std::collections::BTreeSet::new();
         let mut stack = vec![answer.clone()];
         while let Some(value) = stack.pop() {
             match value {
                 Value::Object(object) => {
-                    if let Some(Value::String(level)) = object.get("evidence") {
+                    if let Some(Value::String(word)) = object.get("evidence") {
                         let means = &object["evidence_means"];
-                        assert_eq!(&means["level"], level, "{means}");
-                        seen.insert(level.clone(), means.clone());
+                        assert_eq!(&means["level"], word, "{means}");
+                        levels.insert(word.clone());
+                        seen.insert(word.clone(), means.clone());
                     }
                     stack.extend(object.into_iter().map(|(_, child)| child));
                 }
@@ -462,9 +501,33 @@ fn identity_and_temporal_never_read_alike() {
                 _ => {}
             }
         }
+        assert!(
+            levels.contains(level.as_str()),
+            "the `{run}` run was chosen for its {level} join, and carries only {levels:?}"
+        );
         assert_eq!(answer["evidence_ladder"].as_array().unwrap().len(), 4);
     }
-    let temporal = seen.get("TEMPORAL").expect("the between join is TEMPORAL");
+
+    for (word, means) in &seen {
+        let level: Evidence = serde_json::from_value(Value::String(word.clone())).unwrap();
+        assert_eq!(means["establishes"], level.establishes(), "{word}");
+        assert_eq!(
+            means["does_not_establish"],
+            level.does_not_establish(),
+            "{word}"
+        );
+        let rank = Evidence::LADDER
+            .iter()
+            .position(|rung| *rung == level)
+            .unwrap()
+            + 1;
+        assert_eq!(
+            means["rank"],
+            format!("{rank} of 4, weakest first"),
+            "{word}"
+        );
+    }
+    let temporal = &seen["TEMPORAL"];
     assert!(
         temporal["establishes"]
             .as_str()
@@ -472,16 +535,18 @@ fn identity_and_temporal_never_read_alike() {
             .contains("hypothesis"),
         "{temporal}"
     );
-    assert_eq!(temporal["rank"], "1 of 4, weakest first");
-    if vertical {
-        let identity = seen
-            .get("IDENTITY")
-            .expect("the vertical case has IDENTITY rows");
-        for field in ["rank", "establishes", "does_not_establish"] {
-            assert_ne!(temporal[field], identity[field], "{field}");
+    let levels: Vec<&String> = seen.keys().collect();
+    for (index, left) in levels.iter().enumerate() {
+        for right in &levels[index + 1..] {
+            for field in ["rank", "establishes", "does_not_establish"] {
+                assert_ne!(
+                    seen[*left][field], seen[*right][field],
+                    "{left} and {right}: {field}"
+                );
+            }
         }
-        assert_eq!(identity["rank"], "4 of 4, weakest first");
     }
+    eprintln!("read back with its sentence: {levels:?}");
 }
 
 #[test]
@@ -788,4 +853,165 @@ fn a_bounded_run_over_an_existing_process_reads_back_what_the_process_reports() 
     let name = answer["run"].as_str().unwrap();
     let again = client.call("read_run", json!({"run": name, "max_events": 0}));
     assert_run_unchanged(&again, &dir.join(name));
+}
+
+/// `--allow-launch`: a session its owner put in the approved directory
+/// launches its program, as the file states it, and no other session does.
+///
+/// The program touches a marker only it would write, and says on stderr how
+/// many descriptors it holds by its own count. Through `run_session` the
+/// approved session runs from its own directory (a relative marker lands
+/// there), and the answer carries the program's count unchanged, with the
+/// run's losses and cost. The same text inline, the same file named by a
+/// path outside the directory, a name that climbs out of it, and a link in
+/// it to a file outside, are each refused and write nothing; and without
+/// `--allow-launch` even the approved session is refused.
+#[test]
+fn only_a_session_its_owner_approved_launches_a_program() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("SKIP: the launched program is a python3 one; this machine has no python3");
+        return;
+    }
+    let dir = scratch("launch");
+    let approved = dir.join("approved");
+    std::fs::create_dir_all(&approved).unwrap();
+    let marker = dir.join("the-program-ran");
+    let text = format!(
+        "requests:\n  - label: descriptors\n    source: proc.fd\n    target:\n      launch:\n        \
+         - python3\n        - -c\n        - |\n          import os, sys, time\n          \
+         open('ran-here', 'w').close()\n          open('{}', 'w').close()\n          \
+         held = [open('/dev/null') for _ in range(17)]\n          \
+         sys.stderr.write('FDS %d\\n' % (len(os.listdir('/proc/self/fd')) - 1))\n          \
+         sys.stderr.flush()\n          end = time.time() + 1.0\n          \
+         while time.time() < end: pass\n    mode: poll@50ms\n    emit: [summary]\n",
+        marker.display()
+    );
+    std::fs::write(approved.join("counted.yml"), &text).unwrap();
+    let outside = dir.join("outside.yml");
+    std::fs::write(&outside, &text).unwrap();
+    std::os::unix::fs::symlink(&outside, approved.join("linked.yml")).unwrap();
+    let dir_arg = dir.to_str().unwrap();
+    let approved_arg = approved.to_str().unwrap();
+
+    // --allow-launch alone is refused at startup: it means something only
+    // beside --allow-run.
+    let alone = Command::new(env!("CARGO_BIN_EXE_omn-mcp"))
+        .args(["--dir", dir_arg, "--allow-launch", approved_arg])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(alone.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&alone.stderr).contains("only with --allow-run"),
+        "{}",
+        String::from_utf8_lossy(&alone.stderr)
+    );
+
+    // Without --allow-launch, not even the approved session.
+    let mut runner = Client::start(&["--dir", dir_arg, "--allow-run", "5s"]);
+    let reason = runner.refused(
+        "run_session",
+        json!({"approved": "counted.yml", "duration": "3s", "budget": "50%"}),
+    );
+    assert!(reason.contains("without --allow-launch"), "{reason}");
+    let reason = runner.refused("list_approved", json!({}));
+    assert!(reason.contains("--allow-launch"), "{reason}");
+    drop(runner);
+
+    let mut client = Client::start(&[
+        "--dir",
+        dir_arg,
+        "--allow-run",
+        "5s",
+        "--allow-launch",
+        approved_arg,
+    ]);
+    // Inline, from a path outside the directory, by a name that climbs out,
+    // by an absolute name, and through a link out: all refused.
+    let reason = client.refused(
+        "run_session",
+        json!({"session": text, "duration": "3s", "budget": "50%"}),
+    );
+    assert!(reason.contains("--allow-launch"), "{reason}");
+    let reason = client.refused(
+        "run_session",
+        json!({"path": outside.to_str().unwrap(), "duration": "3s", "budget": "50%"}),
+    );
+    assert!(reason.contains("launch"), "{reason}");
+    for name in [
+        "../outside.yml",
+        outside.to_str().unwrap(),
+        "linked.yml",
+        "./counted.yml",
+        "",
+    ] {
+        let reason = client.refused(
+            "run_session",
+            json!({"approved": name, "duration": "3s", "budget": "50%"}),
+        );
+        assert!(
+            reason.contains("not an approved session"),
+            "{name}: {reason}"
+        );
+    }
+    assert!(!marker.exists(), "a refused call ran the program");
+    assert!(!approved.join("ran-here").exists());
+    assert!(!dir.join("mcp-runs").exists(), "a refused call wrote a run");
+
+    // Listed, with what plan_session says of it; the link is listed as
+    // refused rather than hidden.
+    let listed = client.call("list_approved", json!({}));
+    let sessions = listed["sessions"].as_array().unwrap();
+    let counted = sessions
+        .iter()
+        .find(|one| one["approved"] == "counted.yml")
+        .expect("the approved session is listed");
+    assert_eq!(
+        counted["plan"]["through_run_session"]["allowed"], true,
+        "{counted}"
+    );
+    let linked = sessions
+        .iter()
+        .find(|one| one["approved"] == "linked.yml")
+        .expect("the link is listed");
+    assert!(
+        linked["refused"].as_str().unwrap().contains("outside"),
+        "{linked}"
+    );
+
+    // And the approved one runs, from its own directory, and the answer
+    // carries the program's own count unchanged.
+    let answer = client.call(
+        "run_session",
+        json!({"approved": "counted.yml", "duration": "3s", "budget": "50%"}),
+    );
+    assert_eq!(answer["exit"], 0, "{answer}");
+    assert!(
+        marker.exists(),
+        "the approved session's program did not run"
+    );
+    assert!(
+        approved.join("ran-here").exists(),
+        "the program did not run from its session's own directory"
+    );
+    let held: f64 = answer["said_by_omn"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|line| line.as_str()?.trim().strip_prefix("FDS ")?.parse().ok())
+        .next()
+        .unwrap_or_else(|| panic!("the program's own count is not in what omn said: {answer}"));
+    let request = &answer["read_back"]["requests"][0];
+    let series = &request["result"]["outputs"][0]["series"][0];
+    assert_eq!(series["max"], held, "{series}");
+    assert!(
+        request["what_it_is_missing"]["losses"].is_object(),
+        "{request}"
+    );
+    assert!(
+        request["cost"]["measured_percent"].is_number(),
+        "{}",
+        request["cost"]
+    );
+    assert_eq!(answer["approved"]["name"], "counted.yml");
 }

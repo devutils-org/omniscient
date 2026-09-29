@@ -10,8 +10,9 @@
 //!
 //! It reads; it does not run. The one tool that runs a session exists only
 //! when the person starting the server passes `--allow-run`, is bounded by
-//! what they passed, and refuses a session that would launch a program.
-//! `docs/mcp.md` has why.
+//! what they passed, and refuses a session that would launch a program --
+//! unless that person wrote the session and put it in the directory they
+//! passed with `--allow-launch`. `docs/mcp.md` has why.
 
 mod binary;
 mod evidence;
@@ -23,7 +24,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 const USAGE: &str = "\
-usage: omn-mcp [--dir DIR] [--omn PATH] [--allow-run DURATION]
+usage: omn-mcp [--dir DIR] [--omn PATH] [--allow-run DURATION [--allow-launch DIR]]
 
 An MCP server over stdio for what omn writes.
 
@@ -35,6 +36,11 @@ An MCP server over stdio for what omn writes.
   --allow-run DURATION  enables `run_session`, for sessions over targets that
                         already exist, each at most DURATION long (`10s`).
                         Absent, the tool refuses every call and says this.
+  --allow-launch DIR    with --allow-run: the session files in DIR, which you
+                        wrote, may launch their programs. A model picks which
+                        of them runs and when (`list_approved`, `approved`);
+                        the program, its arguments and its working directory
+                        are the file's. No other session may launch anything.
 ";
 
 fn main() {
