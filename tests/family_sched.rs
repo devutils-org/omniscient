@@ -684,6 +684,80 @@ fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
     );
 }
 
+/// A cpu target is that cpu's run queue: `sched.runqlat` declares `cpu:
+/// native`, and until the thirteenth wave its collector refused one. Three
+/// tasks pinned to one cpu queue there and nowhere else, so a run on that cpu
+/// keeps each of them for what the kernel's own `run_delay` says it waited --
+/// the same bracket as the test above -- and keeps no row of another cpu.
+#[test]
+fn a_cpu_target_is_that_cpus_run_queue() {
+    const EDGE_NS: u64 = 50_000_000;
+    let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
+    let name = workload_name("omncpuq");
+    let Some(load) = PinnedSpinners::start(3, &name) else {
+        eprintln!("skipped: this machine has no `taskset`, so no cpu can be contended");
+        return;
+    };
+    let cpu = PinnedSpinners::cpu().expect("a cpu").to_string();
+    let tids: Vec<u32> = load.0.iter().map(|child| child.id()).collect();
+    let before: Vec<Option<u64>> = tids.iter().map(|tid| run_delay_ns(*tid)).collect();
+    let bracket_opened = monotonic_ns();
+    let output = run(&[
+        "sched.runqlat",
+        "--cpu",
+        &cpu,
+        "--duration",
+        "1s",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+    ]);
+    let bracket = monotonic_ns() - bracket_opened;
+    let after: Vec<Option<u64>> = tids.iter().map(|tid| run_delay_ns(*tid)).collect();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    let result = &document["results"][0];
+    let elsewhere = result["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+        .filter(|event| {
+            event["attrs"]
+                .as_array()
+                .and_then(|attrs| attrs.iter().find(|attr| attr["name"] == "cpu"))
+                .and_then(|attr| attr["value"].as_u64())
+                != cpu.parse().ok()
+        })
+        .count();
+    assert_eq!(
+        elsewhere, 0,
+        "{elsewhere} rows of another cpu were kept:\n{text}"
+    );
+    let (waits, span) = waits_and_span(&output);
+    let outside = bracket.saturating_sub(span);
+    for ((tid, before), after) in tids.iter().zip(&before).zip(&after) {
+        let (Some(before), Some(after)) = (before, after) else {
+            eprintln!("skipped: /proc/{tid}/schedstat is not readable, and it is the reference");
+            return;
+        };
+        let kernel = after - before;
+        let measured = waits.get(&u64::from(*tid)).copied().unwrap_or(0);
+        assert!(
+            measured <= kernel + kernel / 100 + 1_000_000 && measured + outside + 2 * EDGE_NS >= kernel,
+            "task {tid}, pinned to cpu {cpu}, waited {kernel} ns there by the kernel's account \
+             over a bracket {outside} ns longer than the run, and {measured} ns were counted:\n{text}"
+        );
+    }
+}
+
 /// The bucket the kernel chose and the bucket the emit layer draws must be the
 /// same bucket.
 ///

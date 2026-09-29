@@ -488,6 +488,14 @@ Each checked against the code first; all five were open.
   them", and `a_predicate_the_program_carries_is_placed_in_the_kernel_...`
   asserts it (at least a hundred over a Python start-up).
 
+- **Found and fixed: `sched.runqlat --cpu`.** The entry declares `cpu:
+  native` and the collector refused every cpu target. A cpu target is that
+  cpu's queue: the program watches every task and the rows are kept for the
+  cpu each wait was served on, which is in the kernel's key, with a note
+  counting what was set aside. `family_sched::a_cpu_target_is_that_cpus_run_queue`:
+  three tasks pinned to one cpu are each counted for what their own
+  `run_delay` says they waited there, and no row of another cpu is kept.
+
 ## 4. The catalog's words
 
 - `sched.wakeup`'s interrupt caveat as stream D wrote it: **already on
@@ -552,6 +560,16 @@ defect of this stream's:
 | `cross_io::a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing` | the defect it pins is fixed; filed |
 | `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned` | stream P's; passed alone at once |
 | `scenario_net::a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone` | the tally's #17; passed alone at once |
+
+The second commit (`sched.runqlat --cpu`) had its own `make check`: red at
+two tests of the tally, `perf::tests::closing_a_group_gives_its_descriptors_back`
+and `collect::tests::weighing_a_run_costs_a_fraction_of_the_run` (#12), both
+passing alone at once; and its `--no-fail-fast`: **1919 passed, 4 failed** --
+the index row and `cross_io`'s pinned defect again, and
+`join_engine::a_half_blocked_task_decomposes_as_the_kernel_says_and_its_releaser_heads_the_chains`
+(529 of 600 wakeups folded in the top chain, nothing counted lost) and
+`scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not`, each
+passing alone at once, the first twice; both filed for the tally.
 
 `tests/scenario_sched.rs`, `family_sched.rs`, `scenario_proc.rs`,
 `family_proc.rs` and `raw_tracepoints.rs` passed whole, three times each for

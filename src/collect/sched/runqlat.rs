@@ -67,6 +67,14 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
+        // A cpu target is the queue of that cpu: the program watches every
+        // task, and the rows are kept for the cpu each wait was served on,
+        // which is in the kernel's key.
+        if let Target::Cpu(set) = target {
+            let mut collector = RunqLatCollector::new(Whose::Any, self.filter);
+            collector.cpus = Some(set.cpus().to_vec());
+            return Ok(Box::new(collector));
+        }
         let filter = super::whose(target, "a run queue wait is attributed per task")?;
         Ok(Box::new(RunqLatCollector::new(filter, self.filter)))
     }
@@ -76,6 +84,11 @@ pub struct RunqLatCollector {
     id: CollectorId,
     /// Whose waits are kept.
     filter: Whose,
+    /// The cpus whose queues are kept, for a cpu target; every cpu otherwise.
+    cpus: Option<Vec<u32>>,
+    /// Waits on the other cpus, which the program measured and the collector
+    /// set aside for a cpu target.
+    off_target: u64,
     program: Option<RunqLatProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
@@ -106,6 +119,8 @@ impl RunqLatCollector {
         Self {
             id: CollectorId::new("sched.runqlat/bpf:raw_tp"),
             filter,
+            cpus: None,
+            off_target: 0,
             program: None,
             losses: Losses::default(),
             skipped: 0,
@@ -162,6 +177,14 @@ impl RunqLatCollector {
         }
 
         for (index, row) in rows.into_iter().enumerate() {
+            if self
+                .cpus
+                .as_ref()
+                .is_some_and(|cpus| !cpus.contains(&row.cpu))
+            {
+                self.off_target += row.count;
+                continue;
+            }
             let event = Event {
                 // Stamped where the row's first wait began rather than at the
                 // drain that read it, which is finding 44: a join that opens on
@@ -347,6 +370,13 @@ impl Collector for RunqLatCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
+        if self.off_target > 0 {
+            notes.push(format!(
+                "{} waits on other cpus were measured and set aside: the programs run on every \
+                 cpu whatever `--cpu` says, so narrowing costs nothing less",
+                self.off_target
+            ));
+        }
         // What the predicate removed. The runner's own `Filtered` report is not
         // produced for a backend credited with kernel-side filtering, so
         // without this a request whose filter matched nothing looks exactly

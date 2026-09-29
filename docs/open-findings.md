@@ -7702,3 +7702,11 @@ name. A new program narrows with them rather than comparing a thread group.
   ("the lock layer was attached"), in one `--no-fail-fast` run; passed alone.
 - `cross_compute::every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it`
   (653 of 654), already in the tally; passed alone.
+- `join_engine::a_half_blocked_task_decomposes_as_the_kernel_says_and_its_releaser_heads_the_chains`
+  (`tests/join_engine.rs:913`, "the responder released the driver 600 times
+  and its chain folds 529, with 0 counted lost"), in one `--no-fail-fast` run
+  at load 20+; passed alone twice. Worth reading which chains the other 71
+  switches folded into: a preemption of the driver is a switch no wakeup
+  released, and a loaded machine makes more of them.
+- `scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not`,
+  in the same run; passed alone.
