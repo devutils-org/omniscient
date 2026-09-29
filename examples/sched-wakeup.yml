@@ -19,12 +19,21 @@
 # cannot say who released the block; `sched.wakeup` needs CAP_BPF and
 # CAP_PERFMON and is the only thing that can.
 #
-# Read the waker as evidence, not as proof. A wakeup issued from interrupt or
-# softirq context is credited to whatever was interrupted, so a process doing
-# nothing but sleeping appears to wake kernel workers and network daemons; a
-# waker of pid 0 is the idle task, which is what a timer expiry looks like.
-# That caveat travels with the measurement, and examples/sched-round-trips.yml
-# is where the wakers are unambiguous.
+# Read the waker as evidence, not as proof. A wakeup issued from a hard
+# interrupt, a softirq or an NMI has the interrupt as its waker -- `waker_tid`
+# 0 and `waker_context` naming which -- and the join below names it so:
+# `interrupt (hardirq) -> task:N` is a timer releasing a `sleep`, where
+# `task:0 (idle)` would be the idle task, which is what a waker of 0 with
+# `waker_context: task` is. A softirq served in a task's own `local_bh_enable`
+# is recorded as a softirq, though that task caused it.
+#
+# The join is the causal chain, two hops deep: each `sleep` child released by
+# the timer, and the shell released by each child's exit. `sched.switches`
+# is what the released task did next -- every switch of a task until it is
+# woken again is credited to whoever woke it -- so the table ranks who kept
+# whom running. `tests/join_engine.rs` checks both kinds of hop against the
+# loop's five children. examples/sched-round-trips.yml is where the wakers are
+# two threads of one program.
 name: what blocks this program, and who releases it
 requests:
   - label: wakeups
@@ -44,3 +53,14 @@ requests:
     mode: trace
     emit: [summary]
     keys: [task]
+
+joins:
+  - id: who-released-this
+    from: sched.wakeup
+    to: sched.switches
+    via: task
+    match: wakeup
+    waker: waker_tid
+    depth: 2
+    window: 1s
+    top: 12

@@ -1,0 +1,75 @@
+# Who released this thread: a timer, or another thread?
+#
+#   omn -f examples/join-interrupt-or-task.yml
+#
+# A wakeup has a waker, and a waker of 0 used to read as `task:0 (idle)` --
+# the idle task, which is what it is only when the wakeup was issued from task
+# context on a cpu that had nothing to run. A `nanosleep` ends in its hrtimer's
+# hard interrupt, and `sched.wakeup` says so since the twelfth wave: `waker_tid`
+# 0 with `waker_context: hardirq`. The chain says it too, and names the
+# interrupt as the interrupt:
+#
+#   CHAIN                                                  WAKEUPS   EVENTS
+#   interrupt (hardirq) -> task:MAIN                            20       ..
+#   interrupt (hardirq) -> task:HELPER -> task:MAIN             20       ..
+#
+# The first row is the main thread's twenty sleeps, each ended by its timer.
+# The second is its twenty reads of a pipe, each released by the helper
+# thread's write -- and two hops deep, the helper was itself released by its
+# own timer just before, which is the far end of the chain. A task that woke
+# the main thread from task context is named as a task.
+#
+# The property the workload chose, and states on stderr prefixed `omn-truth`:
+# the two thread ids, twenty sleeps, twenty releases through the pipe. The tool
+# reads none of it; `tests/join_engine.rs` holds the chains to it.
+name: a timer or a thread
+format: text
+
+requests:
+  - label: wakeups
+    source: sched.wakeup
+    target: &sleeper
+      launch:
+        - python3
+        - -c
+        - |
+          import os, sys, threading, time
+          SLEEPS = RELEASES = 20
+          read_end, write_end = os.pipe()
+          ready = threading.Event()
+          helper_tid = []
+          def helper():
+              helper_tid.append(threading.get_native_id())
+              ready.wait()
+              for _ in range(RELEASES):
+                  time.sleep(0.003)
+                  os.write(write_end, b"x")
+          thread = threading.Thread(target=helper)
+          thread.start()
+          for _ in range(SLEEPS):
+              time.sleep(0.002)
+          ready.set()
+          for _ in range(RELEASES):
+              os.read(read_end, 1)
+          thread.join()
+          print(f"omn-truth main={threading.get_native_id()} helper={helper_tid[0]} "
+                f"sleeps={SLEEPS} releases={RELEASES}", file=sys.stderr)
+    mode: trace
+    emit: [summary]
+
+  - label: switches
+    source: sched.switches
+    target: *sleeper
+    mode: trace
+    emit: [summary]
+
+joins:
+  - id: timer-or-thread
+    from: sched.wakeup
+    to: sched.switches
+    via: task
+    match: wakeup
+    waker: waker_tid
+    depth: 2
+    window: 1s
+    top: 20

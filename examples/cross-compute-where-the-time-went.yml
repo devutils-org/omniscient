@@ -46,8 +46,9 @@
 # answering, so the driver is on the cpu for its own spin and blocked for the
 # responder's, equal by construction. At the end the driver prints the kernel's
 # own accounting of itself, from `/proc/self/schedstat` and
-# `/proc/self/status`, on stderr: that line is the ground truth each row is
-# checked against, and the tool reads none of it.
+# `/proc/self/status`, and of the responder, read while it still waits on the
+# fifo, on stderr: that line is the ground truth each row is checked against,
+# and the tool reads none of it.
 name: where the time of one task went
 format: text
 
@@ -66,6 +67,7 @@ requests:
               j=0; while [ $j -lt 100 ]; do j=$((j + 1)); done
               echo y >&5
             done; } &
+          R=$!
           exec 3>"$D/a" 6<"$D/b"
           i=0
           while [ $i -lt 600 ]; do
@@ -73,11 +75,12 @@ requests:
             echo x >&3; read -r _ <&6
             i=$((i + 1))
           done
+          read -r RON RRQ _ < /proc/$R/schedstat
           exec 3>&- 6<&-; rm -rf "$D"
           E=$(date +%s%N)
           read -r ON RQ SL < /proc/$$/schedstat
           V=$(grep '^voluntary_ctxt' /proc/$$/status); V=${V##*[!0-9]}
-          echo "omn-truth tid=$$ wall_ns=$((E - S)) oncpu_ns=$ON runq_ns=$RQ slices=$SL voluntary=$V" >&2
+          echo "omn-truth tid=$$ wall_ns=$((E - S)) oncpu_ns=$ON runq_ns=$RQ slices=$SL voluntary=$V responder_oncpu_ns=$RON responder_runq_ns=$RRQ" >&2
     mode: sample@997hz
     # `hist` is here for one reason: it is the only emit of `cpu.profile` that
     # carries the mark a lossy run puts on its counts. A histogram of samples

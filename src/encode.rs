@@ -462,6 +462,8 @@ fn unmatched_reason(kind: MatchKind) -> &'static str {
         MatchKind::ScopedEq => "carried a key no open state had in that scope",
         MatchKind::Wakeup => "followed no wakeup this run saw",
         MatchKind::Between => "moved in no interval where a state opened or closed",
+        MatchKind::Woke => "were followed by no wakeup of their task",
+        MatchKind::Overlap => "overlapped no reading's interval",
     }
 }
 
@@ -472,6 +474,8 @@ fn table_words(kind: MatchKind) -> (&'static str, &'static str) {
         MatchKind::Eq | MatchKind::ScopedEq => ("heaviest keys", "KEY"),
         MatchKind::Wakeup => ("heaviest wakeup chains", "CHAIN"),
         MatchKind::Between => ("heaviest intervals", "KEY"),
+        MatchKind::Woke => ("heaviest wakers", "CHAIN"),
+        MatchKind::Overlap => ("heaviest intervals", "KEY"),
     }
 }
 
