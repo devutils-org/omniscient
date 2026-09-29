@@ -7618,3 +7618,155 @@ open to it.
 local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and `Insn::ld_imm64`
 are on `main` since stream D's merge. Both now call the shared instructions,
 and `mod local` is gone.
+
+## Needs from another stream — the thirteenth wave, stream P (the targets perf can serve)
+
+What stream P's work needs from files it does not own, and what the CI's first
+run (36606817052, `a12e2a5`, Linux 6.17.0-1022-azure, `perf_event_paranoid`
+4, `unprivileged_bpf_disabled` 2) found in them. The record is
+`docs/portability.md`, "The thirteenth wave".
+
+**The CI cell is now configured to upstream defaults** (`.github/workflows/ci.yml`,
+"Configure the cell"): `perf_event_paranoid` 2, unprivileged user namespaces
+allowed, a delegated cgroup. So most of the paranoid-4 failures below will not
+show on the next push. They are still wrong: Debian and Ubuntu ship 4, where
+an unprivileged process may not open even its own counters, and every one of
+these tests treats the resolver's correct *"has no viable backend on this
+machine"* as a failure instead of skipping with it. The pattern stream P used
+in its own files (`tests/scenario_cpu.rs::withheld_here`): a refusal that says
+*"has no viable backend on this machine"* is the machine's, and a test whose
+subject is something else skips with it.
+
+### To stream S
+
+- `src/bpf/fentry.rs:1523`,
+  `the_functions_the_five_sources_time_have_the_prototypes_they_read`: on
+  6.17 `tcp_v4_connect` is `(sock *, sockaddr_unsized *, int)`. A portability
+  finding, like P1: the program's reading and the catalog's prototype both
+  want the 6.17 form accepted beside the older one.
+- `src/collect/proc/status.rs:362`,
+  `the_first_reading_of_a_launched_program_is_of_the_program`: on the runner
+  the first reading named `collect::proc::` -- this tool, before the exec.
+- `tests/scenario_proc.rs` (five tests: `a_poller_that_cannot_keep_up...`,
+  `a_target_that_exits_ends_the_run_cleanly...`, `defect_1_...`,
+  `defect_2_...`, `the_sweep_reports_the_counts_the_workload_chose...`): the
+  program reports 20 descriptors and the series reads 22. The runner's children
+  inherit two descriptors the program did not open; compare with the
+  program's own count of `/proc/self/fd`, which includes them, not with the
+  number it opened.
+- `tests/scenario_sched.rs`, `a_declared_mode_the_build_refuses_says_what_is_missing`
+  and `every_thread_a_program_starts_has_its_switches_counted`: paranoid 4.
+- `src/bpf/attach.rs:624` keeps its own `online_cpus`/`parse_cpu_list`
+  (finding 26). The one reader is `crate::capabilities::online_cpus() ->
+  std::io::Result<Vec<u32>>` and `crate::capabilities::parse_cpu_list(&str) ->
+  Option<Vec<u32>>` now; `perf::` re-exports both.
+- `tests/portability.rs` `KNOWN_DEFECTS` keeps P7's `sched.switches` (`count`
+  mode for `pmu:sw`). `crate::collect::cpu::counters::SCHED_SWITCHES` is still
+  there for it, and `counters::Prepare::new(spec, Mode::Count)` serves it.
+
+### To stream N
+
+- `src/bpf/mem_stall.rs:698`,
+  `the_running_kernel_declares_the_tracepoints_these_programs_attach_to`: 6.17
+  declares `mm_vmscan_direct_reclaim_begin(int, gfp_t)`. The catalog's
+  prototype makes the probe answer missing there, which is right; the test
+  asserts the running kernel matches, which a newer kernel need not.
+- `tests/scenario_io.rs`: eleven skips *"the build directory is not on a block
+  device (/sys/class/block/root does not exist)"*. The runner's root is
+  mounted from `/dev/root`, an alias; the device is under
+  `/sys/dev/block/<major>:<minor>`, from the directory's `st_dev`. Listed in
+  `.github/expected-skips.txt` as filed, to come out when this lands.
+- `tests/scenario_net.rs`, the poll and snapshot legs of the sweep: `net.hwts`
+  is listed usable and refuses at the start, *"no interface on this machine
+  keeps a readable PTP hardware clock"*. The probe should ask what the start
+  asks (P-class: available means it attaches).
+- `tests/family_net.rs:538` (two tests) panics when the machine allows neither
+  a packet socket nor an unprivileged user namespace; that is the machine, and
+  a skip with its reason. (The CI now allows the namespace.)
+- `tests/scenario_mem.rs:432`, the counter sources' sweep: the set of exit-1
+  refusals changes at paranoid 4.
+- `mem.wss`'s `fs:proc:clear_refs` can require
+  `writable:/proc/[pid]/clear_refs` now (finding 21): `Capabilities::probe`
+  answers it with `access(W_OK)`, absent and forbidden kept apart.
+- `mem.cache_l1`, `mem.cache_llc` and `mem.cache_tlb` declare `container:
+  native`. Their collector (`src/collect/cpu/counters.rs`) serves `cgroup`
+  since this wave and refuses `container` by name, because nothing in the tool
+  resolves a container to its cgroup: write `container: no`, as stream P did
+  for its own entries. Taking the key out is not enough -- a `container`
+  target falls back to `cgroup` in the catalog's model (`TargetKind::fallback`),
+  so an entry that serves the cgroup and says nothing accepts the container. The same collector serves `--mode poll` now, if the entries
+  want it (`modes: [count, poll]`, `timeline` in `emits`).
+
+### To stream R
+
+- `src/main.rs`, `resolution_is` and `resolution_hint` match `ResolveError`
+  without a wildcard, so a new variant cannot land in `src/resolve.rs` alone.
+  For `open-requests 2539` (a key the selected backend cannot attach), one arm
+  each, for this variant, which stream P will add with `Backend.keys` next
+  wave:
+
+  ```rust
+  ResolveError::KeyNotCarried { source_id: String, backend: String, key: KeyKind, elsewhere: Option<String> }
+  // resolution_is: Whose::Request; resolution_hint: None (the message names `--backend force:`)
+  ```
+- `src/encode.rs::pprof_unit` for `open-requests 957`: `Unit::Watts =>
+  ("watts", false)` has to land with the variant; `src/catalog.rs` takes
+  `Unit::Watts` the same day.
+- `src/bpf/syscall.rs:593` keeps its own `parse_cpu_list` (finding 26): the
+  one reader is `crate::capabilities::online_cpus()`, and the count is its
+  `len()`.
+- Paranoid 4 (the CI's first run): `tests/bench_capabilities.rs`
+  (`every_resolved_file_carries_the_prefetcher_state`), `tests/encoders.rs`
+  (three `cpu.profile` tests), `tests/runner.rs` (two, `resolve(..).expect`),
+  `tests/triage.rs` (seven: `cpu.profile` is an input the method cannot do
+  without, so the question is refused -- the test should skip with it), and
+  `src/collect/mod.rs:4156`, `a_system_run_with_nothing_to_stop_it_is_refused`,
+  which unwraps a resolution of `gpu.temp` on a machine with no GPU.
+- `tests/encoders.rs:767`, `a_known_allocation_lands_on_the_chrome_trace...`:
+  *"the 64 MiB allocation is not the step in the trace: 10457088 before,
+  67084288 after"* on the runner, not a privilege.
+- `tests/aggregation.rs:668` skips *"the second clean run was not clean"*,
+  printing the text but no number; it is in `.github/expected-skips.txt` as a
+  state skip.
+
+### To stream J
+
+- Paranoid 4: `tests/cross_compute.rs` (four tests; `cpu.profile` withheld),
+  `tests/cross_machine.rs:805`
+  (`a_guardrail_this_machine_cannot_serve_refuses_the_whole_crossing`, whose
+  guardrail is not the one the machine refused first), and `mcp`'s
+  `tests/protocol.rs` (four).
+
+### To the coordinator
+
+- `tests/cli.rs:794`, `a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason`:
+  red on `main` since the twelfth wave, and the replacement stream W proposed
+  (`mem.faults --cgroup`) is served now too. The refusal left is the container:
+  `mem.faults --container web -m sample@997hz -e raw` is refused by the
+  validator, exit 2, *"`mem.faults` cannot be measured per container: a
+  container has to be resolved to its cgroup first"*.
+  The two other `tests/cli.rs` failures of the CI run are paranoid 4.
+- `CATALOG.md` §1: two notations. `writable:<path>` (with `[pid]`), a file this
+  process may write; and a qualified `pmu:<unit>/<event>/` answers *missing*,
+  naming the unit or the event, when the machine does not publish it.
+- `docs/families/cpu.md`: the counting sources, `cpu.topdown`, `cpu.profile`
+  and `mem.faults` serve `--cgroup` (one event per cpu, filtered by the kernel,
+  reported as the cgroup's sum); the counting sources take `--mode poll`; each
+  says `container: no`, which the validator words as *"a container has to be
+  resolved to its cgroup first"*.
+
+### For the flaky tally
+
+- `triage::a_cpu_bound_program_is_named_cpu_bound_for_latency` (R): once in a
+  full run at load 14, *"on-cpu 311935807 against the kernel's 301454489"*;
+  passed alone.
+- `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`
+  (P): once in a full run at load 14, *"this thread burned 200 ms of cpu, about
+  199 samples at 997 Hz, and the machine's profile holds 270"*; passed alone.
+  Not investigated: a unit test in a binary whose other threads burn cpu
+  beside it, holding a per-cpu profile to one thread's own clock.
+- `scenario_io::a_pipe_wait_is_in_the_syscall_layer_and_not_in_the_file_layer`
+  (N): once in a full run, *"the program slept 299940957 ns"*; passed alone.
+- `collect::tests::weighing_a_run_costs_a_fraction_of_the_run` (R), and six
+  `tests/scenario_net.rs` scenarios (N) together, once in a full run at load
+  16; `scenario_net` passed whole alone.

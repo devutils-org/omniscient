@@ -584,3 +584,319 @@ described above (three `power.cstate` on the `nocaps` guests, six in
 `here-nocaps`), not in the flaky tally and not a flake: it is red until those
 cells are swept again. `cargo clippy --all-targets -- -D warnings` and
 `cargo fmt --check` clean. No other test failed, flaky or not.
+
+---
+
+## The thirteenth wave
+
+Stream P -- *the targets perf can serve*. Four things: the one matrix class
+nobody had read (P11), the `cgroup` and `container` targets the counting
+sources, `cpu.profile` and `mem.faults` declared and no collector served (P8's
+shape one target over), the CI's first run, and the loader's and the
+resolver's filed requests.
+
+### P11: the per-cpu rings on 5.15, confirmed and fixed
+
+**The cause**, measured in a 5.15.221 guest under `caps` (uid 1000,
+`perf_event_paranoid` 2, `perf_event_mlock_kb` 516, four vcpus):
+
+| `ulimit -l` (KiB) | `cpu.profile --system` |
+|---|---|
+| 64 (the guest's) | refused: *"perf_event_open on cpu 3 was refused (mmap of 8 ring pages: Operation not permitted)"* |
+| 128, 256 | refused, the same |
+| 8192 | attaches |
+| 64, with `perf_event_mlock_kb` 2064 | attaches |
+
+`perf_mmap` lets one user lock `perf_event_mlock_kb` per online cpu for its
+rings (2064 KiB here) and charges what goes past that to `RLIMIT_MEMLOCK`,
+unless `perf_event_paranoid` is -1 or the process holds `CAP_IPC_LOCK`.
+`CAP_PERFMON` does not lift it. The kernel's default `RLIMIT_MEMLOCK` was 64
+KiB until 5.16 and is 8 MiB since, and a busybox guest has no PAM to raise it:
+so the same rings map on 6.1 and not on 5.15. The reading the twelfth wave
+guessed (*"only `CAP_IPC_LOCK` exceeds it"*) was half of it; the other half is
+the default limit, and it is why 6.1 did not show it.
+
+**And the tool made it worse.** `SampledEvent::open` halves a ring until it
+maps, cpu by cpu: cpus 0 and 1 took 256-page rings (1028 KiB each), cpu 2 went
+past the per-user share into the 64 KiB limit at 16 pages, and cpu 3 had
+nothing left even at the 8-page floor. Four rings of 128 pages fit the share
+exactly.
+
+**The fix** (`src/perf.rs`, `ThreadSampler::open_per_cpu`): every cpu gets the
+same ring. A size one cpu is refused is given up for all of them and the set is
+opened again at half of it, so the first cpus cannot take the budget from the
+last. When even the floor does not fit, the refusal names the budget rather
+than the errno (`ring_budget_refusal`):
+
+```
+cannot start collecting `cpu.profile`: the sampling rings of 4 cpus do not fit what this user may
+lock: cpu 3 was refused a ring of 8 pages (mmap of 8 ring pages: Operation not permitted), after the
+others took theirs, 144 KiB in all at that size. The kernel lets a user lock
+/proc/sys/kernel/perf_event_mlock_kb per online cpu (16 KiB here) and charges the rest to
+RLIMIT_MEMLOCK (64 KiB here; `ulimit -l`), unless perf_event_paranoid is -1 or the process holds
+CAP_IPC_LOCK -- CAP_PERFMON does not lift it. Raise either limit, or close this user's other perf
+sessions
+```
+
+That is the 5.15 guest with `perf_event_mlock_kb` lowered to 16 on purpose.
+With the guest's own 516, `cpu.profile --system` and `mem.faults --system`
+attach there now, which is the ground truth the brief named; `KNOWN_DEFECTS`
+loses P11. **No probe was added**: the budget is per user and counts every
+ring the user's other sessions hold, which only the mapping itself can
+answer, and for a machine or a cgroup target nothing is launched before the
+rings are mapped, so the refusal already comes before the start.
+
+### The `cgroup` targets, served; the `container` targets, refused by name
+
+`perf_event_open` has a third shape beside a task and a cpu: an event on a cpu
+that counts only while a task of one cgroup v2 directory (or one below it)
+runs there (`PERF_FLAG_PID_CGROUP`, `perf::Scope::CgroupOnCpu`). So a cgroup
+is one event per online cpu, and the privilege it asks is a cpu's
+(`perf_allow_cpu`: a cgroup's tasks may be anybody's) -- the resolver adds
+`per-cpu perf events` to a `pmu:` backend for a cgroup target as it does for
+`--system`.
+
+| Source | `--cgroup` | How |
+|---|---|---|
+| `cpu.cycles`, `.instructions`, `.ipc`, `.branch_misses`, `.cache_misses`, `.context_switches`, `.migrations`, and `mem.cache_l1`/`_llc`/`_tlb`, `mem.faults -m count` | served | `src/collect/cpu/cgroup.rs`: a counter group per cpu (`PerCpuGroups::open_cgroup`), read at the end and **summed into one event keyed on the cgroup**, with the times summed the way a process's threads are |
+| `cpu.topdown` | served, not verifiable here | the same groups; this AMD part has no issue-slot counter, so the source is unavailable for every target and its cgroup path is exactly as verified as its system path |
+| `cpu.profile` | served | `ThreadSampler::open_cgroup`: a cpu-clock ring per cpu, every sample keyed on its task, its cpu and the cgroup |
+| `mem.faults` (sample, trace) | served | the same, over the page-fault software event |
+| all of them, and `cpu.throttle` | `container: no` | nothing in the tool resolves a container name to its cgroup |
+
+**Decided per source, and why the same way for all**: a cgroup is reported
+like a process, one number summed over the cpus, not like a machine. A
+machine's cpus are what `--system` asks about and are kept apart; a cgroup's
+cpus are where its tasks happened to run, and a count split across them
+describes the scheduler rather than the cgroup. A sampled source keeps each
+sample's `cpu` key, so nothing is lost there.
+
+**The container**, a finding of its own: removing `container: native` from an
+entry does not refuse a container. `TargetKind::fallback` makes a `container`
+fall back to `cgroup`, so an entry that serves the cgroup and says nothing
+accepts the container, and the collector refused it at the start -- the shape
+this item is about. The entries say `container: no`, and the validator words
+the refusal (`target_rejection_reason`): *"`mem.faults` cannot be measured per
+container: a container has to be resolved to its cgroup first, which this tool
+does not do; pass --cgroup with the container's cgroup path"*, exit 2, before
+anything is resolved.
+
+**Ground truth** (`tests/scenario_cpu.rs`, "The cgroup target"). The test
+makes a cgroup under its own (skipping, with the reason, where the hierarchy
+is not delegated) and runs a workload that forks: the child moves itself into
+the cgroup and does one unit of work, the parent stays outside and does ten,
+at the same time. The child reports its pid, its `CLOCK_MONOTONIC` window and
+its own count of what it did, using system calls only between the fork and
+its exit.
+
+| Scenario | The child, inside | The parent, beside | Asserted |
+|---|---|---|---|
+| `a_cgroup_is_counted_for_its_own_loop_and_not_for_the_one_beside_it` | 50 M turns of `dec`/`jnz`, 10^8 instructions | 10^9 | count in [0.995, 1.25) x 10^8, one event, keyed on the directory's inode |
+| `a_profile_of_a_cgroup_samples_its_task_and_not_the_one_beside_it` | 200 ms of its own cpu | 2 s | every sample's task is the child, none the parent; samples within 10 % + 2 of 997 Hz x the child's thread clock; every sample carries the cgroup key |
+| `a_cgroup_s_faults_are_its_own_and_not_its_neighbour_s` | 2000 fresh pages, its `getrusage` delta | ten times that | count and trace: at least the child's own fault count, short of child + half the parent's; every traced fault is the child's |
+
+`omn` announces nothing when its events are open, and a binary carrying file
+capabilities is not dumpable, so its descriptor table cannot be read to wait
+on either. The order is therefore **checked, not arranged**: the workload
+starts a lead after `omn`, the window is far longer than the work, and the
+result's own `window.opened_ns`/`closed_ns` must hold the child's stamps -- a
+run that does not is taken again with twice the lead, three times at most.
+The durations make an ordered run likely; the stamps make it one.
+(`SIGINT` is not a way to end a run early: `omn` dies of it.)
+
+And `a_container_is_refused_before_the_start_where_only_its_cgroup_is_served`
+holds the container refusal for four of the sources.
+
+### The CI's first run
+
+Run 36606817052 on `a12e2a5`: Linux 6.17.0-1022-azure, **`perf_event_paranoid`
+4**, `unprivileged_bpf_disabled` 2, BTF readable. fmt, clippy, the build and
+the matrix cell were green; the suite had 58 failures and the skip gate
+refused 37 skips. The cell `ci-6.17.0-nocaps` passed every judge of
+`tests/portability.rs`.
+
+**What 4 is.** A Debian patch Ubuntu carries and upstream never took: at 4 an
+unprivileged process may not open even its own counters. About 45 of the 58
+failures are tests that treat the resolver's correct *"has no viable backend
+on this machine"* as a failure. The tool was right in all of them.
+
+**Decided: the cell is configured to the kernel's own defaults**
+(`.github/workflows/ci.yml`, "Configure the cell"), and says why above the
+step:
+
+- `perf_event_paranoid` 2. The cell exists to exercise the unprivileged perf
+  path, which at 4 is never exercised; the paranoid-4 class is a real one and
+  stays filed with each owner, for a paranoid-4 cell once they are fixed.
+- `kernel.apparmor_restrict_unprivileged_userns` 0 (Ubuntu from 23.10 refuses
+  `unshare -Urm`; upstream allows it): six skips and two failures were that.
+- A delegated cgroup, `/sys/fs/cgroup/omn-ci` owned by the runner's user with
+  cpu, memory, io and pids handed down and the job's shell in its leaf `job`:
+  the shape a systemd user session gives a workstation, where the cgroup
+  scenarios make their cgroups. Each later step moves its own shell there
+  first (with sudo, because a move is checked against the common ancestor,
+  the root).
+- `linux-tools-$(uname -r)`, for `btf.rs`'s `bpftool` cross-check.
+
+**Answered in stream P's files** -- each now holds at paranoid 4 and on a
+machine without the hardware, by skipping with the machine's reason where the
+subject is something else, or by a floor that does not assume this machine:
+`collect::cpu::counters` (the cache test, and a worker thread that panicked
+when its test skipped), `tests/catalog_model.rs` (the sweep's floor is on the
+pairs asked, not on what the machine serves), `tests/family_cpu.rs` (two),
+`tests/scenario_cpu.rs` (four; the stdout warning uses `cpu.oncpu_time`,
+which every Linux serves), `tests/scenario_gpu.rs` (two), `tests/family_power.rs`
+(two), `tests/scenario_power.rs` (four) -- and one tool defect:
+
+**A qualified `pmu:` event that is not published answered unknown**
+(`open-requests 1598`). `pmu:power/energy-pkg/` on the runner, which has no
+RAPL: *"needs an event encoding this tool does not build yet"*, so
+`power.energy` was listed as assumed, resolved, and refused at the start.
+`sysfs_device_state` now reads the unit's own directory: *"this machine
+publishes no `power` performance unit"*, or *"the `cpu` performance unit
+publishes no `x` event"*.
+
+**The skip gate**: `.github/expected-skips.txt` gains the classes the cloud VM
+lacks, each with its reason -- the GPU's userspace (CUDA, Vulkan), lowercase
+`intel-rapl`, a hwmon chip, SMT, unprivileged bpf's *"create the row maps"*,
+and the aggregation test's state skip -- and one line **filed, not expected**:
+the block-device lookup of `/dev/root` in `tests/scenario_io.rs`. Checked
+against the first run's log with the new list: what is left unexpected is
+exactly the cgroup, user-namespace, bpftool and `cross-memory` skips the
+configuration step removes. None of this has run on a runner yet: the next
+push is its test.
+
+**Filed**, one request per owner, under "the thirteenth wave, stream P" in
+`docs/open-findings.md`: two 6.17 prototypes (S's `fentry.rs`, N's
+`mem_stall.rs`), the runner's two inherited descriptors (S's
+`scenario_proc`), `net.hwts` listed usable without a PTP clock (N), and the
+paranoid-4 tests of R, J, S, N and the coordinator.
+
+### The loader and the resolver, each checked first
+
+| Request | Found | Now |
+|---|---|---|
+| `check_catalog` in the loader (2493) | open | `Catalog::from_entries` runs it: a `--catalog <dir>` promising what no build keeps does not load |
+| `Backend.keys` and `check_backend_keys` (2493), `KeyNotCarried` (2539) | open | **not taken**: the refusal needs a `ResolveError` variant, and `src/main.rs` (R's) matches the enum without a wildcard, so it cannot land here alone. Filed for R with the arm; the field without the refusal would be vocabulary nothing reads |
+| `check_stack` refuses `dwarf`/`lbr` (815) | refused at the factory | **kept there, and tested**: the factory runs before the launch and answers the build's gap with exit 3; the validator answers what a request means, and a session asking for dwarf is valid for a build with an unwinder. `an_unwinder_this_build_lacks_is_refused_before_the_program_starts`: the program's first act is to create a file, and it is not there |
+| `stack` over a non-additive unit (2127) | `rate` only | `check_catalog` refuses `stack` the same way |
+| a `pmu:` glob refused by the loader (1598) | open | any `*` or `?` in a requirement, outside a raw tracepoint's prototype, is refused naming it |
+| a qualified `pmu:unit/event` absent answers missing (1598) | unknown | missing, naming the unit or the event |
+| one reader of `cpu/online` (1649) | four copies | `capabilities::online_cpus`/`parse_cpu_list`; `perf::` re-exports them, `power::sysfs` calls them; `bpf/attach.rs` (S) and `bpf/syscall.rs` (R) filed |
+| `writable:` (1422) | open | `writable:<path>` (with `[pid]`) asks `access(W_OK)`; filed for N's `mem.wss` |
+| `SampledEvent::throttled()` (885) | partly | an accumulator on `SampledEvent`, `ThreadSampler` and `TaskSampler`, `PERF_RECORD_UNTHROTTLE` not counted; `cpu.profile` and `mem.faults` report from it |
+| `Unit::Watts`, `gpu.power` in watts (957) | open | **not taken**: `src/encode.rs` (R's) matches `Unit` exhaustively; filed with the arm |
+| a per-tick read of a counting PMU event (5099) | open | `--mode poll` on the seven counting entries of `cpu` (`timeline` added to their emits), per task, per cpu and per cgroup: each tick the difference from the one before, with `interval_ns`; a tick the task spent asleep is a count of zero, not a loss. `the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted` |
+
+Each loader refusal is held by
+`tests/catalog_model.rs::a_catalog_carrying_a_promise_no_build_can_keep_is_refused_when_it_is_loaded`:
+a copy of the catalog with an emit no mode produces, `rate` and `stack` over a
+ratio, and a glob, each refused with its reason; a prototype with a `*` is
+not a glob.
+
+### The tally's rows
+
+- **#8** (`per_cpu_utilisation_reports_one_series_for_each_core_asked_for`):
+  already landed -- `util.rs` computes `busy` in ticks before the division.
+- **#9 and `open-requests 5272`** (the known-instruction scenario, +0.69 %):
+  the workload now brackets its loop with two counters of its own, user mode
+  and every mode, and the difference -- what the kernel ran in its context
+  while the loop did -- is the scenario's slack above; nothing is allowed
+  below. The twice-the-startup excess was that: a longer run under load takes
+  more interrupts and preemptions in its context.
+- **#24** (`a_resident_kernel_separates_from_an_idle_device...`): who else is
+  on the device is asked again after the idle baseline and after the busy
+  run, not only before, and a tenant skips the test with its name.
+
+### What the matrix says now
+
+Swept at the end of this stream's work, with the committed binary: the four
+kernels under `caps`, `root` and `nocaps`, twelve cells, on a machine the
+other streams were loading (the judges read no timings). **Every judge passes
+in every cell**, and `KNOWN_DEFECTS` holds two entries: P7's `sched.switches`
+(stream S's) and P10's `mem.cgroup` (the guest's root cgroup).
+
+| Kernel | `caps` attached | `root` attached | `nocaps` attached | eleventh wave's `caps` |
+|---|---|---|---|---|
+| 5.15.221 | 80 | 84 | 42 | 77 |
+| 6.1.188 | 89 | 93 | 42 | 86 |
+| 6.6.157 | 93 | 94 | 42 | 90 |
+| 7.2.6 | 103 | 104 | 43 | 100 |
+
+(Runs that started and ended cleanly, of 140 a cell.) On 5.15 under `caps`,
+`cpu.profile` attaches on both targets, the launched program and `--system`:
+P11 is gone from the cell that showed it. In every guest `power.energy`'s
+`pmu:power/energy-pkg/` now reads *"missing: this machine publishes no `power`
+performance unit"* instead of unknown. **Cells still to verify**, for the coordinator's sweep at the end of the wave
+(this stream started no matrix run after the twelve above):
+
+| Cells | Command | What should change |
+|---|---|---|
+| 5.15, 6.1, 6.6, 7.2 under `nobtf` and `notracefs` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs nobtf,notracefs` | `power.energy`'s `pmu` backend reads missing (no `power` unit) rather than unknown; nothing of BTF or tracefs changes; every judge passes |
+| `here-caps` | `scripts/matrix.sh here` (with the capabilities) | `power.energy` still attaches through `pmu` (this host has the `power` unit); every judge passes |
+| `here-nocaps` | strip both links of the binary (`setcap -r target/debug/omn target/debug/deps/omn-*`), then `scripts/matrix.sh here` | the counting sources on `--system` are refused before the start for per-cpu events as before; every judge passes |
+| `ci-*-nocaps` | the next push | the configured cell (paranoid 2): the counting sources serve a launched program; the skip gate's unexpected list should be empty but for what the first push names |
+
+### For `DECISIONS.md`
+
+- **A cgroup is counted like a process**: one event, the sum over the cpus it
+  ran on, keyed on the cgroup. Its cpus are where its tasks happened to run,
+  not what was asked about; a sampled source keeps each sample's cpu.
+- **A container is refused until something resolves it**: `container: no` on
+  every entry that serves a cgroup through a collector that cannot resolve a
+  container, because the kind falls back to `cgroup` otherwise.
+- **Per-cpu rings are sized together**: one size for every cpu, halved for
+  all when one is refused, and a refusal at the floor names
+  `perf_event_mlock_kb`, `RLIMIT_MEMLOCK` and `CAP_IPC_LOCK`. No probe: the
+  budget is per user and only the mapping knows what the user's other
+  sessions hold.
+- **The CI cell is the kernel's own defaults without capabilities**, not the
+  hosted image's: paranoid 2, unprivileged user namespaces, a delegated
+  cgroup. Distribution-specific hardening is a cell of its own, later.
+- **A build's gap is refused at the factory, not by the validator**: exit 3
+  before the launch, and a session asking for it stays valid for a build that
+  has it.
+
+### Filed or left
+
+- Filed in `docs/open-findings.md`, "the thirteenth wave, stream P": for S,
+  for N, for R, for J and for the coordinator, as listed above, and three
+  flakes for the tally.
+- Left: `Backend.keys`/`KeyNotCarried` and `Unit::Watts`, each waiting on one
+  arm in R's files; the matrix cells this stream did not sweep (below).
+- **A mistake of this stream's, for the coordinator**: to stop a full run of
+  its own whose build had dropped the capabilities, this stream ran `pkill -f
+  'cargo test --workspace --no-fail-fast'`, which matches that command in
+  every worktree. Another stream's run of the same command at that moment
+  (about 20:34) would have been killed with it and should be taken again.
+
+**Index rows for sessions added**: none; this stream adds no session.
+
+### This wave's check
+
+The last `make check` of this branch stopped at the first red binary, a unit
+test of this stream's that failed under the load of five streams and passed
+alone (`a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
+filed for the tally), so the equivalent was run whole on the committed tree:
+`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean, and
+one `cargo test --workspace --no-fail-fast` with the capabilities on the
+binary -- **1922 passed, 4 failed, 8 ignored**:
+
+- `cli::a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason`:
+  red on `main` since the twelfth wave (the coordinator's, filed with what it
+  should ask now);
+- `collect::tests::weighing_a_run_costs_a_fraction_of_the_run` (tally #12) and
+  `scenario_sched::perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides`
+  (the twelfth wave's "for the flaky tally"): in the tally, not rerun;
+- `scenario_io::a_pipe_wait_is_in_the_syscall_layer_and_not_in_the_file_layer`:
+  not in the tally, passed alone once, filed.
+
+Earlier full runs of the same work met, once each and passing alone: six
+`scenario_net` scenarios at load 16 (the file passed whole alone, with the
+capabilities), `triage::a_cpu_bound_program_is_named_cpu_bound_for_latency`,
+`recorder::a_recording_is_held_to_its_budget...`,
+`scenario_mem::a_gibibyte_of_reads...`, `scenario_power::a_core_held_busy...`
+and `scenario_proc::what_the_signal_ring_could_not_hold...` (tally #7).
+`tests/portability.rs`: 16 passed, 1 ignored, judging the cells above.
+
+The commits between the brief and this one were checked as the final tree,
+not one by one: the three of code, then this document.
