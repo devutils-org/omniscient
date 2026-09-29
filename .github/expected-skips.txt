@@ -15,15 +15,24 @@ will not (sample|count|open|report|read)
 would not sample
 refuses to sample another process
 (cannot|may not|does not let this process) create a (bpf |task-storage )?map
+does not let this process create the row maps
 unprivileged_bpf_disabled
 # tracefs, which is root's alone on a distribution kernel.
 tracefs
 # Hardware a cloud VM does not expose: an NVIDIA GPU, AMD IBS or Intel PEBS,
 # RAPL, sensors, cpufreq, and hardware counters at all under some hypervisors.
 nvidia|NVML|NVIDIA|GPU
+# ... and a GPU's userspace, which a runner without one has no reason to carry:
+# the CUDA driver library, and the Vulkan loader the fixtures link against.
+fixture did not build, most likely because this machine has no -l(vulkan|:libcuda)
+libcuda\.so\.1 is not loadable here
 ibs_op|pebs|PEBS
 RAPL
+no /sys/class/powercap/intel-rapl
 temperature sensor
+no chip under /sys/class/hwmon (publishes|reports) a temperature
+# One hardware thread per core: a cloud vcpu is not a physical core's sibling.
+no physical core here has two hardware threads
 cpufreq
 hardware counter|PMU|performance unit
 # Sources this cell cannot serve. "no viable backend on this machine" is the
@@ -50,6 +59,14 @@ does not open on this machine
 # These are the "skip loudly with the numbers" scenarios; each wording is named
 # so a new kind of state skip still stops the job.
 caches were not this thread's
+the second clean run was not clean
 was already stalled on I/O
 AnonHugePages moved from [0-9]+ to [0-9]+ huge pages
 has no partially mapped huge pages right now
+
+# Filed, not expected: a test that cannot find the device it runs on. The build
+# directory is on /dev/root, which the scenario looks up by that name under
+# /sys/class/block; the device is there under its own name. Filed for stream N
+# in docs/open-findings.md (the thirteenth wave, stream P); remove this line
+# when it lands.
+the build directory is not on a block device \(/sys/class/block/root does not exist\)

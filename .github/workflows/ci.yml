@@ -48,6 +48,48 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -yq --no-install-recommends \
             build-essential systemtap-sdt-dev python3 nodejs iproute2 util-linux jq
+          # bpftool, for `btf.rs`'s cross-check of a variable's type id against
+          # the running kernel's own numbering; Ubuntu ships it per kernel.
+          sudo apt-get install -yq --no-install-recommends "linux-tools-$(uname -r)" \
+            || echo "::warning::no linux-tools package for $(uname -r), so no bpftool"
+
+      # The cell is a stock kernel's defaults with no capabilities, which the
+      # hosted image is not in three places, each set back here and printed by
+      # the next step (docs/portability.md, "The thirteenth wave"):
+      #
+      # - perf_event_paranoid is 4 on Ubuntu, a Debian patch upstream never
+      #   took: every perf_event_open of an unprivileged process is refused,
+      #   its own counters included. The unprivileged perf path this cell
+      #   exists to exercise is then never exercised, and the first run's
+      #   suite was 45 tests asserting what paranoid 2 serves. 2 is the kernel's
+      #   own default. (Those tests are wrong at 4 as well, and are filed with
+      #   their owners; a paranoid-4 cell is for when they are fixed.)
+      # - apparmor_restrict_unprivileged_userns is 1 on Ubuntu from 23.10:
+      #   `unshare -Urm` is refused, and the scenarios that build their own
+      #   device, namespace or /proc/diskstats inside one skip. Upstream allows
+      #   an unprivileged user namespace.
+      # - the job runs in root's service cgroup, which delegates nothing. A
+      #   systemd user session delegates its subtree to its user, which is
+      #   where the cgroup scenarios make their cgroups on a workstation; the
+      #   step below makes the same shape by hand: `omn-ci`, owned by the
+      #   runner's user with the controllers enabled below it, and the job's
+      #   shell in its leaf `omn-ci/job` (a cgroup with processes cannot hand
+      #   controllers down, so the leaf holds them). GITHUB_ENV cannot move a
+      #   process, so every later step moves its own shell first -- with sudo,
+      #   because a move is checked against the cgroup both places share, and
+      #   that is the root.
+      - name: Configure the cell
+        run: |
+          sudo sysctl -w kernel.perf_event_paranoid=2
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo mkdir -p /sys/fs/cgroup/omn-ci/job
+          for controller in cpu memory io pids; do
+            echo "+$controller" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null || true
+            echo "+$controller" | sudo tee /sys/fs/cgroup/omn-ci/cgroup.subtree_control >/dev/null || true
+          done
+          echo "omn-ci delegates: $(cat /sys/fs/cgroup/omn-ci/cgroup.subtree_control)"
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/omn-ci
+          echo "OMN_CI_CGROUP=/sys/fs/cgroup/omn-ci/job/cgroup.procs" >> "$GITHUB_ENV"
 
       - name: fmt
         run: cargo fmt --check
@@ -71,6 +113,9 @@ jobs:
           uname -a
           echo "perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid)"
           echo "unprivileged_bpf_disabled $(cat /proc/sys/kernel/unprivileged_bpf_disabled)"
+          echo "apparmor_restrict_unprivileged_userns $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+          echo "$$" | sudo tee "$OMN_CI_CGROUP" >/dev/null && echo "cgroup $(cat /proc/self/cgroup)"
+          ulimit -l
           ls -l /sys/kernel/btf/vmlinux || true
           ls -ld /sys/kernel/tracing || true
           target/debug/omn list | tail -n 3
@@ -79,12 +124,14 @@ jobs:
       # suite's own `tests/portability.rs` judges it.
       - name: The matrix cell of this runner
         run: |
+          echo "$$" | sudo tee "$OMN_CI_CGROUP" >/dev/null
           OMN_MATRIX_CELL="ci-$(uname -r | cut -d- -f1)-nocaps" OMN_MATRIX_CONFIG=nocaps \
             cargo test --test portability sweep_this_machine -- --ignored --exact --nocapture
 
       - name: Suite
         run: |
           set -o pipefail
+          echo "$$" | sudo tee "$OMN_CI_CGROUP" >/dev/null
           cargo test --workspace --no-fail-fast -- --nocapture 2>&1 | tee target/test.log
 
       - name: Every skip is an expected one
