@@ -7618,3 +7618,96 @@ open to it.
 local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and `Insn::ld_imm64`
 are on `main` since stream D's merge. Both now call the shared instructions,
 and `mod local` is gone.
+
+## Needs from another stream — the thirteenth wave, stream R (what a run costs the target)
+
+Stream R's deliverable is `docs/fixes/budget.md`. Nothing here blocks it; each
+item is what would let a landed mechanism reach one more source.
+
+### To stream P (`src/perf.rs` and `src/collect/cpu/profile.rs`): the profile's drops per ring
+
+The collector layer carries losses per ring now (`collect::RingLoss`,
+`Collector::losses_by_ring`, `Collection::by_ring`, `Results::by_ring`), and the
+emit layer places a ring's losses on its own key's series. `cpu.profile` opens a
+ring per task and drains them all through one callback that does not say whose
+record it is, so its drops are still the run's. Wanted:
+
+```rust
+// src/perf.rs, beside the group's `drain`: the same walk, with the tid the
+// ring was opened for.
+pub fn drain_each(&mut self, f: impl FnMut(Option<u32>, Record));
+
+// src/collect/cpu/profile.rs: count `Record::Lost` and `Record::Throttle` per
+// tid as well as in `self.losses`, and hand them over; every entry is a part of
+// `losses()`, not an addition to it.
+fn losses_by_ring(&self) -> Vec<crate::collect::RingLoss> {
+    self.lost_by_task
+        .iter()
+        .map(|(tid, losses)| crate::collect::RingLoss {
+            key: KeyValue::task(*tid as i32),
+            losses: losses.clone(),
+        })
+        .collect()
+}
+```
+
+`tests/runner.rs`'s
+`a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed` then
+stops skipping: the rings overflow here at 50 kHz (3117 samples in one run).
+
+### To stream P (`src/validate.rs`): an attribute a ranking names is one the entry declares
+
+`topk:N@<attr>` parses (`Emit::TopK { k, by: Option<AttrName> }`). Wanted in
+the validator: refuse a `by` that is not among the entry's `filter_fields` (the
+catalog's one list of attribute names), as the filter check already does, with
+the fields it could have named. Until then an attribute no event carries ranks
+every event as `<attr>=?`, and the results say how many.
+
+### To stream P (`src/catalog.rs`) and stream J (`mcp/src/session.rs`): what `extreme` means
+
+`Cost::Extreme`'s doc says "over 10x: kernel replay", and it is the only band
+past 20 %. The bench measured `proc.syscall` at +296 % and the preload shim on
+an allocation- or lock-bound program at about +600 % to +1000 %, which are in no
+band but it, and their `cost:` keys now say `extreme`. `main.rs` renders the
+band as "over 20 %, with no bound above". Wanted: the same words in the doc
+comment, and in `omn-mcp`'s copy of the band table.
+
+### To stream S (`src/bpf/mod.rs`): a re-export for the statistics call
+
+`BPF_ENABLE_STATS` belongs in `src/bpf/syscall.rs`, which is private to
+`src/bpf/`; the call lives in `src/collect/mod.rs` meanwhile. Wanted, when it
+suits: `pub use syscall::enable_run_time_stats;` (or `pub mod syscall`), and R
+moves the call.
+
+### To stream N (`src/collect/net/softirq.rs`): the kernel's own count is a note, not a degradation
+
+`Collector::facts()` exists (default empty), reaching the results as `notes`
+and the text as `note:`, beside `degraded:`. `net.softirq`'s count of the
+handler runs the kernel bucketed is the case `open-requests 3892` was filed
+for: return it from `facts()` rather than `notes()`.
+
+### To nobody (`examples/bench/harness.rs`): two tests of one binary share a report file
+
+`run_bare` writes `report.<pid>.<tag>.json`, and two tests of
+`tests/bench_harness.rs` running in parallel threads of one process share the
+pid and the tag: `the_io_workload_reads_from_a_cold_cache_without_root` failed
+once in `make check` with "the workload wrote no report" and passed alone.
+Wanted: a per-call counter in the name.
+
+### To stream S (`tests/scenario_proc.rs`) and stream N (`tests/scenario_net.rs`): `count` ranks now, and two tests assert it cannot
+
+`ModeKind::Count` accepts `topk` since this stream's change (`open-requests
+2467`, `6181` a): a counted window is one event per series, and ranking them is
+`rate` without the division. Two scenarios pinned the old refusal and are red on
+`feat/budget` for that reason alone:
+
+- `scenario_proc::the_combinations_these_sources_do_not_have_are_refused_with_the_reason`
+  opens with `proc.signals --system --mode count --emit topk`, expecting exit 2
+  and "cannot produce `topk`". Wanted: drop that first block, or turn it round --
+  the run succeeds and ranks the signalled tasks.
+- `scenario_net::the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_three_recorded`
+  lists `("net.tcp.retransmit", "count", "topk")` and `("net.drops", "count",
+  "topk")` in `RECORDED`. Wanted: `RECORDED` keeps `("net.softirq", "count",
+  "hist")` alone, the test's name and doc say one, and -- as the request that
+  filed it said -- `topk` goes back into `net.bytes`'s `emits` in
+  `catalog/net.yaml`.
