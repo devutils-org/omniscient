@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 # Prepares an isolated worktree for one work stream and prints its prompt.
 #
-#   scripts/spawn.sh recorder
-#   cd ../omniscient-recorder && claude "$(cat ../omniscient-recorder.prompt)"
+#   scripts/spawn.sh budget
+#   cd ../omniscient-budget && claude "$(cat ../omniscient-budget.prompt)"
 #
 # Streams own disjoint sets of files (see BRIEF.md), so the worktrees never need
 # to rebase against each other and the merge order does not matter. A merge that
 # conflicts anywhere other than an append seam means a stream edited something
 # it does not own.
 #
-# This wave is two milestones and two sets of debts: the flight recorder, phase
-# 11's MCP surface, the probes the portability matrix caught answering
-# available for sources that do not attach, and the kernel-side attributions
-# and drains the eleventh wave filed. The lock is a named file list per stream.
-# The shared layers not listed below belong to nobody. The two session indexes,
-# examples/README.md and GUIDE.md, belong to the coordinator and are held to
-# the sessions on disk by a test, so a session added without a row is a red
-# suite rather than a gap.
+# This wave has no milestone left to land: finding 47 and the losses per ring
+# (the runner), the targets the counting sources declare and nothing serves
+# (perf and the resolver), the cgroup the sched and proc programs declare (the
+# eBPF layer), the shapes older kernels write (the io, net and mem programs),
+# and the join engine nobody owned for two waves. A catalog entry belongs to
+# the stream that owns its collector, except each backend's `cost:` key, which
+# is stream R's. The two session indexes, examples/README.md and GUIDE.md,
+# belong to the coordinator and are held to the sessions on disk by a test, so
+# a session added without a row is a red suite rather than a gap.
 #
 # The prompt is written beside the worktree, so the agent starts in one line:
 #
@@ -24,106 +25,34 @@
 set -euo pipefail
 
 declare -A OWNS=(
-    [recorder]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/session.rs src/request.rs src/cli.rs src/main.rs src/emit.rs src/encode.rs src/render.rs src/triage/** tests/recorder.rs tests/runner.rs tests/budget.rs tests/triage.rs examples/record-*.yml man/omn.1"
-    [probes]="src/capabilities.rs src/bpf/mod.rs src/bpf/request*.rs src/bpf/btf.rs src/bpf/attach.rs src/bpf/usdt.rs catalog/*.yaml (except W's filter_in_program keys) src/collect/gpu/** src/collect/power/** src/collect/runtime/** tests/portability.rs tests/scenario_gpu.rs tests/scenario_power.rs tests/scenario_runtime.rs scripts/matrix.sh scripts/vm/** .github/**"
-    [resolver]="src/resolve.rs src/catalog.rs src/validate.rs src/filter.rs src/perf.rs the filter_in_program keys of catalog/*.yaml src/collect/cpu/** src/collect/proc/** src/collect/mem/page_faults.rs tests/scenario_cpu.rs tests/scenario_proc.rs tests/family_cpu.rs tests/family_proc.rs tests/vertical.rs tests/cross_compute.rs"
-    [kernel]="src/bpf/wakeup.rs src/bpf/map.rs src/bpf/fentry.rs src/bpf/io_*.rs src/bpf/net_*.rs src/bpf/sched_*.rs src/bpf/mem_*.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/migrate.rs src/bpf/proc_syscall.rs src/collect/sched/** src/collect/io/** src/collect/net/** src/collect/mem/** (except page_faults.rs) tests/scenario_sched.rs tests/family_sched.rs tests/scenario_io.rs tests/scenario_net.rs tests/scenario_mem.rs"
-    [mcp]="mcp/** (a new workspace member) the members line of Cargo.toml, Cargo.lock"
+    [budget]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/main.rs src/session.rs src/request.rs src/cli.rs src/emit.rs src/encode.rs src/render.rs src/triage/** src/bpf/syscall.rs shim/** src/collect/mem/heap/** the cost: key of every backend line in catalog/*.yaml scripts/bench.sh tests/budget.rs tests/runner.rs tests/triage.rs tests/recorder.rs tests/encoders.rs tests/aggregation.rs tests/bench_*.rs examples/record-*.yml man/omn.1"
+    [perf]="src/perf.rs src/resolve.rs src/catalog.rs (except the MatchKind enum, stream J's) src/validate.rs src/filter.rs src/capabilities.rs src/bpf/usdt.rs src/collect/cpu/** src/collect/mem/page_faults.rs src/collect/power/** src/collect/gpu/** src/collect/runtime/** the cpu.*, power.*, gpu.*, runtime.* and mem.faults entries of catalog/*.yaml (except their cost: keys) tests/scenario_{cpu,power,gpu,runtime}.rs tests/family_{cpu,power,gpu,runtime}.rs tests/portability.rs tests/catalog_model.rs scripts/matrix.sh scripts/vm/** .github/** examples/{cpu,power,gpu,runtime}-*.yml"
+    [sched]="src/bpf/insn.rs src/bpf/btf.rs src/bpf/attach.rs src/bpf/mod.rs src/bpf/map.rs src/bpf/ring.rs src/bpf/fentry.rs src/bpf/wakeup.rs src/bpf/sched_*.rs src/bpf/runqlat.rs src/bpf/offcpu.rs src/bpf/migrate.rs src/bpf/proc_*.rs src/collect/sched/** src/collect/proc/** the sched.* and proc.* entries of catalog/*.yaml (except their cost: keys) tests/scenario_{sched,proc}.rs tests/family_{sched,proc}.rs tests/raw_tracepoints.rs examples/{sched,proc}-*.yml (except sched-wakeup.yml)"
+    [devices]="src/bpf/io.rs src/bpf/io_*.rs src/bpf/net_*.rs src/bpf/mem_*.rs src/bpf/request.rs src/bpf/request_net.rs src/collect/io/** src/collect/net/** src/collect/mem/** (except page_faults.rs and heap/**) src/collect/psi.rs (new) the io.*, net.* and mem.* entries of catalog/*.yaml (except mem.faults, and their cost: keys) tests/scenario_{io,net,mem}.rs tests/family_{io,net,mem}.rs examples/{io,net,mem}-*.yml"
+    [join]="src/join.rs src/event.rs src/stack.rs src/clock.rs the MatchKind enum of src/catalog.rs and its parsing mcp/** tests/join_engine.rs tests/cross_*.rs tests/stack_capture.rs tests/vertical.rs examples/cross-*.yml examples/join-*.yml examples/vertical-*.yml examples/sched-wakeup.yml"
 )
 declare -A TITLE=(
-    [recorder]="Stream R -- the flight recorder"
-    [probes]="Stream V -- the probes tell the truth"
-    [resolver]="Stream W -- what the resolver promises"
-    [kernel]="Stream D -- the kernel's attributions and drains"
-    [mcp]="Stream M -- a model reads it"
+    [budget]="Stream R -- what a run costs the target"
+    [perf]="Stream P -- the targets perf can serve"
+    [sched]="Stream S -- the scheduler and the processes, per cgroup"
+    [devices]="Stream N -- the older kernels serve what they can"
+    [join]="Stream J -- the engine says what it knows"
 )
+declare -A LETTER=([budget]=R [perf]=P [sched]=S [devices]=N [join]=J)
 declare -A LOG=(
-    [recorder]="docs/recorder.md"
-    [probes]="docs/portability.md"
-    [resolver]="docs/fixes/resolver.md"
-    [kernel]="docs/families/kernel.md"
-    [mcp]="docs/mcp.md"
+    [budget]="docs/fixes/budget.md"
+    [perf]="docs/portability.md (a section \"The thirteenth wave\")"
+    [sched]="docs/families/kernel.md (a section \"The thirteenth wave\")"
+    [devices]="docs/families/devices.md"
+    [join]="docs/families/join.md (a section \"The thirteenth wave\")"
 )
 declare -A SCENARIO=(
-    [recorder]="tests/recorder.rs, tests/runner.rs, tests/budget.rs and tests/triage.rs"
-    [probes]="tests/portability.rs, tests/scenario_gpu.rs, tests/scenario_power.rs and tests/scenario_runtime.rs"
-    [resolver]="tests/scenario_cpu.rs, tests/scenario_proc.rs, tests/family_cpu.rs, tests/family_proc.rs, tests/vertical.rs and tests/cross_compute.rs"
-    [kernel]="tests/scenario_sched.rs, tests/family_sched.rs, tests/scenario_io.rs, tests/scenario_net.rs and tests/scenario_mem.rs"
-    [mcp]="the tests under mcp/tests/ (cargo test -p omn-mcp)"
+    [budget]="tests/budget.rs, tests/runner.rs, tests/triage.rs, tests/recorder.rs and tests/encoders.rs"
+    [perf]="tests/scenario_cpu.rs, tests/family_cpu.rs, tests/portability.rs, tests/catalog_model.rs and the power, gpu and runtime scenario files"
+    [sched]="tests/scenario_sched.rs, tests/family_sched.rs, tests/scenario_proc.rs, tests/family_proc.rs and tests/raw_tracepoints.rs"
+    [devices]="tests/scenario_io.rs, tests/scenario_net.rs, tests/scenario_mem.rs and their family_ files"
+    [join]="tests/join_engine.rs, tests/cross_*.rs, tests/stack_capture.rs, tests/vertical.rs and cargo test -p omn-mcp"
 )
-
-RECORDER_WORK='STATE.md "What remains" item 1, as DECISIONS.md settled it: a session whose
-duration is until a predicate fires, with a retention bound and one document
-per trigger -- a trigger and a retention bound, not a new kind of program. The
-mechanism is your decision; write it down for DECISIONS.md in your handoff. One
-document covers one window (the span the retention held when it fired) and
-carries its trigger, predicate and firing value; eviction is a counted loss
-through Shortfall; one clock; the predicate uses src/filter.rs grammar over
-what a round read (V owns filter.rs -- file what you need); the budget holds
-over a run with no end; a bound on documents and on the maximum duration.
-Also stream E'"'"'s filed request: a held request that does not resolve is a
-layer this machine cannot serve, not a failed run (collect::Unserved). Ground
-truth: a workload that idles, bursts a known amount at a moment it reports on
-its own clock, twice -- exactly two documents, each window holding its burst,
-evictions counted against what the workload says it did.'
-
-PROBES_WORK='The portability matrix (docs/portability.md) found ten classes, P1-P10, where a
-probe answers available and the attach then refuses -- each filed under "the
-eleventh wave, stream P" in docs/open-findings.md with what is wanted. Yours
-are the probe-side ones: P1-P6 and P10 (P7-P9 are stream W'"'"'s, P8'"'"'s sched half
-stream D'"'"'s). Fix each in the probe or the catalog so the answer is missing
-WITH the reason the attach used to give, and remove its KNOWN_DEFECTS entry in
-tests/portability.rs. Also scenario_gpu.rs'"'"'s capability-less test from stream
-P'"'"'s "five tests" list. Ground truth is the matrix: rerun scripts/matrix.sh on
-the cells a fix touches (the cache is target/matrix/; mind the disk) and each
-goes from failing to passing, while the 7.2 cell keeps attaching what it
-attached. src/bpf/mod.rs is a shared layer.'
-
-RESOLVER_WORK='The resolver-side half of the portability matrix'"'"'s findings: P7 (a collector
-that refuses the mode the resolver chose), P8'"'"'s cpu.profile and page_faults
-half (system: native refused), P9 (a per-task probe for a per-cpu event), each
-filed under "the eleventh wave, stream P" in docs/open-findings.md; say in your
-handoff which KNOWN_DEFECTS entries of tests/portability.rs (stream V'"'"'s file)
-your fixes retire. Stream S'"'"'s request to src/catalog.rs: a filter_in_program
-list per backend (you may add that key to backend lines of catalog/*.yaml, no
-other line there), and resolve::placement says Kernel only for a predicate
-over those fields. The capability-less tests in scenario_proc.rs and
-vertical.rs from stream P'"'"'s "five tests" list, and vertical.rs'"'"'s skip reason.
-And whatever stream R files against src/filter.rs. Ground truth: the matrix
-cell each class failed; a pushed-down predicate and one that is not, checked
-against the program'"'"'s own drop count; the suite with the binary stripped of
-its capabilities. The resolver and catalog loader are shared layers.'
-
-KERNEL_WORK='What the eleventh wave filed against kernel programs nobody owned. (1) Finding
-48: a wakeup made from a hard or soft interrupt is credited to the interrupted
-task -- read the preempt count and, in interrupt context, record the waker as
-the interrupt and keep the event only when its wakee is the target'"'"'s. (2) The
-drain race in io_pagecache.rs, net_qdisc.rs and net_softirq.rs: onto map::Rows
-as stream K filed it, with assert_rows_taken_once and the stack-region entry.
-(3) fentry::HistogramProgram'"'"'s last drain sleeps 1 ms as a grace period a
-preemptible kernel does not honour. (4) sched.switches follows threads on
-perf::ThreadSampler (perf.rs is V'"'"'s: use it, do not change it), and the sched
-half of P8. (5) mem.latency -e stack fails one run in ten with latency_cycles
-not numeric, and scenario_mem.rs'"'"'s capability-less test from stream P'"'"'s list.
-Ground truth: finding 48'"'"'s reproduction (the half-blocked workload beside
-interrupt load) over several runs; a known number of events drained on a short
-tick, every one in a row or a counted loss; N threads switching a known number
-of times.'
-
-MCP_WORK='ROADMAP.md phase 11: an MCP server over stdio, a new workspace member mcp/
-building omn-mcp over the omn library, exposing what exists -- the catalog, a
-run'"'"'s resolved file and results document, the capability sweep -- and not a
-report generator. Nothing in src/ is yours: if the library lacks an entry point,
-file it and read the file formats. It reads and does not run (boundary 5): a
-tool may validate and resolve a session and say what it would cost and degrade;
-decide whether one that runs a bounded session through the omn binary exists,
-and write down why. Every number handed out carries what it is missing --
-Shortfall, losses, evidence level, ts_err_ns, degradations; IDENTITY and
-TEMPORAL must never read alike. Keep to the dependencies the workspace has.
-Ground truth: run example sessions with omn -f, point the server at the output,
-and check with a protocol client in mcp/tests/ that every number, loss,
-shortfall and evidence level comes back unchanged; a lossy run'"'"'s answer
-carries its shortfall; a call that would change the machine is refused.'
 
 stream="${1:-}"
 if [[ -z "$stream" || -z "${OWNS[$stream]:-}" ]]; then
@@ -142,14 +71,6 @@ else
     git -C "$repo" worktree add -b "$branch" "$worktree" HEAD >&2
 fi
 
-case "$stream" in
-    recorder) WORK="$RECORDER_WORK" ;;
-    probes) WORK="$PROBES_WORK" ;;
-    resolver) WORK="$RESOLVER_WORK" ;;
-    kernel) WORK="$KERNEL_WORK" ;;
-    mcp) WORK="$MCP_WORK" ;;
-esac
-
 prompt_file="${worktree}.prompt"
 cat >"$prompt_file" <<PROMPT
 You are ${TITLE[$stream]} of the Omniscient project.
@@ -157,37 +78,42 @@ You are ${TITLE[$stream]} of the Omniscient project.
 Read these first, in this order:
   1. CLAUDE.md                 the standing invariants of this repository
   2. STATE.md                  what works today, measured, and what is left
-  3. BRIEF.md                  the rules, then the section for your stream
+  3. BRIEF.md                  the rules, then the section for Stream ${LETTER[$stream]}
   4. docs/contributing.md      what ground truth means here
+
+Your work is BRIEF.md's section for Stream ${LETTER[$stream]}, whole: its numbered
+items, its ground truth, and its handoff. Several items cite a line of
+docs/open-requests.md, which is a snapshot taken before the twelfth wave: check
+each against the code first, and one that has landed is a line in your handoff,
+not work.
 
 You own, and may only edit:
   ${OWNS[$stream]}
   ${LOG[$stream]}    -- your handoff, and the deliverable rather than a log about one
 
-Everything else is read-only. Needing something from another stream files is not
-a reason to edit them: write it under "## Needs from another stream" in
-docs/open-findings.md, under a heading naming your stream, with the exact
-signature you want, and carry on. That file is append-only per stream -- wave
-three had six streams edit it freely and produced six conflicts on it.
+Everything else is read-only. Needing something from another stream's files is
+not a reason to edit them: write it under "## Needs from another stream" in
+docs/open-findings.md, under a heading naming your stream and the thirteenth
+wave, with the exact signature you want, and carry on. That file is append-only
+per stream -- wave three had six streams edit it freely and produced six
+conflicts on it.
 
 Build with \`make\`, not \`cargo build\`: the preload shim is a workspace member
 nothing depends on, and the CAP_BPF and CAP_PERFMON file capabilities do not
 survive a relink. Both failures are silent -- the tool reports fewer sources as
 available, which reads like the machine changed rather than the binary.
 
-${WORK}
-
 HOW YOU TEST -- this is a rule, not advice, and CLAUDE.md "How much to test,
-and when" is the long version. The full suite is ~1750 tests and 5 to 10
-minutes; four agents running it by reflex is what made the eighth wave slow.
+and when" is the long version. The full suite is ~1800 tests and 5 to 10
+minutes; five agents running it by reflex is what makes a wave slow.
 
   - While iterating: ONLY \`cargo test --lib <your module>\` and
     \`cargo test --test <file>\` for ${SCENARIO[$stream]}. Never \`make check\`.
   - Before each commit: ONE \`make check\`. If red, ONE
     \`cargo test --workspace --no-fail-fast\` to see every failure at once.
-  - A red test outside your paths: check the flaky tally (findings 41-46 in
-    docs/open-findings.md, and docs/scenarios/io.md). If it is there, rerun it
-    alone ONCE and move on. Never rerun the suite for it; never fix it.
+  - A red test outside your paths: check docs/flaky.md and the "for the flaky
+    tally" notes of docs/open-findings.md. If it is there, rerun it alone ONCE
+    and move on. Never rerun the suite for it; never fix it.
   - The session-index test in tests/cli.rs WILL be red for sessions you add.
     Expected: put the rows in your handoff, the coordinator adds them.
   - \`make\` once per build before eBPF tests, not once per test.
@@ -197,7 +123,7 @@ minutes; four agents running it by reflex is what made the eighth wave slow.
 
 You are done when your own tests pass, one \`make check\` is clean apart from the
 index rows you listed and known flakes you named, and everything you were given
-either works with its scenarios or is explained in ${LOG[$stream]}.
+either works with its scenarios or is explained in your handoff.
 
 Ground truth is the bar: a test that checks the code returns what the code
 computed proves nothing. Choose a workload whose property you know independently
@@ -205,10 +131,10 @@ computed proves nothing. Choose a workload whose property you know independently
 state -- and check the tool against that.
 
 A test that skips is not a test that passes, and a test that asserts what the
-machine was doing is worse than either. Four streams share this machine. Assert
+machine was doing is worse than either. Five streams share this machine. Assert
 the separation rather than a calibrated threshold, carry the reference's
 own resolution as slack, and where the property cannot be created here, skip
-loudly with the numbers that show why, and say so in ${LOG[$stream]}.
+loudly with the numbers that show why, and say so in your handoff.
 
 Commit on ${branch}. Do not merge; the coordinator does that.
 

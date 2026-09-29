@@ -251,8 +251,16 @@ profile keyed by `task` cannot say *which* task lost which samples, though each
 ring belongs to one -- losses per ring carried into `Collection`, a change to
 `src/emit.rs` and the collector layer, after the flight recorder.
 
+**The thirteenth wave is dispatched** (`BRIEF.md`): what a run costs the
+target (R, finding 47 and the losses per ring), the targets perf can serve
+(P, P11 and the cgroups the counting sources declare), the scheduler and the
+processes per cgroup (S), the older kernels' shapes (N), and the join engine
+(J). `main` is pushed, so the CI runs from here on; the matrix cells were
+emptied and are swept again by P for its fixes and by the coordinator after
+the wave.
+
 **After the twelfth wave, in order** -- `docs/open-requests.md` is the list the
-next brief is written from, and `docs/flaky.md` the tests it assigns:
+thirteenth brief is written from, and `docs/flaky.md` the tests it assigns:
 
 0. **The flight recorder landed** in the twelfth wave (`docs/recorder.md`): a
    session's `record:` block or `--until`, a trigger in the filter grammar, a
