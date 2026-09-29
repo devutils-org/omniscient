@@ -1052,6 +1052,9 @@ fn text(results: &Results) -> String {
     for degradation in &results.degradations {
         let _ = writeln!(out, "  degraded: {degradation}");
     }
+    for note in &results.notes {
+        let _ = writeln!(out, "  note: {note}");
+    }
     for unverified in &results.unverified {
         let _ = writeln!(out, "  unverified requirement: {unverified}");
     }
@@ -1066,11 +1069,16 @@ fn text(results: &Results) -> String {
                         Some(per_second) => {
                             let _ = writeln!(
                                 out,
-                                "    {:<14} {}{} over {}  {}  {}/s",
+                                "    {:<14} {}{} over {}{}  {}  {}/s",
                                 rate.key,
                                 bound(rate.short.as_ref()),
                                 quantity(rate.total, results.unit),
                                 approximate(rate.window_ns),
+                                if rate.counted_window {
+                                    " the counter was enabled"
+                                } else {
+                                    ""
+                                },
                                 comparison(rate.short.as_ref()),
                                 quantity(per_second, results.unit),
                             );
@@ -1731,8 +1739,9 @@ fn bytes(value: f64) -> String {
 /// the wall-clock start of a profile and this tool has no wall clock --
 /// `CLOCK_MONOTONIC` is the only domain it admits -- so the field is left at
 /// zero, which pprof reads as unknown, and a comment says so. `period` is the
-/// sampling interval, which lives in the request and not in the results, so it
-/// is left out for the same reason.
+/// sampling interval, which the results carry since the thirteenth wave
+/// (`Results::period_ns`); it is written when every profile in the file was
+/// sampled at one rate, and left out with a comment when they were not.
 fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
     let profiles: Vec<(&Results, &[StackCount], usize)> = output
         .results
@@ -1819,12 +1828,27 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
         }
     }
 
+    // The sampling period, when every profile here was sampled at one: a
+    // continuous-profiling pipeline compares two profiles taken at different
+    // rates by it. Two rates in one file have no one period to give.
+    let periods: std::collections::BTreeSet<Option<u64>> = profiles
+        .iter()
+        .map(|(results, _, _)| results.period_ns)
+        .collect();
+    let period_ns = match periods.iter().collect::<Vec<_>>().as_slice() {
+        [Some(period)] => Some(*period),
+        _ => None,
+    };
     let mut comments = vec![
         format!("exporter: omn {}", env!("CARGO_PKG_VERSION")),
         "clock: CLOCK_MONOTONIC; time_nanos is left at zero because this tool has no wall clock"
             .to_owned(),
-        "period is unset: the sampling interval belongs to the request, not to the results"
-            .to_owned(),
+        match period_ns {
+            Some(period) => format!(
+                "period: {period} ns of cpu between samples, from the request's sampling rate"
+            ),
+            None => "period is unset: these profiles were not all sampled at one rate".to_owned(),
+        },
     ];
     for (index, (results, stacks, unattributed)) in profiles.iter().enumerate() {
         comments.push(format!(
@@ -1859,6 +1883,9 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
         for degradation in &results.degradations {
             comments.push(format!("  degraded: {degradation}"));
         }
+        for note in &results.notes {
+            comments.push(format!("  note: {note}"));
+        }
         for unverified in &results.unverified {
             comments.push(format!("  unverified: {unverified}"));
         }
@@ -1875,6 +1902,14 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
         .iter()
         .map(|line| strings.intern(line) as i64)
         .collect();
+    // `period_type` names what the period counts: cpu time, in nanoseconds,
+    // which is what a `perf_event_open` sampling rate is a period of.
+    let period = period_ns.map(|period| {
+        let mut period_type = Vec::new();
+        wire::int64(&mut period_type, 1, strings.intern("cpu") as i64);
+        wire::int64(&mut period_type, 2, strings.intern("nanoseconds") as i64);
+        (period_type, period as i64)
+    });
     let default_type = strings.intern(&type_names[0]) as i64;
     let duration = profiles
         .iter()
@@ -1901,6 +1936,10 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
         wire::string(&mut profile, 6, entry);
     }
     wire::int64(&mut profile, 10, duration as i64);
+    if let Some((period_type, period)) = &period {
+        wire::message(&mut profile, 11, period_type);
+        wire::int64(&mut profile, 12, *period);
+    }
     wire::packed_int64(&mut profile, 13, &comments);
     wire::int64(&mut profile, 14, default_type);
 
@@ -2452,6 +2491,11 @@ mod tests {
             unverified: Vec::new(),
             degradations: vec!["fs:proc:statm: resident pages only".into()],
             stacks: BTreeMap::new(),
+            notes: Vec::new(),
+            overhead: Default::default(),
+            served_by: Vec::new(),
+            period_ns: None,
+            by_ring: Vec::new(),
         }
     }
 
@@ -3443,6 +3487,7 @@ mod tests {
                         total: 900.0,
                         per_second: Some(900.0),
                         window_ns: 1_000_000_000,
+                        counted_window: false,
                         short: short.clone(),
                     }],
                 },

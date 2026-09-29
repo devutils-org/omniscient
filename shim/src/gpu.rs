@@ -26,8 +26,8 @@ use std::ffi::{c_int, c_uint, c_void};
 use std::sync::atomic::AtomicUsize;
 
 use crate::{
-    guarded, in_hook, monotonic_ns, report, reporting, resolve, thread_id, Record, CLASS_GPU,
-    OP_GPU_CALL,
+    guarded, in_hook, monotonic_ns, report, reporting, resolve, thread_id, Record, Timer,
+    CLASS_GPU, OP_GPU_CALL,
 };
 
 /// `CUDA_ERROR_NOT_INITIALIZED`.
@@ -76,6 +76,7 @@ macro_rules! entry_points {
             #[no_mangle]
             pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
                 static REAL: AtomicUsize = AtomicUsize::new(0);
+                let mut timer = Timer::start(CLASS_GPU);
                 let address = resolve(&REAL, concat!(stringify!($name), "\0").as_bytes());
                 if address == 0 {
                     return $missing;
@@ -85,7 +86,7 @@ macro_rules! entry_points {
                     return real($($arg),*);
                 }
                 let entered = monotonic_ns();
-                let result = real($($arg),*);
+                let result = timer.around(|| real($($arg),*));
                 emit($index, entered, monotonic_ns(), i64::from(result));
                 result
             }

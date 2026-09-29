@@ -139,7 +139,10 @@ target = {pid = [4242]}
         assert_eq!(block.source.as_str(), "io.latency");
         assert_eq!(block.target, Target::Pid(vec![4242]));
         assert_eq!(block.mode, Mode::Trace);
-        assert_eq!(block.emit, vec![Emit::Hist(HistScale::Log2), Emit::TopK(5)]);
+        assert_eq!(
+            block.emit,
+            vec![Emit::Hist(HistScale::Log2), Emit::TopK { k: 5, by: None }]
+        );
         assert_eq!(
             block.filter.as_ref().unwrap().to_string(),
             "bytes > 4KiB && rwbs == 'R'"

@@ -202,7 +202,7 @@
     # syscalls, and three hundred pwrites put no call through them. Not
     # `vfs_read` either: that is `io.fs`, and the descriptor is exactly what
     # this layer has and that one does not.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__x64_sys_read", "fentry:__x64_sys_write", "fentry:__x64_sys_pread64", "fentry:__x64_sys_pwrite64"], cost: low, drained: true}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__x64_sys_read", "fentry:__x64_sys_write", "fentry:__x64_sys_pread64", "fentry:__x64_sys_pwrite64"], cost: med, drained: true}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med,
        degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,
@@ -232,8 +232,8 @@
     # `tracepoint:ext4:*` backend this entry used to carry is gone: a glob is
     # not a name, and converting it would have meant choosing which filesystem
     # `io.fs` is about. `docs/families/io.md` has the decision.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: low, drained: true}
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, degraded: "no BTF: struct layouts are not portable"}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: high, drained: true}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high, degraded: "no BTF: struct layouts are not portable"}
   modes: [trace, count]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
@@ -345,8 +345,8 @@
     # `vfs_fsync`, into `do_fsync`, and twenty-five syncs put zero calls
     # through either. All three are timed, `do_fsync` where the kernel has
     # it, and a nested pair is one event.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_fsync", "fentry:vfs_fsync_range"], cost: low}
-    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low,
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_fsync", "fentry:vfs_fsync_range"], cost: high}
+    - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "no BTF: struct offsets are not portable across kernels"}
   modes: [trace]
   emits: [hist, topk, raw, summary]

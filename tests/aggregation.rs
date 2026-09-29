@@ -837,3 +837,113 @@ fn a_result_says_where_in_the_run_its_request_watched() {
         "the late window lies inside the run: {late_opened}..{late_closed} of 0..{whole_closed}"
     );
 }
+
+/// A ranking over an attribute ranks its values, not the series.
+///
+/// `mem.heap.alloc` keys every event by the thread, so on a one-thread
+/// program a ranking of series is one row however many kinds of call it made.
+/// Ranked over `op`, the same run is two rows, and the workload says what each
+/// holds: the program makes exactly `N` `malloc(64)` calls and `N` frees, so
+/// the `op=alloc` row carries at least `N` events and `64 N` bytes, and the
+/// `op=free` row weighs nothing, since a free's `bytes` is zero. The slack is
+/// the run's own count of what it dropped, and the few dozen calls the C
+/// library makes at startup are above the floor, not below it.
+#[test]
+fn a_ranking_over_an_attribute_ranks_its_values() {
+    const N: u64 = 20_000;
+    let dir = std::env::temp_dir().join(format!("omn-topk-by-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("allocate");
+    let source = dir.join("allocate.c");
+    std::fs::write(
+        &source,
+        format!(
+            "#include <stdlib.h>\nint main(void) {{ for (int i = 0; i < {N}; i++) \
+             {{ void *p = malloc(64); __asm__ volatile(\"\" :: \"r\"(p) : \"memory\"); \
+             free(p); }} return 0; }}\n"
+        ),
+    )
+    .unwrap();
+    let built = Command::new("cc")
+        .args(["-O1", "-o"])
+        .arg(&program)
+        .arg(&source)
+        .status();
+    if !built.is_ok_and(|status| status.success()) {
+        eprintln!("SKIP: no C compiler to build the allocating program");
+        return;
+    }
+    let output = Command::new(BINARY)
+        .args([
+            "mem.heap.alloc",
+            "-e",
+            "topk:5@op",
+            "--format",
+            "json",
+            "--",
+        ])
+        .arg(&program)
+        .output()
+        .expect("omn runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_ran(&output);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    let result = &document["results"][0];
+    let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let rows = result["outputs"][0]["series"]
+        .as_array()
+        .expect("a ranking");
+    let row = |key: &str| {
+        rows.iter()
+            .find(|row| row["key"] == key)
+            .unwrap_or_else(|| panic!("a row for {key}: {rows:?}"))
+    };
+    let alloc = row("op=alloc");
+    let free = row("op=free");
+    assert_eq!(rows.len(), 2, "two kinds of call, two rows: {rows:?}");
+    assert!(
+        alloc["events"].as_u64().unwrap() + dropped >= N,
+        "{N} allocations, and the row holds {} with {dropped} dropped",
+        alloc["events"]
+    );
+    assert!(
+        alloc["total"].as_f64().unwrap() + (dropped * 64) as f64 >= (64 * N) as f64,
+        "{alloc}"
+    );
+    assert_eq!(free["total"].as_f64(), Some(0.0), "{free}");
+    assert!(free["events"].as_u64().unwrap() + dropped >= N, "{free}");
+}
+
+/// A counted window ranks its series: `count` produces one event per series,
+/// and a ranking of them is `rate` without the division (`open-requests
+/// 2467`). The machine's block devices are the series; what is checked is
+/// that the ranking is one, heaviest first, and accounts for every series.
+#[test]
+fn a_counted_window_ranks_its_series() {
+    let output = Command::new(BINARY)
+        .args([
+            "io.bytes", "--system", "-m", "count", "-e", "topk:2", "-d", "200ms", "--format",
+            "json",
+        ])
+        .output()
+        .expect("omn runs");
+    assert_ran(&output);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    let result = &document["results"][0];
+    let ranking = &result["outputs"][0];
+    let rows = ranking["series"].as_array().expect("a ranking");
+    let totals: Vec<f64> = rows
+        .iter()
+        .map(|row| row["total"].as_f64().unwrap())
+        .collect();
+    assert!(
+        totals.windows(2).all(|pair| pair[0] >= pair[1]),
+        "heaviest first: {totals:?}"
+    );
+    let series = rows.len() as u64 + ranking["rest"]["series"].as_u64().unwrap_or(0);
+    let events = result["events_seen"].as_u64().unwrap();
+    assert!(
+        rows.len() <= 2 && series >= 1 && series <= events,
+        "the ranking holds every series the counted run produced: {ranking}"
+    );
+}

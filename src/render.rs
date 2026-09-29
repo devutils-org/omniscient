@@ -17,7 +17,7 @@ use crate::catalog::{Catalog, Entry};
 use crate::collect;
 use crate::format::OutputFormat;
 use crate::request::{Request, Session};
-use crate::resolve::{self, Availability, FilterPlacement, ResolvedRequest, Verdict};
+use crate::resolve::{self, Availability, ResolvedRequest, Verdict};
 use crate::style::Style;
 use crate::validate::{Rejection, Report};
 
@@ -155,14 +155,19 @@ fn push_resolution(out: &mut String, resolved: &ResolvedRequest) {
         };
         let _ = writeln!(out, "    chain   {:<34} {verdict}", considered.id);
     }
-    match &resolved.filter {
-        Some(FilterPlacement::Kernel(reason)) => {
-            let _ = writeln!(out, "    filter  pushed into the kernel: {reason}");
-        }
-        Some(FilterPlacement::Userspace(reason)) => {
-            let _ = writeln!(out, "    filter  userspace: {reason}");
-        }
-        None => {}
+    // Who applies the predicate, which is what it costs: one the program
+    // compares is dropped in the kernel, one the collector applies was
+    // delivered first, and one applied after reading was delivered and read.
+    // The reason is the placement's own, not its `Display`, which prefixes a
+    // collector's with `no;` for a line that no longer exists.
+    if let Some(placement) = &resolved.filter {
+        let placed = placement.placed();
+        let heading = match placed.by {
+            resolve::AppliedBy::Program => "in the program",
+            resolve::AppliedBy::Collector => "applied by the collector, after delivery",
+            resolve::AppliedBy::Runner => "applied after reading",
+        };
+        let _ = writeln!(out, "    filter  {heading}: {}", placed.reason);
     }
     for degradation in &resolved.degradations {
         let _ = writeln!(out, "    degraded {degradation}");

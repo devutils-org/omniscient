@@ -83,6 +83,38 @@ fn percent(cost: &serde_json::Value) -> f64 {
         .expect("a launched program burns cpu, so there is something to be a percentage of")
 }
 
+/// How many reads a `mem.rss` run actually made: one event each, from the
+/// results it wrote in JSON.
+fn reads_made(name: &str, extra: &[&str]) -> (serde_json::Value, u64) {
+    let directory = scratch(name);
+    let out = directory.to_string_lossy().into_owned();
+    let mut args = vec![
+        "mem.rss",
+        "-e",
+        "summary",
+        "-d",
+        "500ms",
+        "--format",
+        "json",
+        "-o",
+        out.as_str(),
+    ];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--", "/bin/sh", "-c", BURN]);
+    let output = run(&args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let cost = cost_record(&directory);
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.join("results.json")).expect("results.json"),
+    )
+    .expect("json");
+    let _ = std::fs::remove_dir_all(&directory);
+    let reads = results["results"][0]["events_seen"]
+        .as_u64()
+        .expect("the run says how many reads it made");
+    (cost, reads)
+}
+
 /// The cost the tool reports moves with the work it was asked to do.
 ///
 /// This is the injected ground truth: the two runs differ in one thing, the
@@ -90,17 +122,34 @@ fn percent(cost: &serde_json::Value) -> f64 {
 /// other over the same window against the same program. A tool reporting a
 /// plausible constant would pass every other check in this file and fail this
 /// one.
+///
+/// Weighed by the reads each run *made*, which it reports, rather than by the
+/// ones it was asked for: under load a round that overruns re-bases the
+/// schedule, so a poll at one millisecond makes far fewer than five hundred
+/// reads in half a second, and a fixed ratio of the two costs then asserted
+/// what the machine gave the fast run (the flaky tally, #13).
 #[test]
 fn what_the_tool_says_it_spent_moves_with_how_often_it_was_asked_to_read() {
-    let (_, often) = measured("often", &["-m", "poll@1ms"]);
-    let (_, rarely) = measured("rarely", &["-m", "poll@100ms"]);
+    let (often, often_reads) = reads_made("often", &["-m", "poll@1ms"]);
+    let (rarely, rarely_reads) = reads_made("rarely", &["-m", "poll@100ms"]);
 
     let often_ns = often["overhead"]["collector_cpu_ns"].as_u64().unwrap();
     let rarely_ns = rarely["overhead"]["collector_cpu_ns"].as_u64().unwrap();
+    if often_reads < rarely_reads * 5 {
+        eprintln!(
+            "SKIP: this machine gave the fast poll {often_reads} reads against the slow one's \
+             {rarely_reads}, too few apart for their costs to separate; they cost {often_ns}ns \
+             and {rarely_ns}ns"
+        );
+        return;
+    }
+    // A read of `/proc/<pid>/smaps_rollup` is an open, a read and a close:
+    // three system calls, and never under a microsecond of this process's cpu.
+    const A_READ_AT_LEAST_NS: u64 = 1_000;
     assert!(
-        often_ns > rarely_ns * 5,
-        "polling a hundred times as often cost {often_ns}ns against {rarely_ns}ns, which is not \
-         the difference between a hundred reads and ten thousand"
+        often_ns > rarely_ns + (often_reads - rarely_reads) * A_READ_AT_LEAST_NS,
+        "{often_reads} reads cost {often_ns}ns and {rarely_reads} cost {rarely_ns}ns: the \
+         reads the faster poll made in excess are not in its account"
     );
     assert!(
         percent(&often) > percent(&rarely),
@@ -183,12 +232,17 @@ fn the_cpu_the_tool_charges_the_program_is_the_cpu_the_program_charges_itself() 
 /// the reported cost deliberately excludes; so the two cannot be compared
 /// directly. The *difference* between two runs can: the startup is the same in
 /// both, and what is left is the polling.
+///
+/// Over two seconds, so that the polling is most of the difference: over half
+/// a second, the catalog load and the probe of two separate runs differed under
+/// load by more than the forty milliseconds the faster poll added (the flaky
+/// tally, #14).
 #[test]
 fn the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes() {
     let cpu_ns = |interval: &str, directory: &Path| {
         let out = directory.to_string_lossy().into_owned();
         let script = format!(
-            "\"{BINARY}\" mem.rss -e summary -m poll@{interval} -d 500ms -o \"{out}\" \
+            "\"{BINARY}\" mem.rss -e summary -m poll@{interval} -d 2s -o \"{out}\" \
              -- /bin/sh -c '{BURN}' >/dev/null 2>&1; times"
         );
         let shell = Command::new("/bin/sh")
@@ -670,5 +724,504 @@ fn a_request_attached_for_part_of_the_run_is_weighed_over_its_own_window() {
             .as_str()
             .is_some_and(|why| why.contains("window closed")),
         "{part}"
+    );
+}
+
+// ------------------------------------------------ what a run costs the target
+
+/// The bench's reference workloads (`examples/bench/workload.c`), built once
+/// per test process: programs that time their own work and report it, which
+/// is what a cost inside the target is checked against.
+fn workload() -> Option<PathBuf> {
+    use std::sync::OnceLock;
+    static BUILT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let directory = std::env::temp_dir().join(format!("omn-cost-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).ok()?;
+            let path = directory.join("workload");
+            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/bench/workload.c");
+            let built = Command::new("cc")
+                .args(["-O2", "-pthread", "-o"])
+                .arg(&path)
+                .arg(source)
+                .output()
+                .ok()?;
+            if !built.status.success() {
+                eprintln!(
+                    "SKIP: the reference workload did not build: {}",
+                    String::from_utf8_lossy(&built.stderr)
+                );
+                return None;
+            }
+            Some(path)
+        })
+        .clone()
+}
+
+/// One run of the workload, bare or under `omn`: what the workload says it
+/// did and spent, and what `omn` said it cost when it was there.
+struct Timed {
+    /// The workload's own report: `elapsed_ns`, `cpu_ns`, `ops`.
+    report: serde_json::Value,
+    cost: Option<serde_json::Value>,
+    output: Option<Output>,
+}
+
+impl Timed {
+    fn cpu_ns(&self) -> u64 {
+        self.report["cpu_ns"]
+            .as_u64()
+            .expect("the workload reports its cpu")
+    }
+}
+
+fn timed(name: &str, omn: Option<&[&str]>, workload_args: &[&str]) -> Timed {
+    let directory = scratch(name);
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let report = directory.join("report.json");
+    let program = workload().expect("the workload was built");
+    let program = program.to_string_lossy().into_owned();
+    let output = match omn {
+        None => {
+            let status = Command::new(&program)
+                .args(workload_args)
+                .env("BENCH_REPORT", &report)
+                .status()
+                .expect("the workload runs");
+            assert!(status.success());
+            None
+        }
+        Some(request) => {
+            let out = directory.join("out");
+            let out = out.to_string_lossy().into_owned();
+            let mut args: Vec<&str> = request.to_vec();
+            args.extend_from_slice(&["-o", &out, "--", &program]);
+            args.extend_from_slice(workload_args);
+            let output = Command::new(BINARY)
+                .args(&args)
+                .env("BENCH_REPORT", &report)
+                .output()
+                .expect("omn runs");
+            Some(output)
+        }
+    };
+    let text = std::fs::read_to_string(&report).unwrap_or_default();
+    let cost = output
+        .as_ref()
+        .filter(|output| output.status.success())
+        .map(|_| cost_record(&directory.join("out")));
+    let _ = std::fs::remove_dir_all(&directory);
+    Timed {
+        report: serde_json::from_str(text.trim()).unwrap_or(serde_json::Value::Null),
+        cost,
+        output,
+    }
+}
+
+fn median(mut values: Vec<u64>) -> u64 {
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+/// Finding 47's own case: `proc.syscall` in `count` on a program that does
+/// nothing but syscalls. The tool's cpu is a fraction of a percent of the
+/// program's; the program's timed loop runs about four times slower, because
+/// the eBPF programs run on every syscall entry and exit in its context.
+///
+/// Two answers are right, and which one this machine gives depends on
+/// whether the kernel is timing eBPF programs (`kernel.bpf_stats_enabled`, or
+/// `BPF_ENABLE_STATS`, which needs `CAP_SYS_ADMIN`). Where it is not, the
+/// in-target cost is **unknown**, the record says why, and the percentage is
+/// the tool's alone -- never a zero standing in for what was not measured.
+/// Where it is, the kernel's own count of the programs' runs is checked
+/// against the calls the workload says it made (two a call: entry and exit),
+/// and the run time against what the program itself lost, which it bounds from
+/// below.
+#[test]
+fn what_an_ebpf_program_spends_inside_the_target_is_measured_or_said_to_be_unknown() {
+    if workload().is_none() {
+        return;
+    }
+    const CALLS: u64 = 200_000;
+    let calls = CALLS.to_string();
+    let request: &[&str] = &["proc.syscall", "-m", "count", "-e", "summary"];
+    let traced = timed("syscall-traced", Some(request), &["syscall", &calls]);
+    let output = traced.output.as_ref().expect("omn ran");
+    let said = stderr(output);
+    if !output.status.success() {
+        assert!(
+            said.contains("CAP_BPF") || said.contains("not available") || said.contains("no "),
+            "a run that cannot trace syscalls says why: {said}"
+        );
+        eprintln!("SKIP: `proc.syscall` cannot be served here: {said}");
+        return;
+    }
+    let cost = traced.cost.as_ref().expect("a cost record");
+    let overhead = &cost["overhead"];
+    let from = overhead["in_target_from"].as_str().unwrap_or_default();
+
+    let Some(inside_ns) = overhead["in_target_cpu_ns"].as_u64() else {
+        // Unknown: said, explained, and left out of the percentage.
+        assert!(
+            overhead["in_target_cpu_ns"].is_null(),
+            "unknown is null, never zero: {overhead}"
+        );
+        assert!(
+            from.contains("bpf_stats_enabled") && from.contains("BPF_ENABLE_STATS"),
+            "and the record says what would make it measurable: {from}"
+        );
+        assert_eq!(
+            cost["measured_percent"], cost["own_percent"],
+            "with nothing known inside the target, the percentage is the tool's own: {cost}"
+        );
+        assert!(
+            said.contains("unknown amount inside the target"),
+            "the line a reader gets says so too: {said}"
+        );
+        // And a ceiling cannot be said to have held over what was not weighed.
+        let budgeted = timed(
+            "syscall-budget",
+            Some(&[
+                "proc.syscall",
+                "-m",
+                "count",
+                "-e",
+                "summary",
+                "--budget",
+                "1000%",
+            ]),
+            &["syscall", &calls],
+        );
+        let budget_cost = budgeted.cost.expect("a cost record");
+        assert!(
+            budget_cost["within_budget"].is_null(),
+            "a budget over an unknown in-target cost is neither held nor exceeded: {budget_cost}"
+        );
+        assert!(
+            stderr(budgeted.output.as_ref().unwrap()).contains("could not be checked whole"),
+            "{}",
+            stderr(budgeted.output.as_ref().unwrap())
+        );
+        eprintln!(
+            "SKIP (the measured half): the kernel is not timing eBPF programs on this machine \
+             (`kernel.bpf_stats_enabled` = {}), so what `proc.syscall` spent inside the target \
+             is unknown, as the run said: {from}",
+            std::fs::read_to_string("/proc/sys/kernel/bpf_stats_enabled")
+                .unwrap_or_default()
+                .trim()
+        );
+        return;
+    };
+
+    // Measured: the kernel's run count against the workload's own count.
+    let ops = traced.report["ops"].as_u64().expect("ops");
+    let runs = overhead["in_target_runs"]
+        .as_u64()
+        .expect("runs are counted");
+    assert!(
+        runs >= 2 * ops,
+        "the programs run on every entry and every exit of the {ops} calls the workload made, \
+         and the kernel counted {runs} runs"
+    );
+    // And the run time against what the program lost: three bare runs, three
+    // traced, the program's own cpu time each.
+    let bare: Vec<u64> = (0..3)
+        .map(|i| timed(&format!("syscall-bare-{i}"), None, &["syscall", &calls]).cpu_ns())
+        .collect();
+    let mut runs_traced = vec![traced];
+    for i in 1..3 {
+        runs_traced.push(timed(
+            &format!("syscall-traced-{i}"),
+            Some(request),
+            &["syscall", &calls],
+        ));
+    }
+    let lost: Vec<u64> = runs_traced
+        .iter()
+        .map(|run| run.cpu_ns().saturating_sub(median(bare.clone())))
+        .collect();
+    let spread = bare.iter().max().unwrap() - bare.iter().min().unwrap()
+        + lost.iter().max().unwrap()
+        - lost.iter().min().unwrap();
+    let inside: Vec<u64> = runs_traced
+        .iter()
+        .filter_map(|run| run.cost.as_ref()?["overhead"]["in_target_cpu_ns"].as_u64())
+        .collect();
+    eprintln!("bare cpu {bare:?}, lost {lost:?}, reported inside {inside:?}, spread {spread}");
+    assert!(
+        inside_ns > 0
+            && inside
+                .iter()
+                .all(|ns| *ns <= lost.iter().max().unwrap() + spread),
+        "what the kernel timed of the programs is a part of what the program lost, never more: \
+         {inside:?} against {lost:?}"
+    );
+}
+
+/// The preload shim, on the bench's allocation workload: a million
+/// `malloc`/`free` pairs, timed by the program itself. The shim times one of
+/// its calls in seventeen, less the real allocator's time, and publishes the
+/// account in the ring it shares with `omn`; the run reports it scaled up.
+///
+/// Two independent checks. The count: the program made two million heap
+/// calls, and the account's call count is that within its sampling -- the
+/// few dozen more are the C library's own at startup. And the time: what the
+/// shim says it spent is a part of what the program lost against three bare
+/// runs, bounded above by the loss plus the spread of the runs -- the
+/// jump into the hook and the ring's effect on the caches are not in it -- and
+/// is most of it: in a release build it comes within the spread, and a debug
+/// build's hooks, which are unoptimised function calls before the clock
+/// starts, still leave it above half.
+#[test]
+fn what_the_shim_spends_inside_the_target_is_most_of_what_the_program_lost() {
+    if workload().is_none() {
+        return;
+    }
+    const PAIRS: u64 = 1_000_000;
+    let pairs = PAIRS.to_string();
+    let args = ["async-malloc", "1", pairs.as_str()];
+    let request: &[&str] = &["mem.heap.alloc", "-e", "summary"];
+    let bare: Vec<u64> = (0..3)
+        .map(|i| timed(&format!("malloc-bare-{i}"), None, &args).cpu_ns())
+        .collect();
+    let traced: Vec<Timed> = (0..3)
+        .map(|i| timed(&format!("malloc-shim-{i}"), Some(request), &args))
+        .collect();
+    let Some(first) = traced[0].cost.as_ref() else {
+        let said = stderr(traced[0].output.as_ref().unwrap());
+        eprintln!("SKIP: `mem.heap.alloc` cannot be served here: {said}");
+        return;
+    };
+    let from = first["overhead"]["in_target_from"]
+        .as_str()
+        .unwrap_or_default();
+    let inside: Vec<u64> = traced
+        .iter()
+        .map(|run| {
+            run.cost.as_ref().expect("every run records its cost")["overhead"]["in_target_cpu_ns"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("the shim's account is read from its ring: {from}"))
+        })
+        .collect();
+    for run in &traced {
+        let calls = run.cost.as_ref().unwrap()["overhead"]["in_target_runs"]
+            .as_u64()
+            .expect("the shim counts its calls");
+        assert!(
+            calls.abs_diff(2 * PAIRS) < 2 * PAIRS / 100,
+            "the program made {} heap calls, and the shim's account holds {calls}",
+            2 * PAIRS
+        );
+    }
+    let floor = median(bare.clone());
+    let lost: Vec<u64> = traced
+        .iter()
+        .map(|run| run.cpu_ns().saturating_sub(floor))
+        .collect();
+    let spread = bare.iter().max().unwrap() - bare.iter().min().unwrap()
+        + lost.iter().max().unwrap()
+        - lost.iter().min().unwrap();
+    eprintln!(
+        "bare cpu {bare:?} ns; lost under the shim {lost:?} ns; the shim's account {inside:?} \
+         ns; spread {spread} ns"
+    );
+    let most = *lost.iter().max().unwrap();
+    let least = *lost.iter().min().unwrap();
+    assert!(
+        inside.iter().all(|ns| *ns <= most + spread),
+        "the shim's account cannot exceed what the program lost: {inside:?} against {lost:?}"
+    );
+    assert!(
+        inside.iter().all(|ns| *ns * 2 >= least),
+        "and it is most of it: {inside:?} against {lost:?}"
+    );
+    // The percentage weighs it: the shim's time against what the program did
+    // of its own is far over what the reader's cpu alone would say.
+    let measured = first["measured_percent"].as_f64().expect("a percentage");
+    let own = first["own_percent"].as_f64().expect("the tool's own share");
+    assert!(
+        measured > own,
+        "what the shim spent inside the program is in the percentage: {measured} against {own}"
+    );
+}
+
+/// A collector that reads from outside its target spends nothing inside it,
+/// and says so as a measured zero; one whose mechanism runs inside and keeps no
+/// account says unknown. `mem.rss` reads `/proc`; `cpu.cycles` is a perf
+/// counter the kernel switches on every context switch of the target.
+#[test]
+fn a_reader_from_outside_costs_the_target_nothing_and_a_counter_inside_it_is_unknown() {
+    let (_, outside) = measured("outside", &["-m", "poll@100ms"]);
+    assert_eq!(
+        outside["overhead"]["in_target_cpu_ns"],
+        serde_json::json!(0),
+        "{outside}"
+    );
+    assert!(outside["overhead"]["in_target_from"]
+        .as_str()
+        .is_some_and(|from| from.contains("nothing of this collector runs")));
+
+    let directory = scratch("counter");
+    let out = directory.to_string_lossy().into_owned();
+    let output = run(&[
+        "cpu.cycles",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "-d",
+        "300ms",
+        "-o",
+        &out,
+        "--",
+        "/bin/sh",
+        "-c",
+        BURN,
+    ]);
+    if !output.status.success() {
+        eprintln!(
+            "SKIP (the counter half): `cpu.cycles` is not served here: {}",
+            stderr(&output)
+        );
+        return;
+    }
+    let cost = cost_record(&directory);
+    let _ = std::fs::remove_dir_all(&directory);
+    assert!(cost["overhead"]["in_target_cpu_ns"].is_null(), "{cost}");
+    assert!(
+        cost["overhead"]["in_target_from"]
+            .as_str()
+            .is_some_and(|from| from.contains("context switch")),
+        "{cost}"
+    );
+}
+
+/// The lock storm of finding 47, bounded: four threads, a million round trips
+/// each on one mutex, under `sched.mutex` through the preload shim. The shim
+/// reports every acquisition, far faster than `omn` reads, and before the
+/// bound `omn` held 3.9 GiB of what it had read.
+///
+/// Ground truth is the workload's own count -- it increments a counter under
+/// the lock, four million times, and reports it -- against which every
+/// acquisition the run saw, plus every one it dropped and counted, must come
+/// to exactly that; and the high-water mark of `omn`'s own memory, read from
+/// `/proc/<pid>/status` while it runs, stays under what holding every record
+/// would take.
+#[test]
+fn a_lock_storm_is_read_bounded_and_every_acquisition_is_accounted_for() {
+    let Some(program) = workload() else {
+        return;
+    };
+    const THREADS: u64 = 4;
+    const ROUNDS: u64 = 1_000_000;
+    let directory = scratch("storm");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let report = directory.join("report.json");
+    let out = directory.join("out");
+    let mut child = Command::new(BINARY)
+        .args([
+            "sched.mutex",
+            "-m",
+            "trace",
+            "-e",
+            "summary",
+            "--format",
+            "json",
+            "-o",
+        ])
+        .arg(&out)
+        .arg("--")
+        .arg(&program)
+        .args(["contended", &THREADS.to_string(), &ROUNDS.to_string()])
+        .env("BENCH_REPORT", &report)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn runs");
+    // The high-water mark, read until the process is gone: the last reading
+    // before it exits is its peak, whenever that was.
+    let status = format!("/proc/{}/status", child.id());
+    let mut peak_kb = 0u64;
+    while child.try_wait().expect("waiting").is_none() {
+        if let Ok(text) = std::fs::read_to_string(&status) {
+            if let Some(kb) = text
+                .lines()
+                .find_map(|line| line.strip_prefix("VmHWM:"))
+                .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
+            {
+                peak_kb = kb;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let output = child.wait_with_output().expect("omn ends");
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            said.contains("preload") || said.contains("shim"),
+            "a storm this machine cannot serve says why: {said}"
+        );
+        eprintln!("SKIP: `sched.mutex` cannot be served here: {said}");
+        return;
+    }
+    let workload: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&report)
+            .expect("the workload's report")
+            .trim(),
+    )
+    .expect("json");
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("results.json")).expect("results.json"),
+    )
+    .expect("json");
+    let _ = std::fs::remove_dir_all(&directory);
+    let result = &results["results"][0];
+    let counted = workload["counter"]
+        .as_u64()
+        .expect("the workload's counter");
+    assert_eq!(
+        counted,
+        THREADS * ROUNDS,
+        "the workload did what it was asked"
+    );
+    let seen = result["events_seen"].as_u64().expect("events");
+    let dropped = result["losses"]["dropped"].as_u64().expect("dropped");
+    eprintln!(
+        "storm: {counted} acquisitions, {seen} seen, {dropped} dropped and counted, omn's peak \
+         {} MiB",
+        peak_kb / 1024
+    );
+    assert_eq!(
+        seen + dropped,
+        counted,
+        "every acquisition the program made is either in the run or counted as lost: {}",
+        result["losses"]
+    );
+    // What the run holds is bounded, whatever the program does: the bound is
+    // on records, and what `omn` needs besides them is tens of megabytes.
+    const HELD_RECORDS: u64 = 1 << 19;
+    assert!(
+        seen <= HELD_RECORDS,
+        "the run kept {seen} events, past the {HELD_RECORDS} it holds"
+    );
+    if seen == HELD_RECORDS {
+        assert!(
+            result["losses"]["reasons"]
+                .as_object()
+                .is_some_and(|reasons| reasons
+                    .keys()
+                    .any(|why| why.contains("than this run holds"))),
+            "a run that reached its bound says so: {}",
+            result["losses"]
+        );
+    }
+    // Before the bound, 3.9 GiB for 1.9 million events. Holding the four
+    // million this program made would be about eight.
+    assert!(
+        peak_kb < 3 * 1024 * 1024,
+        "omn's own memory peaked at {} MiB, which is not a bounded reader",
+        peak_kb / 1024
     );
 }

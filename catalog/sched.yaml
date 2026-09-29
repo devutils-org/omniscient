@@ -223,8 +223,8 @@
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: med, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: high, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
   targets: {pid: native, tid: native, launch: native, cgroup: bpf_only}
@@ -244,15 +244,15 @@
   summary: "pthread mutex contention"
   unit: ns
   backends:
-    - {id: "preload", requires: ["dynamic-linking"], cost: med, targets: {launch: native}}
+    - {id: "preload", requires: ["dynamic-linking"], cost: extreme, targets: {launch: native}}
     # glibc's own probes: three traps per lock and unlock, and the one backend
     # that reaches a process already running. Not for a launch, which the shim
     # serves at a fraction of the cost.
-    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf"], cost: high,
+    - {id: "bpf:usdt", requires: ["uprobe", "bpf", "btf"], cost: extreme,
        targets: {pid: native, tid: native, launch: "no"},
        degraded: "three uprobes per lock and unlock, about 2 us: serializes what it measures
          on hot locks, and a successful trylock is not seen"}
-    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:pthread_mutex_lock"], cost: high,
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:pthread_mutex_lock"], cost: extreme,
        degraded: "~1-2 us per call: serializes what it measures on hot locks"}
   modes: [trace]
   # `stack` is the uprobe's: the shim refuses it by name, because walking a

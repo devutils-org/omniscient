@@ -40,6 +40,20 @@
 //! is a reservation, a copy and a release store. The pipe stays as the
 //! fallback for a ring that could not be mapped, and the three rules above
 //! hold for both: a full ring drops and counts, in the ring's own header.
+//!
+//! **What the shim costs the program is published beside what it reports.**
+//! One hooked call in [`SAMPLE_EVERY`] of each thread is timed whole, from
+//! the hook's entry to its return, less the real function it wraps -- the
+//! allocation, the lock, the driver call are the program's own work -- and
+//! the time is added to its class's account in the ring's header
+//! (`ring::SPENT`, `ring::TIMED`). `omn` scales it up to every call and
+//! reports it as what the collector spent inside the target (finding 47): the
+//! tool's own cpu is the reader's, and for a preloaded library that is not
+//! where the cost is. Timing one call in seventeen costs a counter increment
+//! on the other sixteen, where timing each would add four clock reads to a
+//! call whose record costs about three. Seventeen rather than sixteen because
+//! a thread that alternates two hooks -- lock, unlock -- would otherwise time
+//! only one of them.
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_int, c_void};
@@ -236,6 +250,7 @@ fn configure() {
         decimal_variable(RING_FD_VARIABLE),
         decimal_variable(RING_SLOTS_VARIABLE),
     ) {
+        calibrate_clock();
         ring::map(fd, slots as u64);
     }
 }
@@ -299,6 +314,111 @@ fn thread_id() -> u32 {
         cached.set(tid);
         tid
     })
+}
+
+/// One hooked call in this many, per thread, is timed for the shim's own
+/// account. Odd, so that a thread alternating two hooks times both.
+const SAMPLE_EVERY: u32 = 17;
+
+thread_local! {
+    /// Reporting calls this thread still has to make before the next one is
+    /// timed. Counted down, and decided *before* the hook does anything, so
+    /// that a timed call's clock starts ahead of its own checks.
+    static UNTIL_TIMED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// What one `CLOCK_MONOTONIC` read costs here, measured once at load and
+/// published in the ring's header beside the account it is part of.
+static CLOCK_READ_NS: AtomicU64 = AtomicU64::new(0);
+
+fn calibrate_clock() {
+    const READS: u64 = 32;
+    let first = monotonic_ns();
+    let mut last = first;
+    for _ in 0..READS {
+        last = monotonic_ns();
+    }
+    CLOCK_READ_NS.store(last.saturating_sub(first) / READS, Ordering::Relaxed);
+}
+
+/// Times one hooked call in [`SAMPLE_EVERY`], less the real function it
+/// wraps, into the ring's account of what the shim spent inside the program.
+///
+/// A timer that did not draw this call, or whose class is not reported, or
+/// that runs inside another hook (whose time already holds it), reads no
+/// clock at all. Only the ring carries the account: through the pipe the shim
+/// times nothing, and `omn` says the in-target cost is unknown.
+///
+/// The account is added when the timer is dropped, so a hook that returns
+/// early -- a null `free`, a pointer from the bootstrap region -- still
+/// accounts for the turn it drew: the reader scales by the sampling rate, and a
+/// drawn turn that never reported would bias the account down.
+pub(crate) struct Timer {
+    /// Zero when this call is not timed.
+    started_ns: u64,
+    /// Time spent in the real function, which is the program's.
+    excluded_ns: u64,
+    class: u8,
+}
+
+impl Timer {
+    /// The first thing a hook does, so that what it does next is inside the
+    /// timed span: the checks below are part of what the shim costs.
+    pub(crate) fn start(class: u8) -> Timer {
+        let until = UNTIL_TIMED.with(Cell::get);
+        let started_ns = if until == 0 { monotonic_ns() } else { 0 };
+        if !ring::mapped() || in_hook() || !reporting(class) {
+            // Not a reporting call: it neither draws nor spends a turn, and
+            // the clock read above, if any, is the price of a call that
+            // happened to come first.
+            return Timer {
+                started_ns: 0,
+                excluded_ns: 0,
+                class,
+            };
+        }
+        UNTIL_TIMED.with(|slot| {
+            slot.set(if until == 0 {
+                SAMPLE_EVERY - 1
+            } else {
+                until - 1
+            })
+        });
+        Timer {
+            started_ns,
+            excluded_ns: 0,
+            class,
+        }
+    }
+
+    /// Runs the real function, keeping its time out of the account.
+    pub(crate) fn around<T>(&mut self, real: impl FnOnce() -> T) -> T {
+        if self.started_ns == 0 {
+            return real();
+        }
+        let entered = monotonic_ns();
+        let result = real();
+        self.excluded_ns += monotonic_ns().saturating_sub(entered);
+        result
+    }
+}
+
+impl Drop for Timer {
+    /// Adds this call's time to its class's account, less what timing it
+    /// added: the span holds about two clock reads' worth of the four a timed
+    /// call makes -- the end of the first, the start of the one before the
+    /// real function, the end of the one after it and the start of the last
+    /// -- which an untimed call does not pay.
+    fn drop(&mut self) {
+        if self.started_ns == 0 {
+            return;
+        }
+        let spent = monotonic_ns()
+            .saturating_sub(self.started_ns)
+            .saturating_sub(self.excluded_ns)
+            .saturating_sub(2 * CLOCK_READ_NS.load(Ordering::Relaxed));
+        ring::spent(self.class, spent);
+    }
 }
 
 /// Writes one allocator record, when the heap was asked for.
@@ -431,8 +551,15 @@ static FLUSH_AT_EXIT: extern "C" fn() = flush_at_exit;
 ///   64   head   (u64)          the next slot to reserve, advanced by writers
 ///   128  tail   (u64)          the next slot omn will read, advanced by omn
 ///   192  drops  (3 x u64)      records a full ring refused, per class
-///   256  slots  (SLOT_BYTES each): a sequence word, then the 40-byte record
+///   256  spent  (3 x u64)      nanoseconds the timed calls took, per class
+///   288  timed  (3 x u64)      how many calls were timed, per class
+///   312  clock  (u64)          what one clock read costs, as calibrated
+///   320  slots  (SLOT_BYTES each): a sequence word, then the 40-byte record
 /// ```
+///
+/// The magic changed with the account: a shim and an `omn` that disagree
+/// about where the slots start refuse the ring and fall back to the pipe
+/// rather than read each other's records from the wrong offset.
 ///
 /// A writer reserves slot `h` by compare-and-swap on `head`, only while
 /// `h - tail` is under the slot count -- so a slot is never reused before omn
@@ -444,11 +571,14 @@ mod ring {
     use super::{Record, RECORD_SIZE};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    pub const MAGIC: u64 = 0x676e_6972_5f6e_6d6f; // "omn_ring", little endian
+    pub const MAGIC: u64 = 0x3267_6e72_5f6e_6d6f; // "omn_rng2", little endian
     pub const HEAD: usize = 64;
     pub const TAIL: usize = 128;
     pub const DROPS: usize = 192;
-    pub const SLOTS: usize = 256;
+    pub const SPENT: usize = 256;
+    pub const TIMED: usize = 288;
+    pub const CLOCK: usize = 312;
+    pub const SLOTS: usize = 320;
     pub const SLOT_BYTES: usize = 48;
 
     static BASE: AtomicUsize = AtomicUsize::new(0);
@@ -483,7 +613,28 @@ mod ring {
             return;
         }
         COUNT.store(slots, Ordering::Relaxed);
+        word(base as usize, CLOCK).store(
+            super::CLOCK_READ_NS.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         BASE.store(base as usize, Ordering::Release);
+    }
+
+    /// Whether the ring is mapped, and so whether there is an account to add
+    /// the shim's time to.
+    pub fn mapped() -> bool {
+        BASE.load(Ordering::Relaxed) != 0
+    }
+
+    /// Adds one timed record's cost to its class's account.
+    pub fn spent(class: u8, ns: u64) {
+        let base = BASE.load(Ordering::Acquire);
+        if base == 0 {
+            return;
+        }
+        let at = 8 * class.trailing_zeros() as usize;
+        word(base, SPENT + at).fetch_add(ns, Ordering::Relaxed);
+        word(base, TIMED + at).fetch_add(1, Ordering::Relaxed);
     }
 
     fn word(base: usize, offset: usize) -> &'static AtomicU64 {
@@ -562,12 +713,13 @@ fn guarded<T>(body: impl FnOnce() -> T) -> Option<T> {
 /// Replaces libc's `malloc` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    let mut timer = Timer::start(CLASS_HEAP);
     let real = resolve(&REAL_MALLOC, b"malloc\0");
     if real == 0 {
         return bootstrap_alloc(size);
     }
     let real: extern "C" fn(usize) -> *mut c_void = std::mem::transmute(real);
-    let pointer = real(size);
+    let pointer = timer.around(|| real(size));
     if !pointer.is_null() {
         guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
     }
@@ -578,6 +730,7 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
 /// Replaces libc's `calloc` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
+    let mut timer = Timer::start(CLASS_HEAP);
     let real = resolve(&REAL_CALLOC, b"calloc\0");
     if real == 0 {
         // The bump region is zeroed and never reused, so it already satisfies
@@ -585,7 +738,7 @@ pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
         return bootstrap_alloc(count.saturating_mul(size));
     }
     let real: extern "C" fn(usize, usize) -> *mut c_void = std::mem::transmute(real);
-    let pointer = real(count, size);
+    let pointer = timer.around(|| real(count, size));
     if !pointer.is_null() {
         guarded(|| report_heap(OP_ALLOC, pointer, count.saturating_mul(size) as u64));
     }
@@ -596,6 +749,7 @@ pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
 /// Replaces libc's `realloc` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn realloc(pointer: *mut c_void, size: usize) -> *mut c_void {
+    let mut timer = Timer::start(CLASS_HEAP);
     let real = resolve(&REAL_REALLOC, b"realloc\0");
     if real == 0 || is_bootstrap(pointer) {
         let fresh = bootstrap_alloc(size);
@@ -605,7 +759,7 @@ pub unsafe extern "C" fn realloc(pointer: *mut c_void, size: usize) -> *mut c_vo
         return fresh;
     }
     let real: extern "C" fn(*mut c_void, usize) -> *mut c_void = std::mem::transmute(real);
-    let fresh = real(pointer, size);
+    let fresh = timer.around(|| real(pointer, size));
     // A realloc is a free and an allocation, and reporting it as both is what
     // keeps the live set correct without the reader needing a special case.
     guarded(|| {
@@ -623,6 +777,7 @@ pub unsafe extern "C" fn realloc(pointer: *mut c_void, size: usize) -> *mut c_vo
 /// Replaces libc's `free` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn free(pointer: *mut c_void) {
+    let mut timer = Timer::start(CLASS_HEAP);
     if pointer.is_null() {
         return;
     }
@@ -637,7 +792,7 @@ pub unsafe extern "C" fn free(pointer: *mut c_void) {
     }
     guarded(|| report_heap(OP_FREE, pointer, 0));
     let real: extern "C" fn(*mut c_void) = std::mem::transmute(real);
-    real(pointer);
+    timer.around(|| real(pointer));
 }
 
 /// # Safety
@@ -648,12 +803,13 @@ pub unsafe extern "C" fn posix_memalign(
     alignment: usize,
     size: usize,
 ) -> c_int {
+    let mut timer = Timer::start(CLASS_HEAP);
     let real = libc::dlsym(libc::RTLD_NEXT, c"posix_memalign".as_ptr());
     if real.is_null() {
         return libc::ENOMEM;
     }
     let real: extern "C" fn(*mut *mut c_void, usize, usize) -> c_int = std::mem::transmute(real);
-    let result = real(out, alignment, size);
+    let result = timer.around(|| real(out, alignment, size));
     if result == 0 && !out.is_null() {
         let pointer = *out;
         guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
@@ -757,16 +913,23 @@ mod tests {
     /// wrong offset.
     #[test]
     fn the_ring_layout_is_the_one_omn_reads() {
-        assert_eq!(ring::MAGIC, 0x676e_6972_5f6e_6d6f);
+        assert_eq!(ring::MAGIC, 0x3267_6e72_5f6e_6d6f);
         assert_eq!(
             (
                 ring::HEAD,
                 ring::TAIL,
                 ring::DROPS,
+                ring::SPENT,
+                ring::TIMED,
+                ring::CLOCK,
                 ring::SLOTS,
                 ring::SLOT_BYTES
             ),
-            (64, 128, 192, 256, 48)
+            (64, 128, 192, 256, 288, 312, 320, 48)
+        );
+        assert_eq!(
+            SAMPLE_EVERY, 17,
+            "the reader scales the account by seventeen"
         );
         assert_eq!(ring::SLOT_BYTES, 8 + RECORD_SIZE);
     }

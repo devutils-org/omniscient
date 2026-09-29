@@ -143,9 +143,9 @@
   summary: "Userspace allocations by call site"
   unit: bytes
   backends:
-    - {id: "preload", requires: ["preload:shim"], cost: med}
-    - {id: "bpf:usdt", requires: ["usdt:libc"], cost: med, equivalent: true}
-    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc"], cost: high,
+    - {id: "preload", requires: ["preload:shim"], cost: extreme}
+    - {id: "bpf:usdt", requires: ["usdt:libc"], cost: extreme, equivalent: true}
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc"], cost: extreme,
        degraded: "~1-2 us per call: heavily dilates allocation-heavy workloads"}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
@@ -164,7 +164,7 @@
   summary: "Live heap: allocated and not yet freed"
   unit: bytes
   backends:
-    - {id: "preload", requires: ["preload:shim"], cost: low}
+    - {id: "preload", requires: ["preload:shim"], cost: extreme}
     - {id: "fs:proc", requires: ["allocator-stats:jemalloc|tcmalloc"], cost: free,
        degraded: "depends on the linked allocator, no allocation site"}
   modes: [poll, snapshot]
@@ -188,7 +188,7 @@
   primitive: false
   derived_from: [mem.heap.live]
   backends:
-    - {id: "preload", requires: ["preload:shim", "/proc/[pid]/pagemap", "/proc/[pid]/smaps_rollup"], cost: low}
+    - {id: "preload", requires: ["preload:shim", "/proc/[pid]/pagemap", "/proc/[pid]/smaps_rollup"], cost: extreme}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
@@ -368,7 +368,7 @@
     - {id: "fs:sys:damon", requires: ["damon"], cost: low}
     - {id: "fs:sys:page_idle", requires: ["/sys/kernel/mm/page_idle/bitmap", "/proc/[pid]/pagemap"], cost: low,
        degraded: "expensive scan, perturbs reclaim"}
-    - {id: "fs:proc:clear_refs", requires: ["/proc/[pid]/smaps_rollup"], cost: low,
+    - {id: "fs:proc:clear_refs", requires: ["/proc/[pid]/smaps_rollup"], cost: high,
        targets: {pid: native, tid: native, launch: native},
        degraded: "one number for the whole process, not which pages: the kernel's referenced bits are cleared and Referenced: is read back, so the working set is a size and not a set"}
   modes: [poll]
