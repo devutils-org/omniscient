@@ -31,9 +31,10 @@ of the mode. The rest are tenths.
 | `net.qdisc` | `bpf:raw_tp` | trace | hist, raw, summary, timeline | a delay injected by `netem` |
 | `net.softirq` | `bpf:raw_tp` | trace, count | hist, rate, raw, summary | the kernel's own `/proc/softirqs` |
 
-`net.bytes` also declared `topk`, and no mode it declares can produce one. That
-is the first entry under **Defects found**, and it is fixed: the emit is out of
-the entry until `count` mode can rank what it counted.
+`net.bytes` also declared `topk`, and no mode it declares could produce one. That
+is the first entry under **Defects found**, and it is fixed: the emit was out of
+the entry until `count` mode could rank what it counted, which it can since the
+thirteenth wave, and `topk` is back.
 
 The other three sources are vocabulary: `net.tcp.connect`, `net.socket` and
 `net.xdp`. The first two wait on **fentry** -- BTF-typed attach, which the eBPF
@@ -609,7 +610,7 @@ requests:
   - {label: queue-per-link, source: net.backlog, target: {iface: lo}, mode: count, emit: [rate]}
   - {label: sampled-counter, source: net.bytes, target: {iface: lo}, mode: sample@997hz, emit: [hist], keys: [iface]}
   - {label: summarised-capture, source: net.capture, target: {iface: lo}, mode: trace, emit: [summary], keys: [iface]}
-  - {label: ranked-volume, source: net.bytes, target: {iface: lo}, mode: count, emit: [topk:5], keys: [iface]}
+  - {label: counted-histogram, source: net.bytes, target: {iface: lo}, mode: count, emit: [hist], keys: [iface]}
 ```
 
 ---
@@ -656,10 +657,12 @@ and the output that found them are what says a regression has happened.
 
 ### 1. `net.bytes` declares an emit no mode it declares can produce
 
-**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. `topk` is
-out of the entry, so nothing promises it and the refusal names the source:
-`` `net.bytes` cannot emit `topk` ``, with the hint `this source emits rate,
-timeline, summary`. The reproduction below is what it used to say.
+**Fixed** by stream B of the fifth wave; see `docs/fixes/catalog.md`. `topk` was
+taken out of the entry, so nothing promised it and the refusal named the source.
+**Served** since the thirteenth wave: `count` can rank a counted window
+(stream R's `docs/fixes/budget.md`), so `topk` is back in
+the entry and `--mode count --emit topk` answers. The reproduction below is
+what it said before either.
 
 It was removed rather than served because the decision that would serve it is
 not the catalog's: `count` mode refusing to rank what it counted is one arm of

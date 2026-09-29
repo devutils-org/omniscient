@@ -127,7 +127,7 @@
        targets: {system: native, pid: native, cgroup: native, container: native},
        filter_fields: [comm]}
   modes: [poll, count]
-  emits: [rate, timeline, summary]
+  emits: [rate, timeline, summary, topk]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
   keys: [iface, sock, task, cgroup]
   filter_fields: [iface, comm]

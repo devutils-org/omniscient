@@ -407,6 +407,18 @@ and `docs/mcp.md` the launch rules and their refusals.
 
 ---
 
+## Settled in the thirteenth wave: what an older kernel's shape is read as
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A tracepoint whose prototype moved on an older kernel | **The program reads every shape it knows**, and its catalog line lists the same shapes in the same order, held together by a test. Where a kernel splits a tracepoint in two (`kmalloc` and `kmalloc_node` on 5.15), the program attaches to both. | Each was a source the probe rightly called missing on 5.15 or 6.6 for one moved slot; without `kmalloc_node` the 5.15 guest counted 77 KiB for 2000 datagrams of 2 KiB. |
+| A slot that means something else on another kernel | **A different attribute name** (`errno` on 5.15's `block_rq_complete`, against `status`), not a translation table. | A translated value would claim a meaning the kernel did not write. |
+| Counter kinds that are different failures | **One series each, named in the key** (`iface:veth0/drops`). | A sum of drops, errors and overruns is none of the three. |
+
+`docs/families/devices.md` has the cells and the guest scenarios.
+
+---
+
 ## Open
 
 - **Whether `sched.switches` gets a `sched_switch` program that serves every

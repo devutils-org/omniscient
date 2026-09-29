@@ -488,9 +488,9 @@ fn every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares() {
          appeared, that is a promise the catalog now makes and no request can collect"
     );
 
-    // And the refusal a reader actually meets, which now names the source and
-    // the emits it does have. Against the old entry this said `mode `count`
-    // cannot produce `topk``, which pointed at a rule in another file.
+    // And the ranking the entry dropped while `count` could not rank, which it
+    // declares again since the thirteenth wave made a counted window rankable:
+    // a reader asking for it is served, not refused.
     let outcome = omn(&[
         "net.bytes",
         "--iface",
@@ -502,17 +502,7 @@ fn every_emit_a_net_source_declares_is_reachable_from_a_mode_it_declares() {
         "--emit",
         "topk",
     ]);
-    assert_eq!(code(&outcome), 2, "{}", stderr(&outcome));
-    assert!(
-        stderr(&outcome).contains("`net.bytes` cannot emit `topk`"),
-        "the refusal should name the source and the emit: {}",
-        stderr(&outcome)
-    );
-    assert!(
-        stderr(&outcome).contains("this source emits rate, timeline, summary"),
-        "and the hint should be what the entry declares: {}",
-        stderr(&outcome)
-    );
+    assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
 }
 
 /// The format axis: what a `net` result can be written as, and what it cannot.
@@ -1160,20 +1150,6 @@ fn a_net_request_that_cannot_mean_anything_is_refused_with_the_axis_that_is_wron
             ],
             "`net.capture` cannot emit `summary`",
         ),
-        (
-            // Not declared by the source at all, since the entry stopped
-            // promising a ranking neither of its modes can reach.
-            &[
-                "net.bytes",
-                "--iface",
-                "lo",
-                "--mode",
-                "count",
-                "--emit",
-                "topk:5",
-            ],
-            "`net.bytes` cannot emit `topk`",
-        ),
     ];
 
     for (how, expected) in refused {
@@ -1211,7 +1187,7 @@ fn a_net_request_that_cannot_mean_anything_is_refused_with_the_axis_that_is_wron
          \x20 - {label: queue-per-link, source: net.backlog, target: {iface: lo}, mode: count, emit: [rate]}\n\
          \x20 - {label: sampled-counter, source: net.bytes, target: {iface: lo}, mode: sample@997hz, emit: [hist], keys: [iface]}\n\
          \x20 - {label: summarised-capture, source: net.capture, target: {iface: lo}, mode: trace, emit: [summary], keys: [iface]}\n\
-         \x20 - {label: ranked-volume, source: net.bytes, target: {iface: lo}, mode: count, emit: [topk:5], keys: [iface]}\n",
+         \x20 - {label: counted-histogram, source: net.bytes, target: {iface: lo}, mode: count, emit: [hist], keys: [iface]}\n",
     )
     .expect("write the session");
     let outcome = omn(&["validate", "-f", path.to_str().expect("a path")]);
