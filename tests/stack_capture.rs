@@ -532,3 +532,304 @@ fn an_unwind_mode_that_is_not_implemented_says_so_rather_than_unwinding_one_fram
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Names a reader can read: a Rust and a C++ program whose stacks come back in
+// the spelling their source used.
+
+/// The same chain as [`FIXTURE`], left to the compiler's mangling: modules, a
+/// method on a type, and a crate name this file chose. What the stack must say
+/// is written here, in the source; what the linker wrote is whatever `rustc`
+/// does today, which in 1.98 is the v0 scheme.
+const RUST_NAMED: &str = r#"
+use std::io::Write;
+use std::time::{Duration, Instant};
+
+pub mod chain {
+    pub mod outer {
+        #[inline(never)]
+        pub fn a(deadline: std::time::Instant) -> u64 {
+            std::hint::black_box(super::inner::b(deadline))
+        }
+    }
+    pub mod inner {
+        pub struct Spinner;
+
+        impl Spinner {
+            #[inline(never)]
+            pub fn c(&self, deadline: std::time::Instant) -> u64 {
+                let mut total = 0u64;
+                loop {
+                    let mut index = 0u64;
+                    while index < 2_000_000 {
+                        total = (total << 1) ^ index;
+                        index += 1;
+                    }
+                    std::hint::black_box(total);
+                    if std::time::Instant::now() >= deadline {
+                        return total;
+                    }
+                }
+            }
+        }
+
+        #[inline(never)]
+        pub fn b(deadline: std::time::Instant) -> u64 {
+            std::hint::black_box(Spinner.c(deadline))
+        }
+    }
+}
+
+fn main() {
+    let seconds: u64 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(5);
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    println!("ready");
+    std::io::stdout().flush().expect("stdout");
+    std::hint::black_box(chain::outer::a(deadline));
+}
+"#;
+
+/// The names [`RUST_NAMED`]'s chain must come back as, root first.
+const RUST_CHAIN: [&str; 3] = [
+    "omnnamed::chain::outer::a",
+    "omnnamed::chain::inner::b",
+    "<omnnamed::chain::inner::Spinner>::c",
+];
+
+/// The chain again in C++, with what Itanium mangling encodes and Rust's does
+/// not: parameter types, so an overload is its own function, and a reference.
+const CPP_NAMED: &str = r#"
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+
+namespace omn {
+namespace fixture {
+
+static long now_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000L + ts.tv_nsec;
+}
+
+struct Spinner {
+    unsigned long c(long deadline_ns);
+};
+
+__attribute__((noinline)) unsigned long Spinner::c(long deadline_ns) {
+    volatile unsigned long total = 0;
+    for (;;) {
+        for (unsigned long index = 0; index < 2000000; ++index) {
+            total = (total << 1) ^ index;
+        }
+        if (now_ns() >= deadline_ns) {
+            return total;
+        }
+    }
+}
+
+__attribute__((noinline)) unsigned long b(Spinner& spinner, long deadline_ns) {
+    volatile unsigned long kept = spinner.c(deadline_ns);
+    return kept;
+}
+
+__attribute__((noinline)) unsigned long a(long deadline_ns) {
+    Spinner spinner;
+    volatile unsigned long kept = b(spinner, deadline_ns);
+    return kept;
+}
+
+}  // namespace fixture
+}  // namespace omn
+
+int main(int argc, char** argv) {
+    long seconds = argc > 1 ? atol(argv[1]) : 5;
+    long deadline = omn::fixture::now_ns() + seconds * 1000000000L;
+    printf("ready\n");
+    fflush(stdout);
+    return omn::fixture::a(deadline) == 42 ? 1 : 0;
+}
+"#;
+
+/// The names [`CPP_NAMED`]'s chain must come back as, root first.
+const CPP_CHAIN: [&str; 3] = [
+    "omn::fixture::a(long)",
+    "omn::fixture::b(omn::fixture::Spinner&, long)",
+    "omn::fixture::Spinner::c(long)",
+];
+
+/// Builds one of the named fixtures, with frame pointers. `None` with the
+/// reason when the compiler it needs is not here.
+fn build_named(rust: bool) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir().join(format!("omn-stack-names-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let (source, binary, text) = if rust {
+        ("named.rs", "named-rust", RUST_NAMED)
+    } else {
+        ("named.cpp", "named-cpp", CPP_NAMED)
+    };
+    let (source, binary) = (directory.join(source), directory.join(binary));
+    std::fs::write(&source, text).map_err(|error| error.to_string())?;
+    let mut command = if rust {
+        let mut command = Command::new("rustc");
+        command.args([
+            "--edition",
+            "2021",
+            "--crate-name",
+            "omnnamed",
+            "-C",
+            "opt-level=0",
+            "-Cforce-frame-pointers=yes",
+        ]);
+        command
+    } else {
+        let mut command = Command::new("c++");
+        command.args(["-O0", "-fno-omit-frame-pointer", "-fno-inline"]);
+        command
+    };
+    let compiler = format!("{:?}", command.get_program());
+    let output = command
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source)
+        .output()
+        .map_err(|error| format!("{compiler} could not be run: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{compiler} refused the fixture: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(binary)
+}
+
+/// The linker's name of every function in `binary` whose source name is one
+/// of `chain`, read with `nm` -- a second program's reading of the same table.
+fn linker_names(binary: &Path) -> Vec<String> {
+    Command::new("nm")
+        .arg(binary)
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(2).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Samples a named fixture and checks its chain comes back, root first and
+/// adjacent, in the names its source wrote -- and that each frame keeps the
+/// linker's name beside it, which `nm` lists in the binary.
+fn a_named_chain_reads_as_its_source(rust: bool, chain: [&str; 3]) {
+    let language = if rust { "Rust" } else { "C++" };
+    let binary = match build_named(rust) {
+        Ok(binary) => binary,
+        Err(reason) if !rust => {
+            eprintln!(
+                "SKIP: no C++ fixture could be built here ({reason}), so a C++ name was never \
+                 read back"
+            );
+            return;
+        }
+        Err(reason) => panic!("the Rust fixture did not build: {reason}"),
+    };
+    let mut child = spawn_fixture(&binary);
+    let pid = child.id() as i32;
+    let samples = sample_process(pid, 400);
+    let mut unwinder = Unwinder::for_process(pid);
+    let ids: Vec<_> = samples
+        .iter()
+        .flatten()
+        .filter_map(|sample| unwinder.record(sample))
+        .collect();
+    let _ = child.kill();
+    let _ = child.wait();
+    let Some(samples) = samples else {
+        eprintln!(
+            "SKIP: this machine refuses to sample another process, so the {language} names \
+             were never read back"
+        );
+        return;
+    };
+    assert!(
+        !samples.is_empty(),
+        "the {language} fixture produced no sample"
+    );
+
+    let table = unwinder.into_table();
+    let stacks: Vec<&omn::stack::Stack> = ids.iter().filter_map(|id| table.get(*id)).collect();
+    let leaf = chain[2];
+    let through: Vec<&&omn::stack::Stack> = stacks
+        .iter()
+        .filter(|stack| {
+            stack
+                .frames
+                .iter()
+                .any(|frame| frame.symbol.as_deref() == Some(leaf))
+        })
+        .collect();
+    assert!(
+        !through.is_empty(),
+        "no {language} stack named `{leaf}`, where the program spends its time; the stacks were \
+         {:?}",
+        stacks
+            .iter()
+            .take(4)
+            .map(|stack| stack.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    let mangled = linker_names(&binary);
+    for stack in &through {
+        // Root first, as a person reads it: the frames are stored leaf first.
+        let names: Vec<&str> = stack
+            .frames
+            .iter()
+            .rev()
+            .filter_map(|frame| frame.symbol.as_deref())
+            .collect();
+        let at = names
+            .iter()
+            .position(|name| *name == chain[0])
+            .unwrap_or_else(|| panic!("`{}` is not above `{leaf}`: {names:?}", chain[0]));
+        assert_eq!(
+            names.get(at..at + 3),
+            Some(&chain[..]),
+            "the {language} chain is {chain:?}, and the stack reads {names:?}"
+        );
+        for frame in stack.frames.iter().filter(|frame| {
+            frame
+                .symbol
+                .as_deref()
+                .is_some_and(|name| chain.contains(&name))
+        }) {
+            let linker = frame
+                .mangled
+                .as_deref()
+                .unwrap_or_else(|| panic!("`{}` came back with no linker name", frame.label()));
+            assert!(
+                mangled.iter().any(|name| name == linker),
+                "`{}` names its linker symbol `{linker}`, which `nm` does not list in the binary",
+                frame.label()
+            );
+            assert_ne!(Some(linker), frame.symbol.as_deref());
+        }
+    }
+    eprintln!(
+        "{language}: {} of {} samples ran through {leaf}, each reading {}",
+        through.len(),
+        stacks.len(),
+        chain.join(" -> ")
+    );
+}
+
+#[test]
+fn a_rust_stack_comes_back_in_the_names_its_source_wrote() {
+    a_named_chain_reads_as_its_source(true, RUST_CHAIN);
+}
+
+#[test]
+fn a_cpp_stack_comes_back_in_the_names_its_source_wrote() {
+    a_named_chain_reads_as_its_source(false, CPP_CHAIN);
+}
