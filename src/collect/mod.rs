@@ -3589,6 +3589,50 @@ fn drive(
         }
 
         if let Some(reason) = ended() {
+            // The runner closes the window, so the round that meets the stop
+            // condition is the last round of reads, and every polled
+            // collector takes its closing read in it -- also one whose next
+            // read was not due yet. Since the run wakes at its duration, the
+            // stop is met before the read that used to follow it: a counted
+            // window read at the start and due again a second later ended
+            // with its baseline alone, and reported nothing -- as a polled
+            // counter beside a launched program always had at its exit. A
+            // collector read
+            // within the last millisecond has its closing read already, and a
+            // second one would be a point of nothing beside it; one read
+            // earlier than that, a baseline included, has not.
+            let closing_ns = monotonic_ns();
+            for (index, slot) in slots.iter_mut().enumerate() {
+                let Slot::Attached(collector) = slot else {
+                    continue;
+                };
+                let pace = paces[index];
+                let interval_ns = pace.interval.as_nanos() as u64;
+                let last_read_ns = ledger.due_ns[index].saturating_sub(interval_ns);
+                // Only a collector the runner paces: one that keeps its own
+                // tick -- a per-task counter, a ring -- takes its closing read
+                // in `stop`, where it can wait for what an exited target's
+                // children fold into it, and a read here would take the
+                // interval from it and report nothing in its place.
+                if read_now[index]
+                    || collector.tick().is_some()
+                    || pace.snapshot
+                    || interval_ns == 0
+                    || ledger.finished[index].is_some()
+                    || closing_ns.saturating_sub(last_read_ns) < CLOSING_READ_SLACK_NS
+                {
+                    continue;
+                }
+                // Its target going away now changes nothing: the run is over.
+                let _ = ledger.read(
+                    index,
+                    collector.as_mut(),
+                    pace,
+                    about_workload[index],
+                    closing_ns,
+                    spending,
+                );
+            }
             break reason;
         }
 
@@ -3953,6 +3997,11 @@ impl Ledger {
         }
     }
 }
+
+/// How recently a collector must have been read for that read to stand as the
+/// window's closing read: well under any tick a collector keeps, and well over
+/// the gap between two reads of one round.
+const CLOSING_READ_SLACK_NS: u64 = 1_000_000;
 
 /// The span a recording's budget is weighed over, at the least: the retention
 /// bound when it is longer. Two seconds is twenty budget checks, which is

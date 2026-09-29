@@ -2040,3 +2040,106 @@ fn several_processes_asked_of_a_collector_that_observes_one_are_refused_by_name(
     ]);
     assert!(alone.status.success(), "{}", stderr(&alone));
 }
+
+/// A counted window over a polled counter ends with its closing read, whether
+/// the run ends at its duration or when its program exits.
+///
+/// Ground truth is loopback traffic the program makes and measures itself: it
+/// reads `lo`'s own counters in `/proc/net/dev`, sends `N` datagrams of `B`
+/// bytes to a socket of its own and receives them, reads the counters again,
+/// and reports both deltas. The counted window holds the program's whole run,
+/// so `net.bytes` on `lo` must report at least that increment in each
+/// direction, and at least `N` datagrams' worth of payload; `--system` holds the
+/// same `lo` series. Before the fix the run woke at its duration, met the stop
+/// condition before the read that followed it, and a counted window whose
+/// next read was a second away reported its baseline alone: zero events.
+#[test]
+fn a_counted_window_over_a_polled_counter_ends_with_its_closing_read() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("SKIP: no python3 to make the traffic");
+        return;
+    }
+    const N: u64 = 400;
+    const B: u64 = 1000;
+    let program = format!(
+        "import socket, sys, time\n\
+         def lo():\n\
+         \x20   for line in open('/proc/net/dev'):\n\
+         \x20       name, _, rest = line.partition(':')\n\
+         \x20       if name.strip() == 'lo':\n\
+         \x20           f = rest.split()\n\
+         \x20           return int(f[0]), int(f[8])\n\
+         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
+         s.bind(('127.0.0.1', 0))\n\
+         before = lo()\n\
+         for _ in range({N}):\n\
+         \x20   s.sendto(b'x' * {B}, s.getsockname())\n\
+         \x20   s.recv(65536)\n\
+         after = lo()\n\
+         print(after[0] - before[0], after[1] - before[1], flush=True)\n\
+         time.sleep(float(sys.argv[1]))\n"
+    );
+    for (target, linger, duration) in [
+        ("{iface: lo}", "0", None),
+        ("{iface: lo}", "5", Some("1s")),
+        ("system", "5", Some("1s")),
+    ] {
+        let dir = std::env::temp_dir().join(format!("omn-counted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("traffic.py");
+        std::fs::write(&script, &program).unwrap();
+        let duration = duration.map_or_else(String::new, |d| format!("    duration: {d}\n"));
+        let session = format!(
+            "requests:\n\
+             \x20 - label: program\n    source: mem.rss\n    \
+             target: {{launch: [python3, \"{}\", \"{linger}\"]}}\n    mode: poll@100ms\n    \
+             emit: [summary]\n{duration}\
+             \x20 - label: lo\n    source: net.bytes\n    target: {target}\n    mode: count\n    \
+             emit: [summary]\n{duration}",
+            script.display()
+        );
+        let file = dir.join("session.yml");
+        std::fs::write(&file, &session).unwrap();
+        let output = run(&["-f", &file.to_string_lossy(), "--format", "json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(output.status.success(), "{}", stderr(&output));
+        // The program's own line comes first on standard output, then the
+        // document.
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let (first, document) = text.split_once('\n').expect("the program's line");
+        let own: Vec<u64> = first
+            .split_whitespace()
+            .map(|n| n.parse().expect("a count"))
+            .collect();
+        let document: serde_json::Value = serde_json::from_str(document).expect("json");
+        let results = document["results"].as_array().unwrap();
+        let lo = results
+            .iter()
+            .find(|result| result["label"] == "lo")
+            .expect("the counted request");
+        // The series is `lo`'s received plus transmitted bytes over the one
+        // counted window: `net.bytes` declares no emit that shows the two
+        // directions apart, though its event carries both.
+        let series = lo["outputs"][0]["series"].as_array().expect("a summary");
+        let lo_series = series
+            .iter()
+            .find(|one| one["key"].as_str().is_some_and(|key| key.contains("lo")))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{target}, ended by {}: no `lo` series among {series:?}",
+                    lo["stopped_because"]
+                )
+            });
+        let counted = lo_series["last"].as_f64().expect("the window's value") as u64;
+        assert_eq!(lo_series["count"], 1, "one counted window: {lo_series}");
+        assert!(
+            counted >= own[0] + own[1] && counted >= 2 * N * B,
+            "{target}, ended by {}: counted {counted} bytes, the program measured rx {} tx {} \
+             and sent {} bytes of payload each way",
+            lo["stopped_because"],
+            own[0],
+            own[1],
+            N * B
+        );
+    }
+}
