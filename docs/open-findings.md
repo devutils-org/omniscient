@@ -7618,3 +7618,87 @@ open to it.
 local copies of what `Insn::or64_imm`, `Insn::arsh64_imm` and `Insn::ld_imm64`
 are on `main` since stream D's merge. Both now call the shared instructions,
 and `mod local` is gone.
+
+## Needs from another stream — the thirteenth wave, stream S (the scheduler and the processes, per cgroup)
+
+Stream S's deliverable is `docs/families/kernel.md`, "The thirteenth wave".
+What it needs from files it does not own:
+
+### To the coordinator (`tests/cross_io.rs`, nobody's): the thread target's pinned defect is fixed
+
+`a_thread_target_on_the_scheduler_half_keeps_nothing_and_says_nothing` asserts
+`through_thread == 0` and fails, as its own message says it will, because
+`sched.wakeup --tid` and `sched.offcpu --tid` now keep the thread's events.
+Wanted: the assertion flipped to what the thread did, and the test renamed;
+`scenario_sched::a_thread_target_keeps_that_thread_and_not_the_one_beside_it`
+is the ground truth beside it.
+
+```rust
+assert!(
+    through_thread > 0 && through_thread <= through_process,
+    "{source} --tid keeps the thread's own events, and no more than --pid keeps of it"
+);
+```
+
+### To the coordinator (`examples/README.md`, `GUIDE.md`): one index row
+
+`| \`sched-cgroup.yml\` | A cgroup and everything below it: its blocked time, its run queue waits, and who woke it. |`
+
+### To stream R (`src/collect/mod.rs`): a window closes after its collector's last read
+
+`collect::run` sets every attached collector's `Watched::closed_ns` to one
+`monotonic_ns()` taken after all of them were stopped. A drained collector's
+last read is inside its own `stop()`, earlier than that, so an event between
+the two is inside the window the result reports and in no row: 6 of 930
+blocks with `sched.offcpu` alone, 71 with five collectors stopping after it
+(measured against the kernel's own `ru_nvcsw`). Wanted, in the loop that stops
+the collectors:
+
+```rust
+// per collector, just before its `stop()` is called:
+watched[index].closed_ns = monotonic_ns();
+```
+
+so that a window never claims a span its collector could not have seen.
+`tests/scenario_{sched,proc}.rs` bound their actions by the earliest the run
+can end meanwhile, so nothing of this stream's depends on it.
+
+### To stream R (`src/request.rs` or `src/cli.rs`): a container resolved to its cgroup
+
+Every `sched` and `proc` program serves a cgroup now, and `container` was taken
+out of their entries because nothing resolves one: `Target::Container(name)`
+reaches the collectors as a name. Wanted, wherever targets are bound before
+attach:
+
+```rust
+/// The cgroup a container runs in, from its runtime (`docker inspect`,
+/// `podman inspect`, or the container's init pid's `/proc/<pid>/cgroup`).
+pub fn cgroup_of_container(name: &str) -> Result<std::path::PathBuf, String>;
+```
+
+and `Target::Container` bound to `Target::Cgroup` with it, after which the key
+goes back into the entries (stream S's lines, next wave).
+
+### To stream P (`src/collect/cpu/counters.rs`): `SCHED_SWITCHES` is used
+
+`sched.switches -m count` hands its request to
+`counters::Prepare::new(&counters::SCHED_SWITCHES, Mode::Count)`, so the
+`#[allow(dead_code)]` on `SCHED_SWITCHES` can go.
+
+### To the coordinator (`docs/bpf-layer.md`): what a program compares now
+
+`insn::Whose` (`Any`, `Process`, `Thread`, `Cgroup`), `insn::Cgroup::resolve`,
+`insn::push_task_filter` over a `Subject` (a task register and, optionally,
+the ids already on the stack) and `insn::push_current_filter` are the layer's
+target comparison; `bpf::Renames` is the exec program that corrects a row's
+name. A new program narrows with them rather than comparing a thread group.
+
+### For the flaky tally: seen in this stream's runs, not its files
+
+- `collect::tests::the_runner_closes_the_window` (`src/collect/mod.rs:4898`,
+  "the last read must land at the end of the window ... it came 9910729 ns
+  early"), in `make check` at load 27; passed alone at once.
+- `triage::a_join_from_a_held_source_counts_what_fell_outside_its_window`
+  ("the lock layer was attached"), in one `--no-fail-fast` run; passed alone.
+- `cross_compute::every_switch_of_the_task_is_credited_to_the_wakeup_that_released_it`
+  (653 of 654), already in the tally; passed alone.
