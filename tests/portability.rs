@@ -1552,9 +1552,6 @@ fn kernel_releases_parse_the_way_the_cells_write_them() {
 fn everywhere(_: &Sweep) -> bool {
     true
 }
-fn on_5_15_with_capabilities(sweep: &Sweep) -> bool {
-    sweep.kernel().is_some_and(|k| k < (6, 1)) && sweep.cell.config == "caps"
-}
 fn in_a_guest(sweep: &Sweep) -> bool {
     sweep.cell.name.starts_with(|c: char| c.is_ascii_digit())
 }
@@ -1577,12 +1574,5 @@ const KNOWN_DEFECTS: &[Known] = &[
         sources: &["mem.cgroup"],
         targets: &["launch"],
         says: "is the hierarchy root",
-    },
-    Known {
-        finding: "P11 (a per-cpu profile's ring is refused on 5.15 under the two capabilities)",
-        applies: on_5_15_with_capabilities,
-        sources: &["cpu.profile"],
-        targets: &["system"],
-        says: "mmap of 8 ring pages: Operation not permitted",
     },
 ];

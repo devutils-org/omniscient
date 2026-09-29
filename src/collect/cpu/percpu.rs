@@ -28,11 +28,11 @@
 
 use std::time::Duration as StdDuration;
 
-use super::counters::{measured, multiplexing_notes, Spec};
+use super::counters::{measured, measured_tick, multiplexing_notes, Spec, Ticks};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::PerCpuGroups;
+use crate::perf::{PerCpuGroups, Reading};
 
 /// How often the collector is asked for events. It has none to give until the
 /// window closes; the tick only keeps the observed window from being rounded up
@@ -49,9 +49,52 @@ pub struct PerCpuCounters {
     groups: Option<PerCpuGroups>,
     losses: Losses,
     notes: Vec<String>,
+    /// A poll's tick and each cpu's previous reading; `None` counts the
+    /// window once.
+    poll: Option<StdDuration>,
+    ticks: std::collections::BTreeMap<u32, Ticks>,
+    opened_ns: u64,
+    seq: u64,
 }
 
 impl PerCpuCounters {
+    /// Reads the counters every `poll` while they run, one event per cpu per
+    /// tick, instead of once for the window.
+    pub fn polled(mut self, poll: Option<StdDuration>) -> Self {
+        self.poll = poll;
+        self
+    }
+
+    /// One cpu's reading as an event: the window's, or a tick's.
+    fn event(&mut self, cpu: u32, readings: Vec<Reading>, ts_ns: u64) -> Option<Event> {
+        let mut attrs = if self.poll.is_some() {
+            let (delta, interval_ns) =
+                self.ticks
+                    .entry(cpu)
+                    .or_default()
+                    .next(self.opened_ns, ts_ns, readings);
+            measured_tick(self.spec, &delta, interval_ns, &mut self.losses)?
+        } else {
+            self.notes
+                .extend(multiplexing_notes(&readings, &format!("cpu {cpu}")));
+            measured(self.spec, &readings, &mut self.losses)?
+        };
+        // `cpu` is a filter field the catalog declares, and a key is not a
+        // filter field: a predicate cannot read one.
+        attrs.push(Attr::uint("cpu", u64::from(cpu)));
+        let seq = self.seq;
+        self.seq += 1;
+        Some(Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: self.spec.source.to_owned(),
+            keys: vec![KeyValue::cpu(cpu)],
+            attrs,
+            collector_id: self.id.clone(),
+            seq,
+        })
+    }
+
     pub fn new(cpus: Vec<u32>, spec: &'static Spec) -> Self {
         Self {
             id: CollectorId::new(format!("{}/{}", spec.source, spec.backend)),
@@ -60,6 +103,10 @@ impl PerCpuCounters {
             groups: None,
             losses: Losses::default(),
             notes: Vec::new(),
+            poll: None,
+            ticks: std::collections::BTreeMap::new(),
+            opened_ns: 0,
+            seq: 0,
         }
     }
 }
@@ -90,6 +137,7 @@ impl Collector for PerCpuCounters {
             ));
         }
         groups.enable()?;
+        self.opened_ns = monotonic_ns();
         self.groups = Some(groups);
         Ok(())
     }
@@ -97,8 +145,26 @@ impl Collector for PerCpuCounters {
     fn sample(&mut self, _seq: u64) -> Result<Vec<Event>, SampleError> {
         // A cpu does not exit, so unlike the per-task collector there is
         // nothing to notice here: a counted window has one value and it is read
-        // when the window closes.
-        Ok(Vec::new())
+        // when the window closes, and a poll reads every cpu on its tick.
+        if self.poll.is_none() {
+            return Ok(Vec::new());
+        }
+        let Some(readings) = self.groups.as_ref().map(PerCpuGroups::read) else {
+            return Ok(Vec::new());
+        };
+        let ts_ns = monotonic_ns();
+        let mut events = Vec::new();
+        for (cpu, reading) in readings {
+            match reading {
+                Ok(readings) => events.extend(self.event(cpu, readings, ts_ns)),
+                Err(error) => {
+                    self.losses.failed_reads += 1;
+                    self.losses
+                        .note(format!("reading the counters on cpu {cpu} failed: {error}"));
+                }
+            }
+        }
+        Ok(events)
     }
 
     fn stop(&mut self) -> Vec<Event> {
@@ -121,29 +187,13 @@ impl Collector for PerCpuCounters {
                     continue;
                 }
             };
-            self.notes
-                .extend(multiplexing_notes(&readings, &format!("cpu {cpu}")));
-            let Some(mut attrs) = measured(self.spec, &readings, &mut self.losses) else {
-                continue;
-            };
-            // `cpu` is a filter field the catalog declares, and a key is not a
-            // filter field: a predicate cannot read one.
-            attrs.push(Attr::uint("cpu", u64::from(cpu)));
-            events.push(Event {
-                ts_ns,
-                ts_err_ns: 0,
-                kind: self.spec.source.to_owned(),
-                keys: vec![KeyValue::cpu(cpu)],
-                attrs,
-                collector_id: self.id.clone(),
-                seq: events.len() as u64,
-            });
+            events.extend(self.event(cpu, readings, ts_ns));
         }
         events
     }
 
     fn tick(&self) -> Option<StdDuration> {
-        Some(TICK)
+        Some(self.poll.unwrap_or(TICK))
     }
 
     fn losses(&self) -> Losses {

@@ -5,6 +5,9 @@
 //! target and read once, when the window closes. `counters.rs` holds it, and
 //! the table there is what a new counting source is added to.
 
+/// Visible to the rest of the collector layer for `mem.faults`, which samples a
+/// cgroup the way `cpu.profile` does.
+pub(in crate::collect) mod cgroup;
 /// Visible to the rest of the collector layer for `mem.faults`, whose `count`
 /// mode is one software counter read through this group rather than a copy of it.
 pub(in crate::collect) mod counters;

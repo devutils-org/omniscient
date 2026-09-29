@@ -94,10 +94,22 @@ impl Prepared for Prepare {
             collector.cpus = Some(cpus);
             return Ok(Box::new(collector));
         }
+        // A cgroup is the same shape, each cpu's event filtered by the kernel
+        // to the cgroup's tasks (`cgroup.rs`).
+        if let Target::Cgroup(path) = target {
+            let cgroup = super::cgroup::Cgroup::resolve(path)?;
+            let mut collector = ProfileCollector::new(-1, self.mode, self.callchain, false);
+            collector.cpus = Some(
+                crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
+            );
+            collector.cgroup = Some(cgroup);
+            return Ok(Box::new(collector));
+        }
         let pid = target.first_pid().ok_or_else(|| {
             format!(
-                "profiling a {} target is not built: a profile follows a process, a core or \
-                 the whole machine, and this target names none of them",
+                "profiling a {} target is not built: a profile follows a process, a core, a \
+                 cgroup or the whole machine, and this target names none of them",
                 target.kind()
             )
         })?;
@@ -140,6 +152,13 @@ impl Sampler {
             Sampler::Cpus(sampler) => sampler.undecoded(),
         }
     }
+
+    fn throttled(&self) -> u64 {
+        match self {
+            Sampler::Tasks(sampler) => sampler.throttled(),
+            Sampler::Cpus(sampler) => sampler.throttled(),
+        }
+    }
 }
 
 pub struct ProfileCollector {
@@ -150,6 +169,10 @@ pub struct ProfileCollector {
     event: Option<Sampler>,
     /// The cpus sampled, for a machine or a core target. `None` follows `pid`.
     cpus: Option<Vec<u32>>,
+    /// The cgroup whose tasks are sampled on `cpus`, for a cgroup target.
+    cgroup: Option<super::cgroup::Cgroup>,
+    /// Throttled periods already reported; see `Sampler::throttled`.
+    throttled: u64,
     /// Samples a cpu took while it ran nothing: the idle task is not a
     /// program, and its stacks are not on-cpu work, so they are counted here
     /// and left out.
@@ -203,6 +226,8 @@ impl ProfileCollector {
             callchain,
             event: None,
             cpus: None,
+            cgroup: None,
+            throttled: 0,
             idle: 0,
             recent: BTreeSet::new(),
             processes: BTreeSet::new(),
@@ -232,8 +257,8 @@ impl ProfileCollector {
         let processes = &mut self.processes;
         let idle = &mut self.idle;
         let mut index = seq;
+        let cgroup_key = self.cgroup.as_ref().map(|cgroup| cgroup.key());
         let mut dropped = 0u64;
-        let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
             Record::Sample(sample) if sample.pid == 0 && sample.tid == 0 => *idle += 1,
@@ -266,6 +291,7 @@ impl ProfileCollector {
                     keys.push(KeyValue::cpu(cpu));
                     attrs.push(Attr::uint("cpu", u64::from(cpu)));
                 }
+                keys.extend(cgroup_key.clone());
                 events.push(Event {
                     ts_ns: sample.time_ns,
                     ts_err_ns: 0,
@@ -278,9 +304,12 @@ impl ProfileCollector {
                 index += 1;
             }
             Record::Lost { count } => dropped += count,
-            Record::Throttle { throttled } => throttles += u64::from(throttled),
+            // Counted by the sampler itself; see `SampledEvent::throttled`.
+            Record::Throttle { .. } => {}
             Record::Other { .. } => undecoded += 1,
         });
+        let throttles = event.throttled() - self.throttled;
+        self.throttled += throttles;
         if dropped > 0 {
             self.losses.dropped += dropped;
             self.losses.note(
@@ -333,6 +362,14 @@ impl Collector for ProfileCollector {
 
         let spec =
             SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
+        if let (Some(cpus), Some(cgroup)) = (&self.cpus, &self.cgroup) {
+            let event =
+                ThreadSampler::open_cgroup(&spec, &cgroup.directory, cpus, ROOT_RING_PAGES)?;
+            event.enable().map_err(|error| error.to_string())?;
+            self.unwinding = event.callchain() != Callchain::Off;
+            self.event = Some(Sampler::Cpus(event));
+            return Ok(());
+        }
         if let Some(cpus) = &self.cpus {
             let event = ThreadSampler::open_cpus(&spec, cpus, ROOT_RING_PAGES)?;
             event.enable().map_err(|error| error.to_string())?;
@@ -614,22 +651,39 @@ mod tests {
         );
     }
 
-    /// A profile follows a process, a core or the machine. A target that is
-    /// none of them -- a cgroup, for which this build opens no event -- is
-    /// refused by name, rather than served this process's own profile.
+    /// A profile follows a process, a core, a cgroup or the machine. A target
+    /// that is none of them -- a container, which nothing here resolves to its
+    /// cgroup -- is refused by name, rather than served this process's own
+    /// profile.
     #[test]
-    fn a_target_that_is_not_a_process_a_core_or_the_machine_is_refused_by_name() {
+    fn a_target_that_is_not_a_process_a_core_a_cgroup_or_the_machine_is_refused_by_name() {
         let prepare = Box::new(Prepare {
             mode: Mode::Sample {
                 freq: Mode::DEFAULT_SAMPLE_FREQ,
             },
             callchain: Callchain::FramePointers,
         });
-        let Err(error) = prepare.attach(&Target::Cgroup("/sys/fs/cgroup".into())) else {
-            panic!("a cgroup target names no process and no cpu");
+        let Err(error) = prepare.attach(&Target::Container("web".into())) else {
+            panic!("a container target names no process, no cpu and no cgroup");
         };
-        assert!(error.contains("cgroup"), "{error}");
+        assert!(error.contains("container"), "{error}");
         assert!(error.contains("not built"), "{error}");
+    }
+
+    /// A cgroup that is not there is refused as that, at the attach, before
+    /// any event is opened.
+    #[test]
+    fn a_cgroup_that_does_not_exist_is_refused_as_absent() {
+        let prepare = Box::new(Prepare {
+            mode: Mode::Sample {
+                freq: Mode::DEFAULT_SAMPLE_FREQ,
+            },
+            callchain: Callchain::Off,
+        });
+        let Err(error) = prepare.attach(&Target::Cgroup("/omn-no-such-cgroup".into())) else {
+            panic!("a cgroup that does not exist cannot be profiled");
+        };
+        assert!(error.contains("not a cgroup v2 directory"), "{error}");
     }
 
     /// The machine is one cpu-clock event per online cpu, over every task:

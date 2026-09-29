@@ -264,7 +264,13 @@ pub fn spec_for(source: &str, backend: &str) -> Option<&'static Spec> {
 
 /// Holds the source until the target exists.
 #[derive(Debug)]
-pub struct Prepare(&'static Spec);
+pub struct Prepare {
+    spec: &'static Spec,
+    /// The tick of a `poll`: the same counters, read while they run, each
+    /// reading's difference from the one before it an event. `None` is
+    /// `count`, one event for the window.
+    poll: Option<StdDuration>,
+}
 
 impl Prepare {
     /// Refuses a mode this collector cannot serve before anything is launched.
@@ -276,14 +282,79 @@ impl Prepare {
     /// number.
     pub fn new(spec: &'static Spec, mode: Mode) -> Result<Self, String> {
         match mode {
-            Mode::Count => Ok(Self(spec)),
+            Mode::Count => Ok(Self { spec, poll: None }),
+            // `docs/open-findings.md`, "a per-tick read of a counting PMU
+            // event": the counter is already open and read at the end, and a
+            // verdict that asks *when* needs the same read at an interval.
+            Mode::Poll { interval } => Ok(Self {
+                spec,
+                poll: Some(StdDuration::from_nanos(interval.as_nanos())),
+            }),
             other => Err(format!(
                 "`{}` in `{other}` mode needs the sampling path, which lands with stacks; \
-                 `--mode count` reads the same counter exactly",
+                 `--mode count` reads the same counter exactly, and `--mode poll` reads it at \
+                 an interval",
                 spec.source
             )),
         }
     }
+}
+
+/// What a poll's readings counted between two ticks.
+#[derive(Debug, Default)]
+pub(super) struct Ticks {
+    previous: Option<(u64, Vec<Reading>)>,
+}
+
+impl Ticks {
+    /// The difference from the previous reading and the monotonic time
+    /// between the two, or from the open for the first: the counters start
+    /// at zero when they are enabled.
+    pub(super) fn next(
+        &mut self,
+        opened_ns: u64,
+        ts_ns: u64,
+        readings: Vec<Reading>,
+    ) -> (Vec<Reading>, u64) {
+        let (delta, since) = match &self.previous {
+            Some((at, before)) => (crate::perf::delta_readings(&readings, before), *at),
+            None => (readings.clone(), opened_ns),
+        };
+        self.previous = Some((ts_ns, readings));
+        (delta, ts_ns.saturating_sub(since))
+    }
+}
+
+/// A tick's attributes: [`measured`], except that a tick the target spent off
+/// every cpu is a count of zero rather than a loss.
+///
+/// A per-task counter's enabled time advances only while the task runs, so an
+/// idle tick has `enabled_ns` 0 -- and the window a counted run reports as
+/// "there is no count" is, one tick of a poll, the ordinary case of a task
+/// asleep. A ratio has no value over nothing and the tick produces none; a
+/// counter crowded off the pmu while the task ran (`running_ns` 0 with time
+/// enabled) is still the loss it is in a window.
+pub(super) fn measured_tick(
+    spec: &Spec,
+    delta: &[Reading],
+    interval_ns: u64,
+    losses: &mut Losses,
+) -> Option<Vec<Attr>> {
+    let first = delta.first()?;
+    let mut attrs = if first.enabled_ns == 0 {
+        if matches!(spec.value, Value::Ratio { .. }) {
+            return None;
+        }
+        let mut attrs = vec![Attr::uint("count", 0), Attr::text("counter", first.name)];
+        attrs.extend(delta[1..].iter().map(|reading| Attr::uint(reading.name, 0)));
+        attrs.push(Attr::uint("enabled_ns", 0));
+        attrs.push(Attr::uint("running_ns", 0));
+        attrs
+    } else {
+        measured(spec, delta, losses)?
+    };
+    attrs.push(Attr::uint("interval_ns", interval_ns));
+    Some(attrs)
 }
 
 impl Prepared for Prepare {
@@ -292,26 +363,44 @@ impl Prepared for Prepare {
         // third shape. Which one a target means is decided here, once, so that
         // neither collector has to hold a target it cannot serve.
         match target {
-            Target::Cpu(set) => Ok(Box::new(super::percpu::PerCpuCounters::new(
-                set.cpus().to_vec(),
-                self.0,
-            ))),
+            Target::Cpu(set) => Ok(Box::new(
+                super::percpu::PerCpuCounters::new(set.cpus().to_vec(), self.spec)
+                    .polled(self.poll),
+            )),
             Target::System => {
                 let cpus = crate::perf::online_cpus()
                     .map_err(|error| format!("cannot tell which cpus are online: {error}"))?;
-                Ok(Box::new(super::percpu::PerCpuCounters::new(cpus, self.0)))
+                Ok(Box::new(
+                    super::percpu::PerCpuCounters::new(cpus, self.spec).polled(self.poll),
+                ))
             }
+            // The kernel's third shape: a cpu event filtered to one cgroup,
+            // on every cpu. See `cgroup.rs`.
+            Target::Cgroup(path) => {
+                let cgroup = super::cgroup::Cgroup::resolve(path)?;
+                let cpus = crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?;
+                Ok(Box::new(
+                    super::cgroup::CgroupCounters::new(cgroup, cpus, self.spec).polled(self.poll),
+                ))
+            }
+            Target::Container(_) => Err(format!(
+                "`{}` counts a cgroup, and a container has to be resolved to its cgroup first, \
+                 which this tool does not do; pass `--cgroup` with the container's cgroup path",
+                self.spec.source
+            )),
             other => {
                 let pid = other.first_pid().ok_or_else(|| {
                     format!(
-                        "`{}` counts a task or a cpu, and a {} target is neither: name a \
-                         process with --pid or --tid, a core with --cpu, or the machine with \
-                         --system",
-                        self.0.source,
+                        "`{}` counts a task, a cpu or a cgroup, and a {} target is none of \
+                         them: name a process with --pid or --tid, a core with --cpu, a cgroup \
+                         with --cgroup, or the machine with --system",
+                        self.spec.source,
                         other.kind()
                     )
                 })?;
-                let mut collector = CounterCollector::new(pid, self.0);
+                let mut collector = CounterCollector::new(pid, self.spec);
+                collector.poll = self.poll;
                 // A `--tid` target is that task and what it starts; every other
                 // target that names a process is every thread it has.
                 collector.whole_process = !matches!(other, Target::Tid(_));
@@ -463,6 +552,11 @@ pub struct CounterCollector {
     /// Whether the counters follow every thread of `pid` rather than `pid`
     /// alone. See [`ThreadCounters`].
     whole_process: bool,
+    /// A poll's tick, and what it last read. See [`Prepare`].
+    poll: Option<StdDuration>,
+    ticks: Ticks,
+    opened_ns: u64,
+    seq: u64,
     /// The catalog declares `comm` as a filter field on every counting source
     /// of this family, and a filter field nothing emits is false everywhere.
     comm: Comm,
@@ -478,6 +572,10 @@ impl CounterCollector {
             spec,
             group: None,
             whole_process: true,
+            poll: None,
+            ticks: Ticks::default(),
+            opened_ns: 0,
+            seq: 0,
             comm: Comm::of(pid),
             losses: Losses::default(),
             notes: Vec::new(),
@@ -490,7 +588,21 @@ impl CounterCollector {
     /// inventing intermediate points would suggest a resolution the mode does
     /// not have.
     fn event(&mut self, readings: &[Reading], seq: u64) -> Option<Event> {
-        let mut attrs = measured(self.spec, readings, &mut self.losses)?;
+        let attrs = measured(self.spec, readings, &mut self.losses)?;
+        self.event_with(attrs, seq)
+    }
+
+    /// A poll's event: what the counters read since the previous tick.
+    fn tick_event(&mut self, readings: Vec<Reading>) -> Option<Event> {
+        let ts_ns = monotonic_ns();
+        let (delta, interval_ns) = self.ticks.next(self.opened_ns, ts_ns, readings);
+        let attrs = measured_tick(self.spec, &delta, interval_ns, &mut self.losses)?;
+        let seq = self.seq;
+        self.seq += 1;
+        self.event_with(attrs, seq)
+    }
+
+    fn event_with(&mut self, mut attrs: Vec<Attr>, seq: u64) -> Option<Event> {
         if let Some(comm) = self.comm.get() {
             attrs.push(Attr::text("comm", comm));
         }
@@ -560,11 +672,33 @@ impl Collector for CounterCollector {
             ));
         }
         group.enable().map_err(|error| error.to_string())?;
+        self.opened_ns = monotonic_ns();
         self.group = Some(group);
         Ok(())
     }
 
     fn sample(&mut self, _seq: u64) -> Result<Vec<Event>, SampleError> {
+        if self.poll.is_some() {
+            self.comm.get();
+            let reading = self.group.as_ref().map(ThreadCounters::read);
+            let events = match reading {
+                Some(Ok(readings)) => self.tick_event(readings).into_iter().collect(),
+                Some(Err(error)) => {
+                    self.losses.failed_reads += 1;
+                    self.losses
+                        .note(format!("reading the counters on a tick failed: {error}"));
+                    Vec::new()
+                }
+                None => Vec::new(),
+            };
+            if self.pid > 0 && !Path::new(&format!("/proc/{}", self.pid)).exists() {
+                return Err(SampleError::TargetGone(format!(
+                    "process {} exited",
+                    self.pid
+                )));
+            }
+            return Ok(events);
+        }
         // A counted window has one value and it is read at the end. Two things
         // are worth doing on a tick: noticing that the thing being counted is
         // gone, and keeping the task's name, which is read here rather than at
@@ -597,11 +731,15 @@ impl Collector for CounterCollector {
         self.notes
             .extend(multiplexing_notes(&readings, &format!("task {}", self.pid)));
 
+        if self.poll.is_some() {
+            // The closing read is the last tick: what ran since the one before.
+            return self.tick_event(readings).into_iter().collect();
+        }
         self.event(&readings, 0).into_iter().collect()
     }
 
     fn tick(&self) -> Option<StdDuration> {
-        Some(TICK)
+        Some(self.poll.unwrap_or(TICK))
     }
 
     fn losses(&self) -> Losses {
@@ -1008,6 +1146,19 @@ mod tests {
                 attempts.join("; ")
             );
         }
+        if served == 0 {
+            // Not one counter opened, which is `perf_event_paranoid` above 2
+            // (Debian's and Ubuntu's 4) refusing this process its own
+            // counters, not a machine without caches.
+            let paranoid =
+                std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid").unwrap_or_default();
+            eprintln!(
+                "skipped: this machine will not open a counter over this process at all \
+                 (perf_event_paranoid {}), so no cache backend can be checked",
+                paranoid.trim()
+            );
+            return;
+        }
         assert!(
             served >= 3,
             "only {served} of the four cache backends opened here, so the three sources are \
@@ -1240,8 +1391,11 @@ mod tests {
         let floor = (ITERATIONS * 2) as f64;
         let (go, wait) = std::sync::mpsc::channel::<()>();
         let worker = std::thread::spawn(move || {
-            wait.recv().expect("the test says when to start");
-            known_loop(ITERATIONS);
+            // A skipped test drops the sender: nothing to run, and no panic
+            // for a reader of the log to mistake for a failure.
+            if wait.recv().is_ok() {
+                known_loop(ITERATIONS);
+            }
         });
 
         let mut collector =

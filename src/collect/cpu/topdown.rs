@@ -161,9 +161,17 @@ impl Prepared for Prepare {
                 crate::perf::online_cpus()
                     .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
             ),
+            // The counting sources' cgroup shape (`cgroup.rs`): a group per
+            // cpu, each filtered to the cgroup, the slots summed.
+            Target::Cgroup(path) => Scoped::Cgroup(
+                super::cgroup::Cgroup::resolve(path)?,
+                crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
+            ),
             other => Scoped::Task(other.first_pid().ok_or_else(|| {
                 format!(
-                    "`cpu.topdown` counts a task or a cpu, and a {} target is neither",
+                    "`cpu.topdown` counts a task, a cpu or a cgroup, and a {} target is none of \
+                     them",
                     other.kind()
                 )
             })?),
@@ -180,6 +188,7 @@ impl Prepared for Prepare {
 enum Scoped {
     Task(i32),
     Cpus(Vec<u32>),
+    Cgroup(super::cgroup::Cgroup, Vec<u32>),
 }
 
 /// Opened groups, of whichever shape the target asked for.
@@ -188,6 +197,8 @@ enum Opened {
     /// [`ThreadCounters`].
     Task(ThreadCounters),
     Cpus(PerCpuGroups),
+    /// One group per cpu over one cgroup, read as their sum.
+    Cgroup(PerCpuGroups),
 }
 
 pub struct Topdown {
@@ -206,7 +217,7 @@ impl Topdown {
     fn new(scope: Scoped) -> Self {
         let comm = match scope {
             Scoped::Task(pid) => Comm::of(pid),
-            Scoped::Cpus(_) => Comm::of(0),
+            Scoped::Cpus(_) | Scoped::Cgroup(..) => Comm::of(0),
         };
         Self {
             id: CollectorId::new("cpu.topdown/pmu"),
@@ -238,6 +249,7 @@ impl Topdown {
             readings,
             &match &self.scope {
                 Scoped::Task(pid) => format!("task {pid}"),
+                Scoped::Cgroup(cgroup, _) => format!("the cgroup {}", cgroup.directory.display()),
                 Scoped::Cpus(_) => keys
                     .first()
                     .map(KeyValue::to_string)
@@ -318,6 +330,17 @@ impl Collector for Topdown {
                 groups.enable()?;
                 Opened::Cpus(groups)
             }
+            Scoped::Cgroup(cgroup, cpus) => {
+                let groups = PerCpuGroups::open_cgroup(&self.counters, &cgroup.directory, cpus)
+                    .map_err(|reason| {
+                        format!(
+                            "`cpu.topdown` over the cgroup {}: {reason}",
+                            cgroup.directory.display()
+                        )
+                    })?;
+                groups.enable()?;
+                Opened::Cgroup(groups)
+            }
         });
         Ok(())
     }
@@ -333,7 +356,7 @@ impl Collector for Topdown {
             Some(Opened::Task(group)) => {
                 let pid = match self.scope {
                     Scoped::Task(pid) => pid,
-                    Scoped::Cpus(_) => unreachable!("a task group comes from a task scope"),
+                    _ => unreachable!("a task group comes from a task scope"),
                 };
                 match group.read_final() {
                     Ok(readings) => self
@@ -369,6 +392,24 @@ impl Collector for Topdown {
                     }
                 }
                 events
+            }
+            Some(Opened::Cgroup(groups)) => {
+                let (total, failed) = groups.read_total();
+                for (cpu, error) in failed {
+                    self.losses.failed_reads += 1;
+                    self.losses.note(format!(
+                        "reading the top-down counters on cpu {cpu} failed ({error}), so the \
+                         cgroup's slots there are not in the fractions"
+                    ));
+                }
+                let key = match &self.scope {
+                    Scoped::Cgroup(cgroup, _) => cgroup.key(),
+                    _ => unreachable!("a cgroup group comes from a cgroup scope"),
+                };
+                total
+                    .and_then(|readings| self.event(&readings, vec![key], 0))
+                    .into_iter()
+                    .collect()
             }
         }
     }

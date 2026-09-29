@@ -98,7 +98,7 @@
        degraded: "x86 only for this tracepoint"}
   modes: [count, sample, trace]
   emits: [summary, rate, hist, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, mem, cgroup, cpu]
   filter_fields: [comm, addr]
   determinism: medium
