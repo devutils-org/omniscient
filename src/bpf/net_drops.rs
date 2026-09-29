@@ -36,7 +36,9 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters};
-use super::net_program::{count_drop, expect_signature, load, read_field, read_narrow};
+use super::net_program::{
+    count_drop, expect_signature, load, read_field, read_narrow, SocketInode,
+};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
@@ -147,7 +149,12 @@ const DROP_KEY: i16 = EVENT - 8;
 const SCRATCH: i16 = EVENT - 16;
 
 /// Builds the program, or says why this kernel cannot be read.
-fn instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+fn instructions(
+    btf: &Btf,
+    inode: SocketInode,
+    ring_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
     let signature = expect_signature(btf, "kfree_skb", &[&WITH_RX_SOCKET, &WITHOUT_RX_SOCKET])?;
     let has_rx_socket = signature.len() == WITH_RX_SOCKET.len();
 
@@ -160,7 +167,6 @@ fn instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     let family_at = common_at + btf.member_offset("sock_common", "skc_family")?;
     let cookie_at = common_at + btf.member_offset("sock_common", "skc_cookie")?;
     let protocol_at = btf.member_offset("sock", "sk_protocol")?;
-    let inode_at = btf.member_offset("sock", "sk_ino")?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 the buffer and r8 the socket; all three survive
@@ -206,7 +212,7 @@ fn instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, Str
     read_narrow(&mut program, PROTOCOL, 2, 8, protocol_at);
     read_narrow(&mut program, FAMILY, 2, 8, family_at);
     read_field(&mut program, COOKIE, 8, 8, cookie_at);
-    read_field(&mut program, INODE, 8, 8, inode_at);
+    inode.read(&mut program, INODE, 8, SCRATCH, "inode_read");
 
     program.label("emit");
     program.extend(Insn::load_map_fd(1, ring_fd));
@@ -253,7 +259,12 @@ impl DropProgram {
         let drops = Counters::create(1, "omn_drop_lost")
             .map_err(|error| map_failure("drop counter", error))?;
 
-        let instructions = instructions(btf, ring_map.as_raw_fd(), drops.as_raw_fd())?;
+        let instructions = instructions(
+            btf,
+            SocketInode::locate(btf)?,
+            ring_map.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
         let program = load(&instructions, "omn_kfree_skb")?;
         let link = syscall::raw_tracepoint_open("kfree_skb", program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `kfree_skb` tracepoint: {error}"))?;
@@ -370,7 +381,8 @@ mod tests {
     #[test]
     fn every_field_is_written_before_the_record_is_published() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(btf, 3, 4).expect("a program");
+        let program =
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4).expect("a program");
         let published = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -406,7 +418,8 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(btf, 3, 4).expect("a program");
+        let program =
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -426,7 +439,7 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(btf, 3, 4)
+        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -449,5 +462,33 @@ mod tests {
         );
         assert_eq!(signature[0], "sk_buff *");
         assert_eq!(signature[2], "skb_drop_reason", "the reason is the source");
+    }
+
+    /// 6.6 and older have no `sock.sk_ino`, and the program reads the inode
+    /// through `sk_socket` there. That shape is built and audited here, on a
+    /// kernel that would never choose it, because the kernels that do are
+    /// only reached by the portability matrix.
+    #[test]
+    fn the_program_builds_with_the_walk_to_the_inode_older_kernels_need() {
+        let Some(btf) = kernel_btf() else { return };
+        let walk = SocketInode::through_socket(btf).expect("every kernel has the walk");
+        let SocketInode::ThroughSocket { ino_at, .. } = walk else {
+            unreachable!()
+        };
+        let program = instructions(btf, walk, 3, 4).expect("a program");
+        assert!(
+            program
+                .iter()
+                .any(|insn| insn.code == 0x07 && insn.regs & 0xf == 3 && insn.imm == ino_at),
+            "the inode number is read at its offset from the `struct socket`"
+        );
+        assert!(
+            !program.iter().any(
+                |insn| btf
+                    .member_offset("sock", "sk_ino")
+                    .is_ok_and(|at| insn.code == 0x07 && insn.imm == at && insn.regs & 0xf == 3)
+            ),
+            "and `sk_ino` is not read at all"
+        );
     }
 }

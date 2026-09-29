@@ -19,7 +19,8 @@
 #                                     kernel gives a BPF program and therefore
 #                                     the id on `omn`'s events
 #   omn-scenario pgsteal_direct <n>   pages this cgroup reclaimed, from its own
-#                                     memory.stat, before and after
+#                                     memory.stat, before and after (`pgsteal`
+#                                     on a kernel that does not split it)
 #
 # `mem.reclaim` reports `pages_reclaimed` off the kernel's own `end` tracepoint.
 # The two are counted in different places by different code and must agree.
@@ -35,9 +36,11 @@ set -e
 # already has the memory controller in its subtree_control. A cgroup whose
 # parent does not delegate the controller cannot be given a limit.
 own=$(sed -n 's/^0:://p' /proc/self/cgroup)
-dir=/sys/fs/cgroup$own
+# A process in the root cgroup reads `0::/`, and the trailing slash would carry
+# the walk past /sys/fs/cgroup to `/`, whose dirname is itself: forever.
+dir=/sys/fs/cgroup${own%/}
 cg=
-while [ -n "$dir" ] && [ "$dir" != /sys/fs/cgroup ]; do
+while [ -n "$dir" ] && [ "$dir" != /sys/fs/cgroup ] && [ "$dir" != / ]; do
 	case " $(cat "$dir/cgroup.subtree_control" 2>/dev/null) " in
 	*" memory "*)
 		if mkdir "$dir/omn-reclaim.scope" 2>/dev/null; then
@@ -72,7 +75,15 @@ fi
 
 echo 33554432 > "$cg/memory.max"
 file=$work/omn-reclaim-churn.$$
-steal() { sed -n 's/^pgsteal_direct //p' "$cg/memory.stat"; }
+# `pgsteal_direct` where the kernel splits the count (6.x); `pgsteal` where it
+# does not (5.15). A cgroup's limit is enforced by the allocating task itself
+# -- a memcg has no kswapd -- so on 5.15 the whole count is the direct one.
+if grep -q '^pgsteal_direct ' "$cg/memory.stat"; then
+	counter=pgsteal_direct
+else
+	counter=pgsteal
+fi
+steal() { sed -n "s/^$counter //p" "$cg/memory.stat"; }
 before=$(steal)
 
 # In a child, because the shell that reads memory.stat afterwards and removes

@@ -128,7 +128,9 @@ enum Size {
 /// One tracepoint, and what a program attached to it reads out of it.
 struct Site {
     tracepoint: &'static str,
-    signature: &'static [&'static str],
+    /// Every prototype the program reads the same slots out of, newest first,
+    /// in the order the catalog's requirement lists them.
+    signatures: &'static [&'static [&'static str]],
     reads: &'static str,
     size: Size,
     direction: u32,
@@ -141,14 +143,14 @@ impl Allocator {
             Allocator::Pages => [
                 Site {
                     tracepoint: "mm_page_alloc",
-                    signature: &["page *", "unsigned int", "gfp_t", "int"],
+                    signatures: &[&["page *", "unsigned int", "gfp_t", "int"]],
                     reads: "the allocation order",
                     size: Size::Order(8),
                     direction: 0,
                 },
                 Site {
                     tracepoint: "mm_page_free",
-                    signature: &["page *", "unsigned int"],
+                    signatures: &[&["page *", "unsigned int"]],
                     reads: "the allocation order",
                     size: Size::Order(8),
                     direction: 1,
@@ -157,13 +159,18 @@ impl Allocator {
             Allocator::Slab => [
                 Site {
                     tracepoint: "kmalloc",
-                    signature: &[
-                        "long unsigned int",
-                        "void *",
-                        "size_t",
-                        "size_t",
-                        "gfp_t",
-                        "int",
+                    // The NUMA node arrived after 5.15, as a sixth argument: the
+                    // two sizes this reads are in the same slots in both.
+                    signatures: &[
+                        &[
+                            "long unsigned int",
+                            "void *",
+                            "size_t",
+                            "size_t",
+                            "gfp_t",
+                            "int",
+                        ],
+                        &["long unsigned int", "void *", "size_t", "size_t", "gfp_t"],
                     ],
                     reads: "the bytes asked for and the bytes given",
                     size: Size::Bytes {
@@ -174,12 +181,45 @@ impl Allocator {
                 },
                 Site {
                     tracepoint: "kfree",
-                    signature: &["long unsigned int", "void *"],
+                    signatures: &[&["long unsigned int", "void *"]],
                     reads: "the freed pointer",
                     size: Size::Silent,
                     direction: 1,
                 },
             ],
+        }
+    }
+
+    /// Allocation tracepoints a kernel splits the first site into, attached
+    /// with the same program wherever this kernel publishes them.
+    ///
+    /// 5.15 fires `kmalloc` for `__kmalloc` and `kmalloc_node` for
+    /// `__kmalloc_node` and `__kmalloc_node_track_caller` -- which is where a
+    /// socket buffer's data comes from -- and 6.1 folded the second into the
+    /// first. Attached to `kmalloc` alone, 5.15 reported 77 KiB for 2000
+    /// datagrams of 2 KiB (`tests/scenario_mem.rs`, in the matrix's 5.15
+    /// guest). A kernel that has no `kmalloc_node` has folded it, and there is
+    /// nothing to add.
+    fn companions(self) -> &'static [Site] {
+        match self {
+            Allocator::Pages => &[],
+            Allocator::Slab => &[Site {
+                tracepoint: "kmalloc_node",
+                signatures: &[&[
+                    "long unsigned int",
+                    "void *",
+                    "size_t",
+                    "size_t",
+                    "gfp_t",
+                    "int",
+                ]],
+                reads: "the bytes asked for and the bytes given",
+                size: Size::Bytes {
+                    given: 24,
+                    asked: 16,
+                },
+                direction: 0,
+            }],
         }
     }
 
@@ -316,7 +356,7 @@ fn instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, site.tracepoint, site.signature, site.reads)?;
+    check_signature(btf, site.tracepoint, site.signatures, site.reads)?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -478,6 +518,34 @@ impl AllocProgram {
             links.push(link);
         }
 
+        for site in allocator.companions() {
+            // Absent is the kernel that folded it into the first site; present
+            // in another shape is one this program cannot read, and serving
+            // the source without it would be a total short by everything it
+            // carries.
+            if btf.tracepoint_signature(site.tracepoint).is_err() {
+                continue;
+            }
+            let built = instructions(
+                btf,
+                site,
+                allocator.with_cgroup(),
+                rows.as_raw_fd(),
+                drops.as_raw_fd(),
+            )?;
+            let program = load(&built, "omn_slab_node")?;
+            let link = syscall::raw_tracepoint_open(site.tracepoint, program.as_raw_fd()).map_err(
+                |error| {
+                    format!(
+                        "cannot attach to the `{}` tracepoint: {error}",
+                        site.tracepoint
+                    )
+                },
+            )?;
+            programs.push(program);
+            links.push(link);
+        }
+
         Ok(Self {
             allocator,
             rows,
@@ -570,14 +638,73 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         for allocator in [Allocator::Pages, Allocator::Slab] {
             for site in allocator.sites() {
-                assert_eq!(
-                    btf.tracepoint_signature(site.tracepoint)
-                        .unwrap_or_else(|error| panic!("{}: {error}", site.tracepoint)),
-                    site.signature,
-                    "this kernel's `{}` is not the prototype these programs read",
-                    site.tracepoint
+                let found = btf
+                    .tracepoint_signature(site.tracepoint)
+                    .unwrap_or_else(|error| panic!("{}: {error}", site.tracepoint));
+                assert!(
+                    site.signatures.iter().any(|shape| found == *shape),
+                    "this kernel's `{}({})` is none of the prototypes these programs read",
+                    site.tracepoint,
+                    found.join(", ")
                 );
             }
+        }
+    }
+
+    /// The probe answers from the catalog's line and the attach from the
+    /// program; a shape only one of them knows is a source that reads missing
+    /// where it could be served, or usable where it refuses.
+    #[test]
+    fn the_catalog_lists_every_shape_the_programs_read() {
+        for (allocator, source) in [
+            (Allocator::Pages, "mem.page_alloc"),
+            (Allocator::Slab, "mem.kmalloc"),
+        ] {
+            for site in allocator.sites() {
+                crate::bpf::mem_program::assert_catalog_lists(
+                    source,
+                    site.tracepoint,
+                    site.signatures,
+                );
+            }
+        }
+    }
+
+    /// A companion is the first site under another name: same slots, same
+    /// direction, the same program.
+    #[test]
+    fn a_companion_site_reads_what_the_site_it_completes_reads() {
+        for allocator in [Allocator::Pages, Allocator::Slab] {
+            let [first, _] = allocator.sites();
+            for companion in allocator.companions() {
+                assert_eq!(companion.direction, first.direction);
+                assert_eq!(format!("{:?}", companion.size), format!("{:?}", first.size));
+                assert!(
+                    first.signatures.contains(&companion.signatures[0]),
+                    "{} is read in a shape {} is",
+                    companion.tracepoint,
+                    first.tracepoint
+                );
+            }
+        }
+    }
+
+    /// 5.15's `kmalloc` has five arguments where later kernels have six, and
+    /// the program reads the two sizes out of the same slots in both: the
+    /// shape it accepts differs only in the argument it never reads.
+    #[test]
+    fn both_kmalloc_shapes_keep_the_sizes_in_the_slots_the_program_reads() {
+        let [kmalloc, _] = Allocator::Slab.sites();
+        let Size::Bytes { given, asked } = kmalloc.size else {
+            panic!("kmalloc carries sizes");
+        };
+        for shape in kmalloc.signatures {
+            assert_eq!(shape[(asked / 8) as usize], "size_t", "{shape:?}");
+            assert_eq!(shape[(given / 8) as usize], "size_t", "{shape:?}");
+            assert_eq!(
+                shape[..5],
+                ["long unsigned int", "void *", "size_t", "size_t", "gfp_t"]
+            );
         }
     }
 
@@ -588,7 +715,7 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         let wrong = Site {
             tracepoint: "mm_page_alloc",
-            signature: &["page *", "unsigned int"],
+            signatures: &[&["page *", "unsigned int"]],
             reads: "the allocation order",
             size: Size::Order(8),
             direction: 0,

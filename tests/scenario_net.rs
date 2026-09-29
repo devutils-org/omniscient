@@ -1984,6 +1984,18 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
 /// Whether a run was refused for want of the privileges the eBPF backends need.
 /// A machine's limit, and the only thing in this section allowed to stop a test
 /// quietly.
+/// The inode `/proc/self/fd` names a socket by, `socket:[n]`: the kernel's own
+/// account, read by a route that shares nothing with the eBPF programs.
+fn socket_inode(socket: &impl std::os::fd::AsRawFd) -> u64 {
+    let link = std::fs::read_link(format!("/proc/self/fd/{}", socket.as_raw_fd()))
+        .expect("a descriptor this process holds");
+    let link = link.to_string_lossy();
+    link.strip_prefix("socket:[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("`{link}` is not a socket"))
+}
+
 fn unprivileged(text: &str) -> bool {
     text.contains("CAP_BPF") || text.contains("CAP_PERFMON")
 }
@@ -2303,6 +2315,7 @@ fn a_connection_of_a_known_length_and_volume_is_found_by_both_of_its_ends() {
         });
         let mut stream = TcpStream::connect(("127.0.0.1", server_port)).expect("connect");
         let client_port = stream.local_addr().expect("local address").port();
+        let client_inode = socket_inode(&stream);
         stream.write_all(&vec![0x5au8; SENT]).expect("write");
         stream.flush().expect("flush");
         // The connection is established for this long and no less. The far end
@@ -2311,7 +2324,7 @@ fn a_connection_of_a_known_length_and_volume_is_found_by_both_of_its_ends() {
         pause(HELD_MS);
         drop(stream);
         assert_eq!(sink.join().expect("the receiver"), SENT);
-        made.push((client_port, server_port));
+        made.push((client_port, server_port, client_inode));
     }
 
     let outcome = measuring.wait_with_output().expect("omn should finish");
@@ -2338,7 +2351,7 @@ fn a_connection_of_a_known_length_and_volume_is_found_by_both_of_its_ends() {
             .collect();
     let found = made
         .iter()
-        .find(|(client, server)| {
+        .find(|(client, server, _)| {
             closed.contains_key(&u64::from(*client)) && closed.contains_key(&u64::from(*server))
         })
         .unwrap_or_else(|| {
@@ -2402,16 +2415,32 @@ fn a_connection_of_a_known_length_and_volume_is_found_by_both_of_its_ends() {
          generated, which is what a `sock:cookie` join is made of: {client_event}"
     );
 
-    // The peer, which is absent rather than wrong, and said so in the run.
-    assert!(
-        !client_attrs.contains_key("dport") && !client_attrs.contains_key("daddr"),
-        "the peer's address and port are not reachable and must not be invented"
+    // The inode, against the kernel's own name for the client's socket: the
+    // `socket:[n]` its descriptor showed while it was open. The client's end
+    // had its file from before the handshake, so the inode read when the
+    // connection was established is the one; the close is too late for it,
+    // because `sock_orphan` clears it first. Newer kernels read it from
+    // `sock.sk_ino`, 6.6 and older through `sk_socket` -- one assertion for
+    // both, and the portability matrix is where the second runs.
+    assert_eq!(
+        client_attrs["inode"].as_u64(),
+        Some(found.2),
+        "the client's connection carries the inode its descriptor named: {client_event}"
     );
-    let notes = labelled(&run, "connections")["degradations"].to_string();
-    assert!(
-        notes.contains("daddr") && notes.contains("dport"),
-        "a filter on a field no event carries is false everywhere, so the run has to say which \
-         fields those are: {notes}"
+
+    // The peer, read out of `sock_common`'s anonymous unions: each end names
+    // the other. The client's peer is the listener's port, the server's is the
+    // client's, and both addresses are loopback.
+    assert_eq!(client_attrs["daddr"].as_str(), Some("127.0.0.1"));
+    assert_eq!(
+        client_attrs["dport"].as_u64(),
+        Some(u64::from(found.1)),
+        "the client's peer is the port it connected to"
+    );
+    assert_eq!(
+        server_attrs["dport"].as_u64(),
+        Some(u64::from(found.0)),
+        "the server's peer is the port the client connected from"
     );
 }
 
@@ -2506,34 +2535,38 @@ fn every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason() {
     // Every drop, by reason. A drop to a closed port has exactly one, and it
     // has to account for at least the datagrams the scenario sent -- the rest
     // of the machine's drops are other reasons or more of this one.
-    let mut by_reason: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut by_reason: BTreeMap<String, u64> = BTreeMap::new();
     let mut counted = 0;
     for event in raw_events(&run, "drops") {
         let attributes = attrs(event);
         let drops = attributes["drops"].as_u64().expect("a count");
         *by_reason
-            .entry(attributes["reason"].as_u64().expect("a reason"))
+            .entry(
+                attributes["reason"]
+                    .as_str()
+                    .expect("a reason, by name")
+                    .to_owned(),
+            )
             .or_default() += drops;
         counted += drops;
     }
     assert!(counted >= SENT, "only {counted} drops were reported");
 
-    // Reason 3 specifically, and not "the commonest reason", which is what
+    // `NO_SOCKET` specifically, and not "the commonest reason", which is what
     // this asserted first and is a fact about the machine rather than about
     // the tool: nine hundred tests share it, and the rest of this file's own
     // scenarios flood a socket whose receive buffer overflows, which is
-    // reason 6 and outnumbers the scenario's own drops twenty to one.
+    // another reason and outnumbers the scenario's own drops twenty to one.
     //
-    // A packet nobody was listening for is `SKB_DROP_REASON_NO_SOCKET`, which
-    // is 3 on every kernel this has run on. If one renumbers the enum this
-    // fails, rather than silently reporting a different fault under the same
-    // number -- which is exactly why the names are not written into the tool.
-    const NO_SOCKET: u64 = 3;
+    // A packet nobody was listening for is `SKB_DROP_REASON_NO_SOCKET` in the
+    // kernel's source, and the name is read from the running kernel's BTF --
+    // so a kernel that renumbers the enum still says `NO_SOCKET` here, and a
+    // table of numbers in the tool would have said something else.
     assert!(
-        by_reason.get(&NO_SOCKET).copied().unwrap_or(0) >= SENT,
-        "the scenario sent {SENT} datagrams to a port nothing was listening on, and reason \
-         {NO_SOCKET} accounts for {:?} of the {counted} drops this run saw: {by_reason:?}",
-        by_reason.get(&NO_SOCKET)
+        by_reason.get("NO_SOCKET").copied().unwrap_or(0) >= SENT,
+        "the scenario sent {SENT} datagrams to a port nothing was listening on, and \
+         `NO_SOCKET` accounts for {:?} of the {counted} drops this run saw: {by_reason:?}",
+        by_reason.get("NO_SOCKET")
     );
 
     // And the contrast. The device counted no drops at all, because nothing
@@ -2828,7 +2861,7 @@ fn every_segment_the_kernel_resent_is_one_this_run_saw() {
          ip link set lo up
          sleep 0.4
          python3 -c '
-import socket, subprocess, time
+import socket, struct, subprocess, time
 def retrans():
     lines = open(\"/proc/net/snmp\").read().splitlines()
     for at, line in enumerate(lines):
@@ -2842,7 +2875,10 @@ subprocess.run([\"tc\", \"qdisc\", \"add\", \"dev\", \"lo\", \"root\", \"netem\"
 before = retrans()
 c.sendall(b\"x\" * 100)
 time.sleep(1.1)
-print(c.getsockname()[1], retrans() - before)'",
+port = c.getsockname()[1]
+c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0))
+c.close()
+print(port, l.getsockname()[1], retrans() - before)'",
     );
     let built = workload
         .wait_with_output()
@@ -2870,6 +2906,10 @@ print(c.getsockname()[1], retrans() - before)'",
         .next()
         .and_then(|field| field.parse().ok())
         .unwrap_or_else(|| panic!("the workload did not print its port: {spoken}"));
+    let listener: u64 = said
+        .next()
+        .and_then(|field| field.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not print the listener's port: {spoken}"));
     let kernel_counted: u64 = said
         .next()
         .and_then(|field| field.parse().ok())
@@ -2888,13 +2928,25 @@ print(c.getsockname()[1], retrans() - before)'",
         raw_events(&results(&outcome), "retransmits")
             .iter()
             .map(attrs)
-            .filter(|attributes| attributes["sport"].as_u64() == Some(port))
+            // The connection by both of its ports, which the peer's end on
+            // the event makes possible: a system target sees every namespace,
+            // and another namespace's connection may have the same local
+            // port, but not the same pair.
+            .filter(|attributes| {
+                attributes["sport"].as_u64() == Some(port)
+                    && attributes["dport"].as_u64() == Some(listener)
+            })
             .collect();
+    // The kernel's count is the namespace's own `RetransSegs`, read after the
+    // connection was aborted -- `SO_LINGER` of zero stops its retransmission
+    // timer -- so no resend can land between the read and the end of the
+    // connection, which is what reading it before the close allowed (the
+    // flaky tally's #16: "4 against 3").
     assert_eq!(
         mine.len() as u64,
         kernel_counted,
-        "the kernel counted {kernel_counted} retransmitted segments on port {port} and this run \
-         saw {}",
+        "the kernel counted {kernel_counted} retransmitted segments on {port} -> {listener} and \
+         this run saw {}",
         mine.len()
     );
 
@@ -3920,6 +3972,7 @@ fn a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone() 
         std::thread::spawn(move || {
             let mut ports = Vec::new();
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let listening = listener.local_addr().expect("an address").port();
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut client = TcpStream::connect(listener.local_addr().expect("an address"))
                     .expect("connect");
@@ -3932,27 +3985,31 @@ fn a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone() 
                 drop(server);
                 pause(20);
             }
-            ports
+            (listening, ports)
         })
     };
     let outcome = measuring.wait_with_output().expect("omn should finish");
     done.store(true, std::sync::atomic::Ordering::Relaxed);
-    let ports = traffic.join().expect("the traffic thread");
+    let (listening, ports) = traffic.join().expect("the traffic thread");
     assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
     let run = results(&outcome);
     let closed = fx_raw(labelled(&run, "closed"));
     let opened = fx_raw(labelled(&run, "opened"));
+    // One of this test's connections, by both of its ports: the client's
+    // port and the listener's. Both sources are machine-wide, and another
+    // loopback connection in the window may reuse a client port -- which is
+    // how matching on `sport` alone compared two connections' cookies (the
+    // flaky tally's #17) -- but not with this listener at the other end.
+    let ours = |event: &BTreeMap<String, serde_json::Value>, port: u16| {
+        fx_u64(event, "sport") == u64::from(port) && fx_u64(event, "dport") == u64::from(listening)
+    };
     // The connections that both opened and closed inside the window.
     let mine: Vec<u16> = ports
         .iter()
         .copied()
         .filter(|port| {
-            opened
-                .iter()
-                .any(|event| fx_u64(event, "sport") == u64::from(*port))
-                && closed
-                    .iter()
-                    .any(|event| fx_u64(event, "sport") == u64::from(*port))
+            opened.iter().any(|event| ours(event, *port))
+                && closed.iter().any(|event| ours(event, *port))
         })
         .collect();
     assert!(
@@ -3964,11 +4021,11 @@ fn a_connection_is_joined_from_its_handshake_to_its_close_by_the_cookie_alone() 
     for port in &mine {
         let open = opened
             .iter()
-            .find(|event| fx_u64(event, "sport") == u64::from(*port))
+            .find(|event| ours(event, *port))
             .expect("the handshake");
         let close = closed
             .iter()
-            .find(|event| fx_u64(event, "sport") == u64::from(*port))
+            .find(|event| ours(event, *port))
             .expect("the close");
         assert_eq!(
             open.get("cookie"),

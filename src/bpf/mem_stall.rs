@@ -115,7 +115,9 @@ const START_VALUE_BYTES: usize = 8;
 /// One tracepoint a program attaches to.
 struct Site {
     name: &'static str,
-    signature: &'static [&'static str],
+    /// Every prototype the program reads the same slots out of, newest first,
+    /// in the order the catalog's requirement lists them.
+    signatures: &'static [&'static [&'static str]],
     /// What the row gets for [`StallRow::scope`] when this one fires.
     scope: u32,
     /// Whether a kernel without it cannot serve the source at all.
@@ -127,10 +129,55 @@ struct Site {
     required: bool,
 }
 
-/// The prototype both reclaim `begin` tracepoints share. They come from one
+/// The prototypes both reclaim `begin` tracepoints share. They come from one
 /// `DECLARE_EVENT_CLASS`, which is why one program can serve both.
-const RECLAIM_BEGIN: &[&str] = &["gfp_t", "int", "mem_cgroup *"];
-const RECLAIM_END: &[&str] = &["long unsigned int", "mem_cgroup *"];
+///
+/// 6.6 and 5.15 declare `(int order, gfp_t)` and no cgroup; the kernel this
+/// was written against moved the flags first and added the cgroup. The `begin`
+/// program reads no argument at all, so the two are the same to it.
+const RECLAIM_BEGIN: &[&[&str]] = &[&["gfp_t", "int", "mem_cgroup *"], &["int", "gfp_t"]];
+/// The `end` pair: pages reclaimed first in both, and a cgroup after it only in
+/// the newer shape. The program reads slot zero and nothing else.
+const RECLAIM_END: &[&[&str]] = &[
+    &["long unsigned int", "mem_cgroup *"],
+    &["long unsigned int"],
+];
+
+/// Compaction's pair. 5.15 passes the zone's bounds and the two scanners'
+/// positions as four integers where later kernels pass the `compact_control`
+/// that holds them; neither program reads any of it.
+const COMPACTION_BEGIN: &[&[&str]] = &[
+    &[
+        "compact_control *",
+        "long unsigned int",
+        "long unsigned int",
+        "bool",
+    ],
+    &[
+        "long unsigned int",
+        "long unsigned int",
+        "long unsigned int",
+        "long unsigned int",
+        "bool",
+    ],
+];
+const COMPACTION_END: &[&[&str]] = &[
+    &[
+        "compact_control *",
+        "long unsigned int",
+        "long unsigned int",
+        "bool",
+        "int",
+    ],
+    &[
+        "long unsigned int",
+        "long unsigned int",
+        "long unsigned int",
+        "long unsigned int",
+        "bool",
+        "int",
+    ],
+];
 
 /// Which stall a program is watching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,25 +208,20 @@ impl Stall {
             Stall::Reclaim => &[
                 Site {
                     name: "mm_vmscan_direct_reclaim_begin",
-                    signature: RECLAIM_BEGIN,
+                    signatures: RECLAIM_BEGIN,
                     scope: SCOPE_GLOBAL,
                     required: true,
                 },
                 Site {
                     name: "mm_vmscan_memcg_reclaim_begin",
-                    signature: RECLAIM_BEGIN,
+                    signatures: RECLAIM_BEGIN,
                     scope: SCOPE_CGROUP,
                     required: false,
                 },
             ],
             Stall::Compaction => &[Site {
                 name: "mm_compaction_begin",
-                signature: &[
-                    "compact_control *",
-                    "long unsigned int",
-                    "long unsigned int",
-                    "bool",
-                ],
+                signatures: COMPACTION_BEGIN,
                 scope: SCOPE_GLOBAL,
                 required: true,
             }],
@@ -191,26 +233,20 @@ impl Stall {
             Stall::Reclaim => &[
                 Site {
                     name: "mm_vmscan_direct_reclaim_end",
-                    signature: RECLAIM_END,
+                    signatures: RECLAIM_END,
                     scope: SCOPE_GLOBAL,
                     required: true,
                 },
                 Site {
                     name: "mm_vmscan_memcg_reclaim_end",
-                    signature: RECLAIM_END,
+                    signatures: RECLAIM_END,
                     scope: SCOPE_CGROUP,
                     required: false,
                 },
             ],
             Stall::Compaction => &[Site {
                 name: "mm_compaction_end",
-                signature: &[
-                    "compact_control *",
-                    "long unsigned int",
-                    "long unsigned int",
-                    "bool",
-                    "int",
-                ],
+                signatures: COMPACTION_END,
                 scope: SCOPE_GLOBAL,
                 required: true,
             }],
@@ -556,10 +592,10 @@ impl StallProgram {
             match check_signature(
                 btf,
                 site.name,
-                site.signature,
+                site.signatures,
                 "nothing but the moment it fired",
             ) {
-                Ok(()) => links.push(
+                Ok(_) => links.push(
                     syscall::raw_tracepoint_open(site.name, begin_program.as_raw_fd()).map_err(
                         |error| format!("cannot attach to the `{}` tracepoint: {error}", site.name),
                     )?,
@@ -575,7 +611,7 @@ impl StallProgram {
             None => "nothing but the moment it fired",
         };
         for site in stall.ends() {
-            if let Err(reason) = check_signature(btf, site.name, site.signature, reads) {
+            if let Err(reason) = check_signature(btf, site.name, site.signatures, reads) {
                 if site.required {
                     return Err(reason);
                 }
@@ -695,14 +731,54 @@ mod tests {
                     );
                     continue;
                 }
-                assert_eq!(
-                    found.unwrap_or_else(|error| panic!("{}: {error}", site.name)),
-                    site.signature,
-                    "this kernel's `{}` is not the prototype these programs read",
-                    site.name
+                let found = found.unwrap_or_else(|error| panic!("{}: {error}", site.name));
+                assert!(
+                    site.signatures.iter().any(|shape| found == *shape),
+                    "this kernel's `{}({})` is none of the prototypes these programs read",
+                    site.name,
+                    found.join(", ")
                 );
             }
         }
+    }
+
+    /// The probe answers from the catalog's line and the attach from the
+    /// program. A required site's line lists exactly the program's shapes; an
+    /// optional one may ask for existence alone, because its absence is
+    /// reported by the run rather than refused.
+    #[test]
+    fn the_catalog_lists_every_shape_the_programs_read() {
+        for (stall, source) in [
+            (Stall::Reclaim, "mem.reclaim"),
+            (Stall::Compaction, "mem.compaction"),
+        ] {
+            for site in stall.begins().iter().chain(stall.ends()) {
+                if !site.required
+                    && crate::bpf::mem_program::catalog_prototypes(source, site.name).is_empty()
+                {
+                    continue;
+                }
+                crate::bpf::mem_program::assert_catalog_lists(source, site.name, site.signatures);
+            }
+        }
+    }
+
+    /// The one argument either program reads is reclaim's pages reclaimed, in
+    /// slot zero of `end`, and it is that in every shape the program accepts.
+    #[test]
+    fn what_the_end_program_reads_is_in_the_same_slot_in_every_shape() {
+        let Some((at, _)) = Stall::Reclaim.yields() else {
+            panic!("reclaim yields its pages");
+        };
+        for site in Stall::Reclaim.ends() {
+            for shape in site.signatures {
+                assert_eq!(shape[(at / 8) as usize], "long unsigned int", "{shape:?}");
+            }
+        }
+        assert!(
+            Stall::Compaction.yields().is_none(),
+            "compaction reads no argument"
+        );
     }
 
     /// A kernel that publishes the beginning and not the ending cannot serve

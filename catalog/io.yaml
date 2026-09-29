@@ -12,7 +12,7 @@
     # kernel's own BTF. The classic path below reads the same two out of
     # tracefs, which is mounted and unreadable on a stock machine.
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "raw_tracepoint:block_rq_complete(request *, blk_status_t, unsigned int)", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "raw_tracepoint:block_rq_complete(request *, blk_status_t, unsigned int)|(request *, int, unsigned int)", "kernel>=5.8"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
       cost: low
     - id: "bpf:tp"

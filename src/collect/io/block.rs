@@ -227,6 +227,9 @@ pub struct BlockCollector {
     /// Why no event can carry one, when the kernel gave the programs no
     /// task-storage map to read it from.
     no_request_identity: Option<String>,
+    /// Whether this kernel's completion reports a negative errno rather than a
+    /// `blk_status_t` (5.15), which decides what the attribute is called.
+    status_is_errno: bool,
 }
 
 impl BlockCollector {
@@ -262,6 +265,7 @@ impl BlockCollector {
             filtered_in: 0,
             carried_request: 0,
             no_request_identity: None,
+            status_is_errno: false,
         }
     }
 
@@ -395,7 +399,17 @@ impl BlockCollector {
             // A failed I/O's latency is a different measurement from a
             // successful one's -- an error can come back in microseconds -- so
             // the status travels rather than being folded in.
-            attrs.push(Attr::int("status", i64::from(record.status)));
+            //
+            // 5.15 hands the completion a negative errno where later kernels
+            // hand it the `blk_status_t` it came from. Both are zero on
+            // success; neither number is the other's, so the attribute says
+            // which one it is rather than carrying `-5` as a status.
+            let name = if self.status_is_errno {
+                "errno"
+            } else {
+                "status"
+            };
+            attrs.push(Attr::int(name, i64::from(record.status)));
             attrs.push(Attr::uint("done_bytes", u64::from(record.done_bytes)));
         }
 
@@ -538,6 +552,7 @@ impl Collector for BlockCollector {
     fn start(&mut self) -> Result<(), String> {
         let program = BlockProgram::load(self.measure.stage(), self.submitter, RING_BYTES)?;
         self.no_request_identity = program.no_request_identity.clone();
+        self.status_is_errno = program.status_is_errno;
         self.program = Some(program);
         self.names = super::device_names();
         self.opened_ns = monotonic_ns();
@@ -683,6 +698,14 @@ impl Collector for BlockCollector {
                     "s were"
                 }
             ));
+        }
+
+        if self.status_is_errno && self.measure == Measure::Latency {
+            notes.push(
+                "this kernel's `block_rq_complete` reports a negative errno rather than a \
+                 `blk_status_t`, so each event carries `errno` where later kernels carry `status`"
+                    .to_owned(),
+            );
         }
 
         if let Some(reason) = &self.no_request_identity {

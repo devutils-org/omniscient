@@ -144,8 +144,8 @@ pub fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
     })
 }
 
-/// Refuses a kernel whose tracepoint is not the shape a program was written
-/// for.
+/// Refuses a kernel whose tracepoint is not one of the shapes a program was
+/// written for, and says which one it is.
 ///
 /// A raw tracepoint hands its program an array of `u64` and nothing in that
 /// array says what any of them is: a program reads slot two as a byte count
@@ -153,23 +153,83 @@ pub fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
 /// a pointer and the byte count is four hundred billion. So the prototype is
 /// compared before an instruction is built, and a mismatch is an error naming
 /// both shapes rather than a measurement nobody can tell is wrong.
+///
+/// A program that reads the same slots out of several prototypes -- `kmalloc`
+/// has a trailing `node` argument that 5.15 does not, and nothing before it
+/// moved --
+/// lists them all, and gets back the index of the one this kernel declares. The
+/// catalog's `raw_tracepoint:` requirement lists the same shapes, joined by `|`,
+/// in the same order.
 pub fn check_signature(
     btf: &super::btf::Btf,
     tracepoint: &str,
-    expected: &[&str],
+    accepted: &[&[&str]],
     reads: &str,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads {reads} out of fixed slots, and against another \
-             prototype those slots hold something else",
-            signature.join(", "),
-            expected.join(", "),
-        ));
+    if let Some(shape) = accepted.iter().position(|shape| signature == *shape) {
+        return Ok(shape);
     }
-    Ok(())
+    Err(format!(
+        "this kernel declares `{tracepoint}({})`, and this program is written for {}: it reads \
+         {reads} out of fixed slots, and against another prototype those slots hold something \
+         else",
+        signature.join(", "),
+        accepted
+            .iter()
+            .map(|shape| format!("`{tracepoint}({})`", shape.join(", ")))
+            .collect::<Vec<_>>()
+            .join(" or "),
+    ))
+}
+
+/// The prototypes the catalog's `raw_tracepoint:` requirement lists for one
+/// tracepoint of one source, in the order it lists them.
+///
+/// For the tests that hold a program's accepted shapes and its catalog line to
+/// each other: the probe answers from the line and the attach from the
+/// program, and a shape one of them knows and the other does not is a source
+/// that reads *missing* on a kernel it could serve, or *usable* on one where
+/// the attach refuses.
+#[cfg(test)]
+pub(super) fn catalog_prototypes(source: &str, tracepoint: &str) -> Vec<Vec<String>> {
+    let catalog = crate::catalog::Catalog::embedded().expect("the embedded catalog loads");
+    let entry = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.id.as_str() == source)
+        .unwrap_or_else(|| panic!("the catalog has no `{source}`"));
+    for backend in &entry.backends {
+        for requirement in &backend.requires {
+            let Some(event) = requirement.strip_prefix("raw_tracepoint:") else {
+                continue;
+            };
+            let (name, shapes) = super::parse_raw_tracepoint(event).expect("a well-formed line");
+            if name == tracepoint {
+                return shapes;
+            }
+        }
+    }
+    panic!("`{source}` requires no `raw_tracepoint:{tracepoint}`")
+}
+
+/// Holds a program's accepted prototypes and its catalog line to each other.
+#[cfg(test)]
+pub(super) fn assert_catalog_lists(source: &str, tracepoint: &str, accepted: &[&[&str]]) {
+    let listed = catalog_prototypes(source, tracepoint);
+    let program: Vec<Vec<String>> = accepted
+        .iter()
+        .map(|shape| {
+            shape
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        listed, program,
+        "`{source}`'s catalog line for `{tracepoint}` and the program's accepted shapes differ"
+    );
 }
 
 /// Reads a `u32` field of a row key out of a drained record.

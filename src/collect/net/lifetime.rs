@@ -199,15 +199,8 @@ impl LifetimeCollector {
     }
 }
 
-/// What an event carries beside its value.
-///
-/// The catalog declares `comm`, `daddr`, `dport`, `saddr`, `sport` and `family`
-/// as filter fields. Three of them are here; `daddr` and `dport` are the peer's
-/// and are not reachable through named BTF members, which
-/// `src/bpf/net_lifetime.rs` explains and `docs/families/net.md` records. A
-/// predicate over one of those is false everywhere until the shared layer can
-/// walk an anonymous union, which is worse than a refusal and is why it is
-/// written down in both places.
+/// What an event carries beside its value: both ends of the connection, what
+/// crossed it, and the task current at the close.
 fn attributes(closed: &TcpLifetime) -> Vec<Attr> {
     let mut attrs = vec![
         Attr::uint("duration_ns", closed.duration_ns),
@@ -234,6 +227,12 @@ fn attributes(closed: &TcpLifetime) -> Vec<Attr> {
     }
     if let Some(address) = closed.local_address() {
         attrs.push(Attr::text("saddr", address));
+    }
+    if let Some(address) = closed.remote_address() {
+        // The address alone, as `saddr` is: the port is its own field, and an
+        // address with a port inside it is one no equality can match.
+        attrs.push(Attr::text("daddr", address));
+        attrs.push(Attr::uint("dport", u64::from(closed.remote_port())));
     }
     if closed.cookie != 0 {
         attrs.push(Attr::uint("cookie", closed.cookie));
@@ -283,12 +282,6 @@ impl Collector for LifetimeCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
-        notes.push(
-            "the address and port on each event are the local end of the connection; the peer's \
-             live in anonymous unions of `sock_common` that this build cannot resolve by name, \
-             so a filter on `daddr` or `dport` matches nothing"
-                .to_owned(),
-        );
         notes.push(
             "`comm` and `pid` are the task current when the connection reached TCP_CLOSE, which \
              is the closing process when an application closed it and is not the connection's \
@@ -341,7 +334,7 @@ mod tests {
     use super::*;
 
     fn closed() -> TcpLifetime {
-        let mut bytes = [0u8; 104];
+        let mut bytes = [0u8; 128];
         bytes[0..8].copy_from_slice(&1_000_000u64.to_ne_bytes());
         bytes[8..16].copy_from_slice(&300_000_000u64.to_ne_bytes());
         bytes[16..24].copy_from_slice(&4242u64.to_ne_bytes());
@@ -356,6 +349,8 @@ mod tests {
         bytes[80..84].copy_from_slice(&11u32.to_ne_bytes());
         bytes[84..88].copy_from_slice(&12u32.to_ne_bytes());
         bytes[88..92].copy_from_slice(b"curl");
+        bytes[104..108].copy_from_slice(&[127, 0, 0, 2]);
+        bytes[120..124].copy_from_slice(&u32::from(443u16.to_be()).to_ne_bytes());
         TcpLifetime::from_bytes(&bytes).expect("a full record")
     }
 
@@ -387,29 +382,24 @@ mod tests {
         assert!(error.contains("--system"), "{error}");
     }
 
-    /// The three filter fields this backend can serve are on the event, and the
-    /// run says which two it cannot -- because a predicate over a field no
-    /// event carries is false everywhere and empties the series silently.
+    /// Every filter field the catalog declares is on the event: a predicate
+    /// over a field no event carries is false everywhere and empties the
+    /// series silently.
     #[test]
-    fn the_filter_fields_it_can_serve_are_on_the_event_and_the_rest_are_named() {
+    fn every_filter_field_the_catalog_declares_is_on_an_event() {
         let attributes = attributes(&closed());
-        for field in ["comm", "saddr", "sport", "family"] {
+        let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
+        let declared = &catalog
+            .get(&"net.tcp.lifetime".parse().expect("a source id"))
+            .expect("net.tcp.lifetime is in the catalog")
+            .filter_fields;
+        for field in declared {
             assert!(
-                attributes.iter().any(|attr| attr.name == field),
-                "no event carries `{field}`"
+                attributes.iter().any(|attr| attr.name == *field),
+                "the catalog offers a `{field}` filter and no event carries one"
             );
         }
-        let notes = LifetimeCollector::new(None).notes().join(" ");
-        for field in ["daddr", "dport"] {
-            assert!(
-                !attributes.iter().any(|attr| attr.name == field),
-                "`{field}` is not reachable and must not be invented"
-            );
-            assert!(
-                notes.contains(field),
-                "the run must say that a filter on `{field}` matches nothing: {notes}"
-            );
-        }
+        assert!(declared.iter().any(|field| field == "daddr"));
     }
 
     /// The record's numbers reach the event unchanged, and the port is in the
@@ -429,6 +419,8 @@ mod tests {
         assert_eq!(of("bytes_received").as_f64(), Some(8192.0));
         assert_eq!(of("sport").as_f64(), Some(8080.0));
         assert_eq!(of("saddr").to_string(), "127.0.0.1");
+        assert_eq!(of("daddr").to_string(), "127.0.0.2");
+        assert_eq!(of("dport").as_f64(), Some(443.0));
         assert_eq!(of("comm").to_string(), "curl");
     }
 

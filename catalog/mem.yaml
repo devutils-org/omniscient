@@ -129,7 +129,7 @@
   summary: "Kernel slab allocations"
   unit: bytes
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc(long unsigned int, void *, size_t, size_t, gfp_t, int)", "raw_tracepoint:kfree(long unsigned int, void *)", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc(long unsigned int, void *, size_t, size_t, gfp_t, int)|(long unsigned int, void *, size_t, size_t, gfp_t)", "raw_tracepoint:kfree(long unsigned int, void *)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -398,7 +398,7 @@
   summary: "Direct reclaim"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin(gfp_t, int, mem_cgroup *)", "raw_tracepoint:mm_vmscan_direct_reclaim_end(long unsigned int, mem_cgroup *)", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin(gfp_t, int, mem_cgroup *)|(int, gfp_t)", "raw_tracepoint:mm_vmscan_direct_reclaim_end(long unsigned int, mem_cgroup *)|(long unsigned int)", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_begin", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -412,7 +412,7 @@
   summary: "Memory compaction"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin(compact_control *, long unsigned int, long unsigned int, bool)", "raw_tracepoint:mm_compaction_end(compact_control *, long unsigned int, long unsigned int, bool, int)", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin(compact_control *, long unsigned int, long unsigned int, bool)|(long unsigned int, long unsigned int, long unsigned int, long unsigned int, bool)", "raw_tracepoint:mm_compaction_end(compact_control *, long unsigned int, long unsigned int, bool, int)|(long unsigned int, long unsigned int, long unsigned int, long unsigned int, bool, int)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "tracepoint:compaction:mm_compaction_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]

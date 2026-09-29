@@ -11,17 +11,16 @@
 #
 # Five hundred and twelve datagrams, and the kernel has nowhere to put any of
 # them. `net.drops` has to report at least that many drops, all carrying one
-# reason -- `SKB_DROP_REASON_NO_SOCKET`, which is 3 on the kernel this was
-# written against -- and the kernel's own `Udp: NoPorts` counter in
-# `/proc/net/snmp` has to have moved by at least as much.
+# reason -- `NO_SOCKET`, the kernel's `SKB_DROP_REASON_NO_SOCKET` -- and the
+# kernel's own `Udp: NoPorts` counter in `/proc/net/snmp` has to have moved by
+# at least as much.
 #
-# **The reason is a number and not a name.** `enum skb_drop_reason` has a
-# hundred and twenty-eight members and their names are in the kernel's own BTF,
-# which this build reads field offsets out of and cannot yet read an enum out
-# of. A table of names written into the tool would be a constant no run could
-# check against the kernel it is running on, and a mislabelled drop reason
-# sends a reader to fix the wrong thing -- so the number travels alone until
-# the names can come from the same place the offsets do.
+# **The reason is the running kernel's name for it.** `enum skb_drop_reason`
+# has well over a hundred members, is renumbered between releases, and its
+# names are in the kernel's own BTF -- which is where they are read from, the
+# same place the field offsets come from. `reason` is the name without its
+# prefix, `reason_code` the number beside it; a value the enum does not name
+# is carried as its number in both, rather than guessed.
 #
 # **`protocol` says `no-socket` here, and that is the honest answer.** A
 # packet's own protocol is in `skb->protocol`, inside an anonymous union of
