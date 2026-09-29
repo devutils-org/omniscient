@@ -123,12 +123,28 @@ offer, and an entry that offers one no backend in its chain serves.
 `requires` lists what the backend needs, each string answered by
 `Capabilities::probe` in `src/capabilities.rs` as available, missing or unknown.
 The classes it answers include a path (`/proc/diskstats`, with `[pid]`
-substituted), `kernel>=<version>`, `cgroup2:<file>`, `tracepoint:<sys>:<event>`
-(the event's `id` file must be readable, not only its directory),
-`raw_tracepoint:<event>` (looked up in the kernel's BTF), `pmu:<event>`,
-`kprobe` and `uprobe` (the dynamic PMUs), and **`fentry:<function>`**: the
-running kernel's BTF declares a `FUNC` of that name and, where this process may
-load a tracing program, the smallest one loads against it (`src/bpf/fentry.rs`).
+substituted), `kernel>=<version>`, `tracepoint:<sys>:<event>` (the event's `id`
+file must be readable, not only its directory), `pmu:<event>`, `kprobe`, and
+**`fentry:<function>`**: the running kernel's BTF declares a `FUNC` of that name
+and, where this process may load a tracing program, the smallest one loads
+against it (`src/bpf/fentry.rs`). Four more say what a program reads, not only
+where it attaches, because the portability matrix found sources that probed
+available on an older kernel and then refused at the attach:
+
+- `raw_tracepoint:<event>` asks the kernel's BTF whether the event exists.
+  `raw_tracepoint:<event>(<arg>, ...)` also asks for the prototype the program
+  reads, spelled as `Btf::tracepoint_signature` spells it (no `struct`, no
+  qualifier): `raw_tracepoint:block_rq_issue(request *)`. A program that reads
+  more than one shape lists each, `name(a, b)|(a, b, c)`. The program's
+  constant and this string change in the same commit.
+- `btf_member:<struct>.<member>` is a member a program reads, looked up the way
+  the program looks it up: `btf_member:sock.sk_ino`.
+- `uprobe_multi` means a `BPF_TRACE_UPROBE_MULTI` link can be made (Linux 6.6),
+  asked of the kernel. `uprobe` means *this process can place a uprobe*: that
+  link, or the `uprobe` PMU with `CAP_SYS_ADMIN`.
+- `cgroup2:<file>` is a cgroup file readable where this process lives, and
+  `cgroup2:<file>:<key>` a flat-keyed one that carries that key.
+
 A string no probe answers -- `usdt:libc` today -- reads unknown, and unknown
 never counts as available.
 
