@@ -286,7 +286,11 @@ merge, fixed before it (`fix/counted-window`).
 1. **A product wave.** Every roadmap phase is done but phase 6's three filed
    edges, phase 9's last five sources and phase 4's `dm-delay`; what is missing
    is what a user who is not the developer would need: the CI green on
-   a push (its first run with P's configuration is the next one), a cell at a
+   a push -- its second run (`docs/open-findings.md`, "The CI's second run")
+   found the two defects to fix first: `cpu.profile` refused at the kernel's
+   default `perf_event_paranoid` 2, which takes every method built on a
+   profile with it, and `cpu.cycles` read available on a cpu with no hardware
+   PMU -- a cell at a
    distribution's defaults (Ubuntu's `perf_event_paranoid` 4, where every perf
    test must skip rather than fail), a release that installs, and one use case
    polished end to end -- an agent benchmarking a program through `omn-mcp`.
