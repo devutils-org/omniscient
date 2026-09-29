@@ -8147,3 +8147,25 @@ after that merge, so it is left for it: one word in `catalog/net.yaml`.
 - `collect::tests::an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on`
   failed once in `cargo test --lib` here and passed alone; already in the
   tally.
+
+## The thirteenth wave, from the coordinator
+
+### For the flaky tally, and possibly a silent loss: one page-cache lookup in 256
+
+`scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not`
+failed three times this wave -- in stream S's and stream P's full runs, and in
+the coordinator's `make check` after every stream had merged, with no agent and
+no guest running beside it -- each time with *"random: the workload read 256
+pages and 255 lookups were counted"*. It passed alone five times in five
+(2.2 s each), and it has only failed inside the whole `scenario_io` binary
+(about 85 s, its sibling tests in parallel). The random half asserts an exact
+count, because a single-page read is one folio the kernel's early return cannot
+shorten.
+
+What is not known is the one thing that decides it: whether the failing run's
+`io.readahead` result reported a loss. If it did, the assertion should carry
+`losses.dropped` as slack, and this is class (b). If it reported none, a lookup
+was lost silently, which is the invariant this project does not bend, and the
+drain in `src/bpf/io_pagecache.rs` is where to look first (it moved onto
+`map::Rows` in the twelfth wave). Wanted, in `tests/scenario_io.rs`: print the
+run's `losses` and the lookups per inode when the exact count fails.
