@@ -1558,12 +1558,10 @@ fn in_a_guest(sweep: &Sweep) -> bool {
 
 /// `docs/portability.md`, "What the cells found", has each label: what the
 /// cells showed, why, and the request filed for it.
-const KNOWN_DEFECTS: &[Known] = &[
-    Known {
-        finding: "P10 (the guest's own shape: one root cgroup, no cpufreq)",
-        applies: in_a_guest,
-        sources: &["mem.cgroup"],
-        targets: &["launch"],
-        says: "is the hierarchy root",
-    },
-];
+const KNOWN_DEFECTS: &[Known] = &[Known {
+    finding: "P10 (the guest's own shape: one root cgroup, no cpufreq)",
+    applies: in_a_guest,
+    sources: &["mem.cgroup"],
+    targets: &["launch"],
+    says: "is the hierarchy root",
+}];
