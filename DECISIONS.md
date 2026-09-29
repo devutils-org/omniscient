@@ -289,7 +289,7 @@ waits land within what the program timed itself.
 | Decision | Choice | Reason |
 |---|---|---|
 | Who answers a machine question asked through MCP | **The `omn` binary that would run the session.** `omn-mcp` probes nothing and holds no capability; every machine-dependent answer names the binary and the capabilities on it. Validation, which is machine-independent, runs on the library. | A probe answers for the process that asks. A copy of `omn` without its capabilities answered 52 usable sources against 93, silently -- the relink failure, one binary over. |
-| Whether a model may run a session | **Only when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **never a session that launches a program**. | Asking for a measurement is what phase 11 grants; running a program a model chose is changing the machine (boundary 5). The opt-in has `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
+| Whether a model may run a session | **Only when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **never a session that launches a program**. *Amended in the thirteenth wave: a launching session the person approved, below.* | Asking for a measurement is what phase 11 grants; running a program a model chose is changing the machine (boundary 5). The opt-in has `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
 | What an answer is | **The documents as written, regrouped per request**, with each request's losses, shortfalls, degradations, unverified requirements and timestamp error restated first, and two additions only: `evidence_means` beside every evidence level, and `elided` where raw events were cut, counted in `missing`. | Every field a shaped answer leaves out is a place a shortfall falls through; and `IDENTITY` and `TEMPORAL` are one word each, so what each establishes is written beside it. |
 
 `docs/mcp.md` has the protocol, the checks (1346 numbers matched key by key
@@ -348,6 +348,21 @@ the program says it did before them.
 `docs/portability.md`, "The twelfth wave", says which class was verified on a
 matrix cell and which needs the matrix run again on an idle machine
 (`power.cstate`, and the capability-less cells swept before W's and D's fixes).
+---
+
+## Settled in the thirteenth wave: what a model may launch, and what the engine pairs
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Whether a model may run a session that launches a program | **Only a session file in the directory the person starting `omn-mcp` passed with `--allow-launch DIR`**, which needs `--allow-run` beside it. The file is run as it states it, from its own directory: program, arguments, environment and working directory are the file's, and nothing in a tool call changes them. `list_approved` lists them with their plans; a name that leaves the directory is refused. | The model picks which approved session runs and when, never what runs, so boundary 5's reason holds: no code a model chose runs on the machine. It is what lets an agent benchmark a program its owner described, which the user asked for. |
+| Benchmarking through MCP | **Repeated `run_session` calls**, not a tool of its own. | The server hands over documents and does not summarise them, and the bench's variance gate needs a quiet machine and a release binary, which a model's call cannot promise. |
+| Two lives of a block request under one scope | **Paired by order and rated `TEMPORAL` within the key**, counted in `states.scope_collapsed`; the scope is not made unique. | No component both block collectors read changes per request, and order is exact while neither side loses an event. |
+| A decomposition part read from a join | **Allowed, and only from a `woke` join** (`value: paired`). | It is the one match whose pairs have a distance that is a duration. |
+| Symbol names | **Demangled by `rustc-demangle` (legacy and v0) and `cpp_demangle` (Itanium)**; a name neither reads whole is shown as the linker wrote it, and `Frame::mangled` keeps it. | Both schemes are specified in full, with corner cases a partial reader gets wrong and confidently. `rustc-demangle` is the Rust project's own and has no dependencies; `cpp_demangle` depends on `cfg-if` only; `std`, `backtrace` and `pprof` use them. |
+
+`docs/families/join.md`, "The thirteenth wave", has the ground truth for each,
+and `docs/mcp.md` the launch rules and their refusals.
+
 ---
 
 ## Open

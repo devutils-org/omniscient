@@ -420,6 +420,8 @@ and a decomposition that adds up — or prints what does not, as a signed residu
 | `join-between-residency.yml` | What moved the resident size, asked by key and by the clock — and a decoy the clock gets wrong, at TEMPORAL. |
 | `join-decompose-memory.yml` | The rise in resident size split into live and retained bytes, with a signed residue the program predicts. |
 | `join-decompose-compute.yml` | One task's wall clock split into on-cpu, runnable and blocked, each row's kind and resolution, and its releasers ranked by chain. |
+| `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
+| `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
 
 ## cross-family
 
