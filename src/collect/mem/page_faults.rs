@@ -84,9 +84,22 @@ impl Prepared for Prepare {
             collector.cpus = Some(cpus);
             return Ok(Box::new(collector));
         }
+        // A cgroup is one event per cpu too, each filtered by the kernel to
+        // the cgroup's tasks (`crate::collect::cpu::cgroup`).
+        if let crate::request::Target::Cgroup(path) = target {
+            let cgroup = crate::collect::cpu::cgroup::Cgroup::resolve(path)?;
+            let mut collector = PageFaultCollector::new(-1, self.0);
+            collector.cpus = Some(
+                crate::perf::online_cpus()
+                    .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
+            );
+            collector.cgroup = Some(cgroup);
+            return Ok(Box::new(collector));
+        }
         let pid = target.first_pid().ok_or_else(|| {
             format!(
-                "sampling the page faults of a {} target is not built: faults are sampled per                  process, per core or for the whole machine",
+                "sampling the page faults of a {} target is not built: faults are sampled per \
+                 process, per core, per cgroup or for the whole machine",
                 target.kind()
             )
         })?;
@@ -114,6 +127,11 @@ pub struct PageFaultCollector {
     /// The cpus sampled, for a machine or a core target: every task that runs
     /// on them, one event per cpu. `None` samples `pid`.
     cpus: Option<Vec<u32>>,
+    /// The cgroup whose tasks are sampled on `cpus`, for a cgroup target.
+    cgroup: Option<crate::collect::cpu::cgroup::Cgroup>,
+    /// Throttled periods already reported, so that each drain reports what the
+    /// sampler's own count moved by.
+    throttled: u64,
     /// The tasks faults were sampled from, for the note that says how many.
     sampled_tasks: std::collections::BTreeSet<i32>,
     /// What was opened, read at `start` because `stop` closes it before the
@@ -133,6 +151,8 @@ impl PageFaultCollector {
             losses: Losses::default(),
             whole_process: true,
             cpus: None,
+            cgroup: None,
+            throttled: 0,
             sampled_tasks: std::collections::BTreeSet::new(),
             followed: (0, 0),
         }
@@ -145,9 +165,9 @@ impl PageFaultCollector {
         let id = self.id.clone();
         let comms = &mut self.comms;
         let seen = &mut self.sampled_tasks;
+        let cgroup_key = self.cgroup.as_ref().map(|cgroup| cgroup.key());
         let mut index = seq;
         let mut dropped = 0u64;
-        let mut throttles = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
             Record::Sample(sample) => {
@@ -156,18 +176,24 @@ impl PageFaultCollector {
                     ts_ns: sample.time_ns,
                     ts_err_ns: 0,
                     kind: "mem.faults".to_owned(),
-                    keys: vec![
-                        // First key is the series key, so faults group by the
-                        // thread that took them rather than by address, which
-                        // would make one series per page.
-                        KeyValue::task(sample.tid as i32),
-                        // The faulting address, as a one-byte range: an
-                        // interval join asks which allocation contains it.
-                        KeyValue::Mem {
-                            base: sample.addr,
-                            len: 1,
-                        },
-                    ],
+                    keys: {
+                        let mut keys = vec![
+                            // First key is the series key, so faults group by
+                            // the thread that took them rather than by
+                            // address, which would make one series per page.
+                            KeyValue::task(sample.tid as i32),
+                            // The faulting address, as a one-byte range: an
+                            // interval join asks which allocation contains it.
+                            KeyValue::Mem {
+                                base: sample.addr,
+                                len: 1,
+                            },
+                        ];
+                        // The cgroup the kernel filtered the sample to, when
+                        // one was asked for.
+                        keys.extend(cgroup_key.clone());
+                        keys
+                    },
                     attrs: {
                         let mut attrs = vec![
                             Attr::uint("count", 1),
@@ -185,9 +211,12 @@ impl PageFaultCollector {
                 index += 1;
             }
             Record::Lost { count } => dropped += count,
-            Record::Throttle { throttled } => throttles += u64::from(throttled),
+            // Counted by the sampler itself (`ThreadSampler::throttled`).
+            Record::Throttle { .. } => {}
             Record::Other { .. } => undecoded += 1,
         });
+        let throttles = event.throttled() - self.throttled;
+        self.throttled += throttles;
         // A throttle is the kernel deciding this event costs too much and
         // delivering nothing for a while. How many faults happened inside that
         // window is not knowable from userspace, so it is counted as a throttle
@@ -237,6 +266,12 @@ impl Collector for PageFaultCollector {
             period,
             Callchain::Off,
         );
+        if let (Some(cpus), Some(cgroup)) = (&self.cpus, &self.cgroup) {
+            let event = ThreadSampler::open_cgroup(&spec, &cgroup.directory, cpus, RING_PAGES)?;
+            event.enable().map_err(|error| error.to_string())?;
+            self.event = Some(event);
+            return Ok(());
+        }
         if let Some(cpus) = &self.cpus {
             let event = ThreadSampler::open_cpus(&spec, cpus, RING_PAGES)?;
             event.enable().map_err(|error| error.to_string())?;
@@ -295,6 +330,21 @@ impl Collector for PageFaultCollector {
     /// one thread, and what they may have missed.
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        if let (Some(cpus), Some(cgroup)) = (&self.cpus, &self.cgroup) {
+            notes.push(format!(
+                "every task of the cgroup {} was sampled while it ran, one event per cpu on {} \
+                 cpus; faults came from {} task{}",
+                cgroup.directory.display(),
+                cpus.len(),
+                self.sampled_tasks.len(),
+                if self.sampled_tasks.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+            return notes;
+        }
         if let Some(cpus) = &self.cpus {
             notes.push(format!(
                 "every task on {} cpu{} was sampled, one event per cpu; faults came from {} \

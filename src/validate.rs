@@ -265,10 +265,10 @@ fn check_joins(
 /// of YAML that was wrong.
 ///
 /// Returns one complaint per broken promise, empty when the catalog keeps all
-/// of them. It is a function rather than a load-time refusal because the loader
-/// is not this stream's to change; `the_catalog_promises_nothing_it_cannot_produce`
-/// runs it over the embedded catalog, and `docs/open-findings.md` asks for the
-/// one line in `Catalog::from_entries` that would make it a refusal.
+/// of them. `Catalog::from_entries` refuses a catalog with any, so a catalog
+/// given with `--catalog <dir>` is held to the same promises as the embedded
+/// one; `the_catalog_promises_nothing_it_cannot_produce` runs it over the
+/// embedded catalog as well.
 pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
     let mut complaints = Vec::new();
     for entry in catalog.entries() {
@@ -291,6 +291,17 @@ pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
             complaints.push(format!(
                 "catalog entry `{}` declares `rate` over a `{}`, which does not add up: a sum \
                  of them divided by a window is a quantity of nothing",
+                entry.id, entry.unit
+            ));
+        }
+        // A stack's weight is the sum of what its events carried, so it is the
+        // same promise as `rate`: a profile of temperatures sums degrees into a
+        // flame that is wide where the samples were many, not where it was hot.
+        if entry.emits.contains(&EmitKind::Stack) && !adds_up(entry.unit) {
+            complaints.push(format!(
+                "catalog entry `{}` declares `stack` over a `{}`, which does not add up: a \
+                 stack's weight is the sum of its events, and a sum of them is a quantity of \
+                 nothing",
                 entry.id, entry.unit
             ));
         }
@@ -344,6 +355,14 @@ fn target_rejection_reason(entry: &Entry, kind: TargetKind) -> String {
                 .to_owned()
         }
         TargetKind::Iface => format!("`{}` is not a network interface source", entry.id),
+        // A container is a cgroup once something has resolved it to one, which
+        // is why the kind falls back to `cgroup`; an entry that serves the
+        // cgroup and says `container: no` is saying nothing resolves it.
+        TargetKind::Container if entry.target_support(TargetKind::Cgroup) != TargetSupport::No => {
+            "a container has to be resolved to its cgroup first, which this tool does not do; \
+             pass --cgroup with the container's cgroup path"
+                .to_owned()
+        }
         TargetKind::Cpu => "this source is not attributable to a single core".to_owned(),
         _ => format!("the catalog declares no `{kind}` support for this source"),
     }
@@ -823,14 +842,13 @@ mod tests {
     fn an_emit_no_declared_mode_can_produce_is_a_broken_promise() {
         let mut entry = catalog().get(&"mem.swap".parse().unwrap()).unwrap().clone();
         entry.emits.push(EmitKind::Rate);
-        let catalog = Catalog::from_entries(vec![entry]).expect("the loader still takes it");
-        let complaints = check_catalog(&catalog);
-        assert_eq!(complaints.len(), 1, "{complaints:?}");
-        assert!(
-            complaints[0].contains("none of the modes"),
-            "{}",
-            complaints[0]
-        );
+        // The loader runs `check_catalog`, so the broken promise is a catalog
+        // that does not load, with the complaint as its reason.
+        let refusal = Catalog::from_entries(vec![entry])
+            .expect_err("the loader refuses it")
+            .to_string();
+        assert_eq!(refusal.lines().count(), 1, "{refusal}");
+        assert!(refusal.contains("none of the modes"), "{refusal}");
     }
 
     #[test]
@@ -840,14 +858,11 @@ mod tests {
             .unwrap()
             .clone();
         entry.emits.push(EmitKind::Rate);
-        let catalog = Catalog::from_entries(vec![entry]).expect("the loader still takes it");
-        let complaints = check_catalog(&catalog);
-        assert_eq!(complaints.len(), 1, "{complaints:?}");
-        assert!(
-            complaints[0].contains("does not add up"),
-            "{}",
-            complaints[0]
-        );
+        let refusal = Catalog::from_entries(vec![entry])
+            .expect_err("the loader refuses it")
+            .to_string();
+        assert_eq!(refusal.lines().count(), 1, "{refusal}");
+        assert!(refusal.contains("does not add up"), "{refusal}");
     }
 
     #[test]

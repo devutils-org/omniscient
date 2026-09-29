@@ -775,12 +775,12 @@ fn placement(backend: &Backend, entry: &Entry, predicate: &FilterExpr) -> Filter
 }
 
 /// What a request asks of a perf backend beyond what its `pmu:` probes
-/// answered: those open the event over this process, and a system or core
-/// target is one event per cpu, which the kernel guards separately. P9 of
+/// answered: those open the event over this process, and a system, core or
+/// cgroup target is one event per cpu, which the kernel guards separately. P9 of
 /// `docs/portability.md`: without the capability, `perf_event_paranoid` at 2
 /// lets a process count itself and no cpu, and ten sources resolved for
 /// `--system` and refused at attach.
-pub const PER_CPU_EVENTS: &str = "per-cpu perf events (the target observes whole cpus)";
+pub const PER_CPU_EVENTS: &str = "per-cpu perf events (the target is observed cpu by cpu)";
 
 /// Answers every requirement of one backend on this machine, for a target
 /// when there is one.
@@ -811,7 +811,14 @@ pub fn probe_all(
             .strip_prefix("pmu:")
             .is_some_and(|event| !event.contains('/') || event.starts_with("cpu/"))
     });
-    if per_task && matches!(target, Some(Target::System | Target::Cpu(_))) {
+    // A cgroup is one event per cpu as well, filtered to the cgroup's tasks,
+    // and the kernel asks it the same question (`perf_allow_cpu`).
+    if per_task
+        && matches!(
+            target,
+            Some(Target::System | Target::Cpu(_) | Target::Cgroup(_))
+        )
+    {
         requirements.push(Requirement {
             needs: PER_CPU_EVENTS.to_owned(),
             probe: match crate::perf::per_cpu_support() {

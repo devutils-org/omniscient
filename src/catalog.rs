@@ -446,6 +446,39 @@ impl fmt::Display for Unit {
     }
 }
 
+/// Refuses a requirement written as a pattern.
+///
+/// Nothing expands one: a probe asked about `tracepoint:ext4:*` looks for a
+/// directory literally named `*`, and `pmu:topdown-*` for an event of that
+/// name, so the answer is missing for a machine that has every one of them --
+/// or available by an accident of the probe. A chain is resolved against
+/// requirements, and "any of them" is not one; the entry names the events its
+/// collector attaches to. Finding 25 of `docs/open-findings.md`.
+fn check_requirement_globs(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        if let Some(pattern) = backend
+            .requires
+            .iter()
+            // A raw tracepoint's prototype follows its name in parentheses,
+            // and a pointer is written with a `*` there.
+            .find(|needs| {
+                needs
+                    .split('(')
+                    .next()
+                    .unwrap_or(needs)
+                    .contains(['*', '?'])
+            })
+        {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}`: backend `{}` requires `{pattern}`, which is a pattern: no \
+                 probe expands one, so name each event or file the collector attaches to",
+                entry.id, backend.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The per-backend `targets` maps have to stay consistent with the entry's.
 ///
 /// Two ways they can drift, and both are the kind of mistake that reads as
@@ -714,8 +747,16 @@ impl Catalog {
             check_backend_targets(entry)?;
             check_backend_filter_fields(entry)?;
             check_backend_modes(entry)?;
+            check_requirement_globs(entry)?;
         }
         let catalog = Self { entries };
+        // What no build could keep, refused where the catalog is read rather
+        // than found by a test of the embedded one: `--catalog <dir>` loads
+        // through here too (`docs/open-findings.md`, "To catalog.rs").
+        let complaints = crate::validate::check_catalog(&catalog);
+        if !complaints.is_empty() {
+            return Err(ParseError::new(complaints.join("\n")));
+        }
         for entry in &catalog.entries {
             for derived in &entry.derived_from {
                 if catalog.get(derived).is_none() {

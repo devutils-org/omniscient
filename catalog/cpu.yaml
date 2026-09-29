@@ -10,9 +10,9 @@
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK"], cost: free,
        degraded: "CPU time, not cycles: blind to DVFS"}
-  modes: [count, sample]
-  emits: [summary, rate, hist, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  modes: [count, poll, sample]
+  emits: [summary, timeline, rate, hist, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
@@ -25,9 +25,9 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS"], cost: free}
-  modes: [count, sample]
-  emits: [summary, rate, hist, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  modes: [count, poll, sample]
+  emits: [summary, timeline, rate, hist, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: high
@@ -44,9 +44,9 @@
   derived_from: [cpu.instructions, cpu.cycles]
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS", "pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
-  modes: [count]
-  emits: [summary, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  modes: [count, poll]
+  emits: [summary, timeline, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
@@ -62,9 +62,9 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_BRANCH_MISSES"], cost: free}
-  modes: [count, sample]
-  emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  modes: [count, poll, sample]
+  emits: [summary, timeline, rate, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
@@ -75,9 +75,9 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES"], cost: free}
-  modes: [count, sample]
-  emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  modes: [count, poll, sample]
+  emits: [summary, timeline, rate, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -91,7 +91,7 @@
                              "pmu:topdown-fe-bound", "pmu:topdown-be-bound"], cost: low}
   modes: [count]
   emits: [summary, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
@@ -121,7 +121,7 @@
        degraded: "time-based sampling: blind to phases running at reduced frequency"}
   modes: [sample]
   emits: [stack, topk, hist, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -161,9 +161,9 @@
   unit: count
   backends:
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free}
-  modes: [count, sample]
-  emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  modes: [count, poll, sample]
+  emits: [summary, timeline, rate, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -178,9 +178,9 @@
   unit: count
   backends:
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: free}
-  modes: [count]
-  emits: [summary, rate, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
+  modes: [count, poll]
+  emits: [summary, timeline, rate, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: no}
   keys: [task, cgroup]
   filter_fields: [comm]
   determinism: low
@@ -225,7 +225,7 @@
     - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
-  targets: {cgroup: native, container: native}
+  targets: {cgroup: native, container: no}
   keys: [cgroup]
   filter_fields: []
   determinism: medium

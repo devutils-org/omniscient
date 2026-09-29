@@ -182,35 +182,40 @@ fn device_and_workload() -> Result<(), String> {
 /// the `exclusive()` lock is what keeps this suite's own workloads apart.
 fn device_to_ourselves() -> Result<(), String> {
     static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
-    PROBE
-        .get_or_init(|| {
-            let output = Command::new("nvidia-smi")
-                .args([
-                    "--query-compute-apps=pid,process_name,used_memory",
-                    "--format=csv,noheader,nounits",
-                ])
-                .output()
-                .map_err(|error| format!("nvidia-smi does not run here: {error}"))?;
-            if !output.status.success() {
-                return Err("nvidia-smi cannot list the device's clients".to_owned());
-            }
-            let tenants: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(|line| line.to_owned())
-                .collect();
-            if tenants.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "another process is using this GPU, so a device figure is not this \
+    PROBE.get_or_init(device_tenants).clone()
+}
+
+/// Who else is on the device right now, asked again every time: the answer
+/// before a test is not the answer after it (flaky tally #24 -- the idle
+/// baseline read 100 % because somebody else's kernel arrived meanwhile).
+fn device_tenants() -> Result<(), String> {
+    (|| {
+        let output = Command::new("nvidia-smi")
+            .args([
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .map_err(|error| format!("nvidia-smi does not run here: {error}"))?;
+        if !output.status.success() {
+            return Err("nvidia-smi cannot list the device's clients".to_owned());
+        }
+        let tenants: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_owned())
+            .collect();
+        if tenants.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "another process is using this GPU, so a device figure is not this \
                      workload's: {}",
-                    tenants.join("; ")
-                ))
-            }
-        })
-        .clone()
+                tenants.join("; ")
+            ))
+        }
+    })()
 }
 
 /// Runs one of this family's sessions and returns its results as JSON.
@@ -713,11 +718,13 @@ fn every_session_in_the_family_validates_against_the_catalog() {
 fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
     let _together = shared();
     let mut forced = 0;
+    let mut here = 0;
     for (entry, serves, pair) in probed() {
         let Some((mode, emit)) = pair else { continue };
         if *serves != Serves::Here {
             continue;
         }
+        here += 1;
         let source = entry["id"].as_str().unwrap().to_owned();
         let mode = spelled(mode);
         for backend in entry["backends"].as_array().expect("a chain") {
@@ -756,6 +763,15 @@ fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
             );
             forced += 1;
         }
+    }
+    if here == 0 {
+        // A machine with no GPU serves no source of this family, so no chain
+        // is walked far enough to reach a backend nobody wrote.
+        eprintln!(
+            "skipped: this machine serves no gpu source (no NVIDIA driver, no DRM device), so \
+             there is no chain to pin a backend of"
+        );
+        return;
     }
     assert!(
         forced >= 5,
@@ -948,7 +964,17 @@ fn a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power() {
     // from whatever ran before this test.
     settle();
     let idle = session("gpu-idle-baseline.yml");
+    // Asked between the two runs and after them as well: a tenant that arrived
+    // during the baseline is in the baseline, and the device figures below are
+    // the device's, not this workload's. The workload's own process has exited
+    // by the time each is asked.
+    if let Err(reason) = device_tenants() {
+        return eprintln!("skipped: after the idle baseline, {reason}");
+    }
     let busy = session("gpu-device-state.yml");
+    if let Err(reason) = device_tenants() {
+        return eprintln!("skipped: after the resident kernel, {reason}");
+    }
 
     let idle_busy = points(result(&idle, "busy"), "timeline");
     let busy_busy = points(result(&busy, "busy"), "timeline");
@@ -1443,6 +1469,12 @@ fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
         ("gpu.counters", "snapshot", "summary", "vendor:ncu"),
     ] {
         let output = omn(&[source, "--mode", mode, "--emit", emit, "--", "true"]);
+        // Every backend of the chain is probed before the build is asked for a
+        // collector, so a machine without the vendor's library answers first.
+        if stderr(&output).contains("has no viable backend on this machine") {
+            eprintln!("skipped: {}", stderr(&output));
+            continue;
+        }
         assert_eq!(
             code(&output),
             EXIT_NOT_IMPLEMENTED,

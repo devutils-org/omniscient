@@ -172,6 +172,12 @@ fn sampling_a_counter_is_refused_with_the_mechanism_it_would_need() {
     ]);
     assert!(!output.status.success(), "{}", stdout(&output));
     let message = stderr(&output);
+    // The collector's refusal is reached only through a backend the machine
+    // offers; `perf_event_paranoid` above 2 withholds every counter.
+    if message.contains("has no viable backend on this machine") {
+        eprintln!("skipped: {message}");
+        return;
+    }
     assert!(message.contains("sampling path"), "{message}");
     assert!(message.contains("--mode count"), "{message}");
 }
@@ -564,6 +570,14 @@ fn counting_a_cpu_that_does_not_exist_says_so_rather_than_blaming_privileges() {
     ]);
     assert!(!output.status.success(), "{}", stdout(&output));
     let message = stderr(&output);
+    // A machine that withholds every counter refuses before the cpu is looked
+    // at, and rightly names the sysctl: there, it is the answer.
+    if message.contains("has no viable backend on this machine")
+        && message.contains("perf_event_open was refused")
+    {
+        eprintln!("skipped: {message}");
+        return;
+    }
     assert!(message.contains("not online"), "{message}");
     assert!(!message.contains("perf_event_paranoid"), "{message}");
 }

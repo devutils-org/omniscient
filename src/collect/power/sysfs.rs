@@ -89,24 +89,9 @@ pub fn online_cpus(root: &Path) -> Result<Vec<u32>, ReadError> {
     })
 }
 
-/// `0-3,8,10-11` as the kernel writes cpu lists.
-pub fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
-    let mut cpus = Vec::new();
-    for part in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        match part.split_once('-') {
-            Some((first, last)) => {
-                let first: u32 = first.parse().ok()?;
-                let last: u32 = last.parse().ok()?;
-                if last < first {
-                    return None;
-                }
-                cpus.extend(first..=last);
-            }
-            None => cpus.push(part.parse().ok()?),
-        }
-    }
-    Some(cpus)
-}
+/// `0-3,8,10-11` as the kernel writes cpu lists: the one reader, in
+/// `capabilities.rs`.
+pub use crate::capabilities::parse_cpu_list;
 
 /// The entries of a directory, sorted, so a run does not depend on the order
 /// the filesystem happens to return.

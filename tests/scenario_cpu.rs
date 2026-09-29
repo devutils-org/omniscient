@@ -63,7 +63,13 @@ fn workload_runs_only_when_this_binary_was_launched_as_a_workload() {
     match kind {
         // Exactly two instructions per iteration: a decrement and the branch
         // that reads its flag.
-        "retire" => retire(number),
+        "retire" => match std::env::var(REPORT_VAR) {
+            // Asked what its own loop cost the kernel: see `retire_reporting`.
+            Ok(report) => {
+                std::fs::write(report, retire_reporting(number)).expect("the report is written")
+            }
+            Err(_) => retire(number),
+        },
         "sleep" => std::thread::sleep(Duration::from_millis(number)),
         // A chosen amount of cpu, by the thread's own clock rather than by the
         // wall clock: this machine runs eight streams' suites at once, and a
@@ -115,8 +121,134 @@ fn workload_runs_only_when_this_binary_was_launched_as_a_workload() {
             std::fs::write(report, fault_some_pages(number as usize))
                 .expect("the report is written");
         }
+        // Half of a workload inside a cgroup and ten halves outside it: see
+        // `in_and_beside_a_cgroup`.
+        "cgroup-retire" | "cgroup-faults" | "cgroup-burn" => in_and_beside_a_cgroup(kind, number),
         other => panic!("no workload called `{other}`"),
     }
+}
+
+/// The cgroup a `cgroup-*` workload puts its child into.
+const CGROUP_VAR: &str = "OMN_CPU_SCENARIO_CGROUP";
+
+/// One unit of work inside a cgroup and ten outside it, at the same time.
+///
+/// The process forks. The child moves itself into the cgroup named by
+/// [`CGROUP_VAR`] and does `number` units -- instructions retired twice per
+/// turn, pages faulted, milliseconds of its own cpu burned -- and the parent,
+/// which stays where it was, does the same ten times over. A source over the cgroup
+/// has to count the child's and none of the parent's, which is what makes the
+/// ten a separation rather than a threshold.
+///
+/// The child writes what it measured of itself to a pipe as four words -- its
+/// pid, the `CLOCK_MONOTONIC` instants its work began and ended, and its own
+/// count (the loop's turns, its `getrusage` fault delta, its thread cpu
+/// nanoseconds) -- using nothing but system calls between the fork and its
+/// exit, because a forked child of a threaded process may not allocate. The
+/// parent writes the four words and its own pid and count to the report.
+fn in_and_beside_a_cgroup(kind: &str, number: u64) {
+    let cgroup = std::env::var(CGROUP_VAR).expect("a cgroup to join");
+    let procs = std::ffi::CString::new(format!("{cgroup}/cgroup.procs")).expect("a path");
+    let mut pipe = [0i32; 2];
+    // SAFETY: `pipe` has room for the two descriptors.
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0, "a pipe");
+    let work = move |units: u64| -> u64 {
+        match kind {
+            "cgroup-retire" => {
+                retire(units);
+                units
+            }
+            "cgroup-faults" => fault_pages_raw(units as usize),
+            _ => {
+                let before = thread_cpu_ns();
+                burn(Duration::from_millis(units));
+                thread_cpu_ns() - before
+            }
+        }
+    };
+    // SAFETY: the child below uses only system calls and the work, and exits
+    // with `_exit`.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork");
+    if child == 0 {
+        // SAFETY: `procs` is a valid C string, "0" moves the calling process.
+        unsafe {
+            let fd = libc::open(procs.as_ptr(), libc::O_WRONLY);
+            if fd < 0 || libc::write(fd, b"0".as_ptr().cast(), 1) != 1 {
+                libc::_exit(2);
+            }
+            libc::close(fd);
+        }
+        let from_ns = monotonic_ns();
+        let counted = work(number);
+        let to_ns = monotonic_ns();
+        // SAFETY: a query of this process's own id.
+        let words = [unsafe { libc::getpid() } as u64, from_ns, to_ns, counted];
+        // SAFETY: four words from a live array into the pipe, then the exit.
+        unsafe {
+            libc::write(
+                pipe[1],
+                words.as_ptr().cast(),
+                std::mem::size_of_val(&words),
+            );
+            libc::_exit(0);
+        }
+    }
+    // SAFETY: closing the write end this process does not use.
+    unsafe { libc::close(pipe[1]) };
+    // Ten times the child's work, as ten of the child's: a fault count is not
+    // proportional to the pages of one mapping (the kernel picks larger folios
+    // for a larger region), and ten mappings of the child's size are.
+    let own: u64 = (0..10).map(|_| work(number)).sum();
+    let mut words = [0u64; 4];
+    // SAFETY: reading four words into a live array.
+    let read = unsafe { libc::read(pipe[0], words.as_mut_ptr().cast(), 32) };
+    let mut status = 0;
+    // SAFETY: waiting for the child this process forked.
+    unsafe { libc::waitpid(child, &mut status, 0) };
+    assert_eq!(read, 32, "the child reported what it did (status {status})");
+    let report = std::env::var(REPORT_VAR).expect("a report path");
+    std::fs::write(
+        report,
+        format!(
+            "{} {} {} {} {} {own}",
+            words[0],
+            words[1],
+            words[2],
+            words[3],
+            std::process::id()
+        ),
+    )
+    .expect("the report is written");
+}
+
+/// Touches `pages` fresh anonymous pages and returns what this thread's own
+/// fault counter moved by, with system calls only.
+fn fault_pages_raw(pages: usize) -> u64 {
+    let page = 4096;
+    // SAFETY: an anonymous mapping of our own, unmapped below.
+    let block = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            pages * page,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if block == libc::MAP_FAILED {
+        return 0;
+    }
+    let before = thread_faults();
+    for index in 0..pages {
+        // SAFETY: inside the mapping, one byte per page.
+        unsafe { block.cast::<u8>().add(index * page).write_volatile(1) };
+    }
+    let faults = thread_faults() - before;
+    // SAFETY: unmapping what was mapped above.
+    unsafe { libc::munmap(block, pages * page) };
+    faults
 }
 
 /// A loop of `iterations` turns that retires exactly two instructions per
@@ -148,6 +280,34 @@ fn retire(iterations: u64) {
             options(nostack),
         );
     }
+}
+
+/// The loop, bracketed by two counters this process opens on itself -- one of
+/// user mode alone, one of every mode -- and reported as `user all`.
+///
+/// Their difference is what the kernel ran in this task's context while the
+/// loop did: timer interrupts, preemptions, the page faults of its stack. A
+/// counter over the task counts that too, and a loaded machine raises more of
+/// it, which is flaky tally #9's +0.69 %. The workload measures it, so the
+/// scenario carries it as its slack instead of assuming a machine quiet
+/// enough to have none. `all` is `user` when the machine will not count
+/// kernel mode for this process.
+fn retire_reporting(iterations: u64) -> String {
+    use omn::perf::{Counter, CounterGroup, Scope};
+    const INSTRUCTIONS: [Counter; 1] = [Counter::hardware("instructions", 1)];
+    let groups = CounterGroup::open_user_mode(&INSTRUCTIONS, Scope::Process(0))
+        .and_then(|user| Ok((user, CounterGroup::open(&INSTRUCTIONS, Scope::Process(0))?)));
+    let Ok((user, all)) = groups else {
+        retire(iterations);
+        return String::new();
+    };
+    let _ = (user.enable(), all.enable());
+    retire(iterations);
+    let (user, all) = match (user.read_final(), all.read_final()) {
+        (Ok(user), Ok(all)) => (user[0].value, all[0].value),
+        _ => return String::new(),
+    };
+    format!("{user} {all}")
 }
 
 /// Busy on a cpu for a wall-clock duration, blocking on nothing.
@@ -380,6 +540,15 @@ fn last_of(document: &serde_json::Value) -> f64 {
         .expect("a measured value")
 }
 
+/// Whether the resolver refused because this machine withholds the source
+/// altogether -- every backend missing a requirement, which is how
+/// `perf_event_paranoid` above 2 (Debian's and Ubuntu's 4) answers every
+/// counter, even a process's own. A scenario about something else that uses a
+/// counter as its vehicle has nothing to check there.
+fn withheld_here(message: &str) -> bool {
+    message.contains("has no viable backend on this machine")
+}
+
 /// Whether a refusal is this machine's limit rather than a refusal of the
 /// request. Only the first is a reason for a scenario to stop quietly.
 fn machine_cannot_serve(message: &str) -> bool {
@@ -424,10 +593,18 @@ fn a_known_number_of_retired_instructions_is_counted_as_that_number() {
 
     let loop_only = measured.counted - startup.counted;
     let error = (loop_only - EXPECTED) / EXPECTED;
+    // Above the loop, the counter over the task also holds what the kernel ran
+    // in its context while the loop did -- interrupts and preemptions, more of
+    // them on a loaded machine -- which the workload counted itself, as the
+    // difference of an every-mode and a user-mode counter around its loop. It
+    // is the slack above; nothing is allowed below. Flaky tally #9.
+    let kernel = measured.kernel_during_loop - startup.kernel_during_loop;
+    let slack = kernel.max(0.0) / EXPECTED;
     assert!(
-        error.abs() < 0.005,
+        error > -0.005 && error < 0.005 + slack,
         "a workload that retires {EXPECTED:.0} instructions was counted at {loop_only:.0} \
-         ({:+.3} %); the runs were {:.0} and {:.0}",
+         ({:+.3} %, and its own counters put {kernel:.0} of kernel work in the loop's \
+         window); the runs were {:.0} and {:.0}",
         error * 100.0,
         measured.counted,
         startup.counted
@@ -471,6 +648,10 @@ fn a_known_number_of_retired_instructions_is_counted_as_that_number() {
 struct KnownWork {
     counted: f64,
     ratio: (f64, f64, f64),
+    /// What the kernel ran in the workload's context during its loop, by the
+    /// workload's own two counters (`retire_reporting`); 0 when it could not
+    /// count kernel mode.
+    kernel_during_loop: f64,
 }
 
 /// Runs the example that a reader would run, with this binary as the workload
@@ -486,9 +667,16 @@ struct KnownWork {
 /// counter tests.
 fn example_counted(spec: &str) -> Option<KnownWork> {
     let exe = std::env::current_exe().expect("this test binary has a path");
+    let report = std::env::temp_dir().join(format!(
+        "omn-known-work-{}-{}",
+        std::process::id(),
+        spec.replace(':', "-")
+    ));
+    let _ = std::fs::remove_file(&report);
     let output = Command::new(BINARY)
         .args(["-f", "examples/cpu-known-work.yml", "--format", "json"])
         .env(WORKLOAD_VAR, spec)
+        .env(REPORT_VAR, &report)
         .env(
             "OMN_SCENARIO_WORKLOAD",
             format!(
@@ -571,9 +759,19 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
             .as_f64()
             .expect("numeric")
     };
+    let own: Vec<f64> = std::fs::read_to_string(&report)
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|word| word.parse().ok())
+        .collect();
+    let _ = std::fs::remove_file(&report);
     Some(KnownWork {
         counted,
         ratio: (named("ipc"), named("instructions"), named("cycles")),
+        kernel_during_loop: match own[..] {
+            [user, all] => (all - user).max(0.0),
+            _ => 0.0,
+        },
     })
 }
 
@@ -897,6 +1095,15 @@ fn every_mode_and_emit_the_catalog_declares_is_served_or_says_what_is_missing() 
     );
 
     let mut reachable: BTreeMap<(String, String), bool> = BTreeMap::new();
+    // A pair every cell of which this machine withholds (the resolver found
+    // every backend missing a requirement) says nothing about the build's
+    // promise, which only a machine that offers the source can check.
+    let judged = |source: &str, emit: &str| {
+        found
+            .iter()
+            .filter(|(cell, _)| cell.source == source && cell.emit == emit)
+            .any(|(_, served)| !matches!(served, Served::Unserved(_, message) if withheld_here(message)))
+    };
     for (cell, served) in &found {
         let key = (cell.source.clone(), cell.emit.clone());
         let entry = reachable.entry(key).or_insert(false);
@@ -929,7 +1136,10 @@ fn every_mode_and_emit_the_catalog_declares_is_served_or_says_what_is_missing() 
         .filter(|(_, served)| !**served)
         .map(|(key, _)| key.clone())
         .collect();
-    for (source, emit) in &unreachable {
+    for (source, emit) in unreachable.iter().filter(|(s, e)| !judged(s, e)) {
+        eprintln!("UNJUDGED {source} {emit} -- this machine withholds the source");
+    }
+    for (source, emit) in unreachable.iter().filter(|(s, e)| judged(s, e)) {
         assert!(
             UNREACHABLE.contains(&(source.as_str(), emit.as_str())),
             "`{source}` declares `{emit}` and no mode it declares can produce it here. \
@@ -2874,6 +3084,11 @@ fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
         "/bin/true",
     ])
     .refusal();
+    // The build's gap is reached only through a backend the machine offers.
+    if withheld_here(&message) {
+        eprintln!("skipped: {message}");
+        return;
+    }
     assert_eq!(
         code, 3,
         "a mode no collector implements is this build's gap, not this run's failure: {message}"
@@ -3112,6 +3327,12 @@ fn a_duration_beside_a_session_file_replaces_the_sessions_own() {
     ]);
     let (document, rendered) = match dumped {
         Outcome::Measured { document, rendered } => (document, rendered),
+        // The dump is of the resolved request, so a machine that withholds
+        // `cpu.instructions` has no dump to give; the refusal is its own.
+        Outcome::Refused { message, .. } if withheld_here(&message) => {
+            eprintln!("skipped: {message}");
+            return;
+        }
         Outcome::Refused { code, message } => {
             panic!("dumping a request should not fail (exit {code}): {message}")
         }
@@ -3181,9 +3402,9 @@ fn a_duration_beside_a_session_file_replaces_the_sessions_own() {
 fn a_structured_run_that_launches_a_program_says_they_share_the_stdout() {
     let noisy = Command::new(BINARY)
         .args([
-            "cpu.instructions",
+            "cpu.oncpu_time",
             "-m",
-            "count",
+            "poll@50ms",
             "-e",
             "summary",
             "--format",
@@ -3209,9 +3430,9 @@ fn a_structured_run_that_launches_a_program_says_they_share_the_stdout() {
     // what every run in a terminal uses. Warning there would be noise.
     let plain = Command::new(BINARY)
         .args([
-            "cpu.instructions",
+            "cpu.oncpu_time",
             "-m",
-            "count",
+            "poll@50ms",
             "-e",
             "summary",
             "--",
@@ -3340,16 +3561,33 @@ fn a_cgroup_capped_at_a_tenth_of_a_cpu_is_stopped_for_nine_tenths_of_the_time() 
         return;
     };
     let root = std::path::Path::new("/sys/fs/cgroup");
-    let controllers = std::fs::read_to_string(root.join(&parent[1..]).join("cgroup.controllers"))
-        .unwrap_or_default();
-    if !controllers.split_whitespace().any(|name| name == "cpu") {
+    // A quota is a `cpu.max`, which a cgroup has only when its parent hands the
+    // cpu controller down; a cgroup holding processes cannot, so the cgroup
+    // this test runs in never does. The nearest ancestor that does, and that
+    // this user may write, is where a systemd user session (and the CI's
+    // delegated `omn-ci`) lets it be made.
+    let Some(parent) = std::iter::successors(Some(parent.as_str()), |path| {
+        path.rsplit_once('/')
+            .map(|(up, _)| up)
+            .filter(|up| !up.is_empty())
+    })
+    .find(|path| {
+        let directory = root.join(&path[1..]);
+        std::fs::read_to_string(directory.join("cgroup.subtree_control"))
+            .is_ok_and(|enabled| enabled.split_whitespace().any(|name| name == "cpu"))
+            && std::fs::metadata(&directory).is_ok_and(|meta| {
+                use std::os::unix::fs::MetadataExt;
+                // SAFETY: a query of this process's own id.
+                meta.uid() == unsafe { libc::getuid() }
+            })
+    })
+    .map(str::to_owned) else {
         eprintln!(
-            "skipped: the cpu controller is not delegated to `{parent}` (it offers \
-             `{}`), so no cgroup made here can carry a quota and nothing can be throttled",
-            controllers.trim()
+            "skipped: no ancestor of `{parent}` that this user owns hands the cpu controller \
+             down, so no cgroup made here can carry a quota and nothing can be throttled"
         );
         return;
-    }
+    };
 
     let path = root.join(&parent[1..]).join("omn-scenario-throttle");
     if std::fs::create_dir(&path).is_err() && !path.exists() {
@@ -3412,5 +3650,558 @@ impl Drop for CgroupUnderTest {
         // Only ever after the tasks in it have gone; a cgroup with members
         // refuses to be removed, which is the kernel keeping this honest.
         let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The cgroup target: one group of tasks, counted cpu by cpu
+// ---------------------------------------------------------------------------
+
+/// A cgroup made for one scenario under this process's own, and removed with
+/// it.
+struct ScratchCgroup {
+    path: std::path::PathBuf,
+}
+
+impl ScratchCgroup {
+    /// `None`, having said why, when this process may not make one: a cgroup
+    /// target is served on any machine that grants per-cpu events, but only a
+    /// delegated hierarchy lets a test make the cgroup to point it at.
+    fn new(name: &str) -> Option<Self> {
+        let Some(own) = own_cgroup() else {
+            eprintln!("skipped: this process is in no cgroup v2, so none can be made under it");
+            return None;
+        };
+        let path = std::path::Path::new("/sys/fs/cgroup")
+            .join(own.trim_start_matches('/'))
+            .join(format!("{name}-{}", std::process::id()));
+        if let Err(error) = std::fs::create_dir(&path) {
+            eprintln!(
+                "skipped: this user cannot create a cgroup under its own slice ({}: {error})",
+                path.display()
+            );
+            return None;
+        }
+        Some(Self { path })
+    }
+}
+
+impl Drop for ScratchCgroup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+/// What the workload said it did: the child inside the cgroup and the parent
+/// beside it.
+#[derive(Debug)]
+struct Split {
+    child_pid: i64,
+    child_from_ns: u64,
+    child_to_ns: u64,
+    child_units: u64,
+    parent_pid: i64,
+    parent_units: u64,
+}
+
+/// Runs `omn <source> --cgroup <cgroup>` over the `cgroup-*` workload, and
+/// returns the document and what the workload reported.
+///
+/// `omn` announces nothing when its events are open, and a binary carrying
+/// file capabilities is not dumpable, so its descriptor table cannot be read
+/// by a test either. So the order is checked rather than arranged: the
+/// workload starts a lead after `omn` does, `omn` runs for a window far longer
+/// than the workload, and the result's own window is held against the child's
+/// `CLOCK_MONOTONIC` stamps. A run whose window opened after the child began,
+/// or closed before it ended, is not a measurement of the child's work, and is
+/// taken again with twice the lead and the window, three times at most -- the
+/// durations only make an ordered run likely; the stamps are what make it one. `None`, having said why, when
+/// the machine cannot serve the request.
+fn over_a_cgroup(
+    source: &str,
+    mode: &str,
+    cgroup: &ScratchCgroup,
+    workload: &str,
+) -> Option<(serde_json::Value, Split)> {
+    let mut lead = Duration::from_millis(300);
+    let mut window = Duration::from_secs(6);
+    let mut late = Vec::new();
+    for _ in 0..3 {
+        let omn = Command::new(BINARY)
+            .args([source, "--cgroup"])
+            .arg(&cgroup.path)
+            .args(["-m", mode, "-e", "raw", "--format", "json", "-d"])
+            .arg(format!("{}ms", window.as_millis()))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("omn should run");
+        std::thread::sleep(lead);
+        let split = run_the_split(cgroup, workload);
+        let output = omn.wait_with_output().expect("omn finishes");
+        let document = match into_outcome(output) {
+            Outcome::Measured { document, .. } => document,
+            Outcome::Refused { message, .. } => {
+                assert!(
+                    machine_cannot_serve(&message),
+                    "`{source} --cgroup` was refused rather than unserved: {message}"
+                );
+                eprintln!("skipped: {message}");
+                return None;
+            }
+        };
+        let bounds = &document["results"][0]["window"];
+        let opened = bounds["opened_ns"].as_u64().expect("the window's open");
+        let closed = bounds["closed_ns"].as_u64().expect("the window's close");
+        if opened <= split.child_from_ns && split.child_to_ns <= closed {
+            return Some((document, split));
+        }
+        late.push((
+            lead,
+            window,
+            opened as i64 - split.child_from_ns as i64,
+            split.child_to_ns as i64 - closed as i64,
+        ));
+        lead *= 2;
+        window *= 2;
+    }
+    panic!(
+        "the window did not hold the child's work in any run (lead, window, ns opened after \
+         the work began, ns closed before it ended): {late:?}"
+    );
+}
+
+/// Runs the `cgroup-*` workload once and reads what it reported.
+fn run_the_split(cgroup: &ScratchCgroup, workload: &str) -> Split {
+    let report = std::env::temp_dir().join(format!(
+        "omn-cgroup-split-{}-{}",
+        std::process::id(),
+        cgroup.path.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = std::env::current_exe().expect("this test binary has a path");
+    let status = Command::new(exe)
+        .args([
+            "--exact",
+            "--test-threads",
+            "1",
+            "workload_runs_only_when_this_binary_was_launched_as_a_workload",
+        ])
+        .env(WORKLOAD_VAR, workload)
+        .env(REPORT_VAR, &report)
+        .env(CGROUP_VAR, &cgroup.path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the workload runs");
+    assert!(status.success(), "the workload failed: {status}");
+    let words: Vec<u64> = std::fs::read_to_string(&report)
+        .expect("the workload's report")
+        .split_whitespace()
+        .map(|word| word.parse().expect("a number"))
+        .collect();
+    let _ = std::fs::remove_file(&report);
+    Split {
+        child_pid: words[0] as i64,
+        child_from_ns: words[1],
+        child_to_ns: words[2],
+        child_units: words[3],
+        parent_pid: words[4] as i64,
+        parent_units: words[5],
+    }
+}
+
+/// The events of the one result, as JSON.
+fn raw_events(document: &serde_json::Value) -> Vec<serde_json::Value> {
+    document["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn attr_of(event: &serde_json::Value, name: &str) -> Option<f64> {
+    event["attrs"]
+        .as_array()?
+        .iter()
+        .find(|attr| attr["name"] == name)?["value"]
+        .as_f64()
+}
+
+/// A cgroup holding a loop of known length, beside ten times that loop
+/// outside it, is counted as the one and not the other.
+///
+/// The ground truth is the child's `retire` loop, two instructions a turn:
+/// fifty million turns inside the cgroup, five hundred million in the parent
+/// beside it, both running at once. `cpu.instructions --cgroup` has to hold
+/// the child's hundred million and none of the parent's thousand million: its
+/// count sits between the loop and the loop plus a quarter (the child's own
+/// start and exit, and the kernel's work in its context), and the parent's
+/// loop, nine times larger than that slack, cannot hide in it. The event is
+/// keyed on the cgroup's id, which is its directory's inode.
+#[test]
+fn a_cgroup_is_counted_for_its_own_loop_and_not_for_the_one_beside_it() {
+    let _load = may_load_the_machine();
+    const TURNS: u64 = 50_000_000;
+    let Some(cgroup) = ScratchCgroup::new("omn-count") else {
+        return;
+    };
+    let Some((document, split)) = over_a_cgroup(
+        "cpu.instructions",
+        "count",
+        &cgroup,
+        &format!("cgroup-retire:{TURNS}"),
+    ) else {
+        return;
+    };
+    assert_eq!(split.child_units, TURNS);
+    assert_eq!(split.parent_units, TURNS * 10);
+
+    let events = raw_events(&document);
+    assert_eq!(events.len(), 1, "one cgroup, one event: {events:?}");
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&cgroup.path).unwrap().ino()
+    };
+    assert_eq!(events[0]["keys"][0]["cgroup"]["id"], inode, "{}", events[0]);
+    if document.to_string().contains("shared the hardware") {
+        eprintln!(
+            "skipped: the counter shared the pmu with another process's, so its value is \
+             scaled from the slices it was on for and is not a count to check a loop against"
+        );
+        return;
+    }
+    let counted = attr_of(&events[0], "count").expect("a count");
+    let child = 2.0 * TURNS as f64;
+    let parent = 2.0 * (TURNS * 10) as f64;
+    assert!(
+        counted >= child * 0.995,
+        "the cgroup ran a loop of {child:.0} instructions and was counted at {counted:.0}"
+    );
+    assert!(
+        counted < child * 1.25,
+        "the cgroup was counted at {counted:.0}, against its own loop of {child:.0}: the \
+         parent's {parent:.0}, outside it, is in the count"
+    );
+}
+
+/// A profile of a cgroup samples the task inside it, for about the cpu it
+/// burned, and never the one beside it that burned five times more.
+///
+/// Every sample is keyed on its task, and the only task that ever entered the
+/// cgroup is the child; the parent, in the cgroup the test runs in, burns ten
+/// times the child's cpu at the same time. So the ground truth is the child's
+/// pid on every sample, and its own thread clock times the rate for their
+/// number, within the resolution a sampled clock has: a sample per period,
+/// a period either side at each end, and a tenth for a period the scheduler
+/// cut short.
+#[test]
+fn a_profile_of_a_cgroup_samples_its_task_and_not_the_one_beside_it() {
+    let _load = may_load_the_machine();
+    const BURN_MS: u64 = 200;
+    const HZ: f64 = 997.0;
+    let Some(cgroup) = ScratchCgroup::new("omn-profile") else {
+        return;
+    };
+    let Some((document, split)) = over_a_cgroup(
+        "cpu.profile",
+        "sample@997hz",
+        &cgroup,
+        &format!("cgroup-burn:{BURN_MS}"),
+    ) else {
+        return;
+    };
+    let events = raw_events(&document);
+    let tasks: BTreeMap<i64, usize> = events.iter().fold(BTreeMap::new(), |mut tasks, event| {
+        let task = event["keys"][0]["task"]["tid"]
+            .as_i64()
+            .expect("a task key");
+        *tasks.entry(task).or_default() += 1;
+        tasks
+    });
+    assert!(
+        !tasks.contains_key(&split.parent_pid),
+        "the parent burned {} ms outside the cgroup and was sampled in it: {tasks:?}",
+        split.parent_units / 1_000_000
+    );
+    assert_eq!(
+        tasks.keys().copied().collect::<Vec<_>>(),
+        vec![split.child_pid],
+        "the only task in the cgroup was the child {}: {tasks:?}",
+        split.child_pid
+    );
+    let losses = &document["results"][0]["losses"];
+    let lost = losses["dropped"].as_u64().unwrap_or(0) + losses["throttled"].as_u64().unwrap_or(0);
+    let expected = split.child_units as f64 / 1e9 * HZ;
+    let sampled = events.len() as f64;
+    assert!(
+        sampled + lost as f64 >= expected * 0.9 - 2.0 && sampled <= expected * 1.1 + 2.0,
+        "the child burned {:.1} ms of cpu, {expected:.0} periods at {HZ} Hz, and the cgroup's \
+         profile holds {sampled} samples ({lost} lost)",
+        split.child_units as f64 / 1e6
+    );
+    for event in &events {
+        assert_eq!(
+            event["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|key| key["cgroup"]["id"].as_u64()),
+            Some({
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(&cgroup.path).unwrap().ino()
+            }),
+            "a sample of the cgroup carries its id: {event}"
+        );
+    }
+}
+
+/// The faults of a cgroup are its child's, counted and traced, and not the
+/// ten times as many its parent took beside it.
+///
+/// The child faults in two thousand fresh pages and reads its own
+/// `getrusage` for what that took; the parent faults twenty thousand. Counted
+/// (`--mode count`, the kernel's software counter per cpu), the cgroup's total
+/// is at least the child's own and short of the parent's by a margin; traced
+/// (every fault a sample), every sample is the child's.
+#[test]
+fn a_cgroup_s_faults_are_its_own_and_not_its_neighbour_s() {
+    let _load = may_load_the_machine();
+    const PAGES: u64 = 2_000;
+    for mode in ["count", "trace"] {
+        let Some(cgroup) = ScratchCgroup::new(&format!("omn-faults-{mode}")) else {
+            return;
+        };
+        let Some((document, split)) = over_a_cgroup(
+            "mem.faults",
+            mode,
+            &cgroup,
+            &format!("cgroup-faults:{PAGES}"),
+        ) else {
+            return;
+        };
+        assert!(
+            split.child_units > 0 && split.parent_units > split.child_units * 5,
+            "the workload faulted {} pages inside and {} outside: not the split it was built for",
+            split.child_units,
+            split.parent_units
+        );
+        let events = raw_events(&document);
+        let counted = if mode == "count" {
+            assert_eq!(events.len(), 1, "{events:?}");
+            attr_of(&events[0], "count").expect("a count") as u64
+        } else {
+            for event in &events {
+                let task = event["keys"][0]["task"]["tid"].as_i64();
+                assert_eq!(
+                    task,
+                    Some(split.child_pid),
+                    "a fault of the cgroup came from task {task:?}, and only the child {} \
+                     was ever in it",
+                    split.child_pid
+                );
+            }
+            let losses = &document["results"][0]["losses"];
+            assert_eq!(
+                losses["dropped"].as_u64().unwrap_or(0) + losses["throttled"].as_u64().unwrap_or(0),
+                0,
+                "the trace lost faults, so the count below is a floor: {losses}"
+            );
+            events.len() as u64
+        };
+        assert!(
+            counted >= split.child_units,
+            "{mode}: the child took {} faults in the cgroup by its own count, and the cgroup \
+             was counted at {counted}",
+            split.child_units
+        );
+        assert!(
+            counted < split.child_units + split.parent_units / 2,
+            "{mode}: the cgroup was counted at {counted} faults against its child's {}: the \
+             parent's {}, outside it, is in the count",
+            split.child_units,
+            split.parent_units
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A counter read at an interval
+// ---------------------------------------------------------------------------
+
+/// The instructions of all ticks of a polled `cpu.instructions` add up to the
+/// loop's, and the loop spreads over several of them.
+///
+/// `--mode poll` reads the counter the count mode reads once, on every tick,
+/// and each event is what was retired since the one before, with the tick's
+/// `interval_ns`. So the sum of the series is the window's count -- a loop of
+/// half a thousand million turns, two instructions each, above the constant
+/// cost of becoming the workload, measured by the same poll over a loop of one
+/// turn -- and a loop that takes several ticks is in several of them. The
+/// slack above is the kernel's work in the loop's context, which the workload
+/// counts itself (`retire_reporting`); nothing is allowed below.
+#[test]
+fn the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted() {
+    let _load = may_load_the_machine();
+    const ITERATIONS: u64 = 500_000_000;
+    const EXPECTED: f64 = 2.0 * ITERATIONS as f64;
+    let polled = |spec: &str| -> Option<(Vec<serde_json::Value>, f64)> {
+        let report = std::env::temp_dir().join(format!(
+            "omn-polled-{}-{}",
+            std::process::id(),
+            spec.replace(':', "-")
+        ));
+        let mut args: Vec<String> = ["cpu.instructions", "-m", "poll@20ms", "-e", "raw"]
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect();
+        args.extend(["--format".into(), "json".into(), "--".into()]);
+        args.extend(workload_program());
+        let mut command = Command::new(BINARY);
+        command
+            .args(&args)
+            .env(WORKLOAD_VAR, spec)
+            .env(REPORT_VAR, &report);
+        let document = match into_outcome(command.output().expect("omn should run")) {
+            Outcome::Measured { document, .. } => document,
+            Outcome::Refused { message, .. } => {
+                assert!(
+                    machine_cannot_serve(&message),
+                    "a polled counter was refused rather than unserved: {message}"
+                );
+                eprintln!("skipped: {message}");
+                return None;
+            }
+        };
+        if document.to_string().contains("shared the hardware") {
+            eprintln!("skipped: the counter shared the pmu, so its ticks are scaled estimates");
+            return None;
+        }
+        let own: Vec<f64> = std::fs::read_to_string(&report)
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|word| word.parse().ok())
+            .collect();
+        let _ = std::fs::remove_file(&report);
+        let kernel = match own[..] {
+            [user, all] => (all - user).max(0.0),
+            _ => 0.0,
+        };
+        Some((raw_events(&document), kernel))
+    };
+    let Some((startup, startup_kernel)) = polled("retire:1") else {
+        return;
+    };
+    let Some((events, kernel)) = polled(&format!("retire:{ITERATIONS}")) else {
+        return;
+    };
+    let sum = |events: &[serde_json::Value]| -> f64 {
+        events
+            .iter()
+            .map(|event| attr_of(event, "count").expect("a tick's count"))
+            .sum()
+    };
+    for event in &events {
+        assert!(
+            attr_of(event, "interval_ns").is_some_and(|ns| ns > 0.0),
+            "a tick says how long it was: {event}"
+        );
+    }
+    let busy = events
+        .iter()
+        .filter(|event| attr_of(event, "count").unwrap_or(0.0) > 1e6)
+        .count();
+    assert!(
+        busy >= 3,
+        "a loop of {EXPECTED:.0} instructions ran across {busy} ticks of 20 ms: a poll that \
+         reports its window once is a count"
+    );
+    let loop_only = sum(&events) - sum(&startup);
+    let error = (loop_only - EXPECTED) / EXPECTED;
+    let slack = (kernel - startup_kernel).max(0.0) / EXPECTED;
+    assert!(
+        error > -0.005 && error < 0.005 + slack,
+        "the ticks add up to {loop_only:.0} instructions above the startup's, for a loop of \
+         {EXPECTED:.0} ({:+.3} %, with {:.3} % of kernel work in the loop's window)",
+        error * 100.0,
+        slack * 100.0
+    );
+}
+
+/// `--stack dwarf` is this build's gap, refused with the gap's code before the
+/// program it would profile is started.
+///
+/// The factory refuses it, which runs before the launch. The ground truth that
+/// the refusal came first is the program's own: it creates a file as its first
+/// act, and the file is not there.
+#[test]
+fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
+    let marker = std::env::temp_dir().join(format!("omn-dwarf-started-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    for stack in ["dwarf", "lbr"] {
+        let (code, message) = run(&[
+            "cpu.profile",
+            "-m",
+            "sample@99hz",
+            "-e",
+            "stack",
+            "--stack",
+            stack,
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!("touch {}", marker.display()),
+        ])
+        .refusal();
+        if withheld_here(&message) {
+            eprintln!("skipped: {message}");
+            return;
+        }
+        assert_eq!(code, 3, "`--stack {stack}` is this build's gap: {message}");
+        assert!(
+            message.contains(&format!("--stack {stack}")) && message.contains("not implemented"),
+            "{message}"
+        );
+        assert!(
+            !marker.exists(),
+            "the program ran before `--stack {stack}` was refused"
+        );
+    }
+}
+
+/// A container is refused by the validator, with what it would take, for every
+/// source that serves a cgroup and resolves no container to one.
+///
+/// A `container` target falls back to `cgroup` in the catalog's model, so an
+/// entry that serves the cgroup and said nothing accepted the container and
+/// the collector refused it at the start -- P8's shape one target over. The
+/// entries say `container: no` now, and the refusal is the request's (exit 2)
+/// before anything is resolved or opened.
+#[test]
+fn a_container_is_refused_before_the_start_where_only_its_cgroup_is_served() {
+    for (source, mode) in [
+        ("cpu.instructions", "count"),
+        ("cpu.profile", "sample@99hz"),
+        ("mem.faults", "sample@997hz"),
+        ("cpu.throttle", "poll@100ms"),
+    ] {
+        let (code, message) = run(&[
+            source,
+            "--container",
+            "web",
+            "-m",
+            mode,
+            "-e",
+            "raw",
+            "-d",
+            "100ms",
+        ])
+        .refusal();
+        assert_eq!(code, 2, "{source}: {message}");
+        assert!(
+            message.contains(source)
+                && message.contains("per container")
+                && message.contains("resolved to its cgroup first")
+                && message.contains("--cgroup"),
+            "{source}: {message}"
+        );
     }
 }

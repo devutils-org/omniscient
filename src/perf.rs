@@ -453,6 +453,9 @@ pub struct SampledEvent {
     /// Ring overflows, accumulated across drains.
     lost: u64,
     undecoded: u64,
+    /// Throttled periods, accumulated across drains. See
+    /// [`SampledEvent::throttled`].
+    throttled: u64,
     /// What was asked for at open time, because it decides the record layout:
     /// a decoder that reads a callchain the kernel was never asked to write
     /// reads whatever follows the record instead.
@@ -621,6 +624,7 @@ impl SampledEvent {
             data_size: (ring_pages * page) as u64,
             lost: 0,
             undecoded: 0,
+            throttled: 0,
             callchain: spec.callchain,
             sample_type: spec.sample_type(),
             followers: Vec::new(),
@@ -660,6 +664,18 @@ impl SampledEvent {
         self.undecoded
     }
 
+    /// Throttled periods seen since the event was opened, accumulated across
+    /// drains the way [`SampledEvent::lost`] is.
+    ///
+    /// Kept here rather than by each collector, so that a sampling collector
+    /// reports throttling by default rather than by remembering to: one that
+    /// matched `Record::Throttle { .. } => {}` read as complete while the
+    /// kernel skipped samples. `PERF_RECORD_UNTHROTTLE` closes a period and is
+    /// not a second one.
+    pub fn throttled(&self) -> u64 {
+        self.throttled
+    }
+
     /// Reads everything the kernel has published, calling `handle` per record.
     ///
     /// The tail is only published back to the kernel once the batch has been
@@ -683,6 +699,7 @@ impl SampledEvent {
             let record = self.decode(kind, misc, tail, size);
             match &record {
                 Record::Lost { count } => self.lost += count,
+                Record::Throttle { throttled: true } => self.throttled += 1,
                 Record::Other { .. } => self.undecoded += 1,
                 _ => {}
             }
@@ -1580,6 +1597,12 @@ impl ThreadCounters {
         for group in &self.groups {
             group.disable()?;
         }
+        self.read()
+    }
+
+    /// Reads every thread's group while they run, and adds them: a poll's
+    /// reading, whose difference from the previous one is a tick's count.
+    pub fn read(&self) -> io::Result<Vec<Reading>> {
         let mut total: Option<Vec<Reading>> = None;
         for group in &self.groups {
             let readings = group.read()?;
@@ -1590,6 +1613,26 @@ impl ThreadCounters {
         }
         Ok(total.unwrap_or_default())
     }
+}
+
+/// What the counters counted between two readings of one group: a tick's
+/// share of the window, with the tick's own enabled and running times.
+///
+/// Each value was scaled over the whole window up to its reading, so a
+/// difference of two scaled values is the tick's estimate; a tick the counter
+/// was never scheduled in has `running_ns` 0 and says so the way a window
+/// does.
+pub fn delta_readings(now: &[Reading], before: &[Reading]) -> Vec<Reading> {
+    now.iter()
+        .zip(before)
+        .map(|(now, before)| Reading {
+            name: now.name,
+            raw: now.raw.saturating_sub(before.raw),
+            value: now.value.saturating_sub(before.value),
+            enabled_ns: now.enabled_ns.saturating_sub(before.enabled_ns),
+            running_ns: now.running_ns.saturating_sub(before.running_ns),
+        })
+        .collect()
 }
 
 /// Two groups' readings of the same counters, added.
@@ -1705,7 +1748,46 @@ impl ThreadSampler {
     /// [`per_cpu_refusal`] -- a profile of the cores that happened to open
     /// would describe a machine with fewer cores, and a per-task event in
     /// their place would answer a different question under the same name.
+    ///
+    /// Every ring gets the same size. The kernel charges the rings of one user
+    /// against `perf_event_mlock_kb` per online cpu, and beyond that against
+    /// `RLIMIT_MEMLOCK`; shrinking each ring on its own until it maps let the
+    /// first cpus take the whole budget and left the last one nothing, which
+    /// is P11 of `docs/portability.md` -- *"perf_event_open on cpu 3 was
+    /// refused (mmap of 8 ring pages: Operation not permitted)"* on a 5.15
+    /// kernel whose default `RLIMIT_MEMLOCK` is 64 KiB. So a size one cpu is
+    /// refused is given up for every cpu, and the whole set is opened again at
+    /// half of it.
     pub fn open_cpus(spec: &SampleSpec, cpus: &[u32], ring_pages: usize) -> Result<Self, String> {
+        Self::open_per_cpu(spec, cpus, ring_pages, Scope::Cpu)
+    }
+
+    /// Opens `spec` over the tasks of one cgroup v2 directory, on each of
+    /// `cpus`: one event and one ring per cpu, each counting only while a
+    /// task of that cgroup (or of a cgroup below it) runs there.
+    ///
+    /// The directory is opened here and closed once every event is open; the
+    /// kernel resolves it to its cgroup at `perf_event_open`. The privilege
+    /// asked is a per-cpu event's -- the kernel's check is `perf_allow_cpu`,
+    /// because a cgroup's tasks may belong to anybody -- and a refusal says so
+    /// in [`per_cpu_refusal`]'s words.
+    pub fn open_cgroup(
+        spec: &SampleSpec,
+        directory: &std::path::Path,
+        cpus: &[u32],
+        ring_pages: usize,
+    ) -> Result<Self, String> {
+        let cgroup = open_cgroup_directory(directory)?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&cgroup);
+        Self::open_per_cpu(spec, cpus, ring_pages, |cpu| Scope::CgroupOnCpu { fd, cpu })
+    }
+
+    fn open_per_cpu(
+        spec: &SampleSpec,
+        cpus: &[u32],
+        ring_pages: usize,
+        scope: impl Fn(u32) -> Scope,
+    ) -> Result<Self, String> {
         if cpus.is_empty() {
             return Err("no cpu to sample".to_owned());
         }
@@ -1713,18 +1795,26 @@ impl ThreadSampler {
             inherit: false,
             ..*spec
         };
-        let mut rings = Vec::with_capacity(cpus.len());
-        for &cpu in cpus {
-            let event = SampledEvent::open(&spec, Scope::Cpu(cpu), ring_pages)
-                .map_err(|error| per_cpu_refusal(cpu, &error))?;
-            rings.push(event);
+        let mut pages = ring_pages.next_power_of_two().max(MIN_RING_PAGES);
+        loop {
+            match open_rings(&spec, cpus, pages, &scope) {
+                Ok(rings) => {
+                    return Ok(Self {
+                        rings,
+                        ring_cpus: cpus.to_vec(),
+                        tids: Vec::new(),
+                        unlisted: 0,
+                    })
+                }
+                Err((_, error)) if pages > MIN_RING_PAGES && is_ring_too_large(&error) => {
+                    pages /= 2;
+                }
+                Err((cpu, error)) if is_ring_too_large(&error) => {
+                    return Err(ring_budget_refusal(cpu, cpus.len(), pages, &error))
+                }
+                Err((cpu, error)) => return Err(per_cpu_refusal(cpu, &error)),
+            }
         }
-        Ok(Self {
-            rings,
-            ring_cpus: cpus.to_vec(),
-            tids: Vec::new(),
-            unlisted: 0,
-        })
     }
 
     /// The threads an event was opened on.
@@ -1763,6 +1853,11 @@ impl ThreadSampler {
 
     pub fn undecoded(&self) -> u64 {
         self.rings.iter().map(SampledEvent::undecoded).sum()
+    }
+
+    /// Throttled periods over every ring. See [`SampledEvent::throttled`].
+    pub fn throttled(&self) -> u64 {
+        self.rings.iter().map(SampledEvent::throttled).sum()
     }
 
     /// Reads every ring, handing over the samples in time order.
@@ -1861,6 +1956,8 @@ pub struct TaskSampler {
     /// What the rings of tasks that have exited could not decode, kept when
     /// their rings are released.
     retired_undecoded: u64,
+    /// The throttled periods of those rings, kept the same way.
+    retired_throttled: u64,
 }
 
 impl TaskSampler {
@@ -1887,6 +1984,7 @@ impl TaskSampler {
             enabled: false,
             at_open: 0,
             retired_undecoded: 0,
+            retired_throttled: 0,
         };
         let tasks = if follows {
             tasks_under(pid)
@@ -1986,6 +2084,17 @@ impl TaskSampler {
                 .sum::<u64>()
     }
 
+    /// Throttled periods over every ring, including those of tasks that have
+    /// exited. See [`SampledEvent::throttled`].
+    pub fn throttled(&self) -> u64 {
+        self.retired_throttled
+            + self
+                .rings
+                .values()
+                .map(SampledEvent::throttled)
+                .sum::<u64>()
+    }
+
     /// Reads every ring, handing over the samples in time order and the
     /// records that are not samples first. See [`ThreadSampler::drain`].
     ///
@@ -2008,6 +2117,7 @@ impl TaskSampler {
         for tid in exited {
             if let Some(ring) = self.rings.remove(&tid) {
                 self.retired_undecoded += ring.undecoded();
+                self.retired_throttled += ring.throttled();
             }
         }
         samples.sort_by_key(|sample| sample.time_ns);
@@ -2017,50 +2127,11 @@ impl TaskSampler {
     }
 }
 
-/// Where the kernel lists the cpus it currently has.
-pub const ONLINE_CPUS: &str = "/sys/devices/system/cpu/online";
-
-/// The cpus this machine has right now, as the kernel numbers them.
-///
-/// Read rather than derived from a core count: the numbering has holes on a
-/// machine where a cpu was taken offline, and `nproc` would hand back a count
-/// that indexes cpus which do not exist. A per-cpu event opened on one of those
-/// fails with `ENODEV`, which reads like a permission problem and is not.
-pub fn online_cpus() -> io::Result<Vec<u32>> {
-    let list = std::fs::read_to_string(ONLINE_CPUS)?;
-    parse_cpu_list(&list).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{ONLINE_CPUS} does not read as a cpu list: `{}`",
-                list.trim()
-            ),
-        )
-    })
-}
-
-/// `0-3,8,10-11`, which is how the kernel writes every cpu list it publishes.
-pub fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
-    let mut cpus = Vec::new();
-    for part in list
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        match part.split_once('-') {
-            Some((first, last)) => {
-                let first: u32 = first.parse().ok()?;
-                let last: u32 = last.parse().ok()?;
-                if last < first {
-                    return None;
-                }
-                cpus.extend(first..=last);
-            }
-            None => cpus.push(part.parse().ok()?),
-        }
-    }
-    Some(cpus)
-}
+// The cpu list the kernel publishes has one reader, in `capabilities.rs`,
+// which answers "what does this machine have" for everything else; finding 26
+// of `docs/open-findings.md` counted four copies. The names stay here for the
+// callers that know them as perf's.
+pub use crate::capabilities::{online_cpus, parse_cpu_list, ONLINE_CPUS};
 
 /// A cpu list as a person would say it, for a message about one that is not in
 /// it.
@@ -2117,6 +2188,84 @@ pub fn per_cpu_refusal(cpu: u32, error: &io::Error) -> String {
     )
 }
 
+/// Opens one ring of exactly `pages` on each cpu, or says which cpu refused.
+fn open_rings(
+    spec: &SampleSpec,
+    cpus: &[u32],
+    pages: usize,
+    scope: &impl Fn(u32) -> Scope,
+) -> Result<Vec<SampledEvent>, (u32, io::Error)> {
+    cpus.iter()
+        .map(|&cpu| SampledEvent::open_with_ring(spec, scope(cpu), pages).map_err(|e| (cpu, e)))
+        .collect()
+}
+
+/// Opens a cgroup v2 directory for `PERF_FLAG_PID_CGROUP`.
+pub fn open_cgroup_directory(directory: &std::path::Path) -> Result<std::fs::File, String> {
+    std::fs::File::open(directory).map_err(|error| {
+        format!(
+            "cannot open the cgroup {}: {error}; a cgroup target is a directory of the cgroup \
+             v2 hierarchy",
+            directory.display()
+        )
+    })
+}
+
+/// A number read from one of `/proc/sys/kernel`'s files.
+fn kernel_sysctl(name: &str) -> Option<i64> {
+    read_trimmed(&format!("/proc/sys/kernel/{name}"))?
+        .parse()
+        .ok()
+}
+
+/// This process's `RLIMIT_MEMLOCK`, in KiB, or `None` when it is unlimited.
+fn memlock_kib() -> Option<u64> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes the struct it is given and nothing else.
+    if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0
+        || limit.rlim_cur == libc::RLIM_INFINITY
+    {
+        return None;
+    }
+    Some(limit.rlim_cur / 1024)
+}
+
+/// Why rings on every cpu could not be mapped even at the smallest size, in
+/// terms of the two budgets the kernel charges them to.
+///
+/// `perf_mmap` lets one user lock `perf_event_mlock_kb` per online cpu for
+/// its rings, and charges what goes past that to `RLIMIT_MEMLOCK` -- unless
+/// `perf_event_paranoid` is -1 or the process holds `CAP_IPC_LOCK`, neither of
+/// which `CAP_PERFMON` implies. The kernel's default `RLIMIT_MEMLOCK` was 64
+/// KiB until 5.16 and is 8 MiB since, so the same rings map on 6.1 and are
+/// refused on 5.15. The rings of this user's other perf sessions count against
+/// the same budget, which is why the refusal says what the budget is rather
+/// than predicting it.
+pub fn ring_budget_refusal(cpu: u32, cpus: usize, pages: usize, error: &io::Error) -> String {
+    let page_kib = page_size() / 1024;
+    let asked_kib = cpus * (pages + 1) * page_kib;
+    let per_cpu = match kernel_sysctl("perf_event_mlock_kb") {
+        Some(kib) => format!("{kib} KiB"),
+        None => "an unreadable amount".to_owned(),
+    };
+    let memlock = match memlock_kib() {
+        Some(kib) => format!("{kib} KiB"),
+        None => "unlimited".to_owned(),
+    };
+    format!(
+        "the sampling rings of {cpus} cpus do not fit what this user may lock: cpu {cpu} was \
+         refused a ring of {pages} pages ({error}), after the others took theirs, {asked_kib} \
+         KiB in all at that size. The kernel lets a user lock \
+         /proc/sys/kernel/perf_event_mlock_kb per online cpu ({per_cpu} here) and charges the \
+         rest to RLIMIT_MEMLOCK ({memlock} here; `ulimit -l`), unless perf_event_paranoid is \
+         -1 or the process holds CAP_IPC_LOCK -- CAP_PERFMON does not lift it. Raise either \
+         limit, or close this user's other perf sessions"
+    )
+}
+
 /// Whether this process may open an event that observes a whole cpu.
 ///
 /// The question a system or core target asks of every `pmu:` backend, and
@@ -2163,14 +2312,41 @@ impl PerCpuGroups {
     /// was asked for, and reporting the ones that worked would hide the ones
     /// that did not behind a plausible number.
     pub fn open(counters: &[Counter], cpus: &[u32]) -> Result<Self, String> {
+        // The online list is asked before opening anything (in `open_scoped`),
+        // because the kernel answers `EINVAL` for a cpu that does not exist --
+        // the same errno it gives for an attribute it cannot honour. Reading
+        // the list the kernel publishes tells the two apart, and they send the
+        // reader to different places: one is a cpu number, the other is a
+        // counter this hardware lacks.
+        Self::open_scoped(counters, cpus, Scope::Cpu)
+    }
+
+    /// Opens the counters over the tasks of one cgroup v2 directory, on every
+    /// named cpu.
+    ///
+    /// A counter follows a task or a cpu, and a cgroup is the second shape
+    /// with a filter: each cpu's group counts only while a task of that cgroup
+    /// -- or of one below it -- runs there. So a cgroup is one group per cpu,
+    /// like a machine, and the privilege asked is a cpu's (`perf_allow_cpu`):
+    /// the cgroup's tasks may be anybody's.
+    pub fn open_cgroup(
+        counters: &[Counter],
+        directory: &std::path::Path,
+        cpus: &[u32],
+    ) -> Result<Self, String> {
+        let cgroup = open_cgroup_directory(directory)?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&cgroup);
+        Self::open_scoped(counters, cpus, |cpu| Scope::CgroupOnCpu { fd, cpu })
+    }
+
+    fn open_scoped(
+        counters: &[Counter],
+        cpus: &[u32],
+        scope: impl Fn(u32) -> Scope,
+    ) -> Result<Self, String> {
         if cpus.is_empty() {
             return Err("no cpu to count".to_owned());
         }
-        // Asked before opening anything, because the kernel answers `EINVAL`
-        // for a cpu that does not exist -- the same errno it gives for an
-        // attribute it cannot honour. Reading the list the kernel publishes
-        // tells the two apart, and they send the reader to different places:
-        // one is a cpu number, the other is a counter this hardware lacks.
         if let Ok(online) = online_cpus() {
             if let Some(offline) = cpus.iter().find(|cpu| !online.contains(cpu)) {
                 return Err(format!(
@@ -2182,7 +2358,7 @@ impl PerCpuGroups {
         }
         let mut groups = Vec::with_capacity(cpus.len());
         for &cpu in cpus {
-            match CounterGroup::open(counters, Scope::Cpu(cpu)) {
+            match CounterGroup::open(counters, scope(cpu)) {
                 Ok(group) => groups.push((cpu, group)),
                 Err(error) => return Err(per_cpu_refusal(cpu, &error)),
             }
@@ -2227,10 +2403,47 @@ impl PerCpuGroups {
         for (_, group) in &self.groups {
             let _ = group.disable();
         }
+        self.read()
+    }
+
+    /// Reads every cpu while the groups run: a poll's reading.
+    pub fn read(&self) -> Vec<(u32, io::Result<Vec<Reading>>)> {
         self.groups
             .iter()
             .map(|(cpu, group)| (*cpu, group.read()))
             .collect()
+    }
+
+    /// Stops every cpu and adds their readings into one, keeping the cpus
+    /// whose read failed apart.
+    ///
+    /// For a cgroup, where the cpus are where its tasks happened to run and
+    /// not what was asked about: the cgroup's count is the sum, with the times
+    /// summed the way [`ThreadCounters::read_final`] sums a process's threads.
+    /// Each cpu's value is scaled over its own window before it is added.
+    pub fn read_total(&self) -> (Option<Vec<Reading>>, Vec<(u32, io::Error)>) {
+        for (_, group) in &self.groups {
+            let _ = group.disable();
+        }
+        self.read_sum()
+    }
+
+    /// The same sum while the groups run: a poll's reading of a cgroup.
+    pub fn read_sum(&self) -> (Option<Vec<Reading>>, Vec<(u32, io::Error)>) {
+        let mut total: Option<Vec<Reading>> = None;
+        let mut failed = Vec::new();
+        for (cpu, reading) in self.read() {
+            match reading {
+                Ok(readings) => {
+                    total = Some(match total {
+                        None => readings,
+                        Some(sum) => add_readings(&sum, &readings),
+                    })
+                }
+                Err(error) => failed.push((cpu, error)),
+            }
+        }
+        (total, failed)
     }
 }
 
@@ -2242,6 +2455,32 @@ mod tests {
 
     fn callchain_of_fixed(body: &[u8]) -> Vec<u64> {
         callchain_of(body, FIXED_FIELDS)
+    }
+
+    /// P11's refusal names the two budgets and the one capability that lift
+    /// it, with this machine's numbers, and does not send the reader to
+    /// `CAP_PERFMON`, which does not.
+    #[test]
+    fn a_ring_that_does_not_fit_names_what_the_kernel_charged_it_to() {
+        let error = io::Error::other("mmap of 8 ring pages: Operation not permitted (os error 1)");
+        let refusal = ring_budget_refusal(3, 4, 8, &error);
+        for words in [
+            "cpu 3",
+            "4 cpus",
+            "8 pages",
+            "144 KiB",
+            "perf_event_mlock_kb",
+            "RLIMIT_MEMLOCK",
+            "CAP_IPC_LOCK",
+            "CAP_PERFMON does not lift it",
+        ] {
+            assert!(refusal.contains(words), "`{words}` is not in: {refusal}");
+        }
+        let limit = kernel_sysctl("perf_event_mlock_kb").expect("the sysctl is readable");
+        assert!(
+            refusal.contains(&format!("({limit} KiB here)")),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -2767,17 +3006,27 @@ mod tests {
         };
         drop(group);
 
-        let before = perf_descriptors();
-        for _ in 0..GROUPS {
-            let group = CounterGroup::open(&[INSTRUCTIONS, CYCLES], Scope::Process(0))
-                .expect("the first one opened, so these do too");
-            drop(group);
-        }
-        let after = perf_descriptors();
+        // The descriptor table is the process's, and the other tests of this
+        // binary open perf events of their own on other threads meanwhile: a
+        // per-cpu group over twenty-four cpus is more than a round's margin.
+        // A leak is left behind by every round; a neighbour's descriptors are
+        // not, so the least any of three rounds left is the measurement.
+        let left = (0..3)
+            .map(|_| {
+                let before = perf_descriptors();
+                for _ in 0..GROUPS {
+                    let group = CounterGroup::open(&[INSTRUCTIONS, CYCLES], Scope::Process(0))
+                        .expect("the first one opened, so these do too");
+                    drop(group);
+                }
+                perf_descriptors().saturating_sub(before)
+            })
+            .min()
+            .expect("three rounds");
         assert!(
-            after < before + GROUPS,
-            "{GROUPS} groups of two counters left {} perf descriptors behind",
-            after.saturating_sub(before)
+            left < GROUPS,
+            "{GROUPS} groups of two counters left {left} perf descriptors behind in each of \
+             three rounds"
         );
     }
 
