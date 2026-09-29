@@ -1,6 +1,6 @@
 # Brief — a machine that is not the developer's
 
-Five work streams. The fourteenth fan-out, and the first **product wave**:
+Six work streams. The fourteenth fan-out, and the first **product wave**:
 every roadmap phase is done bar three filed edges, and what is missing is what
 someone who is not the developer meets first. The CI's second run found it:
 on a stock kernel, an unprivileged user cannot profile their own program, and
@@ -50,7 +50,7 @@ defaults (paranoid 2). Each holds the Actions log, the suite's log and the
 runner's matrix cell. A fix for a stock machine is checked by the next push's
 CI, which the coordinator makes and reads back to you.
 
-Five streams and a coordinator share this machine. Assert the separation, not
+Six streams and a coordinator share this machine. Assert the separation, not
 a threshold calibrated on a quiet machine.
 
 ---
@@ -74,11 +74,12 @@ that has landed is a line in your handoff, not work.
 
 | | Stream | Delivers | Owns |
 |---|---|---|---|
-| **P** | the stock machine | `cpu.profile` served at paranoid 2, a probe that opens what it promises, the CI green on both cells | `src/perf.rs`, `src/capabilities.rs`, `src/resolve.rs`, `src/validate.rs`, `src/filter.rs`, `src/collect/cpu/**`, `src/collect/mem/page_faults.rs`, `src/collect/power/**`, `src/collect/gpu/**`, `src/collect/runtime/**`, `src/bpf/usdt.rs`, the `cpu.*`, `power.*`, `gpu.*`, `runtime.*` and `mem.faults` entries of `catalog/*.yaml`, `tests/scenario_{cpu,power,gpu,runtime}.rs`, `tests/family_{cpu,power,gpu,runtime}.rs`, `tests/portability.rs`, `tests/catalog_model.rs`, `scripts/matrix.sh`, `scripts/vm/**`, `.github/**` except `workflows/release.yml`, `examples/{cpu,power,gpu,runtime}-*.yml`, `docs/portability.md` |
-| **R** | the results say it | the vocabulary three streams are waiting on, a window that ends where its collector stopped, and what the engine knows printed | `src/collect/mod.rs`, `src/collect/launch.rs`, `src/collect/task.rs`, `src/main.rs`, `src/session.rs`, `src/request.rs`, `src/cli.rs`, `src/catalog.rs`, `src/emit.rs`, `src/encode.rs`, `src/render.rs`, `src/triage/**`, `src/bpf/syscall.rs`, `shim/**`, `src/collect/mem/heap/**`, `tests/{budget,runner,triage,recorder,encoders,aggregation,cli}.rs`, `tests/bench_*.rs`, `examples/bench/**`, `examples/{record,triage}-*.yml`, `man/omn.1`, `docs/fixes/results.md` (new) |
+| **P** | the stock machine | a probe that opens what it promises, the CI green on both cells, and the validator's filed checks | `src/capabilities.rs`, `src/resolve.rs`, `src/validate.rs`, `src/filter.rs` (except `check_stack`, U's), `src/collect/cpu/**` except `profile.rs` (and the lines of `cpu/mod.rs` that read `request.stack`, U's), `src/collect/mem/page_faults.rs`, `src/collect/power/**`, `src/collect/gpu/**`, `src/collect/runtime/**`, `src/bpf/usdt.rs`, the `cpu.*` (except `cpu.profile`), `power.*`, `gpu.*`, `runtime.*` and `mem.faults` entries of `catalog/*.yaml`, `tests/scenario_{cpu,power,gpu,runtime}.rs`, `tests/family_{cpu,power,gpu,runtime}.rs`, `tests/portability.rs`, `tests/catalog_model.rs`, `scripts/matrix.sh`, `scripts/vm/**`, `.github/**` except `workflows/release.yml`, `examples/{cpu,power,gpu,runtime}-*.yml`, `docs/portability.md` |
+| **R** | the results say it | the vocabulary three streams are waiting on, a window that ends where its collector stopped, and what the engine knows printed | `src/collect/mod.rs`, `src/collect/launch.rs`, `src/collect/task.rs`, `src/main.rs`, `src/session.rs`, `src/request.rs` (except `StackMode`, U's), `src/cli.rs`, `src/catalog.rs`, `src/emit.rs`, `src/encode.rs`, `src/render.rs`, `src/triage/**`, `src/bpf/syscall.rs`, `shim/**`, `src/collect/mem/heap/**`, `tests/{budget,runner,triage,recorder,encoders,aggregation,cli}.rs`, `tests/bench_*.rs`, `examples/bench/**`, `examples/{record,triage}-*.yml`, `man/omn.1`, `docs/fixes/results.md` (new) |
 | **K** | the kernel programs | the 6.17 prototypes, the scenarios that must skip on a stock machine, and the read-ahead lookup | `src/bpf/**` except `syscall.rs` and `usdt.rs`, `src/collect/{sched,proc,io,net}/**`, `src/collect/mem/**` except `page_faults.rs` and `heap/**`, `src/collect/psi.rs`, the `sched.*`, `proc.*`, `io.*`, `net.*` and `mem.*` entries of `catalog/*.yaml` except `mem.faults`, `tests/scenario_{sched,proc,io,net,mem}.rs`, `tests/family_{sched,proc,io,net,mem}.rs`, `tests/raw_tracepoints.rs`, `examples/{sched,proc,io,net,mem}-*.yml` except `sched-wakeup.yml`, `docs/families/kernel.md` |
-| **J** | an agent benchmarks a program | the `omn-mcp` use case, end to end, and the engine's last filed edges | `src/join.rs`, `src/event.rs`, `src/stack.rs`, `src/clock.rs`, `mcp/**`, `tests/join_engine.rs`, `tests/cross_*.rs`, `tests/stack_capture.rs`, `tests/vertical.rs`, `examples/{cross,join,vertical}-*.yml`, `examples/sched-wakeup.yml`, `examples/mcp/**` (new), `docs/mcp.md`, `docs/families/join.md` |
+| **J** | an agent benchmarks a program | the `omn-mcp` use case, end to end, and the engine's last filed edges | `src/join.rs`, `src/event.rs`, `src/clock.rs`, `mcp/**`, `tests/join_engine.rs`, `tests/cross_*.rs`, `tests/vertical.rs`, `examples/{cross,join,vertical}-*.yml`, `examples/sched-wakeup.yml`, `examples/mcp/**` (new), `docs/mcp.md`, `docs/families/join.md` |
 | **D** | it installs | a release someone else can install and run, and the first ten minutes of reading | the `Makefile`, `scripts/release.sh` (new), `.github/workflows/release.yml` (new), `README.md`, `DEMO.md`, `docs/install.md` (new) |
+| **U** | every way to unwind a stack | unwind modes as a chain the resolver chooses from, like backends: frame pointers, frame pointers with the leaf's caller recovered, DWARF, LBR, SFrame; and names from debuginfod | `src/perf.rs`, `src/stack.rs`, `src/unwind.rs` (new), `catalog/unwind.yaml` (new), `src/collect/cpu/profile.rs`, the `cpu.profile` entry of `catalog/cpu.yaml`, `StackMode` in `src/request.rs` and its parsing, `check_stack` in `src/validate.rs`, the lines of `src/collect/cpu/mod.rs` and `src/collect/mem/mod.rs` that read `request.stack`, `tests/stack_capture.rs`, `tests/unwind.rs` (new), `examples/unwind-*.yml` (new), `docs/unwind.md` (new) |
 
 **A catalog entry belongs to the stream that owns its collector**, whole. Its
 `cost:` keys are no longer split off. `CATALOG.md` is the coordinator's.
@@ -99,7 +100,10 @@ append-only per stream.
   and K to rebase.
 - `src/validate.rs` is P's, and the two checks the engine's owners asked of it
   (a decomposition against the session's joins, and an attribute a ranking
-  names) are P's. The call sites in `main.rs` and `triage/engine.rs` are R's.
+  names) are P's; `check_stack` in it is U's.
+- **U's first commit is the one P, K and R build against** where they meet a
+  stack: the `StackMode` values and the `stack::` entry point that chooses a
+  mode. The coordinator merges it to `main` as soon as it exists. The call sites in `main.rs` and `triage/engine.rs` are R's.
 - `README.md` and `DEMO.md` are D's this wave. `GUIDE.md`, `STATE.md`,
   `DECISIONS.md`, `ROADMAP.md`, `CATALOG.md` and the two session indexes stay
   the coordinator's.
@@ -116,44 +120,32 @@ rows in your handoff. A decision worth recording goes in your handoff under
 ## Stream P -- the stock machine
 
 > **Mission.** The CI's second run (`docs/open-findings.md`, "The CI's second
-> run"): at the kernel's default `perf_event_paranoid` of 2, `cpu.profile` is
-> refused, and every method built on a profile goes with it; on a cpu with no
-> hardware PMU, `cpu.cycles` reads available and is refused at the attach.
-> Neither can be seen on the development machine.
+> run"): on a cpu with no hardware PMU, `cpu.cycles` reads available and is
+> refused at the attach, and the suite fails where it should skip on a stock
+> machine. Neither can be seen on the development machine. (Its other defect,
+> `cpu.profile` refused at paranoid 2, is stream U's: it is a callchain.)
 
-1. **`cpu.profile` at paranoid 2.** Confirm why `pmu:sw`'s sampling event with
-   a callchain is refused with `EACCES` (the reading to confirm: the kernel
-   half of the stack, and the kernel sample, are what paranoid 2 forbids).
-   Then serve it: user-only callchains and samples where the paranoia requires
-   it, and the resolved file and the result saying the stacks are user-only.
-   It must also stay what it is at paranoid -1 and with `CAP_PERFMON`.
-2. **A probe that opens what it promises.** `cpu.cycles`, and every source whose
+1. **A probe that opens what it promises.** `cpu.cycles`, and every source whose
    requirement is a hardware event, reads available on a cpu that publishes no
    such event (`ENOENT` at the open). The probe opens the event, as `fentry`'s
    does, and answers missing with the reason. A cloud VM is the machine many
    users have.
-3. **The profile's drops per ring** (stream R's thirteenth-wave request): the
-   plumbing is in `Collection`; `perf.rs` and `profile.rs` report which ring
-   lost what, and `tests/cross_compute.rs`'s lossy test can then credit the
-   losses to the task that lost them (J's file: say what changes).
-4. **The CI green, on two cells.** The one P configured (paranoid 2), and a
+2. **The CI green, on two cells.** The one P configured (paranoid 2), and a
    second job at the hosted image as shipped (paranoid 4, no user
    namespaces), where every perf test must skip with the machine's reason
    rather than fail. What you find failing in another stream's files is
    filed, one request per owner, with the log line. The skip gate's ten
    unexpected skips of the second run are yours to sort.
-5. **What the thirteenth wave filed against your files**, each checked first:
+3. **What the thirteenth wave filed against your files**, each checked first:
    `check_decomposition_in` against the session's joins (J), an attribute a
    ranking names is one the entry declares (R), `SCHED_SWITCHES`'s
    `dead_code` (S), `Unit::Watts` and `gpu.power` in watts and `KeyNotCarried`
    once R's vocabulary is on `main`, and the multi-size THP caveat on
    `mem.faults` (N's text, filed).
 
-**Ground truth**: for 1 and 2, the next push's CI (the coordinator pushes when
-you commit and reads the run back to you) -- `cpu.profile` on a launched
-program serving user stacks at paranoid 2, and `cpu.cycles` missing, by name,
-on the Azure runner -- and, on this machine, the same requests unchanged. For
-3, two tasks in one profile, one made to overflow its ring.
+**Ground truth**: for 1, the next push's CI (the coordinator pushes when you
+commit and reads the run back to you): `cpu.cycles` missing, by name, on the
+Azure runner, and on this machine unchanged. For 2, both CI cells green.
 
 You touch the probes, the resolver and the validator, shared layers: a full
 `make check` before each commit.
@@ -287,6 +279,87 @@ Handoff: `docs/families/join.md`, a section "The fourteenth wave", and
 
 ---
 
+## Stream U -- every way to unwind a stack
+
+> **Mission.** A profile's stacks are only as good as the way they were
+> unwound, and today there is one way: the kernel's frame-pointer walk. It
+> loses the caller of every function that sets up no frame (every libc leaf,
+> most of a stock Python), and on the kernel's default paranoia it is refused
+> outright. `ROADMAP.md` said frame pointers first and DWARF later, with a
+> library and never an unwinder of our own. This wave does the rest. The modes
+> sit **side by side, chosen the way backends are**: declared as data, probed,
+> ranked, forced with `--stack`, and each saying what it costs and what it
+> loses.
+
+1. **Unwind modes are data.** `catalog/unwind.yaml` declares each mode like a
+   backend: its requirements (a probe answers available, missing or unknown),
+   its cost (the bytes it copies per sample, measured), and what it degrades.
+   `src/unwind.rs` loads it and chooses: `--stack auto`, the default, takes
+   the best mode this machine and this target serve, and says why it passed
+   over the others, in the resolved file as the resolver does for a backend.
+   `--stack <mode>` forces one and is refused with the reason where it cannot
+   be served. The same shape as backends, not a second mechanism beside them:
+   reuse `resolve.rs`'s vocabulary for a choice and its rejections, and file
+   what you need of it (P's).
+2. **The modes**, each landed with its scenario or refused with its reason:
+   - `fp`: the kernel's frame-pointer callchain, as today.
+   - `fp+leaf`: `fp`, plus the caller of a frameless leaf recovered from the
+     return address at the top of the stack. Ask for the user registers and a
+     few words of the user stack with each sample; use the binary's CFI to tell
+     where the return address is. A caller recovered this way is marked as
+     such.
+   - `dwarf`: the user stack copied with each sample and unwound in user space
+     from `.eh_frame`, through a library (`framehop`, or libdw; the crate is a
+     decision to justify). It serves a program built without frame pointers,
+     at a cost measured and printed.
+   - `lbr`: the branch stack, where the cpu has one (Intel; AMD from Zen 4's
+     LbrExtV2). Probed, and missing by name on this Zen 2.
+   - `sframe`: the kernel reading a binary's `.sframe` section, where the
+     kernel and the binary both support it. Establish what upstream Linux
+     supports and from which release, from the kernel source, before writing
+     anything, and write it down. If no kernel this project runs on serves it,
+     the mode is declared, probed and missing with that reason.
+   - `none`.
+3. **The kernel's default paranoia** (P's defect in the CI's second run):
+   `cpu.profile` is refused at `perf_event_paranoid` 2 because the callchain
+   asks for the kernel half. Confirm it, then serve user-only callchains and
+   samples where the paranoia requires it, with the resolved file saying the
+   stacks are user-only. The chooser in item 1 is where this decision lives.
+4. **Names, from debuginfod**: `--symbols local|debuginfod`. A stripped
+   binary's names (libc's internals, a distribution's `sqlite3`) are fetched
+   by build id from the servers in `DEBUGINFOD_URLS`, cached, and never
+   fetched unless asked, because it is a network request about what this
+   machine runs. The resolved file says where each name came from. A frame
+   still unnamed stays `lib+0xoffset`.
+5. **The profile's drops per ring** (stream R's thirteenth-wave request): the
+   plumbing is in `Collection`; `perf.rs` and `profile.rs` report which ring
+   lost what. What it changes in `tests/cross_compute.rs` (J's) is a line in
+   your handoff.
+6. **What frames were lost, said by the mode that lost them.** The note
+   *"N of M samples landed in a function that sets up no frame pointer ... this
+   target was built without them"* says the target when it is libc; it names
+   the object the frameless function is in, and under `fp+leaf` or `dwarf` it
+   counts what was recovered instead.
+
+**Ground truth**: a C program whose call tree is known by construction, built
+four ways (frame pointers everywhere; frame pointers but frameless leaves, as
+gcc makes them at `-O1` and above; no frame pointers; stripped), whose time
+splits across its branches in known shares. Each mode is held to the tree it
+should recover and the share of each branch, and to the cost it declares,
+against the program's own `CLOCK_THREAD_CPUTIME_ID`. For 3, the CI's next run
+at paranoid 2. For 4, a stripped build of that program, and its names against
+the unstripped build's. Two such programs are in `/home/moha/repos/omniscient-ci-logs/`
+(`calltree.c`, known shares by construction; `loganalyzer.c`, parse,
+aggregate, rank and report over 1.5 M log lines), with how each was built:
+reuse them or write your own.
+
+You touch `perf.rs`, the sampling layer every collector's profile uses: a full
+`make check` before each commit.
+
+Handoff: `docs/unwind.md`.
+
+---
+
 ## Stream D -- it installs
 
 > **Mission.** Nobody but the developer has ever run `omn`. Make the first ten
@@ -331,7 +404,7 @@ The three that have held for thirteen waves:
 2. **The handoff is a file only that stream can write**: P's is
    `docs/portability.md`, R's `docs/fixes/results.md`, K's
    `docs/families/kernel.md`, J's `docs/families/join.md` and `docs/mcp.md`,
-   D's `docs/install.md`. End it with **the index rows for every session you
+   D's `docs/install.md`, U's `docs/unwind.md`. End it with **the index rows for every session you
    added**, **what is for `DECISIONS.md`**, **anything you filed for another
    stream**, and **the matrix cells your change should move**.
 3. **A task is landed when its scenarios are**: ground truth, the capability

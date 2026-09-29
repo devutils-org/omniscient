@@ -24,10 +24,11 @@
 set -euo pipefail
 
 declare -A OWNS=(
-    [stock]="src/perf.rs src/capabilities.rs src/resolve.rs src/validate.rs src/filter.rs src/collect/cpu/** src/collect/mem/page_faults.rs src/collect/power/** src/collect/gpu/** src/collect/runtime/** src/bpf/usdt.rs the cpu.*, power.*, gpu.*, runtime.* and mem.faults entries of catalog/*.yaml tests/scenario_{cpu,power,gpu,runtime}.rs tests/family_{cpu,power,gpu,runtime}.rs tests/portability.rs tests/catalog_model.rs scripts/matrix.sh scripts/vm/** .github/** (except workflows/release.yml) examples/{cpu,power,gpu,runtime}-*.yml"
-    [results]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/main.rs src/session.rs src/request.rs src/cli.rs src/catalog.rs src/emit.rs src/encode.rs src/render.rs src/triage/** src/bpf/syscall.rs shim/** src/collect/mem/heap/** tests/{budget,runner,triage,recorder,encoders,aggregation,cli}.rs tests/bench_*.rs examples/bench/** examples/{record,triage}-*.yml man/omn.1"
+    [stock]="src/capabilities.rs src/resolve.rs src/validate.rs (except check_stack) src/filter.rs src/collect/cpu/** (except profile.rs and the lines of cpu/mod.rs that read request.stack) src/collect/mem/page_faults.rs src/collect/power/** src/collect/gpu/** src/collect/runtime/** src/bpf/usdt.rs the cpu.* (except cpu.profile), power.*, gpu.*, runtime.* and mem.faults entries of catalog/*.yaml tests/scenario_{cpu,power,gpu,runtime}.rs tests/family_{cpu,power,gpu,runtime}.rs tests/portability.rs tests/catalog_model.rs scripts/matrix.sh scripts/vm/** .github/** (except workflows/release.yml) examples/{cpu,power,gpu,runtime}-*.yml"
+    [results]="src/collect/mod.rs src/collect/launch.rs src/collect/task.rs src/main.rs src/session.rs src/request.rs (except StackMode) src/cli.rs src/catalog.rs src/emit.rs src/encode.rs src/render.rs src/triage/** src/bpf/syscall.rs shim/** src/collect/mem/heap/** tests/{budget,runner,triage,recorder,encoders,aggregation,cli}.rs tests/bench_*.rs examples/bench/** examples/{record,triage}-*.yml man/omn.1"
     [kernel]="src/bpf/** (except syscall.rs and usdt.rs) src/collect/{sched,proc,io,net}/** src/collect/mem/** (except page_faults.rs and heap/**) src/collect/psi.rs the sched.*, proc.*, io.*, net.* and mem.* entries of catalog/*.yaml (except mem.faults) tests/scenario_{sched,proc,io,net,mem}.rs tests/family_{sched,proc,io,net,mem}.rs tests/raw_tracepoints.rs examples/{sched,proc,io,net,mem}-*.yml (except sched-wakeup.yml)"
-    [agent]="src/join.rs src/event.rs src/stack.rs src/clock.rs mcp/** tests/join_engine.rs tests/cross_*.rs tests/stack_capture.rs tests/vertical.rs examples/{cross,join,vertical}-*.yml examples/sched-wakeup.yml examples/mcp/** (new) docs/mcp.md"
+    [agent]="src/join.rs src/event.rs src/clock.rs mcp/** tests/join_engine.rs tests/cross_*.rs tests/vertical.rs examples/{cross,join,vertical}-*.yml examples/sched-wakeup.yml examples/mcp/** (new) docs/mcp.md"
+    [unwind]="src/perf.rs src/stack.rs src/unwind.rs (new) catalog/unwind.yaml (new) src/collect/cpu/profile.rs the cpu.profile entry of catalog/cpu.yaml StackMode in src/request.rs and its parsing check_stack in src/validate.rs the lines of src/collect/cpu/mod.rs and src/collect/mem/mod.rs that read request.stack tests/stack_capture.rs tests/unwind.rs (new) examples/unwind-*.yml (new)"
     [install]="Makefile scripts/release.sh (new) .github/workflows/release.yml (new) README.md DEMO.md"
 )
 declare -A TITLE=(
@@ -36,21 +37,24 @@ declare -A TITLE=(
     [kernel]="Stream K -- the kernel programs"
     [agent]="Stream J -- an agent benchmarks a program"
     [install]="Stream D -- it installs"
+    [unwind]="Stream U -- every way to unwind a stack"
 )
-declare -A LETTER=([stock]=P [results]=R [kernel]=K [agent]=J [install]=D)
+declare -A LETTER=([stock]=P [results]=R [kernel]=K [agent]=J [install]=D [unwind]=U)
 declare -A LOG=(
     [stock]="docs/portability.md (a section \"The fourteenth wave\")"
     [results]="docs/fixes/results.md"
     [kernel]="docs/families/kernel.md (a section \"The fourteenth wave\")"
     [agent]="docs/families/join.md (a section \"The fourteenth wave\") and docs/mcp.md"
     [install]="docs/install.md (with a section \"For the coordinator\" at its end)"
+    [unwind]="docs/unwind.md"
 )
 declare -A SCENARIO=(
     [stock]="tests/scenario_cpu.rs, tests/family_cpu.rs, tests/portability.rs, tests/catalog_model.rs and the power, gpu and runtime scenario files"
     [results]="tests/runner.rs, tests/budget.rs, tests/triage.rs, tests/recorder.rs, tests/encoders.rs, tests/aggregation.rs and tests/cli.rs"
     [kernel]="the scenario_ and family_ files of sched, proc, io, net and mem, and tests/raw_tracepoints.rs"
-    [agent]="tests/join_engine.rs, tests/cross_*.rs, tests/stack_capture.rs, tests/vertical.rs and cargo test -p omn-mcp"
+    [agent]="tests/join_engine.rs, tests/cross_*.rs, tests/vertical.rs and cargo test -p omn-mcp"
     [install]="the install check your handoff describes, then tests/cli.rs"
+    [unwind]="tests/stack_capture.rs, tests/unwind.rs, and cargo test --lib filtered to stack, unwind or perf"
 )
 
 stream="${1:-}"
@@ -104,7 +108,7 @@ available, which reads like the machine changed rather than the binary.
 
 HOW YOU TEST -- this is a rule, not advice, and CLAUDE.md "How much to test,
 and when" is the long version. The full suite is ~2000 tests and 5 to 10
-minutes; five agents running it by reflex is what makes a wave slow.
+minutes; six agents running it by reflex is what makes a wave slow.
 
   - While iterating: ONLY \`cargo test --lib <your module>\` and
     \`cargo test --test <file>\` for ${SCENARIO[$stream]}. Never \`make check\`.
@@ -147,7 +151,7 @@ computed proves nothing. Choose a workload whose property you know independently
 state -- and check the tool against that.
 
 A test that skips is not a test that passes, and a test that asserts what the
-machine was doing is worse than either. Five streams share this machine. Assert
+machine was doing is worse than either. Six streams share this machine. Assert
 the separation rather than a calibrated threshold, carry the reference's
 own resolution as slack, and where the property cannot be created here, skip
 loudly with the numbers that show why, and say so in your handoff.

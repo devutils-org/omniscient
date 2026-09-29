@@ -283,8 +283,10 @@ merge, fixed before it (`fix/counted-window`).
 
 **The fourteenth wave's brief is written** (`BRIEF.md`), not yet dispatched:
 the stock machine (P), the results' vocabulary and renderings (R), the kernel
-programs (K), an agent benchmarking a program through `omn-mcp` (J), and a
-release that installs (D). The CI logs it reproduces from are kept in
+programs (K), an agent benchmarking a program through `omn-mcp` (J), a
+release that installs (D), and every way to unwind a stack -- frame pointers,
+the leaf's caller recovered, DWARF, LBR, SFrame -- chosen like backends, with
+names from debuginfod (U). The CI logs it reproduces from are kept in
 `../omniscient-ci-logs/`, outside the repository.
 
 **After the thirteenth wave, in order:**
