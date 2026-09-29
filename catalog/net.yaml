@@ -37,7 +37,7 @@
   unit: ns
   backends:
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "btf_member:sock.sk_ino", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "kernel>=5.8"]
       join: {key: "sock:cookie", match: eq, ttl: 300s}
       cost: low
     - id: "bpf:tp"
@@ -49,7 +49,7 @@
   emits: [hist, topk, raw, timeline, summary]
   targets: {system: native}
   keys: [sock, task]
-  filter_fields: [comm, saddr, sport, family, cookie]
+  filter_fields: [comm, saddr, sport, daddr, dport, family, cookie]
   determinism: low
 
 - id: net.tcp.rtt
@@ -84,13 +84,13 @@
   summary: "TCP retransmissions"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "btf_member:sock.sk_ino", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:tcp_retransmit_skb(sock *, sk_buff *, int)|(sock *, sk_buff *)", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:tcp:tcp_retransmit_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
   keys: [sock, task]
-  filter_fields: [saddr, sport]
+  filter_fields: [saddr, sport, daddr, dport]
   determinism: low
 
 - id: net.drops
@@ -98,7 +98,7 @@
   summary: "Dropped packets with drop reason"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "btf_member:sock.sk_ino", "kernel>=5.8"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
@@ -361,12 +361,10 @@
     - "The procfs backend carries the counters every driver keeps. The long
        driver-specific list `ethtool -S` prints needs the ethtool netlink
        family, which is why that backend is first in the chain."
-    - "Counting them apart costs the aggregates: the event's value is the error
-       count, and drops, pause frames and the per-direction figures are
-       attributes beside it. So rate, timeline and summary answer about errors
-       alone, and a link dropping every frame it is given reads as zero through
-       all three. `raw` is where the other counters are, until the collector
-       emits one event per counter kind."
+    - "Apart, and all of them in every emit: each interface is one series per
+       counter kind, keyed `<iface>/errors`, `/drops`, `/fifo`, `/collisions`
+       and `/carrier`, whose value is frames. The `iface` field is the
+       interface alone, so a filter on it keeps every kind of that interface."
     - "These are counters, so a run reports the increment between two reads and
        its first read is a baseline that produces nothing."
 

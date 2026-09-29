@@ -9,6 +9,12 @@ mod ibs;
 mod numa;
 mod page_faults;
 mod pressure;
+/// The one pressure-stall reader, `src/collect/psi.rs`. Declared here until
+/// `src/collect/mod.rs` declares it (a request to its owner in
+/// `docs/open-findings.md`), because `mem` is the family module the others can
+/// already reach.
+#[path = "../psi.rs"]
+pub mod psi;
 mod stall;
 mod swap;
 #[cfg(test)]

@@ -22,6 +22,10 @@
        allocation-site profile and an RSS curve never line up."
     - "THP breaks reproducibility: khugepaged promotes in the background and RSS
        grows in 2 MB steps. Freeze and log the mode."
+    - "Beside a preload source (`mem.heap.*`, `sched.mutex`) up to 3 MiB of what
+       this reads is the tool's: the shim's record ring -- 65 536 slots of 48
+       bytes -- is mapped into the target and becomes resident as records are
+       written, so a program that allocates a lot carries all of it."
 
 - id: mem.pss
   family: mem
@@ -121,15 +125,20 @@
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cgroup: bpf_only}
   keys: [task, cgroup]
-  filter_fields: [order, comm]
+  filter_fields: [order, comm, direction]
   determinism: medium
+  caveats:
+    - "Allocations are the events unless a filter names `direction`: a
+       histogram of allocations and frees together is a histogram of neither,
+       so the frees are counted in the run's notes by default, and
+       `direction == 'free'` makes them the events."
 
 - id: mem.kmalloc
   family: mem
   summary: "Kernel slab allocations"
   unit: bytes
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc(long unsigned int, void *, size_t, size_t, gfp_t, int)", "raw_tracepoint:kfree(long unsigned int, void *)", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kmalloc(long unsigned int, void *, size_t, size_t, gfp_t, int)|(long unsigned int, void *, size_t, size_t, gfp_t)", "raw_tracepoint:kfree(long unsigned int, void *)", "kernel>=5.8"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:kmem:kmalloc", "tracepoint:kmem:kfree", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -137,6 +146,10 @@
   keys: [task]
   filter_fields: [bytes, comm]
   determinism: medium
+  caveats:
+    - "Frees are counted, never events: `kfree` carries the pointer and the
+       call site and not the size, so a free has no bytes to be measured in, and
+       `direction` is not a filter field here."
 
 - id: mem.heap.alloc
   family: mem
@@ -378,6 +391,11 @@
   filter_fields: []
   determinism: medium
   caveats:
+    - "A working set the TLB holds is not seen. The referenced bit is set when
+       the cpu walks the page tables, and a clear does not evict what the TLB
+       already caches: sixteen mebibytes in eight huge pages, walked twice right
+       after a clear, read as 4 KiB. The same walk over small pages, which do
+       not fit, reads in full. Short windows over huge pages undercount."
     - "This measurement changes what it measures. Clearing the referenced bits
        is process-wide and visible to anything else reading them, and it is the
        kernel's own input to reclaim: for as long as it takes the process to
@@ -398,7 +416,7 @@
   summary: "Direct reclaim"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin(gfp_t, int, mem_cgroup *)", "raw_tracepoint:mm_vmscan_direct_reclaim_end(long unsigned int, mem_cgroup *)", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_vmscan_direct_reclaim_begin(gfp_t, int, mem_cgroup *)|(int, gfp_t)", "raw_tracepoint:mm_vmscan_direct_reclaim_end(long unsigned int, mem_cgroup *)|(long unsigned int)", "raw_tracepoint:mm_vmscan_memcg_reclaim_begin", "raw_tracepoint:mm_vmscan_memcg_reclaim_end", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:vmscan:mm_vmscan_direct_reclaim_begin", "tracepoint:vmscan:mm_vmscan_direct_reclaim_end", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_begin", "tracepoint:vmscan:mm_vmscan_memcg_reclaim_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
@@ -412,7 +430,7 @@
   summary: "Memory compaction"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin(compact_control *, long unsigned int, long unsigned int, bool)", "raw_tracepoint:mm_compaction_end(compact_control *, long unsigned int, long unsigned int, bool, int)", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mm_compaction_begin(compact_control *, long unsigned int, long unsigned int, bool)|(long unsigned int, long unsigned int, long unsigned int, long unsigned int, bool)", "raw_tracepoint:mm_compaction_end(compact_control *, long unsigned int, long unsigned int, bool, int)|(long unsigned int, long unsigned int, long unsigned int, long unsigned int, bool, int)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:compaction:mm_compaction_begin", "tracepoint:compaction:mm_compaction_end", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [hist, rate, raw, summary]
@@ -458,8 +476,8 @@
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, targets: {system: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current", "cgroup2:memory.stat:pswpout"], cost: free, equivalent: true,
        targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
-  modes: [poll, snapshot]
-  emits: [timeline, raw, summary]
+  modes: [poll, snapshot, count]
+  emits: [timeline, rate, raw, summary]
   targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
   keys: [cgroup]
   filter_fields: []

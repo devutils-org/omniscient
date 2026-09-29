@@ -333,10 +333,25 @@ mod tests {
             return;
         }
 
-        // Long enough for the child to walk its working set several times over,
-        // and short enough that it cannot walk all 256 MiB.
-        std::thread::sleep(Duration::from_millis(300));
+        // Two whole walks of the working set after the bits were cleared --
+        // the child counts them -- so every page of it has been touched in
+        // this window however the child was scheduled (the flaky tally's #23,
+        // which slept 300 ms instead). The rest it never touches again.
+        child.wait_for_walks(2);
         let events = collector.sample(1).expect("the child is still running");
+        // The kernel's own account of what the child holds, read beside the
+        // sample: memory pressure from a loaded machine may have taken some of
+        // it, and the resident set is compared against that, not a constant.
+        let held = std::fs::read_to_string(format!("/proc/{}/status", child.pid()))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("VmRSS:"))
+                    .and_then(|rest| rest.split_whitespace().next()?.parse::<f64>().ok())
+            })
+            .map(|kilobytes| kilobytes * 1024.0)
+            .expect("the child's VmRSS");
         child.stop();
 
         let event = events.first().expect("a window was open");
@@ -347,8 +362,13 @@ mod tests {
             .expect("the resident set is carried for scale");
 
         assert!(
-            resident >= 0.9 * RESIDENT as f64,
-            "the child holds {RESIDENT} bytes and its resident set reads {resident}"
+            (resident - held).abs() <= 0.1 * held,
+            "the kernel says the child holds {held} bytes and its resident set reads {resident}"
+        );
+        assert!(
+            held >= 0.5 * RESIDENT as f64,
+            "the child was reclaimed down to {held} of its {RESIDENT} bytes, so it no longer holds \
+             much and touches little; nothing here measures that"
         );
         assert!(
             working >= 0.5 * WORKING as f64,

@@ -11,16 +11,17 @@
 //! to the family: what an event looks like, what is refused and what is counted
 //! as lost.
 //!
-//! **The reason is a number here, and that is deliberate.** `enum
-//! skb_drop_reason` has its names in the kernel's own BTF, which this build
-//! cannot yet read an enum out of. A table of names written into this file
-//! would be a constant no run could check against the kernel it is running on,
-//! and a mislabelled reason is worse than a number: it sends a reader to fix
-//! the wrong thing. The request that would close it is under `## Needs from
-//! another stream` in `docs/open-findings.md`; until then the number is the
-//! kernel's own and `docs/scenarios/net.md` says which one a closed port gives.
+//! **The reason is the kernel's own name for it**, read out of this kernel's
+//! BTF: `enum skb_drop_reason` grows every release and has been reorganised,
+//! so a table compiled in here would be a property of the kernel this was
+//! built against, and a mislabelled reason does not read as wrong -- it sends
+//! a reader to fix a different fault. `reason` is the name without its
+//! `SKB_DROP_REASON_` prefix (`NO_SOCKET`), and `reason_code` the number
+//! beside it; a value the enum does not name -- a subsystem's own reasons sit
+//! in the upper bits -- is carried as its number in both.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{DropProgram, PacketDrop};
@@ -240,6 +241,34 @@ fn protocol_name(protocol: Option<u32>) -> String {
     }
 }
 
+/// The name this kernel gives a drop reason, without the enum's prefix, or the
+/// number when it gives none.
+///
+/// Looked up once per value and kept: a drop storm is thousands of events a
+/// millisecond and a handful of distinct reasons, and the enum is walked
+/// linearly.
+fn reason_name(value: u32) -> String {
+    static NAMES: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+    let names = NAMES.get_or_init(Default::default);
+    let mut names = names
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    names
+        .entry(value)
+        .or_insert_with(|| {
+            crate::bpf::kernel_btf()
+                .ok()
+                .and_then(|btf| btf.enum_variant("skb_drop_reason", i64::from(value)))
+                .map(|name| {
+                    name.strip_prefix("SKB_DROP_REASON_")
+                        .unwrap_or(name)
+                        .to_owned()
+                })
+                .unwrap_or_else(|| value.to_string())
+        })
+        .clone()
+}
+
 /// What an event carries beside its value.
 ///
 /// `reason` and `protocol` are here because the catalog entry declares them as
@@ -249,9 +278,10 @@ fn protocol_name(protocol: Option<u32>) -> String {
 fn attributes(dropped: &PacketDrop, drops: u64, bytes: u64) -> Vec<Attr> {
     let mut attrs = vec![
         Attr::uint("drops", drops),
-        // The kernel's own `enum skb_drop_reason` value. A number, because the
-        // names live in BTF this build cannot yet read.
-        Attr::uint("reason", u64::from(dropped.reason)),
+        // The kernel's own name for `enum skb_drop_reason`'s value, read from
+        // this kernel's BTF, and the value beside it.
+        Attr::text("reason", reason_name(dropped.reason)),
+        Attr::uint("reason_code", u64::from(dropped.reason)),
         Attr::text("protocol", protocol_name(dropped.protocol())),
         Attr::uint("bytes", bytes),
         // Where in the kernel the packet died. Not symbolised: this is a kernel
@@ -420,6 +450,25 @@ mod tests {
                 "the catalog offers a `{field}` filter and no event carries one"
             );
         }
+    }
+
+    /// The reason is named by this kernel's own BTF, and the name is the one
+    /// the kernel's source spells: `SKB_DROP_REASON_NO_SOCKET` is found by its
+    /// name, turned back into its number, and that number named again.
+    #[test]
+    fn a_drop_reason_is_named_by_the_running_kernel() {
+        let Ok(btf) = crate::bpf::kernel_btf() else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        let Some(no_socket) = (0..1024).find(|value| {
+            btf.enum_variant("skb_drop_reason", *value) == Some("SKB_DROP_REASON_NO_SOCKET")
+        }) else {
+            panic!("this kernel's `enum skb_drop_reason` has no NO_SOCKET below 1024");
+        };
+        assert_eq!(reason_name(no_socket as u32), "NO_SOCKET");
+        // A value the enum does not name is its number, not a guess.
+        assert_eq!(reason_name(0xdead_0000), (0xdead_0000u32).to_string());
     }
 
     /// A drop with no socket says so under the `protocol` field rather than

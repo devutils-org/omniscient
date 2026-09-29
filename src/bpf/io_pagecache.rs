@@ -420,7 +420,7 @@ fn get_pages_instructions(
     check_signature(
         btf,
         GET_PAGES,
-        &GET_PAGES_SIGNATURE,
+        &[&GET_PAGES_SIGNATURE],
         "the mapping and the page range",
     )?;
     let at = Offsets::read(btf)?;
@@ -521,7 +521,7 @@ fn add_instructions(
     rows_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
-    check_signature(btf, ADD, &ADD_SIGNATURE, "the folio")?;
+    check_signature(btf, ADD, &[&ADD_SIGNATURE], "the folio")?;
     let at = Offsets::read(btf)?;
 
     let mut program = Program::new();
@@ -866,8 +866,8 @@ mod tests {
     #[test]
     fn the_running_kernel_declares_the_prototypes_these_programs_read() {
         let Some(btf) = kernel_btf() else { return };
-        check_signature(btf, GET_PAGES, &GET_PAGES_SIGNATURE, "the range").expect(GET_PAGES);
-        check_signature(btf, ADD, &ADD_SIGNATURE, "the folio").expect(ADD);
+        check_signature(btf, GET_PAGES, &[&GET_PAGES_SIGNATURE], "the range").expect(GET_PAGES);
+        check_signature(btf, ADD, &[&ADD_SIGNATURE], "the folio").expect(ADD);
         Offsets::read(btf).expect("every field of the chain from a folio to its file");
     }
 

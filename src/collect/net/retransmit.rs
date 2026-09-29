@@ -224,12 +224,7 @@ impl RetransmitCollector {
     }
 }
 
-/// What an event carries beside its value.
-///
-/// The catalog declares `daddr`, `dport`, `saddr` and `sport` as filter fields.
-/// The two local ones are here; the peer's live in anonymous unions of
-/// `sock_common`, which this build cannot resolve by name --
-/// `src/bpf/net_retransmit.rs` explains it and the run says so.
+/// What an event carries beside its value: both ends, the state and the error.
 fn attributes(again: &Retransmit, retransmits: u64, has_error: bool) -> Vec<Attr> {
     let mut attrs = vec![
         Attr::uint("retransmits", retransmits),
@@ -243,6 +238,10 @@ fn attributes(again: &Retransmit, retransmits: u64, has_error: bool) -> Vec<Attr
     ];
     if let Some(address) = again.local_address() {
         attrs.push(Attr::text("saddr", address));
+    }
+    if let Some(address) = again.remote_address() {
+        attrs.push(Attr::text("daddr", address));
+        attrs.push(Attr::uint("dport", u64::from(again.remote_port())));
     }
     if again.cookie != 0 {
         attrs.push(Attr::uint("cookie", again.cookie));
@@ -305,12 +304,7 @@ impl Collector for RetransmitCollector {
     }
 
     fn notes(&self) -> Vec<String> {
-        let mut notes = vec![
-            "the address and port on each event are the local end of the connection; the peer's \
-             live in anonymous unions of `sock_common` that this build cannot resolve by name, \
-             so a filter on `daddr` or `dport` matches nothing"
-                .to_owned(),
-        ];
+        let mut notes = Vec::new();
         if !self.has_error {
             notes.push(
                 "this kernel's `tcp_retransmit_skb` does not carry what the resend returned, so \
@@ -342,7 +336,7 @@ mod tests {
     use super::*;
 
     fn again() -> Retransmit {
-        let mut bytes = [0u8; 56];
+        let mut bytes = [0u8; 80];
         bytes[0..8].copy_from_slice(&1_000u64.to_ne_bytes());
         bytes[8..16].copy_from_slice(&4242u64.to_ne_bytes());
         bytes[16..24].copy_from_slice(&909u64.to_ne_bytes());
@@ -350,6 +344,8 @@ mod tests {
         bytes[40..44].copy_from_slice(&2u32.to_ne_bytes());
         bytes[44..48].copy_from_slice(&u32::from(443u16.to_be()).to_ne_bytes());
         bytes[48..52].copy_from_slice(&1u32.to_ne_bytes());
+        bytes[56..60].copy_from_slice(&[10, 0, 0, 7]);
+        bytes[72..76].copy_from_slice(&u32::from(51000u16.to_be()).to_ne_bytes());
         Retransmit::from_bytes(&bytes).expect("a full record")
     }
 
@@ -401,23 +397,32 @@ mod tests {
         assert_eq!(state_name(99), "state 99");
     }
 
-    /// The local half of the tuple is on the event; the peer's is not, and the
-    /// run says so rather than letting a predicate over it quietly match
-    /// nothing.
+    /// Both halves of the tuple are on the event, each from its own bytes, and
+    /// every filter field the catalog declares is among them.
     #[test]
-    fn the_local_endpoint_is_on_the_event_and_the_peers_absence_is_stated() {
+    fn both_ends_are_on_the_event_and_every_declared_filter_field_with_them() {
         let attributes = attributes(&again(), 1, true);
-        assert!(attributes.iter().any(|attr| attr.name == "saddr"));
-        assert!(attributes.iter().any(|attr| attr.name == "sport"));
-        let notes = RetransmitCollector::new(Mode::Trace, None)
-            .notes()
-            .join(" ");
-        for field in ["daddr", "dport"] {
+        let of = |name: &str| {
+            attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| attr.value.to_string())
+                .unwrap_or_else(|| panic!("no `{name}` attribute"))
+        };
+        assert_eq!(of("saddr"), "127.0.0.1");
+        assert_eq!(of("sport"), "443");
+        assert_eq!(of("daddr"), "10.0.0.7");
+        assert_eq!(of("dport"), "51000");
+        let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
+        for field in &catalog
+            .get(&"net.tcp.retransmit".parse().expect("a source id"))
+            .expect("in the catalog")
+            .filter_fields
+        {
             assert!(
-                !attributes.iter().any(|attr| attr.name == field),
-                "`{field}` is not reachable and must not be invented"
+                attributes.iter().any(|attr| attr.name == *field),
+                "the catalog offers a `{field}` filter and no event carries one"
             );
-            assert!(notes.contains(field), "{notes}");
         }
     }
 

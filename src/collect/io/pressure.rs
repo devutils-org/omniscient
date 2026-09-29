@@ -28,8 +28,9 @@
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
+use crate::collect::mem::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, AttrValue, CollectorId, Event};
+use crate::event::{Attr, CollectorId, Event};
 use crate::request::{Mode, Target};
 
 /// Holds the mode until the run starts.
@@ -100,77 +101,29 @@ impl Pressure {
 
     /// The share of one tick that was spent stalled.
     fn stall_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        if interval_ns == 0 {
-            self.losses.undecoded += 1;
-            self.losses.note(
-                "two reads of /proc/pressure/io landed in the same nanosecond, so there is no \
-                 window to divide by"
-                    .to_owned(),
-            );
-            return None;
-        }
-        let Some(some_ns) = stalled_ns(after.some.total_us, before.some.total_us) else {
-            self.losses.undecoded += 1;
-            self.losses.note(
-                "the stall counter in /proc/pressure/io went backwards, so this interval cannot \
-                 be attributed"
-                    .to_owned(),
-            );
-            return None;
+        let mut attrs = match after.stall_attrs(before) {
+            Ok(attrs) => attrs,
+            Err(unmeasured) => {
+                self.losses.undecoded += 1;
+                self.losses.note(unmeasured.explain("/proc/pressure/io"));
+                return None;
+            }
         };
-
-        let mut attrs = vec![
-            Attr {
-                name: "stall_ratio".to_owned(),
-                value: AttrValue::Float(some_ns as f64 / interval_ns as f64),
-            },
-            Attr::uint("stalled_ns", some_ns),
-            Attr::uint("interval_ns", interval_ns),
-        ];
-        if let Some(full_ns) = after
-            .full
-            .as_ref()
-            .zip(before.full.as_ref())
-            .and_then(|(after, before)| stalled_ns(after.total_us, before.total_us))
-        {
-            attrs.push(Attr {
-                name: "full_stall_ratio".to_owned(),
-                value: AttrValue::Float(full_ns as f64 / interval_ns as f64),
-            });
-            attrs.push(Attr::uint("full_stalled_ns", full_ns));
-        }
-        attrs.extend(after.average_attrs());
-        attrs.push(Attr::text(
-            "basis",
-            "the stall counter's increase over this tick",
-        ));
-
-        Some(Event {
-            ts_ns: after.ts_ns,
-            ts_err_ns: 0,
-            kind: "io.pressure".to_owned(),
-            keys: Vec::new(),
-            attrs,
-            collector_id: self.id.clone(),
-            seq,
-        })
+        attrs.push(Attr::text("basis", POLL_BASIS));
+        Some(self.event(after.ts_ns, attrs, seq))
     }
 
     /// What can be said from a single read: the kernel's own averages, which
     /// describe a window this run did not choose.
     fn snapshot_event(&self, reading: &Reading, seq: u64) -> Event {
-        let mut attrs = reading.average_attrs();
-        attrs.push(Attr::uint("some_total_ns", reading.some.total_us * 1_000));
-        if let Some(full) = &reading.full {
-            attrs.push(Attr::uint("full_total_ns", full.total_us * 1_000));
-        }
-        attrs.push(Attr::text(
-            "basis",
-            "the kernel's decayed averages: a snapshot observes no window of its own",
-        ));
+        let mut attrs = reading.snapshot_attrs();
+        attrs.push(Attr::text("basis", SNAPSHOT_BASIS));
+        self.event(reading.ts_ns, attrs, seq)
+    }
+
+    fn event(&self, ts_ns: u64, attrs: Vec<Attr>, seq: u64) -> Event {
         Event {
-            ts_ns: reading.ts_ns,
+            ts_ns,
             ts_err_ns: 0,
             kind: "io.pressure".to_owned(),
             keys: Vec::new(),
@@ -218,90 +171,6 @@ impl Collector for Pressure {
     }
 }
 
-/// Microseconds of stall turned into nanoseconds, or `None` when the counter
-/// moved backwards.
-fn stalled_ns(after_us: u64, before_us: u64) -> Option<u64> {
-    after_us.checked_sub(before_us).map(|micros| micros * 1_000)
-}
-
-/// One read of the file.
-#[derive(Debug, Clone, PartialEq)]
-struct Reading {
-    ts_ns: u64,
-    some: Psi,
-    /// Absent on kernels or cgroups that do not write a `full` line. Absent is
-    /// not zero: zero would claim nothing was ever fully stalled.
-    full: Option<Psi>,
-}
-
-/// One `some`/`full` line: three decayed averages and a stall counter.
-#[derive(Debug, Clone, PartialEq)]
-struct Psi {
-    avg10: f64,
-    avg60: f64,
-    avg300: f64,
-    total_us: u64,
-}
-
-impl Reading {
-    fn parse(text: &str, ts_ns: u64) -> Option<Self> {
-        let mut some = None;
-        let mut full = None;
-        for line in text.lines() {
-            let mut fields = line.split_whitespace();
-            let kind = fields.next()?;
-            let mut line = Psi {
-                avg10: 0.0,
-                avg60: 0.0,
-                avg300: 0.0,
-                total_us: 0,
-            };
-            for field in fields {
-                let (name, value) = field.split_once('=')?;
-                match name {
-                    "avg10" => line.avg10 = value.parse().ok()?,
-                    "avg60" => line.avg60 = value.parse().ok()?,
-                    "avg300" => line.avg300 = value.parse().ok()?,
-                    "total" => line.total_us = value.parse().ok()?,
-                    // A field this reader does not know is not a reason to
-                    // discard a line that holds what it came for.
-                    _ => {}
-                }
-            }
-            match kind {
-                "some" => some = Some(line),
-                "full" => full = Some(line),
-                _ => {}
-            }
-        }
-        Some(Self {
-            ts_ns,
-            some: some?,
-            full,
-        })
-    }
-
-    /// The kernel's averages, as ratios rather than the per cent the file
-    /// writes, so every ratio this collector emits is on one scale.
-    fn average_attrs(&self) -> Vec<Attr> {
-        let ratio = |name: &str, value: f64| Attr {
-            name: name.to_owned(),
-            value: AttrValue::Float(value / 100.0),
-        };
-        let mut attrs = vec![
-            ratio("some_avg10", self.some.avg10),
-            ratio("some_avg60", self.some.avg60),
-            ratio("some_avg300", self.some.avg300),
-        ];
-        if let Some(full) = &self.full {
-            attrs.push(ratio("full_avg10", full.avg10));
-            attrs.push(ratio("full_avg60", full.avg60));
-            attrs.push(ratio("full_avg300", full.avg300));
-        }
-        attrs
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,39 +208,6 @@ full avg10=29.77 avg60=36.24 avg300=45.91 total=9194047541
             ),
         )
         .expect("writing the fake pressure file");
-    }
-
-    #[test]
-    fn the_file_is_read_the_way_the_kernel_writes_it() {
-        let reading = Reading::parse(SYSTEM, 42).expect("a `some` line");
-        assert_eq!(reading.ts_ns, 42);
-        assert_eq!(reading.some.total_us, 9_276_004_371);
-        assert_eq!(reading.some.avg10, 30.96);
-        assert_eq!(reading.full.as_ref().unwrap().avg300, 45.91);
-    }
-
-    /// A cgroup on an older kernel writes no `full` line. Reporting zero there
-    /// would claim nothing was ever fully stalled, which is a measurement
-    /// nobody took.
-    #[test]
-    fn a_missing_full_line_is_absent_rather_than_zero() {
-        let reading = Reading::parse("some avg10=0.00 avg60=0.00 avg300=0.00 total=17\n", 0)
-            .expect("a `some` line");
-        assert!(reading.full.is_none());
-        assert!(reading
-            .average_attrs()
-            .iter()
-            .all(|attr| !attr.name.starts_with("full")));
-    }
-
-    /// The percentages the kernel writes come out as ratios, on one scale with
-    /// the ratio computed from the counter.
-    #[test]
-    fn the_kernels_averages_are_reported_as_ratios() {
-        let reading = Reading::parse(SYSTEM, 0).expect("a `some` line");
-        let attrs = reading.average_attrs();
-        let avg10 = attrs.iter().find(|attr| attr.name == "some_avg10").unwrap();
-        assert_eq!(avg10.value.as_f64(), Some(0.3096));
     }
 
     /// The share of a window that was stalled is the counter's increase over

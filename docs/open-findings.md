@@ -8058,3 +8058,92 @@ name. A new program narrows with them rather than comparing a thread group.
   released, and a loaded machine makes more of them.
 - `scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not`,
   in the same run; passed alone.
+
+## Needs from another stream — the thirteenth wave, stream N (the older kernels serve what they can)
+
+Stream N's deliverable is `docs/families/devices.md`. Each request below names
+the file, its owner this wave, and the exact change.
+
+### To stream R (`src/collect/mod.rs`): declare `psi` where it lives
+
+`src/collect/psi.rs` is the one pressure-stall reader now (finding 23), and
+`io.pressure` and `mem.pressure` read through it. It is declared from
+`src/collect/mem/mod.rs` with `#[path = "../psi.rs"] pub mod psi;`, because
+`src/collect/mod.rs` is R's. Wanted, in `src/collect/mod.rs`:
+
+```rust
+pub mod psi;
+```
+
+and then, in stream N's files, the `#[path]` declaration and its comment
+removed from `src/collect/mem/mod.rs`, and `crate::collect::mem::psi` /
+`super::psi` in `src/collect/io/pressure.rs` and `src/collect/mem/pressure.rs`
+becoming `crate::collect::psi`. `cpu.pressure` (P's) can read through it too.
+
+### To stream R (`src/collect/net/softirq.rs` is N's; `Collector::facts` is R's): after R's merge
+
+R asked that `net.softirq`'s count of the handler runs the kernel bucketed be
+returned from `Collector::facts()` rather than `notes()`. `facts` does not
+exist on `feat/devices`, so it is not taken here: at the merge, move that one
+string from `notes()` to a `fn facts(&self) -> Vec<String>` in the same impl.
+
+### To stream R (`src/emit.rs`): the flaky tally's #20 is yours
+
+`scenario_mem::every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code`
+fails when a 50 ms `mem.latency -m sample -e stack` run samples an untimed
+load: `fn stack` calls `value_of(event, attr)?`, which turns the absent
+`latency_cycles` into `NotNumeric` and exits 1, where `measured()` would count
+it as unmeasured. Nothing in the test is wrong; the line in `emit.rs` is.
+
+### To stream P (`src/validate.rs`): `mem.swap` answers `rate` now
+
+`open-requests 2619` landed: `mem.swap` has a `count` mode, one event over the
+whole window, and `rate` is back in its `emits`. So
+`validate::tests::an_emit_no_declared_mode_can_produce_is_a_broken_promise`,
+which pushes `EmitKind::Rate` onto `mem.swap` to make a broken promise, now
+makes a kept one and finds no complaint. Wanted: the same test over an entry
+whose modes still cannot produce `rate` and whose unit adds up, for example
+
+```rust
+let mut entry = catalog().get(&"mem.rss".parse().unwrap()).unwrap().clone();
+```
+
+This is the one test red on `feat/devices` for a reason outside its paths.
+
+### To stream P (`catalog/mem.yaml`, `mem.faults`) and the coordinator (`DECISIONS.md`): the multi-size THP explanation (open-requests 4699)
+
+`mem.faults`' second caveat still says "the kernel picks larger folios for
+larger regions", which `docs/scenarios/cross-memory.md` measured to be wrong on
+this machine (every multi-size size `never`, the counts predicted exactly by
+aligned 2 MiB pages). Wanted, in place of it:
+
+```yaml
+    - "A fault is not a page, and not proportional to pages either: how many
+       faults a range costs depends on how it is backed and where it lands --
+       an 8 MiB mapping cost 515 faults, or 4 when it landed on four aligned
+       huge pages. The THP mode is in the environment. Fault counts say where
+       faults happened, not how much memory was made resident."
+```
+
+`mem.thp`'s own caveat about the per-size counters is a fact, not the
+explanation, and stays.
+
+### To the coordinator: after stream R's merge, `topk` back into `net.bytes`
+
+`scenario_net::the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_ones_recorded`
+(renamed from `..._the_three_recorded`) holds on both sides of R's merge: it
+expects `topk` over `net.drops` and `net.tcp.retransmit` in `count` to be
+refused exactly while the build's `ModeKind::Count` refuses it. What R's
+request also asked -- `topk` back into `net.bytes`'s `emits` -- only holds
+after that merge, so it is left for it: one word in `catalog/net.yaml`.
+
+### For the flaky tally
+
+- `scenario_mem::a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` failed
+  once in a run of `tests/scenario_mem.rs` beside the other streams ("the TLB
+  counter saw 77309 misses" for a scan that should cross few huge pages) and
+  passed alone. Class (a): it needs the machine's transparent huge pages for a
+  mapping of its own, and whether it gets them is the machine's.
+- `collect::tests::an_escalated_layer_over_its_budget_is_let_go_and_the_run_goes_on`
+  failed once in `cargo test --lib` here and passed alone; already in the
+  tally.

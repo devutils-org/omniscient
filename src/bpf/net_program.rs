@@ -91,6 +91,78 @@ pub(super) fn expect_signature(
     ))
 }
 
+/// Where a socket's inode number is read from, on this kernel.
+///
+/// The inode is the name `/proc/net/tcp` and `/proc/<pid>/fd` give a socket
+/// (`socket:[n]`), and it is what lets an event be joined to the process that
+/// holds the descriptor. Newer kernels keep it on the socket itself, as
+/// `sock.sk_ino`; 6.6 and older do not have that member, and `sock_i_ino` reads
+/// it where the kernel keeps it there: in the inode allocated beside the
+/// `struct socket` the `sock` points back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SocketInode {
+    /// `sock.sk_ino`, at this offset.
+    Member(i32),
+    /// `sock.sk_socket`, then the `vfs_inode` of the `socket_alloc` that
+    /// embeds that `socket`, then its `i_ino` -- what `SOCK_INODE` computes.
+    /// Zero once the socket is orphaned, which `sk_ino` is too: `sock_orphan`
+    /// clears both on the way into `tcp_close`.
+    ThroughSocket {
+        /// `sock.sk_socket`.
+        socket_at: i32,
+        /// From the `struct socket` to the inode number beside it.
+        ino_at: i32,
+    },
+}
+
+impl SocketInode {
+    /// The member where this kernel has it, the walk where it does not.
+    pub(super) fn locate(btf: &Btf) -> Result<Self, String> {
+        match btf.member_offset("sock", "sk_ino") {
+            Ok(at) => Ok(Self::Member(at)),
+            Err(_) => Self::through_socket(btf),
+        }
+    }
+
+    /// The walk through `sk_socket`, which every kernel this tool serves has.
+    ///
+    /// Every offset is a named member, as everywhere in this layer: the
+    /// `socket` inside `socket_alloc` is at zero on every kernel anyone has
+    /// seen, and it is subtracted anyway.
+    pub(super) fn through_socket(btf: &Btf) -> Result<Self, String> {
+        let socket_at = btf.member_offset("sock", "sk_socket")?;
+        let ino_at = btf.member_offset("socket_alloc", "vfs_inode")?
+            - btf.member_offset("socket_alloc", "socket")?
+            + btf.member_offset("inode", "i_ino")?;
+        Ok(Self::ThroughSocket { socket_at, ino_at })
+    }
+
+    /// Reads the inode of the `sock *` in `sock` into eight bytes of stack at
+    /// `into`, or zero when the socket has no `struct socket` any more.
+    ///
+    /// Clobbers r1 to r3 and the eight bytes at `scratch`. `skip` is a label
+    /// the walk places, so it must be unique within the program.
+    pub(super) fn read(
+        self,
+        program: &mut Program,
+        into: i16,
+        sock: u8,
+        scratch: i16,
+        skip: &'static str,
+    ) {
+        match self {
+            Self::Member(at) => read_field(program, into, 8, sock, at),
+            Self::ThroughSocket { socket_at, ino_at } => {
+                program.push(Insn::st_imm(insn::BPF_DW, insn::R10, into, 0));
+                read_pointer(program, scratch, 3, sock, socket_at);
+                program.jump_to(skip, Insn::jeq_imm(3, 0, 0));
+                read_field(program, into, 8, 3, ino_at);
+                program.label(skip);
+            }
+        }
+    }
+}
+
 /// Loads one program, turning a refusal on privilege grounds into the advice
 /// that names the two capabilities and how to grant them.
 pub(super) fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
@@ -112,6 +184,37 @@ pub(super) fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both ways to a socket's inode can be composed on the running kernel,
+    /// and the walk lands on the same `i_ino` `sock_i_ino` reads: the inode
+    /// that sits right after the `struct socket` in its allocation.
+    #[test]
+    fn the_walk_to_a_sockets_inode_is_composed_from_named_members() {
+        let Ok(btf) = super::super::kernel_btf() else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        let SocketInode::ThroughSocket { socket_at, ino_at } =
+            SocketInode::through_socket(btf).expect("every kernel has the walk")
+        else {
+            panic!("the walk is a walk");
+        };
+        assert!(
+            socket_at > 0,
+            "`sk_socket` is not the first member of `sock`"
+        );
+        let socket_bytes = btf
+            .member_offset("socket_alloc", "vfs_inode")
+            .expect("the inode is beside the socket");
+        assert!(
+            ino_at > socket_bytes,
+            "the inode number is inside the inode, past the socket: {ino_at} against {socket_bytes}"
+        );
+        match SocketInode::locate(btf).expect("one or the other") {
+            SocketInode::Member(at) => assert_eq!(Ok(at), btf.member_offset("sock", "sk_ino")),
+            walk => assert_eq!(walk, SocketInode::through_socket(btf).unwrap()),
+        }
+    }
 
     /// Every accepted prototype is accepted, and a kernel declaring something
     /// else is refused with both the shape it has and the shapes the program

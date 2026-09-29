@@ -34,6 +34,7 @@
 use std::path::PathBuf;
 
 use super::cgroup::Cgroup;
+use super::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -169,65 +170,26 @@ impl Pressure {
 
     /// The share of one tick that was spent stalled on memory.
     fn stall_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
-        let interval_ns = after.ts_ns.saturating_sub(before.ts_ns);
-        if interval_ns == 0 {
-            self.losses.undecoded += 1;
-            self.losses.note(format!(
-                "two reads of {} landed in the same nanosecond, so there is no window to divide \
-                 by",
-                self.path.display()
-            ));
-            return None;
-        }
-        let Some(some_ns) = stalled_ns(after.some.total_us, before.some.total_us) else {
-            self.losses.undecoded += 1;
-            self.losses.note(format!(
-                "the stall counter in {} went backwards, so this interval cannot be attributed",
-                self.path.display()
-            ));
-            return None;
+        let mut attrs = match after.stall_attrs(before) {
+            Ok(attrs) => attrs,
+            Err(unmeasured) => {
+                self.losses.undecoded += 1;
+                self.losses
+                    .note(unmeasured.explain(&self.path.display().to_string()));
+                return None;
+            }
         };
-
-        let mut attrs = vec![
-            Attr::float("stall_ratio", some_ns as f64 / interval_ns as f64),
-            Attr::uint("stalled_ns", some_ns),
-            Attr::uint("interval_ns", interval_ns),
-        ];
-        if let Some(full_ns) = after
-            .full
-            .as_ref()
-            .zip(before.full.as_ref())
-            .and_then(|(after, before)| stalled_ns(after.total_us, before.total_us))
-        {
-            attrs.push(Attr::float(
-                "full_stall_ratio",
-                full_ns as f64 / interval_ns as f64,
-            ));
-            attrs.push(Attr::uint("full_stalled_ns", full_ns));
-        }
-        attrs.extend(after.average_attrs());
         attrs.push(Attr::text("read_from", self.scope.read_from()));
-        attrs.push(Attr::text(
-            "basis",
-            "the stall counter's increase over this tick",
-        ));
-
+        attrs.push(Attr::text("basis", POLL_BASIS));
         Some(self.event(after.ts_ns, attrs, seq))
     }
 
     /// What a single read can say: the kernel's own averages, over a window
     /// this run did not choose.
     fn snapshot_event(&self, reading: &Reading, seq: u64) -> Event {
-        let mut attrs = reading.average_attrs();
-        attrs.push(Attr::uint("some_total_ns", reading.some.total_us * 1_000));
-        if let Some(full) = &reading.full {
-            attrs.push(Attr::uint("full_total_ns", full.total_us * 1_000));
-        }
+        let mut attrs = reading.snapshot_attrs();
         attrs.push(Attr::text("read_from", self.scope.read_from()));
-        attrs.push(Attr::text(
-            "basis",
-            "the kernel's decayed averages: a snapshot observes no window of its own",
-        ));
+        attrs.push(Attr::text("basis", SNAPSHOT_BASIS));
         self.event(reading.ts_ns, attrs, seq)
     }
 
@@ -275,86 +237,6 @@ impl Collector for Pressure {
     }
 }
 
-/// Microseconds of stall turned into nanoseconds, or `None` when the counter
-/// moved backwards.
-fn stalled_ns(after_us: u64, before_us: u64) -> Option<u64> {
-    after_us.checked_sub(before_us).map(|micros| micros * 1_000)
-}
-
-/// One read of a pressure file.
-#[derive(Debug, Clone, PartialEq)]
-struct Reading {
-    ts_ns: u64,
-    some: Psi,
-    /// Absent where the kernel writes no `full` line. Absent is not zero: zero
-    /// would claim nothing was ever fully stalled.
-    full: Option<Psi>,
-}
-
-/// One `some`/`full` line: three decayed averages and a stall counter.
-#[derive(Debug, Clone, PartialEq)]
-struct Psi {
-    avg10: f64,
-    avg60: f64,
-    avg300: f64,
-    total_us: u64,
-}
-
-impl Reading {
-    fn parse(text: &str, ts_ns: u64) -> Option<Self> {
-        let mut some = None;
-        let mut full = None;
-        for line in text.lines() {
-            let mut fields = line.split_whitespace();
-            let kind = fields.next()?;
-            let mut line = Psi {
-                avg10: 0.0,
-                avg60: 0.0,
-                avg300: 0.0,
-                total_us: 0,
-            };
-            for field in fields {
-                let (name, value) = field.split_once('=')?;
-                match name {
-                    "avg10" => line.avg10 = value.parse().ok()?,
-                    "avg60" => line.avg60 = value.parse().ok()?,
-                    "avg300" => line.avg300 = value.parse().ok()?,
-                    "total" => line.total_us = value.parse().ok()?,
-                    // A field this reader does not know is not a reason to
-                    // discard a line that holds what it came for.
-                    _ => {}
-                }
-            }
-            match kind {
-                "some" => some = Some(line),
-                "full" => full = Some(line),
-                _ => {}
-            }
-        }
-        Some(Self {
-            ts_ns,
-            some: some?,
-            full,
-        })
-    }
-
-    /// The kernel's averages as ratios rather than the per cent the file
-    /// writes, so every ratio this collector emits is on one scale.
-    fn average_attrs(&self) -> Vec<Attr> {
-        let mut attrs = vec![
-            Attr::float("some_avg10", self.some.avg10 / 100.0),
-            Attr::float("some_avg60", self.some.avg60 / 100.0),
-            Attr::float("some_avg300", self.some.avg300 / 100.0),
-        ];
-        if let Some(full) = &self.full {
-            attrs.push(Attr::float("full_avg10", full.avg10 / 100.0));
-            attrs.push(Attr::float("full_avg60", full.avg60 / 100.0));
-            attrs.push(Attr::float("full_avg300", full.avg300 / 100.0));
-        }
-        attrs
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,28 +273,6 @@ full avg10=0.98 avg60=1.87 avg300=2.76 total=903210
             ),
         )
         .expect("writing the fake pressure file");
-    }
-
-    #[test]
-    fn the_file_is_read_the_way_the_kernel_writes_it() {
-        let reading = Reading::parse(MEMORY, 7).expect("a `some` line");
-        assert_eq!(reading.ts_ns, 7);
-        assert_eq!(reading.some.total_us, 1_069_440);
-        assert_eq!(reading.full.as_ref().unwrap().avg300, 2.76);
-    }
-
-    /// `some` and `full` are not two precisions of one number, and a kernel
-    /// that writes only the first must not be reported as one where nothing
-    /// was ever fully stalled.
-    #[test]
-    fn a_missing_full_line_is_absent_rather_than_zero() {
-        let reading =
-            Reading::parse("some avg10=0.00 avg60=0.00 avg300=0.00 total=5\n", 0).expect("a line");
-        assert!(reading.full.is_none());
-        assert!(reading
-            .average_attrs()
-            .iter()
-            .all(|attr| !attr.name.starts_with("full")));
     }
 
     #[test]

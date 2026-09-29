@@ -19,15 +19,11 @@
 //! cookie rather than as cookie zero: the inode travels beside it and is set
 //! from the moment the socket exists.
 //!
-//! **What this backend cannot say, and why.** A connection's peer address and
-//! peer port live in `sock_common`'s anonymous unions -- `skc_daddr` and
-//! `skc_dport` are members of an anonymous struct inside an anonymous union --
-//! and `Btf::member_offset` resolves a member by name inside a *named*
-//! structure. Writing the offsets into this file instead is exactly the
-//! staleness the whole layer exists to prevent, so what this reports is the
-//! **local endpoint**: the address and port of the socket the event is about.
-//! The request for a walk through anonymous members is under `## Needs from
-//! another stream` in `docs/open-findings.md`.
+//! **Both ends.** The local address and port come from `inet_sock`; the peer's
+//! live in `sock_common`'s anonymous unions -- `skc_daddr` and `skc_dport` are
+//! members of an anonymous struct inside an anonymous union -- and
+//! `Btf::member_offset` walks into those, so they are the running kernel's
+//! offsets like every other one here rather than numbers written down.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -35,7 +31,7 @@ use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::net_program::{
-    count_drop, expect_signature, load, read_field, read_narrow, GET_CURRENT_COMM,
+    count_drop, expect_signature, load, read_field, read_narrow, SocketInode, GET_CURRENT_COMM,
 };
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
@@ -90,7 +86,7 @@ pub struct TcpLifetime {
     pub segs_out: u32,
     pub segs_in: u32,
     /// The local address, four bytes of it for `AF_INET` and sixteen for
-    /// `AF_INET6`. The peer's is not reachable; the module comment says why.
+    /// `AF_INET6`.
     saddr: [u8; 16],
     pub family: u32,
     /// The local port, in network order as the kernel holds it.
@@ -105,10 +101,28 @@ pub struct TcpLifetime {
     pub pid: u32,
     pub tid: u32,
     comm: [u8; 16],
+    /// The peer's address, in the same layout as `saddr`.
+    daddr: [u8; 16],
+    /// The peer's port, in network order as the kernel holds it.
+    dport: u32,
+    /// Written as zero, so that no byte of the record is left to the stack.
+    _pad: u32,
 }
 
 /// The size of the record the program writes.
-const RECORD_BYTES: usize = 104;
+const RECORD_BYTES: usize = 128;
+
+/// An address as `AF_INET` or `AF_INET6` lays it out in sixteen bytes.
+fn render_address(family: u32, bytes: &[u8; 16]) -> Option<String> {
+    match family {
+        2 => {
+            let octets: [u8; 4] = bytes[..4].try_into().expect("four bytes");
+            Some(std::net::Ipv4Addr::from(octets).to_string())
+        }
+        10 => Some(std::net::Ipv6Addr::from(*bytes).to_string()),
+        _ => None,
+    }
+}
 
 impl TcpLifetime {
     /// The local port, in host order.
@@ -119,14 +133,18 @@ impl TcpLifetime {
     /// The local address, as a string, or `None` for a family this does not
     /// render.
     pub fn local_address(&self) -> Option<String> {
-        match self.family {
-            2 => {
-                let octets: [u8; 4] = self.saddr[..4].try_into().expect("four bytes");
-                Some(std::net::Ipv4Addr::from(octets).to_string())
-            }
-            10 => Some(std::net::Ipv6Addr::from(self.saddr).to_string()),
-            _ => None,
-        }
+        render_address(self.family, &self.saddr)
+    }
+
+    /// The peer's port, in host order.
+    pub fn remote_port(&self) -> u16 {
+        u16::from_be(self.dport as u16)
+    }
+
+    /// The peer's address, as a string, or `None` for a family this does not
+    /// render.
+    pub fn remote_address(&self) -> Option<String> {
+        render_address(self.family, &self.daddr)
     }
 
     /// The name of the task that was current at the close.
@@ -150,6 +168,8 @@ impl TcpLifetime {
         saddr.copy_from_slice(&bytes[56..72]);
         let mut comm = [0u8; 16];
         comm.copy_from_slice(&bytes[88..104]);
+        let mut daddr = [0u8; 16];
+        daddr.copy_from_slice(&bytes[104..120]);
         Some(Self {
             ts_ns: long(0),
             duration_ns: long(8),
@@ -165,12 +185,15 @@ impl TcpLifetime {
             pid: word(80),
             tid: word(84),
             comm,
+            daddr,
+            dport: word(120),
+            _pad: 0,
         })
     }
 }
 
 /// Stack offsets, negative from the frame pointer, matching `TcpLifetime`.
-const EVENT: i16 = -104;
+const EVENT: i16 = -128;
 const TS: i16 = EVENT;
 const DURATION: i16 = EVENT + 8;
 const COOKIE: i16 = EVENT + 16;
@@ -185,6 +208,9 @@ const SPORT: i16 = EVENT + 76;
 const PID: i16 = EVENT + 80;
 const TID: i16 = EVENT + 84;
 const COMM: i16 = EVENT + 88;
+const DADDR: i16 = EVENT + 104;
+const DPORT: i16 = EVENT + 120;
+const PAD: i16 = EVENT + 124;
 /// The open map's key and value, and the drop counter's key, below the record.
 const OPEN_KEY: i16 = EVENT - 8;
 /// Three words: when the connection opened, and the two names the socket had
@@ -202,12 +228,20 @@ const OPEN_INODE: i16 = 16;
 const HELD_COOKIE: i16 = EVENT - 48;
 const HELD_INODE: i16 = EVENT - 56;
 const DROP_KEY: i16 = EVENT - 60;
+/// Eight bytes a pointer read lands in, below the drop counter's key.
+const SCRATCH: i16 = EVENT - 72;
 
 const OPEN_KEY_BYTES: usize = 8;
 const OPEN_VALUE_BYTES: usize = 24;
 
 /// Builds the program, or says why this kernel cannot be read.
-fn instructions(btf: &Btf, ring_fd: i32, open_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+fn instructions(
+    btf: &Btf,
+    inode: SocketInode,
+    ring_fd: i32,
+    open_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
     expect_signature(btf, "inet_sock_set_state", &[&SIGNATURE])?;
 
     // Every offset below is composed out of named members, which is what makes
@@ -229,7 +263,10 @@ fn instructions(btf: &Btf, ring_fd: i32, open_fd: i32, drops_fd: i32) -> Result<
     let cookie_at = common_at + btf.member_offset("sock_common", "skc_cookie")?;
     let family_at = common_at + btf.member_offset("sock_common", "skc_family")?;
     let v6_saddr_at = common_at + btf.member_offset("sock_common", "skc_v6_rcv_saddr")?;
-    let inode_at = btf.member_offset("sock", "sk_ino")?;
+    // The peer's two, inside `sock_common`'s anonymous unions.
+    let daddr_at = common_at + btf.member_offset("sock_common", "skc_daddr")?;
+    let v6_daddr_at = common_at + btf.member_offset("sock_common", "skc_v6_daddr")?;
+    let dport_at = common_at + btf.member_offset("sock_common", "skc_dport")?;
     let saddr_at = from_inet("inet_saddr")?;
     let sport_at = from_inet("inet_sport")?;
     let bytes_sent_at = from_tcp("bytes_sent")?;
@@ -255,7 +292,13 @@ fn instructions(btf: &Btf, ring_fd: i32, open_fd: i32, drops_fd: i32) -> Result<
     // The socket's two names, taken now because the close is too late for one
     // of them.
     read_field(&mut program, OPEN_VALUE + OPEN_COOKIE, 8, 7, cookie_at);
-    read_field(&mut program, OPEN_VALUE + OPEN_INODE, 8, 7, inode_at);
+    inode.read(
+        &mut program,
+        OPEN_VALUE + OPEN_INODE,
+        7,
+        SCRATCH,
+        "open_inode_read",
+    );
     program.extend(Insn::load_map_fd(1, open_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, OPEN_KEY as i32));
@@ -308,7 +351,7 @@ fn instructions(btf: &Btf, ring_fd: i32, open_fd: i32, drops_fd: i32) -> Result<
     program.push(Insn::ldx(BPF_DW, 1, R10, HELD_COOKIE));
     program.push(Insn::stx(BPF_DW, R10, COOKIE, 1));
     program.label("named");
-    read_field(&mut program, INODE, 8, 7, inode_at);
+    inode.read(&mut program, INODE, 7, SCRATCH, "close_inode_read");
     program.push(Insn::ldx(BPF_DW, 1, R10, INODE));
     program.jump_to("numbered", Insn::jne_imm(1, 0, 0));
     program.push(Insn::ldx(BPF_DW, 1, R10, HELD_INODE));
@@ -326,12 +369,18 @@ fn instructions(btf: &Btf, ring_fd: i32, open_fd: i32, drops_fd: i32) -> Result<
     // whatever the last connection left on the stack.
     program.push(Insn::st_imm(BPF_DW, R10, SADDR, 0));
     program.push(Insn::st_imm(BPF_DW, R10, SADDR + 8, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, DADDR, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, DADDR + 8, 0));
+    program.push(Insn::st_imm(BPF_W, R10, PAD, 0));
+    read_narrow(&mut program, DPORT, 2, 7, dport_at);
     program.push(Insn::ldx(BPF_W, 1, R10, FAMILY));
     program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
     read_field(&mut program, SADDR, 4, 7, saddr_at);
+    read_field(&mut program, DADDR, 4, 7, daddr_at);
     program.jump_to("addressed", Insn::ja());
     program.label("v6");
     read_field(&mut program, SADDR, 16, 7, v6_saddr_at);
+    read_field(&mut program, DADDR, 16, 7, v6_daddr_at);
     program.label("addressed");
 
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
@@ -386,6 +435,7 @@ impl TcpLifetimeProgram {
 
         let instructions = instructions(
             btf,
+            SocketInode::locate(btf)?,
             ring_map.as_raw_fd(),
             open.as_raw_fd(),
             drops.as_raw_fd(),
@@ -492,6 +542,9 @@ mod tests {
             (PID, offset_of!(TcpLifetime, pid), "pid"),
             (TID, offset_of!(TcpLifetime, tid), "tid"),
             (COMM, offset_of!(TcpLifetime, comm), "comm"),
+            (DADDR, offset_of!(TcpLifetime, daddr), "daddr"),
+            (DPORT, offset_of!(TcpLifetime, dport), "dport"),
+            (PAD, offset_of!(TcpLifetime, _pad), "_pad"),
         ] {
             assert_eq!(
                 (stack - EVENT) as usize,
@@ -519,6 +572,42 @@ mod tests {
         assert_eq!(closed.local_address().as_deref(), Some("127.0.0.1"));
     }
 
+    /// The peer's end decodes the way the local end does, from its own bytes.
+    #[test]
+    fn the_peers_end_comes_back_from_its_own_bytes() {
+        let mut bytes = [0u8; RECORD_BYTES];
+        bytes[72..76].copy_from_slice(&2u32.to_ne_bytes());
+        bytes[56..60].copy_from_slice(&[127, 0, 0, 1]);
+        bytes[104..108].copy_from_slice(&[10, 1, 2, 3]);
+        bytes[120..124].copy_from_slice(&u32::from(443u16.to_be()).to_ne_bytes());
+        let closed = TcpLifetime::from_bytes(&bytes).expect("a full record");
+        assert_eq!(closed.remote_address().as_deref(), Some("10.1.2.3"));
+        assert_eq!(closed.remote_port(), 443);
+        assert_eq!(closed.local_address().as_deref(), Some("127.0.0.1"));
+    }
+
+    /// The peer's members sit in anonymous unions of `sock_common`, and the
+    /// lookup that walks into them lands them where the kernel keeps them:
+    /// `skc_daddr` beside `skc_rcv_saddr` in the address pair, `skc_dport`
+    /// beside `skc_num` in the port pair, at the pairs' own offsets.
+    #[test]
+    fn the_peers_members_are_found_inside_the_anonymous_unions() {
+        let Some(btf) = kernel_btf() else { return };
+        let pair = btf
+            .member_offset("sock_common", "skc_addrpair")
+            .expect("the address pair is named");
+        assert_eq!(btf.member_offset("sock_common", "skc_daddr"), Ok(pair));
+        assert_eq!(
+            btf.member_offset("sock_common", "skc_rcv_saddr"),
+            Ok(pair + 4)
+        );
+        let ports = btf
+            .member_offset("sock_common", "skc_portpair")
+            .expect("the port pair is named");
+        assert_eq!(btf.member_offset("sock_common", "skc_dport"), Ok(ports));
+        assert_eq!(btf.member_offset("sock_common", "skc_num"), Ok(ports + 2));
+    }
+
     /// A v6 socket's address is sixteen bytes, and the v4 branch must not leave
     /// twelve of them holding the previous connection's.
     #[test]
@@ -535,7 +624,8 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(btf, 3, 4, 5).expect("a program");
+        let program =
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 5).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -553,7 +643,7 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(btf, 3, 4, 5)
+        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 5)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -576,7 +666,8 @@ mod tests {
     #[test]
     fn only_the_two_states_that_bound_a_connection_are_acted_on() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(btf, 3, 4, 5).expect("a program");
+        let program =
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 5).expect("a program");
         let compared: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x15 && insn.regs & 0xf == 1)
@@ -589,6 +680,34 @@ mod tests {
             compared.len(),
             3,
             "three comparisons against a constant and no more: {compared:?}"
+        );
+    }
+
+    /// 6.6 and older have no `sock.sk_ino`, and the program reads the inode
+    /// through `sk_socket` there. That shape is built and audited here, on a
+    /// kernel that would never choose it, because the kernels that do are
+    /// only reached by the portability matrix.
+    #[test]
+    fn the_program_builds_with_the_walk_to_the_inode_older_kernels_need() {
+        let Some(btf) = kernel_btf() else { return };
+        let walk = SocketInode::through_socket(btf).expect("every kernel has the walk");
+        let SocketInode::ThroughSocket { ino_at, .. } = walk else {
+            unreachable!()
+        };
+        let program = instructions(btf, walk, 3, 4, 5).expect("a program");
+        assert!(
+            program
+                .iter()
+                .any(|insn| insn.code == 0x07 && insn.regs & 0xf == 3 && insn.imm == ino_at),
+            "the inode number is read at its offset from the `struct socket`"
+        );
+        assert!(
+            !program.iter().any(
+                |insn| btf
+                    .member_offset("sock", "sk_ino")
+                    .is_ok_and(|at| insn.code == 0x07 && insn.imm == at && insn.regs & 0xf == 3)
+            ),
+            "and `sk_ino` is not read at all"
         );
     }
 }

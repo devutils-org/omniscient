@@ -87,10 +87,10 @@ pub struct Prepare {
 impl Prepare {
     pub fn new(scope: Scope, mode: Mode) -> Result<Self, String> {
         match mode {
-            Mode::Poll { .. } | Mode::Snapshot => Ok(Self { mode, scope }),
+            Mode::Poll { .. } | Mode::Snapshot | Mode::Count => Ok(Self { mode, scope }),
             other => Err(format!(
                 "swap traffic is a counter that is read, not a stream of events: `{}` cannot be \
-                 served from {}; poll it, or take one snapshot",
+                 served from {}; poll it, count it over the window, or take one snapshot",
                 other.kind(),
                 scope.read_from()
             )),
@@ -150,6 +150,9 @@ pub struct Swap {
     stock: Option<PathBuf>,
     page_size: u64,
     previous: Option<Counters>,
+    /// `count` only: the first read of the run, which the one event it
+    /// reports is measured from.
+    opened: Option<Counters>,
     losses: Losses,
 }
 
@@ -170,6 +173,7 @@ impl Swap {
             stock,
             page_size: page_size(),
             previous: None,
+            opened: None,
             losses: Losses::default(),
         }
     }
@@ -302,9 +306,49 @@ impl Collector for Swap {
         if self.mode == Mode::Snapshot {
             return Ok(vec![self.snapshot_event(&now, seq)]);
         }
+        if self.mode == Mode::Count {
+            // The window's two ends and nothing between: the first read opens
+            // it, every later one moves its close, and `stop` reports the one
+            // flow over all of it.
+            self.opened.get_or_insert(now);
+            self.previous = Some(now);
+            return Ok(Vec::new());
+        }
         let before = self.previous.replace(now);
         let event = before.and_then(|before| self.flow_event(&before, &now, seq));
         Ok(event.into_iter().collect())
+    }
+
+    /// Reads nothing: the runner's last round of `sample` calls lands when the
+    /// stop condition is met, so the window is already closed by the read it
+    /// took. A counted run reports its one event here, from the first read to
+    /// that last one, carrying the window it covers.
+    fn stop(&mut self) -> Vec<Event> {
+        if self.mode != Mode::Count {
+            return Vec::new();
+        }
+        let (Some(opened), Some(closed)) = (self.opened, self.previous) else {
+            return Vec::new();
+        };
+        if closed.ts_ns == opened.ts_ns {
+            self.losses.undecoded += 1;
+            self.losses.note(format!(
+                "{} was read once, so a counted run has no window to report a flow over",
+                self.path.display()
+            ));
+            return Vec::new();
+        }
+        self.flow_event(&opened, &closed, u64::MAX / 2)
+            .map(|mut event| {
+                for attr in &mut event.attrs {
+                    if attr.name == "basis" {
+                        *attr = Attr::text("basis", "the swap counters' increase over the window");
+                    }
+                }
+                event
+            })
+            .into_iter()
+            .collect()
     }
 
     fn losses(&self) -> Losses {
@@ -400,6 +444,35 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// A counted run is one event over the whole window: the first read to
+    /// the last, however many reads there were between, and it carries the
+    /// window's length -- which is what `rate` divides by.
+    #[test]
+    fn a_counted_run_reports_one_flow_over_its_whole_window() {
+        let path = scratch_file("count", 10, 20);
+        let mut collector = Swap::new(Mode::Count, Scope::Machine, path.clone(), Vec::new());
+        assert!(collector.sample(0).expect("the opening read").is_empty());
+        write_counters(&path, 11, 25);
+        assert!(collector.sample(1).expect("a read inside").is_empty());
+        write_counters(&path, 14, 70);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(collector.sample(2).expect("the closing read").is_empty());
+        let events = collector.stop();
+        assert_eq!(events.len(), 1, "one window, one event");
+
+        let page = page_size() as f64;
+        let event = &events[0];
+        assert_eq!(event.attr("in_bytes").unwrap().as_f64(), Some(4.0 * page));
+        assert_eq!(event.attr("out_bytes").unwrap().as_f64(), Some(50.0 * page));
+        assert!(event.attr("interval_ns").unwrap().as_f64().unwrap() >= 5e6);
+        assert!(event
+            .attr("basis")
+            .unwrap()
+            .to_string()
+            .contains("over the window"));
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn a_counter_that_goes_backwards_is_a_counted_loss() {
         let path = scratch_file("backwards", 100, 100);
@@ -481,13 +554,29 @@ mod tests {
             return;
         }
 
+        // The same file counted over the same window, as `--mode count` reads
+        // it: one event at the end, from the first read to the last.
+        let mut counted = Swap::new(
+            Mode::Count,
+            Scope::Cgroup,
+            scratch.path().join("memory.stat"),
+            Vec::new(),
+        );
+
         assert!(scratch.write("memory.max", &LIMIT.to_string()));
+        counted.sample(0).expect("the counted run's opening read");
         collector.sample(0).expect("the baseline read");
         let mut child = scratch.spawn_toucher(TOUCHED);
 
         // The swap-out happens while the child faults; the counter is read
         // after it has finished touching, so the window contains all of it.
         let events = collector.sample(1).expect("a second read");
+        counted.sample(1).expect("the counted run's closing read");
+        let counted_out = counted
+            .stop()
+            .first()
+            .and_then(|event| event.attr("out_bytes").and_then(|value| value.as_f64()))
+            .expect("a counted run reports its window");
         let event = events.first().expect("a second read produces a point");
         let out_bytes = event.attr("out_bytes").unwrap().as_f64().unwrap();
         let stock = event
@@ -509,6 +598,14 @@ mod tests {
         assert!(
             stock > 0.0,
             "memory.swap.current is zero although {out_bytes} bytes were paged out"
+        );
+        // The counted window contains the polled one -- it opened before and
+        // closed after -- so it holds at least as much, and the workload's
+        // floor with it.
+        assert!(
+            counted_out >= out_bytes && counted_out >= 0.5 * expected,
+            "the counted window paged out {counted_out} bytes, the poll inside it {out_bytes}, \
+             and the workload had to push out about {expected}"
         );
 
         let process_swap = rollup

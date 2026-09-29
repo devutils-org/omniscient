@@ -134,6 +134,14 @@ impl Submitter {
 /// an error, because a plausible latency is one nobody questions.
 const REQUEST_SIGNATURE: [&str; 1] = ["request *"];
 const COMPLETE_SIGNATURE: [&str; 3] = ["request *", "blk_status_t", "unsigned int"];
+/// `block_rq_complete` on 5.15: the same three slots, with the status already
+/// turned into a negative errno by `blk_status_to_errno`. The slot is read the
+/// same way and means something else, so the collector is told which it is
+/// ([`BlockProgram::status_is_errno`]) and names the attribute accordingly.
+const ERRNO_COMPLETE_SIGNATURE: [&str; 3] = ["request *", "int", "unsigned int"];
+/// Every shape of the completion the program reads, in the order the catalog's
+/// requirement lists them.
+const COMPLETE_SIGNATURES: [&[&str]; 2] = [&COMPLETE_SIGNATURE, &ERRNO_COMPLETE_SIGNATURE];
 
 /// How many requests may be in flight at once before the program stops being
 /// able to record new ones.
@@ -374,20 +382,24 @@ fn count(program: &mut Program, counters_fd: i32, key_at: i16, slot: u32, resume
     program.push(Insn::stx(BPF_DW, 0, 0, 1));
 }
 
-/// Checks a tracepoint's prototype against the shape a program assumes.
-fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
+/// Checks a tracepoint's prototype against the shapes a program assumes, and
+/// says which one this kernel declares.
+fn check_signature(btf: &Btf, tracepoint: &str, accepted: &[&[&str]]) -> Result<usize, String> {
     let signature = btf.tracepoint_signature(tracepoint)?;
-    if signature != expected {
-        return Err(format!(
-            "this kernel declares `{tracepoint}({})`, and this program is written for \
-             `{tracepoint}({})`: it reads the request out of a fixed slot, and against another \
-             prototype that slot holds something else -- which does not fail, it produces a \
-             number",
-            signature.join(", "),
-            expected.join(", "),
-        ));
+    if let Some(shape) = accepted.iter().position(|shape| signature == *shape) {
+        return Ok(shape);
     }
-    Ok(())
+    Err(format!(
+        "this kernel declares `{tracepoint}({})`, and this program is written for {}: it reads \
+         the request out of a fixed slot, and against another prototype that slot holds \
+         something else -- which does not fail, it produces a number",
+        signature.join(", "),
+        accepted
+            .iter()
+            .map(|shape| format!("`{tracepoint}({})`", shape.join(", ")))
+            .collect::<Vec<_>>()
+            .join(" or "),
+    ))
 }
 
 /// The program on the opening tracepoint: record when, and by whom.
@@ -408,7 +420,7 @@ fn open_instructions(
     let tracepoint = stage
         .opens_at()
         .expect("an open program is only built for a stage that has one");
-    check_signature(btf, tracepoint, &REQUEST_SIGNATURE)?;
+    check_signature(btf, tracepoint, &[&REQUEST_SIGNATURE])?;
 
     let mut program = Program::new();
     // r6 keeps the context and r7 the request; both survive helper calls,
@@ -490,12 +502,12 @@ fn close_instructions(
     storage_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
     let tracepoint = stage.closes_at();
-    let expected: &[&str] = if tracepoint == "block_rq_complete" {
-        &COMPLETE_SIGNATURE
+    let accepted: &[&[&str]] = if tracepoint == "block_rq_complete" {
+        &COMPLETE_SIGNATURES
     } else {
-        &REQUEST_SIGNATURE
+        &[&REQUEST_SIGNATURE]
     };
-    check_signature(btf, tracepoint, expected)?;
+    check_signature(btf, tracepoint, accepted)?;
 
     let sector = btf.member_offset("request", "__sector")?;
     let data_len = btf.member_offset("request", "__data_len")?;
@@ -570,8 +582,9 @@ fn close_instructions(
     program.label("no_device");
 
     if tracepoint == "block_rq_complete" {
-        // The second argument is `blk_status_t` and the third the bytes this
-        // completion accounted for.
+        // The second argument is `blk_status_t` -- or, on 5.15, the errno it
+        // was turned into -- and the third the bytes this completion
+        // accounted for.
         program.push(Insn::ldx(BPF_DW, 1, 6, 8));
         program.push(Insn::stx(BPF_W, R10, EV_STATUS, 1));
         program.push(Insn::ldx(BPF_DW, 1, 6, 16));
@@ -711,6 +724,10 @@ pub struct BlockProgram {
     /// kernel would not give them a task-storage map. The measurement is the
     /// same; only `req` is missing from every event, and the run says so.
     pub no_request_identity: Option<String>,
+    /// Whether this kernel's completion carries a negative errno rather than a
+    /// `blk_status_t`: 5.15's `block_rq_complete(request *, int, unsigned
+    /// int)`. Both are zero on success and neither is the other's number.
+    pub status_is_errno: bool,
 }
 
 impl BlockProgram {
@@ -760,6 +777,8 @@ impl BlockProgram {
             storage_fd,
         )?;
         let close_program = load(&close, "omn_blk_close")?;
+        let status_is_errno = stage.closes_at() == "block_rq_complete"
+            && check_signature(btf, "block_rq_complete", &COMPLETE_SIGNATURES)? == 1;
 
         // The opening program is attached first, and that order is not
         // arbitrary. An entry written with no closing program attached ages in
@@ -803,6 +822,7 @@ impl BlockProgram {
             close_program,
             _close_link: close_link,
             no_request_identity,
+            status_is_errno,
         })
     }
 
@@ -1191,18 +1211,48 @@ mod tests {
     #[test]
     fn the_running_kernel_declares_the_prototypes_these_programs_assume() {
         let Some(btf) = kernel_btf() else { return };
-        for (tracepoint, expected) in [
-            ("block_rq_insert", &REQUEST_SIGNATURE[..]),
-            ("block_rq_issue", &REQUEST_SIGNATURE[..]),
-            ("block_rq_complete", &COMPLETE_SIGNATURE[..]),
+        for (tracepoint, accepted) in [
+            ("block_rq_insert", &[&REQUEST_SIGNATURE[..]][..]),
+            ("block_rq_issue", &[&REQUEST_SIGNATURE[..]][..]),
+            ("block_rq_complete", &COMPLETE_SIGNATURES[..]),
         ] {
             let signature = btf
                 .tracepoint_signature(tracepoint)
                 .unwrap_or_else(|reason| panic!("{tracepoint}: {reason}"));
-            assert_eq!(
-                signature, expected,
-                "this kernel declares a different `{tracepoint}`"
+            assert!(
+                accepted.iter().any(|shape| signature == *shape),
+                "this kernel declares a different `{tracepoint}({})`",
+                signature.join(", ")
             );
+        }
+    }
+
+    /// The probe answers from the catalog's line and the attach from the
+    /// program: the completion's shapes are listed in both, in one order.
+    #[test]
+    fn the_catalog_lists_every_completion_shape_the_program_reads() {
+        crate::bpf::mem_program::assert_catalog_lists(
+            "io.latency",
+            "block_rq_complete",
+            &COMPLETE_SIGNATURES,
+        );
+        for source in ["io.latency", "io.queue"] {
+            crate::bpf::mem_program::assert_catalog_lists(
+                source,
+                "block_rq_issue",
+                &[&REQUEST_SIGNATURE],
+            );
+        }
+    }
+
+    /// The two completion shapes differ in what the status slot means and in
+    /// nothing the program reads: the request first, the byte count third.
+    #[test]
+    fn both_completion_shapes_keep_the_request_and_the_bytes_where_the_program_reads_them() {
+        for shape in COMPLETE_SIGNATURES {
+            assert_eq!(shape.len(), 3, "{shape:?}");
+            assert_eq!(shape[0], "request *", "{shape:?}");
+            assert_eq!(shape[2], "unsigned int", "{shape:?}");
         }
     }
 
@@ -1211,7 +1261,7 @@ mod tests {
     #[test]
     fn a_tracepoint_of_another_shape_is_refused_with_both_prototypes() {
         let Some(btf) = kernel_btf() else { return };
-        let error = check_signature(btf, "block_rq_complete", &REQUEST_SIGNATURE)
+        let error = check_signature(btf, "block_rq_complete", &[&REQUEST_SIGNATURE])
             .expect_err("the prototypes differ");
         assert!(error.contains("blk_status_t"), "{error}");
         assert!(error.contains("produces a number"), "{error}");

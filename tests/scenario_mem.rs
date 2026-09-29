@@ -569,25 +569,36 @@ fn every_emit_a_mem_source_declares_can_be_produced_by_a_mode_it_declares() {
          Each of these is a promise in catalog/mem.yaml that no build can keep: the source \
          declares the emit, and every mode it declares refuses it with exit {EXIT_REJECTED}.\n\
          D3 was the two this file used to record -- `mem.sharing` declaring `summary` over its \
-         only mode `sample`, and `mem.swap` declaring `rate` over `poll` and `snapshot`.\n\
-         Both are out of the catalog; what is left here is: {unreachable:?}\n"
+         only mode `sample`, and `mem.swap` declaring `rate` over `poll` and `snapshot`, which \
+         `count` now serves.\n\
+         What is left here is: {unreachable:?}\n"
     );
 
     // And the two that were removed are now refused by the source rather than
     // by the matrix, which is the message that names the line of YAML to look
     // at. Against the old catalog both of these said `mode ... cannot produce`.
-    for (source, mode, emit, target) in [
-        ("mem.swap", "poll@50ms", "rate", "--system"),
-        ("mem.sharing", "sample@997hz", "summary", "--system"),
-    ] {
-        let refused = run(&[source, target, "-m", mode, "-e", emit, "-d", "100ms"]);
-        assert_eq!(code(&refused), EXIT_REJECTED, "{}", stderr(&refused));
-        assert!(
-            stderr(&refused).contains(&format!("`{source}` cannot emit `{emit}`")),
-            "`{source}` should refuse `{emit}` as its own, not as the matrix's: {}",
-            stderr(&refused)
-        );
-    }
+    // `mem.swap` answers `rate` now, over the counted window its `count`
+    // mode reports (open-requests 2619), and a poll still cannot.
+    let counted = run(&[
+        "mem.swap", "--system", "-m", "count", "-e", "rate", "-d", "100ms",
+    ]);
+    assert_eq!(code(&counted), 0, "{}", stderr(&counted));
+    let refused = run(&[
+        "mem.sharing",
+        "--system",
+        "-m",
+        "sample@997hz",
+        "-e",
+        "summary",
+        "-d",
+        "100ms",
+    ]);
+    assert_eq!(code(&refused), EXIT_REJECTED, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("`mem.sharing` cannot emit `summary`"),
+        "`mem.sharing` should refuse `summary` as its own, not as the matrix's: {}",
+        stderr(&refused)
+    );
 }
 
 /// The shapes the family can produce, all at once, over one program.
@@ -1186,8 +1197,16 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     const TRIES: usize = 5;
     let mut pairs = Vec::new();
     let mut partial = None;
+    // `/proc/meminfo` read either side of every round, so that each pair is
+    // bracketed by the kernel's own level around that pair and nothing else:
+    // the endpoints of the whole session were narrower than the level's
+    // excursion inside it (the flaky tally's #21).
+    let mut brackets = Vec::new();
     for _ in 0..TRIES {
+        let level_before = anon_huge_kilobytes();
         let at_one_instant = run_written_session(BOTH_HUGE_PAGE_BACKENDS_AT_ONCE);
+        let level_after = anon_huge_kilobytes();
+        brackets.push(level_before.zip(level_after));
         assert!(
             at_one_instant.status.success(),
             "{}",
@@ -1231,10 +1250,10 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
         .map(|pair| pair[0].0.abs_diff(pair[1].0))
         .max()
         .unwrap_or(0);
-    let (theirs, ours, partial_then) = *pairs
-        .iter()
-        .min_by_key(|(theirs, ours, _)| theirs.abs_diff(*ours))
+    let closest = (0..pairs.len())
+        .min_by_key(|at| pairs[*at].0.abs_diff(pairs[*at].1))
         .expect("five runs");
+    let (theirs, ours, partial_then) = pairs[closest];
 
     if partial == 0 {
         eprintln!(
@@ -1266,7 +1285,7 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     // what moved in between is carried as the slack -- the pattern the PSI
     // pair above uses for the same reason.
     let page_size = sysfs["hpage_bytes"].as_u64().expect("the huge page size") / 1024;
-    let (Some(before), Some(after)) = (before, after) else {
+    let (Some((before, after)), Some(_), Some(_)) = (brackets[closest], before, after) else {
         eprintln!("skipped the kernel cross-check: this kernel publishes no AnonHugePages line");
         return;
     };
@@ -1275,13 +1294,16 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     if drift > 64 {
         eprintln!(
             "skipped the kernel cross-check: AnonHugePages moved from {before} to {after} huge \
-             pages while the session ran, which is wider than the 8 % this is looking for. The \
-             tool said {theirs} and {ours}"
+             pages across the one round being checked, which is wider than the 8 % this is \
+             looking for. The tool said {theirs} and {ours}"
         );
         return;
     }
     let slack = drift + 4;
-    let (low, high) = (before.min(after) - slack, before.max(after) + slack);
+    let (low, high) = (
+        before.min(after).saturating_sub(slack),
+        before.max(after) + slack,
+    );
     for (backend, reported) in [("fs:sys", theirs), ("fs:proc", ours)] {
         assert!(
             (low..=high).contains(&reported),
@@ -2486,14 +2508,40 @@ fn a_cgroup_squeezed_until_it_reclaims_reports_what_the_kernel_counted() {
          never `mm_vmscan_direct_reclaim_*`, so a build attached to one of the two pairs sees \
          exactly this"
     );
+    // Not every page the cgroup lost was reclaimed by a task inside it. A
+    // kernel worker that allocates on the cgroup's behalf -- a loop device's
+    // worker charges the backing file's pages to the cgroup that issued the
+    // I/O -- reclaims *for* the cgroup while being in the root one, and the
+    // event carries the reclaiming task's cgroup. Measured in the
+    // portability matrix's 6.6 guest, whose disk is a loop device on tmpfs:
+    // `dd` reclaimed 3838 pages, two `kworker/u8` 2081 and 1856, and the
+    // three add up to the cgroup's own `pgsteal_direct`, 7775, exactly. On a
+    // real disk the second part is empty.
+    let remote: u64 = raw_events(result)
+        .iter()
+        .filter(|attrs| {
+            attrs.get("cgroup_id").and_then(serde_json::Value::as_u64) != Some(cgroup_id)
+                && attrs.get("scope").and_then(serde_json::Value::as_str) == Some("cgroup")
+                && attrs
+                    .get("comm")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|comm| comm.starts_with("kworker"))
+        })
+        .filter_map(|attrs| {
+            attrs
+                .get("pages_reclaimed")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .sum();
     // The tool may see a little more than the workload's own reading: the
     // script reads memory.stat before it exits, and the run drains again after
-    // it has. It cannot see less: every page counted here was counted there.
+    // it has. It cannot see less: every page counted there was reclaimed by
+    // the cgroup's own tasks or by a worker charging to it.
     assert!(
-        reclaimed >= stolen,
+        reclaimed + remote >= stolen,
         "the kernel's own memory.stat counted {stolen} pages reclaimed and this run found \
-         {reclaimed}; a measurement short of the counter it is read against is a measurement \
-         that missed episodes"
+         {reclaimed} by the cgroup's tasks and {remote} by kernel workers; a measurement short \
+         of the counter it is read against is a measurement that missed episodes"
     );
     assert!(
         reclaimed <= stolen + stolen / 20 + 1024,
@@ -2794,9 +2842,23 @@ fn compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where
     // failed beside it. A workload that cannot create the property and can
     // break the neighbours is worse than no workload: what is left is a real
     // check on any machine that does compact, and an honest skip here.
+    //
+    // **Where this process may ask, it asks.** Writing `/proc/sys/vm/
+    // compact_memory` compacts every zone from the writing thread, through the
+    // same `compact_zone` that raises `mm_compaction_begin`, so as root -- a
+    // portability-matrix guest -- the property is created rather than hoped
+    // for, and `compact_migrate_scanned` says whether it happened. Without
+    // root the write is refused and the test is the passive watch above.
     let beside = run_example_beside("mem-compaction-watch.yml", || {
         before = counters.iter().map(|name| vmstat(name)).collect();
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        let asked = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/sys/vm/compact_memory")
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"1"))
+            .is_ok();
+        if !asked {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
         after = counters.iter().map(|name| vmstat(name)).collect();
     });
     let output = &beside.output;

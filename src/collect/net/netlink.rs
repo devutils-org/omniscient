@@ -57,19 +57,20 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Renders as a person writes it, which for an IPv4 socket means the four
-    /// bytes the kernel put at the front of a sixteen-byte field.
-    pub fn render(&self, family: u8) -> String {
+    /// The address alone, as a person writes it -- for an IPv4 socket the four
+    /// bytes the kernel put at the front of a sixteen-byte field -- and never
+    /// the port, which travels as its own field.
+    ///
+    /// It carried the port once (`127.0.0.1:40123`), and an equality against
+    /// an address could then never match: net 6 in `docs/scenarios/net.md`.
+    /// The rendering is the standard library's, so `net.tcp.rtt`'s `daddr` is
+    /// the same string `net.tcp.lifetime`'s is for the same peer.
+    pub fn address(&self, family: u8) -> String {
         if family == libc::AF_INET as u8 {
-            let a = &self.address;
-            format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], self.port)
+            let octets: [u8; 4] = self.address[..4].try_into().expect("four bytes");
+            std::net::Ipv4Addr::from(octets).to_string()
         } else {
-            let groups: Vec<String> = self
-                .address
-                .chunks(2)
-                .map(|pair| format!("{:x}", u16::from_be_bytes([pair[0], pair[1]])))
-                .collect();
-            format!("[{}]:{}", groups.join(":"), self.port)
+            std::net::Ipv6Addr::from(self.address).to_string()
         }
     }
 }
@@ -348,6 +349,6 @@ mod tests {
             address: [127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8080,
         };
-        assert_eq!(endpoint.render(libc::AF_INET as u8), "127.0.0.1:8080");
+        assert_eq!(endpoint.address(libc::AF_INET as u8), "127.0.0.1");
     }
 }
