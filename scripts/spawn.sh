@@ -121,6 +121,23 @@ minutes; five agents running it by reflex is what makes a wave slow.
     source makes the next test build relink omn without its capabilities,
     and every eBPF test then fails as unprivileged.
 
+HOW YOU READ -- also a rule. Everything you read stays in your context until
+you finish, and a context that fills up is compacted mid-task, losing detail.
+
+  - Locate before reading: \`grep -n\` for the symbol, then read only the line
+    range you need. Never read a large file whole (src/collect/mod.rs,
+    src/emit.rs, src/join.rs, docs/open-findings.md, docs/open-requests.md).
+  - Filter test and build output: \`... 2>&1 | grep -E '^test result|FAILED|panicked'\`
+    or \`| tail -40\`. Read a full failure only for the test you are fixing.
+  - Read the background documents (CLAUDE.md, STATE.md, BRIEF.md,
+    docs/contributing.md) once; after that, grep them for the passage you need.
+
+THE PORTABILITY MATRIX runs alone, at the end of the wave, by the coordinator:
+its guests load the machine, and load is what makes the other streams'
+measuring scenarios fail. Do not start \`scripts/matrix.sh\` during the wave.
+List in your handoff each cell your change should move (kernel, config, which
+source goes from what to what), with the exact command.
+
 You are done when your own tests pass, one \`make check\` is clean apart from the
 index rows you listed and known flakes you named, and everything you were given
 either works with its scenarios or is explained in your handoff.
