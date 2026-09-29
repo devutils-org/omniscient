@@ -223,8 +223,13 @@ an interval is
 .BI \-e ", " \-\-emit " EMIT"
 Comma-separated.
 .BR hist " takes " :log2 " or " :linear: \fIWIDTH\fR,
-and
-.BR topk " takes " : \fIN\fR.
+a width above zero, and
+.BR topk " takes " : \fIN\fR,
+or
+.BI topk: N @ ATTR
+to rank the distinct values of one attribute rather than the series:
+.B topk:5@reason
+ranks the reasons packets were dropped. A counted window ranks too.
 Asking for two emits costs one collection.
 .TP
 .BI \-k ", " \-\-keys " KEY"
@@ -268,6 +273,18 @@ backend in the chain, or, where there is none, stops. Either way the reason is
 in
 .I stopped_because
 and on standard error. Every run reports what it cost, budget or no budget.
+.IP
+What is weighed is this tool's CPU and what the collector spent inside the
+target, where the tool's own account cannot see it: an eBPF program's run time
+as the kernel counts it, the preload shim's time as the shim publishes it. The
+kernel counts a program's run time only while
+.B kernel.bpf_stats_enabled
+is 1 or a process holding
+.B CAP_SYS_ADMIN
+asks it to; otherwise that part is
+.IR unknown ,
+said so, and never taken as zero, and a ceiling over it is reported as not
+checked whole rather than held.
 .TP
 .BI \-\-window " START..STOP"
 When, inside the run, the request is attached and detached, relative to the
@@ -732,10 +749,14 @@ its window, why the run ended, and what was read after the last document and
 is in none.
 .TP
 .I <out>/cost.json
-What the measurement itself cost: the CPU time this tool burned, the CPU time
-the target burned over the same window and where that number was read, what
-weighing the run cost, and the band the backend declared set beside the
-percentage it actually came to.
+What the measurement itself cost: the CPU time this tool burned, what the
+collector spent inside the target
+.RI ( in_target_cpu_ns ,
+null when unknown, with
+.I in_target_from
+saying why), the CPU time the target burned over the same window and where
+that number was read, what weighing the run cost, and the band the backend
+declared set beside the percentage it actually came to.
 .SH EXAMPLES
 .TP
 Resident memory of a program, as it runs:

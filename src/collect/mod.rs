@@ -307,6 +307,29 @@ pub struct Collection {
     /// attached for two seconds of a ten-second run is a rate over two.
     #[serde(default)]
     pub window: Watched,
+    /// The part of `losses` each ring lost, for a collector that reads one
+    /// ring per key; empty when the losses belong to the whole alike.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_ring: Vec<RingLoss>,
+    /// What the collector states about the run that is not a concession:
+    /// [`Collector::facts`]. `notes` is what it had to give up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<String>,
+}
+
+/// What one ring of a collection lost: the key the ring belongs to -- the
+/// thread a per-thread profile opened it for -- and its share of the
+/// collection's losses.
+///
+/// A series keyed by that key is short by this and by nothing else, which is
+/// the point: a profile keyed by `task` whose one thread overflowed its ring
+/// used to mark every thread's series with the run's whole drop count, and a
+/// reader could not tell which thread was missing samples (`STATE.md`, the
+/// note on `cross_compute`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingLoss {
+    pub key: crate::event::KeyValue,
+    pub losses: Losses,
 }
 
 /// The span one collection watched, on `CLOCK_MONOTONIC`.
@@ -609,7 +632,9 @@ pub struct Overhead {
     /// What measuring all of this cost: the `getrusage` calls, the target's
     /// procfs reads, the clock reads that share time out per collector, and --
     /// when a ceiling was exceeded -- moving the collection onto a cheaper
-    /// backend. Enforcing a budget is part of the price of having one.
+    /// backend. Enforcing a budget is part of the price of having one. Cpu
+    /// time of the thread that did it, not wall time: a weighing preempted on a
+    /// loaded machine did not cost the wait.
     ///
     /// Reported rather than subtracted. A measurement that hides its own price
     /// is exactly the thing this field exists to stop, and a budget check that
@@ -617,19 +642,454 @@ pub struct Overhead {
     pub measurement_ns: u64,
     /// How many times the cost was read during the run.
     pub measurements: u64,
+    /// Cpu time the collector's own code spent inside the target's context,
+    /// where the tool's own account cannot see it: an eBPF program run on
+    /// every syscall the target makes, the preload shim's record on every
+    /// allocation (finding 47). `Some(0)` for a collector that reads from
+    /// outside the target; `None` when it runs inside and what it spent there
+    /// is not knowable on this run, which `in_target_from` says why --
+    /// **unknown, never zero**.
+    #[serde(default)]
+    pub in_target_cpu_ns: Option<u64>,
+    /// How many times that code ran inside the target, when it is counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_target_runs: Option<u64>,
+    /// Where `in_target_cpu_ns` came from, or why there is none.
+    #[serde(default)]
+    pub in_target_from: String,
 }
 
 impl Overhead {
-    /// The overhead as a percentage of the observed workload, when there is a
-    /// workload to be a percentage of.
+    /// What this collection cost, as a percentage of the work the target did
+    /// of its own: the tool's cpu and what the collector spent inside the
+    /// target, over the target's cpu less that second part -- which the
+    /// target's account already holds, since it ran in the target's context.
+    /// That is the dilation a program that times itself would see.
+    ///
+    /// Where the in-target part is unknown this is the tool's share alone, and
+    /// [`Overhead::in_target_known`] is what says it is incomplete. Where the
+    /// in-target part is larger than everything the target spent -- a program
+    /// that ran for every task on the machine and filtered most of them out --
+    /// the target's whole account is the denominator, which never understates.
     pub fn percent(&self) -> Option<f64> {
-        match self.observed_cpu_ns {
-            Some(observed) if observed > 0 => {
-                Some(self.attributed_cpu_ns as f64 * 100.0 / observed as f64)
-            }
+        let observed = self.observed_cpu_ns.filter(|observed| *observed > 0)?;
+        let inside = self.in_target_cpu_ns.unwrap_or(0);
+        let work = match observed.checked_sub(inside) {
+            Some(work) if work > 0 => work,
+            _ => observed,
+        };
+        Some((self.attributed_cpu_ns + inside) as f64 * 100.0 / work as f64)
+    }
+
+    /// The tool's own share of the target's cpu, as every run before finding
+    /// 47 reported it.
+    pub fn own_percent(&self) -> Option<f64> {
+        let observed = self.observed_cpu_ns.filter(|observed| *observed > 0)?;
+        Some(self.attributed_cpu_ns as f64 * 100.0 / observed as f64)
+    }
+
+    /// Whether what the collector spent inside the target is part of
+    /// [`Overhead::percent`].
+    pub fn in_target_known(&self) -> bool {
+        self.in_target_cpu_ns.is_some()
+    }
+}
+
+/// What a collector's own code has spent inside its target so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Inside {
+    pub cpu_ns: u64,
+    pub runs: u64,
+}
+
+/// A collector's account of what it spends inside its target, for a
+/// collector whose code runs there and that keeps one: the preload shim
+/// publishes its own time in the ring it shares with `omn`.
+///
+/// Cumulative since the target started: the runner differences it.
+pub trait InsideAccount {
+    /// What has been spent so far, or why it cannot be said.
+    fn read(&self) -> Result<Inside, String>;
+    /// Where the number comes from, for the record beside it.
+    fn describes(&self) -> String;
+}
+
+/// `BPF_ENABLE_STATS` and `BPF_STATS_RUN_TIME`, from `include/uapi/linux/bpf.h`.
+///
+/// Here rather than in `src/bpf/syscall.rs`, which is where a `bpf()` command
+/// belongs: that module is private to `src/bpf/`, and the runner has no way
+/// to reach it without a re-export in `src/bpf/mod.rs` (filed).
+const BPF_ENABLE_STATS: libc::c_long = 32;
+const BPF_STATS_RUN_TIME: u32 = 0;
+
+/// Whether the kernel is counting eBPF programs' run time for this run.
+///
+/// It counts only while `bpf_stats_enabled_key` is on -- the
+/// `kernel.bpf_stats_enabled` sysctl, or a descriptor from `BPF_ENABLE_STATS`
+/// held open -- because timing each run costs two clock reads. Off by default,
+/// and turning it on needs `CAP_SYS_ADMIN`, which the `CAP_BPF` this tool is
+/// granted does not include.
+enum ProgramStats {
+    /// Nothing in the run loads a program.
+    NotAsked,
+    /// Counting, with the descriptor that keeps it on when this run turned it
+    /// on, and without one when the sysctl already was.
+    On(Option<std::os::fd::OwnedFd>),
+    /// Not counting, with why and what would change it.
+    Off(String),
+}
+
+fn bpf_stats_sysctl() -> Option<bool> {
+    std::fs::read_to_string("/proc/sys/kernel/bpf_stats_enabled")
+        .ok()
+        .map(|text| text.trim() != "0")
+}
+
+impl ProgramStats {
+    /// Whether a program loaded now is timed, and why not when it is not.
+    fn counting(&self) -> Result<(), String> {
+        match self {
+            ProgramStats::On(_) => Ok(()),
+            ProgramStats::Off(why) => Err(why.clone()),
+            ProgramStats::NotAsked => Err(
+                "this run did not ask the kernel to time eBPF programs, because none of its \
+                 requests started on a backend that loads one"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    /// Whether the sysctl this run relied on was turned off under it.
+    fn lost(&self) -> Option<String> {
+        match self {
+            ProgramStats::On(None) if bpf_stats_sysctl() == Some(false) => Some(
+                "`kernel.bpf_stats_enabled` was turned off during the run, so the kernel stopped \
+                 timing the programs part way through and their run time is incomplete"
+                    .to_owned(),
+            ),
             _ => None,
         }
     }
+
+    fn for_run(resolved: &[ResolvedRequest]) -> ProgramStats {
+        if !resolved.iter().any(|one| loads_programs(&one.backend.id)) {
+            return ProgramStats::NotAsked;
+        }
+        if bpf_stats_sysctl() == Some(true) {
+            return ProgramStats::On(None);
+        }
+        let mut kind = BPF_STATS_RUN_TIME;
+        // SAFETY: the attribute is the one `u32` the command reads.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                BPF_ENABLE_STATS,
+                &mut kind as *mut u32 as *mut libc::c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+        if fd >= 0 {
+            use std::os::fd::FromRawFd;
+            // SAFETY: a descriptor the kernel just returned to this process.
+            return ProgramStats::On(Some(unsafe {
+                std::os::fd::OwnedFd::from_raw_fd(fd as RawFd)
+            }));
+        }
+        let error = std::io::Error::last_os_error();
+        let sysctl = match bpf_stats_sysctl() {
+            Some(_) => "`kernel.bpf_stats_enabled` is 0",
+            None => "this kernel has no `kernel.bpf_stats_enabled`",
+        };
+        let errno = match error.raw_os_error() {
+            Some(libc::EPERM) => "EPERM: it needs CAP_SYS_ADMIN".to_owned(),
+            _ => error.to_string(),
+        };
+        ProgramStats::Off(format!(
+            "the kernel is not timing eBPF programs on this run: {sysctl}, and BPF_ENABLE_STATS \
+             was refused ({errno}); `sysctl kernel.bpf_stats_enabled=1` before the run makes \
+             what the programs spend inside the target measurable"
+        ))
+    }
+}
+
+/// Whether a backend works by loading eBPF programs, whose run time is then
+/// the kernel's to report.
+fn loads_programs(backend: &str) -> bool {
+    backend == "bpf" || backend.starts_with("bpf:")
+}
+
+/// The eBPF programs this process holds a descriptor to, by descriptor, with
+/// their id and what the kernel has counted of each.
+///
+/// Read from `/proc/self/fdinfo`, which prints `prog_id`, `run_time_ns` and
+/// `run_cnt` for a program and no run time for a link or a map -- so whoever
+/// loaded the program does not matter: the fentry trampolines load their own,
+/// outside `src/bpf/syscall.rs`, and are found the same way.
+fn programs_held() -> BTreeMap<RawFd, (u32, Inside)> {
+    let Ok(entries) = std::fs::read_dir("/proc/self/fdinfo") else {
+        return BTreeMap::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<RawFd>().ok())
+        .filter_map(|fd| program_run(fd).map(|run| (fd, run)))
+        .collect()
+}
+
+/// What the kernel has counted of the program behind `fd`, with its id; `None`
+/// when the descriptor is closed or is not a program.
+fn program_run(fd: RawFd) -> Option<(u32, Inside)> {
+    let text = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).ok()?;
+    parse_program_fdinfo(&text)
+}
+
+fn parse_program_fdinfo(text: &str) -> Option<(u32, Inside)> {
+    let field = |name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().parse::<u64>().ok())?
+        })
+    };
+    // A link prints the id of the program it holds; only a program prints its
+    // own run time.
+    let cpu_ns = field("run_time_ns")?;
+    Some((
+        field("prog_id")? as u32,
+        Inside {
+            cpu_ns,
+            runs: field("run_cnt").unwrap_or(0),
+        },
+    ))
+}
+
+/// The programs that appeared among this process's descriptors since
+/// `before`: what one collector's prepare or attach loaded.
+fn programs_since(before: Option<&BTreeMap<RawFd, (u32, Inside)>>) -> Vec<(RawFd, u32)> {
+    let Some(before) = before else {
+        return Vec::new();
+    };
+    let known: std::collections::BTreeSet<u32> = before.values().map(|(id, _)| *id).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    programs_held()
+        .into_iter()
+        .filter(|(_, (id, _))| !known.contains(id) && seen.insert(*id))
+        .map(|(fd, (id, _))| (fd, id))
+        .collect()
+}
+
+/// Where a collection's in-target cost is read from.
+enum InsideMeter {
+    /// Nothing of the collector runs in the target's context.
+    Outside(&'static str),
+    /// It does, and what it spends there cannot be known on this run.
+    Unknown(String),
+    /// The eBPF programs it loaded, read through the kernel's own account.
+    Programs {
+        held: Vec<(RawFd, u32)>,
+        /// The last reading of each, kept for when its descriptor has closed.
+        last: Vec<Inside>,
+        /// What the backends before a degradation spent.
+        sunk: Inside,
+    },
+    /// An account the collector keeps itself.
+    Reported {
+        account: Box<dyn InsideAccount>,
+        last: Inside,
+        sunk: Inside,
+    },
+}
+
+const OUTSIDE: &str = "nothing of this collector runs in the target's context: it reads the \
+                       kernel's account, or a file, from its own";
+
+const PMU_INSIDE: &str = "a perf event's counter is saved and restored on every context switch \
+                          of the target, and a sampling event interrupts it, in the target's own \
+                          context; the kernel does not account that time apart from the target's";
+
+impl InsideMeter {
+    /// How a collection's in-target cost is read, decided by its mechanism:
+    /// the account the collector keeps, the programs it loaded, or what its
+    /// backend is known to do.
+    fn of(
+        backend: &str,
+        account: Option<Box<dyn InsideAccount>>,
+        programs: Vec<(RawFd, u32)>,
+        stats: &Result<(), String>,
+    ) -> InsideMeter {
+        if let Some(account) = account {
+            return InsideMeter::Reported {
+                account,
+                last: Inside::default(),
+                sunk: Inside::default(),
+            };
+        }
+        if loads_programs(backend) {
+            return match stats {
+                Err(why) => InsideMeter::Unknown(why.clone()),
+                Ok(()) if programs.is_empty() => InsideMeter::Unknown(
+                    "this collector's eBPF programs were not among the descriptors this process \
+                     holds, so the kernel's account of them cannot be read"
+                        .to_owned(),
+                ),
+                _ => InsideMeter::Programs {
+                    last: vec![Inside::default(); programs.len()],
+                    held: programs,
+                    sunk: Inside::default(),
+                },
+            };
+        }
+        let unknown = |why: &str| InsideMeter::Unknown(why.to_owned());
+        match backend.split(':').next().unwrap_or(backend) {
+            "pmu" => unknown(PMU_INSIDE),
+            "preload" => unknown(
+                "a preloaded library runs inside the target, and this one keeps no account of \
+                 its own time",
+            ),
+            "af_packet" => unknown(
+                "the kernel copies each packet into the capture ring in whichever context \
+                 received or sent it, which for a local program is often its own",
+            ),
+            "so_timestamping" => unknown(
+                "a timestamping socket option makes the kernel stamp the target's own packets \
+                 in its context",
+            ),
+            "vendor" if backend != "vendor:nvml" => unknown(
+                "a vendor profiler injects into or replays the target, and says nothing of what \
+                 that cost it",
+            ),
+            _ if backend == "fs:proc:clear_refs" || backend == "fs:sys:page_idle" => unknown(
+                "clearing the pages' referenced bits makes the target take the faults or the \
+                 TLB refills that set them again, in its own context",
+            ),
+            _ => InsideMeter::Outside(OUTSIDE),
+        }
+    }
+
+    /// What has been spent inside the target so far, or why it cannot be
+    /// said. Keeps each reading, so a program whose descriptor has since
+    /// closed still counts what it last reported.
+    fn read(&mut self) -> Result<Inside, String> {
+        match self {
+            InsideMeter::Outside(_) => Ok(Inside::default()),
+            InsideMeter::Unknown(why) => Err(why.clone()),
+            InsideMeter::Programs { held, last, sunk } => {
+                for ((fd, id), last) in held.iter().zip(last.iter_mut()) {
+                    if let Some((now_id, run)) = program_run(*fd) {
+                        if now_id == *id {
+                            *last = run;
+                        }
+                    }
+                }
+                Ok(last.iter().fold(*sunk, |total, one| Inside {
+                    cpu_ns: total.cpu_ns + one.cpu_ns,
+                    runs: total.runs + one.runs,
+                }))
+            }
+            InsideMeter::Reported {
+                account,
+                last,
+                sunk,
+            } => {
+                *last = account.read()?;
+                Ok(Inside {
+                    cpu_ns: sunk.cpu_ns + last.cpu_ns,
+                    runs: sunk.runs + last.runs,
+                })
+            }
+        }
+    }
+
+    /// The same reading, without keeping it.
+    fn peek(&self) -> Result<Inside, String> {
+        match self {
+            InsideMeter::Programs { held, last, sunk } => {
+                Ok(held
+                    .iter()
+                    .zip(last)
+                    .fold(*sunk, |total, ((fd, id), last)| {
+                        let now = program_run(*fd)
+                            .filter(|(now_id, _)| now_id == id)
+                            .map_or(*last, |(_, run)| run);
+                        Inside {
+                            cpu_ns: total.cpu_ns + now.cpu_ns,
+                            runs: total.runs + now.runs,
+                        }
+                    }))
+            }
+            InsideMeter::Reported { account, sunk, .. } => account.read().map(|now| Inside {
+                cpu_ns: sunk.cpu_ns + now.cpu_ns,
+                runs: sunk.runs + now.runs,
+            }),
+            InsideMeter::Outside(_) => Ok(Inside::default()),
+            InsideMeter::Unknown(why) => Err(why.clone()),
+        }
+    }
+
+    /// Where the number comes from.
+    fn describes(&self) -> String {
+        match self {
+            InsideMeter::Outside(why) => (*why).to_owned(),
+            InsideMeter::Unknown(why) => why.clone(),
+            InsideMeter::Programs { held, .. } => format!(
+                "the kernel's own run time of the {} eBPF program(s) this collector loaded \
+                 (bpf_prog_info run_time_ns and run_cnt, through /proc/self/fdinfo). A lower \
+                 bound of what the target paid: the kernel times the program and not the \
+                 tracepoint, trampoline or probe that calls it, nor the slower path an attached \
+                 syscall tracepoint puts every task on. And it counts every run, including the \
+                 ones for other tasks that the program filtered out",
+                held.len()
+            ),
+            InsideMeter::Reported { account, .. } => account.describes(),
+        }
+    }
+
+    /// The meter of the backend a budget moved this collection onto, carrying
+    /// what the one before it spent.
+    fn moved_onto(&mut self, mut next: InsideMeter) {
+        let spent = self.read();
+        let before = match self {
+            InsideMeter::Outside(_) => Ok(Inside::default()),
+            _ => spent,
+        };
+        match (&mut next, before) {
+            (InsideMeter::Programs { sunk, .. } | InsideMeter::Reported { sunk, .. }, Ok(v)) => {
+                *sunk = v;
+            }
+            (InsideMeter::Outside(_), Ok(v)) if v.cpu_ns > 0 || v.runs > 0 => {
+                next = InsideMeter::Unknown(
+                    "the backend this collection started on spent time inside the target that \
+                     the one it moved onto has no account to add to"
+                        .to_owned(),
+                );
+            }
+            (_, Err(why)) => {
+                next = InsideMeter::Unknown(format!(
+                    "before a budget moved this collection, its first backend's cost inside the \
+                     target was unknown: {why}"
+                ));
+            }
+            _ => {}
+        }
+        *self = next;
+    }
+}
+
+/// The cpu time the calling thread has been charged, in nanoseconds.
+///
+/// What weighing a run costs is timed on this clock rather than the monotonic
+/// one: the price of a `getrusage` and a procfs read is the cpu they take, and
+/// a weighing that is preempted half way through did not cost the time it
+/// spent waiting for a core -- which on a loaded machine is what the monotonic
+/// clock mostly measured (the flaky tally, #12: 12.3 ms of "weighing" in a
+/// 605 ms run).
+fn thread_cpu_ns() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` writes a `timespec` this function owns.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+    (time.tv_sec as u64) * 1_000_000_000 + (time.tv_nsec as u64)
 }
 
 /// User plus system cpu time of one `getrusage` account, in nanoseconds.
@@ -667,6 +1127,23 @@ fn task_cpu_ns(pid: i32) -> Option<u64> {
     let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
     let ticks: u64 = fields
         .get(11..15)?
+        .iter()
+        .map(|field| field.parse::<u64>().unwrap_or(0))
+        .sum();
+    Some(ticks * 1_000_000_000 / ticks_per_second())
+}
+
+/// The cpu time one thread has been charged, its own and no other's.
+///
+/// Not `/proc/<tid>/stat`: a thread id looked up at the top of `/proc` names
+/// its whole thread group, and that file sums every thread of the process and
+/// the children it reaped. The thread's own account is under its group's
+/// `task/` directory, and a thread has no children of its own to add.
+fn thread_cpu_of(tid: i32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{tid}/task/{tid}/stat")).ok()?;
+    let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
+    let ticks: u64 = fields
+        .get(11..13)?
         .iter()
         .map(|field| field.parse::<u64>().unwrap_or(0))
         .sum();
@@ -745,8 +1222,10 @@ enum Meter {
     /// kernel has rolled its usage into this process's children account, which
     /// is the same number `time` prints and is read from there instead.
     Launched(i32),
-    /// Processes or threads the request named.
+    /// Processes the request named.
     Tasks(Vec<i32>),
+    /// Threads the request named, each weighed on its own account.
+    Threads(Vec<i32>),
     /// The machine, or the cpus the request named.
     Cpus(Option<Vec<u32>>),
     Cgroup(std::path::PathBuf),
@@ -761,7 +1240,8 @@ impl Meter {
                 Some(pid) => Meter::Launched(pid),
                 None => Meter::Nothing("the program was never launched"),
             },
-            Target::Pid(pids) | Target::Tid(pids) => Meter::Tasks(pids.clone()),
+            Target::Pid(pids) => Meter::Tasks(pids.clone()),
+            Target::Tid(tids) => Meter::Threads(tids.clone()),
             Target::Cgroup(path) => Meter::Cgroup(cgroup_directory(path)),
             Target::Cpu(set) => Meter::Cpus(Some(set.cpus().to_vec())),
             Target::System => Meter::Cpus(None),
@@ -794,6 +1274,10 @@ impl Meter {
                 }
                 any.then_some(total)
             }
+            Meter::Threads(tids) => {
+                let times: Vec<u64> = tids.iter().filter_map(|tid| thread_cpu_of(*tid)).collect();
+                (!times.is_empty()).then(|| times.iter().sum())
+            }
             Meter::Cpus(set) => cpus_busy_ns(set.as_deref()),
             Meter::Cgroup(directory) => cgroup_cpu_ns(directory),
             Meter::Nothing(_) => None,
@@ -811,6 +1295,13 @@ impl Meter {
                 "the cpu time of {} (/proc/<pid>/stat, children included)",
                 pids.iter()
                     .map(|pid| pid.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Meter::Threads(tids) => format!(
+                "the cpu time of thread {} (/proc/<tid>/task/<tid>/stat, its own)",
+                tids.iter()
+                    .map(|tid| tid.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1118,6 +1609,25 @@ pub trait Collector {
         Losses::default()
     }
 
+    /// The same losses, per ring, for a collector that reads one ring per
+    /// key: a profile that follows each thread opens a ring for each, and each
+    /// ring's drops are that thread's (`docs/fixes/silent.md`). Every entry is
+    /// a part of [`Collector::losses`], not an addition to it; what no ring
+    /// owns stays in the whole alone. Empty for a collector with one ring, or
+    /// none, whose losses belong to every series alike.
+    fn losses_by_ring(&self) -> Vec<RingLoss> {
+        Vec::new()
+    }
+
+    /// What the collector states about its run that is not something it gave
+    /// up -- the kernel's own count of what it bucketed, another party's
+    /// account of the same thing -- which reaches the results as `notes`
+    /// rather than as `degraded:`. [`Collector::notes`] stays the channel for
+    /// concessions.
+    fn facts(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The frames behind each stack identity this collector interned.
     ///
     /// Empty for everything that does not capture stacks, which is most of
@@ -1237,6 +1747,17 @@ pub trait Prepared {
     /// right. The runner asks this before a late attach and, when the target
     /// has threads the collector would not see, does not attach it.
     fn follows_only_later_threads(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The account this collector will keep of what it spends inside its
+    /// target, when it keeps one. Asked before the attach, which consumes the
+    /// prepared collector, and after the launch is shared.
+    ///
+    /// A collector that keeps none is weighed by its mechanism: the programs
+    /// it loaded when it loads eBPF, and otherwise what its backend is known
+    /// to do (`InsideMeter::of`).
+    fn inside(&self) -> Option<Box<dyn InsideAccount>> {
         None
     }
 
@@ -1464,7 +1985,24 @@ fn run_core(
     // session with five unbuilt sources used to report one of them and stop,
     // so fixing it took five runs; the validator has always answered for every
     // rejection at once, and this is the same courtesy one layer down.
-    let mut prepared: Vec<Box<dyn Prepared>> = all_or_nothing(resolved.iter().map(prepare))?;
+    //
+    // The kernel is asked to time eBPF programs first, so that it counts every
+    // run of the ones about to be loaded; and each request's programs are the
+    // ones that appear among this process's descriptors while it is prepared
+    // and attached, which is what its cost inside the target is read from.
+    let program_stats = ProgramStats::for_run(resolved);
+    let mut programs: Vec<Vec<(RawFd, u32)>> = vec![Vec::new(); resolved.len()];
+    let mut prepared: Vec<Box<dyn Prepared>> =
+        all_or_nothing(resolved.iter().enumerate().map(|(index, resolved)| {
+            let before = loads_programs(&resolved.backend.id).then(programs_held);
+            Target::narrowed_to_one();
+            let prepared = prepare(resolved);
+            programs[index].extend(programs_since(before.as_ref()));
+            match Target::narrowed_to_one() {
+                Some(named) => Err(one_process_of_several(resolved, named)),
+                None => prepared,
+            }
+        }))?;
 
     // A window this collector or this mode cannot honour is refused while
     // nothing is running, and before the environment is merged: a collector
@@ -1496,6 +2034,10 @@ fn run_core(
         })
         .collect();
     share_launches(&mut prepared, &launching);
+    // Asked once the launch is shared: the account a shared channel keeps is
+    // the one the program was given.
+    let mut accounts: Vec<Option<Box<dyn InsideAccount>>> =
+        prepared.iter().map(|prepared| prepared.inside()).collect();
     let environment = merge_environments(
         prepared
             .iter()
@@ -1619,19 +2161,28 @@ fn run_core(
             continue;
         }
         let source_id = resolved[index].request.source.to_string();
+        let before = loads_programs(&resolved[index].backend.id).then(programs_held);
+        Target::narrowed_to_one();
         // These two happen against a real target -- a counter that would not
         // open, a file that is not readable, a process that has gone -- so an
         // unmarked refusal here is a failure of this run. A collector refusing
         // a shape it has not implemented says so with `not_built`.
-        let mut collector = prepared
-            .attach(&bound[index])
-            .map_err(|reason| CollectError::start(&source_id, reason, Whose::Machine))?;
+        let attached = prepared.attach(&bound[index]);
+        if let Some(named) = Target::narrowed_to_one() {
+            if let Some(child) = child.as_mut() {
+                child.terminate();
+            }
+            return Err(one_process_of_several(&resolved[index], named));
+        }
+        let mut collector =
+            attached.map_err(|reason| CollectError::start(&source_id, reason, Whose::Machine))?;
         if let Err(reason) = collector.start() {
             if let Some(child) = child.as_mut() {
                 child.terminate();
             }
             return Err(CollectError::start(source_id, reason, Whose::Machine));
         }
+        programs[index].extend(programs_since(before.as_ref()));
         slots.push(Slot::Attached(collector));
     }
 
@@ -1676,7 +2227,18 @@ fn run_core(
         .iter()
         .map(|resolved| Meter::of(&resolved.request.target, launched_pid))
         .collect();
-    let mut spending = Spending::open(meters, bound, resolved.to_vec(), cheaper);
+    let counting = program_stats.counting();
+    let inside = resolved
+        .iter()
+        .zip(accounts.iter_mut())
+        .zip(programs)
+        .map(|((resolved, account), programs)| {
+            InsideMeter::of(&resolved.backend.id, account.take(), programs, &counting)
+        })
+        .collect();
+    let mut spending = Spending::open(meters, inside, bound, resolved.to_vec(), cheaper);
+    spending.program_stats = counting;
+    spending.deadline_ns = deadline_ns;
     spending.sheddable = plans.iter().map(|plan| plan.held).collect();
     let started_ns = spending.opened_ns;
     let wake = child.as_ref().and_then(|child| child.exit_fd());
@@ -1795,7 +2357,9 @@ fn run_core(
     let lifetime = child.as_ref().and_then(|child| child.lifetime());
     // Read once the child has been reaped: `getrusage(RUSAGE_CHILDREN)` is what
     // `time` prints, and it only prints it after the wait.
+    spending.stats_lost = program_stats.lost();
     let overheads = spending.close();
+    drop(program_stats);
     let recorded = recording.map(|recording| {
         recording.recorded(&stopped_because, closed_ns, budget_interval_ns.unwrap_or(0))
     });
@@ -1803,18 +2367,24 @@ fn run_core(
         .iter()
         .enumerate()
         .map(|(index, slot)| {
-            let (value_attr, stacks, collector_notes) = match slot {
+            let (value_attr, stacks, collector_notes, by_ring, facts) = match slot {
                 Slot::Attached(collector) => (
                     collector.value_attr(),
                     collector.stacks(),
                     collector.notes(),
+                    collector.losses_by_ring(),
+                    collector.facts(),
                 ),
                 Slot::Detached(record) => (
                     record.value_attr,
                     record.stacks.clone(),
                     record.notes.clone(),
+                    record.by_ring.clone(),
+                    record.facts.clone(),
                 ),
-                Slot::Waiting(_) | Slot::Missed => ("", BTreeMap::new(), Vec::new()),
+                Slot::Waiting(_) | Slot::Missed => {
+                    ("", BTreeMap::new(), Vec::new(), Vec::new(), Vec::new())
+                }
             };
             let mut collected = std::mem::take(&mut events[index]);
             collected.sort_by_key(|event| event.ts_ns);
@@ -1845,10 +2415,35 @@ fn run_core(
                 overhead: overheads[index].clone(),
                 lifetime,
                 window: watched[index],
+                by_ring,
+                facts,
             }
         })
         .collect();
     Ok((collections, recorded))
+}
+
+/// The refusal for a collector that observes one process of the several its
+/// request named: it would measure the first and drop the rest without a
+/// word, which is a number that looks like the whole.
+fn one_process_of_several(resolved: &ResolvedRequest, named: usize) -> CollectError {
+    let target = &resolved.request.target;
+    let first = target
+        .first_pid()
+        .map_or_else(String::new, |pid| format!(" -- only {pid} --"));
+    // The call above narrowed the target again; it is this refusal's own.
+    Target::narrowed_to_one();
+    CollectError::UnsupportedTarget {
+        source_id: resolved.request.source.to_string(),
+        target: format!(
+            "{} (`{}` through `{}` observes one process, and would have measured one \
+             of the {named} this request named{first} and dropped the others without saying so; \
+             ask for each in a request of its own)",
+            target.kind(),
+            resolved.request.source,
+            resolved.backend.id,
+        ),
+    }
 }
 
 /// Whether a request's window is one its collector and its mode can honour.
@@ -2028,6 +2623,8 @@ struct Detached {
     value_attr: &'static str,
     stacks: BTreeMap<u64, Vec<String>>,
     notes: Vec<String>,
+    by_ring: Vec<RingLoss>,
+    facts: Vec<String>,
 }
 
 /// When one request is attached and detached, in nanoseconds after the run
@@ -2128,6 +2725,8 @@ struct Since {
     /// of the same span as the cpu time it divides.
     total_inside_ns: u64,
     wall_opened_ns: u64,
+    /// What the collector had spent inside the target by then.
+    in_target: Inside,
 }
 
 /// The cost half of a run: what it is spending, what it was allowed to spend,
@@ -2136,6 +2735,16 @@ struct Spending<'a> {
     /// What each collection's overhead is a percentage of: its own target's
     /// cpu account, since a core beside a program is weighed against the core.
     meters: Vec<Meter>,
+    /// Where each collection's cost inside its target is read, which the
+    /// tool's own cpu does not include (finding 47).
+    inside: Vec<InsideMeter>,
+    /// What each had spent inside its target when the accounting opened.
+    inside_opened: Vec<Inside>,
+    /// Set at the close when the kernel stopped timing programs part way
+    /// through a run that did not hold them on itself.
+    stats_lost: Option<String>,
+    /// Whether a program loaded during the run is timed by the kernel.
+    program_stats: Result<(), String>,
     /// The target each collector is bound to, which a replacement has to be
     /// attached to as well.
     bound: Vec<Target>,
@@ -2181,6 +2790,11 @@ struct Spending<'a> {
     /// Where each account stood at every check within the rolling span, the
     /// oldest first: the baseline a rolling weighing is against.
     snapshots: Vec<std::collections::VecDeque<Since>>,
+    /// When the run's duration elapses, which the drive loop wakes for: a
+    /// counted request is read at a slow cadence, and a run that slept to its
+    /// next read ended there instead of at its duration -- `-m count -d 600ms`
+    /// observed a second (`open-requests 2947`, `6181`).
+    deadline_ns: Option<u64>,
 }
 
 impl<'a> Spending<'a> {
@@ -2189,11 +2803,20 @@ impl<'a> Spending<'a> {
     /// startup, not the price of the measurement.
     fn open(
         meters: Vec<Meter>,
+        mut inside: Vec<InsideMeter>,
         bound: Vec<Target>,
         serving: Vec<ResolvedRequest>,
         cheaper: &'a mut dyn Cheaper,
     ) -> Self {
         let count = serving.len();
+        inside.resize_with(count, || {
+            InsideMeter::Unknown("this run was not weighed".to_owned())
+        });
+        let inside_opened: Vec<Inside> = inside
+            .iter_mut()
+            .map(|meter| meter.read().unwrap_or_default())
+            .collect();
+        let inside_since = inside_opened.clone();
         let serving_ids = serving
             .iter()
             .map(|resolved| vec![resolved.backend.id.clone()])
@@ -2210,6 +2833,10 @@ impl<'a> Spending<'a> {
             .collect();
         Self {
             meters,
+            inside,
+            inside_opened,
+            stats_lost: None,
+            program_stats: Err("this run was not weighed".to_owned()),
             bound,
             serving,
             ceilings,
@@ -2222,6 +2849,7 @@ impl<'a> Spending<'a> {
                     inside_ns: 0,
                     total_inside_ns: 0,
                     wall_opened_ns: opened_ns,
+                    in_target: inside_since.get(index).copied().unwrap_or_default(),
                 })
                 .collect(),
             opened_ns,
@@ -2238,6 +2866,7 @@ impl<'a> Spending<'a> {
             over: Vec::new(),
             rolling_ns: None,
             snapshots: vec![std::collections::VecDeque::new(); count],
+            deadline_ns: None,
         }
     }
 
@@ -2284,6 +2913,7 @@ impl<'a> Spending<'a> {
         since: Since,
         self_cpu_ns: u64,
         observed_cpu_ns: Option<u64>,
+        in_target: &Result<Inside, String>,
         now_ns: u64,
     ) -> Overhead {
         let collector_cpu_ns = self_cpu_ns.saturating_sub(since.self_cpu_ns);
@@ -2304,6 +2934,23 @@ impl<'a> Spending<'a> {
                 (collector_cpu_ns as u128 * mine as u128 / total as u128) as u64
             }
         };
+        let in_target = match (&self.stats_lost, in_target) {
+            (Some(lost), Ok(_)) if matches!(self.inside[index], InsideMeter::Programs { .. }) => {
+                Err(lost.clone())
+            }
+            (_, reading) => reading.clone(),
+        };
+        let (in_target_cpu_ns, in_target_runs, in_target_from) = match in_target {
+            Ok(now) => {
+                let counted = !matches!(self.inside[index], InsideMeter::Outside(_));
+                (
+                    Some(now.cpu_ns.saturating_sub(since.in_target.cpu_ns)),
+                    counted.then(|| now.runs.saturating_sub(since.in_target.runs)),
+                    self.inside[index].describes(),
+                )
+            }
+            Err(why) => (None, None, why),
+        };
         Overhead {
             collector_cpu_ns,
             attributed_cpu_ns,
@@ -2313,6 +2960,9 @@ impl<'a> Spending<'a> {
             wall_ns: now_ns.saturating_sub(since.wall_opened_ns),
             measurement_ns: self.measurement_ns,
             measurements: self.measurements,
+            in_target_cpu_ns,
+            in_target_runs,
+            in_target_from,
         }
     }
 
@@ -2331,6 +2981,7 @@ impl<'a> Spending<'a> {
         if entered_ns.saturating_sub(self.last_check_ns) < BUDGET_CHECK_INTERVAL.as_nanos() as u64 {
             return None;
         }
+        let entered_cpu_ns = thread_cpu_ns();
         self.last_check_ns = entered_ns;
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         self.measurements += 1;
@@ -2357,6 +3008,7 @@ impl<'a> Spending<'a> {
                 continue;
             }
             let observed_cpu_ns = self.meters[index].read();
+            let in_target = self.inside[index].read();
             let baseline = self.baseline(
                 index,
                 Since {
@@ -2365,9 +3017,17 @@ impl<'a> Spending<'a> {
                     inside_ns: self.inside_ns[index],
                     total_inside_ns: self.inside_ns.iter().sum(),
                     wall_opened_ns: entered_ns,
+                    in_target: in_target.clone().unwrap_or_default(),
                 },
             );
-            let spent = self.spent(index, baseline, self_cpu_ns, observed_cpu_ns, entered_ns);
+            let spent = self.spent(
+                index,
+                baseline,
+                self_cpu_ns,
+                observed_cpu_ns,
+                &in_target,
+                entered_ns,
+            );
             // No denominator yet is not "within budget": it is "not knowable
             // yet", and a target that has burned no cpu at all has nothing for
             // an overhead to be a percentage of.
@@ -2379,6 +3039,13 @@ impl<'a> Spending<'a> {
             }
             let source = self.serving[index].request.source.to_string();
             let was = self.serving[index].backend.id.clone();
+            // What the collector spent inside the target is in the percentage,
+            // and the reason says how much of it, since the tool's own cpu
+            // alone would read as far under the ceiling.
+            let inside = match spent.in_target_cpu_ns {
+                Some(ns) if ns > 0 => format!(" ({} of it inside the target)", span_ns(ns)),
+                _ => String::new(),
+            };
             // A collection a budget has already moved once is weighed on the
             // window since it moved, so the reason has to say which window it
             // is talking about or it reads as disagreeing with the run's own
@@ -2401,23 +3068,24 @@ impl<'a> Spending<'a> {
                 Some(next) => match self.degrade(index, next, slots, events, losses) {
                     Ok(onto) => self.notes[index].push(format!(
                         "over budget at {:.2} ms into the run: `{source}` through `{was}` spent \
-                         {percent:.2} % of the target's cpu time against a ceiling of {ceiling} %, \
-                         so it was moved onto `{onto}` for the rest of it",
+                         {percent:.2} % of the target's cpu time{inside} against a ceiling of \
+                         {ceiling} %, so it was moved onto `{onto}` for the rest of it",
                         entered_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
                     )),
                     Err(why) => {
                         stop = Some(format!(
-                            "`{source}` spent {percent:.2} % of the target's cpu time{window} \
-                             against a ceiling of {ceiling} %, and the cheaper backend could \
-                             not be started: {why}"
+                            "`{source}` spent {percent:.2} % of the target's cpu time{inside}\
+                             {window} against a ceiling of {ceiling} %, and the cheaper backend \
+                             could not be started: {why}"
                         ));
                         break;
                     }
                 },
                 None => {
                     let reason = format!(
-                        "`{source}` spent {percent:.2} % of the target's cpu time{window} against \
-                         a ceiling of {ceiling} %, and nothing cheaper than `{was}` is available"
+                        "`{source}` spent {percent:.2} % of the target's cpu time{inside}{window} \
+                         against a ceiling of {ceiling} %, and nothing cheaper than `{was}` is \
+                         available"
                     );
                     if self.sheddable[index] {
                         self.over.push((index, reason));
@@ -2429,7 +3097,7 @@ impl<'a> Spending<'a> {
             }
         }
 
-        self.measurement_ns += monotonic_ns().saturating_sub(entered_ns);
+        self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
         stop
     }
 
@@ -2451,9 +3119,18 @@ impl<'a> Spending<'a> {
         let Slot::Attached(current) = &mut slots[index] else {
             return Err("it is not attached".to_owned());
         };
+        let before = loads_programs(&onto).then(programs_held);
         let prepared = prepare(&next).map_err(|error| error.to_string())?;
+        let account = prepared.inside();
+        Target::narrowed_to_one();
         let mut replacement = prepared.attach(&self.bound[index])?;
+        if let Some(named) = Target::narrowed_to_one() {
+            return Err(one_process_of_several(&next, named).to_string());
+        }
         replacement.start()?;
+        let programs = programs_since(before.as_ref());
+        let meter = InsideMeter::of(&onto, account, programs, &self.program_stats);
+        self.inside[index].moved_onto(meter);
 
         let mut trailing = current.stop();
         events[index].append(&mut trailing);
@@ -2475,13 +3152,14 @@ impl<'a> Spending<'a> {
     }
 
     /// Where one collection's account stands at this instant.
-    fn now(&self, index: usize) -> Since {
+    fn now(&mut self, index: usize) -> Since {
         Since {
             self_cpu_ns: rusage_ns(libc::RUSAGE_SELF),
             observed_cpu_ns: self.meters[index].read().unwrap_or(0),
             inside_ns: self.inside_ns[index],
             total_inside_ns: self.inside_ns.iter().sum(),
             wall_opened_ns: monotonic_ns(),
+            in_target: self.inside[index].read().unwrap_or_default(),
         }
     }
 
@@ -2492,24 +3170,31 @@ impl<'a> Spending<'a> {
     /// program into the kernel while the target runs -- is in its account
     /// rather than in nobody's.
     fn attaching(&mut self, index: usize) {
-        let entered_ns = monotonic_ns();
+        let entered_cpu_ns = thread_cpu_ns();
         let since = self.now(index);
         self.since[index] = since;
         self.window_since[index] = Some(since);
         self.measurements += 1;
-        self.measurement_ns += monotonic_ns().saturating_sub(entered_ns);
+        self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
     }
 
     /// Closes the account of a collection detached mid-run.
     fn detached(&mut self, index: usize, closed_ns: u64) {
-        let entered_ns = monotonic_ns();
+        let entered_cpu_ns = thread_cpu_ns();
         let since = self.window_since[index].unwrap_or(self.whole_run(index));
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         let observed_cpu_ns = self.meters[index].read();
+        let in_target = self.inside[index].read();
         self.measurements += 1;
-        self.measurement_ns += monotonic_ns().saturating_sub(entered_ns);
-        self.frozen[index] =
-            Some(self.spent(index, since, self_cpu_ns, observed_cpu_ns, closed_ns));
+        self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
+        self.frozen[index] = Some(self.spent(
+            index,
+            since,
+            self_cpu_ns,
+            observed_cpu_ns,
+            &in_target,
+            closed_ns,
+        ));
     }
 
     /// The account of a collection that ran for the whole of the run.
@@ -2520,6 +3205,7 @@ impl<'a> Spending<'a> {
             inside_ns: 0,
             total_inside_ns: 0,
             wall_opened_ns: self.opened_ns,
+            in_target: self.inside_opened.get(index).copied().unwrap_or_default(),
         }
     }
 
@@ -2527,12 +3213,14 @@ impl<'a> Spending<'a> {
     /// collections. This is the whole window, not the part since a degradation:
     /// what the run cost is what it cost.
     fn close(&mut self) -> Vec<Overhead> {
-        let entered_ns = monotonic_ns();
+        let entered_cpu_ns = thread_cpu_ns();
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         let observed_cpu_ns: Vec<Option<u64>> = self.meters.iter().map(Meter::read).collect();
+        let in_target: Vec<Result<Inside, String>> =
+            self.inside.iter_mut().map(InsideMeter::read).collect();
         self.measurements += 1;
         let closed_ns = monotonic_ns();
-        self.measurement_ns += closed_ns.saturating_sub(entered_ns);
+        self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
 
         (0..self.ceilings.len())
             .map(|index| {
@@ -2540,7 +3228,14 @@ impl<'a> Spending<'a> {
                     return frozen.clone();
                 }
                 let since = self.window_since[index].unwrap_or(self.whole_run(index));
-                self.spent(index, since, self_cpu_ns, observed_cpu_ns[index], closed_ns)
+                self.spent(
+                    index,
+                    since,
+                    self_cpu_ns,
+                    observed_cpu_ns[index],
+                    &in_target[index],
+                    closed_ns,
+                )
             })
             .collect()
     }
@@ -2555,11 +3250,14 @@ impl Spending<'static> {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Box::leak(Box::new(StopWhenOverBudget)),
         );
         spending.meters = (0..count)
             .map(|_| Meter::Nothing("this run was not weighed"))
             .collect();
+        spending.inside = (0..count).map(|_| InsideMeter::Outside(OUTSIDE)).collect();
+        spending.inside_opened = vec![Inside::default(); count];
         spending.bound = vec![Target::System; count];
         spending.ceilings = vec![None; count];
         spending.inside_ns = vec![0; count];
@@ -2589,13 +3287,17 @@ impl Spending<'static> {
     /// test `cargo test` runs in parallel beside it -- twenty-odd threads in a
     /// full run, which put a collector spinning a whole thread under a 50 %
     /// ceiling and made the escalation's shedding test fail in every full run
-    /// and pass alone. `/proc/<tid>/stat` is the thread's own account.
+    /// and pass alone. `/proc/<tid>/task/<tid>/stat` is the thread's own
+    /// account; `/proc/<tid>/stat` is its whole process and every child it
+    /// reaped, which let the forked children of other tests keep this run
+    /// under its ceiling.
     fn weighed_against_this_thread(serving: Vec<ResolvedRequest>) -> Spending<'static> {
         // SAFETY: `gettid` takes no argument and cannot fail.
         let thread = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
         let count = serving.len();
         Spending::open(
-            (0..count).map(|_| Meter::Tasks(vec![thread])).collect(),
+            (0..count).map(|_| Meter::Threads(vec![thread])).collect(),
+            (0..count).map(|_| InsideMeter::Outside(OUTSIDE)).collect(),
             vec![Target::Pid(vec![thread]); count],
             serving,
             Box::leak(Box::new(StopWhenOverBudget)),
@@ -2607,6 +3309,7 @@ impl Spending<'static> {
         let count = serving.len();
         Spending::open(
             (0..count).map(|_| Meter::Tasks(vec![own])).collect(),
+            (0..count).map(|_| InsideMeter::Outside(OUTSIDE)).collect(),
             vec![Target::Pid(vec![own]); count],
             serving,
             Box::leak(Box::new(StopWhenOverBudget)),
@@ -2947,11 +3650,18 @@ fn drive(
                 Slot::Detached(_) | Slot::Missed => None,
             })
             .min();
-        // A document due to be cut is a moment to wake for too.
-        let next_due_ns = match recording.as_deref().and_then(Recording::due_ns) {
-            Some(cut_ns) => Some(next_due_ns.map_or(cut_ns, |next| next.min(cut_ns))),
-            None => next_due_ns,
-        };
+        // A document due to be cut is a moment to wake for too, and so is
+        // the end of the run's duration: the run ends there, not at whichever
+        // read would have come after it.
+        let next_due_ns = [
+            recording.as_deref().and_then(Recording::due_ns),
+            spending.deadline_ns,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(next_due_ns, |next, at| {
+            Some(next.map_or(at, |next| next.min(at)))
+        });
         if let Some(next_due_ns) = next_due_ns {
             let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
             if remaining_ns > 0 {
@@ -3104,13 +3814,33 @@ impl Ledger {
         };
         spending.attaching(index);
         let entered_ns = monotonic_ns();
-        let attached = match blind_to_running_threads(prepared.as_ref(), &spending.bound[index]) {
+        let backend = spending.serving[index].backend.id.clone();
+        let before = loads_programs(&backend).then(programs_held);
+        let account = prepared.inside();
+        Target::narrowed_to_one();
+        let mut attached = match blind_to_running_threads(prepared.as_ref(), &spending.bound[index])
+        {
             Some(reason) => Err(reason),
             None => prepared
                 .attach(&spending.bound[index])
                 .and_then(|mut collector| collector.start().map(|()| collector)),
         };
+        if let Some(named) = Target::narrowed_to_one() {
+            attached = Err(one_process_of_several(&spending.serving[index], named).to_string());
+        }
         let attached_ns = monotonic_ns();
+        if attached.is_ok() {
+            // The programs it loaded are its own from their first run: what
+            // they have spent is all this collection's, from zero.
+            let programs = programs_since(before.as_ref());
+            spending.inside[index] =
+                InsideMeter::of(&backend, account, programs, &spending.program_stats);
+            let opened = spending.inside[index].read().unwrap_or_default();
+            spending.since[index].in_target = opened;
+            if let Some(since) = spending.window_since[index].as_mut() {
+                since.in_target = opened;
+            }
+        }
         let took_ns = attached_ns.saturating_sub(entered_ns);
         if self.attributing {
             spending.inside_ns[index] += took_ns;
@@ -3183,7 +3913,12 @@ impl Ledger {
             value_attr: collector.value_attr(),
             stacks: collector.stacks(),
             notes: collector.notes(),
+            by_ring: collector.losses_by_ring(),
+            facts: collector.facts(),
         };
+        // The last look at what it spent inside the target, while its
+        // programs are still open to be read.
+        let _ = spending.inside[index].read();
         drop(collector);
         let closed_ns = monotonic_ns();
         self.watched[index].closed_ns = closed_ns;
@@ -3512,23 +4247,30 @@ impl<'r, 'a> Recording<'r, 'a> {
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         let mut collections = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            let (value_attr, stacks, collector_notes, collector_losses) = match slot {
-                Slot::Attached(collector) => (
-                    collector.value_attr(),
-                    collector.stacks(),
-                    collector.notes(),
-                    collector.losses(),
-                ),
-                Slot::Detached(record) => (
-                    record.value_attr,
-                    record.stacks.clone(),
-                    record.notes.clone(),
-                    Losses::default(),
-                ),
-                Slot::Waiting(_) | Slot::Missed => {
-                    ("", BTreeMap::new(), Vec::new(), Losses::default())
-                }
-            };
+            let (value_attr, stacks, collector_notes, collector_losses, collector_facts) =
+                match slot {
+                    Slot::Attached(collector) => (
+                        collector.value_attr(),
+                        collector.stacks(),
+                        collector.notes(),
+                        collector.losses(),
+                        collector.facts(),
+                    ),
+                    Slot::Detached(record) => (
+                        record.value_attr,
+                        record.stacks.clone(),
+                        record.notes.clone(),
+                        Losses::default(),
+                        record.facts.clone(),
+                    ),
+                    Slot::Waiting(_) | Slot::Missed => (
+                        "",
+                        BTreeMap::new(),
+                        Vec::new(),
+                        Losses::default(),
+                        Vec::new(),
+                    ),
+                };
             let mut events: Vec<Event> = ledger.events[index]
                 .iter()
                 .filter(|event| event.ts_ns >= opened_ns && event.ts_ns <= now_ns)
@@ -3587,10 +4329,15 @@ impl<'r, 'a> Recording<'r, 'a> {
                     spending.whole_run(index),
                     self_cpu_ns,
                     observed_cpu_ns,
+                    &spending.inside[index].peek(),
                     now_ns,
                 ),
                 lifetime: None,
                 window,
+                // A document's losses are those since the one before it, and a
+                // ring's are the run's: they cannot be split per document.
+                by_ring: Vec::new(),
+                facts: collector_facts,
             });
         }
 
@@ -3883,6 +4630,126 @@ mod tests {
     /// backend in its chain. A typo here would surface as "no collector is
     /// written for this" at run time, which reads like an unimplemented source
     /// rather than a mistake.
+    /// The two shapes `/proc/self/fdinfo` gives a bpf descriptor, as a 6.x
+    /// kernel prints them: a program carries its run time, a link only the id
+    /// of the program it holds, and only the first is a program's account.
+    #[test]
+    fn a_program_s_fdinfo_is_its_account_and_a_link_s_is_not() {
+        let program = "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t2080\nprog_type:\t17\n\
+                       prog_jited:\t1\nprog_tag:\t3b185187f1855c4c\nmemlock:\t4096\n\
+                       prog_id:\t812\nrun_time_ns:\t123456\nrun_cnt:\t789\n\
+                       recursion_misses:\t0\nverified_insns:\t12\n";
+        assert_eq!(
+            parse_program_fdinfo(program),
+            Some((
+                812,
+                Inside {
+                    cpu_ns: 123_456,
+                    runs: 789
+                }
+            ))
+        );
+        let link = "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t2080\n\
+                    link_type:\traw_tracepoint\nlink_id:\t55\nprog_tag:\t3b185187f1855c4c\n\
+                    prog_id:\t812\ntp_name:\tsys_enter\n";
+        assert_eq!(parse_program_fdinfo(link), None);
+    }
+
+    /// What a collector spends inside its target is weighed against what the
+    /// target did of its own: a program four times slower for being traced
+    /// cost three hundred percent, which is what it measures of itself, not
+    /// the seventy-five percent of its cpu the tracing was.
+    #[test]
+    fn the_cost_inside_the_target_is_weighed_against_what_the_target_did_of_its_own() {
+        let overhead = Overhead {
+            attributed_cpu_ns: 1_000_000,
+            observed_cpu_ns: Some(400_000_000),
+            in_target_cpu_ns: Some(300_000_000),
+            ..Overhead::default()
+        };
+        let percent = overhead.percent().expect("a percentage");
+        assert!((percent - 301.0).abs() < 1e-9, "{percent}");
+        assert!((overhead.own_percent().unwrap() - 0.25).abs() < 1e-9);
+
+        // Unknown is the tool's own share, never a zero added in.
+        let unknown = Overhead {
+            in_target_cpu_ns: None,
+            ..overhead.clone()
+        };
+        assert_eq!(unknown.percent(), unknown.own_percent());
+        assert!(!unknown.in_target_known());
+
+        // More inside than the target spent at all: programs that ran for
+        // every task and filtered most out. The whole account is the
+        // denominator, which never understates.
+        let everywhere = Overhead {
+            in_target_cpu_ns: Some(900_000_000),
+            ..overhead
+        };
+        assert!(everywhere.percent().unwrap() > 200.0);
+    }
+
+    /// Which account a collection's in-target cost is read from is decided by
+    /// its mechanism, and a mechanism that runs inside the target without an
+    /// account is unknown -- never the zero of one that reads from outside.
+    #[test]
+    fn a_mechanism_inside_the_target_without_an_account_is_unknown_and_one_outside_is_zero() {
+        let on = Ok(());
+        let off: Result<(), String> = Err("statistics are off".to_owned());
+        let mut outside = InsideMeter::of("fs:proc", None, Vec::new(), &on);
+        assert_eq!(outside.read(), Ok(Inside::default()));
+        for inside in [
+            "pmu",
+            "pmu:sw",
+            "preload",
+            "af_packet",
+            "vendor:cupti",
+            "fs:proc:clear_refs",
+        ] {
+            let mut meter = InsideMeter::of(inside, None, Vec::new(), &on);
+            assert!(meter.read().is_err(), "`{inside}` runs inside the target");
+        }
+        let mut nvml = InsideMeter::of("vendor:nvml", None, Vec::new(), &on);
+        assert_eq!(nvml.read(), Ok(Inside::default()));
+        let mut unstated = InsideMeter::of("bpf:raw_tp", None, vec![(3, 7)], &off);
+        assert_eq!(unstated.read(), Err("statistics are off".to_owned()));
+        let mut unfound = InsideMeter::of("bpf:raw_tp", None, Vec::new(), &on);
+        assert!(unfound
+            .read()
+            .is_err_and(|why| why.contains("not among the descriptors")));
+    }
+
+    /// A budget that moves a collection keeps what its first backend spent
+    /// inside the target, and an unknown first half leaves the whole unknown.
+    #[test]
+    fn a_degraded_collection_carries_what_its_first_backend_spent_inside_the_target() {
+        struct Fixed(u64);
+        impl InsideAccount for Fixed {
+            fn read(&self) -> Result<Inside, String> {
+                Ok(Inside {
+                    cpu_ns: self.0,
+                    runs: 1,
+                })
+            }
+            fn describes(&self) -> String {
+                "fixed".to_owned()
+            }
+        }
+        let on = Ok(());
+        let mut meter = InsideMeter::of("preload", Some(Box::new(Fixed(10))), Vec::new(), &on);
+        meter.moved_onto(InsideMeter::of(
+            "preload",
+            Some(Box::new(Fixed(5))),
+            Vec::new(),
+            &on,
+        ));
+        assert_eq!(meter.read().map(|inside| inside.cpu_ns), Ok(15));
+
+        let mut unknown = InsideMeter::of("pmu", None, Vec::new(), &on);
+        unknown.moved_onto(InsideMeter::of("fs:proc", None, Vec::new(), &on));
+        assert!(unknown.read().is_err());
+    }
+
     #[test]
     fn every_registered_collector_names_a_real_catalog_backend() {
         let catalog = Catalog::embedded().unwrap();
@@ -4184,7 +5051,7 @@ mod tests {
             source: "io.bytes".parse().unwrap(),
             target: Target::System,
             mode: crate::request::Mode::Trace,
-            emit: vec![crate::request::Emit::TopK(4)],
+            emit: vec![crate::request::Emit::TopK { k: 4, by: None }],
             keys: Vec::new(),
             filter: None,
             duration: Some("50ms".parse().unwrap()),
@@ -4546,7 +5413,13 @@ mod tests {
         if child == 0 {
             let (mut collectors, spun_ns) = burning(20_000_000);
             let mut spending = Spending::unweighed(1);
-            let deadline_ns = monotonic_ns() + 200_000_000;
+            // Driven to 200 ms of spun cpu, not 200 ms of wall time: a child
+            // on a loaded machine gets a fraction of the wall clock, and a
+            // wall deadline then ended the run before the work it is checked
+            // against was done (the flaky tally, #11). Ten seconds of wall
+            // time is only the bound that keeps a starved child from hanging.
+            let spun = spun_ns.clone();
+            let cap_ns = monotonic_ns() + 10_000_000_000;
             drive_attached(
                 &mut collectors,
                 &[Pace {
@@ -4556,7 +5429,10 @@ mod tests {
                 &[true],
                 None,
                 &mut spending,
-                until(deadline_ns),
+                move || {
+                    (spun.get() >= 200_000_000 || monotonic_ns() >= cap_ns)
+                        .then(|| "the collector spun for 200 ms of cpu".to_owned())
+                },
             );
             let reported_ns = spending.close().remove(0).collector_cpu_ns as f64;
             let spun_ns = spun_ns.get() as f64;

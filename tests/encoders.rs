@@ -198,6 +198,8 @@ struct Profile {
     duration_nanos: u64,
     comments: Vec<String>,
     default_sample_type: String,
+    /// `period_type` and `period`, when the file carries them.
+    period: Option<((String, String), u64)>,
 }
 
 fn decode_profile(gzipped: &[u8]) -> Profile {
@@ -299,7 +301,18 @@ fn decode_profile(gzipped: &[u8]) -> Profile {
         })
         .collect();
 
+    let period = only(&profile, 11).map(|field| {
+        let value_type = message(field.bytes());
+        (
+            (
+                string(only(&value_type, 1).map(Field::varint).unwrap_or(0)),
+                string(only(&value_type, 2).map(Field::varint).unwrap_or(0)),
+            ),
+            only(&profile, 12).map(Field::varint).unwrap_or(0),
+        )
+    });
     Profile {
+        period,
         duration_nanos: only(&profile, 10).map(Field::varint).unwrap_or(0),
         comments: only(&profile, 13)
             .map(Field::packed)
@@ -375,6 +388,27 @@ fn a_real_profile_survives_the_round_trip_through_profile_proto() {
     );
     assert_eq!(profile.default_sample_type, "cpu.profile");
     assert_eq!(profile.duration_nanos, run.results[0].observed_ns);
+    // The period is the request's own rate, carried by the results: 997 Hz is
+    // a sample every 1 003 009 ns of cpu (`open-requests 2127`).
+    assert_eq!(
+        profile.period,
+        Some((
+            ("cpu".to_owned(), "nanoseconds".to_owned()),
+            1_000_000_000 / 997
+        )),
+        "{:?}",
+        profile.comments
+    );
+    // And the results say what the run cost, beside the numbers
+    // (`open-requests 2316`): the tool's cpu, and the collector's inside the
+    // target, which for a perf profile is unknown.
+    let overhead = &run.results[0].overhead;
+    assert!(overhead.wall_ns > 0, "{overhead:?}");
+    assert!(!overhead.in_target_known(), "{overhead:?}");
+    assert_eq!(
+        run.results[0].served_by,
+        vec![run.results[0].backend.clone()]
+    );
 
     let omn::emit::Output::Stack { stacks, .. } = &run.results[0].outputs[0] else {
         unreachable!("cpu_profile asserted this");
@@ -498,6 +532,11 @@ fn a_profile_larger_than_one_gzip_block_comes_back_whole() {
         unverified: Vec::new(),
         degradations: Vec::new(),
         stacks: Default::default(),
+        notes: Vec::new(),
+        overhead: Default::default(),
+        served_by: Vec::new(),
+        period_ns: None,
+        by_ring: Vec::new(),
     };
     let mut stacks = Vec::new();
     // Frame names long enough that the string table alone passes 64 KiB.
@@ -571,6 +610,11 @@ fn a_unit_pprof_does_not_know_is_written_under_its_own_name_and_said_so() {
         unverified: Vec::new(),
         degradations: Vec::new(),
         stacks: Default::default(),
+        notes: Vec::new(),
+        overhead: Default::default(),
+        served_by: Vec::new(),
+        period_ns: None,
+        by_ring: Vec::new(),
     };
     results.stacks.insert(1, vec!["main".into(), "spin".into()]);
     let run = RunOutput {
@@ -1020,6 +1064,11 @@ fn distribution(losses: Losses) -> Results {
         unverified: Vec::new(),
         degradations: Vec::new(),
         stacks: BTreeMap::new(),
+        notes: Vec::new(),
+        overhead: Default::default(),
+        served_by: Vec::new(),
+        period_ns: None,
+        by_ring: Vec::new(),
     }
 }
 

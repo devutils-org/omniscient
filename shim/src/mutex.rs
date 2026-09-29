@@ -30,8 +30,8 @@ use std::ffi::{c_int, c_void};
 use std::sync::atomic::AtomicUsize;
 
 use crate::{
-    guarded, in_hook, monotonic_ns, report, reporting, resolve, thread_id, Record, CLASS_MUTEX,
-    OP_MUTEX,
+    guarded, in_hook, monotonic_ns, report, reporting, resolve, thread_id, Record, Timer,
+    CLASS_MUTEX, OP_MUTEX,
 };
 
 /// The mutex was taken by `pthread_mutex_trylock`, so its wait is zero by
@@ -161,6 +161,7 @@ fn real(slot: &AtomicUsize, name: &[u8]) -> Option<usize> {
 /// Replaces libc's `pthread_mutex_lock` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut c_void) -> c_int {
+    let mut timer = Timer::start(CLASS_MUTEX);
     let Some(address) = real(&REAL_LOCK, b"pthread_mutex_lock\0") else {
         return libc::EINVAL;
     };
@@ -169,7 +170,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut c_void) -> c_int {
         return lock(mutex);
     }
     let asked = monotonic_ns();
-    let result = lock(mutex);
+    let result = timer.around(|| lock(mutex));
     if result == 0 {
         push(mutex as usize, asked, monotonic_ns(), 0);
     }
@@ -180,6 +181,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut c_void) -> c_int {
 /// Replaces libc's `pthread_mutex_trylock` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut c_void) -> c_int {
+    let mut timer = Timer::start(CLASS_MUTEX);
     let Some(address) = real(&REAL_TRYLOCK, b"pthread_mutex_trylock\0") else {
         return libc::EINVAL;
     };
@@ -187,7 +189,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut c_void) -> c_int {
     if !watching() {
         return trylock(mutex);
     }
-    let result = trylock(mutex);
+    let result = timer.around(|| trylock(mutex));
     if result == 0 {
         let now = monotonic_ns();
         push(mutex as usize, now, now, FLAG_TRY);
@@ -199,6 +201,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut c_void) -> c_int {
 /// Replaces libc's `pthread_mutex_unlock` and obeys its contract.
 #[no_mangle]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut c_void) -> c_int {
+    let mut timer = Timer::start(CLASS_MUTEX);
     let Some(address) = real(&REAL_UNLOCK, b"pthread_mutex_unlock\0") else {
         return libc::EINVAL;
     };
@@ -208,7 +211,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut c_void) -> c_int {
     }
     let held = take(mutex as usize);
     let released = monotonic_ns();
-    let result = unlock(mutex);
+    let result = timer.around(|| unlock(mutex));
     if let Some(held) = held {
         emit(mutex as usize, held, released);
     }

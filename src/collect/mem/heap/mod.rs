@@ -74,18 +74,40 @@ const RING_SLOTS: usize = 1 << 16;
 
 /// The ring's layout, mirrored from `shim/src/lib.rs`'s `ring` module; both
 /// sides pin the numbers in a test.
-const RING_MAGIC: u64 = 0x676e_6972_5f6e_6d6f;
+const RING_MAGIC: u64 = 0x3267_6e72_5f6e_6d6f;
 const RING_HEAD: usize = 64;
 const RING_TAIL: usize = 128;
 const RING_DROPS: usize = 192;
-const RING_SLOTS_AT: usize = 256;
+/// What the shim spent inside the program on the records it timed, and how
+/// many it timed, per class; and what it measured one clock read to cost.
+const RING_SPENT: usize = 256;
+const RING_TIMED: usize = 288;
+const RING_CLOCK: usize = 312;
+const RING_SLOTS_AT: usize = 320;
 const RING_SLOT_BYTES: usize = 48;
+
+/// The shim times one hooked call in this many per thread (`shim/src/lib.rs`,
+/// `SAMPLE_EVERY`), so its account is scaled by it.
+const SHIM_SAMPLE_EVERY: u64 = 17;
 
 /// Drains a slot a writer reserved and never published -- a thread that died
 /// between the two -- after this many reads have found it so, so that one lost
 /// record does not hold back every record behind it. At the 10 ms drain, half
 /// a second.
 const RING_STUCK_READS: u32 = 50;
+
+/// The most records of one run a stream hands to a collector that keeps an
+/// event for each: past it, what the shim reports is read, dropped and counted.
+///
+/// The lock storm of finding 47 -- four threads, a million round trips each --
+/// had `omn` hold 3.9 GiB of what it had read, about two kilobytes an event,
+/// before a single number was printed. A reader that holds everything is a
+/// reader whose memory is set by the program it watches; this sets it here
+/// instead, at about a gigabyte of events, and says what it let go. The
+/// sources that remember a total rather than each record -- `mem.heap.live`,
+/// `mem.heap.retained` -- keep reading past it: what they hold is the
+/// program's live set, which the program bounds.
+pub const HELD_RECORDS: u64 = 1 << 19;
 
 /// How often the pipe is drained, whatever the request's poll interval is.
 ///
@@ -151,6 +173,12 @@ pub enum Which {
 }
 
 impl Which {
+    /// Whether this source keeps an event for every record, so that what it
+    /// holds grows with the run and is bounded by [`HELD_RECORDS`].
+    fn keeps_each(self) -> bool {
+        matches!(self, Which::Alloc | Which::Mutex | Which::GpuApi)
+    }
+
     fn source_id(self) -> &'static str {
         match self {
             Which::Alloc => "mem.heap.alloc",
@@ -311,6 +339,28 @@ impl Ring {
     }
 }
 
+impl Ring {
+    /// What the shim says it spent inside the program for `class`, scaled
+    /// from the records it timed to all of them.
+    fn spent(&self, class: u8) -> crate::collect::Inside {
+        use std::sync::atomic::Ordering;
+        let at = 8 * class.trailing_zeros() as usize;
+        let timed = self.word(RING_TIMED + at).load(Ordering::Relaxed);
+        crate::collect::Inside {
+            cpu_ns: self
+                .word(RING_SPENT + at)
+                .load(Ordering::Relaxed)
+                .saturating_mul(SHIM_SAMPLE_EVERY),
+            runs: timed.saturating_mul(SHIM_SAMPLE_EVERY),
+        }
+    }
+
+    fn clock_read_ns(&self) -> u64 {
+        self.word(RING_CLOCK)
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 impl Drop for Ring {
     fn drop(&mut self) {
         self.close_fd();
@@ -417,6 +467,47 @@ impl Drop for Pipe {
             // last reader of it is gone.
             unsafe { libc::close(self.read_fd) };
         }
+    }
+}
+
+/// What the shim spent inside the program for one class, read from the ring
+/// it shares with `omn`: the runner's account of a preload collector's cost in
+/// the target, beside the reader's own cpu.
+struct ShimAccount {
+    pipe: Rc<RefCell<Pipe>>,
+    which: Which,
+}
+
+impl crate::collect::InsideAccount for ShimAccount {
+    fn read(&self) -> Result<crate::collect::Inside, String> {
+        let pipe = self.pipe.borrow();
+        match &pipe.ring {
+            Some(ring) => Ok(ring.spent(self.which.class())),
+            None => Err(format!(
+                "the shim reported {} through its pipe, because the shared ring could not be \
+                 made, and the pipe carries no account of the shim's own time",
+                self.which.activity()
+            )),
+        }
+    }
+
+    fn describes(&self) -> String {
+        let clock = self
+            .pipe
+            .borrow()
+            .ring
+            .as_ref()
+            .map_or(0, Ring::clock_read_ns);
+        format!(
+            "the preload shim's own clock around one hooked call in {SHIM_SAMPLE_EVERY} of the \
+             {} it reported, from the hook's entry to its return less the real function it \
+             wraps, scaled to every call (published in the shared ring's header). What is not \
+             in it: the jump into the hook and back, and what the ring's writes do to the \
+             program's caches, so this is a lower bound; a clock read cost {clock} ns when the \
+             shim was loaded, and a timed call pays four. Shared by every preload source of \
+             this class on the launch",
+            self.which.activity()
+        )
     }
 }
 
@@ -559,6 +650,13 @@ impl Prepared for ShimPrepared {
         Some(self)
     }
 
+    fn inside(&self) -> Option<Box<dyn crate::collect::InsideAccount>> {
+        Some(Box::new(ShimAccount {
+            pipe: Rc::clone(&self.pipe),
+            which: self.which,
+        }))
+    }
+
     fn requires_launch(&self) -> Option<&'static str> {
         Some(
             "a preloaded shim can only be given to a program at exec, so this source needs \
@@ -598,6 +696,9 @@ pub struct Stream {
     seen: u64,
     /// Why the run may have seen nothing, once it is over and did.
     silence: Option<String>,
+    /// Records of this class handed on, against [`HELD_RECORDS`] for the
+    /// sources that keep an event for each.
+    handed: u64,
 }
 
 impl Stream {
@@ -625,6 +726,7 @@ impl Stream {
             losses: Losses::default(),
             seen: 0,
             silence: None,
+            handed: 0,
         }
     }
 
@@ -646,6 +748,8 @@ impl Stream {
         self.pending.extend_from_slice(bytes);
         let mut records = Vec::new();
         let whole = self.pending.len() / RECORD_SIZE * RECORD_SIZE;
+        let bounded = self.which.keeps_each();
+        let mut past_the_bound = 0u64;
 
         for record in self.pending[..whole].chunks_exact(RECORD_SIZE) {
             let read_u64 =
@@ -688,12 +792,26 @@ impl Stream {
             if !mine {
                 continue;
             }
+            if bounded && self.handed >= HELD_RECORDS {
+                past_the_bound += 1;
+                continue;
+            }
+            self.handed += 1;
             if record.op != OP_FREE {
                 self.seen += 1;
             }
             records.push(record);
         }
 
+        if past_the_bound > 0 {
+            self.losses.dropped += past_the_bound;
+            self.losses.note(format!(
+                "the shim reported more {} than this run holds: past the first {HELD_RECORDS} \
+                 records, each one it read was dropped and counted rather than kept, so what \
+                 omn holds does not grow with the program it watches",
+                self.which.activity()
+            ));
+        }
         self.pending.drain(..whole);
         records
     }
@@ -883,6 +1001,44 @@ pub(crate) mod tests {
             .contains(&("OMN_SHIM_REPORT".to_owned(), "1".to_owned())));
     }
 
+    /// Past the bound, a source that keeps an event for each record drops
+    /// and counts; one that keeps a total goes on reading.
+    #[test]
+    fn past_what_a_run_holds_each_record_is_dropped_and_counted() {
+        let (writer, mut stream) = piped();
+        stream.handed = HELD_RECORDS - 2;
+        let mut bytes = Vec::new();
+        for ptr in 0..5 {
+            bytes.extend_from_slice(&record(OP_ALLOC, 0x1000 + ptr, 64));
+        }
+        write(writer, &bytes);
+        assert_eq!(
+            stream.drain().len(),
+            2,
+            "the two the bound still had room for"
+        );
+        assert_eq!(stream.losses().dropped, 3, "and the rest dropped, counted");
+        assert!(stream
+            .losses()
+            .reasons
+            .keys()
+            .any(|reason| reason.contains("than this run holds")));
+
+        let (writer, live) = piped();
+        let mut live = Stream {
+            which: Which::Live,
+            ..live
+        };
+        live.handed = HELD_RECORDS;
+        write(writer, &bytes);
+        assert_eq!(
+            live.drain().len(),
+            5,
+            "a total is not bounded by the run's hold"
+        );
+        assert!(live.losses().is_clean());
+    }
+
     #[test]
     fn a_dropped_record_becomes_a_reported_loss() {
         let (writer, mut stream) = piped();
@@ -922,17 +1078,21 @@ pub(crate) mod tests {
     /// every record from the wrong offset.
     #[test]
     fn the_ring_layout_is_the_one_the_shim_writes() {
-        assert_eq!(RING_MAGIC, 0x676e_6972_5f6e_6d6f);
+        assert_eq!(RING_MAGIC, 0x3267_6e72_5f6e_6d6f);
         assert_eq!(
             (
                 RING_HEAD,
                 RING_TAIL,
                 RING_DROPS,
+                RING_SPENT,
+                RING_TIMED,
+                RING_CLOCK,
                 RING_SLOTS_AT,
                 RING_SLOT_BYTES
             ),
-            (64, 128, 192, 256, 48)
+            (64, 128, 192, 256, 288, 312, 320, 48)
         );
+        assert_eq!(SHIM_SAMPLE_EVERY, 17);
         assert!(RING_SLOTS.is_power_of_two());
         assert_eq!(RING_SLOT_BYTES, 8 + RECORD_SIZE);
     }
@@ -976,6 +1136,21 @@ pub(crate) mod tests {
         let mut again = Vec::new();
         ring.drain_into(&mut again);
         assert!(again.is_empty());
+    }
+
+    /// The shim's account is per class and scaled from the calls it timed:
+    /// ten timed heap calls of 50 ns stand for 170 calls and 8.5 us.
+    #[test]
+    fn the_shim_s_account_is_its_class_s_scaled_to_every_record() {
+        use std::sync::atomic::Ordering;
+        let ring = Ring::create().expect("a ring");
+        ring.word(RING_SPENT).fetch_add(500, Ordering::Relaxed);
+        ring.word(RING_TIMED).fetch_add(10, Ordering::Relaxed);
+        ring.word(RING_SPENT + 8).fetch_add(7, Ordering::Relaxed); // the mutex class
+        let heap = ring.spent(CLASS_HEAP);
+        assert_eq!((heap.cpu_ns, heap.runs), (8_500, 170));
+        let gpu = ring.spent(CLASS_GPU);
+        assert_eq!((gpu.cpu_ns, gpu.runs), (0, 0));
     }
 
     /// A slot reserved and never published -- a writer that died between its

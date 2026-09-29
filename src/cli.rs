@@ -614,7 +614,10 @@ fn fill_emit(kind: crate::request::EmitKind) -> Emit {
         EmitKind::Raw => Emit::Raw,
         EmitKind::Hist => Emit::Hist(crate::request::HistScale::Log2),
         EmitKind::Rate => Emit::Rate,
-        EmitKind::TopK => Emit::TopK(Emit::DEFAULT_TOPK),
+        EmitKind::TopK => Emit::TopK {
+            k: Emit::DEFAULT_TOPK,
+            by: None,
+        },
         EmitKind::Stack => Emit::Stack,
         EmitKind::Timeline => Emit::Timeline,
         EmitKind::Summary => Emit::Summary,

@@ -1178,6 +1178,16 @@ fn escalate(
 /// The `phases` program: `cpu_ms` of spinning, then `locks` acquisitions of
 /// the mutex, each written to the returned log.
 fn phases(name: &str, cpu_ms: u64, locks: u64) -> Option<(Vec<String>, PathBuf)> {
+    phases_holding(name, cpu_ms, locks, HOLD_US)
+}
+
+/// The same program, with each lock held for `hold_us`.
+fn phases_holding(
+    name: &str,
+    cpu_ms: u64,
+    locks: u64,
+    hold_us: u64,
+) -> Option<(Vec<String>, PathBuf)> {
     let fixture = match fixture() {
         Ok(path) => path,
         Err(reason) => {
@@ -1191,7 +1201,7 @@ fn phases(name: &str, cpu_ms: u64, locks: u64) -> Option<(Vec<String>, PathBuf)>
         "phases".to_owned(),
         cpu_ms.to_string(),
         locks.to_string(),
-        HOLD_US.to_string(),
+        hold_us.to_string(),
         log.to_string_lossy().into_owned(),
     ];
     Some((program, log))
@@ -1425,7 +1435,13 @@ fn an_escalating_run_holds_its_budget_and_names_what_it_let_go() {
 #[test]
 fn a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on() {
     let _machine = one_at_a_time();
-    let Some((program, _)) = phases("shed", 1000, 800) else {
+    // Held for 20 ms rather than 2: the lock layer is named when sleeping is
+    // over half of a reading, and each wakeup is followed by a wait in the run
+    // queue that a loaded machine lengthens. Against a 2 ms hold that wait
+    // pushed queue plus cpu over half and nothing was named (the flaky tally,
+    // #15); against 20 ms it is a few percent of every cycle. A hundred of
+    // them is the same two seconds of lock phase.
+    let Some((program, _)) = phases_holding("shed", 1000, 100, 20_000) else {
         return;
     };
     let greedy =

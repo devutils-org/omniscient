@@ -596,8 +596,14 @@ struct MeasuredCost {
     /// no ceiling, or no workload to be a percentage of.
     #[serde(skip_serializing_if = "Option::is_none")]
     within_budget: Option<bool>,
+    /// What the run cost as a share of the work the target did of its own:
+    /// the tool's cpu and what the collector spent inside the target
+    /// (`overhead.in_target_cpu_ns`), when that is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     measured_percent: Option<f64>,
+    /// The tool's own cpu alone, as a share of the target's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    own_percent: Option<f64>,
     overhead: collect::Overhead,
     stopped_because: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -625,9 +631,26 @@ impl MeasuredCost {
             ),
             (None, _) => format!("against nothing measurable: {}", overhead.observed_from),
         };
+        let inside = match (overhead.in_target_cpu_ns, overhead.in_target_runs) {
+            (Some(0), None) => String::new(),
+            (Some(ns), Some(runs)) => format!(
+                ", and {} inside the target over {runs} run(s) of its own code",
+                span(ns)
+            ),
+            (Some(ns), None) => format!(", and {} inside the target", span(ns)),
+            (None, _) => " and an unknown amount inside the target".to_owned(),
+        };
+        let unknown = if overhead.in_target_known() {
+            String::new()
+        } else {
+            format!(
+                ". What it spent inside the target is not in that percentage: {}",
+                overhead.in_target_from
+            )
+        };
         format!(
-            "{} ({}) via `{}` spent {} of cpu {against}, over {} of wall time; measuring that \
-             cost {} across {} read(s)",
+            "{} ({}) via `{}` spent {} of cpu{inside} {against}, over {} of wall time; \
+             measuring that cost {} across {} read(s){unknown}",
             self.source,
             self.mode,
             self.served_by.join("` then `"),
@@ -665,6 +688,11 @@ impl MeasuredCost {
                 "[{}] --budget {budget}% held: {percent:.2} % measured",
                 self.source
             ),
+            (None, Some(percent)) if !self.overhead.in_target_known() => format!(
+                "[{}] --budget {budget}% could not be checked whole: the tool's own cpu came to \
+                 {percent:.2} %, and what the collector spent inside the target is unknown: {}",
+                self.source, self.overhead.in_target_from
+            ),
             (Some(false), Some(percent)) => format!(
                 "[{}] --budget {budget}% was exceeded: {percent:.2} % measured over the whole \
                  window. {}",
@@ -690,23 +718,10 @@ fn span(ns: u64) -> String {
     }
 }
 
-/// The top of the overhead band a declared cost stands for, as `catalog::Cost`
-/// documents it. `extreme` is "over 10x" and no percentage bounds it.
-///
-/// `free` is documented as "a counter read, about zero", which as a number has
-/// to be *something*: at exactly zero the claim can never be met by any real
-/// measurement, so every `free` backend would read as having broken its own
-/// promise the moment the promise became checkable. A tenth of a percent is the
-/// reading that makes "about zero" an assertion rather than a figure of speech.
+/// The top of the overhead band a declared cost stands for: the catalog's
+/// own answer, which `omn-mcp` reads too.
 fn worst_case_percent(cost: omn::catalog::Cost) -> f64 {
-    use omn::catalog::Cost;
-    match cost {
-        Cost::Free => 0.1,
-        Cost::Low => 1.0,
-        Cost::Med => 5.0,
-        Cost::High => 20.0,
-        Cost::Extreme => f64::INFINITY,
-    }
+    cost.worst_case_percent()
 }
 
 fn band(cost: omn::catalog::Cost) -> &'static str {
@@ -716,7 +731,7 @@ fn band(cost: omn::catalog::Cost) -> &'static str {
         Cost::Low => "under 1 %",
         Cost::Med => "1 to 5 %",
         Cost::High => "5 to 20 %",
-        Cost::Extreme => "over 10x",
+        Cost::Extreme => "over 20 %, with no bound above",
     }
 }
 
@@ -1183,9 +1198,15 @@ fn measured_cost(
         declared: declared.as_str(),
         declared_worst_case_percent: worst_case_percent(declared),
         budget_percent,
-        within_budget: budget_percent
-            .and_then(|ceiling| measured_percent.map(|percent| percent <= ceiling)),
+        // Over the ceiling on what is known is over it; under it is "held"
+        // only when nothing spent inside the target is missing from the sum.
+        within_budget: budget_percent.and_then(|ceiling| {
+            measured_percent
+                .map(|percent| percent <= ceiling)
+                .filter(|within| !within || collection.overhead.in_target_known())
+        }),
         measured_percent,
+        own_percent: collection.overhead.own_percent(),
         overhead: collection.overhead.clone(),
         stopped_because: collection.stopped_because.clone(),
         notes: collection.notes.clone(),
@@ -1443,14 +1464,10 @@ fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
                             collector: coverage
                                 .get(entry.id.as_str())
                                 .is_some_and(|built| built.contains(&backend.id.as_str())),
-                            requirements: backend
-                                .requires
-                                .iter()
-                                .map(|needs| resolve::Requirement {
-                                    needs: needs.clone(),
-                                    probe: capabilities.probe(needs, None),
-                                })
-                                .collect(),
+                            // The resolver's own sweep, so the listing and
+                            // a request can never ask the question twice two
+                            // different ways.
+                            requirements: resolve::probe_all(&capabilities, backend, None),
                         })
                         .collect(),
                     entry,

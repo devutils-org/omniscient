@@ -1829,3 +1829,214 @@ fn the_json_listing_carries_the_sweep_the_text_table_shows() {
     );
     assert_eq!(footer, expected, "the JSON sweep and the table agree");
 }
+
+/// A counted window ends at its duration, not at the next read.
+///
+/// `count` reads a counter at the start and at the end, and in between at the
+/// default cadence of a second; the run used to sleep to that next read, so
+/// `-m count -d 600ms` observed a second and divided every rate by it
+/// (`open-requests 2947`, `6181`). The duration is the property here, and on
+/// the machine nothing else ends the run, so the window is the request's: 300 ms against a
+/// cadence of 1 s separate by the whole of the difference. What the window may
+/// run past its duration is the final read and the stop, which the run
+/// reports as `observed_ns` -- a tenth of the cadence is room for both on a
+/// loaded machine and nowhere near the second the defect added.
+#[test]
+fn a_counted_window_ends_at_its_duration_and_not_at_the_next_read() {
+    let output = run(&[
+        "trace", "io.bytes", "-m", "count", "-e", "summary", "-d", "300ms", "--format", "json",
+        "--system",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a JSON document");
+    let result = &document["results"][0];
+    let observed_ns = result["observed_ns"].as_u64().expect("the window");
+    assert!(
+        result["stopped_because"]
+            .as_str()
+            .is_some_and(|why| why.contains("duration")),
+        "{result}"
+    );
+    assert!(
+        (300_000_000..400_000_000).contains(&observed_ns),
+        "a 300 ms count observed {observed_ns} ns"
+    );
+}
+
+/// Two tasks in one profile, one of them made to overflow its ring: the
+/// shortfall lands on that task's series and on no other.
+///
+/// A profile that follows a program opens one ring per thread, so each drop
+/// belongs to one task; before the thirteenth wave the run's whole drop count
+/// was marked on every series, and a reader could not tell the task that lost
+/// samples from the one beside it that lost none. The busy task spins through
+/// the whole run at a sampling rate past what its ring holds between two
+/// drains; the light one wakes briefly twenty times.
+///
+/// What the property needs from the collector is its losses per ring
+/// (`Collector::losses_by_ring`), which `cpu.profile` -- stream P's file --
+/// does not report yet: until it does this says so, loudly, with the run's
+/// numbers.
+#[test]
+fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
+    let busy = "i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done";
+    let light = "for j in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+                 k=0; while [ $k -lt 2000 ]; do k=$((k+1)); done; sleep 0.05; done";
+    let script = format!("({busy}) & ({light}) & wait");
+    let output = run(&[
+        "trace",
+        "cpu.profile",
+        "-m",
+        "sample@50000hz",
+        "-e",
+        "topk:50",
+        "-k",
+        "task",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
+    if !output.status.success() {
+        eprintln!(
+            "SKIP: `cpu.profile` is not served here: {}",
+            stderr(&output)
+        );
+        return;
+    }
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a JSON document");
+    let result = &document["results"][0];
+    let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let rings = result["by_ring"].as_array().cloned().unwrap_or_default();
+    if rings.is_empty() {
+        eprintln!(
+            "SKIP: `cpu.profile` does not report its losses per ring yet (filed for stream P, \
+             `Collector::losses_by_ring`), so its {dropped} dropped samples are the run's on \
+             every series"
+        );
+        return;
+    }
+    let lost_by_task: std::collections::BTreeMap<String, u64> = rings
+        .iter()
+        .filter_map(|ring| {
+            let tid = ring["key"]["task"]["tid"]
+                .as_i64()
+                .or_else(|| ring["key"]["task"].as_i64())?;
+            Some((format!("task:{tid}"), ring["losses"]["dropped"].as_u64()?))
+        })
+        .collect();
+    if dropped == 0 {
+        eprintln!(
+            "SKIP: no ring overflowed at 50 kHz on this machine, so there is no loss to place: \
+             {lost_by_task:?}"
+        );
+        return;
+    }
+    let series = result["outputs"][0]["series"]
+        .as_array()
+        .expect("a ranking of tasks");
+    let mut marked = 0;
+    for one in series {
+        let key = one["key"].as_str().expect("a key");
+        let lost = lost_by_task.get(key).copied().unwrap_or(0);
+        match one["short"]["dropped"].as_u64() {
+            Some(short) => {
+                assert_eq!(short, lost, "{key} is short by its own ring's loss: {one}");
+                marked += 1;
+            }
+            None => assert_eq!(lost, 0, "{key} lost {lost} and is not marked: {one}"),
+        }
+    }
+    assert!(
+        marked > 0 && marked < series.len(),
+        "the loss lands on the task that overflowed and not on the other: {series:?}"
+    );
+}
+
+/// The resolution's filter line says who applies the predicate, which is what
+/// it costs, in the words of the resolver's own placement -- and never the
+/// `no;` its `Display` prefixes to a collector's for the line this replaced.
+#[test]
+fn the_filter_line_says_who_applied_the_predicate() {
+    let output = run(&[
+        "io.bytes",
+        "-e",
+        "summary",
+        "-m",
+        "count",
+        "--system",
+        "--filter",
+        "dev == \"8:0\"",
+        "--dump-request",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = String::from_utf8_lossy(&output.stdout).into_owned() + &stderr(&output);
+    // The request's own `filter` line comes first; the placement is the one
+    // that says who applies it.
+    let headings = [
+        "in the program:",
+        "applied by the collector, after delivery:",
+        "applied after reading:",
+    ];
+    let line = said
+        .lines()
+        .map(str::trim_start)
+        .find(|line| {
+            line.starts_with("filter  ") && headings.iter().any(|heading| line.contains(heading))
+        })
+        .unwrap_or_else(|| panic!("a filter placement line naming who applied it: {said}"));
+    assert!(!line.contains("no;"), "{line}");
+}
+
+/// A request naming several processes, served by a collector that observes
+/// one, is refused with what it would have lost -- not measured for the first
+/// and silent about the rest (`open-requests 250`). Two processes this test
+/// starts and owns are the target; the refusal names the one it would have
+/// kept, and is the build's gap (exit 3), since the request is valid.
+#[test]
+fn several_processes_asked_of_a_collector_that_observes_one_are_refused_by_name() {
+    let mut first = Command::new("sleep").arg("5").spawn().expect("a process");
+    let mut second = Command::new("sleep").arg("5").spawn().expect("a process");
+    let pids = format!("{},{}", first.id(), second.id());
+    let output = run(&[
+        "mem.rss",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "200ms",
+        "--pid",
+        &pids,
+    ]);
+    let _ = first.kill();
+    let _ = second.kill();
+    let _ = first.wait();
+    let _ = second.wait();
+    let said = stderr(&output);
+    assert_eq!(output.status.code(), Some(EXIT_NOT_IMPLEMENTED), "{said}");
+    assert!(
+        said.contains("observes one process")
+            && said.contains(&format!("only {}", first.id()))
+            && said.contains("the 2 this request named"),
+        "{said}"
+    );
+
+    // One process is served as before.
+    let alone = run(&[
+        "mem.rss",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "-d",
+        "200ms",
+        "--pid",
+        &std::process::id().to_string(),
+    ]);
+    assert!(alone.status.success(), "{}", stderr(&alone));
+}

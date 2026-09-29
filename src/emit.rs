@@ -14,15 +14,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
-use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::Unit;
 use crate::collect::{Collection, Filtered, Losses};
-use crate::error::ParseError;
 use crate::event::{Event, KeyValue};
-use crate::request::{Emit, EmitKind, HistScale, KeyKind};
+use crate::request::{Emit, EmitKind, KeyKind};
 use crate::resolve::ResolvedRequest;
 
 /// The attribute a collector puts on an event to say which stack it was taken
@@ -138,6 +136,34 @@ pub struct Results {
     /// fields it is. `Output::Stack` names ids; this says what they were.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stacks: BTreeMap<u64, Vec<String>>,
+    /// What stating the facts of this measurement took that is not a
+    /// concession: a count another party kept of the same thing, a window the
+    /// request asked for. Beside `degradations` rather than in it, because a
+    /// collector saying "the kernel counted 400 handler runs and here are all
+    /// of them" is the strongest thing it can say about its own completeness,
+    /// and under `degraded:` it read as an apology (`open-requests 3892`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// What this measurement cost, measured rather than declared: the tool's
+    /// cpu and what the collector spent inside the target, as `cost.json` has
+    /// it, so a pipeline reading the results alone can tell a 0.1 %
+    /// measurement from a 9 % one (`open-requests 2316`).
+    #[serde(default)]
+    pub overhead: crate::collect::Overhead,
+    /// The backends that produced these results, in order: longer than one
+    /// when a budget moved the collection mid-run, and then `backend` is the
+    /// last of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_by: Vec<String>,
+    /// The interval between samples, for a sampling mode; absent for every
+    /// other, which has no period. What `pprof` writes as `period`
+    /// (`open-requests 2127`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_ns: Option<u64>,
+    /// The part of `losses` each ring lost, for a collector that reads one
+    /// ring per key: what [`Shortfalls`] places on each series.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_ring: Vec<crate::collect::RingLoss>,
 }
 
 /// What a series is keyed on.
@@ -309,6 +335,13 @@ pub struct SeriesRate {
     /// exist.
     pub per_second: Option<f64>,
     pub window_ns: u64,
+    /// Set when `window_ns` is the counter's own enabled time rather than the
+    /// run's: a counted source puts `enabled_ns` on its event, which is the
+    /// window the counter measured -- for a per-task counter, the time the
+    /// task was on a cpu -- and the wall clock also holds the time between
+    /// the last read and the run noticing it was over (`open-requests 168`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub counted_window: bool,
     /// What the run did not see, when it lost anything.
     ///
     /// A rate from a lossy run is a **lower bound**, and it is biased the one
@@ -395,6 +428,107 @@ pub struct Shortfall {
     /// The whole statement, in one sentence, so that a consumer of the
     /// structured output has it without deriving it from the fields above.
     pub note: String,
+}
+
+/// What each series of one collection is short by.
+///
+/// The run's shortfall, on every series alike, is the answer whenever a
+/// loss cannot be placed: a single ring drops without regard to which series
+/// the record would have joined. A collector that reads **one ring per key**
+/// can place it -- a profile that follows each thread opens a ring for each --
+/// and when every loss the run counted belongs to one of those rings, and the
+/// series are keyed by that key, a series is short by its own ring's losses
+/// and by nothing else. The thread that overflowed its ring is marked; the
+/// thread beside it, which lost nothing, is not.
+pub(crate) struct Shortfalls {
+    /// The run's, for the emits that are not per series (`stack`) and for
+    /// every series when the losses cannot be placed.
+    pub(crate) run: Option<Shortfall>,
+    /// Per ring: the ring's key as a series-key part, its losses, and how many
+    /// events carry that key. `None` when the losses are the run's alone.
+    rings: Option<Vec<(String, Losses, u64)>>,
+    per_record: bool,
+}
+
+impl Shortfalls {
+    /// The run's shortfall on every series, as before rings were told apart.
+    #[cfg(test)]
+    pub(crate) fn run_wide(short: Option<&Shortfall>) -> Self {
+        Self {
+            run: short.cloned(),
+            rings: None,
+            per_record: false,
+        }
+    }
+
+    pub(crate) fn of(collection: &Collection, axes: &[KeyKind]) -> Self {
+        let per_record = per_record(&collection.events);
+        let run = Shortfall::of(
+            &collection.losses,
+            collection.events.len() as u64,
+            per_record,
+        );
+        let placed = |losses: &Losses| {
+            let rings = &collection.by_ring;
+            let dropped: u64 = rings.iter().map(|ring| ring.losses.dropped).sum();
+            let throttled: u64 = rings.iter().map(|ring| ring.losses.throttled).sum();
+            !rings.is_empty()
+                && dropped == losses.dropped
+                && throttled == losses.throttled
+                && losses.evicted == 0
+        };
+        // A series is one ring's only when its key names the ring's key: the
+        // grouping asked for includes that kind, or -- with none asked for --
+        // every event's primary key is of it.
+        let keyed_by_ring = collection.by_ring.iter().all(|ring| {
+            let kind = ring.key.kind();
+            if axes.is_empty() {
+                collection
+                    .events
+                    .iter()
+                    .all(|event| event.keys.first().is_some_and(|key| key.kind() == kind))
+            } else {
+                axes.contains(&kind)
+            }
+        });
+        let rings = (placed(&collection.losses) && keyed_by_ring).then(|| {
+            collection
+                .by_ring
+                .iter()
+                .map(|ring| {
+                    let records = collection
+                        .events
+                        .iter()
+                        .filter(|event| event.keys.contains(&ring.key))
+                        .count() as u64;
+                    (ring.key.to_string(), ring.losses.clone(), records)
+                })
+                .collect()
+        });
+        Self {
+            run,
+            rings,
+            per_record,
+        }
+    }
+
+    /// What the series `key` is short by.
+    pub(crate) fn for_series(&self, key: &SeriesKey) -> Option<Shortfall> {
+        let Some(rings) = &self.rings else {
+            return self.run.clone();
+        };
+        let parts: Vec<&str> = key.as_str().split(' ').collect();
+        let mut losses = Losses::default();
+        let mut records = 0;
+        for (ring, lost, carried) in rings {
+            if parts.contains(&ring.as_str()) {
+                losses.dropped += lost.dropped;
+                losses.throttled += lost.throttled;
+                records += carried;
+            }
+        }
+        Shortfall::of(&losses, records, self.per_record)
+    }
 }
 
 impl Shortfall {
@@ -595,21 +729,9 @@ impl Rest {
 }
 
 /// How a histogram's buckets are laid out, carried beside them so a result file
-/// says how to read itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BucketLayout {
-    /// Powers of two: bucket 0 holds nothing but the values below one, and
-    /// bucket *k* holds `[2^(k-1), 2^k)`.
-    ///
-    /// This is the layout an eBPF array map builds for free -- one
-    /// `log2` of the value, one index, one atomic increment, no per-event
-    /// record -- which is what makes moving a histogram into the kernel viable
-    /// later. A prettier layout here would have to be abandoned then, and two
-    /// runs of the same source would not be comparable across the change.
-    Log2,
-    /// Fixed-width buckets: bucket *k* holds `[k*width, (k+1)*width)`.
-    Linear { width: u64 },
-}
+/// says how to read itself: the request's own [`HistScale`], under the name the
+/// results give it.
+pub use crate::request::HistScale as BucketLayout;
 
 impl BucketLayout {
     /// The most buckets a series will be rendered with.
@@ -657,43 +779,6 @@ impl BucketLayout {
         }
     }
 }
-
-impl From<HistScale> for BucketLayout {
-    fn from(scale: HistScale) -> Self {
-        match scale {
-            HistScale::Log2 => BucketLayout::Log2,
-            HistScale::Linear { width } => BucketLayout::Linear { width },
-        }
-    }
-}
-
-impl fmt::Display for BucketLayout {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BucketLayout::Log2 => f.write_str("log2"),
-            BucketLayout::Linear { width } => write!(f, "linear:{width}"),
-        }
-    }
-}
-
-impl FromStr for BucketLayout {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().split_once(':') {
-            None if s.trim() == "log2" => Ok(BucketLayout::Log2),
-            Some(("linear", width)) => width
-                .parse()
-                .map(|width| BucketLayout::Linear { width })
-                .map_err(|_| ParseError::new(format!("`{width}` is not a bucket width"))),
-            _ => Err(ParseError::new(format!(
-                "unknown bucket layout `{s}` (expected log2 or linear:<width>)"
-            ))),
-        }
-    }
-}
-
-serde_as_string!(BucketLayout);
 
 /// One bucket of a histogram, `[low, high)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,11 +881,12 @@ pub fn aggregate(
     // for many measurements makes the fraction a fraction of rows, because
     // what the dropped rows would have weighed is a number nobody up here ever
     // saw -- see [`Shortfall::per_record`], and findings 17 and 18.
-    let short = Shortfall::of(
-        &collection.losses,
-        collection.events.len() as u64,
-        per_record(&collection.events),
-    );
+    //
+    // Per series, when the collector read one ring per key and every loss it
+    // counted belongs to one of them: then a series keyed by that key is short
+    // by its own ring's losses and by nothing else ([`Shortfalls`]).
+    let shorts = Shortfalls::of(&collection, &request.keys);
+    let short = shorts.run.clone();
 
     // `--keys` regroups every reducing emit; the default is the collector's
     // primary key, which is what `SeriesKey` documents.
@@ -815,7 +901,7 @@ pub fn aggregate(
                 series: timeline_by(&collection.events, axes, first_ts_ns, value_attr)?,
             },
             Emit::Summary => Output::Summary {
-                series: summary_by(&collection.events, axes, value_attr, short.as_ref())?,
+                series: summary_by(&collection.events, axes, value_attr, &shorts)?,
             },
             Emit::Rate => Output::Rate {
                 series: rate_by(
@@ -823,17 +909,35 @@ pub fn aggregate(
                     axes,
                     collection.observed_ns,
                     value_attr,
-                    short.as_ref(),
+                    &shorts,
                 )?,
             },
             Emit::Hist(scale) => {
-                let layout = BucketLayout::from(*scale);
+                let layout = *scale;
                 Output::Hist {
                     layout,
-                    series: hist_by(&collection.events, axes, value_attr, layout, short.as_ref())?,
+                    series: hist_by(&collection.events, axes, value_attr, layout, &shorts)?,
                 }
             }
-            Emit::TopK(k) => topk_by(&collection.events, axes, value_attr, *k, short.as_ref())?,
+            Emit::TopK { k, by: None } => {
+                topk_by(&collection.events, axes, value_attr, *k, &shorts)?
+            }
+            Emit::TopK { k, by: Some(by) } => {
+                let carried = collection
+                    .events
+                    .iter()
+                    .filter(|event| event.attr(by.as_str()).is_some())
+                    .count();
+                if carried < collection.events.len() {
+                    degradations.push(format!(
+                        "{} of {} events carried no `{by}`, so the ranking over it holds them \
+                         as `{by}=?`",
+                        collection.events.len() - carried,
+                        collection.events.len()
+                    ));
+                }
+                topk_over(&collection.events, by.as_str(), value_attr, *k, &shorts)?
+            }
             Emit::Stack => {
                 let (output, unmeasured) =
                     stack_counting(&collection.events, value_attr, short.as_ref())?;
@@ -890,6 +994,16 @@ pub fn aggregate(
         unverified: resolved.unverified.clone(),
         degradations,
         stacks,
+        notes: collection.facts,
+        overhead: collection.overhead,
+        served_by: collection.served_by,
+        period_ns: match request.mode {
+            crate::request::Mode::Sample { freq } if freq.as_hz() > 0 => {
+                Some(1_000_000_000 / freq.as_hz())
+            }
+            _ => None,
+        },
+        by_ring: collection.by_ring,
     })
 }
 
@@ -921,7 +1035,7 @@ fn rate(
     attr: &str,
     short: Option<&Shortfall>,
 ) -> Result<Vec<SeriesRate>, EmitError> {
-    rate_by(events, &[], window_ns, attr, short)
+    rate_by(events, &[], window_ns, attr, &Shortfalls::run_wide(short))
 }
 
 #[cfg(test)]
@@ -930,7 +1044,7 @@ fn summary(
     attr: &str,
     short: Option<&Shortfall>,
 ) -> Result<Vec<SeriesSummary>, EmitError> {
-    summary_by(events, &[], attr, short)
+    summary_by(events, &[], attr, &Shortfalls::run_wide(short))
 }
 
 #[cfg(test)]
@@ -940,7 +1054,7 @@ fn hist(
     layout: BucketLayout,
     short: Option<&Shortfall>,
 ) -> Result<Vec<SeriesHist>, EmitError> {
-    hist_by(events, &[], attr, layout, short)
+    hist_by(events, &[], attr, layout, &Shortfalls::run_wide(short))
 }
 
 #[cfg(test)]
@@ -950,7 +1064,7 @@ fn topk(
     k: u32,
     short: Option<&Shortfall>,
 ) -> Result<Output, EmitError> {
-    topk_by(events, &[], attr, k, short)
+    topk_by(events, &[], attr, k, &Shortfalls::run_wide(short))
 }
 
 fn value_of(event: &Event, attr: &str) -> Result<f64, EmitError> {
@@ -1005,9 +1119,8 @@ fn rate_by(
     axes: &[KeyKind],
     window_ns: u64,
     attr: &str,
-    short: Option<&Shortfall>,
+    shorts: &Shortfalls,
 ) -> Result<Vec<SeriesRate>, EmitError> {
-    let seconds = (window_ns > 0).then(|| window_ns as f64 / 1e9);
     let mut rates = Vec::new();
     for (key, events) in grouped(events, axes) {
         let total: f64 = events
@@ -1016,13 +1129,31 @@ fn rate_by(
             .collect::<Result<Vec<_>, EmitError>>()?
             .iter()
             .sum();
+        // A series of counted windows is over the time its counter was
+        // enabled, when every one of them says; the run's window otherwise.
+        let enabled: Option<u64> = events
+            .iter()
+            .map(|event| {
+                event
+                    .attr("enabled_ns")
+                    .and_then(|value| value.as_f64())
+                    .filter(|ns| *ns > 0.0)
+                    .map(|ns| ns as u64)
+            })
+            .sum();
+        let (window_ns, counted_window) = match enabled {
+            Some(enabled) if !events.is_empty() => (enabled, true),
+            _ => (window_ns, false),
+        };
+        let seconds = (window_ns > 0).then(|| window_ns as f64 / 1e9);
         rates.push(SeriesRate {
-            short: short.cloned(),
+            short: shorts.for_series(&key),
             key,
             events: events.len(),
             total,
             per_second: seconds.map(|seconds| total / seconds),
             window_ns,
+            counted_window,
         });
     }
     Ok(rates)
@@ -1032,7 +1163,7 @@ fn summary_by(
     events: &[Event],
     axes: &[KeyKind],
     attr: &str,
-    short: Option<&Shortfall>,
+    shorts: &Shortfalls,
 ) -> Result<Vec<SeriesSummary>, EmitError> {
     let mut summaries = Vec::new();
     for (key, events) in grouped(events, axes) {
@@ -1047,14 +1178,14 @@ fn summary_by(
         if values.is_empty() {
             if unmeasured > 0 {
                 summaries.push(SeriesSummary {
-                    key,
                     count: 0,
                     min: 0.0,
                     max: 0.0,
                     mean: 0.0,
                     last: 0.0,
                     unmeasured,
-                    short: short.cloned(),
+                    short: shorts.for_series(&key),
+                    key,
                 });
             }
             continue;
@@ -1080,6 +1211,7 @@ fn summary_by(
             / weights;
         let last = values.last().expect("checked above").0;
         summaries.push(SeriesSummary {
+            short: shorts.for_series(&key),
             key,
             count,
             min,
@@ -1087,7 +1219,6 @@ fn summary_by(
             mean,
             last,
             unmeasured,
-            short: short.cloned(),
         });
     }
     Ok(summaries)
@@ -1098,7 +1229,7 @@ fn hist_by(
     axes: &[KeyKind],
     attr: &str,
     layout: BucketLayout,
-    short: Option<&Shortfall>,
+    shorts: &Shortfalls,
 ) -> Result<Vec<SeriesHist>, EmitError> {
     if layout == (BucketLayout::Linear { width: 0 }) {
         return Err(EmitError::ZeroBucketWidth);
@@ -1135,12 +1266,12 @@ fn hist_by(
             continue;
         }
         histograms.push(SeriesHist {
+            short: shorts.for_series(&key),
             key,
             count,
             min: if count == 0 { 0.0 } else { min },
             max: if count == 0 { 0.0 } else { max },
             sum,
-            short: short.cloned(),
             buckets: buckets(&counts, layout),
             unbucketable,
             unmeasured,
@@ -1191,7 +1322,7 @@ fn topk_by(
     axes: &[KeyKind],
     attr: &str,
     k: u32,
-    short: Option<&Shortfall>,
+    shorts: &Shortfalls,
 ) -> Result<Output, EmitError> {
     let mut totals = Vec::new();
     for (key, events) in grouped(events, axes) {
@@ -1204,7 +1335,7 @@ fn topk_by(
             }
         }
         totals.push(SeriesTotal {
-            short: short.cloned(),
+            short: shorts.for_series(&key),
             key,
             events: events.len() - unmeasured,
             total,
@@ -1212,6 +1343,53 @@ fn topk_by(
         });
     }
 
+    Ok(ranked(totals, k))
+}
+
+/// The ranking over one attribute's distinct values: each value is a row,
+/// named `<attr>=<value>`, and what it weighs is the value attribute summed
+/// over the events that carried it. The run's shortfall is on every row: a
+/// ring drops without regard to which value the record carried.
+fn topk_over(
+    events: &[Event],
+    by: &str,
+    attr: &str,
+    k: u32,
+    shorts: &Shortfalls,
+) -> Result<Output, EmitError> {
+    let mut groups: BTreeMap<SeriesKey, Vec<&Event>> = BTreeMap::new();
+    for event in events {
+        let value = event
+            .attr(by)
+            .map_or_else(|| "?".to_owned(), |value| value.to_string());
+        groups
+            .entry(SeriesKey::from(format!("{by}={value}").as_str()))
+            .or_default()
+            .push(event);
+    }
+    let mut totals = Vec::new();
+    for (key, events) in groups {
+        let mut total = 0.0;
+        let mut unmeasured = 0;
+        for event in &events {
+            match measured(event, attr)? {
+                Some(value) => total += value * weight_of(event),
+                None => unmeasured += 1,
+            }
+        }
+        totals.push(SeriesTotal {
+            short: shorts.run.clone(),
+            key,
+            events: events.len() - unmeasured,
+            total,
+            unmeasured,
+        });
+    }
+    Ok(ranked(totals, k))
+}
+
+/// Heaviest first, the first `k` kept and the rest summed.
+fn ranked(mut totals: Vec<SeriesTotal>, k: u32) -> Output {
     // Heaviest first, and by key where two are equal: a ranking that reorders
     // itself between two runs of the same workload is not a ranking.
     totals.sort_by(|left, right| {
@@ -1221,9 +1399,8 @@ fn topk_by(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.key.cmp(&right.key))
     });
-
     let dropped = totals.split_off((k as usize).min(totals.len()));
-    Ok(Output::TopK {
+    Output::TopK {
         k,
         series: totals,
         rest: Rest {
@@ -1231,7 +1408,7 @@ fn topk_by(
             events: dropped.iter().map(|series| series.events).sum(),
             total: dropped.iter().map(|series| series.total).sum(),
         },
-    })
+    }
 }
 
 /// Aggregates by stack identity rather than by frame list.
@@ -1550,7 +1727,7 @@ mod tests {
         row.attrs.push(Attr::uint(TOTAL_OF_ATTR, 400));
         let events = vec![row];
 
-        let note = pre_aggregated(&[Emit::Hist(HistScale::Log2), Emit::Summary], &events)
+        let note = pre_aggregated(&[Emit::Hist(BucketLayout::Log2), Emit::Summary], &events)
             .expect("a distribution of drain windows is a degradation of itself");
         assert!(
             note.contains("`hist` and `summary` describe")
@@ -1562,7 +1739,11 @@ mod tests {
 
         // The emits that add or plot a total are not degraded by it: a total is
         // exactly what they were going to sum.
-        assert!(pre_aggregated(&[Emit::Rate, Emit::TopK(3), Emit::Raw], &events).is_none());
+        assert!(pre_aggregated(
+            &[Emit::Rate, Emit::TopK { k: 3, by: None }, Emit::Raw],
+            &events
+        )
+        .is_none());
         // Nor is a row that stands for one measurement, which is one.
         let mut single = event(0, 7, 8_000_000);
         single.attrs.push(Attr::uint(TOTAL_OF_ATTR, 1));
@@ -1594,6 +1775,94 @@ mod tests {
             throttled,
             ..Default::default()
         }
+    }
+
+    /// A collection of two threads' events, with the losses given, one ring
+    /// per thread when `by_ring` says so.
+    fn two_threads(losses: Losses, by_ring: Vec<crate::collect::RingLoss>) -> Collection {
+        let events: Vec<Event> = (0..90)
+            .map(|i| event(i, if i % 3 == 0 { 7 } else { 8 }, 100))
+            .collect();
+        Collection {
+            events,
+            value_attr: "bytes".to_owned(),
+            losses,
+            observed_ns: 1_000,
+            stopped_because: "the test".to_owned(),
+            stacks: BTreeMap::new(),
+            notes: Vec::new(),
+            filtered: None,
+            served_by: Vec::new(),
+            overhead: crate::collect::Overhead::default(),
+            lifetime: None,
+            window: crate::collect::Watched::default(),
+            by_ring,
+            facts: Vec::new(),
+        }
+    }
+
+    fn ring(tid: i32, dropped: u64) -> crate::collect::RingLoss {
+        crate::collect::RingLoss {
+            key: KeyValue::task(tid),
+            losses: lost(dropped, 0),
+        }
+    }
+
+    /// Two threads, one ring each, and only one of them overflowed: the
+    /// shortfall lands on that thread's series, weighed against that thread's
+    /// events, and the other thread's series is complete.
+    #[test]
+    fn a_ring_s_losses_land_on_the_series_of_the_key_it_belongs_to() {
+        let collection = two_threads(lost(20, 0), vec![ring(7, 20), ring(8, 0)]);
+        let shorts = Shortfalls::of(&collection, &[]);
+        let short = shorts
+            .for_series(&SeriesKey::from("task:7"))
+            .expect("the thread that overflowed is short");
+        assert_eq!((short.dropped, short.records), (20, 30));
+        assert!(shorts.for_series(&SeriesKey::from("task:8")).is_none());
+        // The run's own shortfall, for what is not per series, is unchanged.
+        assert_eq!(shorts.run.as_ref().map(|run| run.records), Some(90));
+    }
+
+    /// Losses that are not all a ring's, or series that are not keyed by the
+    /// rings' key, cannot be placed: every series carries the run's.
+    #[test]
+    fn a_loss_no_ring_owns_is_the_run_s_on_every_series() {
+        let unplaced = two_threads(lost(25, 0), vec![ring(7, 20)]);
+        let shorts = Shortfalls::of(&unplaced, &[]);
+        for key in ["task:7", "task:8"] {
+            assert_eq!(
+                shorts
+                    .for_series(&SeriesKey::from(key))
+                    .map(|short| short.dropped),
+                Some(25),
+                "{key}"
+            );
+        }
+        let placed = two_threads(lost(20, 0), vec![ring(7, 20)]);
+        let by_cpu = Shortfalls::of(&placed, &[KeyKind::Cpu]);
+        assert_eq!(
+            by_cpu
+                .for_series(&SeriesKey::from("cpu:?"))
+                .map(|short| short.dropped),
+            Some(20),
+            "grouped by what no ring belongs to, the loss is everyone's"
+        );
+    }
+
+    /// A counted window is a rate over the counter's own enabled time; a
+    /// series without it is over the run's window.
+    #[test]
+    fn a_counted_rate_is_over_the_time_its_counter_was_enabled() {
+        let mut counted = event(0, 7, 3_000);
+        counted.attrs.push(Attr::uint("enabled_ns", 500_000_000));
+        let plain = event(0, 8, 3_000);
+        let rates = rate(&[counted, plain], 1_000_000_000, "bytes", None).unwrap();
+        let by = |key: &str| rates.iter().find(|rate| rate.key == key).unwrap();
+        assert_eq!(by("task:7").per_second, Some(6_000.0));
+        assert!(by("task:7").counted_window);
+        assert_eq!(by("task:8").per_second, Some(3_000.0));
+        assert!(!by("task:8").counted_window);
     }
 
     /// A clean run gains nothing: not a field, not a mark, not a character.
@@ -2026,7 +2295,8 @@ mod tests {
         ];
 
         let by = |axes: &[KeyKind]| -> Vec<(String, f64)> {
-            let Output::TopK { series, .. } = topk_by(&events, axes, "bytes", 10, None).unwrap()
+            let Output::TopK { series, .. } =
+                topk_by(&events, axes, "bytes", 10, &Shortfalls::run_wide(None)).unwrap()
             else {
                 panic!("topk is a ranking");
             };

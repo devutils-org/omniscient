@@ -21,6 +21,11 @@ use crate::filter::FilterExpr;
 use crate::format::OutputFormat;
 use crate::scalar::{Duration, Frequency};
 
+thread_local! {
+    /// Set by [`Target::first_pid`] when it narrowed several processes to one.
+    static NARROWED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A catalog source identifier, `<family>.<metric>`.
 ///
 /// The metric part may itself contain dots (`net.tcp.connect`, `mem.heap.live`);
@@ -122,11 +127,30 @@ impl Target {
     ///
     /// A target that names no process is not an error: an interface or the
     /// whole machine is observed without one.
+    ///
+    /// A collector that asks this of a target naming several processes is
+    /// one that observes one, and the others would be dropped without a word
+    /// (`open-requests 250`). So the call is remembered, and the runner asks
+    /// [`Target::narrowed_to_one`] after preparing and attaching each
+    /// collector and refuses the request, naming what it would have lost,
+    /// before the program is released.
     pub fn first_pid(&self) -> Option<i32> {
         match self {
-            Target::Pid(pids) | Target::Tid(pids) => pids.first().copied(),
+            Target::Pid(pids) | Target::Tid(pids) => {
+                if pids.len() > 1 {
+                    NARROWED.with(|narrowed| narrowed.set(pids.len()));
+                }
+                pids.first().copied()
+            }
             _ => None,
         }
+    }
+
+    /// How many processes a [`Target::first_pid`] on this thread narrowed a
+    /// target from since the last time this was asked, which clears it.
+    pub fn narrowed_to_one() -> Option<usize> {
+        let narrowed = NARROWED.with(|narrowed| narrowed.replace(0));
+        (narrowed > 1).then_some(narrowed)
     }
 
     /// The interface to observe, when the target names one.
@@ -545,7 +569,17 @@ impl ModeKind {
             // enabled for. Without it there is no way to see a derived metric's
             // terms, or the counter's own window, which is the honest
             // denominator for a rate.
-            ModeKind::Count => &[EmitKind::Rate, EmitKind::Summary, EmitKind::Raw],
+            //
+            // `topk` too, for the same reason: a counted window is one event
+            // per series, and ranking them is `rate` without the division --
+            // a counted run could say what its heaviest series' rate was and
+            // not which series was heaviest (`open-requests 2467`, `6181`).
+            ModeKind::Count => &[
+                EmitKind::Rate,
+                EmitKind::Summary,
+                EmitKind::Raw,
+                EmitKind::TopK,
+            ],
             ModeKind::Sample => &[
                 EmitKind::Stack,
                 EmitKind::TopK,
@@ -582,8 +616,12 @@ pub enum Emit {
     Hist(HistScale),
     /// A per-second rate.
     Rate,
-    /// The N heaviest contributors.
-    TopK(u32),
+    /// The N heaviest contributors: series, or with `by` the distinct values
+    /// of one attribute. A series is a set of keys, so a source that carries
+    /// one key answers a ranking of series with one row however many distinct
+    /// things it measured -- `topk:10@method` ranks the methods, `topk:5@reason`
+    /// the reasons packets were dropped (`open-requests 2755`, `3883`).
+    TopK { k: u32, by: Option<AttrName> },
     /// Aggregated call stacks.
     Stack,
     /// Values over time.
@@ -600,7 +638,7 @@ impl Emit {
             Emit::Raw => EmitKind::Raw,
             Emit::Hist(_) => EmitKind::Hist,
             Emit::Rate => EmitKind::Rate,
-            Emit::TopK(_) => EmitKind::TopK,
+            Emit::TopK { .. } => EmitKind::TopK,
             Emit::Stack => EmitKind::Stack,
             Emit::Timeline => EmitKind::Timeline,
             Emit::Summary => EmitKind::Summary,
@@ -625,11 +663,22 @@ impl FromStr for Emit {
             ("summary", None, _) => Emit::Summary,
             ("hist", None, _) => Emit::Hist(HistScale::Log2),
             ("hist", Some("log2"), None) => Emit::Hist(HistScale::Log2),
-            ("hist", Some("linear"), Some(width)) => Emit::Hist(HistScale::Linear {
-                width: crate::scalar::parse_scalar(width)?
+            ("hist", Some("linear"), Some(width)) => {
+                let width: u64 = crate::scalar::parse_scalar(width)?
                     .try_into()
-                    .map_err(|_| ParseError::new("linear histogram width must be positive"))?,
-            }),
+                    .map_err(|_| ParseError::new("linear histogram width must be positive"))?;
+                // Refused here, where the request is written, rather than by
+                // the emit layer after the run has been paid for: a width of
+                // zero puts every value in one bucket of no width, which is
+                // not a histogram of anything (`open-requests 323`).
+                if width == 0 {
+                    return Err(ParseError::new(
+                        "a linear histogram needs a bucket width above zero, as in \
+                         `hist:linear:1ms`",
+                    ));
+                }
+                Emit::Hist(HistScale::Linear { width })
+            }
             ("hist", Some("linear"), None) => {
                 return Err(ParseError::new(
                     "a linear histogram needs a bucket width, as in `hist:linear:1ms`",
@@ -640,12 +689,29 @@ impl FromStr for Emit {
                     "unknown histogram scale `{other}` (expected log2 or linear)"
                 )))
             }
-            ("topk", None, _) => Emit::TopK(Emit::DEFAULT_TOPK),
-            ("topk", Some(count), None) => Emit::TopK(
-                count
-                    .parse()
-                    .map_err(|_| ParseError::new(format!("`{count}` is not a top-k count")))?,
-            ),
+            ("topk", None, _) => Emit::TopK {
+                k: Emit::DEFAULT_TOPK,
+                by: None,
+            },
+            ("topk", Some(argument), None) => {
+                // `topk:N`, `topk:N@<attr>`, or `topk:@<attr>` for the default N.
+                let (count, by) = match argument.split_once('@') {
+                    Some((count, attr)) => (count.trim(), Some(attr.trim())),
+                    None => (argument, None),
+                };
+                let k = if count.is_empty() && by.is_some() {
+                    Emit::DEFAULT_TOPK
+                } else {
+                    count
+                        .parse()
+                        .map_err(|_| ParseError::new(format!("`{count}` is not a top-k count")))?
+                };
+                let by = match by {
+                    None => None,
+                    Some(attr) => Some(AttrName::new(attr)?),
+                };
+                Emit::TopK { k, by }
+            }
             (name @ ("raw" | "rate" | "stack" | "timeline" | "summary"), Some(argument), _) => {
                 return Err(ParseError::new(format!(
                     "emit `{name}` takes no argument, but `:{argument}` was given"
@@ -672,21 +738,112 @@ impl fmt::Display for Emit {
             Emit::Summary => f.write_str("summary"),
             Emit::Hist(HistScale::Log2) => f.write_str("hist:log2"),
             Emit::Hist(HistScale::Linear { width }) => write!(f, "hist:linear:{width}"),
-            Emit::TopK(count) => write!(f, "topk:{count}"),
+            Emit::TopK { k, by: None } => write!(f, "topk:{k}"),
+            Emit::TopK { k, by: Some(attr) } => write!(f, "topk:{k}@{attr}"),
         }
     }
 }
 
 serde_as_string!(Emit);
 
+/// The name of an event attribute a request refers to, as in `topk:10@method`.
+///
+/// Interned, so that an [`Emit`] stays `Copy` as every layer that matches on
+/// it assumes: a name is kept once for the life of the process, and a process
+/// parses a handful of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AttrName(&'static str);
+
+impl AttrName {
+    pub fn new(name: &str) -> Result<Self, ParseError> {
+        use std::collections::BTreeSet;
+        use std::sync::Mutex;
+        static NAMES: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        if !valid {
+            return Err(ParseError::new(format!(
+                "`{name}` is not an attribute name: letters, digits, `_` and `.` only"
+            )));
+        }
+        let mut names = NAMES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(known) = names.get(name) {
+            return Ok(Self(known));
+        }
+        let kept: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        names.insert(kept);
+        Ok(Self(kept))
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Display for AttrName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// How a histogram lays out its buckets.
+///
+/// One type for the request and the results: the emit layer calls it
+/// `BucketLayout` and carries it beside the buckets, and it used to be a copy
+/// of this one that only the results could serialize (`open-requests 314`).
+/// Written `log2` or `linear:<width>`, which is how a result file says how to
+/// read itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistScale {
     /// Power-of-two buckets: what in-kernel aggregation produces cheaply.
+    ///
+    /// Bucket 0 holds nothing but the values below one, and bucket *k* holds
+    /// `[2^(k-1), 2^k)`. This is the layout an eBPF array map builds for free
+    /// -- one `log2` of the value, one index, one atomic increment, no
+    /// per-event record -- which is what makes moving a histogram into the
+    /// kernel viable. A prettier layout here would have to be abandoned then,
+    /// and two runs of the same source would not be comparable across the
+    /// change.
     Log2,
-    /// Fixed-width buckets, for a known range.
+    /// Fixed-width buckets, for a known range: bucket *k* holds
+    /// `[k*width, (k+1)*width)`.
     Linear { width: u64 },
 }
+
+impl fmt::Display for HistScale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HistScale::Log2 => f.write_str("log2"),
+            HistScale::Linear { width } => write!(f, "linear:{width}"),
+        }
+    }
+}
+
+impl FromStr for HistScale {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().split_once(':') {
+            None if s.trim() == "log2" => Ok(HistScale::Log2),
+            Some(("linear", width)) => match width.parse::<u64>() {
+                Ok(0) => Err(ParseError::new(
+                    "a linear histogram's width must be above zero",
+                )),
+                Ok(width) => Ok(HistScale::Linear { width }),
+                Err(_) => Err(ParseError::new(format!("`{width}` is not a bucket width"))),
+            },
+            _ => Err(ParseError::new(format!(
+                "unknown bucket layout `{s}` (expected log2 or linear:<width>)"
+            ))),
+        }
+    }
+}
+
+serde_as_string!(HistScale);
 
 /// An emit without its argument, which is what the catalog declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1829,8 +1986,50 @@ requests:
         assert_eq!("hist".parse::<Emit>().unwrap(), Emit::Hist(HistScale::Log2));
         assert_eq!(
             "topk".parse::<Emit>().unwrap(),
-            Emit::TopK(Emit::DEFAULT_TOPK)
+            Emit::TopK {
+                k: Emit::DEFAULT_TOPK,
+                by: None
+            }
         );
+    }
+
+    /// `topk` ranks series, or the values of an attribute, and each spelling
+    /// comes back as it was written.
+    #[test]
+    fn a_ranking_over_an_attribute_parses_and_round_trips() {
+        for (written, k, by) in [
+            ("topk", Emit::DEFAULT_TOPK, None),
+            ("topk:3", 3, None),
+            ("topk:5@reason", 5, Some("reason")),
+            ("topk:@method", Emit::DEFAULT_TOPK, Some("method")),
+        ] {
+            let emit: Emit = written.parse().unwrap();
+            let Emit::TopK { k: got, by: named } = emit else {
+                panic!("{written} is a ranking");
+            };
+            assert_eq!((got, named.map(AttrName::as_str)), (k, by), "{written}");
+            assert_eq!(emit.to_string().parse::<Emit>().unwrap(), emit);
+        }
+        assert!("topk:5@".parse::<Emit>().is_err());
+        assert!("topk:5@a b".parse::<Emit>().is_err());
+        assert!(ModeKind::Count.valid_emits().contains(&EmitKind::TopK));
+    }
+
+    /// A width of zero is refused where the request is written, and the
+    /// layout serialises as the results write it.
+    #[test]
+    fn a_zero_width_histogram_is_refused_and_a_layout_round_trips() {
+        let refused = "hist:linear:0".parse::<Emit>().unwrap_err().to_string();
+        assert!(refused.contains("above zero"), "{refused}");
+        for scale in [HistScale::Log2, HistScale::Linear { width: 250 }] {
+            let written = serde_json::to_string(&scale).unwrap();
+            assert_eq!(serde_json::from_str::<HistScale>(&written).unwrap(), scale);
+        }
+        assert_eq!(
+            serde_json::to_string(&HistScale::Linear { width: 250 }).unwrap(),
+            "\"linear:250\""
+        );
+        assert!(serde_json::from_str::<HistScale>("\"linear:0\"").is_err());
     }
 
     #[test]
