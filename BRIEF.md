@@ -322,6 +322,14 @@ Handoff: `docs/families/devices.md`.
 5. **A NUMA node has a key** (`open-requests 1469`).
 6. **The tally's rows in your files**: `docs/flaky.md` #10, #25 and #26, and
    the comments that say one run observes one target (`5256`) in yours.
+7. **`omn-mcp` launches the sessions the operator wrote** (added mid-wave,
+   decided by the user): `--allow-launch DIR`, meaningful only with
+   `--allow-run`. A launch target is accepted only from a session file in DIR,
+   exactly as the file states it: program, arguments, environment and working
+   directory. The model chooses which approved session runs and when, never
+   what runs. Duration and budget stay bounded as they are. The approved
+   sessions are discoverable, and whether a repeated, spread-reporting run is
+   its own tool is yours to decide and write down. It goes after items 1 and 2.
 
 **Ground truth**: for 1, every evidence level a real session's joins produce,
 read back through `omn-mcp` with its sentence; for 2, finding 48's
