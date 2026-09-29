@@ -840,7 +840,9 @@ mod tests {
 
     #[test]
     fn an_emit_no_declared_mode_can_produce_is_a_broken_promise() {
-        let mut entry = catalog().get(&"mem.swap".parse().unwrap()).unwrap().clone();
+        // `mem.rss` polls and snapshots, and neither produces a rate. (It was
+        // `mem.swap` until the thirteenth wave gave that one a counted window.)
+        let mut entry = catalog().get(&"mem.rss".parse().unwrap()).unwrap().clone();
         entry.emits.push(EmitKind::Rate);
         // The loader runs `check_catalog`, so the broken promise is a catalog
         // that does not load, with the complaint as its reason.
