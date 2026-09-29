@@ -332,13 +332,23 @@ thread_local! {
 static CLOCK_READ_NS: AtomicU64 = AtomicU64::new(0);
 
 fn calibrate_clock() {
-    const READS: u64 = 32;
-    let first = monotonic_ns();
-    let mut last = first;
-    for _ in 0..READS {
-        last = monotonic_ns();
+    // The least of several short batches, not one long one: a batch the
+    // program's thread was preempted in measures the preemption, and a price
+    // inflated that way is subtracted from every timed call -- which on a
+    // loaded machine zeroed nearly all of them (one run's account came to
+    // 5 ms for 400 ms of shim).
+    const BATCHES: u32 = 16;
+    const READS: u64 = 8;
+    let mut least = u64::MAX;
+    for _ in 0..BATCHES {
+        let first = monotonic_ns();
+        let mut last = first;
+        for _ in 0..READS {
+            last = monotonic_ns();
+        }
+        least = least.min(last.saturating_sub(first) / READS);
     }
-    CLOCK_READ_NS.store(last.saturating_sub(first) / READS, Ordering::Relaxed);
+    CLOCK_READ_NS.store(least, Ordering::Relaxed);
 }
 
 /// Times one hooked call in [`SAMPLE_EVERY`], less the real function it
