@@ -29,6 +29,24 @@ mod switches;
 mod wakeup;
 
 use super::Factory;
+use crate::bpf::Whose;
+use crate::request::Target;
+
+/// Whose tasks one of this family's programs narrows to, or the refusal.
+///
+/// Every eBPF collector here compares a task in the kernel, and until the
+/// thirteenth wave each wrote its own target match: six of them refused a
+/// cgroup, and the ones that took `--tid` compared it against the thread
+/// group. `why` is the collector's own sentence for what it attributes per
+/// task, which the refusal ends with, followed by what does work.
+pub(crate) fn whose(target: &Target, why: &str) -> Result<Whose, String> {
+    Whose::of(target).map_err(|reason| {
+        format!(
+            "{reason}, and {why}; name a process with --pid, a thread with --tid, a cgroup with \
+             --cgroup, or use --system to watch the whole machine"
+        )
+    })
+}
 
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
@@ -110,7 +128,16 @@ pub fn factories() -> Vec<Factory> {
             }))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
-            Ok(Box::new(switches::Prepare(resolved.request.mode)))
+            match resolved.request.mode {
+                // Counted, not sampled: the same software counter
+                // `cpu.context_switches` reads, one inherited counter per
+                // thread read at the end, with no ring and no second party.
+                crate::request::Mode::Count => Ok(Box::new(super::cpu::counters::Prepare::new(
+                    &super::cpu::counters::SCHED_SWITCHES,
+                    crate::request::Mode::Count,
+                )?)),
+                mode => Ok(Box::new(switches::Prepare(mode))),
+            }
         }),
     ]
 }

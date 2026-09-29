@@ -39,9 +39,23 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{count_drop, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{
+    self, count_drop, helper, push_task_filter, read_field, Insn, Log2Labels, Program, Subject,
+    TaskFields, Whose, BPF_DW, BPF_W, R10,
+};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::syscall;
+
+/// This program's own labels for the shared unrolled log2.
+const LOG2: Log2Labels = [
+    "log2_32",
+    "log2_16",
+    "log2_8",
+    "log2_4",
+    "log2_2",
+    "log2_1",
+    "log2_done",
+];
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context: one 64-bit
 /// slot each, in the order the kernel declares them.
@@ -100,14 +114,17 @@ const DROP_TOTALS: u32 = 1;
 /// reads and the map descriptors all come from the same place. Every byte of
 /// each is written before it is handed to a helper: an uninitialised byte in a
 /// key makes two identical blocks land in two different buckets.
-const TOTAL_VALUE: i16 = -96;
-const TOTAL_KEY: i16 = -56;
+const TOTAL_VALUE: i16 = -104;
+/// Twenty bytes of key in a twenty-four-byte slot.
+const TOTAL_KEY: i16 = -64;
 const IN_FLIGHT_VALUE: i16 = -40;
 const IN_FLIGHT_KEY: i16 = -8;
-const DROP_KEY: i16 = -104;
+const DROP_KEY: i16 = -112;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -112;
+const ROWS_SLOT: i16 = -120;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
+const FILTER_SCRATCH: i16 = -136;
 
 /// The layout of a totals key, as byte offsets within it.
 ///
@@ -131,7 +148,18 @@ const KEY_STATE: i16 = 8;
 /// reason this does: the kernel hashes the whole key, and a byte the program
 /// never wrote puts two identical blocks in two buckets.
 const KEY_STACK: i16 = 12;
-const TOTAL_KEY_BYTES: usize = 16;
+/// The log2 bucket the block's duration fell into, in
+/// `emit::BucketLayout::Log2`'s numbering.
+///
+/// In the key, which is what makes `--emit hist` a histogram of blocks rather
+/// than of drain windows (`docs/scenarios/sched.md` defect 1). A total is a
+/// sum, and the durations that went into it are gone once they are added: a
+/// row of four hundred blocks drained on a tick put four hundred blocks in the
+/// bucket of their *sum*, a range none of them was in. Every block behind a
+/// row is inside its bucket now, so the row's mean is too, and the row weighs
+/// as many blocks as it counts.
+const KEY_BUCKET: i16 = 16;
+const TOTAL_KEY_BYTES: usize = 20;
 
 /// The layout of a totals value, the same way.
 const VALUE_TOTAL_NS: i16 = 0;
@@ -184,6 +212,9 @@ pub struct OffCpu {
     pub tid: u32,
     pub tgid: u32,
     pub state: u32,
+    /// The log2 bucket every block behind this row fell into, in
+    /// `emit::BucketLayout::Log2`'s numbering.
+    pub bucket: u32,
     pub total_ns: u64,
     /// The part of `total_ns` that was runnable rather than blocked: the run
     /// queue wait between the wakeup and the switch back onto a cpu.
@@ -257,6 +288,7 @@ impl OffCpu {
             tid: word(key, KEY_TID as usize),
             tgid: word(key, KEY_TGID as usize),
             state: word(key, KEY_STATE as usize),
+            bucket: word(key, KEY_BUCKET as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             queued_ns: long(value, VALUE_QUEUED_NS as usize),
             blocks: long(value, VALUE_BLOCKS as usize),
@@ -279,7 +311,7 @@ impl OffCpu {
 /// Builds the program for a target, or for the whole machine.
 fn instructions(
     btf: &Btf,
-    target_tgid: Option<u32>,
+    whose: Whose,
     in_flight_fd: i32,
     totals_fd: i32,
     drops_fd: i32,
@@ -299,6 +331,7 @@ fn instructions(
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
+    let fields = TaskFields::locate(btf, whose)?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 whichever task is being looked at and r8 the
@@ -343,11 +376,14 @@ fn instructions(
     // out of three was exactly that, and it read as "no user stack to walk".
     // It also walked every blocking stack on the machine to keep one
     // process's.
-    if let Some(tgid) = target_tgid {
-        read_field(&mut program, TOTAL_KEY + KEY_TGID, 4, 7, tgid_offset);
-        program.push(Insn::ldx(BPF_W, 1, R10, TOTAL_KEY + KEY_TGID));
-        program.jump_to("left", Insn::jne_imm(1, tgid as i32, 0));
-    }
+    push_task_filter(
+        &mut program,
+        &fields,
+        whose,
+        Subject::task(7),
+        FILTER_SCRATCH,
+        "left",
+    );
 
     // The stack of the task that is leaving, taken here because here is the
     // only place it exists. `sched_switch` runs in the outgoing task's context
@@ -433,6 +469,11 @@ fn instructions(
     program.push(Insn::ldx(BPF_W, 1, R10, IN_FLIGHT_KEY));
     program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_TID, 1));
     read_field(&mut program, TOTAL_KEY + KEY_TGID, 4, 7, tgid_offset);
+    // The bucket of this block's whole duration, the queue wait included,
+    // because `total_ns` is what the row adds up. `r1` to `r3` are free until
+    // the row map is looked up.
+    insn::push_log2_bucket(&mut program, 9, &LOG2);
+    program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_BUCKET, 3));
 
     // The row map of this interval, taken once: a drain may swap it at any
     // instruction, and a lookup and an insert that named two maps would put
@@ -579,7 +620,7 @@ impl OffCpuProgram {
         crate::bpf::attach::fentry::skipped([&self.program, &self.wakeup_program])
     }
 
-    pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
+    pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
         let in_flight = Hash::create(
@@ -603,7 +644,7 @@ impl OffCpuProgram {
 
         let instructions = instructions(
             btf,
-            target_tgid,
+            whose,
             in_flight.as_raw_fd(),
             totals.as_raw_fd(),
             drops.as_raw_fd(),
@@ -733,7 +774,13 @@ mod tests {
     /// buckets and halves both totals.
     #[test]
     fn every_byte_of_a_key_and_a_value_is_accounted_for() {
-        let key = [(KEY_TID, 4), (KEY_TGID, 4), (KEY_STATE, 4), (KEY_STACK, 4)];
+        let key = [
+            (KEY_TID, 4),
+            (KEY_TGID, 4),
+            (KEY_STATE, 4),
+            (KEY_STACK, 4),
+            (KEY_BUCKET, 4),
+        ];
         let value = [
             (VALUE_TOTAL_NS, 8),
             (VALUE_BLOCKS, 8),
@@ -777,6 +824,7 @@ mod tests {
             ),
             (IN_FLIGHT_KEY, 8, "in-flight key slot"),
             (ROWS_SLOT, 8, "row map slot"),
+            (FILTER_SCRATCH, 16, "filter scratch"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -819,7 +867,8 @@ mod tests {
     fn a_narrowed_run_walks_only_the_targets_stacks() {
         const TGID: i32 = 4242;
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Some(TGID as u32), 3, 4, 5, 6).expect("a program");
+        let program =
+            instructions(&btf, Whose::Process(TGID as u32), 3, 4, 5, 6).expect("a program");
         let compared = program
             .iter()
             .position(|insn| insn.imm == TGID)
@@ -835,7 +884,7 @@ mod tests {
 
         // And a machine-wide run still walks every stack, with nothing to
         // compare against.
-        let everything = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        let everything = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
         assert!(!everything.iter().any(|insn| insn.imm == TGID));
         assert!(helpers_called(&everything).contains(&helper::GET_STACKID));
     }
@@ -870,7 +919,8 @@ mod tests {
     #[test]
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
-        let called = helpers_called(&instructions(&btf, Some(1), 3, 4, 5, 6).expect("a program"));
+        let called =
+            helpers_called(&instructions(&btf, Whose::Process(1), 3, 4, 5, 6).expect("a program"));
         const KTIME_GET_BOOT_NS: i32 = 125;
         assert!(called.contains(&helper::KTIME_GET_NS));
         assert!(!called.contains(&KTIME_GET_BOOT_NS));
@@ -891,7 +941,7 @@ mod tests {
     #[test]
     fn the_duration_is_a_difference_and_not_a_timestamp() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        let program = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
         assert!(
             program.iter().any(|insn| *insn == Insn::sub64_reg(9, 1)),
             "the program must subtract the moment the task left from the moment it came back"
@@ -904,7 +954,7 @@ mod tests {
     #[test]
     fn a_runnable_or_dying_task_is_not_recorded_as_blocked() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        let program = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
         assert!(
             program
                 .iter()
@@ -926,7 +976,7 @@ mod tests {
     #[test]
     fn the_totals_are_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        let program = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
         let atomics = program.iter().filter(|insn| insn.code == 0xdb).count();
         assert_eq!(
             atomics, 3,
@@ -937,9 +987,9 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide = instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        let machine_wide = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
         assert!(!machine_wide.iter().any(|insn| insn.imm == 4242));
-        let filtered = instructions(&btf, Some(4242), 3, 4, 5, 6).expect("a program");
+        let filtered = instructions(&btf, Whose::Process(4242), 3, 4, 5, 6).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
@@ -954,7 +1004,7 @@ mod tests {
     fn a_kernel_with_another_prototype_is_refused_rather_than_read_wrong() {
         let Some(btf) = kernel_btf() else { return };
         assert!(
-            instructions(&btf, None, 3, 4, 5, 6).is_ok(),
+            instructions(&btf, Whose::Any, 3, 4, 5, 6).is_ok(),
             "this kernel's prototype is the one the program is written for"
         );
         assert_eq!(
@@ -1001,7 +1051,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Some(1), 3, 4, 5, 6).expect("a program");
+        let program = instructions(&btf, Whose::Process(1), 3, 4, 5, 6).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

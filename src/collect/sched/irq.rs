@@ -1,7 +1,8 @@
 //! `sched.irq` over a pair of raw tracepoints, bucketed in the kernel.
 //!
 //! The measurement is how long the machine spent inside hardware interrupt
-//! handlers, per cpu and per interrupt line. It is the one kind of cpu time no
+//! handlers, per cpu and per interrupt line, and inside softirqs, per cpu and
+//! per vector. It is the one kind of cpu time no
 //! other source in this tool can attribute: a handler preempts whatever thread
 //! is on the cpu, runs outside any schedule, and is charged to nobody. A
 //! thread that takes longer than its own cpu time explains may have spent the
@@ -20,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{IrqDrops, IrqProgram, IrqRun};
+use crate::bpf::{IrqDrops, IrqProgram, IrqRun, KIND_SOFT};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::WEIGHT_ATTR;
@@ -88,7 +89,7 @@ pub struct IrqCollector {
     /// When the whole window opened, which is the one `count` reports over.
     run_opened_ns: u64,
     /// The totals a `count` run accumulates, by the triple that keys a series.
-    counted: BTreeMap<(u32, u32, u32), IrqRun>,
+    counted: BTreeMap<(u32, u32, u32, u32), IrqRun>,
     predicate: Option<FilterExpr>,
     filtered_out: u64,
     filtered_in: u64,
@@ -206,7 +207,7 @@ impl IrqCollector {
                 // rows -- but what comes out is added to the window's total
                 // rather than published as a slice of it.
                 self.counted
-                    .entry((row.cpu, row.irq, row.bucket))
+                    .entry((row.cpu, row.kind, row.irq, row.bucket))
                     .and_modify(|held| {
                         held.count += row.count;
                         held.total_ns += row.total_ns;
@@ -294,10 +295,41 @@ fn attributes(row: &IrqRun, window_ns: u64) -> Vec<Attr> {
         Attr::uint("window_ns", window_ns),
         Attr::uint("cpu", u64::from(row.cpu)),
         Attr::uint("irq", u64::from(row.irq)),
-        // The handler's name as `/proc/interrupts` shows it. An interrupt line
-        // number is a machine's private business; `nvme0q3` is a device.
-        Attr::text("name", row.name.clone()),
+        // Which half: a hard handler's `irq` is its line, a softirq's is its
+        // vector, and the numbers overlap.
+        Attr::text(
+            "kind",
+            if row.kind == KIND_SOFT {
+                "soft"
+            } else {
+                "hard"
+            },
+        ),
+        // The handler's name as `/proc/interrupts` shows it -- an interrupt line
+        // number is a machine's private business; `nvme0q3` is a device -- and
+        // a softirq's as `/proc/softirqs` does.
+        Attr::text(
+            "name",
+            if row.kind == KIND_SOFT {
+                softirq_name(row.irq)
+            } else {
+                row.name.clone()
+            },
+        ),
     ]
+}
+
+/// A softirq vector's name, as `/proc/softirqs` spells it. The vectors are
+/// `enum` constants the kernel has kept in this order since 2.6.36 and names in
+/// `softirq_to_name`; one this table does not know is given its number.
+fn softirq_name(vector: u32) -> String {
+    const NAMES: [&str; 10] = [
+        "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER",
+        "RCU",
+    ];
+    NAMES
+        .get(vector as usize)
+        .map_or_else(|| format!("softirq {vector}"), |name| (*name).to_owned())
 }
 
 impl Collector for IrqCollector {
@@ -350,14 +382,12 @@ impl Collector for IrqCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
-        // Said on every run of this source rather than left in documentation:
-        // the summary the catalog gives it says "hard and soft", and this
-        // build serves the hard half.
+        // Said on every run: the two halves share `irq` numbers, and a reader
+        // adding them up by line would add a vector to a device.
         notes.push(
-            "hard interrupt handlers only: softirq time -- the network receive path, the block \
-             completion path, the timer wheel -- is `softirq_entry` and `softirq_exit`, which \
-             this source's catalog entry does not declare as requirements and this build does \
-             not attach to"
+            "hard handlers and softirqs are separate rows, told apart by `kind`: a hard row's \
+             `irq` is its line and a soft row's its vector, and a softirq's time has the hard \
+             handlers that landed inside it taken out"
                 .to_owned(),
         );
         if self.off_target > 0 {
@@ -393,12 +423,43 @@ mod tests {
         IrqRun {
             cpu: 3,
             irq: 142,
+            kind: crate::bpf::KIND_HARD,
             bucket: 13,
             count: 24,
             total_ns: 96_000,
             first_ns: 0,
             name: "nvme0q3".to_owned(),
         }
+    }
+
+    /// A softirq row is named by its vector the way `/proc/softirqs` names
+    /// it, and says which half it is; a hard row keeps its handler's name.
+    #[test]
+    fn a_softirq_row_is_named_by_its_vector_and_says_it_is_soft() {
+        let text = |attributes: &[Attr], name: &str| {
+            attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .map(|attr| attr.value.clone())
+        };
+        let hard = attributes(&row(), 1);
+        assert_eq!(
+            text(&hard, "kind"),
+            Some(crate::event::AttrValue::Text("hard".to_owned()))
+        );
+        let mut soft = row();
+        soft.kind = KIND_SOFT;
+        soft.irq = 3;
+        let soft = attributes(&soft, 1);
+        assert_eq!(
+            text(&soft, "name"),
+            Some(crate::event::AttrValue::Text("NET_RX".to_owned()))
+        );
+        assert_eq!(
+            text(&soft, "kind"),
+            Some(crate::event::AttrValue::Text("soft".to_owned()))
+        );
+        assert_eq!(softirq_name(42), "softirq 42");
     }
 
     fn prepare(mode: Mode) -> Box<Prepare> {
@@ -484,17 +545,13 @@ mod tests {
         assert_eq!(of("total_ns"), Some(96_000.0));
     }
 
-    /// The summary the catalog gives this source promises more than the build
-    /// serves, so every run says which half it measured. A limit stated in
-    /// documentation nobody reads at the moment it matters is not stated.
+    /// Every run says the two halves are separate rows, because their `irq`
+    /// numbers overlap.
     #[test]
-    fn every_run_says_that_the_soft_half_is_not_measured() {
+    fn every_run_says_the_two_halves_are_told_apart_by_kind() {
         let collector = IrqCollector::new(None, Mode::Trace, None);
         assert!(
-            collector
-                .notes()
-                .iter()
-                .any(|note| note.contains("softirq_entry")),
+            collector.notes().iter().any(|note| note.contains("`kind`")),
             "{:?}",
             collector.notes()
         );

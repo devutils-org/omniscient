@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{Migration, MigrationProgram};
+use crate::bpf::{Migration, MigrationProgram, Renames, Whose};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -50,16 +50,7 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
-        let filter = match target {
-            Target::System => None,
-            other => Some(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and a migration happens to a task; use \
-                     --system to watch the whole machine",
-                    other.kind()
-                )
-            })? as u32),
-        };
+        let filter = super::whose(target, "a migration happens to a task")?;
         let mut collector = MigrationCollector::new(filter, self.mode);
         collector.predicate = self.filter;
         Ok(Box::new(collector))
@@ -68,7 +59,7 @@ impl Prepared for Prepare {
 
 pub struct MigrationCollector {
     id: CollectorId,
-    filter: Option<u32>,
+    filter: Whose,
     /// What the two declared modes actually differ by.
     ///
     /// `trace` is a series: one event per (task, cpu) per drain, each covering
@@ -98,10 +89,14 @@ pub struct MigrationCollector {
     predicate: Option<FilterExpr>,
     filtered_in: u64,
     filtered_out: u64,
+    /// The names tasks took at exec, applied to the rows of the window.
+    renames: Option<Renames>,
+    /// Why they could not be, when the exec program was refused.
+    exec_note: Option<String>,
 }
 
 impl MigrationCollector {
-    pub fn new(filter: Option<u32>, mode: Mode) -> Self {
+    pub fn new(filter: Whose, mode: Mode) -> Self {
         Self {
             id: CollectorId::new("sched.migrations/bpf:raw_tp"),
             filter,
@@ -116,6 +111,8 @@ impl MigrationCollector {
             predicate: None,
             filtered_in: 0,
             filtered_out: 0,
+            renames: None,
+            exec_note: None,
         }
     }
 
@@ -164,7 +161,7 @@ impl MigrationCollector {
         };
         let closed_ns = monotonic_ns();
         let window_ns = closed_ns.saturating_sub(self.window_opened_ns);
-        let (rows, drain_losses) = match program.drain() {
+        let (mut rows, drain_losses) = match program.drain() {
             Ok(drained) => drained,
             Err(reason) => {
                 self.losses.failed_reads += 1;
@@ -173,6 +170,16 @@ impl MigrationCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        // A task that exec'd in this window is named what it became, not what
+        // it was when its row was made; see `bpf::Renames`.
+        if let Some(renames) = self.renames.as_mut() {
+            let renamed = renames.take();
+            for row in rows.iter_mut() {
+                if let Some(name) = renamed.get(&row.tid) {
+                    row.comm.clone_from(name);
+                }
+            }
+        }
 
         if drain_losses.vanished > 0 {
             self.losses.undecoded += drain_losses.vanished;
@@ -278,6 +285,18 @@ impl Collector for MigrationCollector {
 
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(MigrationProgram::load(self.filter)?);
+        // Optional: without it a row keeps the name its task had when the row
+        // was made, which for a launched program's first rows is this tool's.
+        self.renames = match Renames::load(self.filter) {
+            Ok(renames) => Some(renames),
+            Err(reason) => {
+                self.exec_note = Some(format!(
+                    "a task that exec'd during a window is named what it was when its first \
+                     row was made, because the exec program could not be attached: {reason}"
+                ));
+                None
+            }
+        };
         self.window_opened_ns = monotonic_ns();
         self.run_opened_ns = self.window_opened_ns;
         Ok(())
@@ -319,7 +338,7 @@ impl Collector for MigrationCollector {
     }
 
     fn notes(&self) -> Vec<String> {
-        let mut notes = Vec::new();
+        let mut notes: Vec<String> = self.exec_note.iter().cloned().collect();
         if self.filtered_in > 0 || self.filtered_out > 0 {
             notes.push(format!(
                 "the filter kept {} migrations and removed {}; it ran here, over the drained \

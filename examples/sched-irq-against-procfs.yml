@@ -30,11 +30,11 @@
 # have spent them being interrupted, and no per-task source in this tool can see
 # it. The cpu is the series here for that reason.
 #
-# And this is the hard half only. The catalog's summary for this source says
-# "hard and soft"; softirq time -- the network receive path, block completions,
-# the timer wheel -- is `softirq_entry` and `softirq_exit`, which the entry does
-# not declare as requirements and this build does not attach to. Every run says
-# so in its own output rather than leaving it here.
+# And the soft half beside it, since the thirteenth wave: softirq time -- the
+# network receive path, block completions, the timer wheel -- is its own rows,
+# `kind: soft`, one per cpu and vector, checked against `/proc/softirqs` the
+# same way. A hard handler that lands inside a softirq is taken out of the
+# softirq's time, so the halves add up without counting a nanosecond twice.
 # `count` narrows what any source may emit -- a single measurement over one
 # window is not a distribution and not a ranking -- so this session asks for the
 # three `count` allows. examples/sched-sweep-machine.yml has the traced form,

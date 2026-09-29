@@ -279,6 +279,7 @@ fn every_session_this_family_ships_is_understood() {
 
     let expectations = [
         ("sched-blocking-stack.yml", 0),
+        ("sched-cgroup.yml", 0),
         ("sched-futex-known-wait.yml", 0),
         ("sched-irq-against-procfs.yml", 0),
         ("sched-lock-shared-file.yml", 0),
@@ -368,10 +369,26 @@ fn one_known_number_of_round_trips_is_found_by_four_sources() {
         "{ROUND_TRIPS} round trips are {ROUND_TRIPS} blocks, saw {blocks}"
     );
 
-    let wakeups = events_seen(labelled(&results, "wakeups"));
+    // The pair's wakeups, not the run's: the two heaviest wakee series are
+    // the driver and the responder, one wakeup each per round trip. The run's
+    // total also holds every other wakeup a process of the shell takes part
+    // in, which is the machine's to decide (flaky tally #1).
+    let mut series: Vec<u64> = outputs(labelled(&results, "wakeups"), "summary")
+        .flat_map(|output| {
+            output["series"]
+                .as_array()
+                .expect("a summary carries series")
+                .iter()
+                .filter_map(|series| series["count"].as_u64())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    series.sort_unstable_by(|a, b| b.cmp(a));
+    let wakeups: u64 = series.iter().take(2).sum();
     assert!(
         close_to(wakeups, 2 * ROUND_TRIPS),
-        "a round trip wakes the peer and is woken back, so {ROUND_TRIPS} of them are {} wakeups, saw {wakeups}",
+        "a round trip wakes the peer and is woken back, so {ROUND_TRIPS} of them are {} \
+         wakeups between the pair, saw {wakeups}",
         2 * ROUND_TRIPS
     );
 
@@ -478,7 +495,10 @@ fn a_workload_that_is_half_blocked_measures_as_half_blocked() {
     assert_eq!(exit_code(&output), 0, "{text}");
     let results = results(&output);
 
-    let blocked_ns = total_attribute(labelled(&results, "blocked"), "total_ns");
+    // Blocked, less the run queue wait after each wakeup: a loaded machine
+    // lengthens that wait and the responder's spin with it, and the two halves
+    // are equal in cpu time, not in wall time (flaky tally #2's leftover).
+    let blocked_ns = total_attribute(labelled(&results, "blocked"), "blocked_ns");
     let blocks = total_attribute(labelled(&results, "blocked"), "blocks");
     assert!(
         close_to(blocks, HALF_BLOCKED_ROUND_TRIPS),
@@ -1065,30 +1085,72 @@ fn the_sweep_carries_every_emit_through_a_second_format() {
     }
 }
 
-/// A mode the catalog declares and the build refuses has to say what is
-/// missing, not merely that it failed.
+/// `sched.switches -m count` is served, and counts what the threads counted.
 ///
-/// `sched.switches` declares `count` and only `pmu:sw` is written for it, which
-/// samples. The refusal names the gap and the flag that works around it. The
-/// exit code it uses for that is wrong, and is written up in
-/// `docs/scenarios/sched.md`; what is checked here is the message, which is
-/// what a reader acts on.
+/// The catalog declared `count` for five waves while the only collector
+/// sampled, and refused it after the launch. It is the counting path now --
+/// one inherited software counter per thread of the launched program, read at
+/// the end -- and the ground truth is the switch fixture's: each of its four
+/// threads sleeps a known hundred times and then reads the kernel's own count
+/// of its switches from `/proc/thread-self/status`, and the main thread does
+/// the same after joining them. The total is their sum, up to the edges each
+/// count was read too early to hold: the status read itself and each thread's
+/// exit.
 #[test]
-fn a_declared_mode_the_build_refuses_says_what_is_missing() {
+fn a_counted_switch_total_is_the_sum_of_what_each_thread_counted() {
+    const EDGES: u64 = 4;
+    let fixture = match switch_fixture() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
     let output = omn(&[
         "sched.switches",
-        "--mode",
+        "-m",
         "count",
-        "--emit",
-        "summary",
+        "-e",
+        "raw",
+        "--format",
+        "json",
         "--",
-        "/bin/true",
+        &fixture,
     ]);
     let text = spoken(&output);
-    assert_ne!(exit_code(&output), 0, "`count` mode is not served:\n{text}");
+    assert_eq!(exit_code(&output), 0, "`count` mode is served:\n{text}");
+    let said: Vec<u64> = text
+        .lines()
+        .filter(|line| line.starts_with("omn-switches"))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("switches="))
+                .and_then(|count| count.parse().ok())
+        })
+        .collect();
+    assert_eq!(
+        said.len(),
+        SWITCH_THREADS + 1,
+        "every thread and the main one report:\n{text}"
+    );
+    // The main thread's own count includes the switches it made at the
+    // launch gate, before the counter was enabled on it, so the floor is the
+    // threads it started; the ceiling is everyone's count and the edges.
+    let workers: u64 = text
+        .lines()
+        .filter(|line| line.starts_with("omn-switches "))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("switches="))
+                .and_then(|count| count.parse::<u64>().ok())
+        })
+        .sum();
+    let kernel: u64 = said.iter().sum();
+    let counted = total_attribute(&results(&output)[0], "count");
     assert!(
-        text.contains("counting support") && text.contains("--mode trace"),
-        "the refusal must name the gap and the mode that works:\n{text}"
+        counted >= workers && counted <= kernel + EDGES * said.len() as u64,
+        "the program's four threads counted {workers} switches of their own and all five \
+         {kernel}, and the counter that followed every one of them counted {counted}:\n{text}"
     );
 }
 
@@ -1132,10 +1194,14 @@ fn an_overflowing_wakeup_ring_says_what_it_could_not_hold() {
     if lost == 0 {
         // A machine that drains faster than this workload can fill is a
         // machine that cannot serve this scenario, and says which. It still has
-        // to have counted the workload correctly, or nothing here was measured.
+        // to have counted at least the workload, or nothing here was measured:
+        // the floor is all the workload guarantees, since a contended
+        // interpreter lock adds wakeups of its own and those are real wakeups
+        // of the target too (flaky tally #3).
         assert!(
-            close_to(seen, expected),
-            "nothing was dropped and the count is still wrong: saw {seen}, expected about {expected}\n{text}"
+            seen as f64 >= expected as f64 * (1.0 - TOLERANCE),
+            "nothing was dropped and the count is short of the workload: saw {seen}, expected \
+             at least about {expected}\n{text}"
         );
         eprintln!(
             "skipped: this machine drained the 256 KiB wakeup ring faster than {LOSS_PAIRS} pipe \
@@ -1937,6 +2003,7 @@ fn every_interrupt_this_run_timed_is_one_the_kernel_also_counted() {
         );
         return;
     };
+    let soft_before = softirq_counts();
     let output = session("sched-irq-against-procfs.yml", &["--format", "json"]);
     let text = spoken(&output);
     if unprivileged(&text) {
@@ -1951,7 +2018,15 @@ fn every_interrupt_this_run_timed_is_one_the_kernel_also_counted() {
     let result = labelled(&results, "handlers");
 
     let mut measured: std::collections::BTreeMap<u64, (u64, u64, String)> = Default::default();
+    let mut soft: std::collections::BTreeMap<String, u64> = Default::default();
     for event in raw_events(result) {
+        if event["kind"] == "soft" {
+            *soft
+                .entry(event["name"].as_str().expect("a vector name").to_owned())
+                .or_insert(0) += event["count"].as_u64().expect("a weight");
+            continue;
+        }
+        assert_eq!(event["kind"], "hard", "a row is one half or the other");
         let irq = event["irq"].as_u64().expect("an interrupt number");
         let entry = measured.entry(irq).or_insert((0, 0, String::new()));
         entry.0 += event["count"].as_u64().expect("a weight");
@@ -2020,6 +2095,60 @@ fn every_interrupt_this_run_timed_is_one_the_kernel_also_counted() {
         "irq {irq} ({name}) fired {delta} times by the kernel's own count and this run timed \
          {count} of them, which is less than half"
     );
+
+    // The soft half, against `/proc/softirqs`: the kernel counts each vector's
+    // runs per cpu itself, and the run is inside the two reads of it.
+    let (Some(soft_before), Some(soft_after)) = (soft_before, softirq_counts()) else {
+        eprintln!("the soft half is not compared: /proc/softirqs is not readable");
+        return;
+    };
+    let before_soft = |vector: &str| soft_before.get(vector).copied().unwrap_or(0);
+    assert!(
+        !soft.is_empty(),
+        "a machine runs its timer softirq, and this run timed no softirq at all:\n{text}"
+    );
+    for (vector, count) in &soft {
+        let delta = soft_after
+            .get(vector)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(before_soft(vector));
+        assert!(
+            *count <= delta,
+            "softirq {vector}: this run timed {count} runs and /proc/softirqs moved by {delta} \
+             over a window that contains this run"
+        );
+    }
+    let (vector, count) = soft
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .expect("a busiest vector");
+    let delta = soft_after[vector].saturating_sub(before_soft(vector));
+    eprintln!("softirq {vector}: {count} runs timed against {delta} the kernel counted");
+    assert!(
+        count * 2 >= delta,
+        "softirq {vector} ran {delta} times by the kernel's own count and this run timed \
+         {count} of them, which is less than half"
+    );
+}
+
+/// Every softirq vector's run count, summed over the cpus, from
+/// `/proc/softirqs`: the kernel's own count of the runs `softirq_entry` marks.
+fn softirq_counts() -> Option<std::collections::BTreeMap<String, u64>> {
+    let text = std::fs::read_to_string("/proc/softirqs").ok()?;
+    Some(
+        text.lines()
+            .skip(1)
+            .filter_map(|line| {
+                let (name, counts) = line.split_once(':')?;
+                let total = counts
+                    .split_whitespace()
+                    .filter_map(|count| count.parse::<u64>().ok())
+                    .sum();
+                Some((name.trim().to_owned(), total))
+            })
+            .collect(),
+    )
 }
 
 /// One interrupt line of `/proc/interrupts`.
@@ -3770,13 +3899,37 @@ static void *sleeper(void *unused) {
     return 0;
 }
 
+static void report(const char *prefix) {
+    /* Read last: every switch before this is in the kernel's count. */
+    FILE *status = fopen("/proc/thread-self/status", "r");
+    char line[256];
+    unsigned long voluntary = 0, involuntary = 0;
+    while (status && fgets(line, sizeof line, status)) {
+        sscanf(line, "voluntary_ctxt_switches: %lu", &voluntary);
+        sscanf(line, "nonvoluntary_ctxt_switches: %lu", &involuntary);
+    }
+    if (status) fclose(status);
+    fprintf(stderr, "%s tid=%ld switches=%lu\n", prefix, (long)syscall(SYS_gettid),
+            voluntary + involuntary);
+}
+
 int main(void) {
     pthread_t threads[THREADS];
     for (int i = 0; i < THREADS; i++) pthread_create(&threads[i], 0, sleeper, 0);
     for (int i = 0; i < THREADS; i++) pthread_join(threads[i], 0);
+    report("omn-switches-main");
     return 0;
 }
 "#;
+
+/// The switch fixture, built once for every test that runs it.
+fn switch_fixture() -> Result<String, String> {
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_c("switchers", SWITCH_FIXTURE_SOURCE))
+        .clone()
+        .map(|path| path.to_string_lossy().into_owned())
+}
 
 /// Ground truth for `sched.switches` following threads: each of the fixture's
 /// threads counts its own switches in the kernel's `/proc` counters and says
@@ -3788,18 +3941,13 @@ int main(void) {
 #[test]
 fn every_thread_a_program_starts_has_its_switches_counted() {
     const EDGES: u64 = 4;
-    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
-    let fixture = match BUILT
-        .get_or_init(|| build_c("switchers", SWITCH_FIXTURE_SOURCE))
-        .clone()
-    {
+    let fixture = match switch_fixture() {
         Ok(path) => path,
         Err(reason) => {
             eprintln!("skipped: {reason}");
             return;
         }
     };
-    let fixture = fixture.to_string_lossy().into_owned();
     let output = omn(&[
         "sched.switches",
         "-m",
@@ -3987,5 +4135,735 @@ fn a_filter_over_the_drained_sources_keeps_what_it_names_and_says_what_it_remove
         blocks >= 2,
         "the shell waits for each of its two children, so the name it has keeps at least two \
          blocks, and kept {blocks}:\n{text}"
+    );
+}
+
+// ============================================ a cgroup, and a workload beside it
+
+/// A cgroup this test makes and removes, with one child below it.
+///
+/// Made under the nearest cgroup of this process's own ancestry that this user
+/// may write -- on a systemd machine that is the session's own scope -- because
+/// moving a process needs write access to the cgroup both ends share. The
+/// workload goes in the child, so a run on the parent is asked the question a
+/// reader means by `--cgroup`: the cgroup and everything below it.
+struct Scope {
+    dir: std::path::PathBuf,
+}
+
+impl Scope {
+    fn create(name: &str) -> Result<Self, String> {
+        let own = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+            })
+            .ok_or("this process is not in a cgroup2 hierarchy")?;
+        let root = Path::new("/sys/fs/cgroup");
+        let mut parent = root.join(own.trim().trim_start_matches('/'));
+        loop {
+            let dir = parent.join(format!("omn-{name}-{}", std::process::id()));
+            if std::fs::create_dir(&dir).is_ok() {
+                if std::fs::create_dir(dir.join("inner")).is_ok() {
+                    return Ok(Self { dir });
+                }
+                let _ = std::fs::remove_dir(&dir);
+            }
+            if parent == root || !parent.pop() {
+                break;
+            }
+        }
+        Err(format!(
+            "no cgroup in this process's ancestry ({}) lets this user make one below it",
+            own.trim()
+        ))
+    }
+
+    fn inner_procs(&self) -> std::path::PathBuf {
+        self.dir.join("inner").join("cgroup.procs")
+    }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        // The workloads have been reaped by now; a cgroup with no process in
+        // it is removed like an empty directory.
+        let _ = std::fs::remove_dir(self.dir.join("inner"));
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the kernel to write into.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// How long each copy of the workload runs, and how long the run is. The run
+/// is started after the workloads and outlasts them by two seconds, so every
+/// thing the workload did after the programs were attached is also before the
+/// run's last drain: the window a result reports closes after every collector
+/// has stopped, which for a drained source is later than its last read.
+const CGROUP_WORKLOAD_S: f64 = 4.0;
+const CGROUP_RUN: &str = "6s";
+
+/// A workload that does the same things inside the cgroup and beside it, and
+/// logs each on `CLOCK_MONOTONIC`. It sleeps two milliseconds, which is one
+/// block, one timer wakeup and one run queue wait -- when it blocks at all,
+/// which a sleep whose timer expired while the thread was preempted does not,
+/// so each sleep carries the kernel's own count of the voluntary switches it
+/// made. It moves itself to the other of two cores, one migration of a task
+/// whose affinity admits one core at a time. And it signals its peer, when it
+/// has one, so that the peer is woken by a task of the other side.
+const CGROUP_WORKLOAD: &str = r#"
+import json, os, resource, signal, sys, time
+procs, seconds, peer = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+if procs != "-":
+    with open(procs, "w") as f:
+        f.write(str(os.getpid()))
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+blocked = lambda: resource.getrusage(resource.RUSAGE_THREAD).ru_nvcsw
+signal.signal(signal.SIGUSR2, lambda *_: None)
+cpus = sorted(os.sched_getaffinity(0))[:2]
+sleeps, moves, sent = [], [], []
+print("ready", os.getpid(), flush=True)
+end = mono() + int(seconds * 1e9)
+i = 0
+while mono() < end:
+    v = blocked(); a = mono(); time.sleep(0.002); b = mono(); sleeps.append([a, b, blocked() - v])
+    if len(cpus) == 2:
+        a = mono(); os.sched_setaffinity(0, {cpus[i % 2]}); b = mono(); moves.append([a, b])
+    if peer:
+        a = mono(); os.kill(peer, signal.SIGUSR2); b = mono(); sent.append([a, b])
+    i += 1
+print(json.dumps({"sleeps": sleeps, "moves": moves, "sent": sent}), flush=True)
+"#;
+
+/// One copy of the workload, started and running.
+struct Workload {
+    child: std::process::Child,
+    pid: u64,
+}
+
+impl Workload {
+    fn start(procs: Option<&Path>, peer: u64) -> Self {
+        let mut child = Command::new("python3")
+            .args(["-c", CGROUP_WORKLOAD])
+            .arg(procs.map_or("-".into(), |path| path.display().to_string()))
+            .arg(CGROUP_WORKLOAD_S.to_string())
+            .arg(peer.to_string())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python3 starts");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.as_mut().expect("a pipe"))
+            .read_line(&mut line)
+            .expect("the workload says it is ready");
+        let pid = line
+            .trim()
+            .strip_prefix("ready ")
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or_else(|| panic!("the workload did not start: {line:?}"));
+        Self { child, pid }
+    }
+
+    /// Waits for it to finish, and returns what it logged.
+    fn finish(mut self) -> Value {
+        let mut rest = String::new();
+        std::io::Read::read_to_string(self.child.stdout.as_mut().expect("a pipe"), &mut rest)
+            .expect("the log");
+        let _ = self.child.wait();
+        serde_json::from_str(rest.trim())
+            .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"))
+    }
+}
+
+/// How many logged spans of a kind began at or after `from_ns`.
+fn since(log: &Value, kind: &str, from_ns: u64) -> u64 {
+    log[kind]
+        .as_array()
+        .expect("a logged kind")
+        .iter()
+        .filter(|span| span[0].as_u64().unwrap_or(0) >= from_ns)
+        .count() as u64
+}
+
+/// The kernel's count of the voluntary switches the logged sleeps that began
+/// at or after `from_ns` made: what `sched.offcpu` has to find, where the
+/// number of sleeps is only what the workload asked for.
+fn blocked_since(log: &Value, from_ns: u64) -> u64 {
+    log["sleeps"]
+        .as_array()
+        .expect("the sleeps")
+        .iter()
+        .filter(|span| span[0].as_u64().unwrap_or(0) >= from_ns)
+        .map(|span| span[2].as_u64().unwrap_or(0))
+        .sum()
+}
+
+fn number(event: &std::collections::BTreeMap<String, Value>, name: &str) -> u64 {
+    event.get(name).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A cgroup holding a workload, and the same workload beside it: each run on
+/// the cgroup sees the first and none of the second.
+///
+/// The numbers are the workload's own. Each copy logs every sleep and every
+/// move with `CLOCK_MONOTONIC` stamps. What it did after a request's window
+/// opened -- which is after every program was attached -- is a floor the run
+/// must reach; what it did after `omn` was started is a ceiling no program
+/// attached later can exceed, where the kernel does nothing else to the task:
+/// a sleep that blocked is one block the kernel calls `sleeping`, by the
+/// kernel's own count of the task's voluntary switches, and a move to the
+/// other of two cores is one migration of a task whose affinity admits one
+/// core at a time.
+///
+/// The workload is in a child of the cgroup the runs are given, so a run that
+/// compared the task's own cgroup rather than its ancestry would keep nothing.
+/// The copy inside signals the copy outside on every round, and a signal ends
+/// the sleep it lands in: that is a wakeup whose waker is inside and whose
+/// wakee is not, which `sched.wakeup` keeps because one end of it is the
+/// target's -- through the current task's cgroup, one helper call, rather than
+/// through the woken task's, which is the walk over its `task_struct`.
+#[test]
+fn a_cgroup_target_sees_the_workload_inside_it_and_none_of_the_one_beside_it() {
+    if !have("python3") {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let scope = match Scope::create("sched") {
+        Ok(scope) => scope,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let outside = Workload::start(None, 0);
+    let within = Workload::start(Some(&scope.inner_procs()), outside.pid);
+    let (inner, beside) = (within.pid, outside.pid);
+
+    let target = format!("{{cgroup: \"{}\"}}", scope.dir.display());
+    let requests = [
+        ("blocks", "sched.offcpu"),
+        ("wakeups", "sched.wakeup"),
+        ("waits", "sched.runqlat"),
+        ("moves", "sched.migrations"),
+        ("locks", "sched.lock"),
+        ("futexes", "sched.futex"),
+    ];
+    let mut session =
+        format!("name: a cgroup and a workload beside it\nduration: {CGROUP_RUN}\nrequests:\n");
+    for (label, source) in requests {
+        session.push_str(&format!(
+            "  - {{label: {label}, source: {source}, target: {target}, mode: trace, emit: [raw]}}\n"
+        ));
+    }
+    let spawned_ns = monotonic_ns();
+    let mut run = Command::new(BINARY)
+        .args(["-f", "-", "--input-format", "yaml", "--format", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::io::Write::write_all(run.stdin.as_mut().expect("a pipe"), session.as_bytes())
+        .expect("the session");
+    drop(run.stdin.take());
+    let output = run.wait_with_output().expect("omn should finish");
+    let log = within.finish();
+    let _ = outside.finish();
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!(
+            "skipped: the sched programs need CAP_BPF and CAP_PERFMON, which this machine does \
+             not grant"
+        );
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let window = &labelled(&results, "blocks")["window"];
+    let opened = window["opened_ns"].as_u64().expect("a window");
+    let closed = window["closed_ns"].as_u64().expect("a window");
+    let last = log["sleeps"]
+        .as_array()
+        .and_then(|sleeps| sleeps.last())
+        .and_then(|sleep| sleep[1].as_u64())
+        .unwrap_or(0);
+    if last <= opened {
+        eprintln!(
+            "skipped: the programs were attached {:.2} s after omn started, and the workload \
+             had stopped {:.2} s after it: nothing it did is inside the window",
+            (opened - spawned_ns) as f64 / 1e9,
+            last.saturating_sub(spawned_ns) as f64 / 1e9
+        );
+        return;
+    }
+    assert!(
+        last < closed,
+        "the workload outlived the run it was measured by"
+    );
+
+    // Nothing of the copy beside the cgroup in the five that judge one task. A
+    // wakeup has two, and is checked below for the pair.
+    for (label, _) in requests.iter().filter(|(label, _)| *label != "wakeups") {
+        let strays = raw_events(labelled(&results, label))
+            .iter()
+            .filter(|event| number(event, "pid") == beside || number(event, "tid") == beside)
+            .count();
+        assert_eq!(
+            strays, 0,
+            "`{label}` kept {strays} rows of a process outside the cgroup:\n{text}"
+        );
+    }
+
+    // What a run reports losing -- the kernel's skipped runs of its programs,
+    // which are the machine's, and anything its maps could not hold -- is the
+    // slack on every floor below.
+    let lost = |label: &str| {
+        labelled(&results, label)["losses"]["dropped"]
+            .as_u64()
+            .expect("a drop count")
+    };
+    let (blocked, ceiling) = (blocked_since(&log, opened), blocked_since(&log, spawned_ns));
+    assert!(
+        blocked > 50,
+        "the workload blocked {blocked} times inside the window, too few to judge"
+    );
+    let floor = blocked.saturating_sub(lost("blocks"));
+    let kept: u64 = raw_events(labelled(&results, "blocks"))
+        .iter()
+        .filter(|event| number(event, "tid") == inner && event["state"] == "sleeping")
+        .map(|event| number(event, "blocks"))
+        .sum();
+    eprintln!(
+        "sched.offcpu --cgroup: {kept} sleeping blocks kept for {blocked} to {ceiling} the \
+         kernel counted"
+    );
+    assert!(
+        (floor..=ceiling + 1).contains(&kept),
+        "the task in the child cgroup blocked in its sleeps {blocked} times after the programs \
+         were attached and {ceiling} after omn started, by the kernel's own count of its \
+         voluntary switches, and `sched.offcpu` on the parent kept {kept} sleeping blocks of \
+         it, reporting {} lost:\n{text}",
+        lost("blocks")
+    );
+
+    let queued: u64 = raw_events(labelled(&results, "waits"))
+        .iter()
+        .filter(|event| number(event, "tid") == inner)
+        .map(|event| number(event, "count"))
+        .sum();
+    assert!(
+        queued + lost("waits") >= blocked,
+        "every block ends in a wakeup and a wait for the cpu: {blocked} blocks inside the \
+         window, {queued} waits kept and {} reported lost:\n{text}",
+        lost("waits")
+    );
+
+    if log["moves"]
+        .as_array()
+        .is_some_and(|moves| !moves.is_empty())
+    {
+        let (moved, ceiling) = (
+            since(&log, "moves", opened),
+            since(&log, "moves", spawned_ns),
+        );
+        let migrations: u64 = raw_events(labelled(&results, "moves"))
+            .iter()
+            .filter(|event| number(event, "tid") == inner)
+            .map(|event| number(event, "migrations"))
+            .sum();
+        let floor = moved.saturating_sub(1 + lost("moves"));
+        assert!(
+            (floor..=ceiling + 1).contains(&migrations),
+            "the task moved itself {moved} times inside the window and {ceiling} after omn \
+             started, and `sched.migrations` kept {migrations} of its migrations, reporting {} \
+             lost:\n{text}",
+            lost("moves")
+        );
+    } else {
+        eprintln!("the migration half is skipped: this process may run on one core only");
+    }
+
+    let wakeups = raw_events(labelled(&results, "wakeups"));
+    let woken = wakeups
+        .iter()
+        .filter(|event| number(event, "wakee_tid") == inner)
+        .count() as u64;
+    assert!(
+        woken + lost("wakeups") >= blocked,
+        "every block of the task inside ends in a wakeup of it: {blocked} blocks, {woken} \
+         wakeups kept and {} reported lost:\n{text}",
+        lost("wakeups")
+    );
+    // Kept for its waker: the task inside, signalling the one beside it.
+    let signalled = since(&log, "sent", spawned_ns);
+    let across = wakeups
+        .iter()
+        .filter(|event| number(event, "waker_pid") == inner && number(event, "wakee_pid") == beside)
+        .count() as u64;
+    assert!(
+        since(&log, "sent", opened) < 50 || across > 0,
+        "the task inside signalled the one beside it {} times inside the window, mostly while \
+         it slept, and no wakeup of it by the task inside was kept:\n{text}",
+        since(&log, "sent", opened)
+    );
+    assert!(
+        across <= signalled,
+        "{across} wakeups for {signalled} signals:\n{text}"
+    );
+    eprintln!(
+        "sched.wakeup --cgroup: {woken} wakeups of the task inside for {blocked} blocks; {across} \
+         of the task beside it by the task inside, for {signalled} signals"
+    );
+    let neither = wakeups
+        .iter()
+        .filter(|event| number(event, "wakee_pid") == beside && number(event, "waker_pid") != inner)
+        .count();
+    assert_eq!(
+        neither, 0,
+        "{neither} wakeups of the process beside the cgroup were kept, whose waker was not \
+         inside it either:\n{text}"
+    );
+}
+
+/// A thread that is not its process's first, named by `--tid`: each program
+/// compares the thread, and keeps its events and none of its process's other
+/// thread (`docs/scenarios/cross-io.md` defect 2, where a thread id was
+/// compared with the thread group and nothing was kept).
+///
+/// Both threads sleep in a loop. The reference is the kernel's own count of
+/// the named thread's voluntary switches, read by the thread itself after each
+/// round (`RUSAGE_THREAD`), stamped on `CLOCK_MONOTONIC`: every voluntary
+/// switch is a block, including the waits for the interpreter's lock, and the
+/// ones after the window opened are a floor and the ones after `omn` started a
+/// ceiling, as in the cgroup scenario above.
+#[test]
+fn a_thread_target_keeps_that_thread_and_not_the_one_beside_it() {
+    const WORKLOAD: &str = r#"
+import json, resource, sys, threading, time
+seconds = float(sys.argv[1])
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+blocked = lambda: resource.getrusage(resource.RUSAGE_THREAD).ru_nvcsw
+log, ready = [], threading.Event()
+def named():
+    log.append(threading.get_native_id())
+    ready.set()
+    end = mono() + int(seconds * 1e9)
+    while mono() < end:
+        time.sleep(0.002)
+        log.append([mono(), blocked()])
+worker = threading.Thread(target=named)
+worker.start()
+ready.wait()
+import os
+print("ready", os.getpid(), log[0], flush=True)
+end = mono() + int(seconds * 1e9)
+while mono() < end:
+    time.sleep(0.003)
+worker.join()
+print(json.dumps(log[1:]), flush=True)
+"#;
+    if !have("python3") {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let mut workload = Command::new("python3")
+        .args(["-c", WORKLOAD, "3.0"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("python3 starts");
+    let mut stdout = std::io::BufReader::new(workload.stdout.take().expect("a pipe"));
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("the workload is ready");
+    let ids: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    let [pid, tid] = ids[..] else {
+        panic!("the workload did not start: {line:?}")
+    };
+    assert_ne!(pid, tid, "the named thread is not its process's first");
+
+    let requests = [
+        ("blocks", "sched.offcpu", "trace"),
+        ("wakeups", "sched.wakeup", "trace"),
+        ("waits", "sched.runqlat", "trace"),
+        ("futexes", "sched.futex", "trace"),
+        ("locks", "sched.lock", "trace"),
+        ("calls", "proc.syscall", "trace"),
+    ];
+    let mut session = String::from("name: one thread of two\nduration: 5s\nrequests:\n");
+    for (label, source, mode) in requests {
+        session.push_str(&format!(
+            "  - {{label: {label}, source: {source}, target: {{tid: {tid}}}, mode: {mode}, emit: [raw]}}\n"
+        ));
+    }
+    let spawned_ns = monotonic_ns();
+    let mut run = Command::new(BINARY)
+        .args(["-f", "-", "--input-format", "yaml", "--format", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::io::Write::write_all(run.stdin.as_mut().expect("a pipe"), session.as_bytes())
+        .expect("the session");
+    drop(run.stdin.take());
+    let output = run.wait_with_output().expect("omn should finish");
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).expect("the log");
+    let _ = workload.wait();
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!(
+            "skipped: the sched programs need CAP_BPF and CAP_PERFMON, which this machine does \
+             not grant"
+        );
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let log: Vec<(u64, u64)> = serde_json::from_str::<Vec<Vec<u64>>>(rest.trim())
+        .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"))
+        .into_iter()
+        .map(|round| (round[0], round[1]))
+        .collect();
+    let results = results(&output);
+    let window = &labelled(&results, "blocks")["window"];
+    let opened = window["opened_ns"].as_u64().expect("a window");
+    let last = log.last().map_or(0, |round| round.0);
+    if last <= opened {
+        eprintln!(
+            "skipped: the programs were attached {:.2} s after omn started, after the workload \
+             had stopped",
+            (opened - spawned_ns) as f64 / 1e9
+        );
+        return;
+    }
+    // Voluntary switches after an instant: the last count, less the count at
+    // the first round that ended at or after it -- a round that ended before
+    // it may have blocked on either side of it.
+    let switches_after = |from_ns: u64| -> (u64, u64) {
+        let total = log.last().expect("rounds").1;
+        let first = log.iter().find(|round| round.0 >= from_ns);
+        let before = log.iter().rev().find(|round| round.0 < from_ns);
+        (
+            total - first.map_or(total, |round| round.1),
+            total - before.map_or(0, |round| round.1),
+        )
+    };
+    let (blocked, _) = switches_after(opened);
+    let (_, ceiling) = switches_after(spawned_ns);
+    // The run's own report of what it lost is the slack on every floor.
+    let lost = |label: &str| {
+        labelled(&results, label)["losses"]["dropped"]
+            .as_u64()
+            .expect("a drop count")
+    };
+    let floor = blocked.saturating_sub(lost("blocks"));
+
+    for (label, _, _) in requests.iter().filter(|(label, _, _)| *label != "wakeups") {
+        let others = raw_events(labelled(&results, label))
+            .iter()
+            .filter(|event| number(event, "tid") != tid)
+            .count();
+        assert_eq!(
+            others, 0,
+            "`{label}` --tid kept {others} rows of another thread:\n{text}"
+        );
+    }
+    let kept: u64 = raw_events(labelled(&results, "blocks"))
+        .iter()
+        .map(|event| number(event, "blocks"))
+        .sum();
+    eprintln!("sched.offcpu --tid: {kept} blocks kept for {floor} to {ceiling} the kernel counted");
+    assert!(
+        (floor..=ceiling + 1).contains(&kept),
+        "the named thread switched voluntarily {floor} times after the programs were attached \
+         and {ceiling} after omn started, and `sched.offcpu --tid` kept {kept} blocks:\n{text}"
+    );
+    let wakeups = raw_events(labelled(&results, "wakeups"));
+    let woken = wakeups
+        .iter()
+        .filter(|event| number(event, "wakee_tid") == tid)
+        .count() as u64;
+    assert!(
+        woken + lost("wakeups") >= blocked,
+        "every block of the named thread ends in a wakeup of it: {floor} blocks, {woken} \
+         wakeups:\n{text}"
+    );
+    let neither = wakeups
+        .iter()
+        .filter(|event| number(event, "wakee_tid") != tid && number(event, "waker_tid") != tid)
+        .count();
+    assert_eq!(
+        neither, 0,
+        "{neither} wakeups kept with neither end the thread:\n{text}"
+    );
+    let queued: u64 = raw_events(labelled(&results, "waits"))
+        .iter()
+        .map(|event| number(event, "count"))
+        .sum();
+    assert!(
+        queued + lost("waits") >= blocked,
+        "every block ends in a wait for the cpu: {floor} blocks, {queued} waits:\n{text}"
+    );
+    let calls: u64 = raw_events(labelled(&results, "calls"))
+        .iter()
+        .map(|event| number(event, "count"))
+        .sum();
+    assert!(
+        calls + lost("calls") >= blocked,
+        "each round of the thread sleeps and reads its usage, two syscalls, and {calls} were \
+         kept for {floor} blocks:\n{text}"
+    );
+}
+
+/// Finding 20: a row is named what its task exec'd into, not what it was when
+/// the row was made. A launched program is held at the gate before its first
+/// instruction, so it is still a fork of `omn` when it first waits or blocks,
+/// and a run shorter than a drain tick reported every one of its rows as
+/// `comm=omn`. The ground truth is the program's own name: a launched shell
+/// that runs two children has rows named `sh` and `sleep`, and none named
+/// after the tool that started it.
+#[test]
+fn a_launched_programs_rows_carry_the_name_it_exec_d_into() {
+    for source in ["sched.runqlat", "sched.offcpu"] {
+        let output = omn(&[
+            source,
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 0.02; sleep 0.02",
+        ]);
+        let text = spoken(&output);
+        if unprivileged(&text) {
+            eprintln!(
+                "skipped: {source} needs CAP_BPF and CAP_PERFMON, which this machine does not \
+                 grant"
+            );
+            return;
+        }
+        assert_eq!(exit_code(&output), 0, "{text}");
+        let names: std::collections::BTreeSet<String> = raw_events(&results(&output)[0])
+            .iter()
+            .filter_map(|event| event["comm"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !names.contains("omn"),
+            "{source}: a row of the launched program is named after the tool that launched \
+             it: {names:?}\n{text}"
+        );
+        assert!(
+            names.contains("sh") || names.contains("sleep"),
+            "{source}: the launched program's rows carry its own names: {names:?}\n{text}"
+        );
+    }
+}
+
+/// Defect 1 of `docs/scenarios/sched.md`: `sched.offcpu --emit hist` is a
+/// histogram of blocks, not of drain windows.
+///
+/// A thread that sleeps forty times for 3 ms and twenty times for 40 ms is
+/// bimodal on purpose, and the two modes are in two log2 buckets a factor of
+/// eight apart: `[2^21, 2^22)` ns and `[2^25, 2^26)` ns. Each group reports the
+/// kernel's own count of the voluntary switches it made. Before the bucket was
+/// in the kernel's key, a row was a drain window's sum, so the histogram held
+/// one entry per window, in the buckets of sums no single block was in; now
+/// it holds one per block, in the bucket of that block.
+#[test]
+fn an_off_cpu_histogram_is_of_blocks_and_finds_both_modes_of_a_bimodal_sleeper() {
+    const WORKLOAD: &str = "import resource, sys, time\n\
+        blocked = lambda: resource.getrusage(resource.RUSAGE_THREAD).ru_nvcsw\n\
+        v = blocked()\n\
+        for _ in range(40): time.sleep(0.003)\n\
+        short = blocked() - v\n\
+        v = blocked()\n\
+        for _ in range(20): time.sleep(0.040)\n\
+        long = blocked() - v\n\
+        sys.stderr.write(f'SLEPT short={short} long={long}\\n')\n";
+    if !have("python3") {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let output = omn(&[
+        "sched.offcpu",
+        "-m",
+        "trace",
+        "-e",
+        "hist",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        WORKLOAD,
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: sched.offcpu needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let said = |name: &str| -> u64 {
+        text.lines()
+            .find_map(|line| line.strip_prefix("SLEPT "))
+            .and_then(|line| {
+                line.split_whitespace()
+                    .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            })
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("the workload reports `{name}`:\n{text}"))
+    };
+    let (short, long) = (said("short"), said("long"));
+    let results = results(&output);
+    // The sleeper's own series: the one holding the long sleeps.
+    let series = outputs(&results[0], "hist")
+        .flat_map(|output| output["series"].as_array().expect("series").clone())
+        .max_by_key(|series| series["max"].as_f64().unwrap_or(0.0) as u64)
+        .expect("a series");
+    let in_bucket = |low: u64| -> u64 {
+        series["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["low"].as_u64() == Some(low))
+            .and_then(|bucket| bucket["count"].as_u64())
+            .unwrap_or(0)
+    };
+    let (fast, slow) = (in_bucket(1 << 21), in_bucket(1 << 25));
+    let count = series["count"].as_u64().expect("a count");
+    eprintln!(
+        "sched.offcpu --emit hist: {fast} blocks in [2^21, 2^22) for {short} short ones, {slow} \
+         in [2^25, 2^26) for {long} long ones, {count} in the series"
+    );
+    assert!(
+        count >= short + long,
+        "the thread blocked {short} + {long} times in its sleeps, and the histogram holds \
+         {count}: it is a histogram of something other than blocks:\n{series}"
+    );
+    // A short sleep the thread was preempted in the middle of blocks for less
+    // than 3 ms and lands a bucket lower, which a loaded machine does to a
+    // few; a long one is not moved out of a bucket 33 ms wide.
+    assert!(
+        fast * 2 >= short && fast <= short + 2,
+        "{short} blocks of 3 ms, and [2^21, 2^22) holds {fast}:\n{series}"
+    );
+    assert!(
+        slow + 2 >= long && slow <= long,
+        "{long} blocks of 40 ms, and [2^25, 2^26) holds {slow}:\n{series}"
     );
 }

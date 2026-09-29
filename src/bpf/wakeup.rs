@@ -26,7 +26,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{
+    helper, push_current_filter, push_task_filter, Insn, Program, Subject, TaskFields, Whose,
+    BPF_DW, BPF_W, R10,
+};
 use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
@@ -181,6 +184,8 @@ const CONTEXT: i16 = EVENT + 28;
 const COMM: i16 = EVENT + 32;
 /// The one-word key of the drop counter, below the record.
 const DROP_KEY: i16 = EVENT - 8;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
+const FILTER_SCRATCH: i16 = DROP_KEY - 16;
 
 /// Builds the program for a target, or for the whole machine.
 ///
@@ -191,13 +196,14 @@ const DROP_KEY: i16 = EVENT - 8;
 fn instructions(
     btf: &Btf,
     preempt: Option<PreemptCount>,
-    target_tgid: Option<u32>,
+    whose: Whose,
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
+    let fields = TaskFields::locate(btf, whose)?;
 
     let mut program = Program::new();
     // r6 keeps the context and r7 the task being woken; both survive helper
@@ -254,15 +260,42 @@ fn instructions(
         program.push(Insn::call(helper::PROBE_READ_KERNEL));
     }
 
-    // A run observes one process, so a wakeup is kept when either end of it
-    // belongs to that process: the wakeups it receives are its blocked time
-    // ending, the ones it sends are the blocked time it ends for others. An
-    // interrupt's wakeup has a waker of 0 by now and is kept only as received.
-    if let Some(tgid) = target_tgid {
-        program.push(Insn::ldx(BPF_W, 1, R10, WAKEE_PID));
-        program.jump_to("emit", Insn::jeq_imm(1, tgid as i32, 0));
-        program.push(Insn::ldx(BPF_W, 1, R10, WAKER_PID));
-        program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+    // A run observes one process, one thread or one cgroup, so a wakeup is
+    // kept when either end of it belongs to the target: the wakeups it
+    // receives are its blocked time ending, the ones it sends are the blocked
+    // time it ends for others. An interrupt's wakeup has a waker of 0 by now
+    // and is kept only as received.
+    if whose != Whose::Any {
+        push_task_filter(
+            &mut program,
+            &fields,
+            whose,
+            Subject::with_ids(7, WAKEE_TID, WAKEE_PID),
+            FILTER_SCRATCH,
+            "not_the_wakee",
+        );
+        program.jump_to("emit", Insn::ja());
+        program.label("not_the_wakee");
+        match whose {
+            // The waker's ids are on the stack already, and zero for an
+            // interrupt, which no target's ids are.
+            Whose::Process(_) | Whose::Thread(_) => push_task_filter(
+                &mut program,
+                &fields,
+                whose,
+                Subject::with_ids(7, WAKER_TID, WAKER_PID),
+                FILTER_SCRATCH,
+                "done",
+            ),
+            // The waker is the current task, whose cgroup one helper answers
+            // for -- except in an interrupt, where the current task is only
+            // the one the interrupt landed on.
+            _ => {
+                program.push(Insn::ldx(BPF_W, 1, R10, WAKER_TID));
+                program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+                push_current_filter(&mut program, whose, FILTER_SCRATCH, "done");
+            }
+        }
     }
 
     program.label("emit");
@@ -331,7 +364,7 @@ impl WakeupProgram {
     }
 
     /// Loads and attaches the program, or says why the kernel refused.
-    pub fn load(target_tgid: Option<u32>, requested_ring_bytes: usize) -> Result<Self, String> {
+    pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let bytes = ring_bytes(requested_ring_bytes);
 
@@ -341,13 +374,8 @@ impl WakeupProgram {
             .map_err(|error| map_failure("drop counter", error))?;
 
         let preempt = PreemptCount::locate(btf);
-        let instructions = instructions(
-            btf,
-            preempt,
-            target_tgid,
-            ring_map.as_raw_fd(),
-            drops.as_raw_fd(),
-        )?;
+        let instructions =
+            instructions(btf, preempt, whose, ring_map.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -465,8 +493,8 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        let program =
-            instructions(&btf, PreemptCount::locate(&btf), Some(1), 3, 4).expect("a program");
+        let program = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(1), 3, 4)
+            .expect("a program");
         let called = helpers_called(&program);
         assert!(
             called.contains(&helper::KTIME_GET_NS),
@@ -486,8 +514,8 @@ mod tests {
     #[test]
     fn the_program_calls_only_the_helpers_it_needs() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let program =
-            instructions(&btf, PreemptCount::locate(&btf), Some(1), 3, 4).expect("a program");
+        let program = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(1), 3, 4)
+            .expect("a program");
         let called = helpers_called(&program);
         let expected = [
             helper::KTIME_GET_NS,
@@ -521,13 +549,13 @@ mod tests {
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Ok(btf) = Btf::from_kernel() else { return };
         let machine_wide =
-            instructions(&btf, PreemptCount::locate(&btf), None, 3, 4).expect("a program");
+            instructions(&btf, PreemptCount::locate(&btf), Whose::Any, 3, 4).expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered =
-            instructions(&btf, PreemptCount::locate(&btf), Some(4242), 3, 4).expect("a program");
+        let filtered = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(4242), 3, 4)
+            .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             2,
@@ -542,7 +570,7 @@ mod tests {
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Ok(btf) = Btf::from_kernel() else { return };
         let program =
-            instructions(&btf, PreemptCount::locate(&btf), None, 3, 4).expect("a program");
+            instructions(&btf, PreemptCount::locate(&btf), Whose::Any, 3, 4).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -564,10 +592,10 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        let filtered =
-            instructions(&btf, PreemptCount::locate(&btf), Some(4242), 3, 4).expect("a program");
+        let filtered = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(4242), 3, 4)
+            .expect("a program");
         let machine_wide =
-            instructions(&btf, PreemptCount::locate(&btf), None, 3, 4).expect("a program");
+            instructions(&btf, PreemptCount::locate(&btf), Whose::Any, 3, 4).expect("a program");
         assert!(
             filtered.len() > machine_wide.len(),
             "the filtered program carries the comparisons the machine-wide one does not"
@@ -697,7 +725,8 @@ mod tests {
             eprintln!("skipped: this kernel's preempt count is not a per-cpu variable");
             return;
         };
-        let program = instructions(&btf, Some(preempt), Some(4242), 3, 4).expect("a program");
+        let program =
+            instructions(&btf, Some(preempt), Whose::Process(4242), 3, 4).expect("a program");
         let load = program
             .iter()
             .position(|insn| {

@@ -25,7 +25,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{count_drop, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{
+    count_drop, helper, push_task_filter, read_field, Insn, Program, Subject, TaskFields, Whose,
+    BPF_DW, BPF_W, R10,
+};
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::syscall;
 
@@ -50,6 +53,8 @@ const DROP_KEY: i16 = -12;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
 const ROWS_SLOT: i16 = -56;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
+const FILTER_SCRATCH: i16 = -72;
 
 /// The layout of a key.
 const KEY_TID: i16 = 0;
@@ -107,12 +112,7 @@ impl Migration {
     }
 }
 
-fn instructions(
-    btf: &Btf,
-    target_tgid: Option<u32>,
-    rows_fd: i32,
-    drops_fd: i32,
-) -> Result<Vec<Insn>, String> {
+fn instructions(btf: &Btf, whose: Whose, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
     let signature = btf.tracepoint_signature("sched_migrate_task")?;
     if signature != SIGNATURE {
         return Err(format!(
@@ -126,6 +126,7 @@ fn instructions(
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
+    let fields = TaskFields::locate(btf, whose)?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 the task being moved and r8 the cpu it is going
@@ -137,13 +138,17 @@ fn instructions(
     read_field(&mut program, ROW_KEY + KEY_TID, 4, 7, pid_offset);
     read_field(&mut program, ROW_KEY + KEY_TGID, 4, 7, tgid_offset);
 
-    // A run observes one process. The thread group is known before the program
-    // loads and never changes, so the filter is in the instruction stream
-    // rather than in a map.
-    if let Some(tgid) = target_tgid {
-        program.push(Insn::ldx(BPF_W, 1, R10, ROW_KEY + KEY_TGID));
-        program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
-    }
+    // A run observes one process or one cgroup. Which is known before the
+    // program loads and never changes, so the comparison is in the instruction
+    // stream rather than in a map.
+    push_task_filter(
+        &mut program,
+        &fields,
+        whose,
+        Subject::with_ids(7, ROW_KEY + KEY_TID, ROW_KEY + KEY_TGID),
+        FILTER_SCRATCH,
+        "done",
+    );
     // The last four bytes of the key, so every byte of it is written: the
     // kernel hashes all twelve, and one nobody wrote puts two identical
     // migrations in two buckets.
@@ -228,14 +233,14 @@ impl MigrationProgram {
         crate::bpf::attach::fentry::skipped([&self.program])
     }
 
-    pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
+    pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_migr_rows")
             .map_err(|error| map_failure("migration map", error))?;
         let drops = Counters::create(1, "omn_migr_drop")
             .map_err(|error| map_failure("migration drop counter", error))?;
 
-        let instructions = instructions(btf, target_tgid, rows.as_raw_fd(), drops.as_raw_fd())?;
+        let instructions = instructions(btf, whose, rows.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -309,7 +314,7 @@ mod tests {
     #[test]
     fn the_count_is_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4).expect("a program");
+        let program = instructions(&btf, Whose::Any, 3, 4).expect("a program");
         assert_eq!(
             program.iter().filter(|insn| insn.code == 0xdb).count(),
             1,
@@ -324,7 +329,7 @@ mod tests {
     #[test]
     fn the_program_reads_no_clock_because_it_measures_no_duration() {
         let Some(btf) = kernel_btf() else { return };
-        let called: Vec<i32> = instructions(&btf, None, 3, 4)
+        let called: Vec<i32> = instructions(&btf, Whose::Any, 3, 4)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -338,12 +343,12 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        assert!(!instructions(&btf, None, 3, 4)
+        assert!(!instructions(&btf, Whose::Any, 3, 4)
             .expect("a program")
             .iter()
             .any(|insn| insn.imm == 4242));
         assert_eq!(
-            instructions(&btf, Some(4242), 3, 4)
+            instructions(&btf, Whose::Process(4242), 3, 4)
                 .expect("a program")
                 .iter()
                 .filter(|insn| insn.imm == 4242)
@@ -360,7 +365,7 @@ mod tests {
                 .expect("a prototype"),
             SIGNATURE
         );
-        assert!(instructions(&btf, None, 3, 4).is_ok());
+        assert!(instructions(&btf, Whose::Any, 3, 4).is_ok());
     }
 
     /// The kernel hashes every byte of a key, so one the program never writes
@@ -396,6 +401,7 @@ mod tests {
             (ROW_KEY, ROW_KEY_BYTES as i16, "key"),
             (DROP_KEY, 4, "drop key"),
             (ROWS_SLOT, 8, "row map slot"),
+            (FILTER_SCRATCH, 16, "filter scratch"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -437,7 +443,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, None, 3, 4).expect("a program");
+        let program = instructions(&btf, Whose::Any, 3, 4).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 3);
     }
 }

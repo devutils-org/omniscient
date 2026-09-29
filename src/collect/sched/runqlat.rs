@@ -27,7 +27,7 @@
 
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{RunqLat, RunqLatProgram};
+use crate::bpf::{Renames, RunqLat, RunqLatProgram, Whose};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -67,29 +67,35 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
-        let filter = match target {
-            Target::System => None,
-            other => Some(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and a run queue wait is attributed per task; \
-                     use --system to watch the whole machine",
-                    other.kind()
-                )
-            })? as u32),
-        };
+        // A cpu target is the queue of that cpu: the program watches every
+        // task, and the rows are kept for the cpu each wait was served on,
+        // which is in the kernel's key.
+        if let Target::Cpu(set) = target {
+            let mut collector = RunqLatCollector::new(Whose::Any, self.filter);
+            collector.cpus = Some(set.cpus().to_vec());
+            return Ok(Box::new(collector));
+        }
+        let filter = super::whose(target, "a run queue wait is attributed per task")?;
         Ok(Box::new(RunqLatCollector::new(filter, self.filter)))
     }
 }
 
 pub struct RunqLatCollector {
     id: CollectorId,
-    /// The thread group whose waits are kept, or none for the machine.
-    filter: Option<u32>,
+    /// Whose waits are kept.
+    filter: Whose,
+    /// The cpus whose queues are kept, for a cpu target; every cpu otherwise.
+    cpus: Option<Vec<u32>>,
+    /// Waits on the other cpus, which the program measured and the collector
+    /// set aside for a cpu target.
+    off_target: u64,
     program: Option<RunqLatProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
     notes: Vec<String>,
+    /// The names tasks took at exec, applied to the rows of the window.
+    renames: Option<Renames>,
     /// The program's counters are cumulative, so what is new is the difference.
     dropped_queued: u64,
     dropped_rows: u64,
@@ -109,14 +115,17 @@ pub struct RunqLatCollector {
 }
 
 impl RunqLatCollector {
-    pub fn new(filter: Option<u32>, predicate: Option<FilterExpr>) -> Self {
+    pub fn new(filter: Whose, predicate: Option<FilterExpr>) -> Self {
         Self {
             id: CollectorId::new("sched.runqlat/bpf:raw_tp"),
             filter,
+            cpus: None,
+            off_target: 0,
             program: None,
             losses: Losses::default(),
             skipped: 0,
             notes: Vec::new(),
+            renames: None,
             dropped_queued: 0,
             dropped_rows: 0,
             window_opened_ns: 0,
@@ -134,7 +143,7 @@ impl RunqLatCollector {
         };
         let closed_ns = monotonic_ns();
         let window_ns = closed_ns.saturating_sub(self.window_opened_ns);
-        let (rows, drain_losses) = match program.drain() {
+        let (mut rows, drain_losses) = match program.drain() {
             Ok(drained) => drained,
             Err(reason) => {
                 // A drain that failed is a window whose rows are still in the
@@ -146,6 +155,16 @@ impl RunqLatCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        // A task that exec'd in this window is named what it became, not what
+        // it was when its row was made; see `bpf::Renames`.
+        if let Some(renames) = self.renames.as_mut() {
+            let renamed = renames.take();
+            for row in rows.iter_mut() {
+                if let Some(name) = renamed.get(&row.tid) {
+                    row.comm.clone_from(name);
+                }
+            }
+        }
 
         if drain_losses.vanished > 0 {
             self.losses.undecoded += drain_losses.vanished;
@@ -158,6 +177,14 @@ impl RunqLatCollector {
         }
 
         for (index, row) in rows.into_iter().enumerate() {
+            if self
+                .cpus
+                .as_ref()
+                .is_some_and(|cpus| !cpus.contains(&row.cpu))
+            {
+                self.off_target += row.count;
+                continue;
+            }
             let event = Event {
                 // Stamped where the row's first wait began rather than at the
                 // drain that read it, which is finding 44: a join that opens on
@@ -288,6 +315,18 @@ impl Collector for RunqLatCollector {
 
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(RunqLatProgram::load(self.filter)?);
+        // Optional: without it a row keeps the name its task had when the row
+        // was made, which for a launched program's first rows is this tool's.
+        self.renames = match Renames::load(self.filter) {
+            Ok(renames) => Some(renames),
+            Err(reason) => {
+                self.notes.push(format!(
+                    "a task that exec'd during a window is named what it was when its first \
+                     row was made, because the exec program could not be attached: {reason}"
+                ));
+                None
+            }
+        };
         self.window_opened_ns = monotonic_ns();
         Ok(())
     }
@@ -331,6 +370,13 @@ impl Collector for RunqLatCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
+        if self.off_target > 0 {
+            notes.push(format!(
+                "{} waits on other cpus were measured and set aside: the programs run on every \
+                 cpu whatever `--cpu` says, so narrowing costs nothing less",
+                self.off_target
+            ));
+        }
         // What the predicate removed. The runner's own `Filtered` report is not
         // produced for a backend credited with kernel-side filtering, so
         // without this a request whose filter matched nothing looks exactly
@@ -471,7 +517,7 @@ mod tests {
     /// `rate` and `topk` -- and what is left to say is the bucketing itself.
     #[test]
     fn the_run_says_that_an_event_stands_for_more_than_one_wait() {
-        let mut collector = RunqLatCollector::new(None, None);
+        let mut collector = RunqLatCollector::new(Whose::Any, None);
         assert!(
             collector.notes().is_empty(),
             "a run that bucketed nothing has nothing to qualify"
@@ -518,7 +564,7 @@ mod tests {
     /// run that filtered has to say what the filter did.
     #[test]
     fn a_filter_that_removed_waits_says_how_many_it_removed() {
-        let mut collector = RunqLatCollector::new(None, None);
+        let mut collector = RunqLatCollector::new(Whose::Any, None);
         collector.filtered_in = 4;
         collector.filtered_out = 11;
         let notes = collector.notes().join(" ");
