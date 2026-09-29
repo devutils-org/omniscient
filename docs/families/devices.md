@@ -257,7 +257,7 @@ No session was added.
 
 ## The suite
 
-One `make check` on the final tree, then, because it went red, one `cargo test
+One `make check` on the tree before the last two test fixes, then, because it went red, one `cargo test
 --workspace --no-fail-fast`. Red, and each accounted for:
 
 - `validate::tests::an_emit_no_declared_mode_can_produce_is_a_broken_promise`
