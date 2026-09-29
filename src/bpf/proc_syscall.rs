@@ -33,7 +33,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{self, count_drop, helper, Insn, Log2Labels, Program, BPF_DW, BPF_W, R10};
+use super::insn::{
+    self, count_drop, helper, push_current_filter, Insn, Log2Labels, Program, Whose, BPF_DW, BPF_W,
+    R10,
+};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::syscall;
 
@@ -76,6 +79,11 @@ const MAX_ROWS: u32 = 32768;
 /// Slots of the drop counter, one per thing that can be lost.
 const DROP_PENDING: u32 = 0;
 const DROP_ROWS: u32 = 1;
+/// Not a loss: the calls of the target the pushed-down syscall comparison
+/// skipped, counted where it skips them, so that a run can say how much of the
+/// target's work its predicate declined to time -- which is the one thing that
+/// tells a predicate that ran in the program from one that matched nothing.
+const SKIPPED_BY_PREDICATE: u32 = 2;
 
 /// Where each map's key and value live on the program's stack.
 ///
@@ -91,6 +99,8 @@ const DROP_KEY: i16 = -112;
 /// Where the exit program keeps the row map it looked up through the
 /// generation slot, once per run; see `map::select_rows`.
 const ROWS_SLOT: i16 = -120;
+/// Eight bytes for a cgroup or thread comparison, `insn::push_current_filter`.
+const FILTER_SCRATCH: i16 = -128;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -233,8 +243,8 @@ fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(),
 /// this path runs on every syscall of every process on the machine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Narrowing {
-    /// The thread group whose calls are kept, or none for the machine.
-    pub tgid: Option<u32>,
+    /// Whose calls are kept.
+    pub whose: Whose,
     /// The one syscall number kept, or none for all of them. This is the
     /// predicate the catalog's caveat says to push down.
     pub syscall_nr: Option<u32>,
@@ -261,15 +271,38 @@ fn enter_instructions(
     program.push(Insn::st_imm(BPF_DW, R10, PEND_KEY, 0));
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
     program.push(Insn::stx(BPF_W, R10, PEND_KEY, 0));
-    if let Some(tgid) = narrowing.tgid {
-        program.push(Insn::rsh64_imm(0, 32));
-        program.jump_to("done", Insn::jne_imm(0, tgid as i32, 0));
+    match narrowing.whose {
+        Whose::Any => {}
+        // The thread group is the high half of what is still in r0.
+        Whose::Process(tgid) => {
+            program.push(Insn::rsh64_imm(0, 32));
+            program.jump_to("done", Insn::jne_imm(0, tgid as i32, 0));
+        }
+        // The thread id is the low half, already on the stack as the key.
+        Whose::Thread(tid) => {
+            program.push(Insn::ldx(BPF_W, 1, R10, PEND_KEY));
+            program.jump_to("done", Insn::jne_imm(1, tid as i32, 0));
+        }
+        Whose::Cgroup(_) => {
+            push_current_filter(&mut program, narrowing.whose, FILTER_SCRATCH, "done")
+        }
     }
 
     // The second argument is the syscall number.
     program.push(Insn::ldx(BPF_DW, 9, 6, 8));
     if let Some(nr) = narrowing.syscall_nr {
-        program.jump_to("done", Insn::jne_imm(9, nr as i32, 0));
+        program.jump_to("the_syscall", Insn::jeq_imm(9, nr as i32, 0));
+        // A call of the target's that the predicate declines: counted, so the
+        // run can say what it did not time and why.
+        count_drop(
+            &mut program,
+            drops_fd,
+            DROP_KEY,
+            SKIPPED_BY_PREDICATE,
+            "done",
+        );
+        program.jump_to("done", Insn::ja());
+        program.label("the_syscall");
     }
 
     program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_TS, 8));
@@ -445,7 +478,7 @@ impl SyscallProgram {
         .map_err(|error| map_failure("pending syscall map", error))?;
         let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_sys_hist")
             .map_err(|error| map_failure("syscall histogram map", error))?;
-        let drops = Counters::create(2, "omn_sys_drop")
+        let drops = Counters::create(3, "omn_sys_drop")
             .map_err(|error| map_failure("syscall drop counter", error))?;
 
         let enter = enter_instructions(btf, narrowing, pending.as_raw_fd(), drops.as_raw_fd())?;
@@ -523,6 +556,12 @@ impl SyscallProgram {
     /// `(pending, rows)`.
     pub fn dropped(&self) -> (u64, u64) {
         (self.drops.read(DROP_PENDING), self.drops.read(DROP_ROWS))
+    }
+
+    /// Calls of the target the pushed-down syscall comparison skipped without
+    /// timing them, summed across cpus. Zero when no syscall was pushed down.
+    pub fn skipped_by_predicate(&self) -> u64 {
+        self.drops.read(SKIPPED_BY_PREDICATE)
     }
 }
 
@@ -639,7 +678,7 @@ mod tests {
         let narrowed = enter_instructions(
             &btf,
             Narrowing {
-                tgid: None,
+                whose: Whose::Any,
                 syscall_nr: Some(257),
             },
             3,
@@ -666,7 +705,7 @@ mod tests {
         let both = enter_instructions(
             &btf,
             Narrowing {
-                tgid: Some(4242),
+                whose: Whose::Process(4242),
                 syscall_nr: Some(257),
             },
             3,
@@ -743,6 +782,7 @@ mod tests {
             (PEND_KEY, PEND_KEY_BYTES as i16, "pending key"),
             (DROP_KEY, 4, "drop key"),
             (ROWS_SLOT, 8, "row map slot"),
+            (FILTER_SCRATCH, 8, "filter scratch"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");

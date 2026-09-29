@@ -1,5 +1,6 @@
-//! The `irq_handler_entry` / `irq_handler_exit` pair: time the machine spent
-//! inside a hardware interrupt handler.
+//! The `irq_handler_entry` / `irq_handler_exit` pair, and `softirq_entry` /
+//! `softirq_exit` beside it: time the machine spent
+//! inside hardware interrupt handlers and inside softirqs.
 //!
 //! An interrupt handler runs on somebody else's time. It preempts whatever
 //! thread was on the cpu, it is not scheduled, and the cpu time it costs is
@@ -17,14 +18,16 @@
 //! task would attribute a disk's interrupt to whatever happened to be on the
 //! cpu.
 //!
-//! **This is the hard half only.** The catalog entry's summary says "hard and
-//! soft", and its requirements name `irq_handler_entry` and
-//! `irq_handler_exit`, which are the hard ones; softirq time is
-//! `softirq_entry` and `softirq_exit`, a requirement the entry does not
-//! declare and which this stream does not own. Attaching to a tracepoint the
-//! resolver never probed is how a backend comes to be reported available and
-//! then fail, so the gap is left open and written down rather than closed
-//! quietly. `docs/families/sched.md` says what it costs.
+//! **And the soft half, since the thirteenth wave.** Softirq time -- the
+//! network receive path, block completions, the timer wheel, RCU -- is
+//! `softirq_entry` and `softirq_exit`, paired the same way: a softirq does not
+//! nest in another on the same cpu, so its start is one more per-cpu slot. A
+//! hard interrupt *can* land inside a softirq, and its time is taken out of
+//! the softirq's: every hard exit adds its length to a per-cpu running total,
+//! each softirq entry notes that total, and the exit subtracts what it grew by.
+//! A row says which half it is (`kind`), and the two are never added together
+//! by the program: a softirq is keyed by its vector, a hard interrupt by its
+//! line, and the numbers overlap.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -37,13 +40,19 @@ use super::sched_common::{
 };
 use super::syscall;
 
-/// Arguments of the two tracepoints, in the raw tracepoint's context.
+/// Arguments of the tracepoints, in the raw tracepoint's context. A softirq's
+/// only argument is its vector, in the same first slot.
 const ARG_IRQ: i16 = 0;
 const ARG_ACTION: i16 = 8;
 
 /// The prototypes these programs are written against.
 const ENTRY_SIGNATURE: [&str; 2] = ["int", "irqaction *"];
 const EXIT_SIGNATURE: [&str; 3] = ["int", "irqaction *", "int"];
+const SOFT_SIGNATURE: [&str; 1] = ["unsigned int"];
+
+/// The two halves, as a row's `kind`.
+pub const KIND_HARD: u32 = 0;
+pub const KIND_SOFT: u32 = 1;
 
 /// How many distinct `(cpu, irq, bucket)` rows one interval may hold.
 ///
@@ -71,12 +80,19 @@ const ROWS_SLOT: i16 = -112;
 const TS_KEY: i16 = -16;
 /// Where the pointer to an interrupt's name is read before it is followed.
 const SCRATCH: i16 = -8;
+/// Where a softirq's start is kept while its length is worked out, to stamp
+/// the row with.
+const SOFT_START: i16 = -120;
 
 /// The layout of a row key.
 const KEY_CPU: i16 = 0;
 const KEY_IRQ: i16 = 4;
 const KEY_BUCKET: i16 = 8;
-const ROW_KEY_BYTES: usize = 12;
+/// Which half: [`KIND_HARD`] or [`KIND_SOFT`]. In the key because a vector and
+/// a line are both small integers, and `NET_RX` is 3 as surely as some
+/// device's line is.
+const KEY_KIND: i16 = 12;
+const ROW_KEY_BYTES: usize = 16;
 
 /// The layout of a row value.
 const VALUE_COUNT: i16 = 0;
@@ -99,8 +115,14 @@ const NAME_BYTES: usize = 40;
 const VALUE_FIRST_NS: i16 = 56;
 const ROW_VALUE_BYTES: usize = 64;
 
-/// The in-flight array holds one `u64` per cpu, at index zero.
+/// The in-flight array holds four `u64`s per cpu: the running hard handler's
+/// start, the running softirq's start, the cpu's running total of hard
+/// handler time, and that total as it was when the running softirq began.
 const IN_FLIGHT_SLOT: i32 = 0;
+const SOFT_SLOT: i32 = 1;
+const HARD_TOTAL_SLOT: i32 = 2;
+const HARD_AT_SOFT_SLOT: i32 = 3;
+const IN_FLIGHT_SLOTS: u32 = 4;
 
 const LOG2: Log2Labels = [
     "irq_log2_32",
@@ -118,7 +140,10 @@ const LICENSE: &str = "GPL";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrqRun {
     pub cpu: u32,
+    /// The interrupt line, or for a softirq its vector.
     pub irq: u32,
+    /// [`KIND_HARD`] or [`KIND_SOFT`].
+    pub kind: u32,
     pub bucket: u32,
     pub count: u64,
     pub total_ns: u64,
@@ -145,6 +170,7 @@ impl IrqRun {
         Some(Self {
             cpu: word(key, KEY_CPU as usize),
             irq: word(key, KEY_IRQ as usize),
+            kind: word(key, KEY_KIND as usize),
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
@@ -168,9 +194,9 @@ fn check(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// Puts a pointer to this cpu's in-flight slot in `r0`.
-fn open_in_flight(program: &mut Program, in_flight_fd: i32) {
-    program.push(Insn::st_imm(BPF_W, R10, TS_KEY, IN_FLIGHT_SLOT));
+/// Puts a pointer to one of this cpu's in-flight slots in `r0`.
+fn open_slot(program: &mut Program, in_flight_fd: i32, slot: i32) {
+    program.push(Insn::st_imm(BPF_W, R10, TS_KEY, slot));
     program.extend(Insn::load_map_fd(1, in_flight_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, TS_KEY as i32));
@@ -186,7 +212,7 @@ fn entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String>
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::mov64_reg(7, 0));
 
-    open_in_flight(&mut program, in_flight_fd);
+    open_slot(&mut program, in_flight_fd, IN_FLIGHT_SLOT);
     // Index zero of a per-cpu array is always there; the check is what the
     // verifier requires rather than a case this expects.
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
@@ -218,7 +244,7 @@ fn exit_instructions(
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::mov64_reg(8, 0));
 
-    open_in_flight(&mut program, in_flight_fd);
+    open_slot(&mut program, in_flight_fd, IN_FLIGHT_SLOT);
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
     program.push(Insn::ldx(BPF_DW, 9, 0, 0));
     // Zero means no entry was recorded for this handler: the programs were
@@ -240,24 +266,53 @@ fn exit_instructions(
     program.jump_to("done", Insn::ja());
 
     program.label("forwards");
+    // This cpu's running total of hard handler time, which a softirq this
+    // handler interrupted takes its own length out of.
+    open_slot(&mut program, in_flight_fd, HARD_TOTAL_SLOT);
+    program.jump_to("totalled", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+    program.push(Insn::add64_reg(1, 9));
+    program.push(Insn::stx(BPF_DW, 0, 0, 1));
+    program.label("totalled");
     // r7 keeps the action, which is where the handler's name is.
     program.push(Insn::ldx(BPF_DW, 7, 6, ARG_ACTION));
     program.push(Insn::ldx(BPF_DW, 1, 6, ARG_IRQ));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_IRQ, 1));
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        ROW_KEY + KEY_KIND,
+        KIND_HARD as i32,
+    ));
 
+    push_row(&mut program, rows_fd, drops_fd, Some(name_offset));
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// Adds the run whose length is in `r9` to its row, from the cpu it ran on
+/// and the key fields already on the stack; `r8` is the program's reading of
+/// the clock, and `r7` the `irqaction` whose name a hard row carries.
+///
+/// Shared by the two exits, which differ only in how the length and the key
+/// were found: a hard row is named from its action, a soft row by the
+/// collector from its vector.
+fn push_row(program: &mut Program, rows_fd: i32, drops_fd: i32, name_offset: Option<i32>) {
     // The cpu goes in the key before the bucket does: this call clobbers r1
     // through r5, and the bucket is computed in them. It is the cpu the
     // handler ran on, which is the one whose work it interrupted.
     program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_CPU, 0));
 
-    push_log2_bucket(&mut program, 9, &LOG2);
+    push_log2_bucket(program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
     // The row map of this interval, taken once: a drain may swap it at any
     // instruction, and a lookup and an insert that named two maps would put
     // one occurrence in each. See `map::Rows`.
-    select_rows(&mut program, rows_fd, ROWS_SLOT, "no_rows");
+    select_rows(program, rows_fd, ROWS_SLOT, "no_rows");
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -293,12 +348,14 @@ fn exit_instructions(
     }
     // `irqaction.name` is a pointer to a string, so it takes two reads: the
     // pointer out of the structure, then the characters it points at.
-    read_field(&mut program, SCRATCH, 8, 7, name_offset);
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_NAME) as i32));
-    program.push(Insn::mov64_imm(2, NAME_BYTES as i32));
-    program.push(Insn::ldx(BPF_DW, 3, R10, SCRATCH));
-    program.push(Insn::call(helper::PROBE_READ_KERNEL_STR));
+    if let Some(name_offset) = name_offset {
+        read_field(program, SCRATCH, 8, 7, name_offset);
+        program.push(Insn::mov64_reg(1, R10));
+        program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_NAME) as i32));
+        program.push(Insn::mov64_imm(2, NAME_BYTES as i32));
+        program.push(Insn::ldx(BPF_DW, 3, R10, SCRATCH));
+        program.push(Insn::call(helper::PROBE_READ_KERNEL_STR));
+    }
 
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
@@ -309,7 +366,7 @@ fn exit_instructions(
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jsge_imm(0, 0, 0));
     count_update_failure(
-        &mut program,
+        program,
         drops_fd,
         DROP_KEY,
         &[(E2BIG, DROP_ROWS_FULL, "rows_not_full")],
@@ -320,11 +377,101 @@ fn exit_instructions(
     program.jump_to("done", Insn::ja());
     // The slot held no map, which it always does; counted rather than assumed.
     program.label("no_rows");
-    count_drop(&mut program, drops_fd, DROP_KEY, DROP_ROWS_BUSY, "done");
+    count_drop(program, drops_fd, DROP_KEY, DROP_ROWS_BUSY, "done");
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
+}
+
+/// The program on `softirq_entry`: a softirq vector has the cpu.
+fn soft_entry_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String> {
+    check(btf, "softirq_entry", &SOFT_SIGNATURE)?;
+
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(7, 0));
+
+    open_slot(&mut program, in_flight_fd, SOFT_SLOT);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, 0, 0, 7));
+    // The cpu's hard handler time so far: what the exit takes this softirq's
+    // share of that time against.
+    open_slot(&mut program, in_flight_fd, HARD_TOTAL_SLOT);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 8, 0, 0));
+    open_slot(&mut program, in_flight_fd, HARD_AT_SOFT_SLOT);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, 0, 0, 8));
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The program on `softirq_exit`: the vector is done, and its length is the
+/// time since its entry less the hard handlers that ran inside it.
+fn soft_exit_instructions(
+    btf: &Btf,
+    in_flight_fd: i32,
+    rows_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    check(btf, "softirq_exit", &SOFT_SIGNATURE)?;
+
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    open_slot(&mut program, in_flight_fd, SOFT_SLOT);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 9, 0, 0));
+    program.jump_to("unopened", Insn::jeq_imm(9, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, 0, 0, 0));
+    program.push(Insn::stx(BPF_DW, R10, SOFT_START, 9));
+
+    // r7 = the hard handler time that landed inside this softirq.
+    open_slot(&mut program, in_flight_fd, HARD_TOTAL_SLOT);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 7, 0, 0));
+    open_slot(&mut program, in_flight_fd, HARD_AT_SOFT_SLOT);
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+    program.push(Insn::sub64_reg(7, 1));
+
+    // r9 = now - start - nested.
+    program.push(Insn::mov64_reg(1, 8));
+    program.push(Insn::sub64_reg(1, 9));
+    program.push(Insn::sub64_reg(1, 7));
+    program.push(Insn::mov64_reg(9, 1));
+    program.jump_to("forwards", Insn::jsge_imm(9, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_BACKWARDS, "done");
+    program.jump_to("done", Insn::ja());
+
+    program.label("unopened");
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_UNOPENED, "done");
+    program.jump_to("done", Insn::ja());
+
+    program.label("forwards");
+    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_IRQ));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_IRQ, 1));
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        ROW_KEY + KEY_KIND,
+        KIND_SOFT as i32,
+    ));
+    // The row's stamp is the softirq's start: `push_row` recovers it as the
+    // clock less the length, and the length has the nested hard time taken
+    // out, so the clock is moved back by that much for it.
+    program.push(Insn::sub64_reg(8, 7));
+    push_row(&mut program, rows_fd, drops_fd, None);
 
     let instructions = program.build();
     super::insn::audit(&instructions)?;
@@ -341,15 +488,13 @@ pub struct IrqDrops {
     pub unopened: u64,
 }
 
-/// Two loaded, attached programs and the maps they share.
+/// Four loaded, attached programs and the maps they share.
 pub struct IrqProgram {
     rows: Rows,
     drops: Counters,
     _in_flight: Counters,
-    entry_program: OwnedFd,
-    _entry_link: OwnedFd,
-    exit_program: OwnedFd,
-    _exit_link: OwnedFd,
+    programs: Vec<OwnedFd>,
+    _links: Vec<OwnedFd>,
 }
 
 impl IrqProgram {
@@ -359,7 +504,7 @@ impl IrqProgram {
     /// `bpf_prog_info.recursion_misses` and nowhere else, so nothing in this
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.entry_program, &self.exit_program])
+        crate::bpf::attach::fentry::skipped(self.programs.iter())
     }
 
     pub fn load() -> Result<Self, String> {
@@ -367,44 +512,67 @@ impl IrqProgram {
 
         // A per-cpu array of one `u64`: this build's in-flight timestamp, one
         // per cpu, which is the whole state these two programs share.
-        let in_flight = Counters::create(1, "omn_irq_open")
+        let in_flight = Counters::create(IN_FLIGHT_SLOTS, "omn_irq_open")
             .map_err(|error| map_failure("interrupt in-flight slot", error))?;
         let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_irq_hist")
             .map_err(|error| map_failure("interrupt histogram map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_irq_drop")
             .map_err(|error| map_failure("interrupt drop counter", error))?;
 
-        let entry = entry_instructions(btf, in_flight.as_raw_fd())?;
-        let exit = exit_instructions(
-            btf,
-            in_flight.as_raw_fd(),
-            rows.as_raw_fd(),
-            drops.as_raw_fd(),
-        )?;
-
-        let entry_program = load(&entry, "omn_irq_in")?;
-        let exit_program = load(&exit, "omn_irq_out")?;
-
-        // Entry first: an exit that finds no timestamp is counted and skipped,
-        // where the reverse order would have nothing to stop a handler's
-        // length being measured from zero.
-        let entry_link =
-            syscall::raw_tracepoint_open("irq_handler_entry", entry_program.as_raw_fd()).map_err(
-                |error| format!("cannot attach to the `irq_handler_entry` tracepoint: {error}"),
-            )?;
-        let exit_link = syscall::raw_tracepoint_open("irq_handler_exit", exit_program.as_raw_fd())
-            .map_err(|error| {
-                format!("cannot attach to the `irq_handler_exit` tracepoint: {error}")
-            })?;
+        let built = [
+            (
+                "irq_handler_entry",
+                "omn_irq_in",
+                entry_instructions(btf, in_flight.as_raw_fd())?,
+            ),
+            (
+                "irq_handler_exit",
+                "omn_irq_out",
+                exit_instructions(
+                    btf,
+                    in_flight.as_raw_fd(),
+                    rows.as_raw_fd(),
+                    drops.as_raw_fd(),
+                )?,
+            ),
+            (
+                "softirq_entry",
+                "omn_softirq_in",
+                soft_entry_instructions(btf, in_flight.as_raw_fd())?,
+            ),
+            (
+                "softirq_exit",
+                "omn_softirq_out",
+                soft_exit_instructions(
+                    btf,
+                    in_flight.as_raw_fd(),
+                    rows.as_raw_fd(),
+                    drops.as_raw_fd(),
+                )?,
+            ),
+        ];
+        let mut programs = Vec::with_capacity(built.len());
+        for (_, name, instructions) in &built {
+            programs.push(load(instructions, name)?);
+        }
+        // Each entry before its exit: an exit that finds no timestamp is
+        // counted and skipped, where the reverse order would have nothing to
+        // stop a handler's length being measured from zero.
+        let mut links = Vec::with_capacity(built.len());
+        for ((tracepoint, _, _), program) in built.iter().zip(&programs) {
+            links.push(
+                syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(|error| {
+                    format!("cannot attach to the `{tracepoint}` tracepoint: {error}")
+                })?,
+            );
+        }
 
         Ok(Self {
             rows,
             drops,
             _in_flight: in_flight,
-            entry_program,
-            _entry_link: entry_link,
-            exit_program,
-            _exit_link: exit_link,
+            programs,
+            _links: links,
         })
     }
 
@@ -568,7 +736,7 @@ mod tests {
 
     #[test]
     fn every_byte_of_every_key_and_value_is_accounted_for() {
-        let key = [(KEY_CPU, 4), (KEY_IRQ, 4), (KEY_BUCKET, 4)];
+        let key = [(KEY_CPU, 4), (KEY_IRQ, 4), (KEY_BUCKET, 4), (KEY_KIND, 4)];
         let value = [
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
@@ -604,6 +772,7 @@ mod tests {
             (TS_KEY, 4, "in-flight key"),
             (SCRATCH, 8, "scratch"),
             (ROWS_SLOT, 8, "row map slot"),
+            (SOFT_START, 8, "softirq start"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");

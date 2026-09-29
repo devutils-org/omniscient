@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
+use crate::bpf::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram, Whose};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -155,26 +155,23 @@ impl Predicate {
     }
 }
 
-/// The one target these two sources have, checked by name.
+/// The targets these two sources have, checked by name.
 ///
 /// `proc.exec` and `proc.exit` are machine-wide by construction: an exec is the
 /// moment a pid stops being one program and starts being another, so "watch
 /// this process's execs" is a question about a pid that is about to mean
-/// something else. The catalog declares `system`, `cgroup` and `container` and
-/// no `pid`, and this is the collector half of that.
-fn machine_wide_only(target: &Target, source: &str) -> Result<(), String> {
+/// something else. A cgroup is not: every process started inside it stays
+/// inside it, and the program compares the task's cgroup in the kernel. The
+/// catalog declares `system` and `cgroup` and no `pid`, and this is the
+/// collector half of that.
+fn machine_or_cgroup(target: &Target, source: &str) -> Result<Whose, String> {
     match target {
-        Target::System => Ok(()),
-        Target::Cgroup(_) | Target::Container(_) => Err(format!(
-            "`{source}` cannot be narrowed to a {} in this build: the program keeps every event \
-             on the machine, and filtering one out by cgroup needs a helper the eBPF layer does \
-             not have yet. Use --system and filter on `comm`, which costs the events rather than \
-             reporting the wrong ones",
-            target.kind()
-        )),
+        Target::System | Target::Cgroup(_) => Whose::of(target),
+        Target::Container(_) => Whose::of(target).map_err(|reason| format!("`{source}`: {reason}")),
         other => Err(format!(
-            "`{source}` observes the machine, and a {} target names something narrower than it \
-             can watch; use --system",
+            "`{source}` observes the machine or a cgroup, and a {} target names something it \
+             cannot watch: a pid is what an exec changes the meaning of. Use --system, or \
+             --cgroup for the cgroup the process runs in",
             other.kind()
         )),
     }
@@ -200,13 +197,15 @@ pub struct PrepareExec {
 impl Prepared for PrepareExec {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         trace_only(self.mode, "proc.exec", "an exec")?;
-        machine_wide_only(target, "proc.exec")?;
-        Ok(Box::new(ExecCollector::new(self.filter)))
+        let whose = machine_or_cgroup(target, "proc.exec")?;
+        Ok(Box::new(ExecCollector::new(self.filter).within(whose)))
     }
 }
 
 pub struct ExecCollector {
     inner: Streaming,
+    /// The machine, or a cgroup and everything below it.
+    whose: Whose,
     program: Option<ExecProgram>,
     /// Paths that filled the record. Counted rather than silently shortened,
     /// because a truncated path and a short one look the same afterwards.
@@ -217,9 +216,16 @@ pub struct ExecCollector {
 }
 
 impl ExecCollector {
+    /// Narrows the program to a cgroup; the machine otherwise.
+    pub fn within(mut self, whose: Whose) -> Self {
+        self.whose = whose;
+        self
+    }
+
     pub fn new(filter: Option<FilterExpr>) -> Self {
         Self {
             inner: Streaming::new("proc.exec/bpf:raw_tp"),
+            whose: Whose::Any,
             program: None,
             truncated: 0,
             unnamed: 0,
@@ -310,7 +316,7 @@ impl Collector for ExecCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(ExecProgram::load(RING_BYTES)?);
+        self.program = Some(ExecProgram::load(self.whose, RING_BYTES)?);
         Ok(())
     }
 
@@ -383,13 +389,15 @@ pub struct PrepareExit {
 impl Prepared for PrepareExit {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         trace_only(self.mode, "proc.exit", "an exit")?;
-        machine_wide_only(target, "proc.exit")?;
-        Ok(Box::new(ExitCollector::new(self.filter)))
+        let whose = machine_or_cgroup(target, "proc.exit")?;
+        Ok(Box::new(ExitCollector::new(self.filter).within(whose)))
     }
 }
 
 pub struct ExitCollector {
     inner: Streaming,
+    /// The machine, or a cgroup and everything below it.
+    whose: Whose,
     program: Option<ExitProgram>,
     /// Threads that left, and processes that left. They are different numbers
     /// and only one of them is what a reader counting programs means.
@@ -399,9 +407,16 @@ pub struct ExitCollector {
 }
 
 impl ExitCollector {
+    /// Narrows the program to a cgroup; the machine otherwise.
+    pub fn within(mut self, whose: Whose) -> Self {
+        self.whose = whose;
+        self
+    }
+
     pub fn new(filter: Option<FilterExpr>) -> Self {
         Self {
             inner: Streaming::new("proc.exit/bpf:raw_tp"),
+            whose: Whose::Any,
             program: None,
             threads: 0,
             processes: 0,
@@ -499,7 +514,7 @@ impl Collector for ExitCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(ExitProgram::load(RING_BYTES)?);
+        self.program = Some(ExitProgram::load(self.whose, RING_BYTES)?);
         Ok(())
     }
 
@@ -546,6 +561,15 @@ impl Collector for ExitCollector {
             if self.processes == 1 { "was" } else { "were" },
             if self.processes == 1 { "its" } else { "their" },
         ));
+        if !ExitProgram::group_dead_is_passed() {
+            notes.push(
+                "this kernel's `sched_process_exit` does not say whether a thread was its \
+                 process's last, so `group_dead` is read from the process's count of live \
+                 threads when the tracepoint fires: two threads of one process leaving at the \
+                 same instant can both carry it"
+                    .to_owned(),
+            );
+        }
         notes
     }
 }
@@ -566,27 +590,12 @@ impl Prepared for PrepareSignals {
                  a hundred of them reports whichever signals happened to be under the clock"
             ));
         }
-        let filter = match target {
-            Target::System => None,
-            Target::Pid(_) | Target::Tid(_) => {
-                Some(target.first_pid().expect("a pid target names a process") as u32)
-            }
-            Target::Cgroup(_) | Target::Container(_) => {
-                return Err(format!(
-                    "`proc.signals` cannot be narrowed to a {} in this build: the program filters \
-                     by thread group, and filtering by cgroup needs a helper the eBPF layer does \
-                     not have yet. Use --system, or --pid for one process",
-                    target.kind()
-                ))
-            }
-            other => {
-                return Err(format!(
-                    "a {} target names no process, and a signal is sent to one; use --pid, or \
-                     --system to watch the whole machine",
-                    other.kind()
-                ))
-            }
-        };
+        let filter = Whose::of(target).map_err(|reason| {
+            format!(
+                "{reason}, and a signal is sent to a task; use --pid, --cgroup, or --system to \
+                 watch the whole machine"
+            )
+        })?;
         Ok(Box::new(
             SignalCollector::new(filter, mode).with_predicate(self.filter),
         ))
@@ -595,8 +604,8 @@ impl Prepared for PrepareSignals {
 
 pub struct SignalCollector {
     inner: Streaming,
-    /// The thread group whose signals are kept, or none for the machine.
-    filter: Option<u32>,
+    /// Whose signals are kept, at either end.
+    filter: Whose,
     mode: Mode,
     program: Option<SignalProgram>,
     /// A counted run's running totals, by `(target tid, signal)`.
@@ -615,7 +624,7 @@ struct Counted {
 }
 
 impl SignalCollector {
-    pub fn new(filter: Option<u32>, mode: Mode) -> Self {
+    pub fn new(filter: Whose, mode: Mode) -> Self {
         Self {
             inner: Streaming::new("proc.signals/bpf:raw_tp"),
             filter,
@@ -838,7 +847,7 @@ impl Collector for SignalCollector {
                     .to_owned(),
             );
         }
-        if self.filter.is_none() {
+        if self.filter == Whose::Any {
             notes.push(
                 "machine-wide: every signal on the machine, including the ones this tool \
                  receives itself"
@@ -976,10 +985,10 @@ mod tests {
         assert_eq!(exec.comm(), "true");
     }
 
-    /// `proc.exec` and `proc.exit` watch the machine, and a target that names
-    /// something narrower is refused by name rather than quietly widened.
+    /// `proc.exec` and `proc.exit` watch the machine or a cgroup, and a
+    /// process target is refused by name rather than quietly widened.
     #[test]
-    fn a_narrower_target_than_the_machine_is_refused_by_name() {
+    fn a_process_target_is_refused_and_a_cgroup_is_taken() {
         let Err(error) = Box::new(PrepareExec {
             mode: Mode::Trace,
             filter: None,
@@ -990,15 +999,23 @@ mod tests {
         assert!(error.contains("pid"), "{error}");
         assert!(error.contains("--system"), "{error}");
 
+        // The hierarchy's root is a cgroup every machine with cgroup2 has.
+        if std::path::Path::new("/sys/fs/cgroup/cgroup.procs").exists() {
+            assert!(Box::new(PrepareExit {
+                mode: Mode::Trace,
+                filter: None,
+            })
+            .attach(&Target::Cgroup("/sys/fs/cgroup".into()))
+            .is_ok());
+        }
         let Err(error) = Box::new(PrepareExit {
             mode: Mode::Trace,
             filter: None,
         })
-        .attach(&Target::Cgroup("/sys/fs/cgroup".into())) else {
-            panic!("a cgroup cannot be filtered on by this build");
+        .attach(&Target::Cgroup("/sys/fs/cgroup/no-such-cgroup-here".into())) else {
+            panic!("a cgroup that does not exist names nothing to watch");
         };
-        assert!(error.contains("cgroup"), "{error}");
-        assert!(error.contains("helper"), "{error}");
+        assert!(error.contains("no-such-cgroup-here"), "{error}");
     }
 
     /// A mode that cannot mean anything here is refused with the reason: a

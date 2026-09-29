@@ -27,7 +27,7 @@
 use std::time::Duration as StdDuration;
 
 use super::syscall_names;
-use crate::bpf::{Narrowing, SyscallProgram, SyscallRow};
+use crate::bpf::{Narrowing, SyscallProgram, SyscallRow, Whose};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -63,22 +63,18 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
-        let tgid = match target {
-            Target::System => None,
-            other => Some(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and a syscall is made by one; use --system to \
-                     watch the whole machine",
-                    other.kind()
-                )
-            })? as u32),
-        };
+        let whose = Whose::of(target).map_err(|reason| {
+            format!(
+                "{reason}, and a syscall is made by a task; name a process with --pid, a thread \
+                 with --tid, a cgroup with --cgroup, or use --system to watch the whole machine"
+            )
+        })?;
         let syscall_nr = match self.filter.as_ref() {
             Some(filter) => pushed_down_syscall(filter)?,
             None => None,
         };
         Ok(Box::new(SyscallCollector::new(
-            Narrowing { tgid, syscall_nr },
+            Narrowing { whose, syscall_nr },
             self.mode,
             self.filter.map(numbers_read_as_nr),
         )))
@@ -216,6 +212,9 @@ pub struct SyscallCollector {
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
+    /// The target's calls to other syscalls, which the pushed-down comparison
+    /// declined to time, as the program counted them at `stop`.
+    declined: u64,
     notes: Vec<String>,
     /// The programs' counters are cumulative, so what is new is the difference.
     dropped_pending: u64,
@@ -246,6 +245,7 @@ impl SyscallCollector {
             program: None,
             losses: Losses::default(),
             skipped: 0,
+            declined: 0,
             notes: Vec::new(),
             dropped_pending: 0,
             dropped_rows: 0,
@@ -492,6 +492,7 @@ impl Collector for SyscallCollector {
         // parked in `epoll_wait` always has some, so this is a fact about the
         // window rather than something lost.
         if let Some(program) = self.program.as_ref() {
+            self.declined = program.skipped_by_predicate();
             let open = program.still_pending();
             if open > 0 {
                 self.notes.push(format!(
@@ -525,9 +526,11 @@ impl Collector for SyscallCollector {
         match self.narrowing.syscall_nr {
             Some(nr) => notes.push(format!(
                 "only `{}` ({nr}) was timed: the predicate on `syscall` was pushed into the \
-                 program, so no other syscall is in these numbers at all and none of them was \
-                 paid for",
-                syscall_names::label(nr)
+                 program, so no other syscall is in these numbers at all; the program skipped \
+                 {} call{} to other syscalls without timing them",
+                syscall_names::label(nr),
+                self.declined,
+                if self.declined == 1 { "" } else { "s" },
             )),
             None if self.predicate.is_some() => notes.push(
                 "the predicate names no single syscall, so every syscall in range was timed and \
@@ -554,7 +557,7 @@ impl Collector for SyscallCollector {
                 self.calls, self.rows,
             ));
         }
-        if self.narrowing.tgid.is_none() {
+        if self.narrowing.whose == Whose::Any {
             notes.push(
                 "machine-wide: every syscall on the machine, including the ones this tool makes \
                  to drain the histogram"
@@ -742,7 +745,7 @@ mod tests {
     fn the_notes_say_which_half_of_the_predicate_ran_in_the_kernel() {
         let collector = SyscallCollector::new(
             Narrowing {
-                tgid: Some(1),
+                whose: Whose::Process(1),
                 syscall_nr: Some(110),
             },
             Mode::Trace,
@@ -754,7 +757,7 @@ mod tests {
 
         let userspace = SyscallCollector::new(
             Narrowing {
-                tgid: Some(1),
+                whose: Whose::Process(1),
                 syscall_nr: None,
             },
             Mode::Trace,
@@ -789,7 +792,7 @@ mod tests {
         let getppid = syscall_names::number("getppid").expect("x86_64 has getppid");
         let mut collector = SyscallCollector::new(
             Narrowing {
-                tgid: Some(std::process::id()),
+                whose: Whose::Process(std::process::id()),
                 syscall_nr: Some(getppid),
             },
             Mode::Trace,
@@ -844,7 +847,7 @@ mod tests {
             syscall_names::number("clock_nanosleep").expect("x86_64 has clock_nanosleep");
         let mut collector = SyscallCollector::new(
             Narrowing {
-                tgid: Some(std::process::id()),
+                whose: Whose::Process(std::process::id()),
                 syscall_nr: Some(clock_nanosleep),
             },
             Mode::Trace,

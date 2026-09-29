@@ -10,7 +10,7 @@
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true, drained: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
-  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, system: native}
   keys: [task]
   filter_fields: [comm, syscall, pid]
   determinism: low
@@ -33,7 +33,7 @@
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: free, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
-  targets: {system: native, cgroup: bpf_only, container: bpf_only}
+  targets: {system: native, cgroup: bpf_only}
   keys: [task]
   filter_fields: [comm, filename]
   determinism: medium
@@ -43,11 +43,11 @@
   summary: "Process exit events with exit code"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)", "kernel>=5.8"], cost: free}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "kernel>=5.8"], cost: free}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: free, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
-  targets: {system: native, cgroup: bpf_only, container: bpf_only}
+  targets: {system: native, cgroup: bpf_only}
   keys: [task]
   filter_fields: [comm, code, group_dead]
   determinism: medium

@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{LockDrops, LockProgram, LockWait};
+use crate::bpf::{LockDrops, LockProgram, LockWait, Whose};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::{STACK_ID_ATTR, WEIGHT_ATTR};
@@ -68,16 +68,7 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
-        let filter = match target {
-            Target::System => None,
-            other => Some(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and a lock wait is attributed per thread; \
-                     use --system to watch the whole machine",
-                    other.kind()
-                )
-            })? as u32),
-        };
+        let filter = super::whose(target, "a lock wait is attributed per thread")?;
         Ok(Box::new(LockCollector::new(
             filter,
             self.wants_stacks,
@@ -88,8 +79,8 @@ impl Prepared for Prepare {
 
 pub struct LockCollector {
     id: CollectorId,
-    /// The thread group whose waits are kept, or none for the machine.
-    filter: Option<u32>,
+    /// Whose waits are kept.
+    filter: Whose,
     program: Option<LockProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
@@ -122,7 +113,7 @@ pub struct LockCollector {
 }
 
 impl LockCollector {
-    pub fn new(filter: Option<u32>, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
+    pub fn new(filter: Whose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
         Self {
             id: CollectorId::new("sched.lock/bpf:raw_tp"),
             filter,
@@ -223,7 +214,12 @@ impl LockCollector {
         if !self.wants_stacks {
             return;
         }
-        let Some(tgid) = self.filter else { return };
+        // A thread's `/proc/<tid>/maps` is its process's, so a thread target
+        // is symbolised through its own id.
+        let tgid = match self.filter {
+            Whose::Process(id) | Whose::Thread(id) => id,
+            Whose::Any | Whose::Cgroup(_) => return,
+        };
         match self.symbolizers.entry(tgid as i32) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
                 held.get_mut().refresh();
@@ -590,7 +586,7 @@ mod tests {
     /// emit reads zero from a run that measured something.
     #[test]
     fn the_value_attribute_is_one_the_events_carry() {
-        let collector = LockCollector::new(None, false, None);
+        let collector = LockCollector::new(Whose::Any, false, None);
         let name = collector.value_attr();
         assert!(attributes(&row(), 1).iter().any(|attr| attr.name == name));
     }

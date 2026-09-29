@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{OffCpu, OffCpuProgram};
+use crate::bpf::{OffCpu, OffCpuProgram, Renames, Whose};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
@@ -75,16 +75,7 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
-        let filter = match target {
-            Target::System => None,
-            other => Some(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and blocked time is attributed per task; \
-                     use --system to watch the whole machine",
-                    other.kind()
-                )
-            })? as u32),
-        };
+        let filter = super::whose(target, "blocked time is attributed per task")?;
         let mut collector = OffCpuCollector::new(filter, self.wants_stacks);
         collector.predicate = self.filter;
         Ok(Box::new(collector))
@@ -93,13 +84,15 @@ impl Prepared for Prepare {
 
 pub struct OffCpuCollector {
     id: CollectorId,
-    /// The thread group whose blocks are kept, or none for the machine.
-    filter: Option<u32>,
+    /// Whose blocks are kept.
+    filter: Whose,
     program: Option<OffCpuProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
     notes: Vec<String>,
+    /// The names tasks took at exec, applied to the rows of the window.
+    renames: Option<Renames>,
     /// The counters are cumulative, so what is new is the difference.
     dropped_in_flight: u64,
     dropped_totals: u64,
@@ -134,7 +127,7 @@ pub struct OffCpuCollector {
 }
 
 impl OffCpuCollector {
-    pub fn new(filter: Option<u32>, wants_stacks: bool) -> Self {
+    pub fn new(filter: Whose, wants_stacks: bool) -> Self {
         Self {
             id: CollectorId::new("sched.offcpu/bpf:raw_tp"),
             filter,
@@ -142,6 +135,7 @@ impl OffCpuCollector {
             losses: Losses::default(),
             skipped: 0,
             notes: Vec::new(),
+            renames: None,
             dropped_in_flight: 0,
             dropped_totals: 0,
             window_opened_ns: 0,
@@ -164,7 +158,7 @@ impl OffCpuCollector {
         };
         let closed_ns = monotonic_ns();
         let window_ns = closed_ns.saturating_sub(self.window_opened_ns);
-        let (entries, drain_losses) = match program.drain() {
+        let (mut entries, drain_losses) = match program.drain() {
             Ok(drained) => drained,
             Err(reason) => {
                 // A drain that failed is a window whose totals are still in
@@ -176,6 +170,16 @@ impl OffCpuCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        // A task that exec'd in this window is named what it became, not what
+        // it was when its row was made; see `bpf::Renames`.
+        if let Some(renames) = self.renames.as_mut() {
+            let renamed = renames.take();
+            for row in entries.iter_mut() {
+                if let Some(name) = renamed.get(&row.tid) {
+                    row.comm.clone_from(name);
+                }
+            }
+        }
 
         if drain_losses.vanished > 0 {
             self.losses.undecoded += drain_losses.vanished;
@@ -244,7 +248,12 @@ impl OffCpuCollector {
         if !self.wants_stacks {
             return;
         }
-        let Some(tgid) = self.filter else { return };
+        // A thread's `/proc/<tid>/maps` is its process's, so a thread target
+        // is symbolised through its own id.
+        let tgid = match self.filter {
+            Whose::Process(id) | Whose::Thread(id) => id,
+            Whose::Any | Whose::Cgroup(_) => return,
+        };
         match self.symbolizers.entry(tgid as i32) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
                 held.get_mut().refresh();
@@ -365,6 +374,18 @@ impl OffCpuCollector {
 /// never blocked.
 fn attributes(entry: &OffCpu, window_ns: u64) -> Vec<Attr> {
     vec![
+        // The value: the mean of the blocks behind this row. Every one of them
+        // fell in the row's log2 bucket, so their mean did too, and weighed by
+        // their count it puts each block where a histogram of blocks puts it --
+        // and adds up, in `rate`, `topk` and `stack`, to exactly `total_ns`.
+        // The total was the value before the bucket was in the key, and a
+        // histogram of totals is a histogram of drain windows.
+        Attr::float(
+            "block_ns",
+            entry.total_ns as f64 / entry.blocks.max(1) as f64,
+        ),
+        Attr::uint(crate::emit::WEIGHT_ATTR, entry.blocks),
+        Attr::uint("bucket", u64::from(entry.bucket)),
         Attr::uint("total_ns", entry.total_ns),
         // The part of the total that was runnable rather than blocked, which
         // `sched.runqlat` reports too: a decomposition that adds this source to
@@ -394,11 +415,23 @@ impl Collector for OffCpuCollector {
     }
 
     fn value_attr(&self) -> &'static str {
-        "total_ns"
+        "block_ns"
     }
 
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(OffCpuProgram::load(self.filter)?);
+        // Optional: without it a row keeps the name its task had when the row
+        // was made, which for a launched program's first rows is this tool's.
+        self.renames = match Renames::load(self.filter) {
+            Ok(renames) => Some(renames),
+            Err(reason) => {
+                self.notes.push(format!(
+                    "a task that exec'd during a window is named what it was when its first \
+                     row was made, because the exec program could not be attached: {reason}"
+                ));
+                None
+            }
+        };
         self.window_opened_ns = monotonic_ns();
         Ok(())
     }
@@ -541,6 +574,7 @@ mod tests {
             tid: 7,
             tgid: 7,
             state: 1,
+            bucket: 10,
             total_ns: 1_000,
             queued_ns: 0,
             blocks: 2,
@@ -574,6 +608,7 @@ mod tests {
             // TASK_UNINTERRUPTIBLE | TASK_NOLOAD, which is an idle kernel
             // thread and not a program stuck on a disk.
             state: 0x402,
+            bucket: 1,
             total_ns: 1,
             queued_ns: 0,
             blocks: 1,
@@ -614,7 +649,7 @@ mod tests {
     #[test]
     fn a_thread_that_sleeps_a_known_time_is_off_cpu_for_it() {
         const SLEEP: StdDuration = StdDuration::from_millis(300);
-        let mut collector = OffCpuCollector::new(Some(std::process::id()), false);
+        let mut collector = OffCpuCollector::new(Whose::Process(std::process::id()), false);
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -648,7 +683,7 @@ mod tests {
     /// turn a program doing nothing into a program stuck on a device.
     #[test]
     fn a_timed_sleep_is_reported_as_interruptible() {
-        let mut collector = OffCpuCollector::new(Some(std::process::id()), false);
+        let mut collector = OffCpuCollector::new(Whose::Process(std::process::id()), false);
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -681,7 +716,7 @@ mod tests {
     /// its wait is run queue latency, which is a different source.
     #[test]
     fn a_thread_that_only_spins_is_not_reported_as_blocked() {
-        let mut collector = OffCpuCollector::new(Some(std::process::id()), false);
+        let mut collector = OffCpuCollector::new(Whose::Process(std::process::id()), false);
         if skip_without_bpf(&mut collector) {
             return;
         }

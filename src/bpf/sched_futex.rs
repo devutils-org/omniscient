@@ -31,7 +31,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{helper, push_current_filter, Insn, Program, Whose, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
     bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, read_field, text_of,
@@ -171,18 +171,6 @@ const LOG2: Log2Labels = [
 
 const LICENSE: &str = "GPL";
 
-/// Whose waits a run keeps.
-///
-/// The catalog offers this source a thread as well as a process, and the two
-/// are different filters: a `--tid` run that compared thread groups would
-/// report every thread of the process, which is the answer to the question
-/// next to the one that was asked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Whose {
-    Process(u32),
-    Thread(u32),
-}
-
 /// One `(address, task, command, stack, bucket)` row's waits over one drain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FutexWait {
@@ -283,6 +271,11 @@ fn current_and_filter(program: &mut Program, whose: Whose, resume: &'static str)
             program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
             program.jump_to(resume, Insn::jne_imm(1, tid as i32, 0));
         }
+        // One helper call for the cgroup, and below it; `r7` survives it.
+        Whose::Cgroup(_) => push_current_filter(program, whose, SCRATCH, resume),
+        // Not a target the collector builds: this source has no machine-wide
+        // form. Were one asked for, it would be every syscall on the machine.
+        Whose::Any => {}
     }
 }
 

@@ -24,7 +24,10 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{
+    helper, push_current_filter, push_task_filter, read_field, read_narrow, read_pointer, Insn,
+    Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
+};
 use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
@@ -37,6 +40,10 @@ const LICENSE: &str = "GPL";
 /// them in its own BTF, with the tracepoint's leading data pointer dropped.
 const EXEC_SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];
 const EXIT_SIGNATURE: [&str; 2] = ["task_struct *", "bool"];
+/// `sched_process_exit` before it was handed whether the thread was its
+/// process's last (6.6 and the kernels before it). The program reads the same
+/// fact out of `task->signal->live` there; see [`exit_instructions`].
+const EXIT_SIGNATURE_WITHOUT_GROUP: [&str; 1] = ["task_struct *"];
 const SIGNAL_SIGNATURE: [&str; 5] = ["int", "kernel_siginfo *", "task_struct *", "int", "int"];
 
 /// How much of a path a record carries.
@@ -263,6 +270,8 @@ const EXEC_FILENAME: i16 = EXEC_EVENT + 40;
 /// before the string behind it is read.
 const EXEC_PATH_PTR: i16 = EXEC_EVENT - 8;
 const EXEC_DROP_KEY: i16 = EXEC_EVENT - 16;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
+const EXEC_FILTER: i16 = EXEC_EVENT - 32;
 
 const EXIT_EVENT: i16 = -48;
 const EXIT_TID: i16 = EXIT_EVENT + 8;
@@ -273,6 +282,10 @@ const EXIT_COMM: i16 = EXIT_EVENT + 24;
 const EXIT_CPU: i16 = EXIT_EVENT + 40;
 const EXIT_PAD: i16 = EXIT_EVENT + 44;
 const EXIT_DROP_KEY: i16 = EXIT_EVENT - 8;
+const EXIT_FILTER: i16 = EXIT_EVENT - 24;
+/// Eight bytes for the walk to `signal->live` on a kernel whose tracepoint
+/// does not pass `group_dead`.
+const EXIT_SCRATCH: i16 = EXIT_EVENT - 32;
 
 const SIG_EVENT: i16 = -48;
 const SIG_TARGET_TID: i16 = SIG_EVENT + 8;
@@ -283,6 +296,7 @@ const SIG_COMM: i16 = SIG_EVENT + 24;
 const SIG_NUMBER: i16 = SIG_EVENT + 40;
 const SIG_RESULT: i16 = SIG_EVENT + 44;
 const SIG_DROP_KEY: i16 = SIG_EVENT - 8;
+const SIG_FILTER: i16 = SIG_EVENT - 24;
 
 /// Publishes the record on the stack, and counts it when the ring is full.
 ///
@@ -334,8 +348,14 @@ fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(),
 }
 
 /// The program on `sched_process_exec`: a task has just become another program.
-fn exec_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+fn exec_instructions(
+    btf: &Btf,
+    whose: Whose,
+    ring_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
     check_signature(btf, "sched_process_exec", &EXEC_SIGNATURE)?;
+    let fields = TaskFields::locate(btf, whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
@@ -359,6 +379,16 @@ fn exec_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>
 
     read_field(&mut program, EXEC_TID, 4, 7, pid_offset);
     read_field(&mut program, EXEC_TGID, 4, 7, tgid_offset);
+    // Narrowed to a cgroup before the name and the path are read: the task is
+    // the one that exec'd, and the comparison is cheaper than both reads.
+    push_task_filter(
+        &mut program,
+        &fields,
+        whose,
+        Subject::with_ids(7, EXEC_TID, EXEC_TGID),
+        EXEC_FILTER,
+        "done",
+    );
     read_field(&mut program, EXEC_COMM, COMM_BYTES as i32, 7, comm_offset);
 
     // The path is two reads: the `char *` out of the `linux_binprm`, and then
@@ -391,12 +421,48 @@ fn exec_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>
 }
 
 /// The program on `sched_process_exit`: a task is leaving, and says how.
-fn exit_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
-    check_signature(btf, "sched_process_exit", &EXIT_SIGNATURE)?;
+///
+/// Two shapes of the tracepoint are read. Since it was handed `group_dead`,
+/// the second slot says whether this was the last thread of its process. On
+/// 6.6 and before there is no second slot, and the program reads the same fact
+/// where the kernel decided it: `do_exit` has already decremented
+/// `signal->live` when the tracepoint fires, so a count of zero is the last
+/// thread out. Two threads of one process leaving at the same instant can both
+/// read zero there, which the collector says.
+fn exit_instructions(
+    btf: &Btf,
+    whose: Whose,
+    ring_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let signature = btf.tracepoint_signature("sched_process_exit")?;
+    let passes_group_dead = if signature == EXIT_SIGNATURE {
+        true
+    } else if signature == EXIT_SIGNATURE_WITHOUT_GROUP {
+        false
+    } else {
+        return Err(format!(
+            "this kernel declares `sched_process_exit({})`, and this program is written for \
+             `sched_process_exit({})` or `sched_process_exit({})`: it reads its arguments out \
+             of fixed slots, and against another prototype those slots hold something else",
+            signature.join(", "),
+            EXIT_SIGNATURE.join(", "),
+            EXIT_SIGNATURE_WITHOUT_GROUP.join(", "),
+        ));
+    };
+    let fields = TaskFields::locate(btf, whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
     let exit_code_offset = btf.member_offset("task_struct", "exit_code")?;
+    let live = if passes_group_dead {
+        None
+    } else {
+        Some((
+            btf.member_offset("task_struct", "signal")?,
+            btf.member_offset("signal_struct", "live")?,
+        ))
+    };
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
@@ -410,12 +476,37 @@ fn exit_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>
     // word left uninitialised is whatever was on the stack before.
     program.push(Insn::st_imm(BPF_W, R10, EXIT_PAD, 0));
 
-    // The second argument says whether this was the last thread of its process.
-    program.push(Insn::ldx(BPF_DW, 1, 6, 8));
-    program.push(Insn::stx(BPF_W, R10, EXIT_GROUP_DEAD, 1));
+    match live {
+        // The second argument says whether this was the last thread of its
+        // process.
+        None => {
+            program.push(Insn::ldx(BPF_DW, 1, 6, 8));
+            program.push(Insn::stx(BPF_W, R10, EXIT_GROUP_DEAD, 1));
+        }
+        // `task->signal->live.counter == 0`. A null `signal` is a task this
+        // cannot judge, and is recorded as not the last rather than as the last.
+        Some((signal, live)) => {
+            program.push(Insn::st_imm(BPF_W, R10, EXIT_GROUP_DEAD, 0));
+            read_pointer(&mut program, EXIT_SCRATCH, 4, 7, signal);
+            program.jump_to("group_known", Insn::jeq_imm(4, 0, 0));
+            read_narrow(&mut program, EXIT_SCRATCH, 4, 4, live);
+            program.push(Insn::ldx(BPF_W, 1, R10, EXIT_SCRATCH));
+            program.jump_to("group_known", Insn::jne_imm(1, 0, 0));
+            program.push(Insn::st_imm(BPF_W, R10, EXIT_GROUP_DEAD, 1));
+            program.label("group_known");
+        }
+    }
 
     read_field(&mut program, EXIT_TID, 4, 7, pid_offset);
     read_field(&mut program, EXIT_TGID, 4, 7, tgid_offset);
+    push_task_filter(
+        &mut program,
+        &fields,
+        whose,
+        Subject::with_ids(7, EXIT_TID, EXIT_TGID),
+        EXIT_FILTER,
+        "done",
+    );
     read_field(&mut program, EXIT_CODE, 4, 7, exit_code_offset);
     read_field(&mut program, EXIT_COMM, COMM_BYTES as i32, 7, comm_offset);
 
@@ -445,11 +536,12 @@ fn exit_instructions(btf: &Btf, ring_fd: i32, drops_fd: i32) -> Result<Vec<Insn>
 /// timer, an assertion and a `raise` all look like -- is both.
 fn signal_instructions(
     btf: &Btf,
-    target_tgid: Option<u32>,
+    whose: Whose,
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     check_signature(btf, "signal_generate", &SIGNAL_SIGNATURE)?;
+    let fields = TaskFields::locate(btf, whose)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
@@ -481,11 +573,30 @@ fn signal_instructions(
     read_field(&mut program, SIG_TARGET_TGID, 4, 7, tgid_offset);
     read_field(&mut program, SIG_COMM, COMM_BYTES as i32, 7, comm_offset);
 
-    if let Some(tgid) = target_tgid {
-        program.push(Insn::ldx(BPF_W, 1, R10, SIG_TARGET_TGID));
-        program.jump_to("emit", Insn::jeq_imm(1, tgid as i32, 0));
-        program.push(Insn::ldx(BPF_W, 1, R10, SIG_SENDER_TGID));
-        program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+    // Kept when either end is the target's: the task the signal is for, or
+    // the current task, which raised it.
+    if whose != Whose::Any {
+        push_task_filter(
+            &mut program,
+            &fields,
+            whose,
+            Subject::with_ids(7, SIG_TARGET_TID, SIG_TARGET_TGID),
+            SIG_FILTER,
+            "not_for_the_target",
+        );
+        program.jump_to("emit", Insn::ja());
+        program.label("not_for_the_target");
+        match whose {
+            Whose::Cgroup(_) => push_current_filter(&mut program, whose, SIG_FILTER, "done"),
+            _ => push_task_filter(
+                &mut program,
+                &fields,
+                whose,
+                Subject::with_ids(7, SIG_SENDER_TID, SIG_SENDER_TGID),
+                SIG_FILTER,
+                "done",
+            ),
+        }
     }
 
     program.label("emit");
@@ -602,12 +713,12 @@ impl ExecProgram {
         self.0.skipped()
     }
 
-    pub fn load(requested_ring_bytes: usize) -> Result<Self, String> {
+    pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
         EventStream::load(
             "sched_process_exec",
             "omn_exec",
             requested_ring_bytes,
-            exec_instructions,
+            move |btf, ring, drops| exec_instructions(btf, whose, ring, drops),
         )
         .map(Self)
     }
@@ -630,14 +741,22 @@ impl ExitProgram {
         self.0.skipped()
     }
 
-    pub fn load(requested_ring_bytes: usize) -> Result<Self, String> {
+    pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
         EventStream::load(
             "sched_process_exit",
             "omn_exit",
             requested_ring_bytes,
-            exit_instructions,
+            move |btf, ring, drops| exit_instructions(btf, whose, ring, drops),
         )
         .map(Self)
+    }
+
+    /// Whether this kernel's tracepoint passes `group_dead`, rather than the
+    /// program reading it out of `signal->live`.
+    pub fn group_dead_is_passed() -> bool {
+        super::kernel_btf()
+            .and_then(|btf| btf.tracepoint_signature("sched_process_exit"))
+            .is_ok_and(|signature| signature == EXIT_SIGNATURE)
     }
 
     pub fn drain(&mut self, handle: impl FnMut(Exit), undecoded: &mut u64) {
@@ -658,12 +777,12 @@ impl SignalProgram {
         self.0.skipped()
     }
 
-    pub fn load(target_tgid: Option<u32>, requested_ring_bytes: usize) -> Result<Self, String> {
+    pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
         EventStream::load(
             "signal_generate",
             "omn_signal",
             requested_ring_bytes,
-            move |btf, ring, drops| signal_instructions(btf, target_tgid, ring, drops),
+            move |btf, ring, drops| signal_instructions(btf, whose, ring, drops),
         )
         .map(Self)
     }
@@ -841,11 +960,17 @@ mod tests {
         const KTIME_GET_BOOT_NS: i32 = 125;
         let Some(btf) = kernel_btf() else { return };
         for (name, program) in [
-            ("exec", exec_instructions(&btf, 3, 4).expect("a program")),
-            ("exit", exit_instructions(&btf, 3, 4).expect("a program")),
+            (
+                "exec",
+                exec_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+            ),
+            (
+                "exit",
+                exit_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+            ),
             (
                 "signal",
-                signal_instructions(&btf, None, 3, 4).expect("a program"),
+                signal_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
             ),
         ] {
             let called = helpers_called(&program);
@@ -868,15 +993,15 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         for (program, bytes) in [
             (
-                exec_instructions(&btf, 3, 4).expect("a program"),
+                exec_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
                 EXEC_BYTES,
             ),
             (
-                exit_instructions(&btf, 3, 4).expect("a program"),
+                exit_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
                 EXIT_BYTES,
             ),
             (
-                signal_instructions(&btf, None, 3, 4).expect("a program"),
+                signal_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
                 SIGNAL_BYTES,
             ),
         ] {
@@ -900,12 +1025,12 @@ mod tests {
     #[test]
     fn the_signal_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide = signal_instructions(&btf, None, 3, 4).expect("a program");
+        let machine_wide = signal_instructions(&btf, Whose::Any, 3, 4).expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered = signal_instructions(&btf, Some(4242), 3, 4).expect("a program");
+        let filtered = signal_instructions(&btf, Whose::Process(4242), 3, 4).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             2,
@@ -919,7 +1044,7 @@ mod tests {
     #[test]
     fn the_exec_path_is_read_as_a_string_rather_than_as_a_fixed_block() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exec_instructions(&btf, 3, 4).expect("a program");
+        let program = exec_instructions(&btf, Whose::Any, 3, 4).expect("a program");
         let called = helpers_called(&program);
         assert!(
             called.contains(&helper::PROBE_READ_KERNEL_STR),

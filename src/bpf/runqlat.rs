@@ -35,7 +35,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{
-    self, count_drop, helper, read_field, Insn, Log2Labels, Program, BPF_DW, BPF_W, R10,
+    self, count_drop, helper, push_task_filter, read_field, Insn, Log2Labels, Program, Subject,
+    TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
 use super::syscall;
@@ -87,7 +88,8 @@ const DROP_KEY: i16 = -40;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
 const ROWS_SLOT: i16 = -128;
-const FILTER_TGID: i16 = -36;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
+const FILTER_SCRATCH: i16 = -144;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -216,8 +218,8 @@ struct Enqueue {
     queued_fd: i32,
     drops_fd: i32,
     pid_offset: i32,
-    tgid_offset: i32,
-    target_tgid: Option<u32>,
+    fields: TaskFields,
+    whose: Whose,
 }
 
 /// Writes the moment this task joined a run queue, from a `task_struct` in
@@ -232,8 +234,8 @@ fn enqueue(program: &mut Program, at: &Enqueue, task_reg: u8, ts_reg: u8, resume
         queued_fd,
         drops_fd,
         pid_offset,
-        tgid_offset,
-        target_tgid,
+        fields,
+        whose,
     } = at;
     // The whole slot is cleared first: the key is four bytes in an eight-byte
     // slot, and the four the program does not write are still hashed.
@@ -249,14 +251,18 @@ fn enqueue(program: &mut Program, at: &Enqueue, task_reg: u8, ts_reg: u8, resume
     program.push(Insn::ldx(BPF_W, 1, R10, QUEUED_KEY));
     program.jump_to(resume, Insn::jeq_imm(1, 0, 0));
 
-    // A run observes one process. The thread group is known before the program
-    // loads and never changes, so the filter is written into the instruction
-    // stream rather than looked up in a map on a path this hot.
-    if let Some(tgid) = target_tgid {
-        read_field(program, FILTER_TGID, 4, task_reg, tgid_offset);
-        program.push(Insn::ldx(BPF_W, 1, R10, FILTER_TGID));
-        program.jump_to(resume, Insn::jne_imm(1, tgid as i32, 0));
-    }
+    // A run observes one process, one thread or one cgroup. Which is known
+    // before the program loads and never changes, so the comparison is
+    // written into the instruction stream rather than looked up in a map on a
+    // path this hot.
+    push_task_filter(
+        program,
+        &fields,
+        whose,
+        Subject::task(task_reg),
+        FILTER_SCRATCH,
+        resume,
+    );
 
     program.push(Insn::stx(BPF_DW, R10, QUEUED_VALUE, ts_reg));
     program.extend(Insn::load_map_fd(1, queued_fd));
@@ -288,7 +294,7 @@ const LOG2: Log2Labels = [
 /// The program on `sched_wakeup`: a task has just become runnable.
 fn wakeup_instructions(
     btf: &Btf,
-    target_tgid: Option<u32>,
+    whose: Whose,
     queued_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -303,7 +309,7 @@ fn wakeup_instructions(
         ));
     }
     let pid_offset = btf.member_offset("task_struct", "pid")?;
-    let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let fields = TaskFields::locate(btf, whose)?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 the task being woken and r8 the timestamp. All
@@ -319,8 +325,8 @@ fn wakeup_instructions(
             queued_fd,
             drops_fd,
             pid_offset,
-            tgid_offset,
-            target_tgid,
+            fields,
+            whose,
         },
         7,
         8,
@@ -344,7 +350,7 @@ fn wakeup_instructions(
 /// only place that wait can be closed.
 fn switch_instructions(
     btf: &Btf,
-    target_tgid: Option<u32>,
+    whose: Whose,
     queued_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
@@ -362,6 +368,7 @@ fn switch_instructions(
     }
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let fields = TaskFields::locate(btf, whose)?;
     let prio_offset = btf.member_offset("task_struct", "prio")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
 
@@ -382,8 +389,8 @@ fn switch_instructions(
             queued_fd,
             drops_fd,
             pid_offset,
-            tgid_offset,
-            target_tgid,
+            fields,
+            whose,
         },
         7,
         8,
@@ -520,7 +527,7 @@ impl RunqLatProgram {
         crate::bpf::attach::fentry::skipped([&self.wakeup_program, &self.switch_program])
     }
 
-    pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
+    pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
         let queued = Hash::create(
@@ -535,10 +542,10 @@ impl RunqLatProgram {
         let drops = Counters::create(2, "omn_runq_drop")
             .map_err(|error| map_failure("run queue drop counter", error))?;
 
-        let wakeup = wakeup_instructions(btf, target_tgid, queued.as_raw_fd(), drops.as_raw_fd())?;
+        let wakeup = wakeup_instructions(btf, whose, queued.as_raw_fd(), drops.as_raw_fd())?;
         let switch = switch_instructions(
             btf,
-            target_tgid,
+            whose,
             queued.as_raw_fd(),
             rows.as_raw_fd(),
             drops.as_raw_fd(),
@@ -657,7 +664,7 @@ mod tests {
     }
 
     fn switch_program(btf: &Btf) -> Vec<Insn> {
-        switch_instructions(btf, None, 3, 4, 5).expect("a program")
+        switch_instructions(btf, Whose::Any, 3, 4, 5).expect("a program")
     }
 
     /// The kernel's bucketing and the emit layer's must be the same function.
@@ -717,7 +724,7 @@ mod tests {
         for (what, instructions) in [
             (
                 "the wakeup program",
-                wakeup_instructions(&btf, None, 3, 4).expect("a program"),
+                wakeup_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
             ),
             ("the switch program", switch_program(&btf)),
         ] {
@@ -799,7 +806,7 @@ mod tests {
         for (what, instructions) in [
             (
                 "the wakeup program",
-                wakeup_instructions(&btf, None, 3, 4).expect("a program"),
+                wakeup_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
             ),
             ("the switch program", switch_program(&btf)),
         ] {
@@ -824,19 +831,19 @@ mod tests {
     fn the_filter_is_present_only_where_a_task_joins_the_queue() {
         let Some(btf) = kernel_btf() else { return };
         assert!(!switch_program(&btf).iter().any(|insn| insn.imm == 4242));
-        assert!(!wakeup_instructions(&btf, None, 3, 4)
+        assert!(!wakeup_instructions(&btf, Whose::Any, 3, 4)
             .expect("a program")
             .iter()
             .any(|insn| insn.imm == 4242));
 
-        let filtered = switch_instructions(&btf, Some(4242), 3, 4, 5).expect("a program");
+        let filtered = switch_instructions(&btf, Whose::Process(4242), 3, 4, 5).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
             "a preempted task is filtered where it is enqueued; where it arrives it is already \
              known, because only a task this run enqueued can be found in the map"
         );
-        let filtered = wakeup_instructions(&btf, Some(4242), 3, 4).expect("a program");
+        let filtered = wakeup_instructions(&btf, Whose::Process(4242), 3, 4).expect("a program");
         assert_eq!(filtered.iter().filter(|insn| insn.imm == 4242).count(), 1);
     }
 
@@ -907,7 +914,7 @@ mod tests {
             (QUEUED_VALUE, QUEUED_VALUE_BYTES as i16, "queued value"),
             (QUEUED_KEY, 8, "queued key slot"),
             (DROP_KEY, 4, "drop key"),
-            (FILTER_TGID, 4, "filter tgid"),
+            (FILTER_SCRATCH, 16, "filter scratch"),
             (ROWS_SLOT, 8, "row map slot"),
         ];
         for (at, size, name) in regions {
@@ -949,7 +956,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = switch_instructions(&btf, None, 3, 4, 5).expect("a program");
+        let program = switch_instructions(&btf, Whose::Any, 3, 4, 5).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

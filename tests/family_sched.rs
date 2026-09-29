@@ -488,34 +488,6 @@ fn distinctly_named_shell(name: &str) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
-/// The share of a cpu's last tick that went to something other than idle.
-///
-/// `/proc/stat`'s per-cpu line, sampled twice: an independent answer to "is
-/// this core mine?", which a test pinning its workload to a core has to ask.
-/// `None` where the file cannot be read or the two samples land in one tick.
-fn cpu_busy_share(cpu: usize) -> Option<f64> {
-    let read = || -> Option<(u64, u64)> {
-        let stat = std::fs::read_to_string("/proc/stat").ok()?;
-        let line = stat
-            .lines()
-            .find(|line| line.split_whitespace().next() == Some(&format!("cpu{cpu}")))?;
-        let fields: Vec<u64> = line
-            .split_whitespace()
-            .skip(1)
-            .filter_map(|field| field.parse().ok())
-            .collect();
-        // user nice system idle iowait ...; idle and iowait are both not-work.
-        let idle = fields.get(3)? + fields.get(4).copied().unwrap_or(0);
-        Some((fields.iter().sum(), idle))
-    };
-    let (total_before, idle_before) = read()?;
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    let (total_after, idle_after) = read()?;
-    let total = total_after.checked_sub(total_before)?;
-    let idle = idle_after.checked_sub(idle_before)?;
-    (total > 0).then(|| 1.0 - idle as f64 / total as f64)
-}
-
 /// Busy tasks, all pinned to one cpu, that spin until they are killed.
 ///
 /// The last cpu rather than the first, only so that a suite running its own
@@ -565,65 +537,86 @@ impl Drop for PinnedSpinners {
     }
 }
 
-/// The waits of the pinned tasks, in nanoseconds, by thread.
-fn waits_by_task(text: &str) -> std::collections::BTreeMap<u64, u64> {
-    let mut totals = std::collections::BTreeMap::new();
-    for line in text.lines().filter(|line| line.contains("sched.runqlat")) {
-        let field = |name: &str| {
-            let needle = format!("{name}=");
-            line.split_whitespace()
-                .find_map(|field| field.strip_prefix(&needle))
-                .and_then(|value| value.parse::<u64>().ok())
-        };
-        if let (Some(tid), Some(total)) = (field("tid"), field("total_ns")) {
-            *totals.entry(tid).or_insert(0) += total;
-        }
-    }
-    totals
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the kernel to write into.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
 }
 
-/// Ground truth, and the only kind this source can have: the expected number
-/// comes from the scheduler's own fair-share arithmetic, not from anything this
-/// code computed.
-///
-/// *N* cpu-bound tasks pinned to one cpu each get `1/N` of it, so each one is
-/// runnable and not running for `(N-1)/N` of the window. One task alone on a
-/// cpu never queues at all; three of them queue for two thirds of the run,
-/// each. Nothing about that prediction comes from the tracer, and it separates
-/// a measurement of run queue latency from a measurement of anything else: a
-/// program that reported blocked time, or on-cpu time, or the whole window,
-/// fails at least one of the two cases.
-#[test]
-fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
-    const WINDOW_NS: f64 = 1_000_000_000.0;
-    let mut measured = Vec::new();
+/// The kernel's own account of how long a task has waited on a run queue:
+/// the second field of `/proc/<tid>/schedstat`, in nanoseconds.
+fn run_delay_ns(tid: u32) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/{tid}/schedstat"))
+        .ok()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
 
-    let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
-    // The lock serializes this suite's own tests; it says nothing about the
-    // rest of the machine. This test pins its workload to one core and asserts
-    // what a task alone on that core waits for, so the core has to *be* alone
-    // -- and two copies of this suite pin to the same one, which is how "a task
-    // alone on a cpu waited 50 % of the window" happens.
-    if let (Some(cpu), Some(busy)) = (
-        PinnedSpinners::cpu(),
-        PinnedSpinners::cpu().and_then(cpu_busy_share),
-    ) {
-        if busy > 0.2 {
-            eprintln!(
-                "skipped: /proc/stat says cpu{cpu} was already {:.0} % busy before this test \
-                 started its own load, so what a task waits for there is not this test's to \
-                 measure",
-                busy * 100.0
-            );
-            return;
+/// The waits of the pinned tasks, in nanoseconds, by thread, and the span the
+/// run was attached for, out of a JSON document.
+fn waits_and_span(output: &Output) -> (std::collections::BTreeMap<u64, u64>, u64) {
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    let result = &document["results"][0];
+    let mut totals = std::collections::BTreeMap::new();
+    for output in result["outputs"].as_array().expect("outputs") {
+        for event in output["events"].as_array().into_iter().flatten() {
+            let attr = |name: &str| {
+                event["attrs"]
+                    .as_array()?
+                    .iter()
+                    .find(|attr| attr["name"] == name)?["value"]
+                    .as_u64()
+            };
+            if let (Some(tid), Some(total)) = (attr("tid"), attr("total_ns")) {
+                *totals.entry(tid).or_insert(0) += total;
+            }
         }
     }
+    let window = &result["window"];
+    let span =
+        window["closed_ns"].as_u64().unwrap_or(0) - window["opened_ns"].as_u64().unwrap_or(0);
+    (totals, span)
+}
+
+/// Ground truth, from the kernel's own per-task account: each pinned task's
+/// waits are its `run_delay`, the time `/proc/<tid>/schedstat` says it spent
+/// runnable and not running.
+///
+/// *N* cpu-bound tasks pinned to one cpu queue behind each other; one task
+/// alone on a cpu queues for nothing a spinner does. The reference for each is
+/// read before `omn` starts and after it ends, so it brackets the run: what
+/// the run counted can be no more than the kernel's delta, and no less than
+/// the delta less the part of the bracket the run was not attached for -- no
+/// task can have waited longer than that part lasted -- less one wait at each
+/// edge, which began before the attach or ended after the detach. That is
+/// exact, whatever else the machine runs on that cpu, where the share of a
+/// wall-clock window this test asserted before depended on the machine
+/// (flaky tally #6). And the separation: three tasks sharing a cpu wait,
+/// between them, far more than one alone.
+#[test]
+fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
+    /// One wait at each edge of the window: a timeslice among three
+    /// spinners, with room for a loaded cpu.
+    const EDGE_NS: u64 = 50_000_000;
+    let mut waited = Vec::new();
+
+    let _one_at_a_time = CONTENDED_CPU.lock().expect("the cpu lock");
     let name = workload_name("omnshare");
     for spinners in [1usize, 3] {
-        let Some(_load) = PinnedSpinners::start(spinners, &name) else {
+        let Some(load) = PinnedSpinners::start(spinners, &name) else {
             eprintln!("skipped: this machine has no `taskset`, so no cpu can be contended");
             return;
         };
+        let tids: Vec<u32> = load.0.iter().map(|child| child.id()).collect();
+        let before: Vec<Option<u64>> = tids.iter().map(|tid| run_delay_ns(*tid)).collect();
+        let bracket_opened = monotonic_ns();
         let output = run(&[
             "sched.runqlat",
             "--system",
@@ -631,46 +624,63 @@ fn tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them() {
             "1s",
             "--emit",
             "raw",
+            "--format",
+            "json",
             "--filter",
             &format!("comm == '{name}'"),
         ]);
+        let bracket = monotonic_ns() - bracket_opened;
+        let after: Vec<Option<u64>> = tids.iter().map(|tid| run_delay_ns(*tid)).collect();
         let text = String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr);
         if refused_for_capabilities(&text) {
             return;
         }
         assert!(output.status.success(), "{text}");
+        let (waits, span) = waits_and_span(&output);
+        let outside = bracket.saturating_sub(span);
 
-        let waits = waits_by_task(&text);
-        assert_eq!(
-            waits.len(),
-            spinners,
-            "{spinners} pinned tasks must each appear once, saw {waits:?}:\n{text}"
-        );
-        let share = waits.values().sum::<u64>() as f64 / spinners as f64 / WINDOW_NS;
-        measured.push(share);
+        let mut total = 0;
+        for ((tid, before), after) in tids.iter().zip(&before).zip(&after) {
+            let (Some(before), Some(after)) = (before, after) else {
+                eprintln!(
+                    "skipped: /proc/{tid}/schedstat is not readable, and it is the reference"
+                );
+                return;
+            };
+            let kernel = after - before;
+            let measured = waits.get(&u64::from(*tid)).copied().unwrap_or(0);
+            eprintln!(
+                "{spinners} on one cpu: task {tid} waited {:.1} ms by the kernel's account over \
+                 {:.2} s, and {:.1} ms were counted over the {:.2} s the run was attached",
+                kernel as f64 / 1e6,
+                bracket as f64 / 1e9,
+                measured as f64 / 1e6,
+                span as f64 / 1e9,
+            );
+            assert!(
+                measured <= kernel + kernel / 100 + 1_000_000,
+                "task {tid} was counted waiting {measured} ns, more than the {kernel} ns the \
+                 kernel says it waited over a bracket that contains the run:\n{text}"
+            );
+            assert!(
+                measured + outside + 2 * EDGE_NS >= kernel,
+                "task {tid} waited {kernel} ns by the kernel's account, of which at most \
+                 {outside} ns fell outside the {span} ns the run was attached for, and only \
+                 {measured} ns were counted:\n{text}"
+            );
+            total += measured;
+        }
+        waited.push(total);
     }
 
-    let (alone, contended) = (measured[0], measured[1]);
+    let (alone, contended) = (waited[0], waited[1]);
     assert!(
-        alone < 0.25,
-        "a task alone on a cpu waits for nothing, and this one waited {:.0} % of the window",
-        alone * 100.0
-    );
-    // Two thirds is the prediction; the band is wide enough for a machine that
-    // is also doing something else on that cpu, and far too narrow for any of
-    // the numbers this source could be confused with.
-    assert!(
-        (0.45..0.90).contains(&contended),
-        "three tasks sharing one cpu each wait two thirds of the window, and these waited \
-         {:.0} %",
-        contended * 100.0
-    );
-    assert!(
-        contended > alone * 3.0,
-        "contending for a cpu must show up as waiting for one: alone {:.1} %, contended {:.1} %",
-        alone * 100.0,
-        contended * 100.0
+        contended > alone * 3 + 100_000_000,
+        "contending for a cpu must show up as waiting for one: {:.1} ms alone, {:.1} ms among \
+         three",
+        alone as f64 / 1e6,
+        contended as f64 / 1e6
     );
 }
 
@@ -806,19 +816,6 @@ fn the_kernels_buckets_are_the_emit_layers_buckets() {
 // sched.migrations
 // ---------------------------------------------------------------------------
 
-/// Sums one attribute over the `raw` rendering of a source.
-fn sum_over(text: &str, kind: &str, attribute: &str) -> u64 {
-    let needle = format!("{attribute}=");
-    text.lines()
-        .filter(|line| line.contains(kind))
-        .filter_map(|line| {
-            line.split_whitespace()
-                .find_map(|field| field.strip_prefix(&needle))
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-        .sum()
-}
-
 /// Ground truth: a task moved between two cpus a known number of times must be
 /// counted that many times.
 ///
@@ -830,8 +827,6 @@ fn sum_over(text: &str, kind: &str, attribute: &str) -> u64 {
 /// rather than a floor.
 #[test]
 fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
-    const MOVES: usize = 20;
-
     if std::thread::available_parallelism().map_or(1, |n| n.get()) < 2 {
         eprintln!("skipped: one cpu, so nothing can be moved between two");
         return;
@@ -855,7 +850,6 @@ fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
         return;
     };
     let pid = load.id().to_string();
-    std::thread::sleep(std::time::Duration::from_millis(300));
 
     let measuring = Command::new(BINARY)
         .args([
@@ -868,30 +862,35 @@ fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
             "3s",
             "--emit",
             "raw",
+            "--format",
+            "json",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();
-    let Ok(measuring) = measuring else {
+    let Ok(mut measuring) = measuring else {
         let _ = load.kill();
         panic!("omn should run");
     };
-    // Long enough for the program to be loaded and attached before the first
-    // move: a migration that happens before the tracepoint is attached is one
-    // this test caused and cannot expect to see.
-    std::thread::sleep(std::time::Duration::from_millis(800));
-
-    let mut moved = 0;
-    for step in 1..=MOVES {
+    // The task is moved until the run ends, and each move is stamped: the
+    // moves that are counted are the ones inside the window the run reports,
+    // rather than the ones a fixed delay was hoped to put there (flaky tally
+    // #5). Fifty milliseconds between moves is how long each lasts, not when
+    // anything has started.
+    let mut moves = Vec::new();
+    let mut step = 0;
+    while measuring.try_wait().ok().flatten().is_none() {
+        step += 1;
         let cpu = (step % 2).to_string();
-        if Command::new("taskset")
+        let asked = monotonic_ns();
+        let moved = Command::new("taskset")
             .args(["-cp", &cpu, &pid])
             .output()
             .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            moved += 1;
-        }
+            .unwrap_or(false);
+        let done = monotonic_ns();
+        assert!(moved, "every move must have been made");
+        moves.push((asked, done));
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
@@ -904,22 +903,52 @@ fn a_task_moved_between_two_cpus_is_counted_once_per_move() {
         return;
     }
     assert!(output.status.success(), "{text}");
-    assert_eq!(moved, MOVES, "every move must have been asked for:\n{text}");
-
-    let counted = sum_over(&text, "sched.migrations", "migrations");
-    assert!(
-        counted >= MOVES as u64,
-        "{MOVES} forced moves between two cpus are {MOVES} migrations, and {counted} were \
-         counted:\n{text}"
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    let result = &document["results"][0];
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+    let inside = moves
+        .iter()
+        .filter(|(asked, done)| *asked >= opened && *done <= closed)
+        .count() as u64;
+    let counted: u64 = result["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+        .filter_map(|event| {
+            event["attrs"]
+                .as_array()?
+                .iter()
+                .find(|attr| attr["name"] == "migrations")?["value"]
+                .as_u64()
+        })
+        .sum();
+    eprintln!(
+        "{} moves, {inside} inside the run's window; {counted} migrations counted",
+        moves.len()
     );
-    // A pinned cpu-bound task migrates for no other reason, so anything much
-    // above the number asked for is a migration being counted twice.
     assert!(
-        counted <= MOVES as u64 + 4,
-        "{counted} migrations were counted for {MOVES} moves:\n{text}"
+        inside >= 10,
+        "only {inside} of the moves fell inside the run's window, too few to judge:\n{text}"
     );
     assert!(
-        text.contains("no loss"),
+        counted >= inside,
+        "{inside} forced moves between two cpus inside the window are {inside} migrations, \
+         and {counted} were counted:\n{text}"
+    );
+    // A pinned cpu-bound task migrates for no other reason, so anything above
+    // every move made, the two at the window's edges included, is a
+    // migration being counted twice.
+    assert!(
+        counted <= moves.len() as u64,
+        "{counted} migrations were counted for {} moves:\n{text}",
+        moves.len()
+    );
+    assert_eq!(
+        result["losses"]["dropped"].as_u64(),
+        Some(0),
         "migrations lost to a full map cannot be checked against a known count:\n{text}"
     );
 }

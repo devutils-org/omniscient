@@ -124,6 +124,12 @@ pub mod helper {
     /// `bpf_this_cpu_ptr(percpu_ptr)`: this cpu's copy of a per-cpu kernel
     /// variable, whose address a [`Insn::load_btf_id`] put in `r1`.
     pub const THIS_CPU_PTR: i32 = 154;
+    /// `u64 bpf_get_current_ancestor_cgroup_id(int ancestor_level)`: the id of
+    /// the current task's cgroup's ancestor at that level of the unified
+    /// hierarchy, or zero when the task's cgroup is not that deep. The one call
+    /// that answers "is the current task inside this cgroup or below it"; see
+    /// [`super::Whose`].
+    pub const GET_CURRENT_ANCESTOR_CGROUP_ID: i32 = 123;
 }
 
 /// The frame pointer. Read-only, and the only way to address the stack.
@@ -604,6 +610,407 @@ pub fn bucket_low_ns(bucket: u32) -> u64 {
     }
 }
 
+// ------------------------------------------------------------ whose events
+
+/// Whose events a program keeps, compared in the kernel.
+///
+/// Every `sched` and `proc` program narrows to a target before it does any
+/// work, because the paths they sit on fire for every task on the machine and
+/// a comparison is the cheapest thing a program can do. Until the thirteenth
+/// wave each one wrote its own comparison, against the thread group alone, so
+/// a `--tid` target compared a thread id with a process id and kept nothing
+/// (`docs/scenarios/cross-io.md` defect 2), and a `--cgroup` target was refused
+/// by every one of them. One type, and the two instruction sequences below, is
+/// what every program compares with now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Whose {
+    /// The whole machine: no comparison at all.
+    #[default]
+    Any,
+    /// A thread group: `task_struct.tgid`, the high half of
+    /// `bpf_get_current_pid_tgid`.
+    Process(u32),
+    /// One thread: `task_struct.pid`, which is the kernel's thread id, and the
+    /// low half of `bpf_get_current_pid_tgid`.
+    Thread(u32),
+    /// Every task in a cgroup or in any cgroup below it.
+    Cgroup(Cgroup),
+}
+
+/// A cgroup of the unified hierarchy, as a program compares it.
+///
+/// **Why the ancestor, and not the task's own cgroup.** Two helpers were on
+/// offer (`docs/open-findings.md`, the fifth wave): `bpf_get_current_cgroup_id`
+/// against one id, or `bpf_current_task_under_cgroup` against a
+/// `BPF_MAP_TYPE_CGROUP_ARRAY`. The first answers only for the cgroup a task is
+/// directly in, and a container's or a service's tasks are almost always in
+/// cgroups *below* the path a reader names -- a `--cgroup user.slice` that
+/// missed every session under it would be a filter that keeps nothing and
+/// looks like a quiet machine. The second answers the ancestor question, but
+/// only for the *current* task, and half of these programs judge a task that
+/// is not current: `sched_switch`'s incoming task, `sched_waking`'s wakee, the
+/// task a signal is for, the task being migrated.
+///
+/// So the comparison is the kernel's own `cgroup_is_descendant`, by level: a
+/// cgroup at level `L` of the hierarchy is an ancestor of a task's cgroup
+/// exactly when the task's cgroup is at least `L` deep and its ancestor at `L`
+/// is that cgroup. For the current task that is one helper call
+/// (`bpf_get_current_ancestor_cgroup_id(L)`); for any other task it is the same
+/// question asked of `task->cgroups->dfl_cgrp` through the `ancestors` array
+/// the kernel keeps for exactly this, read with BTF offsets. Neither needs a
+/// map, and both cost the same whatever the depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cgroup {
+    /// The cgroup's id: its directory's inode number, which is `kn->id` and is
+    /// what every cgroup-id helper returns.
+    pub id: u64,
+    /// Its depth below the hierarchy's root, which is level 0.
+    pub level: u32,
+}
+
+/// Where the unified hierarchy is mounted, as every other reader in this
+/// repository assumes.
+const CGROUP2_ROOT: &str = "/sys/fs/cgroup";
+
+impl Cgroup {
+    /// Resolves a `--cgroup` path, written either rooted at the hierarchy (the
+    /// way `/proc/<pid>/cgroup` writes it) or as the mounted directory.
+    ///
+    /// The level is the path's depth below the mount. Inside a cgroup
+    /// namespace the mount's root is the namespace's, so the depth read here is
+    /// short by the namespace's own depth and the comparison would ask about
+    /// the wrong level: the kernel keeps nothing a process can read to correct
+    /// that, which is why `docs/families/kernel.md` names it as the one case
+    /// this does not serve.
+    pub fn resolve(path: &std::path::Path) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+        use std::path::{Component, Path};
+
+        let root = Path::new(CGROUP2_ROOT);
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or_else(|_| path.strip_prefix("/").unwrap_or(path));
+        let mut level = 0u32;
+        for component in relative.components() {
+            match component {
+                Component::Normal(_) => level += 1,
+                Component::CurDir => {}
+                // A `..` would make the depth something other than the count
+                // of names, and a cgroup path never needs one.
+                _ => {
+                    return Err(format!(
+                        "`{}` is not a cgroup path this can compare: write it as the \
+                         directory under {CGROUP2_ROOT}, or rooted at the hierarchy the way \
+                         /proc/<pid>/cgroup writes it, without `..`",
+                        path.display()
+                    ))
+                }
+            }
+        }
+        let directory = root.join(relative);
+        let metadata = std::fs::metadata(&directory)
+            .map_err(|error| format!("cannot stat the cgroup {}: {error}", directory.display()))?;
+        if !metadata.is_dir() || !directory.join("cgroup.procs").exists() {
+            return Err(format!(
+                "{} is not a cgroup of the unified hierarchy: it has no `cgroup.procs`",
+                directory.display()
+            ));
+        }
+        Ok(Self {
+            id: metadata.ino(),
+            level,
+        })
+    }
+}
+
+impl Whose {
+    /// The comparison a target means.
+    ///
+    /// `Err` names what the target is and why a task comparison cannot mean
+    /// it; each collector puts its own sentence in front, because only it
+    /// knows what it attributes per task. A launched program arrives here as
+    /// the pid it was bound to.
+    pub fn of(target: &crate::request::Target) -> Result<Self, String> {
+        use crate::request::Target;
+        match target {
+            Target::System => Ok(Self::Any),
+            Target::Tid(tids) => Ok(Self::Thread(tids[0] as u32)),
+            Target::Cgroup(path) => Cgroup::resolve(path).map(Self::Cgroup),
+            Target::Container(name) => Err(format!(
+                "the container `{name}` would have to be resolved to its cgroup first, which \
+                 this build does not do; pass --cgroup with the container's cgroup path"
+            )),
+            other => other
+                .first_pid()
+                .map(|pid| Self::Process(pid as u32))
+                .ok_or_else(|| format!("a {} target names no task", other.kind())),
+        }
+    }
+
+    /// The thread group, when this compares one.
+    pub fn tgid(self) -> Option<u32> {
+        match self {
+            Self::Process(tgid) => Some(tgid),
+            _ => None,
+        }
+    }
+}
+
+/// The offsets [`push_task_filter`] reads, from the running kernel's BTF.
+///
+/// Located once per program, and only for the comparison asked for: a pid
+/// target never looks at the cgroup structures, so a kernel whose
+/// `struct cgroup` this cannot read still serves every other target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskFields {
+    pid: i32,
+    tgid: i32,
+    cgroup: Option<CgroupWalk>,
+}
+
+/// How a task's cgroup ancestry is laid out on this kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CgroupWalk {
+    /// Since 6.1: `struct cgroup *ancestors[]`, and the id is on each
+    /// ancestor's `kernfs_node`.
+    Ancestors {
+        cgroups: i32,
+        dfl_cgrp: i32,
+        level: i32,
+        ancestors: i32,
+        kn: i32,
+        kn_id: i32,
+    },
+    /// Up to 6.0: `u64 ancestor_ids[]`, the ids themselves.
+    AncestorIds {
+        cgroups: i32,
+        dfl_cgrp: i32,
+        level: i32,
+        ancestor_ids: i32,
+    },
+}
+
+impl TaskFields {
+    pub fn locate(btf: &super::btf::Btf, whose: Whose) -> Result<Self, String> {
+        let pid = btf.member_offset("task_struct", "pid")?;
+        let tgid = btf.member_offset("task_struct", "tgid")?;
+        let cgroup = match whose {
+            Whose::Cgroup(_) => Some(CgroupWalk::locate(btf)?),
+            _ => None,
+        };
+        Ok(Self { pid, tgid, cgroup })
+    }
+}
+
+impl CgroupWalk {
+    fn locate(btf: &super::btf::Btf) -> Result<Self, String> {
+        let cgroups = btf.member_offset("task_struct", "cgroups")?;
+        let dfl_cgrp = btf.member_offset("css_set", "dfl_cgrp")?;
+        let level = btf.member_offset("cgroup", "level")?;
+        if let Ok(ancestors) = btf.member_offset("cgroup", "ancestors") {
+            return Ok(Self::Ancestors {
+                cgroups,
+                dfl_cgrp,
+                level,
+                ancestors,
+                kn: btf.member_offset("cgroup", "kn")?,
+                kn_id: btf.member_offset("kernfs_node", "id")?,
+            });
+        }
+        let ancestor_ids = btf.member_offset("cgroup", "ancestor_ids").map_err(|_| {
+            "this kernel's `struct cgroup` has neither `ancestors` (6.1 and later) nor \
+             `ancestor_ids` (earlier), so a task's cgroup ancestry cannot be read"
+                .to_owned()
+        })?;
+        Ok(Self::AncestorIds {
+            cgroups,
+            dfl_cgrp,
+            level,
+            ancestor_ids,
+        })
+    }
+}
+
+/// The task a filter judges: a `task_struct *` in a register, and, where the
+/// program has already read them, the task's thread id and thread group in
+/// four-byte stack slots -- which a process or thread comparison then reads
+/// instead of the task, saving a helper call on the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Subject {
+    pub task_reg: u8,
+    pub ids: Option<(i16, i16)>,
+}
+
+impl Subject {
+    pub fn task(task_reg: u8) -> Self {
+        Self {
+            task_reg,
+            ids: None,
+        }
+    }
+
+    pub fn with_ids(task_reg: u8, tid_slot: i16, tgid_slot: i16) -> Self {
+        Self {
+            task_reg,
+            ids: Some((tid_slot, tgid_slot)),
+        }
+    }
+}
+
+/// Falls through when the task `subject` names is one `whose` keeps, and
+/// jumps to `skip` when it is not.
+///
+/// Clobbers `r1` to `r5` and the sixteen bytes of stack at `scratch`; the task
+/// register should be one of `r6` to `r9`, since the reads are helper calls.
+/// A pointer that reads as null anywhere along the cgroup walk is a task this
+/// run cannot place, and is skipped rather than kept: a filter that keeps what
+/// it cannot judge is not a filter.
+pub fn push_task_filter(
+    program: &mut Program,
+    fields: &TaskFields,
+    whose: Whose,
+    subject: Subject,
+    scratch: i16,
+    skip: &'static str,
+) {
+    let task_reg = subject.task_reg;
+    match whose {
+        Whose::Any => {}
+        Whose::Process(tgid) => {
+            let slot = match subject.ids {
+                Some((_, tgid_slot)) => tgid_slot,
+                None => {
+                    read_narrow(program, scratch, 4, task_reg, fields.tgid);
+                    scratch
+                }
+            };
+            program.push(Insn::ldx(BPF_W, 1, R10, slot));
+            program.jump_to(skip, Insn::jne_imm(1, tgid as i32, 0));
+        }
+        Whose::Thread(tid) => {
+            let slot = match subject.ids {
+                Some((tid_slot, _)) => tid_slot,
+                None => {
+                    read_narrow(program, scratch, 4, task_reg, fields.pid);
+                    scratch
+                }
+            };
+            program.push(Insn::ldx(BPF_W, 1, R10, slot));
+            program.jump_to(skip, Insn::jne_imm(1, tid as i32, 0));
+        }
+        Whose::Cgroup(cgroup) => {
+            let walk = fields
+                .cgroup
+                .expect("TaskFields::locate reads the cgroup offsets for a cgroup target");
+            push_cgroup_walk(program, walk, cgroup, task_reg, scratch, skip);
+        }
+    }
+}
+
+/// `cgroup_is_descendant(task->cgroups->dfl_cgrp, target)`, by level.
+///
+/// The pointer being followed is carried in `r4`, which `read_field` does not
+/// touch before its call; after each call it is loaded back from the stack.
+fn push_cgroup_walk(
+    program: &mut Program,
+    walk: CgroupWalk,
+    cgroup: Cgroup,
+    task_reg: u8,
+    scratch: i16,
+    skip: &'static str,
+) {
+    let (cgroups, dfl_cgrp, level) = match walk {
+        CgroupWalk::Ancestors {
+            cgroups,
+            dfl_cgrp,
+            level,
+            ..
+        }
+        | CgroupWalk::AncestorIds {
+            cgroups,
+            dfl_cgrp,
+            level,
+            ..
+        } => (cgroups, dfl_cgrp, level),
+    };
+    let pointer = scratch;
+    let word = scratch + 8;
+
+    // task->cgroups, then its default-hierarchy cgroup.
+    read_pointer(program, pointer, 4, task_reg, cgroups);
+    program.jump_to(skip, Insn::jeq_imm(4, 0, 0));
+    read_pointer(program, pointer, 4, 4, dfl_cgrp);
+    program.jump_to(skip, Insn::jeq_imm(4, 0, 0));
+
+    // Shallower than the target: it cannot be inside it.
+    read_narrow(program, word, 4, 4, level);
+    program.push(Insn::ldx(BPF_W, 1, R10, word));
+    program.push(Insn::mov64_imm(2, cgroup.level as i32));
+    program.jump_to(skip, Insn::jgt_reg(2, 1, 0));
+
+    // The ancestor at the target's level, by id. The cgroup pointer is still in
+    // the pointer slot from the read above.
+    program.push(Insn::ldx(BPF_DW, 4, R10, pointer));
+    match walk {
+        CgroupWalk::Ancestors {
+            ancestors,
+            kn,
+            kn_id,
+            ..
+        } => {
+            read_pointer(program, pointer, 4, 4, ancestors + 8 * cgroup.level as i32);
+            program.jump_to(skip, Insn::jeq_imm(4, 0, 0));
+            read_pointer(program, pointer, 4, 4, kn);
+            program.jump_to(skip, Insn::jeq_imm(4, 0, 0));
+            program.push(Insn::st_imm(BPF_DW, R10, pointer, 0));
+            read_field(program, pointer, 8, 4, kn_id);
+        }
+        CgroupWalk::AncestorIds { ancestor_ids, .. } => {
+            program.push(Insn::st_imm(BPF_DW, R10, pointer, 0));
+            read_field(
+                program,
+                pointer,
+                8,
+                4,
+                ancestor_ids + 8 * cgroup.level as i32,
+            );
+        }
+    }
+    program.push(Insn::ldx(BPF_DW, 1, R10, pointer));
+    program.extend(Insn::ld_imm64(2, cgroup.id as i64));
+    program.jump_to(skip, Insn::jne_reg(1, 2, 0));
+}
+
+/// The same comparison for the task the program runs in, through helpers.
+///
+/// For the programs whose subject is the current task -- a syscall, a lock
+/// wait, a signal's sender -- one helper call replaces the reads. Clobbers
+/// `r0` to `r5` and the eight bytes at `scratch`.
+pub fn push_current_filter(program: &mut Program, whose: Whose, scratch: i16, skip: &'static str) {
+    match whose {
+        Whose::Any => {}
+        Whose::Process(tgid) => {
+            program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+            program.push(Insn::rsh64_imm(0, 32));
+            program.jump_to(skip, Insn::jne_imm(0, tgid as i32, 0));
+        }
+        Whose::Thread(tid) => {
+            // The low half, compared 32 bits wide: the high half holds the
+            // thread group, and a 64-bit comparison would never match.
+            program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+            program.push(Insn::stx(BPF_W, R10, scratch, 0));
+            program.push(Insn::ldx(BPF_W, 1, R10, scratch));
+            program.jump_to(skip, Insn::jne_imm(1, tid as i32, 0));
+        }
+        Whose::Cgroup(cgroup) => {
+            program.push(Insn::mov64_imm(1, cgroup.level as i32));
+            program.push(Insn::call(helper::GET_CURRENT_ANCESTOR_CGROUP_ID));
+            program.extend(Insn::ld_imm64(1, cgroup.id as i64));
+            program.jump_to(skip, Insn::jne_reg(0, 1, 0));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,5 +1361,145 @@ mod tests {
         assert_eq!(jump.regs >> 4, 9);
         assert_eq!(jump.off, -4);
         assert_eq!(BPF_H, 0x08, "the half-word width");
+    }
+
+    /// A `--cgroup` path names one cgroup whichever way it is written, and its
+    /// level is its depth below the hierarchy's root: the number the
+    /// comparison asks the kernel's `ancestors` array at.
+    #[test]
+    fn a_cgroup_path_resolves_to_its_inode_and_its_depth_either_way_it_is_written() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::path::Path::new(CGROUP2_ROOT);
+        if !root.join("cgroup.procs").exists() {
+            eprintln!("skipped: no cgroup2 hierarchy is mounted at {CGROUP2_ROOT}");
+            return;
+        }
+        let at_root = Cgroup::resolve(root).expect("the root is a cgroup");
+        assert_eq!(at_root.level, 0);
+        assert_eq!(at_root.id, std::fs::metadata(root).expect("the root").ino());
+        assert_eq!(Cgroup::resolve(std::path::Path::new("/")), Ok(at_root));
+
+        let own = std::fs::read_to_string("/proc/self/cgroup").expect("our cgroup");
+        let own = own
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .expect("a unified hierarchy line")
+            .trim();
+        let depth = own.split('/').filter(|part| !part.is_empty()).count() as u32;
+        let rooted = Cgroup::resolve(std::path::Path::new(own)).expect("our own cgroup");
+        let mounted = Cgroup::resolve(&root.join(own.trim_start_matches('/'))).expect("the same");
+        assert_eq!(rooted, mounted);
+        assert_eq!(rooted.level, depth);
+
+        let Err(error) = Cgroup::resolve(std::path::Path::new("/user.slice/../system.slice"))
+        else {
+            panic!("a `..` makes the depth something other than the count of names");
+        };
+        assert!(error.contains(".."), "{error}");
+        let Err(error) = Cgroup::resolve(std::path::Path::new("/no-such-cgroup-anywhere")) else {
+            panic!("a cgroup that does not exist is refused");
+        };
+        assert!(error.contains("no-such-cgroup-anywhere"), "{error}");
+    }
+
+    /// A process and a thread are compared against different fields, and read
+    /// out of the task only when the program has not read them already.
+    #[test]
+    fn a_thread_is_compared_against_the_thread_id_and_a_process_against_the_group() {
+        let fields = TaskFields {
+            pid: 100,
+            tgid: 104,
+            cgroup: None,
+        };
+        let build = |whose: Whose, subject: Subject| {
+            let mut program = Program::new();
+            push_task_filter(&mut program, &fields, whose, subject, -16, "skip");
+            program.label("skip");
+            program.push(Insn::exit());
+            program.build()
+        };
+        let reads = |program: &[Insn]| -> Vec<i32> {
+            program
+                .windows(2)
+                .filter(|pair| pair[1].code == 0x85 && pair[1].imm == helper::PROBE_READ_KERNEL)
+                .map(|pair| pair[0].imm)
+                .collect()
+        };
+        assert_eq!(reads(&build(Whose::Thread(7), Subject::task(7))), vec![100]);
+        assert_eq!(
+            reads(&build(Whose::Process(7), Subject::task(7))),
+            vec![104]
+        );
+        assert!(reads(&build(Whose::Thread(7), Subject::with_ids(7, -40, -36))).is_empty());
+        assert!(
+            build(Whose::Any, Subject::task(7)).len() == 1,
+            "no comparison at all"
+        );
+    }
+
+    /// The cgroup comparison needs no map and names the id it compares, and
+    /// the current task's form is one helper call.
+    #[test]
+    fn a_cgroup_comparison_is_the_id_at_the_targets_level_and_no_map() {
+        let cgroup = Cgroup {
+            id: 0x1234_5678_9abc,
+            level: 3,
+        };
+        let mut current = Program::new();
+        push_current_filter(&mut current, Whose::Cgroup(cgroup), -8, "skip");
+        current.label("skip");
+        current.push(Insn::exit());
+        let current = current.build();
+        let calls: Vec<i32> = current
+            .iter()
+            .filter(|insn| insn.code == 0x85)
+            .map(|insn| insn.imm)
+            .collect();
+        assert_eq!(calls, vec![helper::GET_CURRENT_ANCESTOR_CGROUP_ID]);
+        assert_eq!(
+            current[0],
+            Insn::mov64_imm(1, 3),
+            "asked at the target's level"
+        );
+        assert!(current
+            .windows(2)
+            .any(|pair| pair[0].imm == 0x5678_9abc_u32 as i32 && pair[1].imm == 0x1234));
+
+        let walk = CgroupWalk::Ancestors {
+            cgroups: 1000,
+            dfl_cgrp: 8,
+            level: 16,
+            ancestors: 64,
+            kn: 24,
+            kn_id: 32,
+        };
+        let fields = TaskFields {
+            pid: 0,
+            tgid: 0,
+            cgroup: Some(walk),
+        };
+        let mut task = Program::new();
+        push_task_filter(
+            &mut task,
+            &fields,
+            Whose::Cgroup(cgroup),
+            Subject::task(7),
+            -16,
+            "skip",
+        );
+        task.label("skip");
+        task.push(Insn::exit());
+        let task = task.build();
+        audit(&task).expect("a well-formed walk");
+        assert!(
+            task.iter().any(|insn| insn.imm == 64 + 8 * 3),
+            "the ancestor is read at `ancestors[level]`"
+        );
+        assert!(
+            !task
+                .iter()
+                .any(|insn| insn.regs >> 4 == BPF_PSEUDO_MAP_FD && insn.code == 0x18),
+            "the walk uses no map"
+        );
     }
 }

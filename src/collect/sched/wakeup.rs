@@ -12,7 +12,7 @@
 
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{Wakeup, WakeupProgram};
+use crate::bpf::{Wakeup, WakeupProgram, Whose};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -51,16 +51,7 @@ impl Prepared for Prepare {
         }
         // A machine-wide run keeps every wakeup on the machine; a process
         // target keeps the ones it takes part in, at either end.
-        let filter = match target {
-            Target::System => None,
-            other => Some(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and wakeups are filtered by process; \
-                     use --system to watch the whole machine",
-                    other.kind()
-                )
-            })? as u32),
-        };
+        let filter = super::whose(target, "wakeups are kept by the task at either end")?;
         let mut collector = WakeupCollector::new(filter);
         collector.predicate = self.filter;
         Ok(Box::new(collector))
@@ -69,8 +60,8 @@ impl Prepared for Prepare {
 
 pub struct WakeupCollector {
     id: CollectorId,
-    /// The thread group whose wakeups are kept, or none for the machine.
-    filter: Option<u32>,
+    /// Whose wakeups are kept, at either end.
+    filter: Whose,
     program: Option<WakeupProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
@@ -89,7 +80,7 @@ pub struct WakeupCollector {
 }
 
 impl WakeupCollector {
-    pub fn new(filter: Option<u32>) -> Self {
+    pub fn new(filter: Whose) -> Self {
         Self {
             id: CollectorId::new("sched.wakeup/bpf:raw_tp"),
             filter,
@@ -347,7 +338,7 @@ mod tests {
     #[test]
     fn a_task_that_sleeps_is_woken_once_per_sleep() {
         const SLEEPS: usize = 20;
-        let mut collector = WakeupCollector::new(Some(std::process::id()));
+        let mut collector = WakeupCollector::new(Whose::Process(std::process::id()));
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -378,7 +369,7 @@ mod tests {
     /// What must hold for the join is that both ends are present and plausible.
     #[test]
     fn both_ends_of_a_wakeup_are_recorded() {
-        let mut collector = WakeupCollector::new(Some(std::process::id()));
+        let mut collector = WakeupCollector::new(Whose::Process(std::process::id()));
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -406,7 +397,7 @@ mod tests {
     /// collectors is silently wrong.
     #[test]
     fn wakeup_timestamps_are_in_the_tools_clock_domain() {
-        let mut collector = WakeupCollector::new(Some(std::process::id()));
+        let mut collector = WakeupCollector::new(Whose::Process(std::process::id()));
         if skip_without_bpf(&mut collector) {
             return;
         }

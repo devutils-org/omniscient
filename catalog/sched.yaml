@@ -22,7 +22,7 @@
       equivalent: true
   modes: [trace]
   emits: [raw, topk, timeline, summary]
-  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, container: bpf_only}
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task, cgroup]
   filter_fields: [comm, pid, cpu]
   determinism: low
@@ -71,7 +71,7 @@
       equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, summary]
-  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only, container: bpf_only}
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu, prio]
   determinism: low
@@ -100,7 +100,7 @@
        degraded: "no stacks: tells you how long, not where"}
   modes: [trace]
   emits: [hist, stack, topk, raw, summary]
-  targets: {pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, container: bpf_only, system: native}
+  targets: {pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, system: native}
   keys: [task, cgroup]
   filter_fields: [comm, pid, state, queued_ns, blocked_ns]
   determinism: low
@@ -117,9 +117,12 @@
        fall outside the state. `window_ns` beside the value says how wide the
        window was."
     - "Expensive on switch-heavy workloads, which is why the totals are kept in
-       the kernel keyed by (task, state, stack-id) rather than streamed as one
-       event per switch. The stack is walked once per distinct call site: what
-       travels with each block is four bytes."
+       the kernel keyed by (task, state, stack-id, log2 bucket) rather than
+       streamed as one event per switch. The stack is walked once per distinct
+       call site: what travels with each block is four bytes. The value is the
+       mean block of a row, `block_ns`, weighed by `blocks`: every block of a
+       row is in its bucket, so a `hist` is of blocks, and `total_ns` beside it
+       is their exact sum."
     - "The stack is taken where the task leaves the cpu, which is the only place
        it exists -- `sched_switch` runs in the outgoing task's context. By the
        time it is scheduled back in, what is under it is the scheduler."
@@ -158,7 +161,10 @@
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
     # A cgroup-scoped perf event is not written: the collector follows a
-    # thread or serves the machine, and refuses a cgroup or a container.
+    # thread or serves the machine. No backend of this entry has a collector
+    # for a cgroup or a container, so neither is a target it declares; the
+    # `sched_switch` program that would serve one is a decision about which
+    # backend answers every other target too (docs/families/kernel.md).
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
        targets: {system: native, pid: native, tid: native, cpu: native, launch: native},
        degraded: "one sample per switch for the observed task, with no second party:
@@ -166,7 +172,7 @@
                   the task left the cpu"}
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, pid: native, tid: native, cpu: native, launch: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu]
   determinism: low
@@ -185,7 +191,7 @@
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]
-  targets: {system: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
+  targets: {system: native, pid: bpf_only, cgroup: bpf_only}
   keys: [task, cgroup]
   filter_fields: [comm, pid, cpu]
   determinism: low
@@ -285,18 +291,25 @@
 
 - id: sched.irq
   family: sched
-  summary: "Time spent in hard interrupt handlers"
+  summary: "Time spent in hard and soft interrupt handlers"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "kernel>=5.8"], cost: med, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "bpf"], cost: med, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:irq_handler_entry(int, irqaction *)", "raw_tracepoint:irq_handler_exit(int, irqaction *, int)", "raw_tracepoint:softirq_entry(unsigned int)", "raw_tracepoint:softirq_exit(unsigned int)", "kernel>=5.8"], cost: med, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:irq:irq_handler_entry", "tracepoint:irq:irq_handler_exit", "tracepoint:irq:softirq_entry", "tracepoint:irq:softirq_exit", "bpf"], cost: med, equivalent: true}
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {system: native, cpu: native}
   keys: [cpu]
-  filter_fields: [irq, cpu, name]
+  filter_fields: [irq, cpu, name, kind]
   determinism: low
   caveats:
+    - "A row is one half: `kind` says `hard` or `soft`. A hard row's `irq` is its
+       interrupt line and its `name` the handler's, as `/proc/interrupts` shows
+       them; a soft row's `irq` is its vector and its `name` the vector's, as
+       `/proc/softirqs` does. The numbers overlap, so a filter on `irq` alone
+       names one of each. A hard handler that lands inside a softirq is taken
+       out of the softirq's time and counted as its own, so the two halves add
+       up without counting any nanosecond twice."
     - "An event is one bucket of one window, and it is stamped at the moment the
        window's first one began rather than at the drain that read it. A join
        that *opens* on this source would otherwise open at the window's close,

@@ -1250,15 +1250,96 @@ fn a_late_tick_is_one_reason_with_a_count_rather_than_one_reason_each() {
 use std::io::Read;
 use std::process::{Child, Stdio};
 
-/// How long the workload waits before it starts, so that the run under test is
-/// attached by the time it does.
+/// Runs an action over and over for as long as some runs in the background
+/// last, and stamps each on `CLOCK_MONOTONIC`.
 ///
-/// Attaching means reading a few megabytes of BTF, building two programs and
-/// having the verifier accept them, which is tens of milliseconds. This is a
-/// margin over that rather than a measurement of it -- and when it is not
-/// enough the test fails saying so, with both numbers, rather than reporting a
-/// smaller count as a result.
-const ATTACH_MARGIN: std::time::Duration = std::time::Duration::from_millis(700);
+/// This is how a machine-wide scenario here knows what it did inside a run:
+/// the run reports the window it was attached for, and what the action did
+/// wholly inside that window is what the run must have seen. Until the
+/// thirteenth wave these tests waited a fixed 700 ms for the programs to
+/// attach and then acted once, and a loaded machine attached later than that
+/// (flaky tally #7, and the four tests beside it that failed the same way).
+/// Each run's output is read on a thread of its own, because a machine-wide
+/// document is larger than a pipe holds and a run blocked on writing it would
+/// never be seen to end.
+fn while_running<T>(
+    runs: Vec<Child>,
+    until_ns: Option<u64>,
+    mut act: impl FnMut() -> T,
+) -> (Vec<Output>, Vec<Acted<T>>) {
+    let (done, finished) = std::sync::mpsc::channel();
+    let expected = runs.len();
+    for (index, run) in runs.into_iter().enumerate() {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let _ = done.send((index, finish(run)));
+        });
+    }
+    let mut outputs: Vec<Option<Output>> = (0..expected).map(|_| None).collect();
+    let mut acted = Vec::new();
+    let mut remaining = expected;
+    let started = std::time::Instant::now();
+    // A bound on the loop, not a synchronisation: every session here is a few
+    // seconds long.
+    while remaining > 0 && started.elapsed() < std::time::Duration::from_secs(60) {
+        while let Ok((index, output)) = finished.try_recv() {
+            outputs[index] = Some(output);
+            remaining -= 1;
+        }
+        let began = monotonic_ns();
+        if remaining == 0 || until_ns.is_some_and(|until| began >= until) {
+            break;
+        }
+        let what = act();
+        acted.push(Acted {
+            began,
+            ended: monotonic_ns(),
+            until_ns: until_ns.unwrap_or(u64::MAX),
+            what,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for (index, output) in finished.iter().take(remaining) {
+        outputs[index] = Some(output);
+    }
+    (
+        outputs
+            .into_iter()
+            .map(|output| output.expect("every run ends"))
+            .collect(),
+        acted,
+    )
+}
+
+/// One action of [`while_running`], and when it ran.
+struct Acted<T> {
+    began: u64,
+    ended: u64,
+    /// When the actions were told to stop: the earliest the run can have
+    /// ended, see [`run_ends_after`].
+    until_ns: u64,
+    what: T,
+}
+
+impl<T> Acted<T> {
+    /// Whether it ran wholly inside a result's window, and before the run's
+    /// last read: a result's window closes once every collector has stopped,
+    /// which for a ring the collector drained in its `stop` is later than the
+    /// last event it could hold.
+    fn inside(&self, result: &serde_json::Value) -> bool {
+        let opened = result["window"]["opened_ns"].as_u64().unwrap_or(u64::MAX);
+        let closed = result["window"]["closed_ns"].as_u64().unwrap_or(0);
+        self.began >= opened && self.ended <= closed.min(self.until_ns)
+    }
+}
+
+/// The earliest a run of `duration` spawned at `spawned_ns` can end: its
+/// deadline counts from after every program is attached, which is after it
+/// was spawned. An action that ends before this is before the run's last
+/// drain, whatever the attach cost.
+fn run_ends_after(spawned_ns: u64, duration: std::time::Duration) -> Option<u64> {
+    Some(spawned_ns + duration.as_nanos() as u64)
+}
 
 /// Starts a session without waiting for it, so a workload can be driven while
 /// it runs.
@@ -1317,12 +1398,26 @@ impl UniqueShell {
         self.path.to_string_lossy().into_owned()
     }
 
-    /// Runs the shell on one script and returns what it exited with.
-    fn run(&self, script: &str) -> std::process::ExitStatus {
-        Command::new(&self.path)
-            .args(["-c", script])
-            .status()
-            .expect("the copied shell runs")
+    /// Runs the shell on one script and returns its pid and what it exited
+    /// with: the pid is the task its exec and its exit are events of.
+    ///
+    /// A copy just written can be refused with `ETXTBSY` for a moment: a
+    /// process another test forked while the copy was open for writing holds
+    /// that descriptor until it execs. The spawn is retried for as long as
+    /// that lasts, which is a property of `fork` rather than of this tool.
+    fn run_with_pid(&self, script: &str) -> (u32, std::process::ExitStatus) {
+        let mut tries = 0;
+        let mut child = loop {
+            match Command::new(&self.path).args(["-c", script]).spawn() {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("the copied shell runs: {error}"),
+            }
+        };
+        (child.id(), child.wait().expect("the copied shell ends"))
     }
 }
 
@@ -1372,35 +1467,62 @@ fn machine_cannot_trace(output: &Output) -> bool {
 /// number of `execve` calls this test made is a defect either way.
 #[test]
 fn every_exec_of_a_path_this_test_invented_is_reported_once() {
-    const RUNS: usize = 5;
     let Some(shell) = UniqueShell::new() else {
         eprintln!("skipped: this machine has no /bin/sh to copy");
         return;
     };
 
-    let run = session_in_background("proc-lifecycle.yml");
-    std::thread::sleep(ATTACH_MARGIN);
-    for _ in 0..RUNS {
-        assert!(shell.run("exit 0").success());
-    }
-    let output = finish(run);
-    if skipped_without_bpf(&output) {
+    let spawned = monotonic_ns();
+    let lifecycle = session_in_background("proc-lifecycle.yml");
+    let until = run_ends_after(spawned, std::time::Duration::from_secs(2));
+    let (outputs, runs) = while_running(vec![lifecycle], until, || {
+        let (pid, status) = shell.run_with_pid("exit 0");
+        assert!(status.success());
+        pid
+    });
+    let output = &outputs[0];
+    if skipped_without_bpf(output) {
         return;
     }
-    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.status.success(), "{}", stderr(output));
 
-    let doc = document(&output);
+    let doc = document(output);
+    let result = result(&doc, "what-ran");
     let path = shell.as_str();
-    let mine: Vec<_> = events(result(&doc, "what-ran"))
+    let mine: Vec<_> = events(result)
         .into_iter()
         .filter(|event| attr_text(event, "filename").as_deref() == Some(path.as_str()))
         .collect();
-    assert_eq!(
-        mine.len(),
-        RUNS,
-        "`{path}` was executed {RUNS} times and {} exec events carry it; losses {}",
-        mine.len(),
-        result(&doc, "what-ran")["losses"]
+    let seen: std::collections::BTreeSet<u64> = mine
+        .iter()
+        .filter_map(|event| attr_f64(event, "tid"))
+        .map(|tid| tid as u64)
+        .collect();
+    let inside: Vec<u64> = runs
+        .iter()
+        .filter(|run| run.inside(result))
+        .map(|run| u64::from(run.what))
+        .collect();
+    assert!(
+        !inside.is_empty(),
+        "none of the {} runs was inside the window",
+        runs.len()
+    );
+    for pid in &inside {
+        assert!(
+            seen.contains(pid),
+            "`{path}` was executed as pid {pid} inside the window and no exec event carries \
+             it; losses {}",
+            result["losses"]
+        );
+    }
+    assert!(
+        mine.len() >= inside.len() && mine.len() <= runs.len(),
+        "`{path}` was executed {} times, {} of them inside the window, and {} exec events \
+         carry it: each exec is reported once",
+        runs.len(),
+        inside.len(),
+        mine.len()
     );
     for event in &mine {
         assert_eq!(
@@ -1430,35 +1552,67 @@ fn a_chosen_exit_status_and_a_sent_signal_are_reported_as_different_things() {
         return;
     };
 
-    let run = session_in_background("proc-lifecycle.yml");
-    std::thread::sleep(ATTACH_MARGIN);
-    assert_eq!(shell.run("exit 7").code(), Some(7));
-    // `kill` is a shell builtin, so this is the same process signalling itself
-    // and no second program is executed.
-    assert_eq!(shell.run("kill -9 $$").code(), None);
-    let output = finish(run);
-    if skipped_without_bpf(&output) {
+    // `kill` is a shell builtin, so the second is the same process
+    // signalling itself and no second program is executed.
+    let spawned = monotonic_ns();
+    let lifecycle = session_in_background("proc-lifecycle.yml");
+    let until = run_ends_after(spawned, std::time::Duration::from_secs(2));
+    let (outputs, pairs) = while_running(vec![lifecycle], until, || {
+        let (returned, status) = shell.run_with_pid("exit 7");
+        assert_eq!(status.code(), Some(7));
+        let (killed, status) = shell.run_with_pid("kill -9 $$");
+        assert_eq!(status.code(), None);
+        (returned, killed)
+    });
+    let output = &outputs[0];
+    if skipped_without_bpf(output) {
         return;
     }
-    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.status.success(), "{}", stderr(output));
 
-    let doc = document(&output);
+    let doc = document(output);
+    let ended = result(&doc, "what-ended");
     let name = shell.name();
-    let mine: Vec<_> = events(result(&doc, "what-ended"))
+    let mine: Vec<_> = events(ended)
         .into_iter()
         .filter(|event| attr_text(event, "comm").as_deref() == Some(name.as_str()))
         .collect();
-    assert_eq!(
-        mine.len(),
-        2,
-        "two copies of `{name}` were run and left; {} exit events carry that name",
+    let inside: Vec<&(u32, u32)> = pairs
+        .iter()
+        .filter(|pair| pair.inside(ended))
+        .map(|pair| &pair.what)
+        .collect();
+    assert!(
+        !inside.is_empty(),
+        "none of the {} pairs was inside the window",
+        pairs.len()
+    );
+    assert!(
+        mine.len() >= 2 * inside.len() && mine.len() <= 2 * pairs.len(),
+        "{} copies of `{name}` were run and left, {} inside the window; {} exit events carry \
+         that name",
+        2 * pairs.len(),
+        2 * inside.len(),
         mine.len()
     );
+    let of = |pid: u32| {
+        mine.iter()
+            .find(|event| attr_f64(event, "tid") == Some(f64::from(pid)))
+            .unwrap_or_else(|| panic!("pid {pid} left inside the window and has no exit event"))
+    };
+    let &&(returned, killed) = inside.first().expect("a pair inside");
+    let (returned, killed) = (of(returned), of(killed));
+    assert_eq!(
+        attr_f64(returned, "signal"),
+        Some(0.0),
+        "one of the two returned a status"
+    );
+    assert_eq!(
+        attr_f64(killed, "signal"),
+        Some(9.0),
+        "the other was killed by SIGKILL"
+    );
 
-    let returned = mine
-        .iter()
-        .find(|event| attr_f64(event, "signal") == Some(0.0))
-        .expect("one of the two returned a status");
     assert_eq!(
         attr_f64(returned, "code"),
         Some(7.0),
@@ -1471,10 +1625,6 @@ fn a_chosen_exit_status_and_a_sent_signal_are_reported_as_different_things() {
         "the kernel's own word is carried undecoded beside the decoded one"
     );
 
-    let killed = mine
-        .iter()
-        .find(|event| attr_f64(event, "signal") == Some(9.0))
-        .expect("the other was killed by SIGKILL");
     assert_eq!(
         attr_f64(killed, "code"),
         Some(137.0),
@@ -1760,6 +1910,22 @@ fn a_predicate_the_program_carries_is_placed_in_the_kernel_and_one_it_does_not_i
         pushed_notes.contains("pushed into the program"),
         "`{pushed}`: the run has to say the program carried it: {pushed_notes}"
     );
+    // And the program's own count of what its comparison declined: every
+    // other syscall of a Python start-up, which the userspace pass below
+    // removes the same way.
+    let declined: u64 = pushed_notes
+        .split("the program skipped ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| {
+            panic!("`{pushed}`: the run has to say what the program skipped: {pushed_notes}")
+        });
+    assert!(
+        declined >= 100,
+        "`{pushed}` ran in the program over a Python start-up, and the program says it skipped \
+         only {declined} other calls: {pushed_notes}"
+    );
     assert_eq!(
         *pushed_removed, None,
         "`{pushed}` ran in the program, so nothing that reached the collector was removed \
@@ -1798,78 +1964,105 @@ fn a_predicate_the_program_carries_is_placed_in_the_kernel_and_one_it_does_not_i
 #[test]
 fn what_the_signal_ring_could_not_hold_is_counted_and_closes_against_what_was_sent() {
     needs_python!();
-    const SENT: u64 = 300_000;
+    const SENT: u64 = 100_000;
+    // One storm per process, so that the run's rows -- one per task and
+    // signal in `count` mode -- separate the storms, and each says when it
+    // began and ended on `CLOCK_MONOTONIC`. The storms run back to back until
+    // the run is over, and the ones wholly inside the window it reports are
+    // the ones checked, rather than one storm started after a fixed delay and
+    // hoped to be inside it (flaky tally #7).
     let storm = format!(
         "import os, signal, sys, time\n\
          signal.signal(signal.SIGRTMIN, lambda *a: None)\n\
-         time.sleep(0.1)\n\
          pid = os.getpid()\n\
+         began = time.clock_gettime_ns(time.CLOCK_MONOTONIC)\n\
          for _ in range({SENT}):\n    os.kill(pid, signal.SIGRTMIN)\n\
-         sys.stderr.write('SENT {SENT}\\n')\n"
+         ended = time.clock_gettime_ns(time.CLOCK_MONOTONIC)\n\
+         sys.stderr.write(f'STORM {{pid}} {{began}} {{ended}}\\n')\n"
     );
 
-    let run = session_in_background("proc-signal-storm.yml");
-    std::thread::sleep(ATTACH_MARGIN);
-    let mut workload = Command::new("python3")
-        .args(["-c", &storm])
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("python3 runs");
-    let mut said = String::new();
-    workload
-        .stderr
-        .take()
-        .expect("a pipe")
-        .read_to_string(&mut said)
-        .expect("readable");
-    let target = workload.id();
-    assert!(workload.wait().expect("the workload finishes").success());
-    assert!(
-        said.contains(&format!("SENT {SENT}")),
-        "the workload has to say how many it sent: {said}"
-    );
-
-    let output = finish(run);
-    if skipped_without_bpf(&output) {
+    let spawned = monotonic_ns();
+    let storm_run = session_in_background("proc-signal-storm.yml");
+    let until = run_ends_after(spawned, std::time::Duration::from_secs(4));
+    let (outputs, storms) = while_running(vec![storm_run], until, || {
+        let output = Command::new("python3")
+            .args(["-c", &storm])
+            .output()
+            .expect("python3 runs");
+        assert!(output.status.success(), "{}", stderr(&output));
+        let said = stderr(&output);
+        let fields: Vec<u64> = said
+            .lines()
+            .find_map(|line| line.strip_prefix("STORM "))
+            .unwrap_or_else(|| panic!("the storm has to say what it did: {said}"))
+            .split_whitespace()
+            .filter_map(|field| field.parse().ok())
+            .collect();
+        (fields[0] as u32, fields[1], fields[2])
+    });
+    let output = &outputs[0];
+    if skipped_without_bpf(output) {
         return;
     }
-    assert!(output.status.success(), "{}", stderr(&output));
-    let doc = document(&output);
+    assert!(output.status.success(), "{}", stderr(output));
+    let doc = document(output);
     let result = result(&doc, "storm");
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+    let inside: Vec<u32> = storms
+        .iter()
+        .filter(|storm| storm.inside(result))
+        .map(|storm| storm.what)
+        .filter(|(_, began, ended)| *began >= opened && *ended <= closed)
+        .map(|(pid, _, _)| pid)
+        .collect();
+    if inside.is_empty() {
+        eprintln!(
+            "skipped: none of the {} storms fell wholly inside the run's window, which was \
+             {:.2} s long",
+            storms.len(),
+            (closed - opened) as f64 / 1e9
+        );
+        return;
+    }
 
     let dropped = result["losses"]["dropped"].as_u64().expect("a drop count");
-    let counted: u64 = events(result)
-        .iter()
-        .filter(|event| attr_f64(event, "pid") == Some(f64::from(target)))
-        .filter(|event| attr_f64(event, "sig").is_some_and(|sig| sig >= 32.0))
-        .filter_map(|event| attr_f64(event, "count"))
-        .sum::<f64>() as u64;
-
-    assert!(
-        counted <= SENT,
-        "{counted} signals were counted and only {SENT} were sent"
+    let counted_of = |target: u32| -> u64 {
+        events(result)
+            .iter()
+            .filter(|event| attr_f64(event, "pid") == Some(f64::from(target)))
+            .filter(|event| attr_f64(event, "sig").is_some_and(|sig| sig >= 32.0))
+            .filter_map(|event| attr_f64(event, "count"))
+            .sum::<f64>() as u64
+    };
+    let counted: u64 = inside.iter().map(|pid| counted_of(*pid)).sum();
+    let sent = SENT * inside.len() as u64;
+    eprintln!(
+        "{} storms of {SENT} signals inside the window: {counted} counted, {dropped} dropped",
+        inside.len()
     );
+    for pid in &inside {
+        assert!(
+            counted_of(*pid) <= SENT,
+            "{} signals were counted for storm {pid}, and only {SENT} were sent",
+            counted_of(*pid)
+        );
+    }
     if dropped == 0 {
         assert_eq!(
-            counted, SENT,
-            "nothing was dropped, so every signal sent has to have been counted"
+            counted, sent,
+            "nothing was dropped, so every signal the storms inside the window sent has to \
+             have been counted"
         );
     } else {
         assert!(
-            counted + dropped >= SENT,
-            "{counted} counted plus {dropped} dropped is fewer than the {SENT} that were sent, \
-             so events went missing without being counted as lost"
+            counted + dropped >= sent,
+            "{counted} counted plus {dropped} dropped is fewer than the {sent} the storms inside \
+             the window sent, so events went missing without being counted as lost"
         );
-        // The loss is a drop and not a late tick. A dropped event is a
-        // measurement that happened and was not recorded; a late tick is a
-        // series whose spacing is not what it claims, and a ring-backed source
-        // has no clock to run late.
-        assert_eq!(
-            result["losses"]["late_ticks"].as_u64(),
-            Some(0),
-            "a full ring is a drop, not a tick that ran late: {}",
-            result["losses"]
-        );
+        // A full ring is named as one, whatever else the drain's lateness is
+        // reported as: a drain that outran its tick is late, and a late drain
+        // is also why the ring filled, so the two are not exclusive.
         let reasons = result["losses"]["reasons"]
             .as_object()
             .expect("a loss says why");
@@ -1895,18 +2088,23 @@ fn every_emit_and_filter_field_the_three_machine_wide_sources_declare_works() {
         return;
     };
 
-    let run = session_in_background("proc-bpf-sweep.yml");
-    std::thread::sleep(ATTACH_MARGIN);
-    // Something for each of the three to find: two programs start, two end,
-    // and one of them signals itself.
-    assert!(shell.run("exit 0").success());
-    assert!(shell.run("kill -USR1 $$").code().is_none());
-    let output = finish(run);
-    if skipped_without_bpf(&output) {
+    // Something for each of the three to find, over and over for as long as
+    // the run lasts: two programs start, two end, and one of them signals
+    // itself.
+    let (outputs, _) = while_running(
+        vec![session_in_background("proc-bpf-sweep.yml")],
+        None,
+        || {
+            assert!(shell.run_with_pid("exit 0").1.success());
+            assert!(shell.run_with_pid("kill -USR1 $$").1.code().is_none());
+        },
+    );
+    let output = &outputs[0];
+    if skipped_without_bpf(output) {
         return;
     }
-    assert!(output.status.success(), "{}", stderr(&output));
-    let doc = document(&output);
+    assert!(output.status.success(), "{}", stderr(output));
+    let doc = document(output);
 
     for (label, emits, fields) in [
         (
@@ -1961,14 +2159,17 @@ fn every_emit_and_filter_field_the_three_machine_wide_sources_declare_works() {
 fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
     const EXIT_REJECTED: i32 = 2;
 
-    // A mode that never sees an individual event cannot rank who produced them.
+    // One count per series over one window is not a distribution. (It used
+    // to be `count` and `topk`, which a counted window can rank once stream R's
+    // thirteenth-wave change lands: this is the refusal that holds on both
+    // sides of it.)
     let output = omn(&[
-        "proc.signals",
+        "proc.syscall",
         "--system",
         "--mode",
         "count",
         "--emit",
-        "topk",
+        "hist",
         "-d",
         "50ms",
     ]);
@@ -1979,7 +2180,7 @@ fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
         stderr(&output)
     );
     assert!(
-        stderr(&output).contains("cannot produce `topk`"),
+        stderr(&output).contains("cannot produce `hist`"),
         "{}",
         stderr(&output)
     );
@@ -2149,7 +2350,6 @@ fn a_syscall_filter_by_number_counts_the_calls_the_program_made() {
 /// of the three filters must remove. Three observers, one workload.
 #[test]
 fn a_filter_on_the_machine_wide_proc_sources_keeps_only_what_it_names() {
-    const RUNS: usize = 4;
     let Some(shell) = UniqueShell::new() else {
         eprintln!("skipped: this machine has no /bin/sh to copy");
         return;
@@ -2162,28 +2362,28 @@ fn a_filter_on_the_machine_wide_proc_sources_keeps_only_what_it_names() {
             &filter, "--format", "json",
         ])
     };
+    let spawned = monotonic_ns();
     let execs = observe("proc.exec", format!("filename == '{path}'"));
     let exits = observe("proc.exit", format!("comm == '{name}' && group_dead == 1"));
     let signals = observe("proc.signals", format!("comm == '{name}' && sig == 10"));
-    std::thread::sleep(ATTACH_MARGIN);
-    for _ in 0..RUNS {
-        assert!(shell.run("exit 0").success());
-        assert!(shell.run("kill -USR1 $$").code().is_none());
+    let until = run_ends_after(spawned, std::time::Duration::from_secs(3));
+    let (outputs, rounds) = while_running(vec![execs, exits, signals], until, || {
+        assert!(shell.run_with_pid("exit 0").1.success());
+        assert!(shell.run_with_pid("kill -USR1 $$").1.code().is_none());
         // What every filter has to remove.
         assert!(Command::new("/bin/true").status().expect("true").success());
-    }
+    });
 
-    for (child, what, expected) in [
-        (execs, "exec", 2 * RUNS),
-        (exits, "exit", 2 * RUNS),
-        (signals, "signal", RUNS),
+    for (output, what, per_round) in [
+        (&outputs[0], "exec", 2),
+        (&outputs[1], "exit", 2),
+        (&outputs[2], "signal", 1),
     ] {
-        let output = finish(child);
-        if skipped_without_bpf(&output) {
+        if skipped_without_bpf(output) {
             return;
         }
-        assert!(output.status.success(), "{what}: {}", stderr(&output));
-        let doc = document(&output);
+        assert!(output.status.success(), "{what}: {}", stderr(output));
+        let doc = document(output);
         let result = &doc["results"][0];
         let events = events(result);
         for event in &events {
@@ -2193,16 +2393,22 @@ fn a_filter_on_the_machine_wide_proc_sources_keeps_only_what_it_names() {
                 "a `{what}` the filter does not name is in the output: {event}"
             );
         }
+        let inside = per_round * rounds.iter().filter(|round| round.inside(result)).count();
+        let made = per_round * rounds.len();
+        assert!(
+            inside > 0,
+            "{what}: none of the rounds was inside the window"
+        );
         let clean = result["losses"]["dropped"] == 0;
         if clean {
-            assert_eq!(
-                events.len(),
-                expected,
-                "this test made {expected} `{what}` events the filter names and {} came back",
+            assert!(
+                events.len() >= inside && events.len() <= made,
+                "this test made {inside} `{what}` events the filter names inside the window, \
+                 {made} in all, and {} came back",
                 events.len()
             );
         } else {
-            assert!(events.len() <= expected, "{what}: {}", result["losses"]);
+            assert!(events.len() <= made, "{what}: {}", result["losses"]);
         }
         let said = result["degradations"].to_string();
         assert!(
@@ -2210,4 +2416,352 @@ fn a_filter_on_the_machine_wide_proc_sources_keeps_only_what_it_names() {
             "a `{what}` run that filtered has to say where the predicate ran: {said}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// A cgroup, and a workload beside it (the thirteenth wave, stream S)
+// ---------------------------------------------------------------------------
+
+/// A cgroup this test makes and removes, with one child below it; see the
+/// same fixture in `tests/scenario_sched.rs`, which says why it is made where
+/// it is.
+struct Scope {
+    dir: PathBuf,
+}
+
+impl Scope {
+    fn create(name: &str) -> Result<Self, String> {
+        let own = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+            })
+            .ok_or("this process is not in a cgroup2 hierarchy")?;
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let mut parent = root.join(own.trim().trim_start_matches('/'));
+        loop {
+            let dir = parent.join(format!("omn-{name}-{}", std::process::id()));
+            if std::fs::create_dir(&dir).is_ok() {
+                if std::fs::create_dir(dir.join("inner")).is_ok() {
+                    return Ok(Self { dir });
+                }
+                let _ = std::fs::remove_dir(&dir);
+            }
+            if parent == root || !parent.pop() {
+                break;
+            }
+        }
+        Err(format!(
+            "no cgroup in this process's ancestry ({}) lets this user make one below it",
+            own.trim()
+        ))
+    }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(self.dir.join("inner"));
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the kernel to write into.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// A workload that starts `/bin/true`, signals itself, signals its peer when it
+/// has one, and asks for its parent's pid five times, round after round for a
+/// fixed time, and logs each on `CLOCK_MONOTONIC` -- with the pid of every
+/// child, which is the task the exec and the exit are of.
+const CGROUP_WORKLOAD: &str = r#"
+import json, os, signal, subprocess, sys, time
+procs, seconds, peer = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+if procs != "-":
+    with open(procs, "w") as f:
+        f.write(str(os.getpid()))
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+for number in (signal.SIGUSR1, signal.SIGUSR2):
+    signal.signal(number, lambda *_: None)
+spawns, own, sent, calls = [], [], [], []
+print("ready", os.getpid(), flush=True)
+end = mono() + int(seconds * 1e9)
+while mono() < end:
+    a = mono(); child = subprocess.Popen(["/bin/true"]); child.wait(); b = mono()
+    spawns.append([a, b, child.pid])
+    a = mono(); os.kill(os.getpid(), signal.SIGUSR1); b = mono(); own.append([a, b])
+    if peer:
+        a = mono(); os.kill(peer, signal.SIGUSR2); b = mono(); sent.append([a, b])
+    a = mono()
+    for _ in range(5):
+        os.getppid()
+    b = mono(); calls.append([a, b])
+    time.sleep(0.005)
+print(json.dumps({"spawns": spawns, "own": own, "sent": sent, "calls": calls}), flush=True)
+"#;
+
+struct Workload {
+    child: Child,
+    pid: u64,
+}
+
+impl Workload {
+    fn start(procs: Option<&std::path::Path>, peer: u64) -> Self {
+        let mut child = Command::new("python3")
+            .args(["-c", CGROUP_WORKLOAD])
+            .arg(procs.map_or("-".into(), |path| path.display().to_string()))
+            .arg("4.0")
+            .arg(peer.to_string())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python3 starts");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.as_mut().expect("a pipe")),
+            &mut line,
+        )
+        .expect("the workload says it is ready");
+        let pid = line
+            .trim()
+            .strip_prefix("ready ")
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or_else(|| panic!("the workload did not start: {line:?}"));
+        Self { child, pid }
+    }
+
+    fn finish(mut self) -> serde_json::Value {
+        let mut rest = String::new();
+        self.child
+            .stdout
+            .as_mut()
+            .expect("a pipe")
+            .read_to_string(&mut rest)
+            .expect("the log");
+        let _ = self.child.wait();
+        serde_json::from_str(rest.trim())
+            .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"))
+    }
+}
+
+/// Logged spans of a kind that began at or after an instant.
+fn spans_since(log: &serde_json::Value, kind: &str, from_ns: u64) -> Vec<serde_json::Value> {
+    log[kind]
+        .as_array()
+        .expect("a logged kind")
+        .iter()
+        .filter(|span| span[0].as_u64().unwrap_or(0) >= from_ns)
+        .cloned()
+        .collect()
+}
+
+fn uint(event: &serde_json::Value, name: &str) -> u64 {
+    attr(event, name)
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+}
+
+/// A cgroup holding a workload that forks, signals and calls a known number of
+/// times, beside the same workload outside it: `proc.exec`, `proc.exit`,
+/// `proc.signals` and `proc.syscall` on the cgroup see the first and none of
+/// the second.
+///
+/// Every child the workload starts inherits its cgroup, so every exec and exit
+/// of a child it started after the programs were attached is in the run, by
+/// pid, and none of the other copy's children is. A signal is kept when either
+/// end is inside: the copy inside signals itself and the copy beside it, and
+/// the second is kept through the sender -- the current task's cgroup, one
+/// helper call -- where the first is kept through the task the signal is for.
+/// Counts are bounded by what the workload did after the window opened, and
+/// after `omn` was started, as in the `sched` scenario.
+#[test]
+fn a_cgroup_target_sees_the_forks_signals_and_calls_inside_it_and_none_beside_it() {
+    needs_python!();
+    let scope = match Scope::create("proc") {
+        Ok(scope) => scope,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let outside = Workload::start(None, 0);
+    let within = Workload::start(
+        Some(&scope.dir.join("inner").join("cgroup.procs")),
+        outside.pid,
+    );
+    let (inner, beside) = (within.pid, outside.pid);
+
+    let target = format!("{{cgroup: \"{}\"}}", scope.dir.display());
+    let mut session =
+        String::from("name: a cgroup and a workload beside it\nduration: 6s\nrequests:\n");
+    for (label, source, extra) in [
+        ("execs", "proc.exec", ""),
+        ("exits", "proc.exit", ""),
+        ("signals", "proc.signals", ""),
+        (
+            "calls",
+            "proc.syscall",
+            ", filter: \"syscall == 'getppid'\"",
+        ),
+    ] {
+        session.push_str(&format!(
+            "  - {{label: {label}, source: {source}, target: {target}, mode: trace, emit: [raw]{extra}}}\n"
+        ));
+    }
+    let spawned_ns = monotonic_ns();
+    let mut run = Command::new(BINARY)
+        .args(["-f", "-", "--input-format", "yaml", "--format", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::io::Write::write_all(run.stdin.as_mut().expect("a pipe"), session.as_bytes())
+        .expect("the session");
+    drop(run.stdin.take());
+    let output = finish(run);
+    let log = within.finish();
+    let other = outside.finish();
+    if skipped_without_bpf(&output) || machine_cannot_trace(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    let opened = result(&doc, "execs")["window"]["opened_ns"]
+        .as_u64()
+        .expect("a window");
+    let last = log["spawns"]
+        .as_array()
+        .and_then(|spawns| spawns.last())
+        .and_then(|spawn| spawn[1].as_u64())
+        .unwrap_or(0);
+    if last <= opened {
+        eprintln!(
+            "skipped: the programs were attached {:.2} s after omn started, after the workload \
+             had stopped",
+            (opened - spawned_ns) as f64 / 1e9
+        );
+        return;
+    }
+    let pids = |log: &serde_json::Value, from_ns: u64| -> std::collections::BTreeSet<u64> {
+        spans_since(log, "spawns", from_ns)
+            .iter()
+            .filter_map(|spawn| spawn[2].as_u64())
+            .collect()
+    };
+    let (must, may) = (pids(&log, opened), pids(&log, spawned_ns));
+    let theirs = pids(&other, 0);
+    assert!(
+        must.len() > 20,
+        "{} children inside the window, too few to judge",
+        must.len()
+    );
+
+    // What a run reports losing -- its ring's drops and the kernel's skipped
+    // runs of the program, which are the machine's -- is the slack on every
+    // floor below: an occurrence the run says it did not see is not one it
+    // is short of.
+    let lost = |label: &str| {
+        result(&doc, label)["losses"]["dropped"]
+            .as_u64()
+            .expect("a drop count") as usize
+    };
+    for (label, what) in [("execs", "exec"), ("exits", "exit")] {
+        let seen: std::collections::BTreeSet<u64> = events(result(&doc, label))
+            .iter()
+            .map(|event| uint(event, "tid"))
+            .collect();
+        let missed = must.difference(&seen).count();
+        assert!(
+            missed <= lost(label),
+            "{missed} of the {} children the workload started inside the window have no {what} \
+             event, and the run reports {} lost",
+            must.len(),
+            lost(label)
+        );
+        let strays = seen.intersection(&theirs).count();
+        assert_eq!(
+            strays, 0,
+            "{strays} {what}s of the children beside the cgroup were kept"
+        );
+        let children = seen.iter().filter(|tid| may.contains(tid)).count();
+        assert!(
+            children <= may.len(),
+            "{children} {what}s for {} children",
+            may.len()
+        );
+    }
+
+    let signals = events(result(&doc, "signals"));
+    let count = |sig: u64, to: u64, from: u64| {
+        signals
+            .iter()
+            .filter(|event| {
+                uint(event, "sig") == sig
+                    && uint(event, "pid") == to
+                    && uint(event, "sender_pid") == from
+            })
+            .count()
+    };
+    let (own, sent) = (count(10, inner, inner), count(12, beside, inner));
+    let bounds = |kind: &str| {
+        (
+            spans_since(&log, kind, opened).len(),
+            spans_since(&log, kind, spawned_ns).len(),
+        )
+    };
+    let ((own_floor, own_ceiling), (sent_floor, sent_ceiling)) = (bounds("own"), bounds("sent"));
+    eprintln!(
+        "proc.signals --cgroup: {own} to itself for {own_floor} to {own_ceiling} sent; {sent} to \
+         the process beside it, kept for their sender, for {sent_floor} to {sent_ceiling}"
+    );
+    let own_floor = own_floor.saturating_sub(lost("signals"));
+    let sent_floor = sent_floor.saturating_sub(lost("signals"));
+    assert!(
+        (own_floor..=own_ceiling).contains(&own),
+        "the workload inside signalled itself {own_floor} times inside the window and \
+         {own_ceiling} after omn started, and {own} were kept:\n{}",
+        stderr(&output)
+    );
+    assert!(
+        (sent_floor..=sent_ceiling).contains(&sent),
+        "the workload inside signalled the one beside it {sent_floor} times inside the window \
+         and {sent_ceiling} after omn started, and {sent} were kept for their sender:\n{}",
+        stderr(&output)
+    );
+    let neither = signals
+        .iter()
+        .filter(|event| uint(event, "pid") == beside && uint(event, "sender_pid") != inner)
+        .count();
+    assert_eq!(
+        neither, 0,
+        "{neither} signals to the process beside the cgroup were kept, sent by something that \
+         is not inside it"
+    );
+
+    let rows = events(result(&doc, "calls"));
+    let strays = rows.iter().filter(|row| uint(row, "pid") == beside).count();
+    assert_eq!(
+        strays, 0,
+        "{strays} rows of the process beside the cgroup were kept"
+    );
+    let calls: u64 = rows
+        .iter()
+        .filter(|row| uint(row, "tid") == inner)
+        .map(|row| uint(row, "count"))
+        .sum();
+    let (floor, ceiling) = (
+        (5 * spans_since(&log, "calls", opened).len()).saturating_sub(lost("calls")) as u64,
+        5 * spans_since(&log, "calls", spawned_ns).len() as u64,
+    );
+    assert!(
+        (floor..=ceiling).contains(&calls),
+        "the workload inside asked for its parent {floor} times inside the window, less what \
+         the run reports lost, and {ceiling} after omn started, and {calls} calls were kept"
+    );
 }

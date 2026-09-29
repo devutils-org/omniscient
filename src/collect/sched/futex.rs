@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{FutexDrops, FutexProgram, FutexWait, FutexWhose};
+use crate::bpf::{FutexDrops, FutexProgram, FutexWait, Whose};
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::{STACK_ID_ATTR, WEIGHT_ATTR};
@@ -60,21 +60,15 @@ impl Prepared for Prepare {
         // offers both: a `--tid` run that compared thread groups would report
         // every thread of the process instead of the one that was named.
         let whose = match target {
-            Target::Tid(tids) => FutexWhose::Thread(
-                *tids
-                    .first()
-                    .ok_or("a tid target with no thread in it names nothing to measure")?
-                    as u32,
-            ),
-            other => FutexWhose::Process(other.first_pid().ok_or_else(|| {
-                format!(
-                    "a {} target names no process, and a futex wait belongs to a thread of one. \
-                     This source has no machine-wide form: `sys_enter` fires on every syscall \
-                     on the box, and a machine's futex histogram is mostly idle thread pools \
-                     waiting on purpose",
-                    other.kind()
-                )
-            })? as u32),
+            Target::System => {
+                return Err("a system target names every thread on the machine, and this \
+                            source has no machine-wide form: `sys_enter` fires on every syscall on the \
+                            box, and a machine's futex histogram is mostly idle thread pools \
+                            waiting on purpose; name a process with --pid, a thread with \
+                            --tid, or a cgroup with --cgroup"
+                    .to_owned())
+            }
+            other => super::whose(other, "a futex wait belongs to a thread of one")?,
         };
         Ok(Box::new(FutexCollector::new(
             whose,
@@ -86,7 +80,7 @@ impl Prepared for Prepare {
 
 pub struct FutexCollector {
     id: CollectorId,
-    whose: FutexWhose,
+    whose: Whose,
     program: Option<FutexProgram>,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
@@ -105,7 +99,7 @@ pub struct FutexCollector {
 }
 
 impl FutexCollector {
-    pub fn new(whose: FutexWhose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
+    pub fn new(whose: Whose, wants_stacks: bool, predicate: Option<FilterExpr>) -> Self {
         Self {
             id: CollectorId::new("sched.futex/bpf:raw_tp"),
             whose,
@@ -126,16 +120,18 @@ impl FutexCollector {
         }
     }
 
-    /// The process whose mappings a stack is symbolized against.
-    fn watched_process(&self) -> u32 {
+    /// The process whose mappings a stack is symbolized against, when the
+    /// target names one; a cgroup's processes are found as their rows arrive.
+    fn watched_process(&self) -> Option<u32> {
         match self.whose {
-            FutexWhose::Process(tgid) => tgid,
+            Whose::Process(tgid) => Some(tgid),
             // A thread's own id is not its process's, but a thread's stack is
             // in its process's mappings; the row carries the thread group and
             // that is what `resolve_stack` uses. This is only the value read
             // eagerly each tick, and for a thread target the process is the
             // one that will appear on the rows anyway.
-            FutexWhose::Thread(tid) => tid,
+            Whose::Thread(tid) => Some(tid),
+            Whose::Any | Whose::Cgroup(_) => None,
         }
     }
 
@@ -210,7 +206,10 @@ impl FutexCollector {
         if !self.wants_stacks {
             return;
         }
-        let watched = self.watched_process() as i32;
+        let Some(watched) = self.watched_process() else {
+            return;
+        };
+        let watched = watched as i32;
         match self.symbolizers.entry(watched) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
                 held.get_mut().refresh();
@@ -540,7 +539,7 @@ mod tests {
 
     #[test]
     fn the_value_attribute_is_one_the_events_carry() {
-        let collector = FutexCollector::new(FutexWhose::Process(1), false, None);
+        let collector = FutexCollector::new(Whose::Process(1), false, None);
         let name = collector.value_attr();
         assert!(attributes(&row(), 1).iter().any(|attr| attr.name == name));
     }

@@ -31,7 +31,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{helper, push_current_filter, Insn, Program, Whose, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
     bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, text_of, Log2Labels,
@@ -95,6 +95,8 @@ const DROP_KEY: i16 = -32;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
 const ROWS_SLOT: i16 = -128;
+/// Eight bytes for a cgroup target's comparison, `insn::push_current_filter`.
+const FILTER_SCRATCH: i16 = -136;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -262,23 +264,35 @@ fn check(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
 /// tracepoints run in the contending thread's own context, so the current task
 /// *is* the subject, and one helper call beats two probe reads on a path this
 /// hot.
-fn current_and_filter(program: &mut Program, target_tgid: Option<u32>, resume: &'static str) {
+fn current_and_filter(program: &mut Program, whose: Whose, resume: &'static str) {
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
     program.push(Insn::mov64_reg(7, 0));
-    if let Some(tgid) = target_tgid {
+    match whose {
+        Whose::Any => {}
         // The thread group is the high half. Known before the program loads
         // and never changing, so the comparison is in the instruction stream
         // rather than in a map.
-        program.push(Insn::mov64_reg(1, 7));
-        program.push(Insn::rsh64_imm(1, 32));
-        program.jump_to(resume, Insn::jne_imm(1, tgid as i32, 0));
+        Whose::Process(tgid) => {
+            program.push(Insn::mov64_reg(1, 7));
+            program.push(Insn::rsh64_imm(1, 32));
+            program.jump_to(resume, Insn::jne_imm(1, tgid as i32, 0));
+        }
+        // The low half, compared 32 bits wide: a 64-bit compare would include
+        // the thread group and never match.
+        Whose::Thread(tid) => {
+            program.push(Insn::stx(BPF_W, R10, FILTER_SCRATCH, 7));
+            program.push(Insn::ldx(BPF_W, 1, R10, FILTER_SCRATCH));
+            program.jump_to(resume, Insn::jne_imm(1, tid as i32, 0));
+        }
+        // One helper call for the cgroup; `r7` survives it.
+        Whose::Cgroup(_) => push_current_filter(program, whose, FILTER_SCRATCH, resume),
     }
 }
 
 /// The program on `contention_begin`: a thread has started waiting.
 fn begin_instructions(
     btf: &Btf,
-    target_tgid: Option<u32>,
+    whose: Whose,
     waiting_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -288,7 +302,7 @@ fn begin_instructions(
     // r6 keeps the context and r7 the caller's ids; both survive the helper
     // calls, which clobber r1 through r5.
     program.push(Insn::mov64_reg(6, 1));
-    current_and_filter(&mut program, target_tgid, "done");
+    current_and_filter(&mut program, whose, "done");
 
     // The whole slot is cleared first: the key is four bytes in an eight-byte
     // slot, and the four the program does not write are still on the stack.
@@ -364,7 +378,7 @@ fn begin_instructions(
 /// a length.
 fn end_instructions(
     btf: &Btf,
-    target_tgid: Option<u32>,
+    whose: Whose,
     waiting_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
@@ -378,7 +392,7 @@ fn end_instructions(
     // part of the wait it is closing.
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::mov64_reg(8, 0));
-    current_and_filter(&mut program, target_tgid, "done");
+    current_and_filter(&mut program, whose, "done");
 
     program.push(Insn::st_imm(BPF_DW, R10, WAIT_KEY, 0));
     program.push(Insn::stx(BPF_W, R10, WAIT_KEY, 7));
@@ -545,7 +559,7 @@ impl LockProgram {
         crate::bpf::attach::fentry::skipped([&self.begin_program, &self.end_program])
     }
 
-    pub fn load(target_tgid: Option<u32>) -> Result<Self, String> {
+    pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
         let waiting = Hash::create(
@@ -562,10 +576,10 @@ impl LockProgram {
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_lock_stk")
             .map_err(|error| map_failure("lock stack map", error))?;
 
-        let begin = begin_instructions(btf, target_tgid, waiting.as_raw_fd(), drops.as_raw_fd())?;
+        let begin = begin_instructions(btf, whose, waiting.as_raw_fd(), drops.as_raw_fd())?;
         let end = end_instructions(
             btf,
-            target_tgid,
+            whose,
             waiting.as_raw_fd(),
             rows.as_raw_fd(),
             drops.as_raw_fd(),
@@ -685,7 +699,7 @@ mod tests {
         }
     }
 
-    fn end_program(btf: &Btf, target: Option<u32>) -> Vec<Insn> {
+    fn end_program(btf: &Btf, target: Whose) -> Vec<Insn> {
         end_instructions(btf, target, 3, 4, 5, 6).expect("a program")
     }
 
@@ -698,8 +712,8 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for program in [
-            begin_instructions(&btf, None, 3, 4).expect("a program"),
-            end_program(&btf, None),
+            begin_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+            end_program(&btf, Whose::Any),
         ] {
             let called: Vec<i32> = program
                 .iter()
@@ -719,7 +733,7 @@ mod tests {
     fn the_count_and_the_total_are_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
         assert_eq!(
-            end_program(&btf, None)
+            end_program(&btf, Whose::Any)
                 .iter()
                 .filter(|insn| insn.code == 0xdb)
                 .count(),
@@ -735,7 +749,7 @@ mod tests {
     #[test]
     fn the_stack_walked_is_the_tasks_own() {
         let Some(btf) = kernel_btf() else { return };
-        let program = end_program(&btf, None);
+        let program = end_program(&btf, Whose::Any);
         let walk = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::GET_STACKID)
@@ -751,9 +765,11 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        assert!(!end_program(&btf, None).iter().any(|insn| insn.imm == 4242));
+        assert!(!end_program(&btf, Whose::Any)
+            .iter()
+            .any(|insn| insn.imm == 4242));
         assert_eq!(
-            end_program(&btf, Some(4242))
+            end_program(&btf, Whose::Process(4242))
                 .iter()
                 .filter(|insn| insn.imm == 4242)
                 .count(),
@@ -825,6 +841,7 @@ mod tests {
             (WAIT_KEY, 8, "in-flight key"),
             (DROP_KEY, 4, "drop key"),
             (ROWS_SLOT, 8, "row map slot"),
+            (FILTER_SCRATCH, 8, "filter scratch"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -896,7 +913,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = end_instructions(&btf, None, 3, 4, 5, 6).expect("a program");
+        let program = end_instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

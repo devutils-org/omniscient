@@ -1,0 +1,45 @@
+# Where a cgroup's time goes when it is not on a cpu, and how long it queues.
+#
+#   omn -f examples/sched-cgroup.yml
+#
+# `--cgroup` names a cgroup and everything below it: a service, a login
+# session, a container's slice. Every program here compares the task it is
+# about -- the one leaving the cpu, the one being woken, the one being moved --
+# against the cgroup's ancestry in the kernel, by level, the way the kernel's
+# own `cgroup_is_descendant` does, so a task in a child cgroup is kept and a
+# task beside the cgroup is not. `/user.slice` is every login session on a
+# systemd machine; a service is `/system.slice/<name>.service`.
+#
+# tests/scenario_sched.rs holds the ground truth: a workload in a child of a
+# cgroup and the same workload beside it, where the runs on the parent keep
+# every block, wakeup and migration of the first -- by the kernel's own count
+# of its voluntary switches -- and nothing of the second.
+#
+# What this does not do: a container name. `--container` would have to be
+# resolved to its cgroup first, which this build does not do; pass the
+# container's cgroup path instead.
+name: a cgroup's blocked time and run queue waits
+format: text
+duration: 2s
+
+requests:
+  - label: blocked
+    source: sched.offcpu
+    target: {cgroup: /user.slice}
+    mode: trace
+    emit: [hist, topk]
+    keys: [task]
+
+  - label: queued
+    source: sched.runqlat
+    target: {cgroup: /user.slice}
+    mode: trace
+    emit: [hist, summary]
+    keys: [task]
+
+  - label: released-by
+    source: sched.wakeup
+    target: {cgroup: /user.slice}
+    mode: trace
+    emit: [topk]
+    keys: [task]
