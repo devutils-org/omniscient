@@ -8169,3 +8169,31 @@ was lost silently, which is the invariant this project does not bend, and the
 drain in `src/bpf/io_pagecache.rs` is where to look first (it moved onto
 `map::Rows` in the twelfth wave). Wanted, in `tests/scenario_io.rs`: print the
 run's `losses` and the lookups per inode when the exact count fails.
+
+### The CI's second run: two defects a developer's machine cannot show
+
+Run 36627338505 (`4d7731b`, Linux 6.17.0-azure, the cell P configured:
+`perf_event_paranoid` 2, no capabilities). `fmt`, `clippy`, the build and the
+runner's matrix cell pass; the suite fails 53 of 1994 and the skip gate names
+10 skips it does not expect. Most of the 53 follow from two defects, both of
+which the development machine hides, since it runs at `perf_event_paranoid` -1
+on a cpu with a hardware PMU:
+
+- **`cpu.profile` is refused at the kernel's default paranoia.** `pmu:sw`'s
+  sampling event carrying a callchain is refused with `EACCES` at paranoid 2,
+  so an unprivileged user cannot profile their own program, and everything
+  built on the profile fails with it: `omn latency`, the decompositions, the
+  `pprof` and `chrome` encoders, `omn-mcp`'s evidence tests, the crossings.
+  Unconfirmed reading: the event asks for the kernel half of the stack, which
+  paranoid 2 forbids to an unprivileged process; `exclude_callchain_kernel`
+  (and `exclude_kernel` on the sample) where the paranoia requires it, with
+  the resolved file saying the stacks are user-only, would serve it. The first
+  thing to fix for anyone who is not the developer.
+- **`cpu.cycles` reads available on a cpu with no hardware PMU.** The cell
+  lists it `yes`, and its runs are refused with *"`PERF_COUNT_HW_CPU_CYCLES` is
+  not available on this cpu"* (`ENOENT` on cpu 0). *Available means it
+  attaches* fails on a cloud VM, which is where a CI runner and many users
+  are. The probe has to open the event rather than read the PMU's existence.
+
+`docs/portability.md` is the record once these are read; the log and the cell
+are the run's artifact.
