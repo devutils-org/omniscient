@@ -322,6 +322,19 @@ mod tests {
 
         let mut collector = PerCpuCounters::new(asked.clone(), spec("cpu.cycles", "pmu"));
         if let Err(reason) = collector.start() {
+            // Two machines refuse this, and the skip says which: a cpu with no
+            // hardware counter (a cloud VM's, the CI's), and one that lets no
+            // process count a whole cpu.
+            let counter = crate::capabilities::Capabilities::detect()
+                .probe("pmu:PERF_COUNT_HW_CPU_CYCLES", None);
+            if counter.is_missing() {
+                eprintln!("skipped: this cpu has no hardware counter for cycles ({counter})");
+                return;
+            }
+            assert!(
+                reason.contains("perf_event_paranoid") || reason.contains("CAP_PERFMON"),
+                "a cpu with a cycle counter refused a per-cpu one for another reason: {reason}"
+            );
             eprintln!("skipped: {reason}");
             return;
         }

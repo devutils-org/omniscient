@@ -1097,12 +1097,20 @@ fn every_mode_and_emit_the_catalog_declares_is_served_or_says_what_is_missing() 
     let mut reachable: BTreeMap<(String, String), bool> = BTreeMap::new();
     // A pair every cell of which this machine withholds (the resolver found
     // every backend missing a requirement) says nothing about the build's
-    // promise, which only a machine that offers the source can check.
+    // promise, which only a machine that offers the source can check. A cell
+    // refused as a request (exit 2: that mode does not produce that emit) is
+    // no evidence either way: it is the same refusal on every machine, and it
+    // is the modes that *can* produce the emit that decide. On the CI's cpu
+    // with no hardware PMU, `cpu.branch_misses` `rate` is reached by `count`
+    // alone, which that cpu withholds, and the two exit-2 cells beside it had
+    // it judged unreachable.
     let judged = |source: &str, emit: &str| {
         found
             .iter()
             .filter(|(cell, _)| cell.source == source && cell.emit == emit)
-            .any(|(_, served)| !matches!(served, Served::Unserved(_, message) if withheld_here(message)))
+            .any(|(_, served)| {
+                !matches!(served, Served::Unserved(code, message) if *code == 2 || withheld_here(message))
+            })
     };
     for (cell, served) in &found {
         let key = (cell.source.clone(), cell.emit.clone());
@@ -1255,22 +1263,48 @@ impl Spinner {
         assert!(name.len() <= 15, "`{name}` is longer than a comm");
         let path = std::env::temp_dir().join(name);
         if !path.exists() {
-            std::fs::copy("/bin/sh", &path).ok()?;
-            let mut mode = std::fs::metadata(&path).ok()?.permissions();
+            // Copied beside the name and renamed onto it, so no test ever
+            // executes a copy another is still writing.
+            let partial = std::env::temp_dir().join(format!(
+                "{name}.{}.{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::copy("/bin/sh", &partial).ok()?;
+            let mut mode = std::fs::metadata(&partial).ok()?.permissions();
             std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
-            std::fs::set_permissions(&path, mode).ok()?;
+            std::fs::set_permissions(&partial, mode).ok()?;
+            std::fs::rename(&partial, &path).ok()?;
         }
         let shell = path.to_str()?;
-        let mut command = match cpu {
-            Some(cpu) => {
-                let mut pinned = Command::new("taskset");
-                pinned.args(["-c", &cpu.to_string(), shell]);
-                pinned
+        // A test thread that forks while this one still holds the copy open
+        // for writing gives its child that descriptor until the child execs,
+        // and executing the copy meanwhile is `ETXTBSY`. The CI's runner, with
+        // its tests in parallel, skipped once with "/bin/sh could not be
+        // copied", which printed no error; this is the likeliest reading, and
+        // any other error is now printed. The window is the other child's
+        // fork-to-exec, so a few retries outlast it.
+        for _ in 0..50 {
+            let mut command = match cpu {
+                Some(cpu) => {
+                    let mut pinned = Command::new("taskset");
+                    pinned.args(["-c", &cpu.to_string(), shell]);
+                    pinned
+                }
+                None => Command::new(shell),
+            };
+            match command.args(["-c", "while :; do :; done"]).spawn() {
+                Ok(child) => return Some(Self { child }),
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    eprintln!("the spinner `{shell}` did not start: {error}");
+                    return None;
+                }
             }
-            None => Command::new(shell),
-        };
-        let child = command.args(["-c", "while :; do :; done"]).spawn().ok()?;
-        Some(Self { child })
+        }
+        None
     }
 
     fn pid(&self) -> String {

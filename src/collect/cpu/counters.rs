@@ -240,10 +240,9 @@ pub const PAGE_FAULTS: Spec = Spec {
 /// `sched.switches` on `pmu:sw`, counted rather than sampled: the same
 /// software counter `cpu.context_switches` reads, handed over by that family's
 /// collector for `--mode count` the way [`PAGE_FAULTS`] is by `mem.faults`'s.
-/// Here for stream D to call (`docs/open-findings.md`, the twelfth wave,
-/// stream W): P7 of `docs/portability.md` is `sched.switches -m count`
-/// refused at start.
-#[allow(dead_code)]
+/// `sched.switches`'s collector hands its counted requests here, which is what
+/// closed P7 of `docs/portability.md` (`sched.switches -m count` refused at
+/// start).
 pub const SCHED_SWITCHES: Spec = Spec {
     source: "sched.switches",
     backend: "pmu:sw",
@@ -253,6 +252,21 @@ pub const SCHED_SWITCHES: Spec = Spec {
     )],
     value: Value::Count,
 };
+
+impl Spec {
+    /// Whether every counter of the spec is one the kernel raises from its own
+    /// code (`capabilities::counted_only_in_kernel`), so that excluding kernel
+    /// mode leaves nothing to count.
+    fn counts_in_kernel_only(&self) -> bool {
+        self.counters
+            .iter()
+            .all(|counter| KERNEL_ONLY.iter().any(|only| only.name == counter.name))
+    }
+}
+
+/// The counters of this table the scheduler raises: the two that
+/// `capabilities::counted_only_in_kernel` names, by the same config.
+const KERNEL_ONLY: [Counter; 2] = [CONTEXT_SWITCHES, MIGRATIONS];
 
 /// The source and backend a counting spec serves, or nothing when the pair is
 /// not one of them.
@@ -662,6 +676,20 @@ impl Collector for CounterCollector {
                 group.unlisted(),
                 if group.unlisted() == 1 { "" } else { "s" },
                 self.pid
+            ));
+        }
+        if group.kernel_excluded() && self.spec.counts_in_kernel_only() {
+            // Its every event is raised from the scheduler's code, so a count
+            // of user mode only is zero whatever the program did: the CI's
+            // paranoid-2 cell read 0 switches where the kernel counted 50. The
+            // probe asks with the kernel included and should have said so
+            // first; this is the attach refusing the same thing if it did not.
+            return Err(format!(
+                "`{}` is counted by the kernel's scheduler, and this machine would only open \
+                 it for user mode, where it reads zero whatever the program does: it needs \
+                 /proc/sys/kernel/perf_event_paranoid at 1 or below, or CAP_PERFMON on this \
+                 binary",
+                self.spec.source
             ));
         }
         if group.kernel_excluded() {
@@ -1452,8 +1480,15 @@ mod tests {
         }
 
         let mut collector = CounterCollector::new(0, spec("cpu.context_switches"));
-        if collector.start().is_err() {
-            eprintln!("skipped: this machine refuses unprivileged perf counting");
+        if let Err(reason) = collector.start() {
+            // At perf_event_paranoid 2 the counter opens for user mode only and
+            // would read zero; the refusal has to say that, not blame the
+            // counter's existence.
+            assert!(
+                reason.contains("reads zero") || reason.contains("refused"),
+                "{reason}"
+            );
+            eprintln!("skipped: {reason}");
             return;
         }
         let before = kernel_switches();

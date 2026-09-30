@@ -1032,6 +1032,21 @@ fn probe_msr(requirement: &str) -> Probe {
     }
 }
 
+/// Whether a perf event is only ever raised from kernel code, so that a count
+/// excluding kernel mode is zero whatever the task did.
+///
+/// A context switch and a migration are both counted by the scheduler, with
+/// the scheduler's registers: `perf_exclude_event` drops every one of them for
+/// an event that sets `exclude_kernel`. A page fault is not on this list -- it
+/// is raised with the faulting task's registers, which are user mode for a
+/// fault in user code, so a user-mode count of it is the program's own faults.
+pub fn counted_only_in_kernel(kind: u32, config: u64) -> bool {
+    use perf_event_open_sys::bindings as perf;
+    kind == perf::PERF_TYPE_SOFTWARE
+        && (config == perf::PERF_COUNT_SW_CONTEXT_SWITCHES as u64
+            || config == perf::PERF_COUNT_SW_CPU_MIGRATIONS as u64)
+}
+
 fn probe_pmu(event: &str) -> Probe {
     // A PMU that is not the cpu's -- RAPL, the uncore, the memory controller --
     // counts for a whole package and refuses to be opened against a process.
@@ -1051,12 +1066,21 @@ fn probe_pmu(event: &str) -> Probe {
         };
     };
 
+    // An event the kernel raises only from its own code -- the scheduler's
+    // switch and migration counters -- counts nothing once kernel mode is
+    // excluded, and excluding it is exactly what perf_event_paranoid 2 lets an
+    // unprivileged process do. So it is asked for with the kernel included:
+    // "you may open it for user mode" would be a yes for a counter that then
+    // reads zero, which is what the CI's paranoid-2 cell measured (0 switches
+    // against the kernel's 50).
+    let kernel_only = counted_only_in_kernel(kind, config);
+
     let mut attr: perf_event_open_sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
     attr.type_ = kind;
     attr.size = std::mem::size_of::<perf_event_open_sys::bindings::perf_event_attr>() as u32;
     attr.config = config;
     attr.set_disabled(1);
-    if !system_wide {
+    if !system_wide && !kernel_only {
         // Meaningless for a package counter, and rejected: RAPL answers EINVAL
         // to an event that asks it to exclude kernel mode, because it does not
         // have modes to exclude.
@@ -1084,11 +1108,16 @@ fn probe_pmu(event: &str) -> Probe {
     }
 
     let error = std::io::Error::last_os_error();
+    let paranoid =
+        read_trimmed("/proc/sys/kernel/perf_event_paranoid").unwrap_or_else(|| "unknown".into());
     match error.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) if kernel_only => Probe::Missing(format!(
+            "`{event}` is raised by the kernel's own code, so a count of user mode only reads \
+             zero, and perf_event_paranoid {paranoid} allows this process nothing else: it needs \
+             perf_event_paranoid at 1 or below, or CAP_PERFMON on this binary"
+        )),
         Some(libc::EACCES) | Some(libc::EPERM) => Probe::Missing(format!(
-            "perf_event_open was refused for `{event}`: perf_event_paranoid is {}",
-            read_trimmed("/proc/sys/kernel/perf_event_paranoid")
-                .unwrap_or_else(|| "unknown".into())
+            "perf_event_open was refused for `{event}`: perf_event_paranoid is {paranoid}"
         )),
         Some(libc::ENOENT) | Some(libc::EOPNOTSUPP) => {
             Probe::Missing(format!("`{event}` is not available on this cpu"))
@@ -1359,6 +1388,102 @@ mod tests {
         }
     }
 
+    /// This thread's own switches, counted by the kernel in
+    /// `/proc/thread-self/status`: voluntary plus involuntary.
+    fn switches_of_this_thread() -> u64 {
+        let status = std::fs::read_to_string("/proc/thread-self/status").expect("status");
+        status
+            .lines()
+            .filter(|line| line.contains("ctxt_switches:"))
+            .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+            .sum()
+    }
+
+    /// The scheduler's counters are raised from kernel code, so excluding
+    /// kernel mode leaves them at zero: the probe has to ask with the kernel
+    /// included, or it says yes to a counter that reads nothing.
+    ///
+    /// Ground truth is the kernel's own per-thread account in
+    /// `/proc/thread-self/status`, over a workload that sleeps a chosen number
+    /// of times on this thread alone (the counter is opened on this thread,
+    /// not the process, because `cargo test` runs its tests as threads of one).
+    #[test]
+    fn a_switch_counter_that_excludes_the_kernel_counts_none_and_is_not_offered() {
+        use perf_event_open_sys::bindings as perf;
+        const SLEEPS: u64 = 30;
+        let count = |exclude_kernel: bool| -> Result<(u64, u64), std::io::Error> {
+            let mut attr: perf::perf_event_attr = unsafe { std::mem::zeroed() };
+            attr.type_ = perf::PERF_TYPE_SOFTWARE;
+            attr.size = std::mem::size_of::<perf::perf_event_attr>() as u32;
+            attr.config = perf::PERF_COUNT_SW_CONTEXT_SWITCHES as u64;
+            if exclude_kernel {
+                attr.set_exclude_kernel(1);
+                attr.set_exclude_hv(1);
+            }
+            let fd = unsafe {
+                perf_event_open_sys::perf_event_open(
+                    &mut attr,
+                    0,
+                    -1,
+                    -1,
+                    perf::PERF_FLAG_FD_CLOEXEC as u64,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let before = switches_of_this_thread();
+            for _ in 0..SLEEPS {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let after = switches_of_this_thread();
+            let mut value = 0u64;
+            let read = unsafe { libc::read(fd, (&mut value as *mut u64).cast(), 8) };
+            unsafe { libc::close(fd) };
+            assert_eq!(read, 8, "the counter reads");
+            Ok((value, after - before))
+        };
+
+        // Opening user mode only is what paranoid 2 allows everyone, so this
+        // half runs on every machine.
+        let (user_only, kernel_saw) = count(true).expect("a user-mode software counter opens");
+        assert!(
+            kernel_saw >= SLEEPS,
+            "{SLEEPS} sleeps, and the kernel saw {kernel_saw} switches"
+        );
+        assert_eq!(
+            user_only, 0,
+            "a user-mode switch counter read {user_only} over {kernel_saw} switches"
+        );
+
+        let probe = super::probe_pmu("PERF_COUNT_SW_CONTEXT_SWITCHES");
+        match count(false) {
+            Ok((counted, kernel_saw)) => {
+                // The status reads bracket the counted window, and each read
+                // is a syscall that may itself be switched out: the kernel's
+                // account can only be the larger, by those two reads at most.
+                assert!(
+                    counted >= SLEEPS && counted <= kernel_saw,
+                    "the counter read {counted} and the kernel {kernel_saw} for {SLEEPS} sleeps"
+                );
+                assert_eq!(probe, super::Probe::Available);
+            }
+            Err(error) => {
+                eprintln!(
+                    "this machine will not count kernel mode for this process ({error}), so \
+                     the probe must say so rather than offer a counter that reads zero"
+                );
+                match probe {
+                    super::Probe::Missing(reason) => {
+                        assert!(reason.contains("reads zero"), "{reason}");
+                        assert!(reason.contains("CAP_PERFMON"), "{reason}");
+                    }
+                    other => panic!("a switch counter that can only read zero answered {other:?}"),
+                }
+            }
+        }
+    }
+
     /// A qualified `pmu:unit/event` whose unit or event this machine does not
     /// publish is missing, naming which -- never unknown, which the resolver
     /// would have walked past as "assumed" onto a start that fails.
@@ -1377,7 +1502,7 @@ mod tests {
             .join("cpu")
             .exists()
         {
-            eprintln!("skipped: this machine publishes no `cpu` unit to ask about an event of");
+            eprintln!("skipped: this machine publishes no `cpu` performance unit to ask about an event of");
             return;
         }
         match super::probe_pmu("cpu/omn-no-such-event") {

@@ -409,10 +409,18 @@ fn what_a_collector_discovers_at_open_time_reaches_the_output() {
         eprintln!("skipped: /proc/self/cgroup is not the shape this expects");
         return;
     };
-    let stat =
-        std::fs::read_to_string(format!("/sys/fs/cgroup{path}/cpu.stat")).unwrap_or_default();
-    if stat.contains("nr_throttled") {
-        eprintln!("skipped: this session's cgroup has a quota, so there is nothing to disclose");
+    // Two shapes have nothing to be throttled by, and each is disclosed: the
+    // cpu controller not enabled (no `cpu.max`), and `cpu.max` at `max`. Only
+    // a real quota leaves nothing to say. (This read the presence of
+    // `nr_throttled` as a quota, and skipped on the CI's delegated cgroup,
+    // which has the counters and no quota.)
+    let quota = std::fs::read_to_string(format!("/sys/fs/cgroup{path}/cpu.max")).ok();
+    if let Some(quota) = quota.filter(|quota| !quota.starts_with("max")) {
+        eprintln!(
+            "skipped: this session's cgroup has a cpu.max quota ({}), so there is nothing to \
+             disclose",
+            quota.trim()
+        );
         return;
     }
 
@@ -572,9 +580,10 @@ fn counting_a_cpu_that_does_not_exist_says_so_rather_than_blaming_privileges() {
     let message = stderr(&output);
     // A machine that withholds every counter refuses before the cpu is looked
     // at, and rightly names the sysctl: there, it is the answer.
-    if message.contains("has no viable backend on this machine")
-        && message.contains("perf_event_open was refused")
-    {
+    // So does one that has no cycle counter at all, or lets no process count
+    // a cpu (the CI's paranoid-2 cell): the refusal is about the machine, and
+    // about cpu 0 rather than the cpu asked for.
+    if message.contains("has no viable backend on this machine") && !message.contains("4095") {
         eprintln!("skipped: {message}");
         return;
     }

@@ -289,9 +289,21 @@ impl Availability {
 }
 
 /// Asks what a source could do here, without a request to pin it down.
+///
+/// Only a backend this build collects counts: *available means it attaches*,
+/// and a backend with no collector attaches nowhere. The resolver passes such a
+/// backend over for the next one that is written (`Verdict::Unimplemented`),
+/// and the listing has to agree with it -- `cpu.cycles` on a cpu with no
+/// hardware PMU read "usable through `pmu:sw`", the one backend of its chain
+/// nobody wrote, and every run of it was refused (the CI's second run). Such a
+/// source is out of reach here, and the listing's backend lines say which
+/// requirement is missing and which backend has no collector.
 pub fn availability(entry: &Entry, capabilities: &Capabilities) -> Availability {
     let mut unverified = None;
     for backend in &entry.backends {
+        if !crate::collect::implements(entry.id.as_str(), &backend.id) {
+            continue;
+        }
         let requirements = probe_all(capabilities, backend, None);
         if requirements
             .iter()
@@ -395,6 +407,13 @@ pub fn resolve(
     // still reports "no collector is written", rather than claiming the machine
     // cannot serve it at all.
     let mut unimplemented_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
+    // Whether a backend this build collects would serve this very request --
+    // its target, its mode -- and was turned down by the machine alone. Then
+    // the build has a way and this machine withholds it, and an unwritten
+    // backend further down is not the answer to give: `cpu.cycles` on a cpu
+    // with no hardware PMU resolved to `pmu:sw`, nobody's collector, and was
+    // refused as this build's gap on the machine whose gap it was.
+    let mut written_but_withheld = false;
 
     for (index, backend) in entry.backends.iter().enumerate() {
         let unfit = cannot_serve_target(entry, backend, request.target.kind())
@@ -414,7 +433,9 @@ pub fn resolve(
             .map(|requirement| format!("{}: {}", requirement.needs, requirement.probe))
             .collect();
 
+        let implemented = crate::collect::implements(request.source.as_str(), &backend.id);
         if !missing.is_empty() {
+            written_but_withheld |= implemented;
             chain.push(ConsideredBackend {
                 id: backend.id.clone(),
                 verdict: Verdict::Rejected(missing),
@@ -425,7 +446,6 @@ pub fn resolve(
         let all_checked = requirements
             .iter()
             .all(|requirement| requirement.probe.is_available());
-        let implemented = crate::collect::implements(request.source.as_str(), &backend.id);
 
         if all_checked && implemented {
             check_filter_fields(entry, backend, request)?;
@@ -469,7 +489,13 @@ pub fn resolve(
     }
 
     // An unverified-but-implemented backend beats a verified one nothing can
-    // collect: the first might work, the second certainly will not.
+    // collect: the first might work, the second certainly will not. And an
+    // unwritten backend is the answer only where no written one could have
+    // served the request on a machine that had its requirements: otherwise it
+    // is this machine that cannot, and saying so names what it lacks.
+    if written_but_withheld && unverified_candidate.is_none() {
+        unimplemented_candidate = None;
+    }
     for candidate in [unverified_candidate.take(), unimplemented_candidate.take()] {
         let Some((index, backend, requirements)) = candidate else {
             continue;
@@ -508,6 +534,11 @@ pub fn resolve(
                 Verdict::Rejected(reasons) => {
                     format!("  {}: {}", considered.id, reasons.join("; "))
                 }
+                Verdict::Unimplemented => format!(
+                    "  {}: every requirement is available here, and this build has no \
+                     collector for it",
+                    considered.id
+                ),
                 _ => format!("  {}", considered.id),
             })
             .collect(),
@@ -1146,6 +1177,69 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// The CI's second run: on a cpu with no hardware PMU, `cpu.cycles`'s
+    /// written backend (`pmu`) is withheld by the machine and the one left is
+    /// `pmu:sw`, which nobody wrote. That is this machine's refusal, naming the
+    /// missing event and the unwritten backend -- not this build's gap, which
+    /// it was reported as (exit 3) on the machine whose gap it was. And the
+    /// listing agrees: out of reach, not "usable through `pmu:sw`".
+    ///
+    /// The machine is made to lack the hardware event by asking for one no
+    /// machine publishes, on the entry's own `pmu` backend, so the collector
+    /// registered for it is the real one.
+    #[test]
+    fn a_written_backend_the_machine_withholds_is_not_replaced_by_an_unwritten_one() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"cpu.cycles".parse().unwrap())
+            .expect("cpu.cycles is in the catalog")
+            .clone();
+        assert!(crate::collect::implements("cpu.cycles", "pmu"));
+        assert!(!crate::collect::implements("cpu.cycles", "pmu:sw"));
+        entry.backends[0].requires = vec!["pmu:omnnounit/cycles/".into()];
+        let catalog = Catalog::from_entries(vec![entry.clone()]).unwrap();
+        let capabilities = Capabilities::detect();
+        let sw_clock = capabilities.probe("pmu:PERF_COUNT_SW_CPU_CLOCK", None);
+        if !sw_clock.is_available() {
+            eprintln!("skipped: this machine withholds the software clock too ({sw_clock})");
+            return;
+        }
+        let mut request = fixture("cpu.cycles", Target::Pid(vec![std::process::id() as i32]));
+        request.mode = Mode::Count;
+        request.emit = vec!["summary".parse().unwrap()];
+
+        match resolve(&catalog, &capabilities, &request) {
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                let text = rejections.join("\n");
+                assert!(
+                    text.contains("pmu: pmu:omnnounit/cycles/: missing"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(
+                        "pmu:sw: every requirement is available here, and this build \
+                         has no collector for it"
+                    ),
+                    "{text}"
+                );
+            }
+            other => panic!("the machine's refusal was expected: {other:?}"),
+        }
+        assert_eq!(
+            availability(&entry, &capabilities),
+            Availability::Unavailable
+        );
+
+        // With no written backend in the chain at all, the unwritten one is
+        // still what the request resolves to: that gap is this build's on every
+        // machine, and the runner says so.
+        let mut vocabulary = entry;
+        vocabulary.backends.remove(0);
+        let catalog = Catalog::from_entries(vec![vocabulary]).unwrap();
+        let resolved = resolve(&catalog, &capabilities, &request).expect("resolves to pmu:sw");
+        assert_eq!(resolved.backend.id, "pmu:sw");
     }
 
     /// P7 of `docs/portability.md`: a backend that holds a total cannot be
