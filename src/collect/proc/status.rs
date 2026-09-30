@@ -360,9 +360,11 @@ mod tests {
             .expect("`comm` travels on every event")
             .to_string();
         assert_eq!(
-            comm, "sleep",
+            comm,
+            "sleep",
             "the first reading named `{comm}`, which is this tool rather than the program it \
-             launched"
+             launched; the collector's own account: {:?}",
+            collector.losses()
         );
     }
 

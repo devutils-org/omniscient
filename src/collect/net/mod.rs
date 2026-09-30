@@ -26,6 +26,30 @@ mod tcp_rtt;
 use super::Factory;
 use crate::request::Mode;
 
+/// The probes behind the `phc` and `ethtool` requirements, answered by the
+/// code that serves them and remembered, since `omn list` asks once per
+/// backend: `None` for any other requirement.
+pub fn probe(requirement: &str) -> Option<Result<(), String>> {
+    use std::sync::OnceLock;
+    static PHC: OnceLock<Result<(), String>> = OnceLock::new();
+    static ETHTOOL: OnceLock<Result<(), String>> = OnceLock::new();
+    match requirement {
+        "phc" => Some(PHC.get_or_init(hwts::clock_support).clone()),
+        "ethtool" => Some(
+            ETHTOOL
+                .get_or_init(|| {
+                    ethtool::Ethtool::open().map(drop).map_err(|error| {
+                        format!(
+                            "the `ethtool` generic-netlink family could not be resolved: {error}"
+                        )
+                    })
+                })
+                .clone(),
+        ),
+        _ => None,
+    }
+}
+
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![

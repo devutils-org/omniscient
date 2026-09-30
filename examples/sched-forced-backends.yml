@@ -3,9 +3,10 @@
 #   omn -f examples/sched-forced-backends.yml ; echo $?   # 3
 #
 # `--backend force:` bypasses the resolver, which is how a comparison bench
-# measures one road at a time. This family has no comparison to make: each of
-# its five collected sources has exactly one implemented backend, so there is no
-# second road to measure. What there is instead is a refusal, and the refusal
+# measures one road at a time. This family has one comparison to make --
+# `sched.switches -m count`, `pmu:sw` against the `sched_switch` program, which
+# `scenario_sched` makes -- and otherwise each collected source has one
+# implemented backend. What a pinned backend without one gets is a refusal, and the refusal
 # has to be the right one -- exit 3, "this build does not implement it", not
 # exit 1, "this machine cannot serve it". The machine can: every requirement of
 # every backend below probes available here, which `omn list sched.offcpu`
@@ -31,12 +32,12 @@ requests:
     emit: [summary]
     backend: "force:bpf:tp"
 
-  - label: switches-through-a-raw-tracepoint
+  - label: switches-through-tracefs
     source: sched.switches
     target: {launch: ["/bin/true"]}
-    mode: trace
+    mode: count
     emit: [summary]
-    backend: "force:bpf:raw_tp"
+    backend: "force:bpf:tp"
 
   - label: wakeup-through-tracefs
     source: sched.wakeup

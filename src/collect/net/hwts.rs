@@ -75,6 +75,20 @@ impl Prepared for Prepare {
     }
 }
 
+/// The probe behind the `phc` requirement: whether some interface on this
+/// machine keeps a PTP hardware clock this process can read.
+///
+/// It asks exactly what `start` asks -- every interface's timestamping
+/// capabilities over ethtool, and an open of each clock they name -- because
+/// available means it attaches. Until the fourteenth wave `phc` had no probe,
+/// the netlink backend did not require it, and the CI's runner listed
+/// `net.hwts` usable and refused it at start: its one interface keeps
+/// `/dev/ptp1`, which only root may read.
+pub fn clock_support() -> Result<(), String> {
+    let mut collector = Box::new(Prepare).attach(&Target::System)?;
+    collector.start()
+}
+
 /// An open PTP hardware clock, and the clock id `clock_gettime` reads it by.
 struct Phc {
     index: u32,

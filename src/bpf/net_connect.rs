@@ -41,7 +41,7 @@ use crate::bpf::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 /// The prototypes these programs read. `tcp_v4_connect` took a `sockaddr *`
 /// until the 7.x series and a `sockaddr_unsized *` since; the program reads
 /// neither, so both are accepted.
-const CONNECT_SIGNATURES: [&[&str]; 2] = [
+pub(crate) const CONNECT_SIGNATURES: [&[&str]; 2] = [
     &["sock *", "sockaddr_unsized *", "int"],
     &["sock *", "sockaddr *", "int"],
 ];
@@ -587,6 +587,39 @@ mod tests {
         assert_eq!(record.outcome, Some(Outcome::Refused));
         assert_eq!(record.errno, 111);
         assert!(Connect::from_bytes(&bytes[..50]).is_none());
+    }
+
+    /// The probe answers from the catalog's line and the attach from this
+    /// program: the two list the same shapes of `tcp_v4_connect`, in the same
+    /// order, or a kernel reads *usable* where the attach refuses it, or
+    /// *missing* where the program would have served it.
+    #[test]
+    fn the_catalog_lists_every_shape_of_the_connect_call_the_program_reads() {
+        let catalog = crate::catalog::Catalog::embedded().expect("the embedded catalog loads");
+        let entry = catalog
+            .entries()
+            .iter()
+            .find(|entry| entry.id.as_str() == "net.tcp.connect")
+            .expect("net.tcp.connect");
+        let listed: Vec<Vec<String>> = entry
+            .backends
+            .iter()
+            .flat_map(|backend| &backend.requires)
+            .filter_map(|requirement| requirement.strip_prefix("fentry:"))
+            .map(|line| crate::bpf::parse_raw_tracepoint(line).expect("a well-formed line"))
+            .find(|(name, _)| *name == "tcp_v4_connect")
+            .map(|(_, shapes)| shapes)
+            .expect("`net.tcp.connect` requires `fentry:tcp_v4_connect`");
+        let program: Vec<Vec<String>> = CONNECT_SIGNATURES
+            .iter()
+            .map(|shape| {
+                shape
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(listed, program);
     }
 
     /// Each of the three closes is built against this kernel, and the one on

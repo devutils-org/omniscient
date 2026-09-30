@@ -259,6 +259,113 @@ fn bring_loopback_up() {
 // Class A -- the capability sweep
 // ---------------------------------------------------------------------------
 
+/// The source the resolver said this machine cannot serve, when it said so:
+/// exit 1 and *"`<source>` has no viable backend on this machine"*.
+fn withheld_source(outcome: &Output) -> Option<String> {
+    const WITHHELD: &str = "` has no viable backend on this machine";
+    let said = stderr(outcome);
+    if code(outcome) != 1 {
+        return None;
+    }
+    let at = said.find(WITHHELD)?;
+    let opened = said[..at].rfind('`')?;
+    Some(said[opened + 1..at].to_owned())
+}
+
+/// A sweep session with every request for `source` taken out, written to a
+/// scratch file: the requests are the `  - label:` blocks under `requests:`.
+fn without_source(text: &str, source: &str) -> String {
+    let (head, requests) = text
+        .split_once("\nrequests:\n")
+        .expect("a session with requests");
+    let mut kept = format!("{head}\nrequests:\n");
+    for block in requests
+        .split_inclusive('\n')
+        .fold(Vec::<String>::new(), |mut blocks, line| {
+            if line.starts_with("  - label:") || blocks.is_empty() {
+                blocks.push(String::new());
+            }
+            blocks.last_mut().expect("a block").push_str(line);
+            blocks
+        })
+    {
+        let names_it = block
+            .lines()
+            .any(|line| line.trim() == format!("source: {source}"));
+        if !names_it {
+            kept.push_str(&block);
+        }
+    }
+    kept
+}
+
+/// Runs one leg of the sweep, leaving out each source the resolver said this
+/// machine cannot serve, and printing it.
+///
+/// A sweep is about the axes, and a source the machine cannot serve is a
+/// machine's limit -- the CI's runner keeps a PTP hardware clock only root may
+/// read, so `net.hwts` has nothing to measure there. The rest of the leg is
+/// still asked: skipping the whole leg for one withheld source left every
+/// other source of it untested wherever that one was missing. Returns the
+/// outcome and the sources left out.
+fn run_leg(name: &str) -> (Output, Vec<String>) {
+    let mut text = std::fs::read_to_string(session(name)).expect("the sweep session");
+    let mut left_out = Vec::new();
+    loop {
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("leg-{}", left_out.len()))
+            .join(name);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a scratch directory");
+        std::fs::write(&path, &text).expect("the session");
+        let outcome = omn(&["-f", path.to_str().expect("a path"), "--format", "json"]);
+        let Some(source) = withheld_source(&outcome) else {
+            if !left_out.is_empty() {
+                eprintln!(
+                    "note: `{name}` ran without {left_out:?}, which this machine cannot serve"
+                );
+            }
+            return (outcome, left_out);
+        };
+        assert!(
+            !left_out.contains(&source),
+            "`{source}` was left out of `{name}` and still refused:\n{}",
+            stderr(&outcome)
+        );
+        eprintln!(
+            "note: this machine cannot serve `{source}`, left out of `{name}`:\n{}",
+            stderr(&outcome)
+        );
+        text = without_source(&text, &source);
+        left_out.push(source);
+    }
+}
+
+/// Leaving a withheld source out of a sweep leg leaves every other request of
+/// it, and a session that still validates: the pruning `run_leg` does where a
+/// machine cannot serve `net.hwts`, done here where it can.
+#[test]
+fn a_leg_without_a_withheld_source_keeps_every_other_request() {
+    for (name, requests) in [("net-capability-sweep.yml", 6), ("net-snapshot.yml", 3)] {
+        let text = std::fs::read_to_string(session(name)).expect("the sweep session");
+        let count = |text: &str| text.lines().filter(|l| l.starts_with("  - label:")).count();
+        assert_eq!(count(&text), requests, "`{name}` changed its requests");
+        let pruned = without_source(&text, "net.hwts");
+        assert_eq!(
+            count(&pruned),
+            requests - 1,
+            "`{name}` without net.hwts:\n{pruned}"
+        );
+        assert!(!pruned.contains("source: net.hwts"), "{pruned}");
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("pruned")
+            .join(name);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a scratch directory");
+        std::fs::write(&path, &pruned).expect("the session");
+        let outcome = omn(&["validate", "-f", path.to_str().expect("a path")]);
+        assert_eq!(code(&outcome), 0, "{pruned}\n{}", stderr(&outcome));
+    }
+}
+
 /// Every `net` session this family ships parses and validates.
 ///
 /// Cheap, and it is the only check that an example a reader is told to run
@@ -299,24 +406,26 @@ fn the_sessions_this_family_ships_say_something_the_catalog_offers() {
 /// a combination the catalog offers and the build cannot serve.
 #[test]
 fn the_poll_leg_of_the_sweep_answers_with_every_emit_it_promised() {
-    let outcome = omn(&[
-        "-f",
-        &session("net-capability-sweep.yml"),
-        "--format",
-        "json",
-    ]);
+    let (outcome, left_out) = run_leg("net-capability-sweep.yml");
     assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
     let run = results(&outcome);
 
-    let expected: &[(&str, &[&str])] = &[
-        ("volume", &["timeline", "summary"]),
-        ("packets", &["timeline", "summary"]),
-        ("links", &["raw", "timeline", "summary"]),
-        ("accept-queue", &["raw", "timeline", "summary"]),
-        ("round-trip", &["raw", "timeline", "summary"]),
-        ("nic-clocks", &["raw", "timeline", "summary"]),
+    let expected: &[(&str, &str, &[&str])] = &[
+        ("volume", "net.bytes", &["timeline", "summary"]),
+        ("packets", "net.packets", &["timeline", "summary"]),
+        ("links", "net.iface", &["raw", "timeline", "summary"]),
+        (
+            "accept-queue",
+            "net.backlog",
+            &["raw", "timeline", "summary"],
+        ),
+        ("round-trip", "net.tcp.rtt", &["raw", "timeline", "summary"]),
+        ("nic-clocks", "net.hwts", &["raw", "timeline", "summary"]),
     ];
-    for (label, wanted) in expected {
+    for (label, source, wanted) in expected {
+        if left_out.iter().any(|out| out == source) {
+            continue;
+        }
         let result = labelled(&run, label);
         assert_eq!(&emits(result), wanted, "`{label}` emitted the wrong set");
         assert!(
@@ -421,11 +530,18 @@ fn the_count_leg_of_the_sweep_finds_the_traffic_the_scenario_pushed() {
 /// `docs/scenarios/net.md` records under "Defects found" 3.
 #[test]
 fn the_snapshot_leg_of_the_sweep_answers_with_every_emit_it_promised() {
-    let outcome = omn(&["-f", &session("net-snapshot.yml"), "--format", "json"]);
+    let (outcome, left_out) = run_leg("net-snapshot.yml");
     assert_eq!(code(&outcome), 0, "{}", stderr(&outcome));
     let run = results(&outcome);
 
-    for label in ["links", "accept-queue", "nic-clocks"] {
+    for (label, source) in [
+        ("links", "net.iface"),
+        ("accept-queue", "net.backlog"),
+        ("nic-clocks", "net.hwts"),
+    ] {
+        if left_out.iter().any(|out| out == source) {
+            continue;
+        }
         let result = labelled(&run, label);
         assert_eq!(
             emits(result),
@@ -2687,6 +2803,17 @@ fn the_kernels_own_softirq_counter_bounds_what_this_run_bucketed() {
     assert!(
         notes.contains("NET_RX") && notes.contains("/proc/softirqs"),
         "the run has to name the vectors it measured and where their numbers came from: {notes}"
+    );
+    // And the kernel's own count is a fact the run states, not something it
+    // gave up: it reaches `notes`, and not `degraded:`.
+    let facts = labelled(&run, "softirq")["notes"].to_string();
+    assert!(
+        facts.contains("the kernel's own /proc/softirqs counted"),
+        "the kernel's count of the same handler runs is a fact of the run: {facts}"
+    );
+    assert!(
+        !notes.contains("the kernel's own /proc/softirqs counted"),
+        "and not a degradation: {notes}"
     );
 }
 

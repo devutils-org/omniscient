@@ -1,12 +1,16 @@
 //! `sched.switches` over `perf_event_open`.
 //!
-//! The degraded backend of the pair, and worth having anyway: it needs no
-//! privileges beyond what a normal machine already grants, so a context-switch
-//! rate is available where the eBPF path is refused. What it gives up is the
-//! second party. `PERF_COUNT_SW_CONTEXT_SWITCHES` fires for the task being
-//! observed; it does not say what ran next, and it does not distinguish a task
-//! that blocked from one whose slice ran out. That distinction is the whole
-//! diagnosis, which is why `bpf:tp` is ahead of it in the chain.
+//! The first backend of the chain for every target it can follow: an exact
+//! count that costs nothing. It needs less than the eBPF path where
+//! `perf_event_paranoid` is 1 or lower, and the same `CAP_PERFMON` at the
+//! kernel's default of 2, because a context switch happens in kernel mode and
+//! a user-mode-only counter of one counts zero (`kernel_mode_counted` in
+//! `mod.rs` refuses that). What it gives up is the second party.
+//! `PERF_COUNT_SW_CONTEXT_SWITCHES` fires for the task being observed; it does
+//! not say what ran next, and it does not distinguish a task that blocked from
+//! one whose slice ran out. That distinction is the whole
+//! diagnosis, which the `sched_switch` program behind it in the chain
+//! (`switch_count.rs`) keeps, in `count` mode.
 
 use std::collections::BTreeSet;
 use std::time::Duration as StdDuration;

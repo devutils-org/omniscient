@@ -98,6 +98,19 @@ fn unprivileged(text: &str) -> bool {
     text.contains("CAP_BPF") || text.contains("CAP_PERFMON")
 }
 
+/// Why this machine cannot serve `sched.switches` at all, when that is what a
+/// run said: every backend refused by the resolver (the CI's first runner, at
+/// `perf_event_paranoid` 4 with no capability), or `pmu:sw` refused because
+/// a context switch is kernel mode and the machine lets this process count
+/// its own user mode only (the second runner, at 2).
+fn switches_withheld_here(output: &Output) -> Option<String> {
+    let text = spoken(output);
+    (exit_code(output) != 0
+        && (text.contains("has no viable backend on this machine")
+            || text.contains("which happen only in kernel mode")))
+    .then_some(text)
+}
+
 /// Whether a program the workload needs is on this machine.
 fn have(program: &str) -> bool {
     Command::new(program)
@@ -1117,6 +1130,10 @@ fn a_counted_switch_total_is_the_sum_of_what_each_thread_counted() {
         "--",
         &fixture,
     ]);
+    if let Some(reason) = switches_withheld_here(&output) {
+        eprintln!("skipped: this machine cannot serve `sched.switches` here:\n{reason}");
+        return;
+    }
     let text = spoken(&output);
     assert_eq!(exit_code(&output), 0, "`count` mode is served:\n{text}");
     let said: Vec<u64> = text
@@ -1363,8 +1380,8 @@ fn a_source_with_no_collector_is_refused_with_its_own_exit_code() {
     }
 }
 
-/// This family has no source with two implemented backends, so the comparison
-/// `--backend force:` exists for is with the refusal.
+/// Where this family's chains have no second implemented backend, the
+/// comparison `--backend force:` exists for is with the refusal.
 ///
 /// Every backend pinned in this session probes available on a machine that can
 /// run the rest of these tests: the requirement is there, the kernel is there,
@@ -1398,7 +1415,7 @@ fn pinning_a_backend_this_build_lacks_blames_the_build_and_not_the_machine() {
     for (source, backend) in [
         ("sched.offcpu", "bpf:tp:stacks"),
         ("sched.offcpu", "bpf:tp"),
-        ("sched.switches", "bpf:raw_tp"),
+        ("sched.switches", "bpf:tp"),
         ("sched.wakeup", "bpf:tp"),
         ("sched.migrations", "bpf:tp"),
     ] {
@@ -3894,8 +3911,8 @@ static void *sleeper(void *unused) {
         sscanf(line, "nonvoluntary_ctxt_switches: %lu", &involuntary);
     }
     if (status) fclose(status);
-    fprintf(stderr, "omn-switches tid=%ld switches=%lu\n", (long)syscall(SYS_gettid),
-            voluntary + involuntary);
+    fprintf(stderr, "omn-switches tid=%ld switches=%lu voluntary=%lu involuntary=%lu\n",
+            (long)syscall(SYS_gettid), voluntary + involuntary, voluntary, involuntary);
     return 0;
 }
 
@@ -3921,6 +3938,101 @@ int main(void) {
     return 0;
 }
 "#;
+
+/// `sched.switches -m count` through the `sched_switch` program tells a
+/// voluntary switch from an involuntary one by the kernel's own rule.
+///
+/// Ground truth: each of the fixture's threads reads its own
+/// `voluntary_ctxt_switches` and `nonvoluntary_ctxt_switches` from
+/// `/proc/thread-self/status`, which `__schedule` increments by the same rule
+/// the program applies to the arguments it hands the tracepoint. The program
+/// is attached before the program is released from its gate, so it sees every
+/// switch the thread counted; what it may add is the edges -- the switches
+/// after the read, in the `fprintf` and the exit.
+#[test]
+fn a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them() {
+    const EDGES: u64 = 4;
+    let fixture = match switch_fixture() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let output = omn(&[
+        "sched.switches",
+        "--backend",
+        "force:bpf:raw_tp",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        &fixture,
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!(
+            "skipped: the sched_switch program needs CAP_BPF and CAP_PERFMON, which this \
+             machine does not grant"
+        );
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let field = |line: &str, name: &str| -> u64 {
+        line.split_whitespace()
+            .find_map(|field| field.strip_prefix(name))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("`{name}` in `{line}`"))
+    };
+    let said: Vec<(u64, u64, u64)> = text
+        .lines()
+        .filter(|line| line.starts_with("omn-switches "))
+        .map(|line| {
+            (
+                field(line, "tid="),
+                field(line, "voluntary="),
+                field(line, "involuntary="),
+            )
+        })
+        .collect();
+    assert_eq!(said.len(), SWITCH_THREADS, "every thread reports:\n{text}");
+
+    let results = results(&output);
+    let result = &results[0];
+    let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let rows = raw_events(result);
+    let counted = |tid: u64, voluntary: bool| -> u64 {
+        rows.iter()
+            .filter(|row| number(row, "tid") == tid && (number(row, "voluntary") == 1) == voluntary)
+            .map(|row| number(row, "count"))
+            .sum()
+    };
+    for (tid, voluntary, involuntary) in said {
+        assert!(
+            voluntary >= SWITCH_SLEEPS,
+            "{SWITCH_SLEEPS} sleeps are at least {SWITCH_SLEEPS} voluntary switches, and thread \
+             {tid} counted {voluntary}"
+        );
+        let (seen_v, seen_i) = (counted(tid, true), counted(tid, false));
+        assert!(
+            seen_v + lost >= voluntary && seen_v <= voluntary + EDGES,
+            "thread {tid} counted {voluntary} voluntary switches of its own and the program \
+             {seen_v}, with {lost} lost:\n{text}"
+        );
+        assert!(
+            seen_i + lost >= involuntary && seen_i <= involuntary + EDGES,
+            "thread {tid} counted {involuntary} involuntary switches of its own and the \
+             program {seen_i}, with {lost} lost:\n{text}"
+        );
+        eprintln!(
+            "note: thread {tid}: voluntary {seen_v} against its own {voluntary}, involuntary \
+             {seen_i} against {involuntary}"
+        );
+    }
+}
 
 /// The switch fixture, built once for every test that runs it.
 fn switch_fixture() -> Result<String, String> {
@@ -3959,6 +4071,10 @@ fn every_thread_a_program_starts_has_its_switches_counted() {
         "--",
         &fixture,
     ]);
+    if let Some(reason) = switches_withheld_here(&output) {
+        eprintln!("skipped: this machine cannot serve `sched.switches` here:\n{reason}");
+        return;
+    }
     let text = spoken(&output);
     assert_eq!(exit_code(&output), 0, "{text}");
     let said: Vec<(String, u64)> = text
@@ -4241,7 +4357,9 @@ while mono() < end:
     if peer:
         a = mono(); os.kill(peer, signal.SIGUSR2); b = mono(); sent.append([a, b])
     i += 1
-print(json.dumps({"sleeps": sleeps, "moves": moves, "sent": sent}), flush=True)
+usage = resource.getrusage(resource.RUSAGE_SELF)
+print(json.dumps({"sleeps": sleeps, "moves": moves, "sent": sent,
+                  "nvcsw": usage.ru_nvcsw, "nivcsw": usage.ru_nivcsw}), flush=True)
 "#;
 
 /// One copy of the workload, started and running.
@@ -4530,6 +4648,112 @@ fn a_cgroup_target_sees_the_workload_inside_it_and_none_of_the_one_beside_it() {
         neither, 0,
         "{neither} wakeups of the process beside the cgroup were kept, whose waker was not \
          inside it either:\n{text}"
+    );
+}
+
+/// `sched.switches` on a cgroup: the `sched_switch` program, which is the
+/// backend of the chain that can see into one, counts the workload inside and
+/// nothing of the copy beside it.
+///
+/// Ground truth is the workload's own: every sleep that blocked is one
+/// voluntary switch by the kernel's count of it (`ru_nvcsw`, read around each
+/// sleep), so the sleeps inside the run's window are a floor on the voluntary
+/// switches counted, less what the run reports it lost; and the process's
+/// whole-life `ru_nvcsw` and `ru_nivcsw`, read at its end, are a ceiling on
+/// each kind, up to the edges after that read -- the print and the exit.
+#[test]
+fn a_cgroup_has_its_switches_counted_by_kind_and_none_of_the_one_beside_it() {
+    const EDGES: u64 = 8;
+    if !have("python3") {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let scope = match Scope::create("switches") {
+        Ok(scope) => scope,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let outside = Workload::start(None, 0);
+    let within = Workload::start(Some(&scope.inner_procs()), outside.pid);
+    let (inner, beside) = (within.pid, outside.pid);
+    let session = format!(
+        "name: switches of a cgroup\nduration: {CGROUP_RUN}\nrequests:\n  - {{label: switches, \
+         source: sched.switches, target: {{cgroup: \"{}\"}}, mode: count, emit: [raw]}}\n",
+        scope.dir.display()
+    );
+    let mut run = Command::new(BINARY)
+        .args(["-f", "-", "--input-format", "yaml", "--format", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::io::Write::write_all(run.stdin.as_mut().expect("a pipe"), session.as_bytes())
+        .expect("the session");
+    drop(run.stdin.take());
+    let output = run.wait_with_output().expect("omn should finish");
+    let log = within.finish();
+    let _ = outside.finish();
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!(
+            "skipped: the sched_switch program needs CAP_BPF and CAP_PERFMON, which this \
+             machine does not grant"
+        );
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let result = labelled(&results, "switches");
+    assert_eq!(
+        result["backend"].as_str(),
+        Some("bpf:raw_tp"),
+        "a cgroup is the program's to serve: {result}"
+    );
+    let rows = raw_events(result);
+    let strays = rows
+        .iter()
+        .filter(|row| number(row, "pid") == beside)
+        .count();
+    assert_eq!(
+        strays, 0,
+        "the run kept {strays} rows of the process beside the cgroup:\n{text}"
+    );
+    let counted = |voluntary: bool| -> u64 {
+        rows.iter()
+            .filter(|row| {
+                number(row, "pid") == inner && (number(row, "voluntary") == 1) == voluntary
+            })
+            .map(|row| number(row, "count"))
+            .sum()
+    };
+    let (voluntary, involuntary) = (counted(true), counted(false));
+    let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let blocked = blocked_since(&log, opened);
+    assert!(
+        blocked > 50,
+        "the workload blocked {blocked} times inside the window, too few to judge"
+    );
+    let (whole_v, whole_i) = (
+        log["nvcsw"].as_u64().expect("the workload's own count"),
+        log["nivcsw"].as_u64().expect("the workload's own count"),
+    );
+    assert!(
+        voluntary + lost >= blocked && voluntary <= whole_v + EDGES,
+        "the workload blocked {blocked} times inside the window and {whole_v} in its whole \
+         life, and the program counted {voluntary} voluntary switches, with {lost} lost"
+    );
+    assert!(
+        involuntary <= whole_i + EDGES,
+        "the workload was switched out involuntarily {whole_i} times in its whole life, and \
+         the program counted {involuntary}"
+    );
+    eprintln!(
+        "note: voluntary {voluntary} (floor {blocked}, ceiling {whole_v}), involuntary \
+         {involuntary} (ceiling {whole_i}), {lost} lost"
     );
 }
 

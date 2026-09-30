@@ -58,6 +58,7 @@ mod sched_futex;
 mod sched_irq;
 mod sched_lock;
 mod sched_numa;
+mod switch_count;
 mod syscall;
 // Stream U's: reading `.note.stapsdt` and putting a uprobe on what it names.
 pub mod usdt;
@@ -89,9 +90,43 @@ pub use sched_futex::{FutexDrops, FutexProgram, FutexWait};
 pub use sched_irq::{IrqDrops, IrqProgram, IrqRun, KIND_HARD, KIND_SOFT};
 pub use sched_lock::{LockDrops, LockProgram, LockWait};
 pub use sched_numa::{NumaDrops, NumaProgram, NumaStick};
+pub use switch_count::{SwitchCount, SwitchCountProgram};
 pub use wakeup::{Wakeup, WakeupProgram};
 
 use btf::Btf;
+
+/// Asks the kernel to time every eBPF program's runs for as long as the
+/// returned descriptor is held: `BPF_ENABLE_STATS` with `BPF_STATS_RUN_TIME`.
+///
+/// Refused with `EPERM` without `CAP_SYS_ADMIN`, which the `CAP_BPF` this
+/// tool is granted does not include; the `kernel.bpf_stats_enabled` sysctl is
+/// the other switch. Here, in the layer's public face, for the runner in
+/// `src/collect/mod.rs`, which kept its own copy of the call because
+/// `syscall` is private to this layer (stream R's request of the thirteenth
+/// wave). `syscall.rs` is where a `bpf()` command belongs; it is not the
+/// kernel stream's file this wave, so the call is written here and can move
+/// there behind this same name.
+pub fn enable_run_time_stats() -> std::io::Result<std::os::fd::OwnedFd> {
+    /// `include/uapi/linux/bpf.h`.
+    const BPF_ENABLE_STATS: libc::c_long = 32;
+    const BPF_STATS_RUN_TIME: u32 = 0;
+    let mut kind = BPF_STATS_RUN_TIME;
+    // SAFETY: the attribute is the one `u32` the command reads.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_ENABLE_STATS,
+            &mut kind as *mut u32 as *mut libc::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    use std::os::fd::FromRawFd;
+    // SAFETY: a descriptor the kernel just returned to this process.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+}
 
 /// Whether a requirement of this layer is met, could not be met, or could not
 /// be checked.
@@ -370,6 +405,20 @@ pub fn permission_advice(action: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The statistics switch is granted or refused for want of
+    /// `CAP_SYS_ADMIN`, and nothing else: an unknown command would be
+    /// `EINVAL`, which is what a wrong constant here would read as.
+    #[test]
+    fn the_statistics_switch_is_granted_or_refused_for_privilege() {
+        match enable_run_time_stats() {
+            Ok(_) => {}
+            Err(error) => assert!(
+                matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)),
+                "BPF_ENABLE_STATS was refused for another reason than privilege: {error}"
+            ),
+        }
+    }
 
     #[test]
     fn a_tracepoint_the_kernel_does_not_have_is_reported_missing_not_unknown() {

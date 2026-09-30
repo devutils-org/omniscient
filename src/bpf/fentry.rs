@@ -366,7 +366,36 @@ pub fn expect(name: &str, accepted: &[&[&str]]) -> Result<Function, String> {
 /// one against the function -- a verifier pass over two instructions, nothing
 /// attached -- and remembered, because a run asks the same question once per
 /// backend per source.
-pub fn support(function: &str) -> Support {
+///
+/// The requirement is `function` or, like a raw tracepoint's,
+/// `function(arg, ...)|(arg, ...)`: every prototype the program reads, in the
+/// words `expect` compares. Existence alone was the question until the CI's
+/// 6.17 runner: `tcp_v4_connect` takes a `sockaddr *` there and a
+/// `sockaddr_unsized *` on 7.x, and a probe that asks only whether the function
+/// exists says yes on a kernel whose prototype the program has never seen.
+pub fn support(requirement: &str) -> Support {
+    let (function, prototypes) = match crate::bpf::parse_raw_tracepoint(requirement) {
+        Ok(parsed) => parsed,
+        Err(reason) => return Support::Unchecked(reason.replace("raw_tracepoint:", "fentry:")),
+    };
+    let answer = exists(function);
+    if !matches!(answer, Support::Yes) || prototypes.is_empty() {
+        return answer;
+    }
+    let accepted: Vec<Vec<&str>> = prototypes
+        .iter()
+        .map(|shape| shape.iter().map(String::as_str).collect())
+        .collect();
+    let accepted: Vec<&[&str]> = accepted.iter().map(Vec::as_slice).collect();
+    match expect(function, &accepted) {
+        Ok(_) => Support::Yes,
+        Err(reason) => Support::No(reason),
+    }
+}
+
+/// Whether `function` is in this kernel's BTF and, where this process may ask,
+/// whether a tracing program loads against it.
+fn exists(function: &str) -> Support {
     static CONFIRMED: OnceLock<Mutex<HashMap<String, Support>>> = OnceLock::new();
     let index = match index() {
         Ok(index) => index,
@@ -1511,11 +1540,6 @@ mod tests {
                 "vfs_fsync_range",
                 &["file *", "loff_t", "loff_t", "int"][..],
             ),
-            // `sockaddr_unsized *` since 7.x; the connect program accepts both.
-            (
-                "tcp_v4_connect",
-                &["sock *", "sockaddr_unsized *", "int"][..],
-            ),
             ("tcp_finish_connect", &["sock *", "sk_buff *"][..]),
             ("sock_recvmsg", &["socket *", "msghdr *", "int"][..]),
         ] {
@@ -1523,6 +1547,42 @@ mod tests {
             assert_eq!(function.params, params, "{name}");
             assert!(function.id > 0);
         }
+        // Two shapes: `sockaddr *` through 6.17 (the CI's runner), and
+        // `sockaddr_unsized *` since 7.x (this machine). The program reads
+        // neither argument, and accepts both; the test holds the kernel to
+        // one of them rather than to the one the developer's machine has.
+        let connect = index.function("tcp_v4_connect").expect("tcp_v4_connect");
+        assert!(
+            super::super::net_connect::CONNECT_SIGNATURES
+                .iter()
+                .any(|shape| connect.params == *shape),
+            "this kernel's `tcp_v4_connect({})` is none of the shapes the connect program reads",
+            connect.params.join(", ")
+        );
+    }
+
+    /// The probe asks what the attach asks: a prototype the requirement does
+    /// not list is missing, by name, even though the function exists.
+    #[test]
+    fn a_requirement_with_a_prototype_is_missing_when_the_kernel_declares_another() {
+        let Some(index) = functions() else { return };
+        let read = index.function("vfs_read").expect("vfs_read");
+        let declared = format!("vfs_read({})", read.params.join(", "));
+        assert!(
+            matches!(support(&declared), Support::Yes),
+            "the kernel's own prototype must be accepted: {declared}"
+        );
+        let two = format!("vfs_read(int)|({})", read.params.join(", "));
+        assert!(matches!(support(&two), Support::Yes), "{two}");
+        let Support::No(reason) = support("vfs_read(int)") else {
+            panic!("a prototype the kernel does not declare is missing");
+        };
+        assert!(reason.contains("`vfs_read(int)`"), "{reason}");
+        assert!(reason.contains("file *"), "{reason}");
+        let Support::Unchecked(reason) = support("vfs_read(int") else {
+            panic!("a malformed requirement cannot be checked");
+        };
+        assert!(reason.contains("fentry:"), "{reason}");
     }
 
     /// A function the kernel does not have is missing, not unknown: the answer

@@ -563,6 +563,10 @@ mod tests {
             Vec::new(),
         );
 
+        if let Some(reason) = scratch.no_swap_room(2 * TOUCHED.saturating_sub(LIMIT)) {
+            eprintln!("skipped: {reason}");
+            return;
+        }
         assert!(scratch.write("memory.max", &LIMIT.to_string()));
         counted.sample(0).expect("the counted run's opening read");
         collector.sample(0).expect("the baseline read");
@@ -674,6 +678,10 @@ mod tests {
             return;
         }
 
+        if let Some(reason) = scratch.no_swap_room(2 * TOUCHED.saturating_sub(LIMIT)) {
+            eprintln!("skipped: {reason}");
+            return;
+        }
         assert!(scratch.write("memory.max", &LIMIT.to_string()));
         collector.sample(0).expect("the baseline read");
         let mut child = scratch.spawn_zero_toucher(TOUCHED);
@@ -745,6 +753,10 @@ mod tests {
             return;
         }
 
+        if let Some(reason) = scratch.no_swap_room(2 * TOUCHED.saturating_sub(LIMIT)) {
+            eprintln!("skipped: {reason}");
+            return;
+        }
         assert!(scratch.write("memory.max", &LIMIT.to_string()));
         machine.sample(0).expect("vmstat reads");
         cgroup.sample(0).expect("memory.stat reads");
