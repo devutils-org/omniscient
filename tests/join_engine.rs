@@ -99,7 +99,7 @@ fn eq_rule() -> Rule {
         id: "handles-of-a-thread".to_owned(),
         from: "proc.threads".to_owned(),
         to: "proc.fd".to_owned(),
-        via: KeyKind::Task,
+        via: Some(KeyKind::Task),
         match_kind: MatchKind::Eq,
         opens: None,
         closes: None,
@@ -226,7 +226,7 @@ fn wakeup_rule() -> Rule {
         id: "who-released-this".to_owned(),
         from: "sched.wakeup".to_owned(),
         to: "sched.switches".to_owned(),
-        via: KeyKind::Task,
+        via: Some(KeyKind::Task),
         match_kind: MatchKind::Wakeup,
         opens: None,
         closes: None,
@@ -1428,6 +1428,33 @@ fn a_timer_is_named_as_an_interrupt_and_a_thread_as_a_task() {
 /// than the interval holds.
 #[test]
 fn a_wait_across_several_readings_is_split_by_its_overlap_with_each() {
+    waits_are_split_by_their_overlap(
+        "join-overlap-waits.yml",
+        "that four 250 ms waits are split across 100 ms readings by their overlap with each",
+        "waiting-per-interval",
+        None,
+    );
+}
+
+/// `overlap` with no key, against the same program: the machine's memory
+/// pressure is one series with no task on it, and each of the program's waits
+/// is laid across its intervals as across the task's own. The ground truth is
+/// the program's brackets and the intervals the readings state; the rows are
+/// the machine's, keyed `machine`, and nothing is counted keyless.
+#[test]
+fn a_wait_is_split_across_the_machines_readings_with_no_key() {
+    waits_are_split_by_their_overlap(
+        "join-overlap-machine.yml",
+        "that four 250 ms waits are split across the machine's 100 ms pressure readings",
+        "waiting-per-pressure-interval",
+        Some(omn::join::MACHINE),
+    );
+}
+
+/// The four waits of `join-overlap-*.yml`, each interval's credit held to what
+/// the program's brackets put in it. `series` is the rows' key: the waiting
+/// task's when `None`.
+fn waits_are_split_by_their_overlap(file: &str, what: &str, id: &str, series: Option<&str>) {
     /// The gap between the program's bracket and the kernel's span, per wait:
     /// an interpreted call on either side of the syscall. Measured here at
     /// 20 to 60 us; ten times that, so a slow interpreter is not taken for a
@@ -1438,10 +1465,7 @@ fn a_wait_across_several_readings_is_split_by_its_overlap_with_each() {
         eprintln!("SKIPPED: the workload is a python3 program, and this machine has none");
         return;
     }
-    let Some(run) = session(
-        "join-overlap-waits.yml",
-        "that four 250 ms waits are split across 100 ms readings by their overlap with each",
-    ) else {
+    let Some(run) = session(file, what) else {
         return;
     };
     let waits: Vec<(i64, f64, f64)> = run
@@ -1461,10 +1485,17 @@ fn a_wait_across_several_readings_is_split_by_its_overlap_with_each() {
         "the workload waits four times:\n{}",
         run.stderr
     );
-    let task = format!("task:{}", waits[0].0);
+    let task = series.map_or_else(|| format!("task:{}", waits[0].0), str::to_owned);
 
-    let join = run.join("waiting-per-interval");
+    let join = run.join(id);
     assert_eq!(join["evidence"], "TEMPORAL");
+    if series.is_some() {
+        assert_eq!(
+            join["keyless"].as_u64().unwrap_or(0),
+            0,
+            "with no key, no event can lack it: {join}"
+        );
+    }
     let intervals: Vec<(f64, f64, f64)> = join["top"]
         .as_array()
         .expect("rows")
@@ -1538,5 +1569,44 @@ fn a_wait_across_several_readings_is_split_by_its_overlap_with_each() {
         split >= 2 * waits.len(),
         "four 250 ms waits across 100 ms readings touch at least eight intervals; the tool \
          credited {split}"
+    );
+}
+
+/// A rule with no key is `overlap`'s alone. Written for `eq`, it is refused
+/// before anything runs, and the refusal names `via`; the same session with
+/// `overlap` passes validation. Both are asked with `--dump-resolved`, which
+/// validates and resolves and runs nothing.
+#[test]
+fn a_rule_with_no_key_is_refused_on_every_match_but_overlap() {
+    let session = |kind: &str| {
+        format!(
+            "name: a machine-wide join
+requests:
+  - {{label: pressure, source: mem.pressure, target: system, mode: poll@100ms, emit: [raw]}}
+  - {{label: waits, source: sched.futex, target: system, mode: trace, emit: [raw]}}
+joins:
+  - {{id: no-key, from: mem.pressure, to: sched.futex, match: {kind}, value: total_ns}}
+"
+        )
+    };
+    let output = written_session(
+        &session("eq"),
+        &["--input-format", "yaml", "--dump-resolved"],
+    );
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "an `eq` with no key ran: {said}");
+    assert!(
+        said.contains("names no key") && said.contains("via"),
+        "the refusal says what is missing: {said}"
+    );
+
+    let output = written_session(
+        &session("overlap"),
+        &["--input-format", "yaml", "--dump-resolved"],
+    );
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !said.contains("names no key") && !said.contains("does not carry"),
+        "`overlap` with no key is refused as if it needed one: {said}"
     );
 }

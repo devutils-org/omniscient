@@ -156,7 +156,16 @@ pub struct Rule {
     /// The event kind that is matched against open states.
     pub to: String,
     /// The typed key both sides carry.
-    pub via: KeyKind,
+    ///
+    /// Absent only for `overlap`, over state the machine holds once and no key
+    /// names: `mem.pressure` read for the whole machine is one series, and a
+    /// window of any task can be laid across its intervals. Every `from`
+    /// reading is then one series and every `to` event is overlapped against
+    /// it; a `from` source that turns out to carry several series is refused by
+    /// name rather than read as one. Every other match needs a key to match
+    /// on, and [`check`] refuses one without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<KeyKind>,
     #[serde(rename = "match")]
     pub match_kind: MatchKind,
     /// Which `from` events open a state. Every one of them, when absent.
@@ -310,6 +319,24 @@ pub enum JoinError {
         id: String,
         attr: String,
         kind: String,
+    },
+    #[error(
+        "rule `{id}` matches by `{match_kind}` and names no key: every match but `overlap` \
+         pairs events that share one, so say which with `via`, as in `via: task`; a rule over \
+         state the machine holds once, with no key, matches by `overlap`"
+    )]
+    NoKey { id: String, match_kind: MatchKind },
+    #[error(
+        "rule `{id}` names no key, so it reads every `{from}` reading as one series, and \
+         `{from}` carried {series} of them ({sample}): the interval since the reading before \
+         would be the gap between two series, not a poll. Name the key they differ by with \
+         `via`, or read `{from}` for one of them"
+    )]
+    SeveralSeries {
+        id: String,
+        from: String,
+        series: usize,
+        sample: String,
     },
     #[error("rule `{id}` joins on `{via}`, which `{kind}` events do not carry")]
     MissingKey {
@@ -809,24 +836,37 @@ fn finish(
 /// costs the measurement. The engine asks it again for itself, so a caller that
 /// forgets cannot produce a wrong answer, only a late one.
 pub fn check(rule: &Rule) -> Result<(), JoinError> {
+    let Some(via) = rule.via else {
+        return match rule.match_kind {
+            MatchKind::Overlap if rule.value.is_none() => Err(JoinError::NoShareValue {
+                id: rule.id.clone(),
+                to: rule.to.clone(),
+            }),
+            MatchKind::Overlap => Ok(()),
+            match_kind => Err(JoinError::NoKey {
+                id: rule.id.clone(),
+                match_kind,
+            }),
+        };
+    };
     let unmatchable = |reason: &str| JoinError::UnmatchableKey {
         id: rule.id.clone(),
         match_kind: rule.match_kind,
-        via: rule.via,
+        via,
         reason: reason.to_owned(),
     };
 
     match rule.match_kind {
-        MatchKind::Interval if rule.via != KeyKind::Mem => Err(unmatchable(
+        MatchKind::Interval if via != KeyKind::Mem => Err(unmatchable(
             "an interval match needs a range to fall inside, and `mem:[base,len)` is the only key \
              that is one",
         )),
-        MatchKind::ScopedEq if !is_scoped(rule.via) => Err(unmatchable(
+        MatchKind::ScopedEq if !is_scoped(via) => Err(unmatchable(
             "a scoped match needs a key that says which life of an identity it names, written \
              `<id>@<scope>`; `blk:rq@open_ts` is the only one today, and on a key without a scope \
              `scoped_eq` is `eq` under a name that promises more",
         )),
-        MatchKind::Wakeup if rule.via != KeyKind::Task => Err(unmatchable(
+        MatchKind::Wakeup if via != KeyKind::Task => Err(unmatchable(
             "a wakeup is an edge between two tasks, so `task:tid` is the only key it can follow",
         )),
         MatchKind::Wakeup if rule.waker.is_none() => Err(JoinError::NoWakerAttribute {
@@ -837,7 +877,7 @@ pub fn check(rule: &Rule) -> Result<(), JoinError> {
             id: rule.id.clone(),
             to: rule.to.clone(),
         }),
-        MatchKind::Woke if rule.via != KeyKind::Task => Err(unmatchable(
+        MatchKind::Woke if via != KeyKind::Task => Err(unmatchable(
             "`woke` pairs a close with the next wakeup of the task it names, so `task:tid` is \
              the only key it can follow",
         )),
@@ -1061,7 +1101,7 @@ fn interval(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correla
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
-            let Some(KeyValue::Mem { base, len }) = event.key(rule.via).cloned() else {
+            let Some(KeyValue::Mem { base, len }) = event.key(keyed_by(rule)).cloned() else {
                 return Err(missing_key(rule, event));
             };
 
@@ -1088,7 +1128,7 @@ fn interval(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correla
             if watch.outside(event.ts_ns) {
                 continue;
             }
-            let Some(KeyValue::Mem { base: address, .. }) = event.key(rule.via) else {
+            let Some(KeyValue::Mem { base: address, .. }) = event.key(keyed_by(rule)) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
                 // and is counted apart rather than refusing the whole rule.
@@ -1140,7 +1180,7 @@ fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlatio
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
-            let Some(key) = event.key(rule.via) else {
+            let Some(key) = event.key(keyed_by(rule)) else {
                 return Err(missing_key(rule, event));
             };
             let id = identity(key);
@@ -1177,7 +1217,7 @@ fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlatio
             if watch.outside(event.ts_ns) {
                 continue;
             }
-            let Some(key) = event.key(rule.via) else {
+            let Some(key) = event.key(keyed_by(rule)) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
                 // and is counted apart rather than refusing the whole rule.
@@ -1236,7 +1276,7 @@ fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlati
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
-            let Some(KeyValue::Task { tid: wakee }) = event.key(rule.via).cloned() else {
+            let Some(KeyValue::Task { tid: wakee }) = event.key(keyed_by(rule)).cloned() else {
                 return Err(missing_key(rule, event));
             };
 
@@ -1285,7 +1325,7 @@ fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlati
                     to: rule.to.clone(),
                 });
             }
-            let Some(KeyValue::Task { tid }) = event.key(rule.via) else {
+            let Some(KeyValue::Task { tid }) = event.key(keyed_by(rule)) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
                 // and is counted apart rather than refusing the whole rule.
@@ -1357,7 +1397,7 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
-            let Some(key) = event.key(rule.via) else {
+            let Some(key) = event.key(keyed_by(rule)) else {
                 return Err(missing_key(rule, event));
             };
             let closing = closes(rule, event);
@@ -1380,7 +1420,7 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
             if watch.outside(event.ts_ns) {
                 continue;
             }
-            let Some(key) = event.key(rule.via) else {
+            let Some(key) = event.key(keyed_by(rule)) else {
                 // A downstream event without the key is outside every state by
                 // construction -- a block request issued outside any request --
                 // and is counted apart rather than refusing the whole rule.
@@ -1511,7 +1551,7 @@ fn woke<'a>(
         states.expire(event.ts_ns);
 
         if event.kind == rule.from {
-            let Some(KeyValue::Task { tid }) = event.key(rule.via).cloned() else {
+            let Some(KeyValue::Task { tid }) = event.key(keyed_by(rule)).cloned() else {
                 return Err(missing_key(rule, event));
             };
             if closes(rule, event) {
@@ -1555,7 +1595,7 @@ fn woke<'a>(
                         })?,
                     )
                 }
-                None => match event.key(rule.via) {
+                None => match event.key(keyed_by(rule)) {
                     Some(KeyValue::Task { tid }) => Some(*tid),
                     _ => None,
                 },
@@ -1632,7 +1672,8 @@ struct Covered {
 /// credited to each by the share of it that overlaps.
 ///
 /// Each `from` reading covers the interval since the reading before it of the
-/// same `via` key -- or `[ts - interval_ns, ts]` when the reading says so
+/// same `via` key (of the one series, when the rule names none) -- or
+/// `[ts - interval_ns, ts]` when the reading says so
 /// itself -- and the first reading of a key with neither is a baseline. Each
 /// `to` event covers `[ts - span, ts]`, or is an instant when the rule names no
 /// `span`. A `to` event is attributed to every interval its window overlaps,
@@ -1667,17 +1708,35 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         before_first: 0,
     };
 
+    // With no key, every reading is one series, and a source that carries
+    // several would have each series' reading close the other's interval:
+    // refused by name before anything is credited.
+    if rule.via.is_none() {
+        let series: BTreeSet<String> = events
+            .iter()
+            .filter(|event| event.kind == rule.from && opens(rule, event))
+            .map(|event| all_keys(event))
+            .collect();
+        if series.len() > 1 {
+            return Err(JoinError::SeveralSeries {
+                id: rule.id.clone(),
+                from: rule.from.clone(),
+                series: series.len(),
+                sample: series.into_iter().take(3).collect::<Vec<_>>().join(", "),
+            });
+        }
+    }
+
     // The intervals each key's readings cover, in the order they ended.
     let mut last: BTreeMap<String, u64> = BTreeMap::new();
     let mut intervals: BTreeMap<String, Vec<Covered>> = BTreeMap::new();
     for event in events.iter().filter(|event| event.kind == rule.from) {
-        let Some(key) = event.key(rule.via) else {
+        let Some(key) = series_of(rule, event) else {
             return Err(missing_key(rule, event));
         };
         if !opens(rule, event) {
             continue;
         }
-        let key = key.to_string();
         let stated = event
             .attr("interval_ns")
             .and_then(AttrValue::as_f64)
@@ -1714,11 +1773,10 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         if watch.outside(event.ts_ns) {
             continue;
         }
-        let Some(key) = event.key(rule.via) else {
+        let Some(key) = series_of(rule, event) else {
             keyless += 1;
             continue;
         };
-        let key = key.to_string();
         let value = event
             .attr(attr)
             .and_then(AttrValue::as_f64)
@@ -2111,8 +2169,8 @@ fn evidence(rule: &Rule) -> Evidence {
         // exists to correct. The pointer is shared, and which life of it an
         // event lands on is whichever held the address last -- two events at
         // one address around the same time, which is all it establishes.
-        MatchKind::Eq if is_scoped(rule.via) => Evidence::Temporal,
-        _ if rule.via == KeyKind::Req => Evidence::Identity,
+        MatchKind::Eq if rule.via.is_some_and(is_scoped) => Evidence::Temporal,
+        _ if rule.via == Some(KeyKind::Req) => Evidence::Identity,
         _ => Evidence::Key,
     }
 }
@@ -2176,8 +2234,39 @@ fn with_keyless(mut correlation: Correlation, keyless: u64) -> Correlation {
 fn missing_key(rule: &Rule, event: &Event) -> JoinError {
     JoinError::MissingKey {
         id: rule.id.clone(),
-        via: rule.via,
+        via: keyed_by(rule),
         kind: event.kind.clone(),
+    }
+}
+
+/// The key a keyed match pairs on. Every match but `overlap` has one: [`check`]
+/// refuses the rule otherwise, and [`apply_within`] asks it before any match
+/// runs, so a rule reaching a keyed match without one is this module's defect.
+fn keyed_by(rule: &Rule) -> KeyKind {
+    rule.via
+        .expect("`check` refuses a rule with no key on every match but `overlap`")
+}
+
+/// What a keyless `overlap` calls its one series, in the rows it writes.
+pub const MACHINE: &str = "machine";
+
+/// The series an `overlap` event belongs to: its `via` key, or the machine's
+/// one series when the rule names none. `None` is an event without the key.
+fn series_of(rule: &Rule, event: &Event) -> Option<String> {
+    match rule.via {
+        Some(via) => event.key(via).map(ToString::to_string),
+        None => Some(MACHINE.to_owned()),
+    }
+}
+
+/// Every key an event carries, as one label: what tells two series of one
+/// source apart when a rule names none of them.
+fn all_keys(event: &Event) -> String {
+    let keys: Vec<String> = event.keys.iter().map(ToString::to_string).collect();
+    if keys.is_empty() {
+        "no key".to_owned()
+    } else {
+        keys.join(" ")
     }
 }
 
@@ -3480,7 +3569,7 @@ mod tests {
             id: "pages-of-allocation".to_owned(),
             from: "mem.heap.alloc".to_owned(),
             to: "mem.faults".to_owned(),
-            via: KeyKind::Mem,
+            via: Some(KeyKind::Mem),
             match_kind: MatchKind::Interval,
             opens: Some("op == 'alloc'".parse().unwrap()),
             closes: Some("op == 'free'".parse().unwrap()),
@@ -3783,7 +3872,7 @@ mod tests {
     #[test]
     fn an_interval_match_on_a_key_that_is_not_a_range_is_refused_with_the_reason() {
         let mut rule = rule();
-        rule.via = KeyKind::Task;
+        rule.via = Some(KeyKind::Task);
         let error = check(&rule).unwrap_err();
         assert!(error.to_string().contains("mem:[base,len)"), "{error}");
         assert_eq!(
@@ -3824,7 +3913,7 @@ mod tests {
             id: "handles-of-a-thread".to_owned(),
             from: "proc.threads".to_owned(),
             to: "proc.fd".to_owned(),
-            via: KeyKind::Task,
+            via: Some(KeyKind::Task),
             match_kind: MatchKind::Eq,
             opens: None,
             closes: None,
@@ -3881,7 +3970,7 @@ mod tests {
             seq: 0,
         };
         let mut rule = eq_rule();
-        rule.via = KeyKind::Req;
+        rule.via = Some(KeyKind::Req);
         rule.from = "net.tcp.lifetime".to_owned();
         rule.to = "io.latency".to_owned();
 
@@ -3914,7 +4003,7 @@ mod tests {
             id: "latency-of-a-request".to_owned(),
             from: "io.rq.issue".to_owned(),
             to: "io.rq.complete".to_owned(),
-            via: KeyKind::Blk,
+            via: Some(KeyKind::Blk),
             match_kind: MatchKind::ScopedEq,
             opens: None,
             closes: None,
@@ -3988,7 +4077,7 @@ mod tests {
     #[test]
     fn a_scoped_match_on_a_key_with_no_scope_is_refused_with_the_reason() {
         let mut rule = scoped_rule();
-        rule.via = KeyKind::Task;
+        rule.via = Some(KeyKind::Task);
         let error = check(&rule).unwrap_err();
         assert!(error.to_string().contains("blk:rq@open_ts"), "{error}");
         assert!(error.to_string().contains("under a name"), "{error}");
@@ -4029,7 +4118,7 @@ mod tests {
             id: "who-released-this".to_owned(),
             from: "sched.wakeup".to_owned(),
             to: "sched.switches".to_owned(),
-            via: KeyKind::Task,
+            via: Some(KeyKind::Task),
             match_kind: MatchKind::Wakeup,
             opens: None,
             closes: None,
@@ -4191,7 +4280,7 @@ mod tests {
     #[test]
     fn a_wakeup_rule_on_a_key_that_is_not_a_task_is_refused_with_the_reason() {
         let mut rule = wakeup_rule();
-        rule.via = KeyKind::Sock;
+        rule.via = Some(KeyKind::Sock);
         let error = check(&rule).unwrap_err();
         assert!(
             error.to_string().contains("edge between two tasks"),
@@ -4316,7 +4405,7 @@ mod tests {
     #[test]
     fn a_woke_rule_on_a_key_that_is_not_a_task_is_refused_with_the_reason() {
         let rule = Rule {
-            via: KeyKind::Blk,
+            via: Some(KeyKind::Blk),
             ..woke_rule()
         };
         let error = apply(&rule, &[]).unwrap_err().to_string();
@@ -4447,6 +4536,146 @@ mod tests {
         assert_eq!(credit(100), Some(7.0), "and one at 101 in (100, 200]");
     }
 
+    /// A machine-wide reading, as `mem.pressure` for the system writes one:
+    /// no key, and the interval it covers stated.
+    fn pressure(ts_ns: u64, interval_ns: u64) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: "mem.pressure".to_owned(),
+            keys: vec![],
+            attrs: vec![
+                Attr::float("stall_ratio", 0.0),
+                Attr::uint("interval_ns", interval_ns),
+            ],
+            collector_id: CollectorId::new("pressure"),
+            seq: 0,
+        }
+    }
+
+    fn machine_rule() -> Rule {
+        Rule {
+            id: "blocked-per-pressure-reading".to_owned(),
+            from: "mem.pressure".to_owned(),
+            via: None,
+            ..overlap_rule()
+        }
+    }
+
+    /// With no key, the machine's readings are one series and every task's
+    /// window is laid across it: two tasks' blocks share one interval, which a
+    /// keyed rule would have kept apart, and nothing is keyless.
+    #[test]
+    fn with_no_key_every_window_is_laid_across_the_machines_one_series() {
+        let events = vec![
+            pressure(100, 100),
+            pressure(200, 100),
+            pressure(300, 100),
+            // [120, 370]: 80 of (100, 200], 100 of (200, 300], 70 unread.
+            blocked(370, 7, 250),
+            // Another task, [240, 250], wholly in (200, 300].
+            blocked(250, 8, 10),
+        ];
+        let correlation = apply(&machine_rule(), &events).unwrap();
+        assert_eq!(correlation.evidence, Evidence::Temporal);
+        assert_eq!((correlation.matched, correlation.unmatched), (2, 0));
+        assert_eq!(correlation.keyless, 0);
+        let credit = |start: u64| {
+            correlation
+                .top
+                .iter()
+                .find(|row| row.opened_ns == start)
+                .map(|row| (row.key.clone(), row.change.as_ref().map(|c| c.delta)))
+        };
+        assert_eq!(
+            credit(0),
+            None,
+            "the first interval, (0, 100], holds nothing"
+        );
+        assert_eq!(credit(100), Some((MACHINE.to_owned(), Some(80.0))));
+        assert_eq!(credit(200), Some((MACHINE.to_owned(), Some(100.0 + 10.0))));
+        let readings = correlation.readings.as_ref().unwrap();
+        assert_eq!(readings.baselines, 0, "every reading stated its interval");
+        assert_eq!(readings.credited, 190.0);
+        assert_eq!(readings.uncredited, 70.0, "the part after the last reading");
+        states_balance(&correlation);
+    }
+
+    /// The same rule, keyed by task, finds no task on the machine's readings:
+    /// the separation that says the keyless rule is not the keyed one with a
+    /// default.
+    #[test]
+    fn a_keyed_rule_over_the_machines_readings_finds_no_key_and_says_so() {
+        let rule = Rule {
+            via: Some(KeyKind::Task),
+            ..machine_rule()
+        };
+        let events = vec![pressure(100, 100), blocked(90, 7, 10)];
+        let error = apply(&rule, &events).unwrap_err();
+        assert!(matches!(error, JoinError::MissingKey { .. }), "{error}");
+    }
+
+    /// A source read as one series that carries several is refused by name:
+    /// each series' reading would close the other's interval.
+    #[test]
+    fn with_no_key_a_source_of_several_series_is_refused_by_name() {
+        let events = vec![polled(100, 7), polled(101, 8), blocked(150, 7, 10)];
+        let rule = Rule {
+            via: None,
+            ..overlap_rule()
+        };
+        let error = apply(&rule, &events).unwrap_err();
+        assert!(
+            matches!(error, JoinError::SeveralSeries { series: 2, .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("task:7"), "{error}");
+    }
+
+    /// Every match but `overlap` pairs events by a key, and one with none is
+    /// refused before any event is read.
+    #[test]
+    fn every_match_but_overlap_is_refused_without_a_key() {
+        for rule in [
+            eq_rule(),
+            wakeup_rule(),
+            woke_rule(),
+            between_rule(),
+            rule(),
+        ] {
+            let rule = Rule { via: None, ..rule };
+            let error = check(&rule).unwrap_err();
+            assert!(matches!(error, JoinError::NoKey { .. }), "{error}");
+            assert!(error.to_string().contains("via"), "{error}");
+        }
+        let rule = Rule {
+            value: None,
+            ..machine_rule()
+        };
+        assert!(matches!(
+            check(&rule).unwrap_err(),
+            JoinError::NoShareValue { .. }
+        ));
+        assert_eq!(check(&machine_rule()), Ok(()));
+    }
+
+    /// A rule written without `via` reads back without it, and one with it
+    /// reads back with it.
+    #[test]
+    fn a_rule_without_via_parses_and_round_trips() {
+        let rule: Rule = serde_norway::from_str(
+            "{id: m, from: mem.pressure, to: sched.offcpu, match: overlap, value: total_ns}",
+        )
+        .unwrap();
+        assert_eq!(rule.via, None);
+        assert!(!serde_json::to_string(&rule).unwrap().contains("via"));
+        let rule: Rule = serde_norway::from_str(
+            "{id: m, from: proc.threads, to: sched.offcpu, via: task, match: overlap, value: total_ns}",
+        )
+        .unwrap();
+        assert_eq!(rule.via, Some(KeyKind::Task));
+    }
+
     #[test]
     fn an_overlap_rule_that_names_no_value_or_a_missing_span_is_refused_by_name() {
         let rule = Rule {
@@ -4541,7 +4770,7 @@ mod tests {
             id: "residency".to_owned(),
             from: "mem.heap.alloc".to_owned(),
             to: "mem.rss".to_owned(),
-            via: KeyKind::Task,
+            via: Some(KeyKind::Task),
             match_kind: MatchKind::Between,
             opens: Some("op == 'alloc'".parse().unwrap()),
             closes: Some("op == 'free'".parse().unwrap()),

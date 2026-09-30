@@ -804,10 +804,38 @@ requests:
         String::from_utf8_lossy(&output.stdout)
     );
     let message = stderr(&output);
-    assert!(
-        message.contains("power.throttle"),
-        "the refusal must name the guardrail it could not serve: {message}"
-    );
+    if !message.contains("power.throttle") {
+        // The refusal named something else first. That is the property only
+        // if the count itself is served here: at `perf_event_paranoid` 4 (the
+        // CI's first run) `cpu.instructions` is refused before the guardrail
+        // is reached, and the crossing this test is about -- a count served
+        // beside a guardrail that is not -- cannot be created. Asked alone, so
+        // the machine says which.
+        let count_alone = run_session(
+            "\
+name: the count alone
+duration: 100ms
+requests:
+  - {label: instructions, source: cpu.instructions, target: system, mode: count, emit: [rate]}
+",
+            &["--dump-resolved"],
+        );
+        assert!(
+            !count_alone.status.success(),
+            "the count is served here, and the refusal of the crossing did not name the \
+             guardrail it could not serve: {message}"
+        );
+        eprintln!(
+            "skipped: this machine refuses the count itself, so a count served beside a \
+             guardrail it cannot serve is not a crossing it can create. The machine's reason: {}",
+            stderr(&count_alone)
+                .lines()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" / ")
+        );
+        return;
+    }
     eprintln!(
         "refused whole, as it must be: {}",
         message.lines().next().unwrap_or("").trim()

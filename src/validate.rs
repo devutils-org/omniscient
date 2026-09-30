@@ -213,11 +213,17 @@ fn check_joins(
             let Some(entry) = kind.parse().ok().and_then(|id| catalog.get(&id)) else {
                 continue;
             };
-            if !entry.keys.contains(&rule.via) {
+            // A rule with no key reads machine-wide state and has nothing to
+            // look for here; the engine refuses it on every match but
+            // `overlap` (`join::check`, below).
+            let Some(via) = rule.via else {
+                continue;
+            };
+            if !entry.keys.contains(&via) {
                 rejections.push(Rejection::with_hint(
                     format!(
-                        "join `{}` matches on `{}`, which `{kind}` does not carry",
-                        rule.id, rule.via
+                        "join `{}` matches on `{via}`, which `{kind}` does not carry",
+                        rule.id
                     ),
                     format!(
                         "`{kind}` carries {}",
