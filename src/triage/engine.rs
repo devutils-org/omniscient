@@ -109,8 +109,16 @@ pub fn prune(
                 ),
             )),
             Err(error) => {
-                let whose = match error {
+                let whose = match &error {
                     resolve::ResolveError::NoViableBackend { .. } => Whose::Machine,
+                    // A target and a mode no one backend declares together
+                    // is the request's, as `omn` answers it (exit 2).
+                    resolve::ResolveError::NoBackendDeclares { .. } => Whose::Request,
+                    resolve::ResolveError::KeyNotCarried {
+                        elsewhere: Some(elsewhere),
+                        ..
+                    } => elsewhere.whose(),
+                    resolve::ResolveError::StackRefused { whose, .. } => *whose,
                     // A source the catalog does not carry is a catalog this
                     // build was not given, not a request anyone wrote wrong.
                     _ => Whose::Build,
@@ -172,8 +180,13 @@ pub fn run(
         match resolve::resolve(catalog, capabilities, request) {
             Ok(one) => resolved.push(one),
             Err(error) => {
-                let whose = match error {
+                let whose = match &error {
                     resolve::ResolveError::NoViableBackend { .. } => Whose::Machine,
+                    resolve::ResolveError::KeyNotCarried {
+                        elsewhere: Some(elsewhere),
+                        ..
+                    } => elsewhere.whose(),
+                    resolve::ResolveError::StackRefused { whose, .. } => *whose,
                     _ => Whose::Request,
                 };
                 return Err(Failure {
