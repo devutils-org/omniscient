@@ -1423,8 +1423,9 @@ mod tests {
         );
     }
 
-    /// The paired stages subtract; the unpaired one has nothing to subtract
-    /// from and must not pretend to.
+    /// A close into the histogram adds to a `(device, bucket)` row in the
+    /// kernel and writes no ring record: the per-request stream is exactly
+    /// what `--emit hist` alone is meant not to pay for.
     #[test]
     fn a_histogram_close_writes_no_record_and_counts_its_row_atomically() {
         let Some(btf) = kernel_btf() else { return };
@@ -1489,6 +1490,8 @@ mod tests {
         assert!(HIST_KEY + HIST_KEY_BYTES as i16 <= CLOSE_DROP_KEY);
     }
 
+    /// The paired stages subtract; the unpaired one has nothing to subtract
+    /// from and must not pretend to.
     #[test]
     fn only_a_paired_stage_computes_an_interval() {
         let Some(btf) = kernel_btf() else { return };

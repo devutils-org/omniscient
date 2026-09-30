@@ -2110,12 +2110,20 @@ fn every_usable_net_source_starts_in_every_mode_that_resolves() {
             .unwrap_or_default()
     };
     let mut ran = 0;
+    let mut ready = 0;
     let mut failures = Vec::new();
     for entry in catalog.iter().filter(|e| e["family"] == "net") {
         let id = entry["id"].as_str().expect("an id");
         if entry["here"]["availability"] != "ready" {
             continue;
         }
+        ready += 1;
+        // Every (target, mode) pair this source refused, and how many
+        // resolved onto a backend this build collects. A source called ready
+        // for which none does is the listing and the run disagreeing as much
+        // as a run that fails to start, so it is a failure too.
+        let mut refusals: Vec<String> = Vec::new();
+        let mut resolved_here = 0;
         let collected: Vec<String> = entry["probes"]
             .as_array()
             .into_iter()
@@ -2149,6 +2157,12 @@ fn every_usable_net_source_starts_in_every_mode_that_resolves() {
                     .collect();
                 let resolved = omn(&resolve);
                 if code(&resolved) != 0 {
+                    refusals.push(format!(
+                        "`-m {mode} {}` exited {}: {}",
+                        target.join(" "),
+                        code(&resolved),
+                        stderr(&resolved).lines().next().unwrap_or_default()
+                    ));
                     continue;
                 }
                 let resolved: serde_json::Value =
@@ -2159,11 +2173,16 @@ fn every_usable_net_source_starts_in_every_mode_that_resolves() {
                     .unwrap_or_default()
                     .to_owned();
                 if !collected.contains(&backend) {
+                    refusals.push(format!(
+                        "`-m {mode} {}` resolved onto `{backend}`, which this build does not collect",
+                        target.join(" ")
+                    ));
                     continue;
                 }
                 let run: Vec<&str> = head.iter().copied().chain(target.iter().copied()).collect();
                 let outcome = omn(&run);
                 ran += 1;
+                resolved_here += 1;
                 let complaint = stderr(&outcome);
                 if code(&outcome) == 0
                     || (id == "net.request" && complaint.contains("declares no request"))
@@ -2178,9 +2197,17 @@ fn every_usable_net_source_starts_in_every_mode_that_resolves() {
                 ));
             }
         }
+        if resolved_here == 0 {
+            failures.push(format!(
+                "`{id}` is listed ready and no declared mode resolves onto a collected backend \
+                 on {} target(s):\n  {}",
+                targets.len(),
+                refusals.join("\n  ")
+            ));
+        }
     }
-    if ran == 0 {
-        eprintln!("skipped: no net source is usable through a collected backend on this machine");
+    if ready == 0 {
+        eprintln!("skipped: `omn list` calls no net source ready on this machine");
         return;
     }
     assert!(

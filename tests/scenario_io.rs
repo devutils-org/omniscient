@@ -4930,9 +4930,12 @@ fn buckets_of(series: &serde_json::Value) -> BTreeMap<u64, u64> {
 /// and `raw` with `hist`, which streams every completion through the ring and
 /// buckets it up here. The program reads 256 pages and 64 blocks of 64 KiB
 /// through `O_DIRECT` and counts what completed, so the ground truth is its
-/// own: the streamed requests are of those two sizes and no more of them than
-/// it issued, and the kernel's histogram holds exactly as many requests as the
-/// stream carried, in the same buckets.
+/// own, and each path is held to it separately before the two are compared:
+/// each counts no more requests than the program issued and, with what it
+/// dropped added, no fewer than that less the two a filesystem may turn into
+/// readaheads; the stream's are of those two sizes or readaheads. Then the
+/// kernel's histogram holds exactly as many requests as the stream carried, in
+/// the same buckets. A run that dropped anything still gets the first half.
 ///
 /// Not bit for bit per bucket, and why: the two program sets are two programs
 /// on each tracepoint, each reading the clock when it runs, so the same request
@@ -5041,24 +5044,6 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         );
     }
     let lost = |result: &serde_json::Value| losses(result)["dropped"].as_u64().unwrap_or(0);
-    // Both lost nothing, or the comparison is of two different sets of requests.
-    if lost(kernel) > 0 || lost(streamed) > 0 {
-        eprintln!(
-            "skipped the comparison: the kernel skipped runs of the programs ({} and {} \
-             dropped), each set its own, so the two histograms are of different requests",
-            lost(kernel),
-            lost(streamed)
-        );
-        return;
-    }
-    assert!(
-        of(4096) + 1 >= PAGES && of(65536) + 1 >= BLOCKS,
-        "a run that lost nothing is short of the program's reads by more than the one a \
-         filesystem may turn into a readahead: {} of {PAGES} pages, {} of {BLOCKS} blocks",
-        of(4096),
-        of(65536)
-    );
-
     let series = |result: &serde_json::Value| -> BTreeMap<String, BTreeMap<u64, u64>> {
         output_of(result, "hist")["series"]
             .as_array()
@@ -5073,25 +5058,76 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
             .collect()
     };
     let (from_kernel, from_stream) = (series(kernel), series(streamed));
+    let total = |all: &BTreeMap<String, BTreeMap<u64, u64>>| -> u64 {
+        all.values().flat_map(|buckets| buckets.values()).sum()
+    };
+
+    // The program's own account, against each path separately and before
+    // either is compared with the other. It made PAGES + BLOCKS reads, each
+    // one request; a filesystem may turn the first direct read of a size into
+    // a readahead (`RA`, of any size), which is the only request allowed that
+    // the program did not ask for, and it replaces a read rather than adding
+    // to one. So a path that lost nothing holds between PAGES + BLOCKS - 2 of
+    // the program's sizes and PAGES + BLOCKS in all -- the two readaheads
+    // included -- and a request both paths count and the program never made
+    // (the interpreter's own reads, another process's under the same launch)
+    // shows here as a total above what the program issued.
+    let issued = (PAGES + BLOCKS) as u64;
+    let readahead = events.len() as u64 - (of(4096) + of(65536)) as u64;
+    assert!(
+        readahead <= 2,
+        "{readahead} requests of neither size the program read at: at most the first read \
+         of each size may be a readahead in its place"
+    );
+    let own = |result: &serde_json::Value, counted: u64| {
+        // A lost request is one the path did not count; it was still made.
+        let seen = counted + lost(result);
+        assert!(
+            seen + 2 >= issued && counted <= issued,
+            "the `{}` path counted {counted} requests and dropped {}, and the program made \
+             {issued} ({PAGES} of 4 KiB and {BLOCKS} of 64 KiB)",
+            result["label"].as_str().unwrap_or("?"),
+            lost(result)
+        );
+    };
+    own(kernel, total(&from_kernel));
+    own(streamed, events.len() as u64);
+    assert_eq!(
+        total(&from_stream),
+        events.len() as u64,
+        "the stream's histogram is its events"
+    );
+    // Both lost nothing, or the comparison of one with the other is of two
+    // different sets of requests. What each path could be held to alone has
+    // been checked above, with its losses counted, so this is not a skip.
+    if lost(kernel) > 0 || lost(streamed) > 0 {
+        eprintln!(
+            "not compared bucket by bucket: the kernel skipped runs of the programs ({} and {} \
+             dropped), each set its own, so the two histograms are of different requests; \
+             each was held to the program's account on its own",
+            lost(kernel),
+            lost(streamed)
+        );
+        return;
+    }
+    assert!(
+        of(4096) + 1 >= PAGES && of(65536) + 1 >= BLOCKS,
+        "a run that lost nothing is short of the program's reads by more than the one a \
+         filesystem may turn into a readahead: {} of {PAGES} pages, {} of {BLOCKS} blocks",
+        of(4096),
+        of(65536)
+    );
     assert_eq!(
         from_kernel.keys().collect::<Vec<_>>(),
         from_stream.keys().collect::<Vec<_>>(),
         "the two histograms are of different devices"
     );
-    let total = |all: &BTreeMap<String, BTreeMap<u64, u64>>| -> u64 {
-        all.values().flat_map(|buckets| buckets.values()).sum()
-    };
     assert_eq!(
         total(&from_kernel),
         total(&from_stream),
         "the kernel counted {} requests and the stream carried {}",
         total(&from_kernel),
         total(&from_stream)
-    );
-    assert_eq!(
-        total(&from_stream),
-        events.len() as u64,
-        "the stream's histogram is its events"
     );
 
     // Requests within 2 % of a power of two, which either side may put in the

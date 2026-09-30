@@ -142,8 +142,69 @@ what a row does not carry. Anything else -- `summary` beside it, `raw`,
   `#[ignore]`d, needs `null_blk` (below). It runs `fio` bare and under the
   in-kernel histogram and asserts the IOPS ratio is within 1 %.
 
+## Review, and what changed after it
+
+1. **`scenario_sched::a_run_that_could_not_time_a_wait_says_which_wait_and_why`
+   red once in a whole-file run** -- real. The full run after the review caught
+   the reason: *"a round of reads outran the 100.0ms tick: worst 291.7ms,
+   263.5ms on average"*, the collection loop's own lateness
+   (`src/collect/mod.rs:557`), which is not a lost wait: the rows stay in the
+   kernel's map and arrive with the next drain. The test now sets that reason
+   apart (it neither needs a lost count nor fails the list), and the list of
+   known reasons gained the three sentences `src/collect/sched/lock.rs` can
+   write and it lacked: a row gone between listing and reading, a walk stopped
+   at its bound, a failed histogram read. Passed alone after the change.
+2. **`scenario_mem::a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line`** --
+   not this branch's: already in the flaky tally (huge-page TLB misses), and
+   the branch only rewords a skip in that file. Nothing changed.
+3. **The net sweep passed a ready source for which no mode resolved** -- real.
+   `every_usable_net_source_starts_in_every_mode_that_resolves` now records
+   every (target, mode) refusal and every resolution onto a backend this build
+   does not collect, and fails a source `omn list` calls ready for which none
+   resolves onto a collected backend, printing the refusals. The early return
+   is now only for a machine where no net source is ready at all. Here all
+   fourteen ready net sources resolve somewhere, and the test passes (16 s).
+4. **Exit 1 for a `net.hwts` trace of an interface** -- not a defect of this
+   branch, as the reviewer says: 2 is filed to P. The test accepts `1 | 2` so
+   it does not go red the day P lands; 1 is not final.
+5. **The in-kernel histogram test compared the code with itself** -- real. Each
+   path is now held to the program's own account *before* the two are
+   compared: each counts no more requests than the program issued (320) and,
+   with what it dropped added back, no fewer than 318 (the two first reads a
+   filesystem may turn into readaheads); the stream holds at most two requests
+   of neither size. A request both paths count and the program never made
+   now fails the total. A run with drops no longer skips: it gets the
+   per-path checks with its losses counted, and only the bucket-by-bucket
+   comparison is left out, loudly. Three runs, all through the full
+   comparison.
+6. **Misplaced doc comment in `src/bpf/io.rs`** -- real, fixed: the comment is
+   back on `only_a_paired_stage_computes_an_interval` and the histogram test
+   has its own. The `kernel_btf() else { return }` is not silent: the module's
+   `kernel_btf()` prints `skipped: <reason>` before returning `None`
+   (`src/bpf/io.rs:1199`), the pattern all ten tests there use.
+7. **No green full run after the last change; a relink drops the
+   capabilities** -- `make` was run before every test run here and `getcap`
+   checked. See Checks for the full runs.
+8. **Ownership** -- nothing to do. The two test files touched after the review
+   are this stream's.
+
 ## Checks
 
+After the review: `make check` once at load 8, red on
+`scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+(in the flaky tally; passed alone once); then one
+`cargo test --workspace --no-fail-fast`, red on two of this stream's
+`scenario_sched` tests: the lock-loss test, whose reason it printed (review
+item 1, fixed), and `every_thread_a_program_starts_has_its_switches_counted`
+(113 switches seen against 108 counted plus the edge allowance; unchanged on
+this branch, passed alone once). After the fix, `make check` once more at
+load 37: red on `scenario_mem::a_walk_that_fits_in_l1_is_never_timed_...`
+(*"13 of 52 of the small walk's loads"* timed; a cache measurement under load,
+`docs/open-findings.md:7549`; passed alone once), and then
+`cargo test --workspace --no-fail-fast` **green, every binary**, clippy
+`-D warnings` and `fmt --check` clean, capabilities on the binary throughout.
+
+Before the review:
 `make check` once, red on two `tests/runner.rs` tests (R's) at load 37:
 `a_counted_window_over_a_polled_counter_ends_with_its_closing_read` passed
 alone; `a_source_attached_for_one_phase_...` (1.0186e9 and then 1.0058e9

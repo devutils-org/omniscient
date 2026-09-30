@@ -2077,9 +2077,20 @@ fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
     let result = &results(&output)[0];
 
     let lost = dropped(result);
-    let reasons = result["losses"]["reasons"]
+    // A drain that ran late is not a wait lost: the rows stay in the kernel's
+    // map and arrive with the next drain. The run still says it was late, as
+    // a reason, and on a loaded machine it is; it is set apart here so it is
+    // neither taken for a lost wait nor for a sentence with no number. This is
+    // the reason that made this test red once in the fifteenth wave's review
+    // (`a round of reads outran the 100.0ms tick: worst 291.7ms`).
+    let late = "a round of reads outran the";
+    let reasons: serde_json::Map<String, Value> = result["losses"]["reasons"]
         .as_object()
-        .expect("a loss carries its reasons");
+        .expect("a loss carries its reasons")
+        .iter()
+        .filter(|(reason, _)| !reason.contains(late))
+        .map(|(reason, count)| (reason.clone(), count.clone()))
+        .collect();
     if lost == 0 {
         // Stated rather than hidden: this run lost nothing, so what it
         // establishes is the negative -- a clean run claims no loss.
@@ -2110,6 +2121,13 @@ fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
         "before it began",
         "than the histogram holds",
         "already running on that cpu",
+        // The drain's own: a row the kernel deleted between the walk that
+        // listed it and the lookup that read it, a walk that stopped at its
+        // bound, and a read of the histogram that failed outright. Each is a
+        // sentence `src/collect/sched/lock.rs` can write and the list lacked.
+        "gone between being listed and being read",
+        "more rows than one drain can walk",
+        "cannot read the lock histogram",
     ];
     for reason in reasons.keys() {
         assert!(
