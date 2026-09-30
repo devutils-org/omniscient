@@ -1488,6 +1488,10 @@ mod tests {
             attr.type_ = perf::PERF_TYPE_SOFTWARE;
             attr.size = std::mem::size_of::<perf::perf_event_attr>() as u32;
             attr.config = perf::PERF_COUNT_SW_CONTEXT_SWITCHES as u64;
+            // Opened disabled, and enabled only once the first status read has
+            // returned: the counted window then lies inside the kernel's
+            // bracket, so every switch the counter sees the kernel saw too.
+            attr.set_disabled(1);
             if exclude_kernel {
                 attr.set_exclude_kernel(1);
                 attr.set_exclude_hv(1);
@@ -1505,9 +1509,11 @@ mod tests {
                 return Err(std::io::Error::last_os_error());
             }
             let before = switches_of_this_thread();
+            assert_eq!(unsafe { perf_event_open_sys::ioctls::ENABLE(fd, 0) }, 0);
             for _ in 0..SLEEPS {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
+            assert_eq!(unsafe { perf_event_open_sys::ioctls::DISABLE(fd, 0) }, 0);
             let after = switches_of_this_thread();
             let mut value = 0u64;
             let read = unsafe { libc::read(fd, (&mut value as *mut u64).cast(), 8) };
@@ -1550,9 +1556,12 @@ mod tests {
         let probe = super::probe_pmu("PERF_COUNT_SW_CONTEXT_SWITCHES");
         match count(false) {
             Ok((counted, kernel_saw)) => {
-                // The status reads bracket the counted window, and each read
-                // is a syscall that may itself be switched out: the kernel's
-                // account can only be the larger, by those two reads at most.
+                // The counter is enabled after the first status read and
+                // disabled before the second, so its window lies inside the
+                // kernel's bracket: a switch in the gaps (the thread preempted
+                // around an ioctl, at this wave's load) is in the kernel's
+                // account and not the counter's, never the other way round.
+                // Each of the thirty sleeps is a switch inside the window.
                 assert!(
                     counted >= SLEEPS && counted <= kernel_saw,
                     "the counter read {counted} and the kernel {kernel_saw} for {SLEEPS} sleeps"
@@ -1572,6 +1581,151 @@ mod tests {
                     other => panic!("a switch counter that can only read zero answered {other:?}"),
                 }
             }
+        }
+    }
+
+    /// `pmu:ibs_op` is answered by opening AMD's op sampler, not by finding it
+    /// in sysfs. Ground truth is an open made without the probe's code: the
+    /// unit's type number read straight from sysfs, no config bit and no
+    /// `exclude_*` bit, following this thread. That open asks for more than the
+    /// probe's does (the kernel's ops included), so where it succeeds the probe
+    /// must say available; where it is refused, missing, naming the sysctl.
+    ///
+    /// A refusal is then made here, whatever this machine allows: a seccomp
+    /// filter on one thread of its own makes `perf_event_open` answer EACCES,
+    /// which is what a sandbox or a paranoid kernel answers, and the probe run
+    /// on that thread has to read missing with `perf_event_paranoid` named.
+    #[test]
+    fn the_op_sampler_is_available_exactly_when_it_opens() {
+        use perf_event_open_sys::bindings as perf;
+        let Some(kind) = super::read_trimmed(&format!(
+            "{}/{}/type",
+            super::PMU_DEVICES,
+            crate::perf::IbsOp::PMU
+        ))
+        .and_then(|kind| kind.parse::<u32>().ok()) else {
+            eprintln!(
+                "skipped: this machine publishes no `{}` unit under {}, so there is no op \
+                 sampler to open",
+                crate::perf::IbsOp::PMU,
+                super::PMU_DEVICES
+            );
+            return;
+        };
+
+        let reference = {
+            let mut attr: perf::perf_event_attr = unsafe { std::mem::zeroed() };
+            attr.type_ = kind;
+            attr.size = std::mem::size_of::<perf::perf_event_attr>() as u32;
+            attr.__bindgen_anon_1.sample_period = 1 << 20;
+            attr.set_disabled(1);
+            // SAFETY: a zeroed attr with its size set, opened on this thread.
+            let fd = unsafe {
+                perf_event_open_sys::perf_event_open(
+                    &mut attr,
+                    0,
+                    -1,
+                    -1,
+                    perf::PERF_FLAG_FD_CLOEXEC as u64,
+                )
+            };
+            if fd >= 0 {
+                // SAFETY: closing a descriptor just opened here.
+                unsafe { libc::close(fd) };
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        };
+        let probe = super::probe_pmu(crate::perf::IbsOp::PMU);
+        match &reference {
+            Ok(()) => assert_eq!(
+                probe,
+                super::Probe::Available,
+                "the op sampler opens on this thread, and the probe said otherwise"
+            ),
+            Err(error) if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => {
+                match &probe {
+                    super::Probe::Missing(reason) => {
+                        assert!(reason.contains("perf_event_paranoid"), "{reason}")
+                    }
+                    other => panic!(
+                        "the op sampler is refused here ({error}), and the probe said {other:?}"
+                    ),
+                }
+            }
+            Err(error) => {
+                assert!(
+                    matches!(probe, super::Probe::Missing(_)),
+                    "the op sampler does not open here ({error}), and the probe said {probe:?}"
+                );
+            }
+        }
+
+        // The refusal, made on a thread of its own: a seccomp filter binds the
+        // thread that installs it and nothing else in this process.
+        let refused = std::thread::spawn(|| {
+            const LOAD_SYSCALL_NR: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
+            const JUMP_IF_EQUAL: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+            const RETURN: u16 = 0x06; // BPF_RET | BPF_K
+            const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+            const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+            let filter = [
+                libc::sock_filter {
+                    code: LOAD_SYSCALL_NR,
+                    jt: 0,
+                    jf: 0,
+                    k: 0,
+                },
+                libc::sock_filter {
+                    code: JUMP_IF_EQUAL,
+                    jt: 0,
+                    jf: 1,
+                    k: libc::SYS_perf_event_open as u32,
+                },
+                libc::sock_filter {
+                    code: RETURN,
+                    jt: 0,
+                    jf: 0,
+                    k: SECCOMP_RET_ERRNO | libc::EACCES as u32,
+                },
+                libc::sock_filter {
+                    code: RETURN,
+                    jt: 0,
+                    jf: 0,
+                    k: SECCOMP_RET_ALLOW,
+                },
+            ];
+            let program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_ptr() as *mut libc::sock_filter,
+            };
+            // SAFETY: both calls affect only this thread, which ends with the
+            // closure; the program outlives the prctl that copies it.
+            unsafe {
+                assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+                assert_eq!(
+                    libc::prctl(
+                        libc::PR_SET_SECCOMP,
+                        libc::SECCOMP_MODE_FILTER,
+                        &program as *const libc::sock_fprog
+                    ),
+                    0,
+                    "installing the filter: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            super::probe_pmu(crate::perf::IbsOp::PMU)
+        })
+        .join()
+        .expect("the filtered thread");
+        match refused {
+            super::Probe::Missing(reason) => {
+                assert!(reason.contains("refused"), "{reason}");
+                assert!(reason.contains("perf_event_paranoid"), "{reason}");
+                assert!(reason.contains("CAP_PERFMON"), "{reason}");
+            }
+            other => panic!("an op sampler whose open is refused answered {other:?}"),
         }
     }
 

@@ -964,13 +964,30 @@ around it:
   `capabilities::tests::a_switch_counter_that_excludes_the_kernel_counts_none_and_is_not_offered`:
   thirty 1 ms sleeps on the test's own thread, against
   `/proc/thread-self/status` -- the user-mode counter reads exactly 0, the
-  full one between 30 and the kernel's count.
+  full one between 30 and the kernel's count. That upper bound holds by
+  construction: the counter is opened disabled and enabled only after the
+  first status read, and disabled before the second, so its window lies
+  inside the kernel's bracket and a switch in the gaps is the kernel's alone.
+  (As first landed, the counter ran from the open to the read, a window
+  holding the bracket, so the bound it asserted was in fact equality, red
+  whenever the thread was preempted in a gap.)
 - **AMD's op sampler read available wherever its unit is published.**
   `pmu:ibs_op` was a device-presence answer; in the rehearsal it read available
   and both `mem.latency` and `mem.sharing` were refused at the attach -- the
   sandboxed sweep's judge found it. It is opened now the way its collector
   opens it (one event following this process on one cpu, `swfilt` where the
-  unit has it), and refused says so by name.
+  unit has it), and refused says so by name. Ground truth,
+  `capabilities::tests::the_op_sampler_is_available_exactly_when_it_opens`:
+  an open of the unit made without the probe's code (its type read straight
+  from sysfs, no config bit, the kernel's ops included, so it asks for more
+  than the probe does) -- where it opens, the probe must be available, where
+  it is refused, missing with `perf_event_paranoid` named. Then a refusal is
+  made whatever the machine allows: a seccomp filter on one thread of the
+  test's own answers EACCES to `perf_event_open`, as a sandbox does, and the
+  probe run on that thread must read missing, naming the sysctl and
+  CAP_PERFMON. This host publishes `ibs_op`: it opens, the probe says
+  available, and under the filter missing -- thirty runs of both tests, all
+  green at a load of 8.
 
 Beside them, found on the same runs:
 
@@ -1062,55 +1079,6 @@ counts of 6.17-azure (K's).
 | the multi-size THP caveat on `mem.faults` (N's text) | still "the kernel picks larger folios" | N's text, and a second caveat for user-mode sampling |
 | `mem.swap` answers `rate` (N, for `validate.rs`'s test) | the test already uses `mem.rss` | landed before this wave |
 
-### The matrix cells this change should move
-
-Nothing here was swept in a guest (the matrix runs alone, at the end of the
-wave). What should change, and how to see it:
-
-| Cells | Command | What should change |
-|---|---|---|
-| `ci-6.17-nocaps` (`defaults`) | the next push | `cpu.cycles` `here: no`, `pmu` missing *"not available on this cpu"*; `cpu.context_switches`, `cpu.migrations` and `sched.switches`'s `pmu:sw` missing *"reads zero ... CAP_PERFMON"*; `mem.faults` attaches for a launched program; `pmu:ibs_op`, if that cpu publishes it at all, answered by opening it; every judge passes, and the gate's unexpected list holds only the filed rows |
-| `ci-6.17-stock` (`stock`, new) | the next push | every `pmu:` requirement missing by the sysctl; the suite fails only in the filed rows; the gate passes with both expected files |
-| 5.15, 6.1, 6.6, 7.2 under `nocaps` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs nocaps` | where the guest's `perf_event_paranoid` is 2 or above (`cell.sh` prints it; this host's `/etc/sysctl.d/99-perf.conf` sets -1, and whether a guest applies it is not checked here), the switch and migration counters read missing rather than attaching and counting zero; at 1 or below nothing changes; `mem.faults` attaches either way; judges pass |
-| the same four under `caps` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs caps` | no source changes except those listed above as leaving usable through an unwritten backend (`power.throttle` where `thermal_throttle` is absent, and the like); the new judge (no usable-through-unwritten) passes |
-
-### For `DECISIONS.md`
-
-- **A source is usable only through a backend this build collects.** The
-  listing's `here` is "available means it attaches" for this binary; a backend
-  with no collector is shown as such and never makes a source usable. The
-  resolver's order is unchanged: a request still resolves to an unwritten
-  backend when no written one is viable, and is refused as the build's gap.
-- **A counter the kernel raises from its own code is probed with the kernel
-  included**; a user-mode-only answer is missing, because the count it gives
-  is zero whatever the program does.
-- **A sampled source falls back to user mode where the kernel allows no
-  more**, when its events are raised with the program's registers (page
-  faults), and says what that loses; a counted one already did.
-- **The CI has two cells**, the kernel's defaults and the hosted image as
-  shipped, and each has its own expected skips beside the common ones.
-
-### Filed or left
-
-- Filed in `docs/open-findings.md`, "the fourteenth wave, stream P": for R
-  (four groups of tests that should skip where the machine withholds a source;
-  a rate over joules printed as watts; optionally the `here` line), for K
-  (`sched.switches` on `pmu:sw`, the `scenario_mem` sweeps, two skip lines),
-  for J (two skip lines and one refusal), and three for the flaky tally.
-- Left: `KeyNotCarried`'s resolver half, on `Backend.keys` in R's
-  `src/catalog.rs`; the `pmu:sw` collector for `cpu.cycles` (cpu time under
-  the name of cycles, which the catalog declares as a degraded fallback and
-  nobody wrote); the matrix cells above.
-- For the coordinator: `CLAUDE.md`'s *"86 usable sources and 51"* is a count
-  this branch changes (91 with the capabilities here).
-
-**Index rows for sessions added**: `examples/gpu-draw-in-watts.yml`, in
-`examples/README.md` and `GUIDE.md`'s gpu table:
-
-```
-| `gpu-draw-in-watts.yml` | How many watts the board drew over a window, from its energy counter. |
-```
-
 ### This wave's check
 
 `make check` stops at the first red binary, and `tests/cli.rs`'s index test is
@@ -1146,3 +1114,81 @@ the rehearsed stock cell: `family_cpu`, `scenario_cpu`, `scenario_gpu`,
 `portability`, `catalog_model`, and the power, gpu and runtime family and
 scenario files, all green; `scenario_power::a_core_held_busy...` failed once in
 the first full run for the machine's state and is fixed above.
+
+After a review, one more pass, checked the same way (`make check` stops at
+the index test; one `cargo test --workspace --no-fail-fast` at load 6 to 8,
+capabilities on the binary; clippy and fmt clean): **2004 passed, 7 failed,
+8 ignored**, none in this stream's paths. The index test (the row below);
+`family_sched::a_task_moved_between_two_cpus...` (`docs/flaky.md` #5),
+`scenario_sched::an_overflowing_wakeup_ring...` (#3),
+`scenario_io::a_sequential_read_is_read_ahead_of...`,
+`scenario_sched::perf_counts_the_blocks_a_raw_tracepoint...` and
+`runner::a_source_attached_for_one_phase...` (each in
+`docs/open-findings.md` or `docs/scenarios/attach.md`), and one in no tally,
+`scenario_sched::a_mutex_nobody_else_wants_is_held_as_long...` (*"3230753 ns
+against 135630634 ns, which is not a separation"*): each passed rerun alone
+once. The pass changed:
+
+- the switch counter's test, whose window now lies inside the kernel's
+  bracket (item 1 above);
+- a test of `pmu:ibs_op` of its own (item 1 above);
+- `scenario_cpu::a_profile_of_a_cgroup_samples_its_task_and_not_the_one_beside_it`,
+  which failed once in a review's run of this stream's files
+  (*"the window did not hold the child's work in any run"*) and passed alone.
+  The cause is measured: `omn cpu.profile --cgroup` takes 930 to 975 ms here
+  from its spawn to its window's open at a load of 8, and the shared
+  `over_a_cgroup` helper led the workload by 300, 600 and 1200 ms, so the first
+  two runs were always late and the third had a quarter of a second to spare.
+  The next lead is now taken from the late run's own spawn-to-open, half as
+  long again, and there are four runs: three runs in a row pass, 20 s each.
+
+### Index rows for sessions added
+
+`examples/gpu-draw-in-watts.yml`, in
+`examples/README.md` and `GUIDE.md`'s gpu table:
+
+```
+| `gpu-draw-in-watts.yml` | How many watts the board drew over a window, from its energy counter. |
+```
+
+### For `DECISIONS.md`
+
+- **A source is usable only through a backend this build collects.** The
+  listing's `here` is "available means it attaches" for this binary; a backend
+  with no collector is shown as such and never makes a source usable. The
+  resolver's order is unchanged: a request still resolves to an unwritten
+  backend when no written one is viable, and is refused as the build's gap.
+- **A counter the kernel raises from its own code is probed with the kernel
+  included**; a user-mode-only answer is missing, because the count it gives
+  is zero whatever the program does.
+- **A sampled source falls back to user mode where the kernel allows no
+  more**, when its events are raised with the program's registers (page
+  faults), and says what that loses; a counted one already did.
+- **The CI has two cells**, the kernel's defaults and the hosted image as
+  shipped, and each has its own expected skips beside the common ones.
+
+### Filed or left
+
+- Filed in `docs/open-findings.md`, "the fourteenth wave, stream P": for R
+  (four groups of tests that should skip where the machine withholds a source;
+  a rate over joules printed as watts; optionally the `here` line), for K
+  (`sched.switches` on `pmu:sw`, the `scenario_mem` sweeps, two skip lines),
+  for J (two skip lines and one refusal), and three for the flaky tally.
+- Left: `KeyNotCarried`'s resolver half, on `Backend.keys` in R's
+  `src/catalog.rs`; the `pmu:sw` collector for `cpu.cycles` (cpu time under
+  the name of cycles, which the catalog declares as a degraded fallback and
+  nobody wrote); the matrix cells above.
+- For the coordinator: `CLAUDE.md`'s *"86 usable sources and 51"* is a count
+  this branch changes (91 with the capabilities here).
+
+### The matrix cells this change should move
+
+Nothing here was swept in a guest (the matrix runs alone, at the end of the
+wave). What should change, and how to see it:
+
+| Cells | Command | What should change |
+|---|---|---|
+| `ci-6.17-nocaps` (`defaults`) | the next push | `cpu.cycles` `here: no`, `pmu` missing *"not available on this cpu"*; `cpu.context_switches`, `cpu.migrations` and `sched.switches`'s `pmu:sw` missing *"reads zero ... CAP_PERFMON"*; `mem.faults` attaches for a launched program; `pmu:ibs_op`, if that cpu publishes it at all, answered by opening it; every judge passes, and the gate's unexpected list holds only the filed rows |
+| `ci-6.17-stock` (`stock`, new) | the next push | every `pmu:` requirement missing by the sysctl; the suite fails only in the filed rows; the gate passes with both expected files |
+| 5.15, 6.1, 6.6, 7.2 under `nocaps` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs nocaps` | where the guest's `perf_event_paranoid` is 2 or above (`cell.sh` prints it; this host's `/etc/sysctl.d/99-perf.conf` sets -1, and whether a guest applies it is not checked here), the switch and migration counters read missing rather than attaching and counting zero; at 1 or below nothing changes; `mem.faults` attaches either way; judges pass |
+| the same four under `caps` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs caps` | no source changes except those listed above as leaving usable through an unwritten backend (`power.throttle` where `thermal_throttle` is absent, and the like); the new judge (no usable-through-unwritten) passes |

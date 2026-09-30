@@ -3758,9 +3758,12 @@ struct Split {
 /// than the workload, and the result's own window is held against the child's
 /// `CLOCK_MONOTONIC` stamps. A run whose window opened after the child began,
 /// or closed before it ended, is not a measurement of the child's work, and is
-/// taken again with twice the lead and the window, three times at most -- the
-/// durations only make an ordered run likely; the stamps are what make it one. `None`, having said why, when
-/// the machine cannot serve the request.
+/// taken again, four times at most -- the durations only make an ordered run
+/// likely; the stamps are what make it one. The next lead is not a guess: the
+/// late run's own window says how long `omn` took from its spawn to its open
+/// (near a second for `cpu.profile` at a load of 8, past a doubled 300 ms
+/// under the whole wave's), and the next run waits half as long again as
+/// that. `None`, having said why, when the machine cannot serve the request.
 fn over_a_cgroup(
     source: &str,
     mode: &str,
@@ -3770,7 +3773,8 @@ fn over_a_cgroup(
     let mut lead = Duration::from_millis(300);
     let mut window = Duration::from_secs(6);
     let mut late = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
+        let spawned = monotonic_ns();
         let omn = Command::new(BINARY)
             .args([source, "--cgroup"])
             .arg(&cgroup.path)
@@ -3800,18 +3804,20 @@ fn over_a_cgroup(
         if opened <= split.child_from_ns && split.child_to_ns <= closed {
             return Some((document, split));
         }
+        let startup = Duration::from_nanos(opened.saturating_sub(spawned));
         late.push((
             lead,
             window,
+            startup,
             opened as i64 - split.child_from_ns as i64,
             split.child_to_ns as i64 - closed as i64,
         ));
-        lead *= 2;
-        window *= 2;
+        lead = (lead * 2).max(startup * 3 / 2);
+        window = (window * 2).max(lead * 2 + Duration::from_secs(6));
     }
     panic!(
-        "the window did not hold the child's work in any run (lead, window, ns opened after \
-         the work began, ns closed before it ended): {late:?}"
+        "the window did not hold the child's work in any run (lead, window, omn's spawn to \
+         open, ns opened after the work began, ns closed before it ended): {late:?}"
     );
 }
 
