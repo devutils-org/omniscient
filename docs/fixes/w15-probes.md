@@ -33,7 +33,10 @@ the fifteenth wave, stream probes".
    backend's half. `validate::tests::a_target_and_mode_no_backend_declares_together_are_refused_as_the_request`
    and `a_pair_refused_as_the_catalogs_would_not_have_resolved_on_this_machine`
    (every refused triple held to the resolver's walk on this machine; one
-   triple in today's catalog).
+   triple in today's catalog), and on the binary
+   `catalog_model::a_target_and_mode_no_backend_declares_together_is_refused_as_the_request`:
+   the pairs found from each backend's declared targets and modes, each run
+   through `omn trace`, held to exit 2 and the pair's reason.
    **A binary whose file capabilities the kernel withheld is told why**:
    `capabilities::withheld_file_capabilities()` reads `security.capability`
    off `/proc/self/exe` and `CapEff`, and names the `nosuid` mount (with
@@ -58,13 +61,21 @@ the fifteenth wave, stream probes".
 4. **Phase 9's guardrail**: stated in `docs/portability.md` (item 4) why the
    bench reads the throttle counters directly and what that is not; the call
    filed for the runner stream with a signature.
-5. **Phase 2 and phase 7 audits**, over the 20 cells copied from the main
-   checkout into this worktree's `target/matrix/cells`:
+5. **Phase 2 and phase 7 audits**, over the 22 cells of the finished
+   2026-09-30 sweep, copied from the main checkout into this worktree's
+   `target/matrix/cells`:
    `portability::two_cells_list_different_sources_for_the_condition_between_them`
    and `every_gap_between_two_cells_is_explained_by_their_resolved_records`,
    both skipping loudly without cells, and
-   `a_gap_is_explained_only_by_a_recorded_field_that_differs` judging the
-   judge. What the second found is a gap in the record itself: nothing in the
+   `a_gap_is_explained_only_by_a_recorded_field_that_differs` and
+   `a_gap_is_credited_to_the_cause_the_refusal_names_not_to_any_field_that_differs`
+   judging the judge. A gap is credited to the cause the refusing probe
+   names in its own words (a BTF it could not read, a capability, the
+   sysctl, a tracepoint the kernel does not define, hardware not published),
+   and only when the field standing for it differs between the two records
+   the way that refuses (a `kernel>=` requirement: the refusing side's
+   release older, the other's not); a reason naming nothing a record carries
+   fails. What the second found is a gap in the record itself: nothing in the
    resolved file said what the process was privileged to do, or whether the
    machine was a guest. `Environment.privileges` and
    `Environment.virtualization` are captured now
@@ -81,37 +92,80 @@ the fifteenth wave, stream probes".
 
 ## Open
 
-- **473 gaps between the cells on disk are counted as unrecorded**, not
-  explained: 335 only privileges could explain and 138 privileges or
-  virtualization, because the cells were swept before the record carried
-  them. Measured by `every_gap_...` on the 20 cells; the next matrix sweep
-  turns them into explained or failed.
-- **217 differences are the build's**, between cells swept by two binaries
-  (2026-09-29 and 2026-09-30) and recorded before `cell.build` existed.
+- **2754 gaps between the cells on disk are counted as unrecorded**, not
+  explained: 2514 only the privileges could explain, 197 only the
+  virtualization, 43 both, because the cells were swept by `main`'s binary,
+  before the record carried them. Explained: 1716 by `kernel_btf`, 991 by
+  `tracefs`, 255 by `kernel_release`, 200 by `gpus` (NVML, here against the
+  guests), 20 by `perf_event_paranoid`. Measured by `every_gap_...` on the
+  22 cells; the next sweep with this branch's binary turns the unrecorded
+  ones into explained or failed.
+- **83 differences are the build's**, between cells recorded before
+  `cell.build` existed (`here-nocaps` is from 2026-09-29).
+- **`portability::every_cell_on_disk_holds_the_invariants` is red on the
+  cells on disk, 6 violations, none this branch's**: five in `here-nocaps`,
+  the stale 2026-09-29 cell `docs/portability.md` already names (*"usable
+  through `pmu`, which has no collector in this build"* for `cpu.profile`,
+  and four like it), which the 2026-09-30 sweep did not redo; and one in
+  `here-caps`, `net.hwts --system -m trace` listed usable through
+  `netlink:ethtool` and refused at the start (exit 3), filed for the net
+  family's owner. It was 60 in review because the cells had been copied
+  mid-sweep: `7.2.6-nobtf` and `-notracefs` were still the previous build's
+  and `7.2.6-nocaps` had no `sweep.json` yet.
 - `cpu.cycles` through `pmu:sw` reports its value in the entry's unit
   (`count`): the degradation line says "CPU time, not cycles", and the
   counter's name is `cpu_clock_ns`, but a per-backend unit would need
   `Backend.unit` in `src/catalog.rs` (R's), not filed as it changes the
   catalog's model.
-- `resolve::tests::a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable`
-  fails by design on this branch (filed for R, with the replacement).
 - The attach-time privilege advice (`bpf::permission_advice`) still says
   `setcap` for a withheld capability (filed; the probe's is rewritten).
 
+## Review fixes
+
+1. **The resolver test this branch broke, in a file it does not own**:
+   `resolve::tests::a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable`
+   is replaced in a commit of its own that touches `src/resolve.rs` alone,
+   so the branch merges green and R can drop the commit for another fix.
+   The unwritten backend is `cpu.cycles`'s `pmu:sw` declaration renamed to
+   `fs:proc`, asserted unwritten; finding the pair at run time was tried
+   and found none on this build, a permanent skip. The request to R says so.
+2. **The phase 7 test credited any differing field**: rewritten (item 5
+   above). The reviewer's two cases are the new unit test's first two: a
+   `bpf` gap across kernels is the privileges' (unrecorded), not
+   `kernel_release`'s; a `hwmon` gap is the virtualization's (unrecorded),
+   not `gpus`'. On the cells, `kernel_release` went from 1740 to 255 and
+   `gpus` from 296 to 200 (all NVML), and the unrecorded count from 473 to
+   2754.
+3. **`every_cell_on_disk_holds_the_invariants` red**: real, and now said
+   under Open with its six violations on the finished sweep; not this
+   branch's, and not made green by weakening the judge.
+4. **No integration test held the pair refusal's exit code**: added
+   (item 2 above). The `nosuid` diagnosis end to end stays under Needs
+   privilege.
+5. **Found by the check**: the user-mode page-fault test's bound counted
+   samples against pages (see below); it counts pages now.
+
 ## This stream's check
 
-`make check` stopped at the library's one expected failure
-(`resolve::tests::a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable`,
-filed). `cargo test --workspace --no-fail-fast` then, with five other streams
-and a matrix sweep on the machine: 2203 passed, that one failed, and ten more
-failed that this branch does not touch -- `budget`, `cross_compute`, `cross_io`,
-`encoders`, `family_sched` (0 migrations counted for 58 moves), `scenario_net`
-(`net.hwts` forced exited 1), `triage`, two `unwind` -- each of which passed
-alone at once. One failed again alone:
-`scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`
-(*"`fs:sys` reports 570 fully-mapped huge pages and /proc/meminfo says between
-489 and 508"*), whose entry and collector this branch does not change: for the
-flaky tally, and its owner. Clippy and fmt clean.
+After the review fixes, one `make check`: red in the library at
+`collect::mem::page_faults::tests::sampled_in_user_mode_the_programs_own_faults_arrive_and_the_kernels_do_not`
+(*"65 user-mode samples landed in the 64 pages this code touched"*), which
+passed alone at once. It is this stream's file, and the bound was a count of
+samples held to a count of pages: a retried fault raises the event twice.
+`landed_in` now counts the pages that took a fault (both page-fault tests
+use it). Then `cargo test --workspace --no-fail-fast`, with the capabilities
+on the binary: 2085 passed, 3 failed, 8 ignored. The three:
+`portability::every_cell_on_disk_holds_the_invariants` (the six stale or
+filed violations under Open), and `runner::a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other`
+and `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`,
+neither this branch's, both passing alone at once (for the flaky tally).
+`resolve::tests::a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable`
+passes. Clippy (`--workspace --all-targets -D warnings`) and fmt clean.
+
+Before the review, `make check` had stopped at that resolver test, and the
+workspace run had 2203 passed and ten unrelated failures, each passing alone
+at once except `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`
+(for its owner and the flaky tally).
 
 ## Needs privilege
 
@@ -156,7 +210,10 @@ In `docs/open-findings.md`, "Needs from another stream -- the fifteenth wave,
 stream probes":
 
 - R (`src/resolve.rs`): the resolver test that named `cpu.cycles` on
-  `pmu:sw` as unwritten, with its replacement.
+  `pmu:sw` as unwritten -- replaced on this branch in its own commit; R keeps
+  it or drops it.
+- The net family's owner: `net.hwts`'s `netlink:ethtool` declares
+  `modes: [snapshot, poll]`.
 - The owner of `src/bpf/mod.rs`: `permission_advice` calling
   `capabilities::withheld_file_capabilities()`.
 - The runner stream (`examples/bench/harness.rs`): the guardrail through

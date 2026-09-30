@@ -1297,34 +1297,46 @@ keep the read and correct the phase 9 sentence.
   `notracefs`, `caps` against `root`) lists no source the one that grants
   does not, the capability and BTF pairs list strictly fewer, and every
   source usable only where the condition is granted names it in the
-  withholding cell's reason. On the cells on disk: 41 against 71 to 78 for
+  withholding cell's reason. On the cells on disk: 41 against 71 to 80 for
   `nocaps`/`caps`, 45 against 75 to 81 for `nobtf`/`root`, 52 against 92 for
   `here-nocaps`/`here-caps`.
 - `portability::every_gap_between_two_cells_is_explained_by_their_resolved_records`
-  (phase 7): over every two of the 21 cells, each source whose availability
-  differs has requirements that answered differently, and a field of the two
-  resolved records that differs and can explain them: `kernel_release`
-  (1740), `kernel_btf` (1336), `gpus` (296), `tracefs` (105),
-  `perf_event_paranoid` (24). **473 are not explained yet** -- 335 only the
-  privileges could explain, 138 the privileges or the virtualization -- because
-  the resolved record carried neither. It does now: `Environment.privileges`
+  (phase 7): over every two of the 22 cells of the finished 2026-09-30
+  sweep, each source whose availability differs has requirements that
+  answered differently, and the refusing side's probe names the cause in its
+  own words -- a BTF it could not read, a capability, the sysctl, a
+  tracepoint this kernel does not define, hardware the machine does not
+  publish. The field of the two resolved records standing for that cause has
+  to differ the way that refuses on the refusing side (a `kernel>=`
+  requirement: that side's release older, the other's not); a field that
+  merely differs explains nothing, and a reason naming nothing a record
+  carries fails. Explained: `kernel_btf` (1716), `tracefs` (991),
+  `kernel_release` (255), `gpus` (200, NVML), `perf_event_paranoid` (20).
+  **2754 are not explained yet** -- 2514 only the privileges could explain,
+  197 only the virtualization, 43 both -- because the resolved record carried
+  neither. (A first version credited the alphabetically first field that
+  differed, and put 1740 on `kernel_release` and 296 on `gpus`: a `bpf` gap
+  between `caps` on one kernel and `nocaps` on another is the capabilities',
+  a `hwmon` gap between this host and a guest is the virtualization's.) The
+  record carries both now: `Environment.privileges`
   (uid, the effective capabilities this tool asks for, `no_new_privs`, what
   the file carries that the process was not given) and
   `Environment.virtualization` (`none`, or the firmware's name for the
   machine), held to `capget` and `systemd-detect-virt --vm`. The test counts
   those and says so until the matrix is swept again; with new cells a gap
   only a missing field explains fails. `a_gap_is_explained_only_by_a_recorded_field_that_differs`
-  judges the judge on planted cells.
+  and `a_gap_is_credited_to_the_cause_the_refusal_names_not_to_any_field_that_differs`
+  judge the judge on planted cells.
 - A cell now records its `build` (a hash of the binary that swept it): two
   cells differing by what the build answers (a probe not written, a listing
   rule) are the build's difference, not the machine's, and are held only
-  between cells of one build. Cells on disk predate it: 217 such differences
-  between cells swept on 2026-09-29 and 2026-09-30.
+  between cells of one build. Cells on disk predate it: 83 such differences,
+  against `here-nocaps`, swept on 2026-09-29.
 
 ### The matrix cells this change should move
 
 | Cells | What should change |
 |---|---|
-| every cell | `environment.privileges`, `environment.virtualization` and `cell.build` recorded; `every_gap_...` explains the 473 it counts as unrecorded today, or fails naming the ones it cannot |
+| every cell | `environment.privileges`, `environment.virtualization` and `cell.build` recorded; `every_gap_...` explains the 2754 it counts as unrecorded today, or fails naming the ones it cannot |
 | every guest | nothing for `cpu.cycles`: the guests expose the host's PMU and stay on `pmu`; `pmu:sw` now reads `collector written` in the listing |
 | `ci-6.17-*` | `cpu.cycles` served on the runner's vcpu, `pmu:sw`, with the degradation |

@@ -8766,32 +8766,22 @@ Stream probes' record is `docs/fixes/w15-probes.md`, and `docs/portability.md`,
 "The fifteenth wave". Nothing here blocks it; each item is the other half of a
 change landed in this stream's files.
 
-### To stream R (`src/resolve.rs`): the test that needed `cpu.cycles` on `pmu:sw` unwritten
+### To stream R (`src/resolve.rs`): the test that needed `cpu.cycles` on `pmu:sw` unwritten -- landed here, in its own commit
 
 `cpu.cycles` on `pmu:sw` has a collector since this wave (the cpu clock, the
 degraded fallback the catalog declares), so
 `resolve::tests::a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable`
-fails at its second line, `assert!(!crate::collect::implements("cpu.cycles",
-"pmu:sw"))`, **by design**. What it holds is still true of the resolver; it
-needs another pair. Wanted: the pair found at run time rather than named, so a
-collector written tomorrow cannot break it again:
-
-```rust
-// The first entry whose first backend is written, whose later backend is not,
-// and which that later backend serves for a pid, with its requirements here.
-let (entry, unwritten) = embedded.entries().iter().find_map(|entry| {
-    let first = entry.backends.first()?;
-    let later = entry.backends.iter().skip(1).find(|b| {
-        !crate::collect::implements(entry.id.as_str(), &b.id)
-            && entry.backend_target_support(b, TargetKind::Pid) != TargetSupport::No
-            && b.requires.iter().all(|r| capabilities.probe(r, None).is_available())
-    })?;
-    crate::collect::implements(entry.id.as_str(), &first.id).then(|| (entry.clone(), later.id.clone()))
-})?; // skip, saying so, when this build has no such pair
-```
-
-then `entry.backends[0].requires = vec!["pmu:omnnounit/cycles/".into()]` and the
-assertions as today, on `unwritten`.
+failed at `assert!(!crate::collect::implements("cpu.cycles", "pmu:sw"))`, and
+`make check` on this branch stopped there. A pair found at run time was tried
+first and found none on this build and machine (no entry has an unwritten
+later backend whose requirements are met here), which would have made the
+test a permanent skip. **Landed on this branch, as a commit of its own that
+touches `src/resolve.rs` alone**, so it can be dropped if R lands another: the
+test keeps `cpu.cycles`'s `pmu` backend (withheld by an event no machine
+publishes) and its `pmu:sw` fallback's declaration, renamed to `fs:proc`, a
+tag no collector serves for `cpu.cycles` -- asserted unwritten, so a
+collector written there tomorrow fails the test by name rather than removing
+its subject. R: keep it, or replace it and drop the commit.
 
 ### To the owner of `src/bpf/mod.rs` (the coordinator's shared layer): the attach-time advice
 
@@ -8862,3 +8852,16 @@ fourteenth wave, but `src/catalog.rs` is R's.
 ### For the flaky tally
 
 Nothing new from this stream's paths in its runs; see the handoff's check.
+
+### To the owner of `net.hwts` (`catalog/net.yaml`, `src/collect/net/**`): listed usable for `trace`, refused at the start
+
+Found by `portability::every_cell_on_disk_holds_the_invariants` on the
+`here-caps` cell of the 2026-09-30 sweep (the one violation there):
+`omn trace net.hwts -m trace -e summary -d 300ms --system` exits 3 with
+*"`trace` on net.hwts means a timestamp per packet, which is the
+`so_timestamping` backend and is not built"*, while `omn list net.hwts` calls
+it usable through `netlink:ethtool`. Wanted: `netlink:ethtool` declares
+`modes: [snapshot, poll]` in the catalog, so the resolver passes over it for
+`trace` with that reason in the chain, lands on the unwritten
+`so_timestamping`, and the listing and the run agree.
+
