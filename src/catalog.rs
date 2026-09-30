@@ -336,9 +336,13 @@ pub enum Cost {
     Med,
     /// 5 to 20 %.
     High,
-    /// Over 10x: kernel replay, as a GPU profiler does it to read more counters
-    /// than the hardware has. Not dynamic binary instrumentation, which
-    /// `DECISIONS.md` rules out as a backend.
+    /// Over 20 %, with no bound above: the one band past `High`. What the
+    /// bench measured in it is a program the collector runs inside -- the
+    /// preload shim on an allocation- or lock-bound program, about +600 % to
+    /// +1000 %, and `proc.syscall`'s program on every system call, +296 % --
+    /// and it is also where kernel replay would sit, as a GPU profiler does it
+    /// to read more counters than the hardware has. Not dynamic binary
+    /// instrumentation, which `DECISIONS.md` rules out as a backend.
     Extreme,
 }
 

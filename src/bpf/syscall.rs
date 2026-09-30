@@ -589,28 +589,12 @@ pub fn possible_cpus() -> usize {
     })
 }
 
-/// Counts the cpus in a list such as `0-7` or `0,2-3`.
+/// Counts the cpus in a list such as `0-7` or `0,2-3`, with the one parser
+/// the crate has for the kernel's cpu lists: an empty list is none.
 fn parse_cpu_list(text: &str) -> Option<usize> {
-    let mut total = 0usize;
-    for part in text.trim().split(',') {
-        if part.is_empty() {
-            return None;
-        }
-        let count = match part.split_once('-') {
-            Some((first, last)) => {
-                last.parse::<usize>()
-                    .ok()?
-                    .checked_sub(first.parse().ok()?)?
-                    + 1
-            }
-            None => {
-                part.parse::<usize>().ok()?;
-                1
-            }
-        };
-        total += count;
-    }
-    (total > 0).then_some(total)
+    crate::capabilities::parse_cpu_list(text)
+        .map(|cpus| cpus.len())
+        .filter(|count| *count > 0)
 }
 
 #[cfg(test)]

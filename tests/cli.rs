@@ -762,6 +762,12 @@ fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_se
         "--filter",
         "state == 'nothing-here'",
     ]);
+    // A cloud VM has no cpuidle driver to read, and no eBPF without the
+    // capabilities: the CI's runners serve neither backend.
+    if stderr(&output).contains("has no viable backend on this machine") {
+        eprintln!("skipped: {}", stderr(&output));
+        return;
+    }
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("kept 0 of"), "{text}");

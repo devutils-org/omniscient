@@ -665,7 +665,18 @@ fn a_clean_run_of_the_same_workload_gains_nothing() {
     assert_ran(&output);
     let text = stdout(&output);
     if !text.contains("no loss") {
-        eprintln!("skipped: the second clean run was not clean:\n{text}");
+        // The number first, on the skip's own line: what the run said it lost.
+        let losses: Vec<&str> = text
+            .lines()
+            .filter(|line| {
+                line.contains("lost") || line.contains("dropped") || line.contains("loss")
+            })
+            .map(str::trim)
+            .collect();
+        eprintln!(
+            "skipped: the second clean run was not clean: {}\n{text}",
+            losses.join("; ")
+        );
         return;
     }
     assert!(

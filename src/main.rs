@@ -202,6 +202,21 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         Err(rejections) => return Ok(reject(&rejections)),
     };
 
+    // A dump is a document about the request, and a results format cannot
+    // hold one. Asked before the machine is, because the answer does not
+    // depend on it: a stock kernel that refuses `cpu.profile` used to answer
+    // "no viable backend" to a question about the request's spelling.
+    if (args.dump_request || args.dump_resolved || args.no_resolve)
+        && !session.format.renders_documents()
+    {
+        eprintln!(
+            "error: `{}` describes results, not a request: a request dumps as text, json, yaml \
+             or toml",
+            session.format
+        );
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+
     // A session written here for another machine is not resolved here: what
     // this machine can do says nothing about what that one can.
     if args.no_resolve {

@@ -206,6 +206,20 @@ fn answer(args: &[&str], would_have_checked: &str) -> Option<Answered> {
         );
         return None;
     }
+    // An input the method cannot do without, which this machine cannot serve:
+    // `cpu.profile` on a stock kernel's `perf_event_paranoid`, or on a cpu with
+    // no PMU. The question is refused, rightly, and the refusal is the
+    // machine's -- its reasons follow on the lines after.
+    if !output.status.success()
+        && text.contains("cannot do without")
+        && text.contains("has no viable backend on this machine")
+    {
+        eprintln!(
+            "skipped: `omn {}` would have checked {would_have_checked}, and: {text}",
+            args.join(" ")
+        );
+        return None;
+    }
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -608,7 +622,26 @@ fn the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail() {
     ) else {
         return;
     };
-    assert_eq!(latency.limit(), Some("cpu"), "{}", latency.text);
+    // The median run spins 100 ms and sleeps nothing, so what limits it is a
+    // cpu: its own work on an idle machine, and waiting for one on a machine
+    // whose cpus the rest of the suite holds -- which is the tool being right
+    // about the run it measured, and failed this test at a load of 20. What
+    // the median run is never limited by is the sleep the tail's run made.
+    match latency.limit() {
+        Some("cpu") => {}
+        Some("cpu-queue") => eprintln!(
+            "the median run waited for a cpu longer than it ran on one: this machine's cpus \
+             were busy (load {}), and the verdict says so:\n{}",
+            std::fs::read_to_string("/proc/loadavg")
+                .unwrap_or_default()
+                .trim(),
+            latency.text
+        ),
+        other => panic!(
+            "the median of the same five runs is limited by {other:?}, not by a cpu:\n{}",
+            latency.text
+        ),
+    }
 }
 
 /// The loss path: a profile taken fast enough to lose samples carries its
@@ -920,8 +953,11 @@ fn the_function_whose_cost_doubled_is_the_only_difference() {
             factor,
         ]);
         let text = spoken(&output);
-        if !output.status.success() && text.contains("CAP_PERFMON") {
-            eprintln!("skipped: profiling needs CAP_PERFMON: {text}");
+        if !output.status.success()
+            && (text.contains("CAP_PERFMON")
+                || text.contains("has no viable backend on this machine"))
+        {
+            eprintln!("skipped: this machine does not profile here: {text}");
             return None;
         }
         assert!(output.status.success(), "{text}");

@@ -766,8 +766,15 @@ impl Run {
     }
 }
 
+/// A report file of this call alone. Two tests of one binary run in threads of
+/// one process, so the pid and the tag are shared, and one test's run read or
+/// removed the other's report ("the workload wrote no report"): the counter
+/// makes each call's name its own. The pid stays first, which is what
+/// `sweep_leftovers` reads.
 fn report_path(tag: &str) -> PathBuf {
-    bench_dir().join(format!("report.{}.{tag}.json", std::process::id()))
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    bench_dir().join(format!("report.{}.{call}.{tag}.json", std::process::id()))
 }
 
 fn read_report(path: &Path) -> Result<Value, String> {

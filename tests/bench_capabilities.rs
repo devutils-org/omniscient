@@ -75,8 +75,11 @@ fn a_shim_that_is_not_there_is_missing_and_named() {
 
 #[test]
 fn every_resolved_file_carries_the_prefetcher_state() {
+    // `proc.threads` reads `/proc`, which every machine serves: the property is
+    // the resolved file's, of any request, and a counter was refused on the
+    // CI's runners (paranoid 4, and no hardware PMU) before the file existed.
     let output = Command::new(omn())
-        .args(["trace", "cpu.instructions", "-m", "count", "-e", "summary"])
+        .args(["trace", "proc.threads", "-m", "poll", "-e", "summary"])
         .args(["--dump-resolved", "--", "true"])
         .output()
         .expect("omn runs");

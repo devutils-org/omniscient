@@ -418,6 +418,18 @@ fn resolved(
     mode: Mode,
     duration: Option<&str>,
 ) -> omn::resolve::ResolvedRequest {
+    try_resolved(source, target, mode, duration).expect("the request resolves here")
+}
+
+/// The same, or the resolver's refusal: a counter is refused on a stock
+/// kernel's `perf_event_paranoid` and on a cpu with no hardware PMU, and a
+/// test that needs one says so and stops.
+fn try_resolved(
+    source: &str,
+    target: Target,
+    mode: Mode,
+    duration: Option<&str>,
+) -> Result<omn::resolve::ResolvedRequest, omn::resolve::ResolveError> {
     let catalog = omn::catalog::Catalog::embedded().expect("the embedded catalog loads");
     let capabilities = omn::capabilities::Capabilities::detect();
     let request = Request {
@@ -434,7 +446,7 @@ fn resolved(
         label: None,
         window: None,
     };
-    omn::resolve::resolve(&catalog, &capabilities, &request).expect("the request resolves here")
+    omn::resolve::resolve(&catalog, &capabilities, &request)
 }
 
 fn poll_every(text: &str) -> Mode {
@@ -1116,11 +1128,12 @@ fn windowed(
     mode: Mode,
     window: Option<&str>,
     label: &str,
-) -> omn::resolve::ResolvedRequest {
-    let mut resolved = resolved(source, Target::Launch(argv.to_vec()), mode, None);
+) -> Result<omn::resolve::ResolvedRequest, String> {
+    let mut resolved = try_resolved(source, Target::Launch(argv.to_vec()), mode, None)
+        .map_err(|error| error.to_string())?;
     resolved.request.window = window.map(|text| text.parse().expect("a window"));
     resolved.request.label = Some(label.to_owned());
-    resolved
+    Ok(resolved)
 }
 
 /// The count a `count` collection ended on.
@@ -1139,13 +1152,13 @@ fn instructions_in(collection: &Collection) -> f64 {
 fn count_the_phases(
     argv: &[String],
     windows: [Option<&str>; 4],
-) -> Result<Vec<Collection>, omn::collect::CollectError> {
-    let requests: Vec<_> = ["first", "pause", "second", "whole"]
+) -> Result<Vec<Collection>, String> {
+    let requests = ["first", "pause", "second", "whole"]
         .into_iter()
         .zip(windows)
         .map(|(label, window)| windowed("cpu.instructions", argv, Mode::Count, window, label))
-        .collect();
-    collect::run_all(&requests)
+        .collect::<Result<Vec<_>, _>>()?;
+    collect::run_all(&requests).map_err(|error| error.to_string())
 }
 
 /// A source attached for the first phase counts the first phase and nothing
@@ -1197,7 +1210,7 @@ fn a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other() 
         ],
     ) {
         Ok(collections) => collections,
-        Err(error) if machine_cannot_serve(&error.to_string()) => {
+        Err(error) if machine_cannot_serve(&error) => {
             eprintln!("skipped: this machine will not count instructions here: {error}");
             return;
         }
@@ -1414,7 +1427,7 @@ fn a_counter_attached_late_counts_the_threads_already_running_or_says_it_cannot(
         ],
     ) {
         Ok(collections) => collections,
-        Err(error) if machine_cannot_serve(&error.to_string()) => {
+        Err(error) if machine_cannot_serve(&error) => {
             eprintln!("skipped: this machine will not count instructions here: {error}");
             return;
         }

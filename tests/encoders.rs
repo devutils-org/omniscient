@@ -340,7 +340,10 @@ fn frames_of(run: &RunOutput, results_index: usize, stack: u64) -> Vec<String> {
 /// A CPU-bound python loop, profiled for real. The interpreter's own evaluation
 /// frames are what a profile of it has to contain, and they come from the
 /// target's symbol table rather than from anything this tool decided.
-fn cpu_profile() -> RunOutput {
+///
+/// `None` on a machine that cannot profile, having said so: a stock kernel's
+/// `perf_event_paranoid` 4, or 2 before the callchain is user-only.
+fn cpu_profile() -> Option<RunOutput> {
     let output = run(&[
         "cpu.profile",
         "-m",
@@ -354,6 +357,9 @@ fn cpu_profile() -> RunOutput {
         "-c",
         "x = 0\nfor i in range(12_000_000): x += i",
     ]);
+    if machine_cannot_profile(&output) {
+        return None;
+    }
     assert!(output.status.success(), "{}", stderr(&output));
     let run: RunOutput = serde_json::from_str(&stdout(&output)).expect("one json document");
     let stacks = match &run.results[0].outputs[0] {
@@ -365,7 +371,21 @@ fn cpu_profile() -> RunOutput {
         "the profile is empty, so nothing below is testing an encoder: {:?}",
         run.results[0]
     );
-    run
+    Some(run)
+}
+
+/// Whether a run was refused by the machine rather than by the request, in
+/// which case the test skips with the machine's own reason. The resolver's
+/// classification is the sentence it prints for that case.
+fn machine_cannot_profile(output: &Output) -> bool {
+    let complaint = stderr(output);
+    let machine = !output.status.success()
+        && (complaint.contains("has no viable backend on this machine")
+            || complaint.contains("perf_event_paranoid"));
+    if machine {
+        eprintln!("skipped: {complaint}");
+    }
+    machine
 }
 
 /// Ground truth for the protobuf: every stack the collector measured is in the
@@ -377,7 +397,9 @@ fn a_real_profile_survives_the_round_trip_through_profile_proto() {
         eprintln!("skipped: this machine has no python3 to profile");
         return;
     }
-    let run = cpu_profile();
+    let Some(run) = cpu_profile() else {
+        return;
+    };
     let bytes = encode::run_output_bytes(OutputFormat::Pprof, &run).expect("a pprof file");
     let profile = decode_profile(&bytes);
 
@@ -475,7 +497,9 @@ fn go_tool_pprof_reads_the_file_and_agrees_with_what_was_measured() {
         return;
     }
 
-    let run = cpu_profile();
+    let Some(run) = cpu_profile() else {
+        return;
+    };
     let bytes = encode::run_output_bytes(OutputFormat::Pprof, &run).expect("a pprof file");
     let path = scratch("pprof").join("profile.pb.gz");
     std::fs::write(&path, &bytes).expect("writing the profile");
@@ -744,6 +768,17 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
     const ALLOCATED: f64 = 64.0 * MIB;
     const AFTER_MS: f64 = 300.0;
 
+    // The program reports its own resident size on either side of the
+    // allocation, read from its own `/proc/self/status`: that is the step the
+    // trace has to show. The nominal 64 MiB is not -- on the CI's first run the
+    // process grew by 56.6 MiB of it, and the trace was right.
+    let own = scratch("chrome-allocation").join("own-rss");
+    let program = "import sys, time\n\
+        rss = lambda: int(next(l for l in open('/proc/self/status') \
+        if l.startswith('VmRSS')).split()[1]) * 1024\n\
+        time.sleep(0.3)\nbefore = rss()\nb = bytearray(64 * 1024 * 1024)\nafter = rss()\n\
+        open(sys.argv[1], 'w').write(f'{before} {after}')\ntime.sleep(0.3)";
+    let own_arg = own.display().to_string();
     let output = run(&[
         "mem.rss",
         "-m",
@@ -755,7 +790,8 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
         "--",
         "python3",
         "-c",
-        "import time\ntime.sleep(0.3)\nb = bytearray(64 * 1024 * 1024)\ntime.sleep(0.3)",
+        program,
+        &own_arg,
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     let document: serde_json::Value =
@@ -795,13 +831,40 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
     // independently of the machine's load is the order -- the program sleeps
     // 300 ms before it allocates -- so the rise cannot come earlier than that,
     // to within one poll of the axis's origin.
+    //
+    // Zeroing 64 MiB can take longer than one poll on a loaded machine, and
+    // then the rise is two or three polls long: it is read as one, every
+    // adjacent poll that rose by more than a twentieth of the program's own
+    // growth taken with the largest.
+    let reported = std::fs::read_to_string(&own).expect("the program reports its own size");
+    let grown = match reported
+        .split_whitespace()
+        .map(|number| number.parse::<f64>().expect("a byte count"))
+        .collect::<Vec<_>>()[..]
+    {
+        [before, after] => after - before,
+        _ => panic!("the program's report is two numbers: {reported:?}"),
+    };
+    assert!(
+        grown > ALLOCATED * 0.5,
+        "the program grew by {grown} bytes for a 64 MiB allocation, too little to judge"
+    );
     let values: Vec<f64> = counters.iter().map(|(_, value)| *value).collect();
     let step = (1..values.len())
         .max_by(|&left, &right| {
             (values[left] - values[left - 1]).total_cmp(&(values[right] - values[right - 1]))
         })
         .expect("more than ten points");
-    let (before, after) = values.split_at(step);
+    let rising = |index: usize| values[index] - values[index - 1] > grown / 20.0;
+    let mut start = step;
+    while start >= 2 && rising(start - 1) {
+        start -= 1;
+    }
+    let mut end = step;
+    while end + 1 < values.len() && rising(end + 1) {
+        end += 1;
+    }
+    let (before, after) = (&values[..start], &values[end..]);
     assert!(
         before.len() >= 2 && after.len() >= 2,
         "the step is at an edge of the trace, so one side of it was never polled: {counters:?}"
@@ -809,16 +872,16 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
     let peak_before = before.iter().cloned().fold(f64::MIN, f64::max);
     let floor_after = after.iter().cloned().fold(f64::MAX, f64::min);
     assert!(
-        floor_after - peak_before > ALLOCATED * 0.9,
-        "the 64 MiB allocation is not the step in the trace: {peak_before} before, \
-         {floor_after} after"
+        floor_after - peak_before > grown * 0.9,
+        "the allocation is not the step in the trace: {peak_before} before, {floor_after} \
+         after, and the program itself grew by {grown}"
     );
     assert!(
         peak_before < ALLOCATED,
         "the process was already holding the allocation before it was made: {peak_before}"
     );
     const POLL_MS: f64 = 25.0;
-    let step_at_ms = counters[step].0 / 1000.0;
+    let step_at_ms = counters[start].0 / 1000.0;
     assert!(
         step_at_ms >= AFTER_MS - POLL_MS,
         "the trace puts the allocation {step_at_ms:.1} ms in, and the program slept \
@@ -908,6 +971,9 @@ fn the_command_line_writes_a_profile_and_a_trace_a_reader_can_open() {
         "-c",
         program,
     ]);
+    if machine_cannot_profile(&output) {
+        return;
+    }
     assert!(output.status.success(), "{}", stderr(&output));
 
     // `.pb.gz`, because that is the extension every reader of this format opens

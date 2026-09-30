@@ -423,11 +423,37 @@ impl Drop for Timer {
         if self.started_ns == 0 {
             return;
         }
-        let spent = monotonic_ns()
-            .saturating_sub(self.started_ns)
-            .saturating_sub(self.excluded_ns)
-            .saturating_sub(2 * CLOCK_READ_NS.load(Ordering::Relaxed));
+        let spent = own_time(
+            monotonic_ns().saturating_sub(self.started_ns),
+            self.excluded_ns,
+            CLOCK_READ_NS.load(Ordering::Relaxed),
+        );
         ring::spent(self.class, spent);
+    }
+}
+
+/// A hook's own time over a span longer than this is not the hook's: nothing
+/// the shim does between its clock reads -- a few checks, a record copied
+/// into the ring -- comes within three orders of magnitude of it, and a
+/// preemption of the program's thread inside the span does. One such span
+/// on a two-cpu CI runner, scaled by [`SAMPLE_EVERY`], put a scheduler slice
+/// seventeen times into the account, which came to 610 ms for 396 ms the
+/// program lost.
+const PREEMPTED_NS: u64 = 200_000;
+
+/// What a timed call spent of the shim's own: its span, less the real function
+/// and the two clock reads timing added. A span the thread was preempted in
+/// counts nothing -- the turn is still counted as timed, so the account is low
+/// by the few hundred nanoseconds the hook itself took in it, where keeping it
+/// would add a time slice.
+fn own_time(span_ns: u64, excluded_ns: u64, clock_read_ns: u64) -> u64 {
+    let own = span_ns
+        .saturating_sub(excluded_ns)
+        .saturating_sub(2 * clock_read_ns);
+    if own > PREEMPTED_NS {
+        0
+    } else {
+        own
     }
 }
 
@@ -942,5 +968,20 @@ mod tests {
             "the reader scales the account by seventeen"
         );
         assert_eq!(ring::SLOT_BYTES, 8 + RECORD_SIZE);
+    }
+
+    /// A timed call's own time is its span less the real function and the
+    /// clock reads, and a span a preemption fell in is none of the hook's.
+    #[test]
+    fn a_preempted_span_adds_nothing_to_the_account() {
+        assert_eq!(own_time(1_000, 600, 20), 360);
+        assert_eq!(own_time(500, 600, 20), 0, "never below zero");
+        assert_eq!(own_time(PREEMPTED_NS + 640, 600, 20), PREEMPTED_NS);
+        assert_eq!(own_time(PREEMPTED_NS + 641, 600, 20), 0);
+        assert_eq!(
+            own_time(4_000_000 + 1_000, 600, 20),
+            0,
+            "a scheduler slice inside the span is the machine's, not the shim's"
+        );
     }
 }
