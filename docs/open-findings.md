@@ -8759,3 +8759,65 @@ backend with no collector, lead with the first backend passed over and why.
 `LICENSE`. A release archive should carry it; adding it is one line in
 `contents` of `scripts/release.sh` (and one in `make install`), which stream D
 will take once the file exists.
+
+## Needs from another stream — the fifteenth wave, stream docs
+
+Stream docs' record is `docs/fixes/w15-docs.md`. Nothing here blocks it. Each
+item is something writing `docs/keys.md` and the fifteenth wave's decisions
+found in a file this stream does not own.
+
+### To whoever owns `src/event.rs` and `src/join.rs`: `iface` is compared by its name alone
+
+`join::identity` compares a key's `Display`, and `KeyValue::Iface` displays
+`iface:<name>`. So the index takes no part in a match, and the doc comment on
+`KeyValue::Iface` (*"an interface that gets renamed is still the same
+interface"*) is not what a join does: a rename mid-run makes a second key.
+Worse for an `eq` on `iface`: `net.iface` writes the counter kind into the name
+(`iface:lo/drops`, `src/collect/net/iface.rs:46`), so it cannot join
+`net.qdisc`'s or `net.capture`'s `iface:lo`. And `net.bytes` and `net.iface`
+leave the index 0 (`src/collect/net/dev.rs:190`, `iface.rs:46`) while
+`net.qdisc`, `net.capture` and `net.hwts` fill it. Wanted, in this order:
+
+- every producer fills the index (`if_nametoindex` at the read, for the procfs
+  ones);
+- `identity` compares the index for `Iface` (`iface#<index>`), and `Display`
+  keeps the name for people;
+- the counter kind moves out of the name once a series can carry one
+  (`docs/open-requests.md`, line 3054).
+
+A test: two sources of one interface, joined by `eq` on `iface`, credit each
+other's events on `lo`, whose index is 1 on every Linux machine.
+
+### To whoever owns `src/request.rs` and `src/event.rs`: `proc` has no producer
+
+`KeyKind::Proc` and `KeyValue::Proc { pidns, pid }` exist, and no collector
+writes one. No catalog entry lists `proc` among its keys either. Processes are
+keyed `task:<pid>` (`src/collect/proc/status.rs:241`,
+`src/collect/mem/footprint.rs:260`), so a process and its main thread share a
+key. Either a producer (the procfs sources know their pid namespace from
+`/proc/<pid>/ns/pid`), or the kind goes, and `docs/keys.md` changes in the same
+commit.
+
+### To the coordinator (`STATE.md`), and whoever owns `docs/install.md` and `docs/families/sched.md`: the floor is per backend
+
+`DECISIONS.md` now says there is no single kernel floor: each backend carries
+its own `kernel>=`, and 5.15 is served ("Settled in the fifteenth wave").
+Three places still say 6.1 is the floor:
+
+- `STATE.md`, "Where each roadmap phase stands", phase 0: *"kernel floor 6.1"*.
+  Phase 1's *"`Span`-equivalent attributions"* can point to "No `Span`
+  struct" there too.
+- `docs/install.md`, "The kernel": *"Linux 6.1 is the floor (`DECISIONS.md`,
+  "Kernel floor")"*.
+- `docs/families/sched.md:57`: *"`DECISIONS.md` chose that floor"*. This one
+  is still true of `sched.lock`, which needs `lock:contention_*`; it wants
+  "that backend's `kernel>=6.1`".
+
+### To the probes stream: the power guardrail is yours to decide, and `DECISIONS.md` is mine
+
+`ROADMAP.md` phase 9 now says `power` is not collected as a guardrail: the
+bench reads `thermal_throttle` around each repetition
+(`examples/bench/harness.rs`, `throttle_count`) and says on AMD that it cannot
+tell. The sentence ends *"pending that stream"*. Whatever you decide, put it
+under "For DECISIONS.md" in your handoff. The coordinator lands it, and the
+phase 9 sentence changes to point at it.
