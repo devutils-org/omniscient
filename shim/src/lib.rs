@@ -129,6 +129,11 @@ static REAL_MALLOC: AtomicUsize = AtomicUsize::new(0);
 static REAL_CALLOC: AtomicUsize = AtomicUsize::new(0);
 static REAL_REALLOC: AtomicUsize = AtomicUsize::new(0);
 static REAL_FREE: AtomicUsize = AtomicUsize::new(0);
+static REAL_POSIX_MEMALIGN: AtomicUsize = AtomicUsize::new(0);
+static REAL_ALIGNED_ALLOC: AtomicUsize = AtomicUsize::new(0);
+static REAL_MEMALIGN: AtomicUsize = AtomicUsize::new(0);
+static REAL_VALLOC: AtomicUsize = AtomicUsize::new(0);
+static REAL_PVALLOC: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     /// Set while a hook is running, so anything the hook itself allocates goes
@@ -812,9 +817,11 @@ pub unsafe extern "C" fn realloc(pointer: *mut c_void, size: usize) -> *mut c_vo
     let real: extern "C" fn(*mut c_void, usize) -> *mut c_void = std::mem::transmute(real);
     let fresh = timer.around(|| real(pointer, size));
     // A realloc is a free and an allocation, and reporting it as both is what
-    // keeps the live set correct without the reader needing a special case.
+    // keeps the live set correct without the reader needing a special case. A
+    // realloc that failed left the block where it was, and only one to zero
+    // bytes gives it back without returning another.
     guarded(|| {
-        if !pointer.is_null() {
+        if !pointer.is_null() && (!fresh.is_null() || size == 0) {
             report_heap(OP_FREE, pointer, 0);
         }
         if !fresh.is_null() {
@@ -855,8 +862,8 @@ pub unsafe extern "C" fn posix_memalign(
     size: usize,
 ) -> c_int {
     let mut timer = Timer::start(CLASS_HEAP);
-    let real = libc::dlsym(libc::RTLD_NEXT, c"posix_memalign".as_ptr());
-    if real.is_null() {
+    let real = resolve(&REAL_POSIX_MEMALIGN, b"posix_memalign\0");
+    if real == 0 {
         return libc::ENOMEM;
     }
     let real: extern "C" fn(*mut *mut c_void, usize, usize) -> c_int = std::mem::transmute(real);
@@ -866,6 +873,89 @@ pub unsafe extern "C" fn posix_memalign(
         guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
     }
     result
+}
+
+// The aligned entry points below are why a hook on `malloc` is not a hook on
+// the heap. glibc implements each of them on its internal allocator, not
+// through `malloc`'s PLT slot (`reallocarray` does call `realloc`'s, and is
+// seen through it; `tests/aggregation.rs` holds both), so an allocation made through one of them never
+// reaches the `malloc` above: `dd bs=64M` allocates its 64 MiB buffer with
+// `aligned_alloc`, and before these hooks a run of it reported a largest
+// allocation of 4 KiB and no loss. An allocation nobody saw, with nothing
+// counted, is the silent kind of loss. Each one reports the size the caller
+// asked for, as `malloc` does, and `pvalloc`'s rounding up to a page is the
+// allocator's, not the program's.
+//
+// Before `dlsym` has answered there is no bootstrap for them: the bump region
+// is 16-byte aligned and nothing larger is promised, so an aligned request
+// that early is refused the way the allocator refuses one it cannot serve.
+
+/// Calls the aligned allocator `slot` names with `(alignment, size)`, and
+/// reports what it returned.
+///
+/// # Safety
+/// `name` must name a libc function of type `fn(usize, usize) -> *mut c_void`.
+unsafe fn aligned(slot: &AtomicUsize, name: &[u8], alignment: usize, size: usize) -> *mut c_void {
+    let mut timer = Timer::start(CLASS_HEAP);
+    let real = resolve(slot, name);
+    if real == 0 {
+        *libc::__errno_location() = libc::ENOMEM;
+        return std::ptr::null_mut();
+    }
+    let real: extern "C" fn(usize, usize) -> *mut c_void = std::mem::transmute(real);
+    let pointer = timer.around(|| real(alignment, size));
+    if !pointer.is_null() {
+        guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
+    }
+    pointer
+}
+
+/// Calls the page-aligned allocator `slot` names with `size`, and reports what
+/// it returned.
+///
+/// # Safety
+/// `name` must name a libc function of type `fn(usize) -> *mut c_void`.
+unsafe fn page_aligned(slot: &AtomicUsize, name: &[u8], size: usize) -> *mut c_void {
+    let mut timer = Timer::start(CLASS_HEAP);
+    let real = resolve(slot, name);
+    if real == 0 {
+        *libc::__errno_location() = libc::ENOMEM;
+        return std::ptr::null_mut();
+    }
+    let real: extern "C" fn(usize) -> *mut c_void = std::mem::transmute(real);
+    let pointer = timer.around(|| real(size));
+    if !pointer.is_null() {
+        guarded(|| report_heap(OP_ALLOC, pointer, size as u64));
+    }
+    pointer
+}
+
+/// # Safety
+/// Replaces libc's `aligned_alloc` and obeys its contract.
+#[no_mangle]
+pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
+    aligned(&REAL_ALIGNED_ALLOC, b"aligned_alloc\0", alignment, size)
+}
+
+/// # Safety
+/// Replaces libc's `memalign` and obeys its contract.
+#[no_mangle]
+pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut c_void {
+    aligned(&REAL_MEMALIGN, b"memalign\0", alignment, size)
+}
+
+/// # Safety
+/// Replaces libc's `valloc` and obeys its contract.
+#[no_mangle]
+pub unsafe extern "C" fn valloc(size: usize) -> *mut c_void {
+    page_aligned(&REAL_VALLOC, b"valloc\0", size)
+}
+
+/// # Safety
+/// Replaces libc's `pvalloc` and obeys its contract.
+#[no_mangle]
+pub unsafe extern "C" fn pvalloc(size: usize) -> *mut c_void {
+    page_aligned(&REAL_PVALLOC, b"pvalloc\0", size)
 }
 
 #[cfg(test)]

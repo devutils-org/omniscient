@@ -1178,6 +1178,9 @@ pub struct Planned {
     /// What the catalog says this backend loses, if it is a fallback.
     pub degraded: Option<String>,
     pub equivalent: bool,
+    /// The cost band the catalog declares for this backend, which the row's
+    /// measurement is held to.
+    pub declared: omn::catalog::Cost,
 }
 
 /// A (source, backend) the bench does not measure, and why.
@@ -1342,6 +1345,7 @@ pub fn plan(omn: &Omn, only: Option<&str>) -> (Vec<Planned>, Vec<Unplanned>) {
                     chosen: chosen.as_ref().map(|(id, _)| id.as_str()) == Some(backend.id.as_str()),
                     degraded: backend.degraded.clone(),
                     equivalent: backend.equivalent,
+                    declared: backend.cost,
                     method,
                 }),
                 None => unplanned.push(Unplanned {
@@ -1409,6 +1413,88 @@ pub struct Measured {
     /// Collector cpu per repetition, in ns.
     pub cost: Stats,
     pub losses: u64,
+}
+
+/// What one row of the cost table says against the band its backend
+/// declares.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Band {
+    /// Measured, and inside the band.
+    Within(String),
+    /// Measured, and over the band: the row is flagged, and the flag is the
+    /// finding -- a band the machine does not keep is a catalog claim to
+    /// correct, not a table to throw away.
+    Over(String),
+    /// A column the row needs is not there. A table with such a row is wrong,
+    /// and the test that writes it fails.
+    Missing(String),
+}
+
+impl Band {
+    /// The table cell.
+    pub fn cell(&self) -> String {
+        match self {
+            Band::Within(why) => format!("within: {why}"),
+            Band::Over(why) => format!("**over**: {why}"),
+            Band::Missing(why) => format!("**missing**: {why}"),
+        }
+    }
+}
+
+/// Holds one row to the band its backend declares.
+///
+/// The cost compared is the larger of the share of the target's cpu
+/// `cost.json` reports and the dilation the workload measured of itself: an
+/// in-kernel collector's cost is in the target's dilation and not in the
+/// tool's cpu (`DECISIONS.md`, the bench's correction to the bands), so a
+/// band judged on the tool's cpu alone would pass every eBPF program. Either
+/// column is enough to judge by; a row with neither, with no repetition that
+/// completed, or with no collector cpu at all is missing what the table is for.
+/// `measured` is how many repetitions completed; `losses` is always a count,
+/// so its column is there by construction and it is `measured` that says it
+/// was counted over something.
+pub fn judge_band(
+    declared: omn::catalog::Cost,
+    measured: usize,
+    collector: Option<Stats>,
+    percent: Option<Stats>,
+    dilation: Option<Stats>,
+) -> Band {
+    if measured == 0 {
+        return Band::Missing("no repetition completed, so no column is measured".into());
+    }
+    if collector.is_none() {
+        return Band::Missing(format!(
+            "{measured} repetitions completed and none reported its collector cpu"
+        ));
+    }
+    let share = percent.map(|stats| stats.median);
+    let dilated = dilation.map(|stats| stats.median * 100.0);
+    let (cost, from) = match (share, dilated) {
+        (Some(share), Some(dilated)) if dilated > share => (dilated, "dilation"),
+        (Some(share), _) => (share, "share of the target's cpu"),
+        (None, Some(dilated)) => (dilated, "dilation"),
+        (None, None) => {
+            return Band::Missing(
+                "neither a share of the target's cpu nor a dilation to hold to the band".into(),
+            )
+        }
+    };
+    let ceiling = declared.worst_case_percent();
+    let said = format!(
+        "{cost:.2} % ({from}) against `{}`'s {}",
+        declared.as_str(),
+        if ceiling.is_finite() {
+            format!("{ceiling} %")
+        } else {
+            "no bound".into()
+        }
+    );
+    if cost <= ceiling {
+        Band::Within(said)
+    } else {
+        Band::Over(said)
+    }
 }
 
 /// Judges the resolver against the measurements of every backend of one

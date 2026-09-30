@@ -1375,3 +1375,353 @@ fn a_lock_storm_is_read_bounded_and_every_acquisition_is_accounted_for() {
         peak_kb / 1024
     );
 }
+
+/// Ground truth for what the run cost the machine: the kernel's account of the
+/// tool, read by `wait4` from outside it, less what the target says of itself.
+///
+/// A profile with stacks reads the kernel's symbol table before its window
+/// opens, so that no drain pays for it, and a debug build spends the better
+/// part of a second parsing it. `cost.json` weighed only the window and said
+/// 26 ms where the kernel counted 986 ms of `omn` beyond its target (stream
+/// U's finding, fourteenth wave). The record now carries the process's cpu
+/// before and after the window, and the three add up to the kernel's account,
+/// less what formatting the results costs once the record was taken -- held
+/// here to within a fifth of it, and never above it.
+#[test]
+fn what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted() {
+    // The target burns half a second and says, at its exit, the cpu it
+    // spent over its whole life -- the same kernel account `wait4` sums.
+    const TARGET: &str = "import resource, time\n\
+         t = time.process_time()\n\
+         while time.process_time() - t < 0.5: pass\n\
+         u = resource.getrusage(resource.RUSAGE_SELF)\n\
+         import sys; sys.stderr.write('target_cpu_ns=%d\\n' % int((u.ru_utime + u.ru_stime) * 1e9))\n";
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("SKIP: this machine has no python3 to launch");
+        return;
+    }
+    let directory = scratch("profile-stacks");
+    let out = directory.to_string_lossy().into_owned();
+    // Reaped with `wait4` below, for the kernel's account of what it used.
+    #[allow(clippy::zombie_processes)]
+    let mut child = Command::new(BINARY)
+        .args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"])
+        .args(["--format", "json", "-o", out.as_str()])
+        .args(["--", "python3", "-c", TARGET])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn runs");
+    let pid = child.id() as i32;
+    let mut said = String::new();
+    std::io::Read::read_to_string(
+        &mut child.stderr.take().expect("stderr is piped"),
+        &mut said,
+    )
+    .expect("reading omn's stderr");
+    let mut status = 0;
+    // SAFETY: `wait4` fills a struct this test owns.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert!(unsafe { libc::wait4(pid, &mut status, 0, &mut usage) } == pid);
+    if said.contains("has no viable backend on this machine") {
+        eprintln!("SKIP: this machine does not serve cpu.profile: {said}");
+        return;
+    }
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        "{said}"
+    );
+    let micros = |time: libc::timeval| time.tv_sec as u64 * 1_000_000 + time.tv_usec as u64;
+    let tree_ns = (micros(usage.ru_utime) + micros(usage.ru_stime)) * 1_000;
+    let target_ns: u64 = said
+        .lines()
+        .find_map(|line| line.strip_prefix("target_cpu_ns="))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the target said what it spent: {said}"));
+    let kernel_ns = tree_ns.saturating_sub(target_ns);
+
+    let overhead = &cost_record(&directory)["overhead"];
+    let _ = std::fs::remove_dir_all(&directory);
+    let field = |name: &str| {
+        overhead[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("cost.json carries `{name}`: {overhead}"))
+    };
+    let (before, during, after) = (
+        field("before_window_cpu_ns"),
+        field("collector_cpu_ns"),
+        field("after_window_cpu_ns"),
+    );
+    let reported = before + during + after;
+    let account = format!(
+        "cost.json says {:.1} ms before the window, {:.1} ms in it and {:.1} ms after, {:.1} ms \
+         in all; the kernel counts {:.1} ms of omn beyond the target's own {:.1} ms",
+        before as f64 / 1e6,
+        during as f64 / 1e6,
+        after as f64 / 1e6,
+        reported as f64 / 1e6,
+        kernel_ns as f64 / 1e6,
+        target_ns as f64 / 1e6,
+    );
+    eprintln!("{account}");
+    // `wait4` counts in microseconds; the target's figure and the tool's are
+    // two reads of the same kernel accounts, a clock tick apart at most.
+    assert!(
+        reported <= kernel_ns + 5_000_000,
+        "more than the kernel counted: {account}"
+    );
+    assert!(
+        reported * 5 >= kernel_ns * 4,
+        "the record leaves out more than a fifth of what the run cost: {account}"
+    );
+}
+
+/// A task that blocks every fifth of a millisecond until it is told to stop,
+/// and logs, on `CLOCK_MONOTONIC`, the kernel's own count of every switch it
+/// made -- voluntary and not -- before and after each sleep.
+const SWITCHING_WORKLOAD: &str = r#"
+import json, os, resource, signal, time
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+def switched():
+    u = resource.getrusage(resource.RUSAGE_THREAD)
+    return u.ru_nvcsw + u.ru_nivcsw
+done = []
+signal.signal(signal.SIGUSR1, lambda *_: done.append(1))
+points = []
+print("ready", os.getpid(), flush=True)
+end = mono() + 60 * 10**9
+while not done and mono() < end:
+    points.append((mono(), switched())); time.sleep(0.0002); points.append((mono(), switched()))
+print(json.dumps(points), flush=True)
+"#;
+
+/// One run of `sched.switches` over a task that switches at a known rate,
+/// with `budget`, and the task's own log of what it did meanwhile.
+struct Switched {
+    output: Output,
+    cost: serde_json::Value,
+    results: serde_json::Value,
+    /// `(CLOCK_MONOTONIC, switches so far)`, from the task.
+    points: Vec<(u64, u64)>,
+}
+
+fn switched_under(budget: &str) -> Option<Switched> {
+    use std::io::{BufRead, Read};
+
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("SKIP: the workload is python3, which this machine does not have");
+        return None;
+    }
+    let mut task = Command::new("python3")
+        .args(["-c", SWITCHING_WORKLOAD])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("python3 starts");
+    let mut stdout = std::io::BufReader::new(task.stdout.take().expect("a pipe"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the workload says it is ready");
+    let pid: i32 = line
+        .trim()
+        .strip_prefix("ready ")
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not start: {line:?}"));
+
+    let directory = scratch(&format!("switches-{budget}"));
+    let out = directory.to_string_lossy().into_owned();
+    let pid_text = pid.to_string();
+    let output = run(&[
+        "sched.switches",
+        "-m",
+        "count",
+        "-e",
+        "rate",
+        "--format",
+        "json",
+        "--budget",
+        budget,
+        "-d",
+        "3s",
+        "-o",
+        out.as_str(),
+        "--pid",
+        pid_text.as_str(),
+    ]);
+    // SAFETY: a signal to the child this test started and has not reaped.
+    unsafe { libc::kill(pid, libc::SIGUSR1) };
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).expect("the log");
+    let _ = task.wait();
+
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&directory);
+        let said = stderr(&output);
+        if said.contains("has no viable backend on this machine") {
+            eprintln!("SKIP: `sched.switches` is not served here: {said}");
+            return None;
+        }
+        panic!("the run failed: {said}");
+    }
+    let cost = cost_record(&directory);
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.join("results.json")).expect("results.json"),
+    )
+    .expect("results.json is json");
+    let _ = std::fs::remove_dir_all(&directory);
+    let points = serde_json::from_str(rest.trim())
+        .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"));
+    Some(Switched {
+        output,
+        cost,
+        results,
+        points,
+    })
+}
+
+impl Switched {
+    fn served(&self) -> Vec<String> {
+        self.cost["served_by"]
+            .as_array()
+            .expect("served_by")
+            .iter()
+            .filter_map(|backend| backend.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The task's switches from its last logged instant at or before `from`
+    /// to its first at or after `to`, and from its first at or after `from`
+    /// to its last at or before `to`: the most and the least the span held.
+    fn bracket(&self, from: u64, to: u64) -> (u64, u64) {
+        let at_or_before = |ts: u64| {
+            self.points
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= ts)
+                .map(|point| point.1)
+        };
+        let at_or_after = |ts: u64| self.points.iter().find(|(at, _)| *at >= ts).map(|p| p.1);
+        match (
+            at_or_after(from),
+            at_or_before(to),
+            at_or_before(from),
+            at_or_after(to),
+        ) {
+            (Some(first_in), Some(last_in), Some(before), Some(after)) => (
+                last_in.saturating_sub(first_in),
+                after.saturating_sub(before),
+            ),
+            _ => panic!("the workload's log does not straddle {from}..{to}"),
+        }
+    }
+}
+
+/// Ground truth for the drain across a budget's move: every switch the task
+/// made inside the window is counted, by one backend or the other, or
+/// reported lost -- none dropped at the seam -- and a switch counted by both
+/// is one inside the overlap the run announces, and nowhere else.
+///
+/// `sched.switches` counts through `pmu:sw` first and `bpf:raw_tp` below it.
+/// A ceiling of 1 % is more than a counter read every tick keeps to against a
+/// task that mostly sleeps, and `bpf:raw_tp` declares `low`, which fits it, so
+/// the run moves once and then stops with nowhere cheaper to go. The
+/// replacement is counting before the outgoing counter's last read -- a gap
+/// would lose events with nothing to show it -- so the two overlap, and the
+/// run says from when to when. The task's own `getrusage` count, logged on
+/// the run's clock, brackets what the window held and what the overlap held.
+/// The same run with a ceiling nothing reaches is the control: one backend,
+/// inside the bracket with no allowance at all.
+#[test]
+fn a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted() {
+    let Some(control) = switched_under("10000%") else {
+        return;
+    };
+    let window = |run: &Switched| {
+        let result = &run.results["results"][0];
+        let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+        let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+        let counted: u64 = result["outputs"][0]["series"]
+            .as_array()
+            .expect("a rate")
+            .iter()
+            .map(|series| series["total"].as_f64().unwrap_or(0.0) as u64)
+            .sum();
+        let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
+        (opened, closed, counted, lost)
+    };
+    let (opened, closed, counted, lost) = window(&control);
+    let (least, most) = control.bracket(opened, closed);
+    assert_eq!(control.served(), ["pmu:sw"], "{}", stderr(&control.output));
+    assert!(
+        counted + lost >= least && counted <= most,
+        "one backend, no move: {counted} counted and {lost} lost, the task made {least} to \
+         {most}"
+    );
+
+    let Some(moved) = switched_under("1%") else {
+        return;
+    };
+    let served = moved.served();
+    if served.len() < 2 {
+        // The move needs `bpf:raw_tp`, which needs CAP_BPF; without it the run
+        // stops on its first backend, which the tests above hold.
+        eprintln!(
+            "SKIP: the run never moved ({served:?}, {}); `make` grants the capabilities the \
+             second backend needs",
+            moved.cost["stopped_because"]
+        );
+        return;
+    }
+    assert_eq!(
+        served,
+        ["pmu:sw", "bpf:raw_tp"],
+        "{}",
+        stderr(&moved.output)
+    );
+    let (opened, closed, counted, lost) = window(&moved);
+    let (least, most) = moved.bracket(opened, closed);
+    let degradations = moved.results["results"][0]["degradations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let seam = degradations
+        .iter()
+        .filter_map(|note| note.as_str())
+        .find(|note| note.contains("both counted"))
+        .unwrap_or_else(|| panic!("the overlap is announced: {degradations:?}"));
+    // "... both counted from 430.120 ms to 430.556 ms into the run ..."
+    let instants: Vec<f64> = seam
+        .split_once("both counted from ")
+        .map_or("", |(_, rest)| rest)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .filter(|pair| pair[1].trim_end_matches(',') == "ms")
+        .filter_map(|pair| pair[0].parse().ok())
+        .collect();
+    let [from_ms, to_ms] = instants[..] else {
+        panic!("the overlap names two instants: {seam}");
+    };
+    let run_opened = moved.results["results"][0]["window"]["run_opened_ns"]
+        .as_u64()
+        .expect("the run's opening");
+    // The note rounds to a microsecond; widen by one either way.
+    let from = run_opened + (from_ms * 1e6) as u64 - 1_000;
+    let to = run_opened + (to_ms * 1e6) as u64 + 1_000;
+    let (_, twice_at_most) = moved.bracket(from, to);
+    let account = format!(
+        "the tool counted {counted} switches across {served:?} and lost {lost}; the task's own \
+         count puts {least} to {most} inside the window and at most {twice_at_most} in the \
+         overlap: {seam}"
+    );
+    eprintln!("{account}");
+    assert!(least > 200, "too few switches to judge: {account}");
+    assert!(
+        counted + lost >= least,
+        "switches dropped at the seam: {account}"
+    );
+    assert!(
+        counted <= most + twice_at_most,
+        "switches counted twice outside the announced overlap: {account}"
+    );
+}

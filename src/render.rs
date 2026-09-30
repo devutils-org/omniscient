@@ -379,6 +379,42 @@ fn table(
     out
 }
 
+/// Why nothing serves a source here, telling the machine's gap from the
+/// build's: a backend this machine meets every requirement of, with no
+/// collector written for it, is something this build lacks, not something the
+/// machine refuses -- and a reader told only "no backend is usable on this
+/// machine" goes looking for a capability that would change nothing.
+fn unavailable_here(
+    entry: &Entry,
+    capabilities: &Capabilities,
+    written: Option<&Vec<&'static str>>,
+) -> String {
+    let unwritten: Vec<&str> = entry
+        .backends
+        .iter()
+        .filter(|backend| !written.is_some_and(|ids| ids.contains(&backend.id.as_str())))
+        .filter(|backend| {
+            backend
+                .requires
+                .iter()
+                .all(|requirement| capabilities.probe(requirement, None).is_available())
+        })
+        .map(|backend| backend.id.as_str())
+        .collect();
+    match unwritten.as_slice() {
+        [] => "no backend is usable on this machine".to_owned(),
+        ids => format!(
+            "no backend is usable in this build: this machine serves {}, and no collector is \
+             written for {}",
+            ids.iter()
+                .map(|id| format!("`{id}`"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            if ids.len() == 1 { "it" } else { "them" }
+        ),
+    }
+}
+
 /// Renders one source in full: every backend, in order, with what it needs and
 /// what it costs.
 pub fn entry(entry: &Entry, capabilities: &Capabilities, style: Style) -> String {
@@ -406,6 +442,8 @@ pub fn entry(entry: &Entry, capabilities: &Capabilities, style: Style) -> String
     }
 
     let availability = resolve::availability(entry, capabilities);
+    let written = collect::coverage();
+    let written = written.get(entry.id.as_str());
     let _ = writeln!(
         out,
         "  here          {}",
@@ -414,7 +452,7 @@ pub fn entry(entry: &Entry, capabilities: &Capabilities, style: Style) -> String
             Availability::Unverified(id) => format!(
                 "`{id}` has requirements no probe covers yet, so it would be assumed, not checked"
             ),
-            Availability::Unavailable => "no backend is usable on this machine".to_owned(),
+            Availability::Unavailable => unavailable_here(entry, capabilities, written),
         }
     );
 
@@ -422,8 +460,6 @@ pub fn entry(entry: &Entry, capabilities: &Capabilities, style: Style) -> String
         out,
         "\n  backends (ordered; the resolver keeps the first viable one)"
     );
-    let written = collect::coverage();
-    let written = written.get(entry.id.as_str());
     for (index, backend) in entry.backends.iter().enumerate() {
         let collector = match written.is_some_and(|ids| ids.contains(&backend.id.as_str())) {
             true => style.present("collector written"),
@@ -540,6 +576,46 @@ mod tests {
 
     fn capabilities() -> Capabilities {
         Capabilities::detect()
+    }
+
+    /// A backend the machine meets every requirement of and nobody wrote a
+    /// collector for is the build's gap, and "here" says so; with that
+    /// backend's requirement unmet, it is the machine's again. Built on a real
+    /// entry: `power.throttle`'s `bpf:raw_tp` has no collector in this build
+    /// (`collect::coverage` is the independent record of which do).
+    #[test]
+    fn here_tells_a_gap_in_this_build_from_one_in_this_machine() {
+        let catalog = catalog();
+        let mut entry = catalog
+            .get(&"power.throttle".parse().unwrap())
+            .expect("power.throttle is in the catalog")
+            .clone();
+        let coverage = collect::coverage();
+        let written = coverage.get("power.throttle");
+        entry
+            .backends
+            .retain(|backend| !written.is_some_and(|ids| ids.contains(&backend.id.as_str())));
+        assert!(
+            entry
+                .backends
+                .iter()
+                .any(|backend| backend.id == "bpf:raw_tp"),
+            "the fixture needs a backend with no collector: {:?}",
+            written
+        );
+        entry.backends.truncate(1);
+        let capabilities = capabilities();
+        entry.backends[0].requires = Vec::new();
+        let gap = unavailable_here(&entry, &capabilities, written);
+        assert!(
+            gap.contains("in this build") && gap.contains("`bpf:raw_tp`"),
+            "{gap}"
+        );
+        entry.backends[0].requires = vec!["kernel>=999.0".to_owned()];
+        assert_eq!(
+            unavailable_here(&entry, &capabilities, written),
+            "no backend is usable on this machine"
+        );
     }
 
     #[test]
