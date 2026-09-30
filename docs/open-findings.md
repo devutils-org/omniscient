@@ -9151,3 +9151,109 @@ A rate over joules prints in watts now (`encode::per_second_quantity`):
 `examples/gpu-draw-in-watts.yml:15`, `examples/power-energy.yml:15` and
 `docs/scenarios/power.md:84,86,345` quote `J/s` in outputs the tool no longer
 prints.
+
+## Needs from another stream — the fifteenth wave, stream probes
+
+Stream probes' record is `docs/fixes/w15-probes.md`, and `docs/portability.md`,
+"The fifteenth wave". Nothing here blocks it; each item is the other half of a
+change landed in this stream's files.
+
+### To stream R (`src/resolve.rs`): the test that needed `cpu.cycles` on `pmu:sw` unwritten -- landed here, in its own commit
+
+`cpu.cycles` on `pmu:sw` has a collector since this wave (the cpu clock, the
+degraded fallback the catalog declares), so
+`resolve::tests::a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable`
+failed at `assert!(!crate::collect::implements("cpu.cycles", "pmu:sw"))`, and
+`make check` on this branch stopped there. A pair found at run time was tried
+first and found none on this build and machine (no entry has an unwritten
+later backend whose requirements are met here), which would have made the
+test a permanent skip. **Landed on this branch, as a commit of its own that
+touches `src/resolve.rs` alone**, so it can be dropped if R lands another: the
+test keeps `cpu.cycles`'s `pmu` backend (withheld by an event no machine
+publishes) and its `pmu:sw` fallback's declaration, renamed to `fs:proc`, a
+tag no collector serves for `cpu.cycles` -- asserted unwritten, so a
+collector written there tomorrow fails the test by name rather than removing
+its subject. R: keep it, or replace it and drop the commit.
+
+### To the owner of `src/bpf/mod.rs` (the coordinator's shared layer): the attach-time advice
+
+`capabilities::probe` now rewrites a privilege refusal when the binary's file
+carries `CAP_BPF`/`CAP_PERFMON` and the process was not given them (a `nosuid`
+mount, `no_new_privs`, a grant without `e`): the listing and the resolver say
+why instead of *"Grant them to the binary with `sudo setcap ...`"*. The same
+advice is also produced at the attach, by `bpf::permission_advice`, which the
+probe does not see. Wanted, in that function, before the `format!`:
+
+```rust
+if let Some(withheld) = crate::capabilities::withheld_file_capabilities() {
+    return format!("{action} needs CAP_BPF and CAP_PERFMON{sysctl}. {withheld}.");
+}
+```
+
+`withheld_file_capabilities() -> Option<String>` is `pub` and cached.
+
+### To the runner stream (`examples/bench/harness.rs`): the guardrail through the source it claims
+
+`ROADMAP.md` phase 9 says `power` has been "collected unconditionally since
+phase 8 as a guardrail". The harness reads `thermal_throttle/*_throttle_count`
+itself (`throttle_count()`, line ~559), which are the files `power.throttle`'s
+`fs:sys` backend reads, and nothing else of `power.*`. Wanted, in the runner's
+files: the before/after read replaced by a run of the source over each
+repetition, outside the timed region's own process --
+
+```rust
+/// `power.throttle --system -m poll@<window> -e summary --format json -d <window>`,
+/// started before the repetition and read after it: Some(events) where the
+/// source is served, None with the resolver's reason where it is not.
+fn throttled_during(omn: &Path, window: Duration) -> Result<bool, String>
+```
+
+-- so a machine without the counters is told by the resolver's refusal (which
+names the file) rather than by `None`, and a `power.freq` or `power.energy`
+guardrail can be added the same way. If the runner keeps the direct read (a
+polled source costs a sysfs read per cpu per tick inside the window it guards),
+the phase 9 sentence should say "`power.throttle`'s counters, read directly",
+which is the coordinator's line in `ROADMAP.md`. `docs/portability.md`, "The
+fifteenth wave", item 4, has both halves.
+
+### To stream R (`src/catalog.rs`): what `extreme` means (stream J's, the fourteenth wave, again)
+
+`Cost::Extreme`'s doc comment still says "Over 10x: kernel replay"; `omn-mcp`
+and `main.rs` say "over 20 %, with no bound above". Filed to P in the
+fourteenth wave, but `src/catalog.rs` is R's.
+
+### To the coordinator: four lines in documents nobody owns
+
+- `CATALOG.md:510`: *"same as cgroup, and every entry that says `container:
+  no`"* -- no entry that serves a cgroup says it now, and the loader refuses
+  one that would (`validate::container_complaints`). Wanted: *"same as
+  cgroup"*.
+- `docs/scenarios/cpu.md`: `cpu.cycles` has two collectors, and
+  `scenario_cpu::every_backend_either_measures_or_says_it_is_not_built` now
+  names the test that compares them
+  (`a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency`).
+  Wanted, a row: *"`cpu.cycles`: `pmu` over `pmu:sw` is the core's cycles per
+  nanosecond of cpu -- 4.2 GHz on the development machine -- between half
+  cpufreq's minimum and a fifth over its maximum."*
+- `CLAUDE.md`'s *"86 usable sources and 51"*: 92 and 56 on this branch
+  (`omn list --format json`, `here.availability == ready`, with and without
+  `setpriv --no-new-privs`).
+- `DECISIONS.md`'s open line on `pmu:sw` for `cpu.cycles` is closed; the
+  handoff has the line.
+
+### For the flaky tally
+
+Nothing new from this stream's paths in its runs; see the handoff's check.
+
+### To the owner of `net.hwts` (`catalog/net.yaml`, `src/collect/net/**`): listed usable for `trace`, refused at the start
+
+Found by `portability::every_cell_on_disk_holds_the_invariants` on the
+`here-caps` cell of the 2026-09-30 sweep (the one violation there):
+`omn trace net.hwts -m trace -e summary -d 300ms --system` exits 3 with
+*"`trace` on net.hwts means a timestamp per packet, which is the
+`so_timestamping` backend and is not built"*, while `omn list net.hwts` calls
+it usable through `netlink:ethtool`. Wanted: `netlink:ethtool` declares
+`modes: [snapshot, poll]` in the catalog, so the resolver passes over it for
+`trace` with that reason in the chain, lands on the unwritten
+`so_timestamping`, and the listing and the run agree.
+

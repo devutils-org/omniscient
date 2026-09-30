@@ -67,6 +67,12 @@ struct Cell {
     environment: serde_json::Value,
     /// How long the sweep took.
     elapsed_s: f64,
+    /// Which binary swept the cell: a hash of its bytes. Two cells swept by
+    /// two builds can differ by what the build knows -- a probe written, a
+    /// listing rule changed -- rather than by the machine, and only this says
+    /// which. Absent from cells swept before it existed.
+    #[serde(default)]
+    build: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -615,9 +621,22 @@ fn sweep(name: &str, config: &str) -> Sweep {
             tracefs_hidden: flag("OMN_MATRIX_TRACEFS_HIDDEN"),
             environment,
             elapsed_s: started.elapsed().as_secs_f64(),
+            build: build_of(&omn),
         },
         sources,
     }
+}
+
+/// A 64-bit FNV-1a hash of a binary's bytes, in hex: enough to tell two builds
+/// apart, and nothing to depend on.
+fn build_of(binary: &std::path::Path) -> Option<String> {
+    let bytes = fs::read(binary).ok()?;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    Some(format!("{hash:016x}"))
 }
 
 /// Measures whatever machine this runs on, and writes the cell.
@@ -1173,6 +1192,527 @@ fn every_cell_covers_the_whole_catalog() {
     }
 }
 
+// ------------------------------------------------------------ two cells, compared
+
+/// Whether a source is listed usable through a backend with no collector: a
+/// cell swept before the fourteenth wave's listing rule, which the invariant
+/// judge refuses on its own. Not a difference of machines, so left out here.
+fn listed_through_nobody(source: &Source) -> bool {
+    source.here == Here::Yes
+        && source
+            .here_backend
+            .as_deref()
+            .and_then(|id| source.backend(id))
+            .is_some_and(|backend| !backend.collector)
+}
+
+/// Whether a source's answer in a cell is the build's rather than the
+/// machine's: every requirement available and the source still not usable (a
+/// listing rule), or a requirement no probe was written for.
+fn answered_by_the_build(source: &Source) -> bool {
+    let requirements: Vec<&Requirement> = source.requirements().collect();
+    (source.here != Here::Yes && requirements.iter().all(|r| r.state == State::Available))
+        || requirements
+            .iter()
+            .any(|r| r.state != State::Available && r.detail.contains("no probe is written"))
+}
+
+/// Whether two cells were swept by the same binary, as far as they record.
+fn same_build(a: &Sweep, b: &Sweep) -> Option<bool> {
+    Some(a.cell.build.as_ref()? == b.cell.build.as_ref()?)
+}
+
+fn usable(sweep: &Sweep) -> std::collections::BTreeSet<&str> {
+    sweep
+        .sources
+        .iter()
+        .filter(|source| source.here == Here::Yes && !listed_through_nobody(source))
+        .map(|source| source.id.as_str())
+        .collect()
+}
+
+/// ROADMAP phase 2: "`omn list` shows different sources on two different
+/// machines", held directly to two cells' listings.
+///
+/// The truth is the condition the matrix set up between the two cells of one
+/// guest, and not anything the tool said: `nocaps` runs the binary without
+/// the capabilities `caps` grants it, `nobtf` hides the BTF `root` has, and
+/// `notracefs` unmounts what `root` mounts. So for every such pair on disk
+/// the cell that withholds lists no source the one that grants does not, and
+/// the two capability and BTF pairs list strictly fewer -- the listings
+/// differ, and in the direction the condition predicts. Each source usable
+/// only where the condition is granted says, in the withholding cell, a
+/// reason that names the condition. A source the build answers (a listing
+/// rule, a probe not written) is the build's difference, not the machine's,
+/// and is held only between cells swept by the same binary.
+#[test]
+fn two_cells_list_different_sources_for_the_condition_between_them() {
+    let cells = cells_on_disk();
+    if cells.is_empty() {
+        eprintln!(
+            "skipped: no matrix cell under {} -- `scripts/matrix.sh` writes them",
+            cells_dir().display()
+        );
+        return;
+    }
+    let by_name: BTreeMap<&str, &Sweep> = cells
+        .iter()
+        .map(|(_, sweep)| (sweep.cell.name.as_str(), sweep))
+        .collect();
+    // (withheld, granted, strictly fewer, what a withholding reason names)
+    let pairs: [(&str, &str, bool, &[&str]); 4] = [
+        ("nocaps", "caps", true, &["CAP_", "perf_event_paranoid"]),
+        ("nobtf", "root", true, &["btf", "BTF"]),
+        ("notracefs", "root", false, &["tracefs"]),
+        ("caps", "root", false, &["root", "CAP_", "uid"]),
+    ];
+    let mut compared = 0;
+    let mut failures = Vec::new();
+    let mut builds = Vec::new();
+    for (name, withheld) in &by_name {
+        let Some((machine, config)) = name.rsplit_once('-') else {
+            continue;
+        };
+        for (lo, hi, strictly, names) in pairs {
+            if config != lo {
+                continue;
+            }
+            let Some(granted) = by_name.get(format!("{machine}-{hi}").as_str()) else {
+                continue;
+            };
+            compared += 1;
+            let (few, many) = (usable(withheld), usable(granted));
+            let only_withheld: Vec<&&str> = few.difference(&many).collect();
+            if !only_withheld.is_empty() {
+                failures.push(format!(
+                    "{name} lists usable what {machine}-{hi} does not, though it only withholds: \
+                     {only_withheld:?}"
+                ));
+            }
+            if strictly && few.len() >= many.len() {
+                failures.push(format!(
+                    "{name} and {machine}-{hi} list {} and {} usable sources: withholding {lo} \
+                     changed nothing",
+                    few.len(),
+                    many.len()
+                ));
+            }
+            for id in many.difference(&few) {
+                let source = withheld
+                    .sources
+                    .iter()
+                    .find(|source| source.id == *id)
+                    .expect("both cells swept the same catalog");
+                if listed_through_nobody(source) {
+                    // Listed usable through a backend with no collector: the
+                    // invariant judge's to refuse, and no machine's answer.
+                    continue;
+                }
+                if answered_by_the_build(source) {
+                    if same_build(withheld, granted) == Some(true) {
+                        failures.push(format!(
+                            "{name}: `{id}` is usable in {machine}-{hi} and not here, and no \
+                             requirement says why, under the same build"
+                        ));
+                    } else {
+                        builds.push(format!("{name} / {machine}-{hi}: `{id}`"));
+                    }
+                    continue;
+                }
+                let said: Vec<&str> = source
+                    .requirements()
+                    .filter(|r| r.state != State::Available)
+                    .map(|r| r.detail.as_str())
+                    .collect();
+                if !said
+                    .iter()
+                    .any(|detail| names.iter().any(|word| detail.contains(word)))
+                {
+                    failures.push(format!(
+                        "{name}: `{id}` is usable only in {machine}-{hi}, and no reason here \
+                         names what {lo} withholds ({names:?}): {said:?}"
+                    ));
+                }
+            }
+            eprintln!(
+                "listings: {name:<22} {:>3} usable, {machine}-{hi:<10} {:>3}",
+                few.len(),
+                many.len()
+            );
+        }
+    }
+    if !builds.is_empty() {
+        eprintln!(
+            "not compared, the build's and not the machine's (cells swept by two binaries, or \
+             before cells recorded theirs): {}",
+            builds.join("; ")
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    if compared == 0 {
+        eprintln!("skipped: no two cells of one machine differ by a condition the matrix sets");
+    }
+}
+
+/// What a refusal says decided it, read from the probe's own words: the
+/// kernel's version, or the one or two fields of a resolved record's
+/// `environment` that stand for what the probe found missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    /// The requirement names a kernel version, and the refusing machine's is
+    /// older.
+    KernelBelow((u32, u32)),
+    /// Any of these fields decides it: `perf_event_open` at paranoia 2 is
+    /// refused by the sysctl and granted by CAP_PERFMON, so either explains.
+    Fields(&'static [&'static str]),
+}
+
+/// The cause a probe names for a requirement it did not answer available, or
+/// `None` when its words name nothing a resolved record carries.
+///
+/// The order matters where a reason names two things: "cannot be asked
+/// without loading a program, which needs CAP_BPF" is a privilege, although
+/// it also says "this kernel".
+fn cause(needs: &str, detail: &str) -> Option<Cause> {
+    if let Some(version) = needs.strip_prefix("kernel>=") {
+        return kernel_version(version).map(Cause::KernelBelow);
+    }
+    let says = |words: &[&str]| words.iter().any(|w| detail.contains(w));
+    Some(Cause::Fields(if says(&["/sys/kernel/btf/vmlinux"]) {
+        &["kernel_btf"]
+    } else if says(&["tracefs is not mounted"]) {
+        &["tracefs"]
+    } else if says(&["tracefs is mounted but not readable"]) {
+        &["tracefs", "privileges"]
+    } else if says(&["perf_event_paranoid"]) {
+        &["perf_event_paranoid", "privileges"]
+    } else if says(&["CAP_", "not readable by uid"]) {
+        &["privileges"]
+    } else if says(&[
+        "this kernel declares",
+        "this kernel defines no",
+        "this kernel refused",
+    ]) {
+        &["kernel_release"]
+    } else if needs == "nvml" || says(&["libnvidia-ml"]) {
+        &["gpus"]
+    } else if says(&[
+        "does not exist",
+        "publishes no",
+        "no chip under",
+        "no interface on this machine",
+    ]) {
+        // Hardware the machine does not have: a guest's virtual cpu publishes
+        // no cpufreq, no hwmon chip, no PMU of the host's vendor.
+        &["virtualization"]
+    } else {
+        return None;
+    }))
+}
+
+/// A field that a record written before it existed leaves out, and that an
+/// absent key cannot be read as a value of.
+const RECORDED_SINCE_THE_FIFTEENTH_WAVE: [&str; 2] = ["privileges", "virtualization"];
+
+/// What comparing two cells' resolved records found, source by source.
+#[derive(Debug, Default)]
+struct Gaps {
+    /// By the field that explains each difference.
+    explained: BTreeMap<String, usize>,
+    /// Differences only a field the records do not carry could explain.
+    unrecorded: BTreeMap<String, usize>,
+    /// Differences the build made, between cells that record no common build.
+    builds: usize,
+    unexplained: Vec<String>,
+}
+
+fn environment_field(sweep: &Sweep, field: &str) -> Option<serde_json::Value> {
+    match sweep.cell.environment.get(field) {
+        Some(value) => Some(value.clone()),
+        // Serialized only when not empty.
+        None if field == "gpus" => Some(serde_json::Value::Array(Vec::new())),
+        None => None,
+    }
+}
+
+/// How one refusal's cause stands against the two records.
+enum Verdict {
+    Explained(&'static str),
+    Unrecorded(&'static str),
+    Unexplained(String),
+}
+
+/// Whether the cause the refusing side's probe named is borne out by the two
+/// records: the field it names differs, the way that refuses on the refusing
+/// side (a BTF or a tracefs that side's record calls readable explains
+/// nothing), or the kernel it names is newer than the refusing side's and not
+/// newer than the other's.
+fn judge_cause(
+    refusing: &Sweep,
+    other: &Sweep,
+    other_available: bool,
+    requirement: &Requirement,
+) -> Verdict {
+    let release = |sweep: &Sweep| {
+        environment_field(sweep, "kernel_release")
+            .and_then(|value| value.as_str().and_then(kernel_version))
+    };
+    match cause(&requirement.needs, &requirement.detail) {
+        None => Verdict::Unexplained(format!(
+            "`{}` refused with a reason that names nothing a resolved record carries: {}",
+            requirement.needs, requirement.detail
+        )),
+        Some(Cause::KernelBelow(needed)) => match (release(refusing), release(other)) {
+            (Some(here), Some(there)) if here < needed && (!other_available || there >= needed) => {
+                Verdict::Explained("kernel_release")
+            }
+            (here, there) => Verdict::Unexplained(format!(
+                "`{}` refused on kernel {here:?} and {} on {there:?}",
+                requirement.needs,
+                if other_available {
+                    "available"
+                } else {
+                    "refused too"
+                }
+            )),
+        },
+        Some(Cause::Fields(fields)) => {
+            for field in fields {
+                let (Some(x), Some(y)) = (
+                    environment_field(refusing, field),
+                    environment_field(other, field),
+                ) else {
+                    continue;
+                };
+                let refuses_here = !matches!(*field, "kernel_btf" | "tracefs")
+                    || x != serde_json::json!("readable");
+                if x != y && refuses_here {
+                    return Verdict::Explained(field);
+                }
+            }
+            if let Some(field) = fields.iter().find(|field| {
+                RECORDED_SINCE_THE_FIFTEENTH_WAVE.contains(field)
+                    && (environment_field(refusing, field).is_none()
+                        || environment_field(other, field).is_none())
+            }) {
+                return Verdict::Unrecorded(field);
+            }
+            Verdict::Unexplained(format!(
+                "`{}` refused ({}), and none of {fields:?} differs between the two records the \
+                 way that refuses",
+                requirement.needs, requirement.detail
+            ))
+        }
+    }
+}
+
+/// For each source whose availability differs between two cells, the
+/// recorded field of their resolved records that explains it: for every
+/// requirement answered differently, the cause the refusing side's probe
+/// names, borne out by the two records.
+fn gaps_between(a: &Sweep, b: &Sweep, gaps: &mut Gaps) {
+    for left in &a.sources {
+        let Some(right) = b.sources.iter().find(|source| source.id == left.id) else {
+            continue;
+        };
+        if left.here == right.here || listed_through_nobody(left) || listed_through_nobody(right) {
+            continue;
+        }
+        let where_ = format!("{} / {}: `{}`", a.cell.name, b.cell.name, left.id);
+        if answered_by_the_build(left) || answered_by_the_build(right) {
+            if same_build(a, b) == Some(true) {
+                gaps.unexplained.push(format!(
+                    "{where_} differs by what the build answers, under one build"
+                ));
+            } else {
+                gaps.builds += 1;
+            }
+            continue;
+        }
+        let mut verdicts = Vec::new();
+        for backend in &left.backends {
+            let Some(other) = right.backend(&backend.id) else {
+                continue;
+            };
+            for mine in &backend.requires {
+                let Some(theirs) = other
+                    .requires
+                    .iter()
+                    .find(|r| r.needs == mine.needs && r.state != mine.state)
+                else {
+                    continue;
+                };
+                // When both refuse, differently, the difference is the
+                // side whose cause the records bear out: a BTF that one side
+                // could not read explains its `unverified` against the other
+                // side's `missing`, whatever the other side's reason.
+                let mut judged: Vec<Verdict> =
+                    [(a, mine, b, theirs.state), (b, theirs, a, mine.state)]
+                        .into_iter()
+                        .filter(|(_, requirement, _, _)| requirement.state != State::Available)
+                        .map(|(refusing, requirement, other, other_state)| {
+                            judge_cause(
+                                refusing,
+                                other,
+                                other_state == State::Available,
+                                requirement,
+                            )
+                        })
+                        .collect();
+                judged.sort_by_key(|verdict| match verdict {
+                    Verdict::Explained(_) => 0,
+                    Verdict::Unrecorded(_) => 1,
+                    Verdict::Unexplained(_) => 2,
+                });
+                verdicts.extend(judged.into_iter().next());
+            }
+        }
+        if verdicts.is_empty() {
+            gaps.unexplained.push(format!(
+                "{where_} is {:?} and {:?} with every requirement answered alike",
+                left.here, right.here
+            ));
+            continue;
+        }
+        let mut unexplained: Vec<String> = Vec::new();
+        let mut unrecorded = std::collections::BTreeSet::new();
+        let mut explained = std::collections::BTreeSet::new();
+        for verdict in verdicts {
+            match verdict {
+                Verdict::Explained(field) => {
+                    explained.insert(field);
+                }
+                Verdict::Unrecorded(field) => {
+                    unrecorded.insert(field);
+                }
+                Verdict::Unexplained(why) => unexplained.push(why),
+            }
+        }
+        if !unexplained.is_empty() {
+            unexplained.dedup();
+            gaps.unexplained
+                .push(format!("{where_}: {}", unexplained.join("; ")));
+        } else if !unrecorded.is_empty() {
+            let key = unrecorded.into_iter().collect::<Vec<_>>().join(" and ");
+            *gaps.unrecorded.entry(key).or_default() += 1;
+        } else {
+            for field in explained {
+                *gaps.explained.entry(field.to_owned()).or_default() += 1;
+            }
+        }
+    }
+}
+
+/// ROADMAP phase 7: "the resolved file is enough to explain a gap between two
+/// machines", over every two cells on disk.
+///
+/// For each source listed usable in one cell and not in the other, the
+/// requirements that answered differently are found in the two listings. The
+/// refusing side's probe names its cause in its own words (a BTF it could not
+/// read, a capability, a sysctl, a kernel that defines no such tracepoint,
+/// hardware the machine does not publish), and the field of the two resolved
+/// records' `environment` that stands for that cause -- the kernel release,
+/// the BTF, tracefs, `perf_event_paranoid`, the privileges, the
+/// virtualization, the GPUs -- has to differ the way that refuses on the
+/// refusing side; a `kernel>=` requirement has to be newer than the refusing
+/// side's release and not newer than the other's. A field that merely differs
+/// explains nothing. A gap whose cause the records do not bear out, or whose
+/// reason names nothing a record carries, fails, naming the source and the two
+/// cells. Fields a record written before the
+/// fifteenth wave does not carry (`privileges`, `virtualization`) are counted
+/// and said, not failed, until the matrix is swept again.
+#[test]
+fn every_gap_between_two_cells_is_explained_by_their_resolved_records() {
+    let cells = cells_on_disk();
+    if cells.len() < 2 {
+        eprintln!(
+            "skipped: {} matrix cell(s) under {}, and a gap needs two",
+            cells.len(),
+            cells_dir().display()
+        );
+        return;
+    }
+    let mut gaps = Gaps::default();
+    for (index, (_, a)) in cells.iter().enumerate() {
+        for (_, b) in &cells[index + 1..] {
+            gaps_between(a, b, &mut gaps);
+        }
+    }
+    eprintln!(
+        "gaps between {} cells: explained by {:?}; the build's, between cells that record no \
+         common build: {}",
+        cells.len(),
+        gaps.explained,
+        gaps.builds
+    );
+    if !gaps.unrecorded.is_empty() {
+        eprintln!(
+            "NOT EXPLAINED YET, the records predate the field that would: {:?} -- sweep the \
+             matrix again (`scripts/matrix.sh`)",
+            gaps.unrecorded
+        );
+    }
+    assert!(
+        gaps.unexplained.is_empty(),
+        "{} gap(s) no field of the resolved records explains:\n{}",
+        gaps.unexplained.len(),
+        gaps.unexplained.join("\n")
+    );
+    assert!(
+        !gaps.explained.is_empty(),
+        "no gap between {} cells was explained, so this compared nothing",
+        cells.len()
+    );
+}
+
+/// A binary that carries `cap_bpf,cap_perfmon` and runs where the kernel does
+/// not grant them -- here under `no_new_privs`, which a sandbox sets and which
+/// drops file capabilities at exec the way a `nosuid` mount does -- says why,
+/// and does not tell the reader to run the `setcap` they already ran.
+///
+/// The truth is the kernel's: the flag is set on the child before it execs,
+/// and `getcap` says what the file carries.
+#[test]
+fn a_binary_denied_its_file_capabilities_says_why_instead_of_advising_the_grant() {
+    let omn = omn();
+    let printed = Command::new("getcap")
+        .arg(&omn)
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    if !printed.contains("cap_bpf") {
+        eprintln!(
+            "skipped: {} carries no CAP_BPF ({printed:?}), so nothing can be withheld from it -- \
+             `make` grants it",
+            omn.display()
+        );
+        return;
+    }
+    let mut command = Command::new(&omn);
+    command.args(["list", "sched.offcpu", "--color", "never"]);
+    // SAFETY: prctl is async-signal-safe, and the flag only narrows the child.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    let output = command.output().expect("omn runs");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let bpf = listing
+        .lines()
+        .find(|line| line.trim_start().starts_with("needs") && line.contains(" bpf "))
+        .unwrap_or_else(|| panic!("the listing names the `bpf` requirement:\n{listing}"));
+    assert!(bpf.contains("missing"), "{bpf}");
+    assert!(
+        bpf.contains("carries CAP_BPF") && bpf.contains("no_new_privs") && !bpf.contains("setcap"),
+        "{bpf}"
+    );
+}
+
 // ------------------------------------------------------------ the judges, judged
 
 /// A cell with one source of each shape, every answer honest. Each test below
@@ -1203,6 +1743,7 @@ fn honest_cell(kernel: &str, config: &str) -> Sweep {
             tracefs_hidden: false,
             environment: serde_json::Value::Null,
             elapsed_s: 1.0,
+            build: Some("honest".into()),
         },
         sources: vec![
             Source {
@@ -1392,6 +1933,201 @@ fn a_source_listed_usable_through_a_backend_nobody_wrote_fails_the_cell() {
             .is_some_and(|v| v.iter().any(|v| v.contains("no collector in this build"))),
         "{found:#?}"
     );
+}
+
+/// The gap judge, judged: two cells where one hides the BTF. With records
+/// that say nothing, the gap is unexplained and fails; with records that carry
+/// `kernel_btf`, it is explained by that field and nothing else; and a gap
+/// that only privileges could explain, between records written before they
+/// were, is counted as unrecorded rather than failed or passed.
+#[test]
+fn a_gap_is_explained_only_by_a_recorded_field_that_differs() {
+    let a = honest_cell("6.6", "root");
+    let mut b = honest_cell("6.6", "nobtf");
+    let lock = source(&mut b, "sched.lock");
+    lock.here = Here::No;
+    lock.here_backend = None;
+    for requirement in lock
+        .backends
+        .iter_mut()
+        .flat_map(|backend| &mut backend.requires)
+    {
+        if requirement.needs == "btf" {
+            requirement.state = State::Missing;
+            requirement.detail = "/sys/kernel/btf/vmlinux is absent".into();
+        }
+    }
+    let mut silent = Gaps::default();
+    gaps_between(&a, &b, &mut silent);
+    assert_eq!(silent.unexplained.len(), 1, "{silent:?}");
+    assert!(silent.unexplained[0].contains("sched.lock"), "{silent:?}");
+
+    let (mut a, mut b) = (a, b);
+    a.cell.environment = serde_json::json!({"kernel_btf": "readable", "tracefs": "readable"});
+    b.cell.environment = serde_json::json!({"kernel_btf": "absent", "tracefs": "readable"});
+    let mut recorded = Gaps::default();
+    gaps_between(&a, &b, &mut recorded);
+    assert!(recorded.unexplained.is_empty(), "{recorded:?}");
+    assert_eq!(
+        recorded.explained.get("kernel_btf"),
+        Some(&1),
+        "{recorded:?}"
+    );
+
+    // A `bpf` refusal, which only the privileges explain, between records
+    // that do not carry them.
+    let lock = source(&mut b, "sched.lock");
+    for requirement in lock
+        .backends
+        .iter_mut()
+        .flat_map(|backend| &mut backend.requires)
+    {
+        *requirement = if requirement.needs == "btf" {
+            Requirement {
+                needs: "bpf".into(),
+                state: State::Missing,
+                detail: "loading a tracing program needs CAP_BPF".into(),
+            }
+        } else {
+            requirement.clone()
+        };
+    }
+    for requirement in source(&mut a, "sched.lock")
+        .backends
+        .iter_mut()
+        .flat_map(|backend| &mut backend.requires)
+    {
+        if requirement.needs == "btf" {
+            requirement.needs = "bpf".into();
+        }
+    }
+    b.cell.environment = a.cell.environment.clone();
+    let mut unrecorded = Gaps::default();
+    gaps_between(&a, &b, &mut unrecorded);
+    assert!(unrecorded.unexplained.is_empty(), "{unrecorded:?}");
+    assert_eq!(
+        unrecorded.unrecorded.get("privileges"),
+        Some(&1),
+        "{unrecorded:?}"
+    );
+}
+
+/// A field that differs is not the cause because it differs: the cause is the
+/// one the refusing probe names, and the records have to bear it out. Each
+/// case below was credited to the wrong field by a test that took the first
+/// differing field in alphabetical order.
+#[test]
+fn a_gap_is_credited_to_the_cause_the_refusal_names_not_to_any_field_that_differs() {
+    // One requirement of `sched.lock` refused on `b` with `detail`, between
+    // two records.
+    let pair = |kernels: (&str, &str), needs: &str, detail: &str, env: [serde_json::Value; 2]| {
+        let mut a = honest_cell(kernels.0, "caps");
+        let mut b = honest_cell(kernels.1, "nocaps");
+        let [env_a, env_b] = env;
+        a.cell.environment = env_a;
+        b.cell.environment = env_b;
+        for (sweep, state) in [(&mut a, State::Available), (&mut b, State::Missing)] {
+            let lock = source(sweep, "sched.lock");
+            let requires = &mut lock.backends[0].requires;
+            requires.retain(|r| r.needs != needs);
+            requires.push(Requirement {
+                needs: needs.into(),
+                state,
+                detail: if state == State::Available {
+                    String::new()
+                } else {
+                    detail.into()
+                },
+            });
+            if state == State::Missing {
+                lock.here = Here::No;
+                lock.here_backend = None;
+            }
+        }
+        let mut gaps = Gaps::default();
+        gaps_between(&a, &b, &mut gaps);
+        gaps
+    };
+    let env = |release: &str, gpus: bool| {
+        let mut value = serde_json::json!({
+            "kernel_release": release, "kernel_btf": "readable", "tracefs": "readable",
+            "perf_event_paranoid": 2,
+        });
+        if gpus {
+            value["gpus"] = serde_json::json!([{"card": "card1", "driver": "nvidia"}]);
+        }
+        value
+    };
+
+    // The capability config differs between two kernels: `bpf` refused for
+    // CAP_BPF is the privileges', which these records do not carry, and not
+    // the kernel release's, which differs too.
+    let bpf = pair(
+        ("6.1", "6.6"),
+        "bpf",
+        "loading a tracing program needs CAP_BPF and CAP_PERFMON",
+        [env("6.1.0-test", false), env("6.6.0-test", false)],
+    );
+    assert!(bpf.explained.is_empty(), "{bpf:?}");
+    assert_eq!(bpf.unrecorded.get("privileges"), Some(&1), "{bpf:?}");
+
+    // No hwmon chip in a guest is its virtualization, which these records
+    // do not carry, and not its GPUs, which differ too.
+    let hwmon = pair(
+        ("7.2", "7.2"),
+        "/sys/class/hwmon",
+        "no chip under /sys/class/hwmon publishes a temperature",
+        [env("7.2.6-test", true), env("7.2.6-test", false)],
+    );
+    assert!(hwmon.explained.is_empty(), "{hwmon:?}");
+    assert_eq!(
+        hwmon.unrecorded.get("virtualization"),
+        Some(&1),
+        "{hwmon:?}"
+    );
+
+    // A kernel requirement refused on the newer kernel is not explained by
+    // the release, although the releases differ.
+    let backwards = pair(
+        ("6.6", "5.15"),
+        "kernel>=6.1",
+        "kernel 6.6 is older than 6.1",
+        [env("5.15.0-test", false), env("6.6.0-test", false)],
+    );
+    assert_eq!(backwards.unexplained.len(), 1, "{backwards:?}");
+    let forwards = pair(
+        ("6.6", "5.15"),
+        "kernel>=6.1",
+        "kernel 5.15 is older than 6.1",
+        [env("6.6.0-test", false), env("5.15.0-test", false)],
+    );
+    assert_eq!(
+        forwards.explained.get("kernel_release"),
+        Some(&1),
+        "{forwards:?}"
+    );
+
+    // A BTF that the refusing side's record calls readable explains nothing,
+    // even where the other side's differs.
+    let mut btf_backwards = [env("6.6.0-test", false), env("6.6.0-test", false)];
+    btf_backwards[0]["kernel_btf"] = serde_json::json!("absent");
+    let btf = pair(
+        ("6.6", "6.6"),
+        "btf",
+        "/sys/kernel/btf/vmlinux is absent, so CO-RE is unavailable",
+        btf_backwards,
+    );
+    assert_eq!(btf.unexplained.len(), 1, "{btf:?}");
+
+    // A reason that names nothing a record carries fails, rather than being
+    // credited to whatever differs.
+    let unnamed = pair(
+        ("6.6", "7.2"),
+        "bpf",
+        "something went wrong",
+        [env("6.6.0-test", false), env("7.2.6-test", false)],
+    );
+    assert_eq!(unnamed.unexplained.len(), 1, "{unnamed:?}");
 }
 
 #[test]

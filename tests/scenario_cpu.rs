@@ -1635,6 +1635,15 @@ fn every_backend_either_measures_or_says_it_is_not_built() {
         "no backend of this family is declared without a collector, which cannot be right"
     );
     for (source, backends) in &implemented {
+        // The chains whose two collectors are measured against each other,
+        // and the test that states the relationship.
+        const COMPARED: &[(&str, &str)] = &[(
+            "cpu.cycles",
+            "a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency",
+        )];
+        if COMPARED.iter().any(|(compared, _)| compared == source) {
+            continue;
+        }
         assert!(
             backends.len() < 2,
             "`{source}` now has two implemented backends ({}), so this family owes a real \
@@ -1650,6 +1659,97 @@ fn every_backend_either_measures_or_says_it_is_not_built() {
         declared_only.len(),
         declared_only.join(", ")
     );
+}
+
+/// `cpu.cycles` has two collectors since the fifteenth wave: the hardware
+/// cycle counter (`pmu`), and the kernel's cpu clock (`pmu:sw`), which is what
+/// a cpu with no hardware PMU -- most cloud VMs -- can offer, and which the
+/// catalog declares degraded: "CPU time, not cycles: blind to DVFS".
+///
+/// Each is held to what it claims, and the two to each other. The workload
+/// burns a chosen amount of its own thread's cpu (`CLOCK_THREAD_CPUTIME_ID`),
+/// twice, 100 ms and 500 ms, so the constant cost of becoming the workload
+/// cancels: the fallback's difference is the 400 ms burned, to 15 %, under
+/// the counter's own name, `cpu_clock_ns`, with the degradation said. The
+/// hardware counter's difference over the fallback's is the cycles per
+/// nanosecond the core ran at, which has to lie between the slowest and
+/// fastest frequency cpufreq says the core has (half the minimum to a fifth
+/// above the maximum, for a core that sleeps or boosts inside the run).
+#[test]
+fn a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency() {
+    let _load = may_load_the_machine();
+    let counted = |backend: &str, burn_ms: u64| -> Option<(f64, serde_json::Value)> {
+        let pin = format!("force:{backend}");
+        let axes = ["--backend", pin.as_str(), "-m", "count", "-e", "raw"];
+        match measure("cpu.cycles", &format!("burn:{burn_ms}"), &axes) {
+            Outcome::Measured { document, .. } => {
+                let events = raw_events(&document);
+                assert_eq!(events.len(), 1, "one window, one event: {events:?}");
+                let value = attr_of(&events[0], "count").expect("a count");
+                Some((value, document))
+            }
+            Outcome::Refused { message, .. } => {
+                assert!(
+                    machine_cannot_serve(&message),
+                    "`cpu.cycles` on `{backend}` was refused, not unserved: {message}"
+                );
+                eprintln!("skipped `{backend}`: {message}");
+                None
+            }
+        }
+    };
+    let Some((short, _)) = counted("pmu:sw", 100) else {
+        return;
+    };
+    let Some((long, document)) = counted("pmu:sw", 500) else {
+        return;
+    };
+    let said = document.to_string();
+    assert!(
+        said.contains("cpu_clock_ns"),
+        "the counter names itself: {said}"
+    );
+    assert!(
+        said.contains("CPU time, not cycles"),
+        "the fallback says what it degrades: {said}"
+    );
+    let burned = 400e6;
+    let clock = long - short;
+    assert!(
+        (clock - burned).abs() < burned * 0.15,
+        "the workload burned {burned:.0} ns more of its own cpu, and the cpu clock counted \
+         {clock:.0} more ({short:.0} and {long:.0})"
+    );
+
+    let (Some((cycles_short, _)), Some((cycles_long, _))) =
+        (counted("pmu", 100), counted("pmu", 500))
+    else {
+        return;
+    };
+    let khz = |file: &str| -> Option<f64> {
+        std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu0/cpufreq/{file}"))
+            .ok()?
+            .trim()
+            .parse::<f64>()
+            .ok()
+    };
+    let ghz = (cycles_long - cycles_short) / clock;
+    match (khz("cpuinfo_min_freq"), khz("cpuinfo_max_freq")) {
+        (Some(min), Some(max)) => {
+            let (low, high) = (min / 1e6 * 0.5, max / 1e6 * 1.2);
+            assert!(
+                (low..=high).contains(&ghz),
+                "the cycles counted over the cpu clock say the core ran at {ghz:.2} GHz, and \
+                 cpufreq says it runs between {:.2} and {:.2}",
+                min / 1e6,
+                max / 1e6
+            );
+        }
+        _ => eprintln!(
+            "the cycles over the cpu clock say {ghz:.2} GHz; this machine publishes no cpufreq \
+             range to hold it to"
+        ),
+    }
 }
 
 /// The one comparison this family does own: two mechanisms, one busy core.
@@ -3057,18 +3157,22 @@ fn each_refusal_names_the_thing_that_is_missing() {
     // This build does not implement these, which is neither of the above.
     let unbuilt: [(&[&str], &str); 2] = [
         (
+            // `cpu.cycles` on `pmu:sw` stood here until the fifteenth wave
+            // wrote it.
             &[
-                "cpu.cycles",
+                "cpu.pressure",
                 "--backend",
-                "force:pmu:sw",
+                "force:fs:cgroup",
+                "--cgroup",
+                "/",
                 "-m",
-                "count",
+                "poll@100ms",
                 "-e",
                 "summary",
-                "--",
-                "/bin/true",
+                "-d",
+                "100ms",
             ],
-            "no collector is written for `cpu.cycles` on backend `pmu:sw`",
+            "no collector is written for `cpu.pressure` on backend `fs:cgroup`",
         ),
         (
             &[
@@ -3770,14 +3874,37 @@ fn over_a_cgroup(
     cgroup: &ScratchCgroup,
     workload: &str,
 ) -> Option<(serde_json::Value, Split)> {
+    over_a_target(source, mode, cgroup, workload, None)
+}
+
+/// [`over_a_cgroup`], with the cgroup named as a container its runtime knows
+/// when `container` is given: `--container <name>`, and the runtime `omn`
+/// asks is the script at the path.
+fn over_a_target(
+    source: &str,
+    mode: &str,
+    cgroup: &ScratchCgroup,
+    workload: &str,
+    container: Option<(&str, &std::path::Path)>,
+) -> Option<(serde_json::Value, Split)> {
     let mut lead = Duration::from_millis(300);
     let mut window = Duration::from_secs(6);
     let mut late = Vec::new();
     for _ in 0..4 {
         let spawned = monotonic_ns();
-        let omn = Command::new(BINARY)
-            .args([source, "--cgroup"])
-            .arg(&cgroup.path)
+        let mut command = Command::new(BINARY);
+        command.arg(source);
+        match container {
+            Some((name, runtime)) => {
+                command
+                    .args(["--container", name])
+                    .env("OMN_CONTAINER_RUNTIME", runtime);
+            }
+            None => {
+                command.arg("--cgroup").arg(&cgroup.path);
+            }
+        }
+        let omn = command
             .args(["-m", mode, "-e", "raw", "--format", "json", "-d"])
             .arg(format!("{}ms", window.as_millis()))
             .stdout(std::process::Stdio::piped())
@@ -4222,41 +4349,153 @@ fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
     }
 }
 
-/// A container is refused by the validator, with what it would take, for every
-/// source that serves a cgroup and resolves no container to one.
+/// A container runtime that knows the containers given, and nothing else: a
+/// script answering `inspect --format '{{.State.Pid}}' <name>` the way
+/// `docker` does, which is all `omn` asks of one.
+fn runtime_knowing(dir: &std::path::Path, containers: &[(&str, u32)]) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).expect("a directory for the runtime");
+    let mut script = String::from("#!/bin/sh\n[ \"$1\" = inspect ] || exit 2\ncase \"$4\" in\n");
+    for (name, pid) in containers {
+        script.push_str(&format!("  {name}) echo {pid} ;;\n"));
+    }
+    script.push_str("  *) echo \"Error: No such object: $4\" >&2; exit 1 ;;\nesac\n");
+    let path = dir.join("runtime");
+    std::fs::write(&path, script).expect("the runtime is written");
+    let mut permissions = std::fs::metadata(&path).expect("it is there").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&path, permissions).expect("it is executable");
+    path
+}
+
+/// A container is no longer refused by the validator where its cgroup is
+/// served: it is asked of its runtime, and a runtime that does not know it is
+/// the answer.
 ///
-/// A `container` target falls back to `cgroup` in the catalog's model, so an
-/// entry that serves the cgroup and said nothing accepted the container and
-/// the collector refused it at the start -- P8's shape one target over. The
-/// entries say `container: no` now, and the refusal is the request's (exit 2)
-/// before anything is resolved or opened.
+/// Until the fifteenth wave these four entries said `container: no`, and the
+/// validator refused the container (exit 2, "resolved to its cgroup first")
+/// although `omn` binds a container to the cgroup its runtime names before
+/// resolution. With the key dropped, the kind falls back to `cgroup`, and a
+/// name no runtime knows is refused by the runtime's own answer, exit 1 --
+/// the machine's -- before anything starts. The runtime is a script that
+/// knows no container at all, so the answer is the same on every machine.
 #[test]
-fn a_container_is_refused_before_the_start_where_only_its_cgroup_is_served() {
+fn a_container_is_asked_of_its_runtime_where_its_cgroup_is_served() {
+    let dir = std::env::temp_dir().join(format!("omn-cpu-runtime-none-{}", std::process::id()));
+    let runtime = runtime_knowing(&dir, &[]);
     for (source, mode) in [
         ("cpu.instructions", "count"),
         ("cpu.profile", "sample@99hz"),
         ("mem.faults", "sample@997hz"),
         ("cpu.throttle", "poll@100ms"),
     ] {
-        let (code, message) = run(&[
-            source,
-            "--container",
-            "web",
-            "-m",
-            mode,
-            "-e",
-            "raw",
-            "-d",
-            "100ms",
-        ])
-        .refusal();
-        assert_eq!(code, 2, "{source}: {message}");
+        let output = Command::new(BINARY)
+            .args([
+                source,
+                "--container",
+                "web",
+                "-m",
+                mode,
+                "-e",
+                "raw",
+                "-d",
+                "100ms",
+            ])
+            .env("OMN_CONTAINER_RUNTIME", &runtime)
+            .output()
+            .expect("omn runs");
+        let message = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(output.status.code(), Some(1), "{source}: {message}");
         assert!(
-            message.contains(source)
-                && message.contains("per container")
-                && message.contains("resolved to its cgroup first")
-                && message.contains("--cgroup"),
+            message.contains("no container named `web`")
+                && message.contains("No such object: web")
+                && !message.contains("per container"),
             "{source}: {message}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A container is counted as the cgroup its runtime names: the loop inside
+/// it, and none of the one beside it.
+///
+/// The container is what a container is to the kernel, a cgroup with a
+/// process in it: a cgroup made here, holding a `sleep` the runtime script
+/// names as the container's init. `omn` asks the runtime, reads the pid's
+/// `/proc/<pid>/cgroup`, and counts that cgroup. The ground truth is
+/// [`a_cgroup_is_counted_for_its_own_loop_and_not_for_the_one_beside_it`]'s:
+/// the child's `retire` loop joins the cgroup and retires two instructions a
+/// turn, the parent beside it ten times as many, and the count has to hold the
+/// child's and not the parent's. The sleeper retires almost nothing.
+#[test]
+fn a_container_is_counted_as_the_cgroup_its_runtime_names() {
+    let _load = may_load_the_machine();
+    const TURNS: u64 = 50_000_000;
+    let Some(cgroup) = ScratchCgroup::new("omn-container") else {
+        return;
+    };
+    let mut init = Command::new("sleep")
+        .arg("120")
+        .spawn()
+        .expect("sleep runs");
+    let procs = cgroup.path.join("cgroup.procs");
+    if let Err(error) = std::fs::write(&procs, init.id().to_string()) {
+        let _ = init.kill();
+        let _ = init.wait();
+        eprintln!(
+            "skipped: this user cannot move a process into the cgroup it made ({}: {error})",
+            procs.display()
+        );
+        return;
+    }
+    let name = format!("omn-counted-{}", std::process::id());
+    let dir = std::env::temp_dir().join(format!("omn-cpu-runtime-{}", std::process::id()));
+    let runtime = runtime_knowing(&dir, &[(name.as_str(), init.id())]);
+    let measured = over_a_target(
+        "cpu.instructions",
+        "count",
+        &cgroup,
+        &format!("cgroup-retire:{TURNS}"),
+        Some((name.as_str(), runtime.as_path())),
+    );
+    let _ = init.kill();
+    let _ = init.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    let Some((document, split)) = measured else {
+        return;
+    };
+    assert_eq!(split.child_units, TURNS);
+    let events = raw_events(&document);
+    assert_eq!(
+        events.len(),
+        1,
+        "one container, one cgroup, one event: {events:?}"
+    );
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&cgroup.path).unwrap().ino()
+    };
+    assert_eq!(
+        events[0]["keys"][0]["cgroup"]["id"], inode,
+        "the container is counted as the cgroup its runtime names: {}",
+        events[0]
+    );
+    if document.to_string().contains("shared the hardware") {
+        eprintln!(
+            "skipped: the counter shared the pmu with another process's, so its value is \
+             scaled from the slices it was on for and is not a count to check a loop against"
+        );
+        return;
+    }
+    let counted = attr_of(&events[0], "count").expect("a count");
+    let child = 2.0 * TURNS as f64;
+    let parent = 2.0 * (TURNS * 10) as f64;
+    assert!(
+        counted >= child * 0.995,
+        "the container ran a loop of {child:.0} instructions and was counted at {counted:.0}"
+    );
+    assert!(
+        counted < child * 1.25,
+        "the container was counted at {counted:.0}, against its own loop of {child:.0}: the \
+         parent's {parent:.0}, outside it, is in the count"
+    );
 }

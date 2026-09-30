@@ -451,17 +451,28 @@ mod tests {
         block
     }
 
+    /// How many of the block's pages took at least one sampled fault.
+    ///
+    /// Pages, not samples: a fault the kernel retries (`VM_FAULT_RETRY`, when
+    /// the mmap lock is contended -- five other test binaries on the machine
+    /// are enough) raises the software event again for the same page, and
+    /// one run here counted 65 samples in 64 pages. What the block's owner
+    /// knows is which pages its code touched, not how often the kernel had to
+    /// try.
     fn landed_in(events: &[Event], block: *mut libc::c_void, pages: usize) -> usize {
         let base = block as u64;
         events
             .iter()
-            .filter(|event| match event.key(crate::request::KeyKind::Mem) {
-                Some(KeyValue::Mem { base: addr, .. }) => {
-                    (base..base + (pages * 4096) as u64).contains(addr)
+            .filter_map(|event| match event.key(crate::request::KeyKind::Mem) {
+                Some(KeyValue::Mem { base: addr, .. })
+                    if (base..base + (pages * 4096) as u64).contains(addr) =>
+                {
+                    Some((addr - base) / 4096)
                 }
-                _ => false,
+                _ => None,
             })
-            .count()
+            .collect::<std::collections::BTreeSet<u64>>()
+            .len()
     }
 
     /// The paranoid-2 path, taken here on purpose: sampled in user mode only,
@@ -507,7 +518,7 @@ mod tests {
         // (a multi-size THP fault installs a whole folio).
         assert!(
             (PAGES / 16..=PAGES).contains(&own),
-            "{own} user-mode samples landed in the {PAGES} pages this code touched"
+            "user-mode samples landed in {own} of the {PAGES} pages this code touched"
         );
         assert_eq!(
             kernels, 0,

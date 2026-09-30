@@ -1515,34 +1515,46 @@ mod tests {
         }
     }
 
-    /// The CI's second run: on a cpu with no hardware PMU, `cpu.cycles`'s
-    /// written backend (`pmu`) is withheld by the machine and the one left is
-    /// `pmu:sw`, which nobody wrote. The request resolves there and the runner
-    /// refuses it as this build's gap (exit 3) -- true: a collector for it
-    /// would serve this machine -- with the chain saying what the machine
-    /// withheld. The listing is what was wrong: it called the source usable
-    /// through `pmu:sw`, and available means it attaches. Out of reach now.
+    /// The CI's second run: on a machine that withholds an entry's written
+    /// backend, the one left can be a backend nobody wrote. The request
+    /// resolves there and the runner refuses it as this build's gap (exit 3)
+    /// -- true: a collector for it would serve this machine -- with the chain
+    /// saying what the machine withheld. The listing is what was wrong: it
+    /// called the source usable through the unwritten backend, and available
+    /// means it attaches. Out of reach now.
     ///
-    /// The machine is made to lack the hardware event by asking for one no
-    /// machine publishes, on the entry's own `pmu` backend, so the collector
-    /// registered for it is the real one.
+    /// `cpu.cycles` on `pmu:sw` was the pair until its collector landed. The
+    /// unwritten backend is now `cpu.cycles`'s own `pmu:sw` fallback renamed
+    /// to a tag no collector serves for this source, and asserted unwritten,
+    /// so no collector written tomorrow can make the test's subject vanish
+    /// again: it fails at that assertion, naming it. The machine is made to
+    /// lack the first backend by asking for an event no machine publishes, so
+    /// the collector registered for it is the real one.
     #[test]
     fn a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable() {
+        const UNWRITTEN: &str = "fs:proc";
         let embedded = Catalog::embedded().unwrap();
         let mut entry = embedded
             .get(&"cpu.cycles".parse().unwrap())
             .expect("cpu.cycles is in the catalog")
             .clone();
         assert!(crate::collect::implements("cpu.cycles", "pmu"));
-        assert!(!crate::collect::implements("cpu.cycles", "pmu:sw"));
+        assert!(
+            !crate::collect::implements("cpu.cycles", UNWRITTEN),
+            "cpu.cycles on {UNWRITTEN} has a collector now: pick another tag nobody wrote"
+        );
         entry.backends[0].requires = vec!["pmu:omnnounit/cycles/".into()];
+        let mut fallback = entry
+            .backends
+            .iter()
+            .find(|b| b.id == "pmu:sw")
+            .expect("cpu.cycles declares its pmu:sw fallback")
+            .clone();
+        fallback.id = UNWRITTEN.into();
+        fallback.requires = Vec::new();
+        entry.backends = vec![entry.backends[0].clone(), fallback];
         let catalog = Catalog::from_entries(vec![entry.clone()]).unwrap();
         let capabilities = Capabilities::detect();
-        let sw_clock = capabilities.probe("pmu:PERF_COUNT_SW_CPU_CLOCK", None);
-        if !sw_clock.is_available() {
-            eprintln!("skipped: this machine withholds the software clock too ({sw_clock})");
-            return;
-        }
         assert_eq!(
             availability(&entry, &capabilities),
             Availability::Unavailable
@@ -1551,8 +1563,9 @@ mod tests {
         let mut request = fixture("cpu.cycles", Target::Pid(vec![std::process::id() as i32]));
         request.mode = Mode::Count;
         request.emit = vec!["summary".parse().unwrap()];
-        let resolved = resolve(&catalog, &capabilities, &request).expect("resolves to pmu:sw");
-        assert_eq!(resolved.backend.id, "pmu:sw");
+        let resolved = resolve(&catalog, &capabilities, &request)
+            .unwrap_or_else(|e| panic!("resolves to {UNWRITTEN}: {e}"));
+        assert_eq!(resolved.backend.id, UNWRITTEN);
         match &resolved.chain[0].verdict {
             Verdict::Rejected(reasons) => assert!(
                 reasons.iter().any(|reason| reason.contains("omnnounit")),

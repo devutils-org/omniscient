@@ -748,3 +748,86 @@ fn a_catalog_carrying_a_promise_no_build_can_keep_is_refused_when_it_is_loaded()
         .push("raw_tracepoint:sched_switch(bool, task_struct *, task_struct *)".to_owned());
     assert!(Catalog::from_entries(kept).is_ok());
 }
+
+/// A (target, mode) pair that an entry accepts one half at a time and that no
+/// backend of its chain declares together is the request's, exit 2, with the
+/// reason -- not the machine's "no viable backend", exit 1, which would send
+/// the reader looking for a kernel or a capability that no machine has.
+///
+/// The truth is the catalog's own data: the pairs are found here from each
+/// backend's declared targets and modes, independently of the validator, and
+/// every one is run through the binary. `sched.switches` per cgroup in
+/// `trace` mode is one such pair today (`pmu:sw` traces and does not follow a
+/// cgroup; the two programs follow one and only count), so the set is not
+/// empty.
+#[test]
+fn a_target_and_mode_no_backend_declares_together_is_refused_as_the_request() {
+    let catalog = Catalog::embedded().expect("the embedded catalog loads");
+    let own_pid = std::process::id().to_string();
+    let target_args = |kind: TargetKind| -> Option<Vec<String>> {
+        Some(match kind {
+            TargetKind::Pid => vec!["--pid".into(), own_pid.clone()],
+            TargetKind::Cgroup => vec!["--cgroup".into(), "/sys/fs/cgroup".into()],
+            TargetKind::Cpu => vec!["--cpu".into(), "0".into()],
+            TargetKind::Iface => vec!["--iface".into(), "lo".into()],
+            TargetKind::System => vec!["--system".into()],
+            _ => return None,
+        })
+    };
+    let mut pairs = Vec::new();
+    for entry in catalog.entries() {
+        for kind in TargetKind::ALL {
+            if entry.target_support(kind) == TargetSupport::No {
+                continue;
+            }
+            for mode in &entry.modes {
+                let together = entry.backends.iter().any(|backend| {
+                    entry.backend_target_support(backend, kind) != TargetSupport::No
+                        && entry.backend_modes(backend).contains(mode)
+                });
+                if !together {
+                    pairs.push((entry, kind, *mode));
+                }
+            }
+        }
+    }
+    assert!(
+        pairs
+            .iter()
+            .any(|(entry, kind, mode)| entry.id.as_str() == "sched.switches"
+                && *kind == TargetKind::Cgroup
+                && mode.to_string() == "trace"),
+        "the catalog no longer has the pair this test was written on: {:?}",
+        pairs
+            .iter()
+            .map(|(e, k, m)| format!("{} {k} {m}", e.id))
+            .collect::<Vec<_>>()
+    );
+    let mut ran = 0;
+    for (entry, kind, mode) in &pairs {
+        let Some(target) = target_args(*kind) else {
+            continue;
+        };
+        let emit = entry.emits[0].to_string();
+        let mode = mode.to_string();
+        let mut args: Vec<&str> = vec!["trace", entry.id.as_str()];
+        args.extend(target.iter().map(String::as_str));
+        args.extend(["-m", &mode, "-e", &emit, "-d", "100ms"]);
+        let output = run(&args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_REJECTED),
+            "omn {}: {stderr}",
+            args.join(" ")
+        );
+        assert!(
+            stderr.contains("no backend of its chain declares both"),
+            "omn {}: the refusal has to say it is the pair's: {stderr}",
+            args.join(" ")
+        );
+        ran += 1;
+    }
+    assert!(ran > 0, "no pair had a target this test can write");
+    eprintln!("{ran} pair(s) no backend declares, each refused as the request");
+}

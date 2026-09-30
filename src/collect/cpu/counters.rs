@@ -53,6 +53,11 @@ const CACHE_REFERENCES: Counter =
 const CONTEXT_SWITCHES: Counter =
     Counter::software("context_switches", perf::PERF_COUNT_SW_CONTEXT_SWITCHES);
 const MIGRATIONS: Counter = Counter::software("migrations", perf::PERF_COUNT_SW_CPU_MIGRATIONS);
+/// The kernel's cpu clock: nanoseconds the task ran, counted by the scheduler's
+/// clock rather than by the core. What `cpu.cycles` falls back to where the
+/// cpu has no hardware PMU -- most cloud VMs -- and says so: a nanosecond of
+/// cpu is a cycle only at one gigahertz, and never through a frequency change.
+const CPU_CLOCK: Counter = Counter::software("cpu_clock_ns", perf::PERF_COUNT_SW_CPU_CLOCK);
 
 // The cache descriptors. These are the `mem.cache_*` sources, and they are
 // here rather than under `src/collect/mem/` because the mechanism decides who
@@ -144,6 +149,16 @@ pub const SPECS: &[Spec] = &[
         source: "cpu.cycles",
         backend: "pmu",
         counters: &[CYCLES],
+        value: Value::Count,
+    },
+    // The degraded fallback the catalog declares (`CPU time, not cycles:
+    // blind to DVFS`): the same group and window, one software counter, and
+    // the counter's own name in the event so the value is never read as
+    // cycles. DECISIONS.md, the fifteenth wave.
+    Spec {
+        source: "cpu.cycles",
+        backend: "pmu:sw",
+        counters: &[CPU_CLOCK],
         value: Value::Count,
     },
     Spec {
@@ -398,9 +413,12 @@ impl Prepared for Prepare {
                     super::cgroup::CgroupCounters::new(cgroup, cpus, self.spec).polled(self.poll),
                 ))
             }
-            Target::Container(_) => Err(format!(
-                "`{}` counts a cgroup, and a container has to be resolved to its cgroup first, \
-                 which this tool does not do; pass `--cgroup` with the container's cgroup path",
+            // `omn` binds a container to its cgroup before resolution; only a
+            // library caller that skips `request::find_container` gets here.
+            Target::Container(name) => Err(format!(
+                "`{}` counts a cgroup, and container `{name}` was handed over unbound: bind it \
+                 to its cgroup with `request::find_container` first, or pass `--cgroup` with \
+                 the container's cgroup path",
                 self.spec.source
             )),
             other => {
@@ -898,6 +916,44 @@ mod tests {
         group.enable().ok()?;
         work();
         group.read_final().ok()
+    }
+
+    /// `cpu.cycles` on `pmu:sw` counts the task's cpu time, and the thread's
+    /// own clock (`CLOCK_THREAD_CPUTIME_ID`, the scheduler's account of the
+    /// same thread, read through another call) is the truth: a spin of 50 ms
+    /// of that clock is counted as 50 ms, to a tenth -- the counter opens a
+    /// few microseconds before the first reading and the scheduler's tick
+    /// rounds both. Excluding the kernel, as paranoid 2 makes a counter do,
+    /// leaves out only the system calls a spin does not make.
+    #[test]
+    fn the_cpu_clock_fallback_counts_the_nanoseconds_the_thread_ran() {
+        let spec = spec_for("cpu.cycles", "pmu:sw").expect("the fallback is in the table");
+        let thread_ns = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: a timespec for the kernel to fill.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+            now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+        };
+        let mut spun = 0;
+        let Some(readings) = counted_on_this_thread(spec, || {
+            let from = thread_ns();
+            while thread_ns() - from < 50_000_000 {
+                std::hint::spin_loop();
+            }
+            spun = thread_ns() - from;
+        }) else {
+            eprintln!("skipped: this machine refuses the software cpu clock to this process");
+            return;
+        };
+        let counted = readings[0].value as f64;
+        assert_eq!(readings[0].name, "cpu_clock_ns");
+        assert!(
+            (counted - spun as f64).abs() < spun as f64 * 0.1,
+            "the thread ran {spun} ns by its own clock and the counter says {counted:.0}"
+        );
     }
 
     /// The misses a spec counted, whichever shape its value takes.
