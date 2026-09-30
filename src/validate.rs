@@ -1178,7 +1178,13 @@ mod tests {
                     }
                     refused += 1;
                     match crate::resolve::resolve(&catalog, &capabilities, &asked) {
-                        Err(crate::resolve::ResolveError::NoViableBackend { .. }) => {}
+                        // A pair no one backend declares together is the
+                        // resolver's own refusal of the same fact, now that
+                        // backends declare their modes (net.hwts).
+                        Err(
+                            crate::resolve::ResolveError::NoViableBackend { .. }
+                            | crate::resolve::ResolveError::NoBackendDeclares { .. },
+                        ) => {}
                         other => panic!(
                             "`{}` per {kind} in `{mode}` is refused as the catalog's ({}), and \
                              the resolver answered {other:?}",
