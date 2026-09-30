@@ -14,6 +14,9 @@
 #   make matrix     the tool under other kernels in KVM (about 70 minutes)
 #   make man        the manual page
 #   make release    the same for an optimised build
+#   make install    an optimised build into $(PREFIX), capabilities left to you
+#   make install-check  install into a scratch prefix and run it from there
+#   make dist       the release archive and its checksum (scripts/release.sh)
 #
 # `cargo build` still works and is still correct; it just leaves the privileged
 # backends reporting the capability they need.
@@ -28,7 +31,8 @@ CAPS       = cap_bpf,cap_perfmon$(if $(CAPTURE),$(comma)cap_net_raw,)+ep
 CAPCHECK   = $(if $(CAPTURE),cap_net_raw,cap_bpf)
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
-.PHONY: vertical-server triage-fixture all build release caps test check demo demo-all matrix man fmt clippy clean
+.PHONY: vertical-server triage-fixture all build release caps test check demo demo-all matrix man fmt clippy clean \
+        install uninstall install-check dist dist-verify
 
 all: build
 
@@ -137,6 +141,65 @@ demo-all: build
 # `scripts/matrix.sh here` is this machine alone, in about two.
 matrix: build
 	@scripts/matrix.sh
+
+# Installing. docs/install.md is the user's side of these targets.
+#
+# The layout is the release archive's, so a tree installed from here and one
+# extracted from `make dist` are the same tree: the binaries and the preload
+# shim in bin/, side by side, because `omn` looks for the shim beside its own
+# executable and `omn-mcp` looks for `omn` beside its own; the manual page in
+# share/man/man1.
+#
+# The build is `cargo build --release` without the capability step: a
+# capability granted in target/ would not survive the copy, and granting one
+# on the installed path is the user's decision. So the target says how.
+# DESTDIR is honoured for packaging, and the command it prints names the path
+# the package will install to, which is where the grant has to happen.
+PREFIX  ?= /usr/local
+DESTDIR ?=
+BINDIR   = $(PREFIX)/bin
+MAN1DIR  = $(PREFIX)/share/man/man1
+DOCDIR   = $(PREFIX)/share/doc/omn
+
+install:
+	cargo build --workspace --release --locked
+	install -D -m 755 target/release/omn            $(DESTDIR)$(BINDIR)/omn
+	install -D -m 755 target/release/omn-mcp        $(DESTDIR)$(BINDIR)/omn-mcp
+	install -D -m 644 target/release/libomn_preload.so $(DESTDIR)$(BINDIR)/libomn_preload.so
+	install -D -m 644 man/omn.1                     $(DESTDIR)$(MAN1DIR)/omn.1
+	install -D -m 644 README.md                     $(DESTDIR)$(DOCDIR)/README.md
+	install -D -m 644 docs/install.md               $(DESTDIR)$(DOCDIR)/install.md
+	@echo
+	@echo "installed omn, omn-mcp and the preload shim in $(DESTDIR)$(BINDIR)."
+	@echo "no capability was granted. Without them the eBPF and per-cpu perf backends"
+	@echo "report what they need instead of collecting; to grant them:"
+	@echo
+	@echo "    sudo setcap cap_bpf,cap_perfmon+ep $(BINDIR)/omn"
+	@echo
+	@echo "and \`omn list\` says what this machine then serves. docs/install.md has why."
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/omn $(DESTDIR)$(BINDIR)/omn-mcp $(DESTDIR)$(BINDIR)/libomn_preload.so
+	rm -f $(DESTDIR)$(MAN1DIR)/omn.1 $(DESTDIR)$(DOCDIR)/README.md $(DESTDIR)$(DOCDIR)/install.md
+	-rmdir $(DESTDIR)$(DOCDIR) 2>/dev/null
+
+# The ground truth for an installed tree: `make install` into a scratch
+# prefix, then the installed `omn` run from there with target/ moved out of
+# the way -- `omn list`, a launched `mem.rss` and `mem.heap.alloc` through the
+# installed shim, each against a size the workload chose. scripts/release.sh
+# `check` says what each check compares.
+install-check:
+	@prefix=$$(mktemp -d "$${TMPDIR:-/tmp}/omn-prefix.XXXXXX") \
+	  && $(MAKE) --no-print-directory install PREFIX=$$prefix >/dev/null \
+	  && scripts/release.sh check $$prefix; \
+	  status=$$?; rm -rf "$$prefix"; exit $$status
+
+# The release archive, its checksum, and the same checks on the extracted tree.
+dist:
+	@scripts/release.sh
+
+dist-verify: dist
+	@scripts/release.sh verify target/dist/$$(scripts/release.sh name).tar.gz
 
 # The manual page, rendered.
 man:

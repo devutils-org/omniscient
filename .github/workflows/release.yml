@@ -1,0 +1,55 @@
+# The release archive, built on a tag: scripts/release.sh builds it, verifies
+# its checksum and contents, and runs the extracted tree with the build tree
+# moved out of the way (docs/install.md, "Checking a release"). Only then is it
+# attached to a GitHub release named after the tag.
+#
+# Built on the oldest hosted Ubuntu there is, because the glibc a binary needs
+# is the newest one it was linked against: the line `glibc floor` below is what
+# docs/install.md promises, and a newer runner would raise it silently.
+#
+# No capability is granted here or carried by the archive. The runner's checks
+# are the ones that need none (`omn list`, `mem.rss`, `mem.heap.alloc`), which
+# is also what a user who has not yet run setcap meets first.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  archive:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The tag names the version being built
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+
+      - name: Build the archive
+        run: scripts/release.sh
+
+      - name: Verify it, and run the extracted tree
+        run: scripts/release.sh verify "target/dist/$(scripts/release.sh name).tar.gz"
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="$(scripts/release.sh name)"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            "target/dist/$name.tar.gz" "target/dist/$name.tar.gz.sha256"
