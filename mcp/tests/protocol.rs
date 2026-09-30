@@ -226,8 +226,8 @@ fn identity_and_temporal_never_read_alike() {
         } else {
             eprintln!(
                 "SKIP ({level}): examples/{example}.yml cannot run here, so no {level} join is \
-                 read back:\n{}",
-                String::from_utf8_lossy(&output.stderr)
+                 read back: {}",
+                on_one_line(&String::from_utf8_lossy(&output.stderr))
             );
         }
     }
@@ -492,8 +492,8 @@ fn a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing() {
         assert_eq!(resolution["said_by_omn"], json!(said), "{plan}");
         eprintln!(
             "SKIP (half): this machine withholds `cpu.profile`, so the plan's backend, rank and \
-             cost were not compared; its refusal was, line for line. The machine's reason:\n\
-             {reason}"
+             cost were not compared; its refusal was, line for line. The machine's reason: {}",
+            on_one_line(&reason)
         );
     } else {
         let resolved: Value = serde_json::from_slice(&dumped.stdout).unwrap();

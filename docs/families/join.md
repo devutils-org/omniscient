@@ -1,6 +1,10 @@
 # The join engine and the decomposition
 
-Four waves of stream J are recorded here, the newest first. The fourteenth
+Five waves of the engine's stream are recorded here, the newest first. The
+fifteenth wave held the engine to its phase 1, 4 and 5 exit criteria: a
+signed integer that survives a round trip, a row that cannot go without its
+evidence level, a load test, an eviction seen end to end, and a boundary
+added by a session alone. The fourteenth
 wave ran the use case `omn-mcp` was built for end to end and paid the
 engine's last filed edge, a join with no key. The thirteenth
 wave gave the engine the words and the match kinds the crossings asked for,
@@ -9,6 +13,110 @@ tenth wave found in the engine. Each was a place where the engine said more,
 or less, than it had measured. The eighth wave built the engine's third rung
 (`TEMPORAL`), the decomposition and the chains. Their records follow
 unchanged.
+
+---
+
+# The fifteenth wave — the engine held to its exit criteria
+
+| | |
+|---|---|
+| Delivered | `join::decompose_within` (R's filed request); `AttrValue`'s canonical integer and its equality; `Breakdown` refusing a row without an evidence level when read; the open states' age index and the unmatched attributions no longer kept; the load test, the hour test, the end-to-end eviction and the new-boundary test; skip lines that carry their reason |
+| Refused, new | a decomposition table read back (a `results.json`) whose row carries no evidence level, or whose whole was read from a source and carries none |
+| Tests | `src/event.rs` 1 new, 1 widened; `src/join.rs` 2 new; `tests/join_engine.rs` 4 new (one `#[ignore]`); `tests/vertical.rs` 1 new; `tests/cross_memory.rs` 1 new |
+| Sessions | none added: the two sessions of the end-to-end tests are written by the tests |
+| Files | `src/join.rs`, `src/event.rs`, `tests/{join_engine,vertical,cross_memory,cross_machine,cross_compute}.rs`, `mcp/tests/{protocol.rs,common/mod.rs}`, this document |
+| Machine | 24 cpus, kernel 7.2.6, `CAP_BPF` and `CAP_PERFMON` on the binary, loaded by five other streams and a matrix sweep |
+
+## 1. A paired part pairs over the joins' windows
+
+`main.rs` gives `join::apply_within` every source that ran to the end with
+`closed_ns = u64::MAX`, because what a stop drains is stamped after the
+window's close; `decompose_with` rebuilt the windows from the results and cut
+the pairs at the real close. `decompose_within(.., windows)` takes the map the
+joins were given, and `decompose_with` is now `decompose_within(..,
+&windows_of(results))`. The results' windows still decide the window row and
+whether an absent key is a zero. The swap of the two call sites is the
+resolver stream's (`docs/open-findings.md`, fifteenth wave).
+
+## 2. A signed integer reads back as what was written
+
+`AttrValue` is untagged on the wire, and `5` does not say whether it was an
+`Int` or a `Uint`: the reader answered `Uint`, so an `Int(0)` (an `fsync`'s
+`ret`, a process's `exit_code`) came back as another variant. The fix keeps
+the wire as it is, since every consumer reads a number as a number: an
+integer has one canonical form, `Uint` when non-negative and `Int` only when
+negative, which `Attr::int` and the new `AttrValue::int` produce, and
+`AttrValue`'s equality holds `Int(n) == Uint(n)` for `n >= 0`, so an `Int`
+built by hand is still the integer it holds. The round-trip test covers every
+`KeyValue` and `AttrValue` variant, a non-zero `ts_err_ns`, and zero, negative,
+`i64::MIN`, `i64::MAX` and `u64::MAX` values, and compares the `Debug` form as
+well as equality, so the variant itself is held.
+
+## 3. No row without its evidence level
+
+Every row the engine builds is rated (`Readout::row`), and only a whole that
+is a bracket (`Kind::Window`, `Kind::Lifetime`, `Kind::is_bracket`) goes
+without a level, since nothing joins it to the key. `Breakdown` now
+deserializes through a check: a row with no level, or a whole read from a
+source with none, is refused with the row and the key named. The vertical
+case's `block-io` table is held to `IDENTITY`, row and whole, and its device
+row to the server's own count of `O_DIRECT` pages.
+
+## 4. Under load
+
+`join_engine::a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map`
+builds 1.5 million block-request events over 1200 recycled pointers, through
+a `scoped_eq` rule with a 10 ms window and a map of 1000, in segments in each
+of which one thing can happen to a state: done, reissued before done (the
+stale segment unmatched), expired, evicted from a full map, keyless, and in
+flight when the `from` window closes. Every count is the generator's own,
+written as it built the stream, and the balance holds against it. The memory
+is counted by a counting allocator in a child process of the test binary:
+the peak is linear in the stream (a twice longer stream takes 2.0x), and
+nothing is left live after the engine returns.
+
+What it found, fixed here:
+
+- **Expiry walked every open state on every event**, and eviction on every
+  insert: a pass over the map per event, which is quadratic in a full map.
+  The states now keep an age index (`States::ages`), and both walk only the
+  oldest; states still end in key order, so no output moved.
+- **Every state that ever ended was kept until the end**, to be dropped at
+  ranking if it matched nothing. Only `wakeup`'s chains read those (they count
+  every wakeup), so every other match drops them when they end. Measured at a
+  million events: 179 MiB of peak beyond the stream, down to 97 MiB.
+
+The hour, by hand (`an_hour_of_joins_leaks_no_state`, `OMN_JOIN_LOAD_SECS`
+to shorten it): rounds of two million events, each held to its own counts, the
+peak of each to under twice the first's and the heap after each to the
+baseline.
+
+## 5. An eviction, end to end
+
+`a_join_that_evicts_says_how_many_in_results_json_and_in_the_text` runs
+`power.freq` to `power.cstate`, by cpu, with a map of two and a window of
+5 ms, polled every 100 ms. From the kernel's count of online cpus and the
+rule alone: nothing closes (each poll reads every cpu in turn), the map peaks
+at two, the overflow and the expiry are both non-zero, and the states balance.
+The counts are `results.json`'s, the text rendered from that document prints
+them on its `EVICTED:` line, and a text-format run's own lines balance.
+
+## 6. A boundary is a session's rule
+
+`a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine`: no catalog id
+is a string in `src/join.rs` outside its tests, and the same two sources,
+which no test or session had joined, run through a join the session writes;
+each cpu is credited exactly its `power.cstate` readings from its first
+frequency reading on, counted off the raw events. The kernel and query tiers
+are still not a rule's choice, so the criterion stays partial.
+
+## 7. Skip lines
+
+`cross_memory`'s, `cross_compute`'s and `omn-mcp`'s skips put the machine's
+reason on the skip line and indent the rest (P's gate saw a skip with nothing
+after it). `cross_machine`'s churn says what the program printed, or that it
+printed nothing, and how it exited. The three `mcp/tests/protocol.rs` tests D
+filed already skip with the resolver's reason since `8e4d7d2`.
 
 ---
 

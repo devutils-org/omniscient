@@ -8821,3 +8821,82 @@ bench reads `thermal_throttle` around each repetition
 tell. The sentence ends *"pending that stream"*. Whatever you decide, put it
 under "For DECISIONS.md" in your handoff. The coordinator lands it, and the
 phase 9 sentence changes to point at it.
+
+## Needs from another stream — the fifteenth wave, stream engine
+
+### To the resolver stream (`src/main.rs`, `src/triage/engine.rs`): the swap to `join::decompose_within`
+
+Landed in `src/join.rs` (stream R's fourteenth-wave request, above):
+
+```rust
+pub fn decompose_within(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    results: &[Results],
+    events: &[Event],
+    joins: &[Rule],
+    windows: &BTreeMap<String, Watched>, // what apply_within was given
+) -> DecompositionOutput
+```
+
+`decompose_with` is unchanged in signature and now calls it on
+`windows_of(results)`. Held by
+`join::tests::a_paired_part_pairs_over_the_windows_the_joins_were_given`: a
+wakeup drained after a window's close is one of the join's two pairs through
+`decompose_within(.., &windows)` and is lost to the part through
+`decompose_with`. The two call sites, exactly:
+
+- `src/main.rs`, `assemble` (around line 1234), where `windows` is the map
+  built above it and handed to `join::apply_within`:
+
+  ```rust
+  run.decompositions.push(join::decompose_within(
+      decomposition,
+      &served,
+      &run.results,
+      &merged,
+      &session.joins,
+      &windows,
+  ));
+  ```
+
+- `src/triage/engine.rs` (around line 220), which applies its joins with
+  `join::apply`, which watches everything:
+
+  ```rust
+  output.decompositions.push(join::decompose_within(
+      decomposition,
+      &requests,
+      &output.results,
+      &events,
+      &session.joins,
+      &BTreeMap::new(),
+  ));
+  ```
+
+and then remove the two `session.check_paired_parts()` refusals
+(`src/main.rs` around line 229, `src/triage/engine.rs` line 170) and, if
+nothing else calls it, `Session::check_paired_parts` with its test in
+`src/request.rs` (around lines 1678 and 2213). A session with a `paired` part
+then runs instead of being refused.
+
+### To the coordinator (`ROADMAP.md`): the exit criteria this stream's tests now hold
+
+- Phase 1, "a serialized/deserialized `Event` is identical": `[x]`, by
+  `event::tests::an_event_survives_a_round_trip_through_json_and_yaml` (every
+  `KeyValue` and `AttrValue` variant, `ts_err_ns` 1250, zero, negative and
+  extreme integers) and
+  `event::tests::a_non_negative_signed_integer_reads_back_as_what_was_written`.
+- Phase 4, "every line carries its evidence level": `[x]`, by
+  `vertical::the_block_io_rows_carry_the_identity_the_block_requests_read_back`
+  and `join::tests::a_row_without_an_evidence_level_is_never_built_and_never_read`.
+- Phase 5, "a load test proves there is no open-state leak over 1 h": `[x]`
+  for the engine as it is applied (after the run), by
+  `join_engine::a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map`
+  in the suite and `join_engine::an_hour_of_joins_leaks_no_state` by hand;
+  the hour itself has been run for 300 s here (24 rounds), not 3600 (`docs/fixes/w15-engine.md`).
+- Phase 5, "evictions appear in the user-visible output": `[x]`, by
+  `join_engine::a_join_that_evicts_says_how_many_in_results_json_and_in_the_text`.
+- Phase 5, "adding a boundary means adding a rule": still `[~]`: the agent
+  tier is held by `join_engine::a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine`;
+  a rule still cannot choose the kernel or query tier.

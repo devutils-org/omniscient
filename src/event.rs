@@ -234,10 +234,13 @@ impl Attr {
         }
     }
 
+    /// A signed integer: an errno, a return value, a difference. Stored in
+    /// its canonical form ([`AttrValue::int`]), so a non-negative one is a
+    /// `Uint` and reads back as the value it was written as.
     pub fn int(name: impl Into<String>, value: i64) -> Self {
         Self {
             name: name.into(),
-            value: AttrValue::Int(value),
+            value: AttrValue::int(value),
         }
     }
 
@@ -259,7 +262,19 @@ impl Attr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A measured value.
+///
+/// Untagged on the wire, so a number is written as a number and every consumer
+/// of the output reads it without knowing this type. What that costs is the
+/// integer's signedness: `5` does not say whether it was written as a `Uint`
+/// or an `Int`, and the untagged reader answers `Uint`. So an integer has one
+/// canonical form -- `Uint` when it is non-negative, `Int` only when it is
+/// negative -- which [`AttrValue::int`] and [`Attr::int`] produce and which is
+/// what a round trip reads back. An `Int` built directly with a non-negative
+/// value is still equal to the `Uint` of the same integer: two spellings of one
+/// number are one value, and equality says so rather than depending on how a
+/// collector happened to build it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AttrValue {
     Uint(u64),
@@ -268,7 +283,32 @@ pub enum AttrValue {
     Text(String),
 }
 
+impl PartialEq for AttrValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (AttrValue::Uint(left), AttrValue::Uint(right)) => left == right,
+            (AttrValue::Int(left), AttrValue::Int(right)) => left == right,
+            (AttrValue::Uint(unsigned), AttrValue::Int(signed))
+            | (AttrValue::Int(signed), AttrValue::Uint(unsigned)) => {
+                u64::try_from(*signed).is_ok_and(|signed| signed == *unsigned)
+            }
+            (AttrValue::Float(left), AttrValue::Float(right)) => left == right,
+            (AttrValue::Text(left), AttrValue::Text(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
 impl AttrValue {
+    /// A signed integer in its canonical form: `Uint` when it is
+    /// non-negative, which is what the untagged reader makes of it.
+    pub fn int(value: i64) -> Self {
+        match u64::try_from(value) {
+            Ok(unsigned) => AttrValue::Uint(unsigned),
+            Err(_) => AttrValue::Int(value),
+        }
+    }
+
     /// The numeric value, for aggregation. Text attributes have none.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
@@ -310,13 +350,108 @@ mod tests {
         }
     }
 
+    /// One of every key and every kind of value, at the edges of their
+    /// ranges, with a timestamp converted from another clock.
+    fn every_variant() -> Event {
+        Event {
+            ts_ns: u64::MAX - 1,
+            ts_err_ns: 1_250,
+            kind: "gpu.kernel".to_owned(),
+            keys: vec![
+                KeyValue::Req {
+                    id: "req-7f3a".to_owned(),
+                },
+                KeyValue::task(-1),
+                KeyValue::proc(4_026_531_836, i32::MAX),
+                KeyValue::File {
+                    dev: 0x10302,
+                    ino: u64::MAX,
+                },
+                KeyValue::Sock { cookie: 1 << 40 },
+                KeyValue::Blk {
+                    ptr: 0xffff_8881_0a2b_c000,
+                    open_ts: 0,
+                },
+                KeyValue::Mem {
+                    base: 0x7f00_0000_0000,
+                    len: 4096,
+                },
+                KeyValue::Gpu {
+                    fence_ctx: 3,
+                    seqno: u64::MAX,
+                },
+                KeyValue::Cgroup { id: 0 },
+                KeyValue::iface(u32::MAX, "enp3s0"),
+                KeyValue::dev(259, 0),
+                KeyValue::cpu(0),
+                KeyValue::node(u32::MAX),
+            ],
+            attrs: vec![
+                Attr::uint("zero", 0),
+                Attr::uint("large", u64::MAX),
+                Attr::int("negative", -1),
+                Attr::int("most_negative", i64::MIN),
+                Attr::int("int_zero", 0),
+                Attr::int("int_positive", 42),
+                Attr::int("int_largest", i64::MAX),
+                Attr::float("ratio", 0.25),
+                Attr::float("negative_ratio", -1.5e-9),
+                Attr::float("large_ratio", 1.0e300),
+                Attr::float("whole_float", 2.0),
+                Attr::text("digits", "5"),
+                Attr::text("empty", ""),
+                Attr::text("yaml_word", "yes"),
+            ],
+            collector_id: CollectorId::new("gpu.kernel/bpf:uprobe"),
+            seq: u64::MAX,
+        }
+    }
+
+    /// The round trip is held structurally, variant by variant, and not only
+    /// through `PartialEq`, which equates two spellings of one integer.
+    fn assert_identical(back: &Event, event: &Event) {
+        assert_eq!(back, event);
+        assert_eq!(format!("{back:?}"), format!("{event:?}"));
+    }
+
     #[test]
     fn an_event_survives_a_round_trip_through_json_and_yaml() {
-        let event = sample();
-        let json = serde_json::to_string(&event).unwrap();
-        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
-        let yaml = serde_norway::to_string(&event).unwrap();
-        assert_eq!(serde_norway::from_str::<Event>(&yaml).unwrap(), event);
+        for event in [sample(), every_variant()] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_identical(&serde_json::from_str::<Event>(&json).unwrap(), &event);
+            let yaml = serde_norway::to_string(&event).unwrap();
+            assert_identical(&serde_norway::from_str::<Event>(&yaml).unwrap(), &event);
+        }
+    }
+
+    /// The defect the fourteenth wave's audit found: an `Int` holding a
+    /// non-negative value was read back as a `Uint`. The canonical form is
+    /// what is written, so what is read back is what was written; and the
+    /// number on the wire is the number, whatever its variant.
+    #[test]
+    fn a_non_negative_signed_integer_reads_back_as_what_was_written() {
+        for value in [0i64, 1, 42, i64::MAX] {
+            let attr = Attr::int("ret", value);
+            let json = serde_json::to_string(&attr).unwrap();
+            assert_eq!(json, format!("{{\"name\":\"ret\",\"value\":{value}}}"));
+            let back: Attr = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{attr:?}"));
+            assert_eq!(back.value.as_f64(), Some(value as f64));
+        }
+        for value in [-1i64, i64::MIN] {
+            let attr = Attr::int("errno", value);
+            assert!(matches!(attr.value, AttrValue::Int(v) if v == value));
+            let back: Attr = serde_json::from_str(&serde_json::to_string(&attr).unwrap()).unwrap();
+            assert!(matches!(back.value, AttrValue::Int(v) if v == value));
+        }
+        // An `Int` spelled directly is still the integer it holds.
+        assert_eq!(AttrValue::Int(7), AttrValue::Uint(7));
+        assert_eq!(AttrValue::Uint(7), AttrValue::Int(7));
+        assert_ne!(AttrValue::Int(-1), AttrValue::Uint(u64::MAX));
+        assert_ne!(AttrValue::Int(7), AttrValue::Float(7.0));
+        let back: AttrValue =
+            serde_json::from_str(&serde_json::to_string(&AttrValue::Int(7)).unwrap()).unwrap();
+        assert_eq!(back, AttrValue::Int(7));
     }
 
     #[test]

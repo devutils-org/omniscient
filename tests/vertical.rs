@@ -910,6 +910,67 @@ fn the_network_rows_are_read_by_the_socket_the_server_accepted() {
     }
 }
 
+/// The `block-io` table is held to its evidence level the way the one-request
+/// table is.
+///
+/// Its one part is read by the request's id off every block request that
+/// carries it, and the id is the one the serving thread held at the issue: so
+/// the row is `IDENTITY`, and so is the whole, read off the request's own
+/// event. The level is only worth what it counts, so the row is also held to
+/// the server's own account: one block request per page it read with
+/// `O_DIRECT` (`done_reads`), and a request that read nothing has no table.
+/// And no row of either table goes without a level: the engine refuses to read
+/// back a table one of whose rows has none, and here it is checked on the
+/// document the run wrote.
+#[test]
+fn the_block_io_rows_carry_the_identity_the_block_requests_read_back() {
+    let run = needs_run!();
+    for name in ["one-request", "block-io"] {
+        for table in run.decomposition(name)["tables"]
+            .as_array()
+            .expect("tables")
+        {
+            for row in table["rows"].as_array().expect("rows") {
+                assert!(
+                    row["evidence"].is_string(),
+                    "{name} {}: a row with no evidence level: {row}",
+                    table["key"]
+                );
+            }
+        }
+    }
+    let mut tabled = 0;
+    for id in IDS {
+        let request = run.request(id);
+        let reads = field(request.worker, "done_reads") as u64;
+        let Some(table) = request.block_table else {
+            assert_eq!(
+                reads, 0,
+                "req:{id} read {reads} pages and has no `block-io` table"
+            );
+            continue;
+        };
+        tabled += 1;
+        assert_eq!(table["whole"]["evidence"], "IDENTITY", "req:{id} whole");
+        let device = table["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["state"] == "device")
+            .unwrap_or_else(|| panic!("req:{id}: no `device` row in {table}"));
+        assert_eq!(device["evidence"], "IDENTITY", "req:{id} device");
+        assert_eq!(
+            device["readings"].as_u64(),
+            Some(reads),
+            "req:{id} read {reads} pages with O_DIRECT, one block request each"
+        );
+    }
+    assert!(
+        tabled >= 2,
+        "a002 and a003 read, and {tabled} requests had a table"
+    );
+}
+
 /// Without the socket, a wait on it is a sleep, and the run says so.
 ///
 /// The same slow reader through `bpf:usdt:threads`, the backend for a kernel

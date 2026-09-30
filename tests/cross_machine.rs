@@ -1071,7 +1071,24 @@ fn churn_in(cgroup: &Cgroup, file: &Path) -> Result<Churned, String> {
     let line = text
         .lines()
         .find(|line| line.starts_with("omn-cross "))
-        .ok_or_else(|| format!("the program did not report itself: {}", text.trim()))?;
+        .ok_or_else(|| {
+            // What it did say, or that it said nothing, with how it ended: a
+            // `cgroup.procs` the shell could not write, a python3 that is
+            // missing, and a program that died on a signal all print nothing
+            // here and differ in the status.
+            let out = String::from_utf8_lossy(&output.stdout);
+            let said = match (text.trim(), out.trim()) {
+                ("", "") => "it printed nothing".to_owned(),
+                (err, "") => format!("it printed on stderr: {err}"),
+                ("", out) => format!("it printed on stdout only: {out}"),
+                (err, out) => format!("it printed on stderr: {err}; on stdout: {out}"),
+            };
+            format!(
+                "the program did not report itself: {said}, and exited {} (moved into {})",
+                output.status,
+                cgroup.dir.display()
+            )
+        })?;
     let fields: Vec<&str> = line.split_whitespace().collect();
     let number = |at: usize| -> u64 { fields.get(at).and_then(|f| f.parse().ok()).unwrap_or(0) };
     Ok(Churned {
