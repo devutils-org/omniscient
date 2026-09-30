@@ -1,6 +1,6 @@
 # Examples
 
-A hundred and forty-five sessions. Each is the same object a command line builds,
+A hundred and sixty-three sessions. Each is the same object a command line builds,
 written down, so a reader can run it and a test can run it identically.
 
 ```console
@@ -42,6 +42,19 @@ for.
 | `cpu-saturation.yml` | Is this machine busy, or is it oversubscribed? |
 | `cpu-throttled-cgroup.yml` | Was this run throttled, and is it therefore worth keeping? |
 | `cpu-where-the-time-went.yml` | Where did this program's time go -- on a cpu, or waiting? |
+
+## unwind
+
+The fourteenth wave's unwind modes: a profile's stacks are only as good as the
+way they were unwound, and the mode is chosen like a backend -- by the machine
+and by the target -- or forced, and refused by name. `docs/unwind.md` is what
+each mode costs and what it was held to.
+
+| Session | The question it answers |
+|---|---|
+| `unwind-auto.yml` | How were these stacks unwound, and why that way? `--stack auto` choosing by machine and target, and saying what it passed over. |
+| `unwind-leaf-caller.yml` | The same program under `fp` and `fp+leaf`: the leaf's caller lost, then recovered and marked. |
+| `unwind-refused.yml` | `--stack lbr` refused before the launch, naming the requirement and the cpu. |
 
 ## mem
 
@@ -166,6 +179,7 @@ for.
 | `gpu-api-cuda.yml` | How long the host spends inside the CUDA driver API, call by call. |
 | `gpu-api-vulkan.yml` | How long the host spends submitting to a Vulkan queue and waiting for it. |
 | `gpu-api-unreachable.yml` | A program that drives the GPU where the shim cannot see it, and says so. |
+| `gpu-draw-in-watts.yml` | How many watts the board drew over a window, from its energy counter. |
 
 ## proc
 
@@ -262,6 +276,7 @@ and a decomposition that adds up — or prints what does not, as a signed residu
 | `join-decompose-compute.yml` | One task's wall clock split into on-cpu, runnable and blocked, each row's kind and resolution, and its releasers ranked by chain. |
 | `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
 | `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
+| `join-overlap-machine.yml` | A thread's waits laid across the machine's memory-pressure readings with no key: `overlap` over state the machine holds once. |
 
 ## cross-family
 

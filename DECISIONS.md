@@ -419,13 +419,96 @@ and `docs/mcp.md` the launch rules and their refusals.
 
 ---
 
+## Settled in the fourteenth wave: what a stock machine is told
+
+| Decision | Choice | Reason |
+|---|---|---|
+| When a source is usable | **Only through a backend this build collects.** The listing's `here` is "available means it attaches" for this binary; a backend with no collector is shown as such and never makes a source usable. The resolver's order is unchanged: a request still resolves to an unwritten backend when no written one is viable, and is refused as the build's gap (exit 3). | `cpu.cycles` read "usable through `pmu:sw`" on the CI's runner, a backend nobody wrote, and every run of it exited 3. Refusing it as the machine instead was written and reverted: the gap is real, and a `pmu:sw` collector would serve that machine. The listing was what lied. |
+| A counter the kernel raises from its own code | **Probed with the kernel included; a user-mode-only answer is missing**, and a counter the machine would open for user mode only is refused, not noted. | A context switch or a migration never happens in user mode: at paranoid 2 `sched.switches -m count` read 0 for 406 switches. |
+| A sampled source where the kernel allows no more | **Falls back to user mode when its events are raised with the program's registers** (page faults), and says what that loses; a counted one already did. | `mem.faults` was refused outright at paranoid 2; in user mode every fault the program's own code takes is there, and a caveat says which are not. |
+| The CI | **Two cells**: the kernel's defaults (paranoid 2, a delegated cgroup) and the hosted image as shipped (paranoid 4), each with its own expected skips beside the common ones. | The two CI runs were the only ground truth for a stock machine, and each showed defects the other did not. |
+| A requirement a collector's own start decides | **Probed by that start** (`phc` by `hwts::clock_support`, `ethtool` by resolving the family). | `net.hwts` read usable on a runner whose PTP clock was root's alone. |
+| An `fentry:` requirement | **Carries its prototypes like a raw tracepoint's** (`fentry:name(a, b)`, each further shape after a `\|`); a bare name asks for existence only. | A kernel whose prototype the program has never seen reads missing in `omn list` instead of failing at the attach. |
+| Where a check that asks the machine runs | **At the attach, never in a factory.** A factory's refusal is classified as the build's (exit 3); an unmarked refusal at the attach is the machine's (exit 1). | `sched.switches` on `pmu:sw` at paranoid 2 was first refused from the factory, and read as a gap in the build. |
+
+`docs/portability.md` and `docs/families/kernel.md`, "The fourteenth wave", have the ground truth.
+
+---
+
+## Settled in the fourteenth wave: every way to unwind a stack
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What an unwind mode is | **A chain the chooser walks like a backend chain**: `sframe`, `fp+leaf`, `dwarf`, `lbr`, `fp`, `none`, each with `requires`, `copies`, `cost` and what it degrades, in `src/unwind.yaml`, held by the loader to the fallback rule. `--stack auto` takes the first mode whose every requirement is available; unknown never counts. | Several mechanisms can do one job, and the resolver's shape is how this project chooses between them. |
+| Where the table lives | **`src/unwind.yaml`, compiled in**, not `catalog/unwind.yaml`. | `Catalog::load_dir` parses every YAML file of the directory as entries, and three scenarios copy the directory for `--catalog`. Moving it is one line in `catalog.rs` (filed for R). |
+| What `auto` is decided by | **The target as well as the machine**: `fp+leaf` for a build with frame pointers (`main`'s prologue, or more than a quarter of the indexed functions), `dwarf` for one without, `fp` for a system-wide or cgroup profile. | The cheap mode where it loses nothing, the expensive one only where the cheap one would be a profile of leaves. A Rust debug binary is profiled with `dwarf` by default now. |
+| `lbr` and `sframe` | **Declared, probed and not collected.** | No machine this project runs on offers either (no cpu here has a branch call stack; no kernel through 7.2 reads `.sframe`); an untested decoder is worse than a refusal. |
+| The DWARF unwinder | **`framehop`**, over libdw. | Pure Rust, nothing to find at install; libdw would tie the release to elfutils' ABI. |
+| At a paranoia that refuses the kernel | **Every mode is user-only, `none` included**, and the choice says what that loses. | The kernel refuses the unprivileged sampler itself, not only the stack's kernel half. |
+| What a mode costs | **Measured from outside the tool**: the kernel's account of `omn` against the target's own clock. The tool's own figure is a lower bound, never the reference. | `cost.json` said 26 ms where `wait4` counted 986 ms beyond the target (filed). |
+| Names for a stripped file | **debuginfod, fetched with `curl`, into elfutils' own cache, and never unless asked.** | The public servers are HTTPS; a TLS stack linked in for one optional request was the alternative. |
+| A recovered frame | **Marked in its label** (` [recovered]`). | An inferred frame is different evidence from a walked one, and the label is what reaches the results, flame graphs and `omn diff`. |
+| The IBS sources | **Keep frame pointers**: `auto` means `fp` there, and a forced mode that needs more is refused by name. | |
+
+`docs/unwind.md` has the call tree each mode was held to.
+
+---
+
+## Settled in the fourteenth wave: what a run's results claim
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Where a run's windows close | **At one instant before the first collector is stopped**; a detached one just before its own stop. A join treats a source that ran to the end as watching to the end. | Closing after the last stop claimed spans a drained collector could not read (71 blocks of 930 in no row); one close per collector would have given one session's sources different windows. |
+| What a container is | **Its cgroup, found by asking its runtime** (`docker`, `podman`, `nerdctl`, or `OMN_CONTAINER_RUNTIME`), bound before resolution. The session keeps the container, the resolved request the cgroup, and the run says which. A container no runtime knows is exit 1. | A runtime's state files are its own layout; asking it the way a user would is the one stable interface. |
+| A container on an entry that says `container: no` | **Refused, not bound before validation.** The entries' key is what changes (filed for P and U). | Code overriding explicit catalog data would make the validator stop being a projection of it. |
+| A dump's format | **Checked before resolution.** | Whether a format can hold a request does not depend on the machine. |
+| The shim's account of a preempted call | **A timed span over 200 us is left out, counted, priced at the mean of the others, and reported** (`in_target_left_out`). | It is a scheduler slice, never the hook: 610 ms accounted for 396 ms lost. |
+| A `paired` decomposition part | **Refused before the run** until the decomposition pairs over the windows the joins were given (filed for J). | Run as it is, it would be reported different from its own join. |
+
+`docs/fixes/results.md` has the ground truth.
+
+---
+
+## Settled in the fourteenth wave: joins, agents and the release
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A join with no key | **`overlap`'s alone, reading its `from` source as one series keyed `machine`.** A keyless rule of any other kind is refused before the run; a keyless `overlap` over a source with several series is refused by name at apply time. | `KeyKind` names what an event carries, and machine-wide state carries nothing; a `machine` key variant would say otherwise. |
+| The spread of a repeated benchmark through MCP | **Computed by the model from N answers; the walk-through says how** (`result.lifetime`, the bench's statistics, the gate's two conditions). | Reaffirms the thirteenth wave's no-tool decision with the use case run: a server-computed spread would be the one number no document carries. |
+| Where the walk-through's approved sessions live | **`examples/mcp/approved/`, with the client configuration one level up.** | `list_approved` lists every session-shaped file under the directory, `.json` included. |
+| Who answers a machine question asked through MCP | **The `omn` binary that would run the session.** | A copy of `omn` without its capabilities answered 52 usable sources against 93, silently. |
+| The installed layout | **Flat: `bin/omn`, `bin/omn-mcp`, `bin/libomn_preload.so`.** | `omn` finds the shim beside itself and `omn-mcp` finds `omn`; `setcap` refuses a symbolic link, so `lib/omn/` with links in `bin/` would put the capability on a file the user does not name. |
+| What installing grants | **Nothing.** `make install` and the archive print the `setcap` line for the installed path. | A grant is a decision about the machine; a `DESTDIR` build cannot make it on the final path, and tar does not carry it. |
+| The glibc floor | **2.34, built on the oldest hosted Ubuntu, enforced by `release.sh verify`.** Raising it changes `GLIBC_FLOOR` and the two documents together. | The floor is the newest symbol linked against; printed rather than enforced, it would drift. |
+| `make install` as root | **Copies, never builds**; a system-wide install is `make release && sudo make install`. | Building as `$SUDO_USER` from a root recipe depends on a `PATH` sudo's `secure_path` drops. |
+
+`docs/families/join.md`, `docs/mcp.md` and `docs/install.md` have the ground truth.
+
+---
+
+## Settled in the fourteenth wave: a chain ordered by cost
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `sched.switches` per cgroup (was open) | **A `sched_switch` program, second in the chain, in `count` mode**, serving every target and reached first for a cgroup; `pmu:sw` stays first wherever it serves, and `trace` stays `pmu:sw`'s. The program's rows carry the kernel's voluntary/involuntary split (`--backend force:bpf:raw_tp -m count`). | On the question both answer, an inherited counter is exact and free and the program costs a run on every switch of the machine; the `woke` join needs a per-switch event. The first chain ordered by cost where two backends answer the same question and one answers more: "the backend that answers best first" holds for the question asked. |
+| A loss counted over the whole machine | **Not slack for one workload's count.** A scenario whose count an eBPF program's skipped runs would excuse holds the count exact in a run that lost nothing, repeats until one does, and says so when none did. | The read-ahead lookup lost 395 000 to 477 000 runs against a shortfall of 3 to 15 of 256: as slack, it would hide a silent loss in the drain. |
+| A sweep leg on a machine that withholds one source | **Leaves out that source, printed, and asks the rest**, not the whole leg. | Skipping the leg left every other source of it untested wherever `net.hwts` was missing. |
+
+---
+
 ## Open
 
-- **Whether `sched.switches` gets a `sched_switch` program that serves every
-  target, a cgroup included.** Today it is served by `pmu:sw` alone, which
-  cannot follow a cgroup, so the entry no longer declares one. A program would
-  be first in the chain for every target, which changes what every existing
-  `sched.switches` run costs. Leaving it open costs one target on one source.
+- **An `overlap` rule's `span` that encloses a drained row's occurrences.**
+  A row of several episodes whose enclosing window fits in one interval could
+  be credited whole and exactly, but the engine cannot tell an enclosing
+  window from a sum of durations by the attribute's name, so the rule would
+  have to say which. Leaving it open costs the credit of drained sources:
+  41 184 of 41 639 reclaimed pages uncredited on the reclaim crossing, counted
+  and said.
+- **Whether a `pmu:sw` collector serves `cpu.cycles`** (cpu time under the
+  name of cycles, a degraded fallback the catalog declares). Leaving it open
+  costs `cpu.cycles` on every machine without a hardware PMU, which is most
+  cloud VMs; it is refused there as the build's gap.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

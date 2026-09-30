@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and forty-five sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and sixty-three sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,14 +12,14 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and forty-five
+make demo-all           # the tour and then all one hundred and sixty-three
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
 `make` rather than `cargo build`, for two reasons that both fail silently:
 `--workspace` builds the preload shim that `mem.heap.*` loads, and the eBPF and
 per-cpu perf backends need `CAP_BPF` and `CAP_PERFMON`, which **every relink
-drops**. Without them this machine serves 51 sources instead of 86, and nothing
+drops**. Without them this machine serves 51 sources instead of 92, and nothing
 announces it — the tool simply reports fewer things as available, which reads
 like the machine changed rather than the binary.
 
@@ -158,6 +158,7 @@ Most run anywhere. These do not, and they say so rather than printing a zero.
 | Session | Needs |
 |---|---|
 | `sched-*.yml`, `cpu-where-the-time-went.yml` | `CAP_BPF` and `CAP_PERFMON` — `make` grants them, every `cargo build` drops them |
+| `unwind-leaf-caller.yml` | a `/bin/sh` built with frame pointers, as Arch and Fedora ship it; on one built without them the forced `fp+leaf` half is refused, naming `target:frame_pointers`, and `unwind-auto.yml` picks `dwarf` |
 | `net-capture-accounting.yml` | `CAP_NET_RAW`, which the build does **not** grant |
 | `gpu-*.yml` | an NVIDIA device and NVML |
 | `cpu-one-busy-core.yml`, `power-core-under-load.yml` | a load started from outside, named in the file's header |
@@ -182,6 +183,15 @@ Most run anywhere. These do not, and they say so rather than printing a zero.
   boots it under 5.15, 6.1, 6.6 and 7.2 in KVM, with and without capabilities,
   BTF and tracefs, and runs every source each guest calls available;
   `scripts/matrix.sh here` is this machine alone, in about two minutes.
+- **`docs/install.md`** — what a stock Ubuntu, Fedora or Arch machine needs to
+  run `omn`, the two capabilities and three ways to lose them, and what
+  `perf_event_paranoid` withholds. `make install-check` checks an installed
+  tree against workloads it chose.
+- **`docs/mcp.md`** — an agent benchmarks a program through `omn-mcp`, and
+  says what dominates its time: the walk-through, over the approved sessions
+  in `examples/mcp/approved/`.
+- **`docs/unwind.md`** — the unwind modes (`fp`, `fp+leaf`, `dwarf`, `lbr`,
+  `sframe`), what each costs, and the call tree each was held to.
 
 ---
 
@@ -203,6 +213,19 @@ Each is `omn -f examples/<file>`. The whole family is
 | `cpu-saturation.yml` | Is this machine busy, or is it oversubscribed? |
 | `cpu-throttled-cgroup.yml` | Was this run throttled, and is it therefore worth keeping? |
 | `cpu-where-the-time-went.yml` | Where did this program's time go -- on a cpu, or waiting? |
+
+## unwind
+
+The fourteenth wave's unwind modes: a profile's stacks are only as good as the
+way they were unwound, and the mode is chosen like a backend -- by the machine
+and by the target -- or forced, and refused by name. `docs/unwind.md` is what
+each mode costs and what it was held to.
+
+| Session | The question it answers |
+|---|---|
+| `unwind-auto.yml` | How were these stacks unwound, and why that way? `--stack auto` choosing by machine and target, and saying what it passed over. |
+| `unwind-leaf-caller.yml` | The same program under `fp` and `fp+leaf`: the leaf's caller lost, then recovered and marked. |
+| `unwind-refused.yml` | `--stack lbr` refused before the launch, naming the requirement and the cpu. |
 
 ## mem
 
@@ -327,6 +350,7 @@ Each is `omn -f examples/<file>`. The whole family is
 | `gpu-api-cuda.yml` | How long the host spends inside the CUDA driver API, call by call. |
 | `gpu-api-vulkan.yml` | How long the host spends submitting to a Vulkan queue and waiting for it. |
 | `gpu-api-unreachable.yml` | A program that drives the GPU where the shim cannot see it, and says so. |
+| `gpu-draw-in-watts.yml` | How many watts the board drew over a window, from its energy counter. |
 
 ## proc
 
@@ -423,6 +447,7 @@ and a decomposition that adds up — or prints what does not, as a signed residu
 | `join-decompose-compute.yml` | One task's wall clock split into on-cpu, runnable and blocked, each row's kind and resolution, and its releasers ranked by chain. |
 | `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
 | `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
+| `join-overlap-machine.yml` | A thread's waits laid across the machine's memory-pressure readings with no key: `overlap` over state the machine holds once. |
 
 ## cross-family
 

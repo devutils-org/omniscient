@@ -182,6 +182,22 @@ not look like a correlation that found nothing.
 Records the reader does not recognise are counted as `undecoded` rather than
 reinterpreted.
 
+**A preempted program skips every run behind it on that cpu.** A
+raw-tracepoint program runs with migration disabled, not preemption, and the
+kernel's per-cpu recursion guard (`prog->active`) stays raised while a
+preempted run waits. Every later run of the same program on that cpu is
+skipped, and counted in the program's `recursion_misses` (which the collector
+reads as `fentry::skipped` and reports as a loss), until the preempted one
+resumes -- a whole timeslice of events, not one. Measured in the fourteenth
+wave with `io.readahead` beside 48 processes re-reading a cached file on 24
+cpus: 377 000 to 478 000 skipped runs in a two-second session, and the
+workload's own lookups short by 3 to 15 of 256. Nothing was silent, but the
+count is every task's, not the target's, so it is never slack for one
+workload's count (`DECISIONS.md`, the fourteenth wave). Narrowing earlier does
+not help, since the guard is taken before the program runs; a per-target
+attach (an fentry on a function only the target calls) or a shorter program
+does. Not scheduled.
+
 ## Privileges
 
 `CAP_BPF` and `CAP_PERFMON`, as settled in `DECISIONS.md`. Root works because

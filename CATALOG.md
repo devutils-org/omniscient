@@ -55,7 +55,7 @@ filter   predicate                  pushed into the kernel when possible, else u
 | `low` | < 1 % |
 | `med` | 1-5 % |
 | `high` | 5-20 % |
-| `extreme` | > 10× (replay, DBI) |
+| `extreme` | > 20 %, with no bound above (a collector running inside the target: the preload shim, `proc.syscall`'s program; kernel replay) |
 
 Cost is **throughput-dependent**: a tracepoint at 1 kHz is `low`, the same one at
 2 MHz is `high`. The resolver must be able to switch `trace` → in-kernel `hist`,
@@ -65,6 +65,13 @@ or `trace` → `sample`, when the observed rate exceeds the budget.
 
 `IDENTITY` (propagated key) > `KEY` (shared typed key) > `WAKEUP` (wakeup chain)
 > `TEMPORAL` (overlap only, a hypothesis).
+
+A session's join rule names the key it matches on with `via`. `via` is
+optional for `overlap` alone: without it, the `from` source is read as one
+series, keyed `machine`, and every `to` event is laid across its intervals. A
+keyless rule of any other kind is refused before the run, and a keyless
+`overlap` whose `from` source carries several series (a per-device or per-cpu
+poll) is refused by name.
 
 ---
 
@@ -127,7 +134,12 @@ substituted), `kernel>=<version>`, `tracepoint:<sys>:<event>` (the event's `id`
 file must be readable, not only its directory), `pmu:<event>`, `kprobe`, and
 **`fentry:<function>`**: the running kernel's BTF declares a `FUNC` of that name
 and, where this process may load a tracing program, the smallest one loads
-against it (`src/bpf/fentry.rs`). Four more say what a program reads, not only
+against it (`src/bpf/fentry.rs`). Since the fourteenth wave it may carry the
+prototypes the program reads, spelled and separated as a raw tracepoint's
+below -- `fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *,
+sockaddr *, int)` -- so a kernel with a shape the program has never seen reads
+*missing* instead of failing at the attach; a bare name asks for existence
+only. Four more say what a program reads, not only
 where it attaches, because the portability matrix found sources that probed
 available on an older kernel and then refused at the attach:
 
@@ -154,7 +166,18 @@ not unknown: a runner without RAPL listed `power.energy` as assumed and refused
 it at the start.
 
 A string no probe answers -- `usdt:libc` today -- reads unknown, and unknown
-never counts as available.
+never counts as available. A requirement a collector's own start decides is
+probed by that start: `phc` by `hwts::clock_support`, `ethtool` by resolving
+the netlink family. A counter the kernel raises from its own code (a context
+switch, a migration) is probed with the kernel included, and a machine that
+would open it for user mode only answers missing: that count is zero whatever
+the program does.
+
+**Usable means a backend this build collects.** `omn list` calls a source
+usable here only through a backend with a collector; one whose only viable
+backends are unwritten is out of reach, with each backend's reason below it.
+The resolver's order does not change: a request still resolves to an unwritten
+backend when no written one is viable, and is refused as the build's gap.
 
 Two fields a backend may carry beside `cost`, and each is a statement about what
 its events mean rather than about how it is reached:
@@ -168,6 +191,39 @@ its events mean rather than about how it is reached:
   event that is a sum of blocks cannot be the one it released. An entry is
   `always_drained` only when every backend of its chain is, so a partial flag
   never refuses a chain that still has a per-occurrence backend.
+
+### Unwind modes
+
+A stack is unwound by one of several mechanisms, and they are declared, probed
+and chosen the way backends are: ordered best first in `src/unwind.yaml`
+(compiled in; it moves to `catalog/` once the loader skips it), each with its
+`requires`, the bytes of user stack the kernel `copies` per sample, a `cost`,
+and what it `degraded`s against the modes above it. The loader holds the table
+to the fallback rule, and refuses a mode declared twice or a declared `auto`.
+
+| Mode | Requires | Copies | Cost | Degraded | Served |
+|---|---|---|---|---|---|
+| `sframe` | `kernel:sframe`, `target:sframe`, `perf:callchain` | 0 | low | (first) | no: no kernel through 7.2 reads `.sframe` |
+| `fp+leaf` | `perf:callchain`, `perf:user_stack`, `target:frame_pointers`, `target:cfi` | 256 | low | only the leaf's caller is recovered, and marked ` [recovered]` | yes |
+| `dwarf` | `perf:user_stack`, `target:cfi` | 8192 | high | 8 KiB per sample; a deeper stack is cut where the copy ends, counted | yes (`framehop`) |
+| `lbr` | `pmu:branch_call_stack` | 0 | low | 16 to 32 calls | no: probed, and no collector decodes branch stacks |
+| `fp` | `perf:callchain` | 0 | low | the caller of a frameless function is lost | yes |
+| `none` | -- | 0 | free | no stack; never chosen by `auto` | yes |
+
+`--stack auto`, the default, takes the first mode whose every requirement is
+available, and unknown never counts as available. The `target:` requirements
+are read from the binary a launch names or `/proc/<pid>/exe`, so the choice is
+the target's as well as the machine's: `fp+leaf` for a build with frame
+pointers, `dwarf` for one without, `fp` for a system-wide or cgroup profile,
+whose binaries are not known before the run. `--stack <mode>` forces one:
+refused before the launch where a requirement is missing, served with
+`assumed rather than checked` where one is only unknown. The profile says which
+mode unwound it, what `auto` passed over and why, and at a paranoia that
+refuses the kernel, that every mode -- `none` included -- is user-only.
+
+`--symbols debuginfod` (the mechanism is landed, the flag is not yet) names a
+stripped file's frames from `DEBUGINFOD_URLS` by its build id, through
+elfutils' own cache, and never unless asked.
 
 ---
 
@@ -197,8 +253,10 @@ its events mean rather than about how it is reached:
   determinism belongs to DBI (cachegrind), outside the kernel-level core.
 - `cpu.topdown` is **heavily microarchitecture-dependent**. The catalog must map
   it per CPU family rather than hard-code event names.
-- `cpu.profile` with stacks: the unwind mode must be declared (`fp` / `dwarf` /
-  `lbr`). `dwarf` copies the stack on every sample → far higher volume and cost.
+- `cpu.profile` with stacks: the unwind mode is chosen by `--stack auto` or
+  forced (§1, "Unwind modes"), and the profile says which. `dwarf` copies 8 KiB
+  of stack on every sample → about twice the tool's cpu per sample of `fp`,
+  measured, and rings that fill a hundred times faster.
 - `cpu.flow`: the kernel provides raw bytes, decoding is a separate concern
   (libipt + binary images + sideband). A late-phase deliverable.
 - Disabling SMT or pinning affinity shifts counters by 10-30 %: capture it in the
@@ -334,7 +392,7 @@ invisible to every CPU profiler.
 | `sched.runqlat` | run queue wait | `bpf:tp` sched_wakeup → sched_switch | trace | pid, cgroup, cpu | med | low |
 | `sched.offcpu` | blocked time + stack | `bpf:tp` sched_switch + callchain | trace | pid, cgroup | med-high | low |
 | `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:tp` sched_wakeup (waker context) | trace | pid, system | med | low |
-| `sched.switches` | context switches | `bpf:tp` · `pmu:sw` | count, trace | all | free-low | low |
+| `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free-low | low |
 | `sched.migrations` | migrations | `bpf:tp` sched_migrate_task | trace, count | pid, cgroup | low | low |
 | `sched.lock` | kernel lock contention | `bpf:tp` lock:contention_begin/end (≥6.1) | trace | pid, system | med | low |
 | `sched.futex` | userspace futex wait | `bpf:tp` raw_syscalls (futex) | trace | pid | med | low |
@@ -449,7 +507,7 @@ probes.
 | `--cpu` | core(s) | per-process sources |
 | `--iface` | network interface | everything but `net.*` |
 | `--system` | global | — |
-| `--container` | resolved to cgroup + pidns | same as cgroup |
+| `--container` | bound to the cgroup its runtime names (`docker`, `podman`, `nerdctl`, or `OMN_CONTAINER_RUNTIME`), before resolution | same as cgroup, and every entry that says `container: no` |
 
 **The container trap**: `--cgroup` is not a PID filter. Without the pid namespace,
 events get attributed to the wrong process. Hence the `proc:pidns+pid` key: a
@@ -506,7 +564,9 @@ loses are the ones from the moments that stalled -- the slow ones. `sample` and
 --budget 2%                 overhead ceiling, enforced by the runner: over it, a
                             cheaper backend of the chain or a stop, and it says which
 --filter "bytes > 4096"     pushed into the kernel when possible, else userspace
---stack fp|dwarf|lbr|none   unwind mode
+--stack auto|sframe|fp+leaf|dwarf|lbr|fp|none
+                            unwind mode; auto (the default) chooses by
+                            machine and target, as a chain
 --emit hist|raw|rate|topk|stack|timeline
 --keys req,task,blk         correlation keys to attach
 --backend force:<id>        escape hatch, for the comparison bench only

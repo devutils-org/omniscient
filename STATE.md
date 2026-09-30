@@ -23,7 +23,11 @@ attach kinds eight sources had waited on since the fifth. Every emit the catalog
 formats have an encoder, stacks are captured two ways — a `perf_event_open`
 callchain for `cpu.profile` and `bpf_get_stackid` for `sched.offcpu`, which is
 the one that says *where* a task blocked — and a run measures and reports what
-it cost, against a ceiling it can be held to.
+it cost, against a ceiling it can be held to. Since the fourteenth wave a
+profile's stacks are unwound by a mode chosen like a backend -- frame pointers,
+frame pointers with the leaf's caller recovered, or DWARF from a copied stack,
+by machine and target -- and served with user-only stacks at the kernel's
+default `perf_event_paranoid`.
 
 **All four join match kinds now have a producer**, which took until the sixth
 wave. `scoped_eq` was the last, and it was the quarter of the engine that
@@ -41,9 +45,12 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**1830 tests pass** after the eleventh wave's merge, eight more ignored, and
-four failed in that run: three passed alone at once (load-sensitive, in the
-flaky tally) and one is `cross_compute`'s lossy profile, below. The ignored are
+**2068 tests passed** in the fourteenth wave's merge run (`cargo test
+--workspace --no-fail-fast`), eight more ignored, and three failed: the
+session-index test (closed by the coordinator's end-of-wave documents), a
+refusal test the merge of stream U made stale (fixed in `1fbf331`), and the
+portability judge reading cells swept before stream P's probe fix (cleared by
+the end-of-wave matrix sweep, "What remains" below). The ignored are
 the bench's measurements, which `scripts/bench.sh` runs on a quiet machine and the suite
 never does. Most of them are scenarios: a workload whose property the scenario
 chose, a session that measures it, and a check against that property.
@@ -93,19 +100,22 @@ XDP program, and NVIDIA's CUPTI.
 ## What the numbers say
 
 ```
-101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
-96 of them have a collector, covering 106 of their 205 backends.
+101 sources: 92 usable here, 0 unverified, 9 out of reach on this machine.
+96 of them have a collector, covering 107 of their 205 backends.
 ```
+
+(`target/debug/omn list` on `main` after the fourteenth wave's merge, with
+`CAP_BPF` and `CAP_PERFMON` on the binary; 51 usable without them.)
 
 Three different questions, deliberately kept apart.
 
 | Question | Answer | Meaning |
 |---|---|---|
-| What can this machine serve? | 90 | probed now: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 96 sources, 106 backends | a collector is written and registered |
+| What can this machine serve? | 92 | probed now, **through a backend this build collects**: the file is readable, the event opens, the tracepoint is there |
+| What can this build collect? | 96 sources, 107 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
-That `90` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
+That `92` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
 `make` reapplies the capabilities that every relink drops. Without them the
 whole eBPF and per-cpu perf surface goes, and nothing announces the loss — the
 tool reports fewer sources, which reads like the machine changed rather than
@@ -126,6 +136,15 @@ probe covered it and the source reported `?` from both ends. It names two
 tracepoints now. `87` is what this machine can serve through a path that
 attaches, checked name by name against `/sys/kernel/btf/vmlinux`.
 
+**The fourteenth wave changed what the number means.** A source used to be
+called usable when any backend of its chain was viable, written or not, and on
+the CI's runner `cpu.cycles` read usable through `pmu:sw`, which nobody wrote,
+and every run of it exited 3. It is usable now only through a backend with a
+collector (`docs/portability.md`): `power.throttle`, `gpu.kernel`,
+`mem.bandwidth`, `net.xdp` and `gpu.counters` left usable or unverified here,
+and `cpu.profile`, `cpu.oncpu_time`, `io.bytes` and six more now name the
+written backend a request resolves to. None reads unverified any more.
+
 It cuts the other way too, which cost a session to find: a binary that carries
 capabilities is non-dumpable, so its own `/proc` entries belong to root and the
 three `mem.heap.*` sources lost the `pagemap` they read. Finding 14 of
@@ -136,10 +155,10 @@ Per family, sources with a collector:
 | Family | With a collector | Sources | Usable here |
 |---|---|---|---|
 | `mem` | 22 | 23 | 22 |
-| `net` | 15 | 16 | 13 |
+| `net` | 15 | 16 | 14 |
 | `io` | 14 | 14 | 14 |
 | `cpu` | 13 | 14 | 12 |
-| `sched` | 10 | 10 | 9 |
+| `sched` | 10 | 10 | 10 |
 | `gpu` | 7 | 9 | 6 |
 | `proc` | 6 | 6 | 6 |
 | `power` | 5 | 5 | 4 |
@@ -161,7 +180,7 @@ known, not against what the code computed.
 | `cpu.instructions`, `.cycles`, `.ipc`, and the rest of the counters | `perf_event_open`, counting | a hundred million known instructions, user-mode only, within 1 % and with a run-to-run spread under 1 % |
 | `cpu.util`, `.pressure`, `.throttle` | procfs, cgroup | against `/proc/stat`'s own accounting |
 | `mem.rss`, `.pss`, `.uss` | procfs | two backends cross-checked against each other |
-| `mem.faults` | `perf_event_open`, sampling | against the kernel's own minor-fault counter for the same process |
+| `mem.faults` | `perf_event_open`, sampling | against the kernel's own minor-fault counter for the same process; in user mode where the kernel allows no more, a block the program writes gets its faults and one only `read()` fills gets none |
 | `mem.heap.alloc`, `.live`, `.retained` | `LD_PRELOAD` shim | allocation sizes the test chose |
 | `io.bytes`, `.iops`, `.inflight`, `.merges`, `.pressure` | `/proc/diskstats`, PSI | a device resolved through `mountinfo`, with known I/O pushed through it |
 | `net.bytes`, `.packets` | `/proc/net/dev` | 16 MiB pushed through loopback |
@@ -173,9 +192,12 @@ known, not against what the code computed.
 | `proc.fd`, `.threads` | procfs | a launched process that reports its own counts; asserted equal, not close |
 | `runtime.jit` | `/tmp/perf-<pid>.map` | a map the test wrote |
 | `sched.wakeup` | eBPF raw tracepoint | the causal chain of a shell and its children, loaded and attached for real |
-| `sched.switches` | `perf_event_open` | against the kernel's own switch counter for the same thread |
+| `sched.switches` | `perf_event_open`, and a `sched_switch` program for a cgroup | against the kernel's own switch counter for the same thread; per cgroup, split voluntary and involuntary within each thread's own `nvcsw` and `nivcsw` |
 | `sched.offcpu` | eBPF raw tracepoint | a thread that sleeps a known 300 ms, whose off-cpu duration and interruptible state must both match |
 | `cpu.profile` | `perf_event_open`, sampling with `PERF_SAMPLE_CALLCHAIN` | a cpu-bound loop in the test binary, whose own symbols must appear in the table |
+| `cpu.profile --stack fp`, `fp+leaf`, `dwarf`, `auto` | the kernel's frame-pointer walk; one `framehop` step over 256 copied bytes; a `framehop` walk over 8 KiB | one C program built four ways, whose time goes to one leaf in shares known by construction (20/40/30/10 %): each branch's whole path from `main` and its share, within four binomial deviations; `fp` loses the frameless leaf's caller in ≥ 95 % of its samples and `fp+leaf` puts it back, marked (`docs/unwind.md`) |
+| `gpu.power --mode count --emit rate` | NVML's energy counter at each end of a window | the board's mean draw in watts, against `nvidia-smi` sampled from another process over the same window (21.09 W against 20.47 W) |
+| `--container NAME` | the cgroup its runtime names | 388 blocks kept of the task inside, 387 by the kernel's count, 0 of the task beside |
 | `sched.offcpu --emit stack` | eBPF `bpf_get_stackid` into a stack map | the verifier accepting the hand-assembled program, and a 300 ms sleep coming back with the twelve frames that led to it |
 | `sched.runqlat` | eBPF, bucketed in the kernel | a known number of blocking round trips, found by four sources at once |
 | `sched.migrations` | eBPF classic tracepoint | two hundred migrations driven on purpose with `sched_setaffinity` |
@@ -213,15 +235,15 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 0 — decisions | **done**. Language, clock, scope, kernel floor 6.1, `CAP_BPF`+`CAP_PERFMON`, raw tracepoints first. |
 | 1 — event model and request schema | **done**. `Event`, `Span`-equivalent attributions, `Request`, `ResolvedRequest`, typed keys, one clock domain. |
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
-| 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling, a launch gate, frame-pointer unwinding and symbolization through the target's own maps. |
+| 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling (per ring, since the fourteenth wave), a launch gate, unwinding by frame pointers, frame pointers and the leaf's caller, or DWARF (the fourteenth wave), and symbolization through the target's own maps, or debuginfod when asked. |
 | 4 — the vertical case | **done, except `dm-delay`, which needs root.** One request decomposed boundary by boundary on a real server, the lock's holder and the block device named, and since the tenth wave the tree's two network rows: a client that pauses 30 ms mid-request puts 30.14 to 30.27 ms in `net_rx`, and a slow reader puts 32.8 to 33.8 ms in `net_tx`, both injected from the client without root. The rows sum to the client's latency within +0.06 % to +0.36 % (+3.1 % for the slow reader, whose last buffer the client reads after the server is done). The network rows print `IDENTITY` where they are `KEY`; the engine change is filed. |
 | 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. |
 | 6 — emit, aggregation, budget | **partly**. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. And since the tenth wave, **hot attach**: a request carries a `window` inside the run, attached and detached while the rest keep running, and two sources attached for one phase each of a program count that phase within +0.17 % and nothing of the other. Three edges are filed with the files that own them: the join engine credits events after a detach to a stale state, the results document does not yet say where a window was, and a per-task counter attached late to a program that already has threads counts one of them. |
 | 7 — declarative configuration | **done**. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **done.** The harness has every task the phase lists, and it has measured: 94 (source, backend) pairs alone on this machine, every workload admitted by a gate that judges what a median resolves and refuses a busy machine (`docs/bench.md`). The resolver's seven choices between served backends were confirmed. What the table corrects is the cost bands: an in-kernel collector's cost is in the target's dilation, not the tool's cpu (`proc.syscall`: 0.42 % against +296 %), and the preload shim cost an allocation-bound program about 150 times -- two system calls a record -- until it was moved onto a shared ring, which brought a record to about 70 ns. Finding 47 files each. |
-| 9 — breadth | nearly done; **96 of 101 sources, 106 of 205 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
+| 9 — breadth | nearly done; **96 of 101 sources, 107 of 205 backends**. The five without a collector wait on hardware this machine lacks or on a vendor library. |
 | 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. Since the eleventh wave **the escalation** closes it: a session's `escalate:` block attaches the layer the cheap pass names mid-run, detaches the rest and holds the budget; a program cpu-bound then lock-bound gets the lock layer 0.4 to 0.5 s after the switch (`docs/triage.md`). **Done.** |
-| 11 — a model reads it | **done** (the twelfth wave): `omn-mcp`, an MCP server over stdio in the workspace, exposing the catalog, the runs a directory holds and this machine's sweep, as the documents themselves regrouped per request with what each is missing stated first. It probes nothing (the `omn` binary answers every machine question), and runs a session only when its operator allowed it, bounded, budgeted, and never one that launches a program (`docs/mcp.md`). What it filed: `omn list --format json` carrying the sweep, so the server stops parsing the text table. |
+| 11 — a model reads it | **done** (the twelfth wave): `omn-mcp`, an MCP server over stdio in the workspace, exposing the catalog, the runs a directory holds and this machine's sweep, as the documents themselves regrouped per request with what each is missing stated first. It probes nothing (the `omn` binary answers every machine question), and runs a session only when its operator allowed it, bounded, budgeted, and never one that launches a program (`docs/mcp.md`). What it filed: `omn list --format json` carrying the sweep, so the server stops parsing the text table. Since the fourteenth wave the use case runs end to end: an agent benchmarks a launched program through approved sessions and says what dominates its time, every number it is handed held to the run's files (`docs/mcp.md`, "The walk-through"). |
 
 ---
 
@@ -281,35 +303,161 @@ judge passing and `KNOWN_DEFECTS` down to P10's `mem.cgroup`. A counted window
 over a polled counter had lost its closing read on R's branch; found at the
 merge, fixed before it (`fix/counted-window`).
 
-**The fourteenth wave's brief is written** (`BRIEF.md`), not yet dispatched:
-the stock machine (P), the results' vocabulary and renderings (R), the kernel
-programs (K), an agent benchmarking a program through `omn-mcp` (J), a
-release that installs (D), and every way to unwind a stack -- frame pointers,
-the leaf's caller recovered, DWARF, LBR, SFrame -- chosen like backends, with
-names from debuginfod (U). The CI logs it reproduces from are kept in
-`../omniscient-ci-logs/`, outside the repository.
+**The fourteenth wave is merged**, all six streams, and
+`docs/briefs/wave-14-product.md` keeps its brief -- the first product wave,
+about the machine someone who is not the developer meets first:
 
-**After the thirteenth wave, in order:**
+- **P, the stock machine** (`docs/portability.md`): a source is usable only
+  through a backend this build collects; the scheduler's counters are probed
+  with the kernel included and refused where they would read zero; `pmu:ibs_op`
+  is opened, not assumed; `mem.faults` samples in user mode at paranoid 2;
+  `cpu.throttle` explains both cgroup shapes; the CI has two cells (`defaults`
+  at paranoid 2, `stock` at 4) with their own expected skips, and the
+  portability judge learned `stock` and refuses a source listed usable through
+  an unwritten backend; `gpu.power` counts a window and its rate is watts; the
+  validator checks a decomposition against the session's joins and a ranking's
+  attribute against the entry.
+- **R, the results say it** (`docs/fixes/results.md`): `Unit::Watts`,
+  `KeyKind::Node` and `KeyNotCarried` first; every window closes at one instant
+  before the first stop (72 blocks inside the window and in no row, before);
+  `overlap` and `woke` print their amounts and the evidence level its sentence;
+  `--container` is bound to the cgroup its runtime names; the shim's account
+  leaves out a preempted span, counted and priced; a dump's format is refused
+  before resolution; the CI's failures in R's files skip with the machine's
+  reason.
+- **K, the kernel programs** (`docs/families/kernel.md`): `fentry:`
+  requirements carry prototypes (6.17's `tcp_v4_connect`); the read-ahead
+  lookup is held exact in a run that lost nothing and repeated until one does;
+  `sched.switches` gets a `sched_switch` program, second in the chain, serving a
+  cgroup in `count` (the open decision, closed); `net.hwts` probed by its
+  collector's own start; the runner's `/dev/root`, descriptor counts, exec
+  naming and swap room answered; a sweep leg leaves out only the source the
+  machine withholds.
+- **J, an agent benchmarks a program** (`docs/families/join.md`,
+  `docs/mcp.md`): the walk-through over `examples/mcp/approved/`, every number
+  handed over held to the run's files and the spread computed from the answers
+  equal to the files' to the bit; `overlap` with no key over machine-wide state
+  (`join::MACHINE`), with `NoKey` and `SeveralSeries` refusals; `omn-mcp`'s
+  `extreme` band from `Cost::worst_case_percent`.
+- **D, it installs** (`docs/install.md`): `scripts/release.sh`, a reproducible
+  archive with a glibc floor of 2.34 enforced, `make install` /
+  `install-check` / `dist` / `dist-verify`, `release.yml` on a `v*` tag, and a
+  README and `DEMO.md` for a stranger. An installed tree with the capabilities
+  serves what `target/debug/omn` serves.
+- **U, every way to unwind a stack** (`docs/unwind.md`): unwind modes as a
+  chain (`src/unwind.yaml`) chosen by machine and target; `fp`, `fp+leaf` and
+  `dwarf` (through `framehop`) served and held to a known call tree; `lbr` and
+  `sframe` declared, probed and refused by name; user-only stacks at paranoid
+  2, `--stack none` included; debuginfod names (the mechanism, not yet the
+  flag); drops per ring; the frame-pointer note names the object the frameless
+  leaves are in.
 
-1. **A product wave.** Every roadmap phase is done but phase 6's three filed
-   edges, phase 9's last five sources and phase 4's `dm-delay`; what is missing
-   is what a user who is not the developer would need: the CI green on
-   a push -- its second run (`docs/open-findings.md`, "The CI's second run")
-   found the two defects to fix first: `cpu.profile` refused at the kernel's
-   default `perf_event_paranoid` 2, which takes every method built on a
-   profile with it, and `cpu.cycles` read available on a cpu with no hardware
-   PMU -- a cell at a
-   distribution's defaults (Ubuntu's `perf_event_paranoid` 4, where every perf
-   test must skip rather than fail), a release that installs, and one use case
-   polished end to end -- an agent benchmarking a program through `omn-mcp`.
-2. **The requests the thirteenth wave filed**, under its headings in
-   `docs/open-findings.md`: per-ring drops in `cpu.profile`, `KeyKind::Node`,
-   `Unit::Watts` and `KeyNotCarried` (each an enum arm R's matches must take),
-   a container resolved to its cgroup, a window that closes at each collector's
-   last read, and the read-ahead scenario's one lookup in 256. Refresh
-   `docs/open-requests.md` first: it is a snapshot from before the twelfth wave.
-3. **The bench's second table**, on a quiet machine: the bands changed.
-4. **`dm-delay`**, the one injection left that needs root.
+**At the merge**: 2068 passed, 3 failed, 8 ignored in one `--no-fail-fast`
+run. The session-index test is closed by this commit, `scenario_cpu`'s
+unwinder refusal by `1fbf331` (the list is `lbr`, `sframe` now that `dwarf`
+is served), and `tests/portability.rs`'s
+`every_cell_on_disk_holds_the_invariants` is **still red**: 267 violations in
+the 13 cells under `target/matrix/cells/`, all "usable through `<backend>`,
+which has no collector in this build" -- P's new judge reading cells swept on
+2026-09-29, before P's probe fix. The current binary answers otherwise
+(`cpu.profile` through `pmu:sw`, `cpu.oncpu_time` and `io.bytes` through
+`fs:proc`). One `make check` went red once on
+`page_faults::tests::faults_are_reported_at_the_address_that_faulted` (in the
+tally, `docs/scenarios/cross-machine.md` row 2) and passed alone. `make
+check` was not rerun after `1fbf331`.
+
+**After the fourteenth wave, in order:**
+
+1. **The end-of-wave matrix sweep, alone on a quiet machine.** It clears the
+   portability judge and is the check of what P, K and U changed in a guest:
+
+   ```console
+   scripts/matrix.sh here      # here-caps, here-nocaps
+   scripts/matrix.sh           # 5.15.221, 6.1.188, 6.6.157 and host, under caps, root, nocaps, nobtf, notracefs
+   cargo test --test portability
+   ```
+
+   Every cell on disk is stale and has to be rewritten: `5.15.221-{nobtf,
+   notracefs,root}`, `6.1.188-{caps,nobtf,notracefs}`, `6.6.157-{nobtf,
+   notracefs,root}`, `7.2.6-{nobtf,notracefs}`, `here-caps`, `here-nocaps`.
+   The full default run also writes the `nocaps` cells, which the streams'
+   moves are about. What should move:
+
+   | Cells | What should change | Whose |
+   |---|---|---|
+   | every cell | no source listed usable through a backend with no collector; the judge's 267 violations gone | P |
+   | `nocaps`, every kernel | `cpu.profile` from missing (`callchain ... Permission denied`) to available with user-only stacks, and the triage methods on a profile with it, where the guest is at paranoid 2; the switch and migration counters missing (*"reads zero ... CAP_PERFMON"*) rather than attaching and counting zero; `mem.faults` attaches | P, U |
+   | `caps`, 6.1 and later, and `here-caps` | `sched.switches --cgroup -m count` served through `bpf:raw_tp` (5.15 is below the program's `kernel>=6.1`); `--cgroup -m trace` still refused | K |
+   | every guest (no readable PTP clock) | `net.hwts` from usable to missing, *"no interface on this machine keeps a readable PTP hardware clock"*; `here-*` unchanged | K |
+   | every cell with BTF | `net.tcp.connect` stays available through its two `tcp_v4_connect` prototypes | K |
+   | `caps`, `root` | nothing else: `CAP_PERFMON` allows the kernel half; `lbr` and `sframe` missing everywhere | U |
+   | `here-nocaps` | the walk-through serves `benchmark.yml` and `profile.yml`, skips the two eBPF sessions | J |
+
+   Then **the next push's CI**, both cells, read back: `ci-6.17-nocaps`
+   (`defaults`) and `ci-6.17-stock` (new). Each stream's handoff lists the
+   tests it expects to go from failed to passed or to a gated skip; the gate's
+   unexpected list should hold only the filed rows below. And once, **a sweep
+   from an installed tree** (`make release && sudo make install
+   PREFIX=/usr/local`, the `setcap` line it prints, then `/usr/local/bin/omn
+   list`: 92 here, as `target/debug/omn`), and `release.yml`'s first run on
+   `ubuntu-22.04` at the next tag.
+2. **What the fourteenth wave filed**, under its six headings in
+   `docs/open-findings.md` ("Needs from another stream — the fourteenth wave,
+   stream X"), each checked against `main` after the merge and still open.
+   Grouped by the files they land in:
+   - **R's files** (`src/request.rs`, `cli.rs`, `main.rs`, `catalog.rs`,
+     `encode.rs`, `render.rs`, `collect/mod.rs`, `shim/**`,
+     `collect/mem/heap/**`): `--symbols local|debuginfod` (U; the mechanism is
+     landed); the `StackChoice` in `resolved.json` (U, with P's
+     `ResolvedRequest`); `load_dir` skipping `unwind.yaml`, so the mode table
+     moves to `catalog/` (U); a rate over joules printed as `W`, not `J/s`
+     (P); optionally, "here" naming a build's gap (P); `pub mod net` and
+     `ProgramStats::for_run` onto `bpf::enable_run_time_stats` (K); the `psi`
+     declaration moved in one commit with K's three lines (R and K, the
+     coordinator's at a merge); the shim hooking `aligned_alloc`, `memalign`,
+     `valloc` and `pvalloc` -- `dd bs=64M` shows a largest allocation of 4 KiB
+     and no loss, **a silent loss** -- and its missing-shim refusal advising a
+     reinstall, and `find_shim` in `<exe>/../lib/omn/` (D); the "no viable
+     backend" refusal leading with the backend passed over, not the unwritten
+     one (D); and `cost.json` for a profile with stacks, which reports 26 ms
+     where the kernel counts 986 ms of `omn` beyond the target (U's finding).
+   - **P's files** (`src/validate.rs`, `resolve.rs`, `capabilities.rs`, the
+     `cpu.*` and `mem.faults` entries, `.github/**`, `tests/scenario_cpu.rs`):
+     `container: no` dropped from the eleven entries that serve a cgroup
+     (`cpu.cycles`, `.instructions`, `.ipc`, `.branch_misses`,
+     `.cache_misses`, `.topdown`, `.context_switches`, `.migrations`,
+     `.throttle`, `mem.faults`; `cpu.profile` is U's), with
+     `scenario_cpu`'s container-refusal test changed in the same commit and
+     `validate.rs`'s "which this tool does not do" sentence gone (R); a
+     (target, mode) pair no backend declares refused as the request's, exit 2
+     (K: `sched.switches --cgroup -m trace` reads as the machine's today); a
+     binary on a `nosuid` mount told so instead of told to run the `setcap` it
+     ran (D); `.github/expected-skips.txt` gaining the cgroup-ancestry wording
+     (R) and losing the `/sys/class/block/root` line (K); `KeyNotCarried`'s
+     resolver half, waiting on `Backend.keys` in R's `catalog.rs`.
+   - **J's files**: `join::decompose_within(.., windows)`, so a `paired` part
+     pairs over the windows the joins were given (R); then the coordinator
+     swaps R's two call sites and drops `Session::check_paired_parts`, and the
+     brief's item-3 ground truth for a `paired` part can run.
+     `tests/cross_memory.rs:147`'s skip line, whose reason is on the next line
+     where the gate cannot read it (P).
+   - **K's files**: `src/bpf/btf.rs:670`'s *"bpftool could not dump the
+     BTF"*, which the gate cannot read as a reason (P).
+   - **Nobody's**: a `LICENSE` file (`Cargo.toml` says Apache-2.0; D takes it
+     into the archive once it exists); `CLAUDE.md`'s *"86 usable sources and
+     51"*, which reads 92 and 51 now (P); `DEMO.md`'s outputs, left for the
+     coordinator to regenerate (D).
+   - **The flaky tally** (`docs/open-findings.md`, "for the flaky tally" under
+     each stream's heading, and `docs/flaky.md`): new this wave,
+     `scenario_net::a_queue_that_delays_every_packet...` (401 of 200),
+     `scenario_net::every_datagram_sent_to_a_closed_port...` (0 drops, twice
+     alone), `scenario_sched::an_overflowing_wakeup_ring...` (#3: its checked
+     run dropped nothing), and three of P's `cpu` tests K saw once each.
+3. **Refresh `docs/open-requests.md`**: it is still the snapshot from before
+   the twelfth wave, and each wave now checks its items against the code
+   before starting.
+4. **The bench's second table**, on a quiet machine: the bands changed.
+5. **`dm-delay`**, the one injection left that needs root.
 
 Below the milestones, and not scheduled:
 
@@ -317,8 +465,17 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **One decision is open** (`DECISIONS.md`): whether `sched.switches` gets a
-  `sched_switch` program that serves every target, a cgroup included.
+- **Two decisions are open** (`DECISIONS.md`): an `overlap` rule's `span` that
+  encloses a drained row's occurrences (41 184 of 41 639 reclaimed pages
+  uncredited on the reclaim crossing today), and whether a `pmu:sw` collector
+  serves `cpu.cycles` on a cpu with no hardware PMU.
+- **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
+  Haswell) to be tested against, and **`sframe`** on a kernel that reads
+  `.sframe` (none through 7.2).
+- **A preempted eBPF program skips every run behind it on that cpu**
+  (`docs/bpf-layer.md`, "Losses"): counted, never silent, but a program that
+  fires on every page-cache lookup loses the target's events to the machine's
+  load. A per-target attach would narrow it.
 
 The fifth wave closed 52 of the sixty-three defects the scenario wave found;
 the eleven that are left are named in `docs/fixes/`.
@@ -393,8 +550,9 @@ sources and put the capability advice where the failure actually is.
 
 ### 5. The smaller ones, each with its reason
 
-- **`Unit::Watts` does not exist**, which is part of why `gpu.power` reports an
-  energy counter.
+- ~~**`Unit::Watts` does not exist**~~ — it does since the fourteenth wave, and
+  `gpu.power` counts a window's energy and its rate is the mean draw in watts.
+  The text still prints that rate as `J/s` (filed for R).
 - ~~**The GPU is not in the environment capture**~~ — it is, and has been since
   `f5ae1c6`. The resolved file carries every card the kernel describes, by PCI
   ids, driver and driver version, read from sysfs in 47 µs rather than from
