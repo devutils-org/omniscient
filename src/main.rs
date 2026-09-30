@@ -1107,6 +1107,14 @@ fn assemble(
     let mut costs: Vec<MeasuredCost> = Vec::new();
     let mut served_by: Vec<ResolvedRequest> = Vec::new();
 
+    // The sources a detach ended, which is not the same as a window that
+    // closed a little before another's.
+    let detached: std::collections::BTreeSet<String> = collections
+        .iter()
+        .zip(resolved)
+        .filter(|(collection, _)| collection.detached)
+        .map(|(_, resolved)| resolved.request.source.to_string())
+        .collect();
     for (index, collection) in collections.into_iter().enumerate() {
         // The record of how these events were obtained is the request that was
         // serving when they arrived, which a budget may have moved. Handing
@@ -1144,6 +1152,15 @@ fn assemble(
                 },
             )
             .or_insert(results.window);
+    }
+    // A window that closed with the run rather than at a detach closed before
+    // the collectors were stopped, and what their stops drained is later than
+    // it: to a join such a source watched to the end of the run, and its
+    // states still open then are open, not ended by a detach.
+    for (source, watched) in windows.iter_mut() {
+        if watched.attached && !detached.contains(source) {
+            watched.closed_ns = u64::MAX;
+        }
     }
     for rule in &session.joins {
         run.joins.push(join::apply_within(rule, &merged, &windows)?);

@@ -307,6 +307,14 @@ pub struct Collection {
     /// attached for two seconds of a ten-second run is a rate over two.
     #[serde(default)]
     pub window: Watched,
+    /// Whether that window closed at a detach rather than with the run.
+    /// Every window closes where its own collector stopped, and the run stops
+    /// them in turn, so a close earlier than another's is not by itself a
+    /// detach: a join across a source that ran to the end treats it as
+    /// watching to the end, and one across a detached source ends its states
+    /// at the detach.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     /// The part of `losses` each ring lost, for a collector that reads one
     /// ring per key; empty when the losses belong to the whole alike.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2285,10 +2293,21 @@ fn run_core(
 
     // Whatever the kernel or the shim published between the last tick and the
     // stop still belongs to this run.
-    let ended_s = monotonic_ns().saturating_sub(started_ns) as f64 / 1e9;
+    //
+    // The window closes before any of them is stopped. A drained collector's
+    // last read is inside its own `stop()`, and the run stops them one after
+    // another, so a window closed after the last stop claimed the span after
+    // each earlier collector's last read, where nothing of it could be in a
+    // row: stream S measured 6 of 930 blocks with `sched.offcpu` alone and 71
+    // with five collectors stopping after it. One instant before the first
+    // stop is before every last read, and it is one window for every
+    // collector the run held to the end, as a session's sources share one.
+    let closing_ns = monotonic_ns();
+    let ended_s = closing_ns.saturating_sub(started_ns) as f64 / 1e9;
     for (index, slot) in slots.iter_mut().enumerate() {
         match slot {
             Slot::Attached(collector) => {
+                watched[index].closed_ns = closing_ns;
                 let mut trailing = collector.stop();
                 events[index].append(&mut trailing);
                 let collector_losses = collector.losses();
@@ -2345,10 +2364,10 @@ fn run_core(
     }
 
     let closed_ns = monotonic_ns();
-    for (index, slot) in slots.iter().enumerate() {
-        if matches!(slot, Slot::Attached(_)) {
-            watched[index].closed_ns = closed_ns;
-        } else if !watched[index].attached {
+    for index in 0..slots.len() {
+        // An attached collector's window closed before the first stop, above;
+        // a detached one's at its detach.
+        if !watched[index].attached {
             // Never attached: a span of nothing, at the end.
             watched[index].opened_ns = closed_ns;
             watched[index].closed_ns = closed_ns;
@@ -2415,6 +2434,7 @@ fn run_core(
                 overhead: overheads[index].clone(),
                 lifetime,
                 window: watched[index],
+                detached: matches!(slot, Slot::Detached(_)),
                 by_ring,
                 facts,
             }
@@ -3950,6 +3970,10 @@ impl Ledger {
         else {
             unreachable!("only an attached request is detached");
         };
+        // Its window closes before its last read, as at the end of the run:
+        // what the stop drains was all written before it returns.
+        let closed_ns = monotonic_ns();
+        self.watched[index].closed_ns = closed_ns;
         let mut trailing = collector.stop();
         self.events[index].append(&mut trailing);
         self.losses[index].absorb(collector.losses());
@@ -3964,10 +3988,10 @@ impl Ledger {
         // programs are still open to be read.
         let _ = spending.inside[index].read();
         drop(collector);
-        let closed_ns = monotonic_ns();
-        self.watched[index].closed_ns = closed_ns;
-        spending.detached(index, closed_ns);
-        self.closed_because[index] = Some(because(self.seconds_in(closed_ns)));
+        // What it cost is weighed up to the end of its stop, which it paid.
+        let stopped_ns = monotonic_ns();
+        spending.detached(index, stopped_ns);
+        self.closed_because[index] = Some(because(self.seconds_in(stopped_ns)));
         slots[index] = Slot::Detached(record);
         // A collection whose target had already gone keeps saying so.
         self.finished[index].get_or_insert(Finished::Window);
@@ -4383,6 +4407,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                 ),
                 lifetime: None,
                 window,
+                detached: false,
                 // A document's losses are those since the one before it, and a
                 // ring's are the run's: they cannot be split per document.
                 by_ring: Vec::new(),
