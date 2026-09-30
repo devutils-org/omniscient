@@ -4880,3 +4880,339 @@ fn every_call_through_fentry_is_in_a_row_or_a_counted_loss_to_the_last_drain() {
     }
     eprintln!("{}", seen.join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// The histogram the kernel builds
+
+/// Reads of two known sizes through `O_DIRECT`, each one block request, and
+/// the program's own count of how many of each it completed.
+const TWO_SIZES: &str = r#"
+import json, mmap, os, sys
+path, account = sys.argv[1], sys.argv[2]
+done = {}
+cached = os.open(path, os.O_RDONLY)
+os.posix_fadvise(cached, 0, 0, os.POSIX_FADV_DONTNEED)
+os.close(cached)
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+except OSError as error:
+    done["refused"] = str(error)
+else:
+    offset = 0
+    for size, count in ((4096, 256), (65536, 64)):
+        buffer = mmap.mmap(-1, size)
+        issued = 0
+        for _ in range(count):
+            if os.preadv(fd, [buffer], offset) != size:
+                break
+            offset += size
+            issued += 1
+        done[str(size)] = issued
+json.dump(done, open(account, "w"))
+"#;
+
+/// The requests of a log2 histogram series, by bucket low bound.
+fn buckets_of(series: &serde_json::Value) -> BTreeMap<u64, u64> {
+    series["buckets"]
+        .as_array()
+        .expect("a histogram series has buckets")
+        .iter()
+        .filter_map(|bucket| Some((bucket["low"].as_u64()?, bucket["count"].as_u64()?)))
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
+/// `io.latency --emit hist` builds its histogram in the kernel, and it is the
+/// histogram the streamed requests make.
+///
+/// One launch, two requests over it: `hist` alone, which the kernel answers
+/// with one `(device, log2 bucket)` row per bucket and no record per request,
+/// and `raw` with `hist`, which streams every completion through the ring and
+/// buckets it up here. The program reads 256 pages and 64 blocks of 64 KiB
+/// through `O_DIRECT` and counts what completed, so the ground truth is its
+/// own: the streamed requests are of those two sizes and no more of them than
+/// it issued, and the kernel's histogram holds exactly as many requests as the
+/// stream carried, in the same buckets.
+///
+/// Not bit for bit per bucket, and why: the two program sets are two programs
+/// on each tracepoint, each reading the clock when it runs, so the same request
+/// has two intervals a few tens of nanoseconds apart, and one within that of a
+/// power of two can land on either side of it. The comparison allows a request
+/// to cross only where the stream's own value is within 2 % of a bucket edge,
+/// and the totals must agree exactly.
+#[test]
+fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    const PAGES: usize = 256;
+    const BLOCKS: usize = 64;
+    let path = direct_read_file("io-two-sizes.bin", PAGES + BLOCKS * 16);
+    let workload = script("io-two-sizes.py", TWO_SIZES);
+    let account_path = scratch("io-two-sizes.json");
+    let _ = std::fs::remove_file(&account_path);
+    let launch = format!(
+        "[python3, {}, {}, {}]",
+        workload.display(),
+        path.display(),
+        account_path.display()
+    );
+    let session = format!(
+        "name: one launch, two histograms\n\
+         requests:\n\
+         \x20 - label: in-kernel\n\
+         \x20   source: io.latency\n\
+         \x20   target: {{launch: {launch}}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [hist]\n\
+         \x20 - label: streamed\n\
+         \x20   source: io.latency\n\
+         \x20   target: {{launch: {launch}}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [raw, hist]\n"
+    );
+    let session_path = scratch("io-two-histograms.yml");
+    std::fs::write(&session_path, session).expect("the session");
+    let output = run(&[
+        "-f",
+        session_path.to_str().expect("a path"),
+        "--format",
+        "json",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    if let Some(error) = did["refused"].as_str() {
+        eprintln!("skipped: {} refuses O_DIRECT ({error})", path.display());
+        return;
+    }
+    assert_eq!(
+        did["4096"].as_u64(),
+        Some(PAGES as u64),
+        "the program's account: {did}"
+    );
+    assert_eq!(
+        did["65536"].as_u64(),
+        Some(BLOCKS as u64),
+        "the program's account: {did}"
+    );
+
+    let document = json(&output);
+    let kernel = result(&document, "in-kernel");
+    let streamed = result(&document, "streamed");
+    // The kernel's answer says how it was obtained, and the stream's does not.
+    let said = |result: &serde_json::Value| result["notes"].to_string();
+    assert!(
+        said(kernel).contains("the histogram was built in the kernel"),
+        "the `hist`-only request did not say it was built in the kernel: {}",
+        said(kernel)
+    );
+    assert!(
+        !said(streamed).contains("built in the kernel"),
+        "{}",
+        said(streamed)
+    );
+
+    // What the stream carried: every request one of the two sizes, or the
+    // readahead a filesystem may turn a first direct read into, and never more
+    // requests of a size than reads of it.
+    let events = raw_events(streamed);
+    let of = |bytes: u64| {
+        events
+            .iter()
+            .filter(|attrs| attrs["bytes"].as_u64() == Some(bytes) && attrs["rwbs"] != "RA")
+            .count()
+    };
+    assert!(
+        of(4096) <= PAGES && of(65536) <= BLOCKS,
+        "more requests than reads: {}",
+        of(4096)
+    );
+    for attrs in &events {
+        let bytes = attrs["bytes"].as_u64().unwrap_or_default();
+        let rwbs = attrs["rwbs"].as_str().unwrap_or_default();
+        assert!(
+            bytes == 4096 || bytes == 65536 || rwbs.contains('A'),
+            "a request of {bytes} bytes (`{rwbs}`) that the program did not make"
+        );
+    }
+    let lost = |result: &serde_json::Value| losses(result)["dropped"].as_u64().unwrap_or(0);
+    // Both lost nothing, or the comparison is of two different sets of requests.
+    if lost(kernel) > 0 || lost(streamed) > 0 {
+        eprintln!(
+            "skipped the comparison: the kernel skipped runs of the programs ({} and {} \
+             dropped), each set its own, so the two histograms are of different requests",
+            lost(kernel),
+            lost(streamed)
+        );
+        return;
+    }
+    assert!(
+        of(4096) + 1 >= PAGES && of(65536) + 1 >= BLOCKS,
+        "a run that lost nothing is short of the program's reads by more than the one a \
+         filesystem may turn into a readahead: {} of {PAGES} pages, {} of {BLOCKS} blocks",
+        of(4096),
+        of(65536)
+    );
+
+    let series = |result: &serde_json::Value| -> BTreeMap<String, BTreeMap<u64, u64>> {
+        output_of(result, "hist")["series"]
+            .as_array()
+            .expect("series")
+            .iter()
+            .map(|series| {
+                (
+                    series["key"].as_str().unwrap_or("").to_owned(),
+                    buckets_of(series),
+                )
+            })
+            .collect()
+    };
+    let (from_kernel, from_stream) = (series(kernel), series(streamed));
+    assert_eq!(
+        from_kernel.keys().collect::<Vec<_>>(),
+        from_stream.keys().collect::<Vec<_>>(),
+        "the two histograms are of different devices"
+    );
+    let total = |all: &BTreeMap<String, BTreeMap<u64, u64>>| -> u64 {
+        all.values().flat_map(|buckets| buckets.values()).sum()
+    };
+    assert_eq!(
+        total(&from_kernel),
+        total(&from_stream),
+        "the kernel counted {} requests and the stream carried {}",
+        total(&from_kernel),
+        total(&from_stream)
+    );
+    assert_eq!(
+        total(&from_stream),
+        events.len() as u64,
+        "the stream's histogram is its events"
+    );
+
+    // Requests within 2 % of a power of two, which either side may put in the
+    // bucket on the other side of it.
+    let near_an_edge = events
+        .iter()
+        .filter_map(|attrs| attrs["latency_ns"].as_u64())
+        .filter(|&value| {
+            let edge = value.next_power_of_two();
+            let below = edge / 2;
+            let near = |edge: u64| (value as f64 - edge as f64).abs() <= edge as f64 * 0.02;
+            near(edge) || (below > 0 && near(below))
+        })
+        .count() as u64;
+    let mut moved = 0;
+    for (key, kernel_buckets) in &from_kernel {
+        let stream_buckets = &from_stream[key];
+        let lows: std::collections::BTreeSet<&u64> =
+            kernel_buckets.keys().chain(stream_buckets.keys()).collect();
+        for low in lows {
+            let a = kernel_buckets.get(low).copied().unwrap_or(0);
+            let b = stream_buckets.get(low).copied().unwrap_or(0);
+            moved += a.abs_diff(b);
+        }
+    }
+    // A request that crossed an edge is one bucket short and one over: two.
+    assert!(
+        moved <= 2 * near_an_edge,
+        "the kernel's buckets differ from the stream's by {moved} counts, and only \
+         {near_an_edge} requests were close enough to an edge to cross it:\n kernel {from_kernel:?}\n \
+         stream {from_stream:?}"
+    );
+}
+
+/// Phase 6's exit criterion: `io.latency --emit hist` at two million requests
+/// a second costs the target under 1 %.
+///
+/// The load needs a device that answers that fast and no disk does: `null_blk`
+/// completes every request at once from memory, and loading it is root. With
+/// it loaded and readable (`/dev/nullb0`), `fio` drives it from 8 jobs at queue
+/// depth 64, once bare and once under the in-kernel histogram, and the ratio
+/// of the two IOPS figures is the overhead: the target's own rate is the
+/// ground truth, measured the same way both times. `1 %` is the criterion's
+/// number; a loaded machine widens the noise, so this runs alone.
+///
+/// ```console
+/// sudo modprobe null_blk queue_mode=2 irqmode=0 completion_nsec=0 nr_devices=1 \
+///     gb=4 bs=4096 hw_queue_depth=256 submit_queues=8
+/// sudo chmod a+r /dev/nullb0
+/// cargo test --test scenario_io -- --ignored --exact \
+///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
+/// sudo rmmod null_blk
+/// ```
+#[test]
+#[ignore = "needs null_blk (root): see the doc comment for the commands"]
+fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
+    const DEVICE: &str = "/dev/nullb0";
+    if std::fs::File::open(DEVICE).is_err() {
+        panic!("{DEVICE} is not there or not readable: load null_blk as the doc comment says");
+    }
+    if let Some(reason) = no_bpf_here() {
+        panic!("{reason}");
+    }
+    let fio = |under: Option<&str>| -> f64 {
+        let job = [
+            "fio",
+            "--name=omn-iops",
+            "--filename",
+            DEVICE,
+            "--rw=randread",
+            "--bs=4k",
+            "--direct=1",
+            "--ioengine=io_uring",
+            "--iodepth=64",
+            "--numjobs=8",
+            "--thread",
+            "--group_reporting",
+            "--time_based",
+            "--runtime=10",
+            "--output-format=json",
+        ];
+        let output = match under {
+            None => Command::new(job[0]).args(&job[1..]).output(),
+            Some(emit) => Command::new(BINARY)
+                .args([
+                    "io.latency",
+                    "-m",
+                    "trace",
+                    "-e",
+                    emit,
+                    "--format",
+                    "json",
+                    "--",
+                ])
+                .args(job)
+                .output(),
+        }
+        .expect("fio runs (is it installed?)");
+        assert!(output.status.success(), "{}", stderr(&output));
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Under omn, fio's own document comes first on stdout, then omn's.
+        let start = text.find('{').expect("fio printed json");
+        let report: serde_json::Value = serde_json::Deserializer::from_str(&text[start..])
+            .into_iter()
+            .next()
+            .expect("a document")
+            .expect("fio's json parses");
+        report["jobs"][0]["read"]["iops"]
+            .as_f64()
+            .expect("fio reports iops")
+    };
+    let bare = fio(None);
+    assert!(
+        bare >= 2_000_000.0,
+        "the device answered {bare:.0} IOPS bare, short of the 2 M the criterion is about"
+    );
+    let measured = fio(Some("hist"));
+    let overhead = (bare - measured) / bare * 100.0;
+    eprintln!("bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} %");
+    assert!(
+        overhead < 1.0,
+        "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load"
+    );
+}

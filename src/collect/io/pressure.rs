@@ -62,7 +62,8 @@ impl Prepared for Prepare {
                 PathBuf::from("/proc/pressure/io"),
             ))),
             other => Err(format!(
-                "/proc/pressure/io is the machine's stall counter; a {} target needs                  `io.pressure` under that cgroup, which is the `fs:cgroup` backend",
+                "/proc/pressure/io is the machine's stall counter; a {} target needs \
+                 `io.pressure` under that cgroup, which is the `fs:cgroup` backend",
                 other.kind()
             )),
         }

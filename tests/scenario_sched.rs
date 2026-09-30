@@ -1173,81 +1173,326 @@ fn a_counted_switch_total_is_the_sum_of_what_each_thread_counted() {
 
 // ------------------------------------------------------------- the loss path
 
+/// The wakeup ring's size and drain, as `src/collect/sched/wakeup.rs` sets
+/// them, and what one record takes in it: a 48-byte event behind the ring's
+/// 8-byte header.
+const WAKEUP_RING_BYTES: u64 = 256 * 1024;
+const WAKEUP_RECORD_BYTES: u64 = 48 + 8;
+const WAKEUP_DRAIN_MS: u64 = 10;
+
+/// How many wakeup records the ring holds between two drains: 4681.
+const WAKEUP_RING_RECORDS: u64 = WAKEUP_RING_BYTES / WAKEUP_RECORD_BYTES;
+
+/// Waiters one `FUTEX_WAKE` makes runnable at once, in the burst: three and a
+/// half rings' worth, so that even two drains landing inside the one system
+/// call cannot make room for all of them.
+const BURST_WAITERS: u64 = 16_384;
+const BURST_ROUNDS: u64 = 3;
+
+/// The moderate load: pipe round trips at a fixed rate, each two wakeups of
+/// the program's own threads and one of its timer. 2 000 a second is 6 000
+/// wakeups a second, against the 468 100 a second the ring drains
+/// (`WAKEUP_RING_RECORDS` every `WAKEUP_DRAIN_MS`): under 1.3 % of it.
+const PACED_ROUND_TRIPS: u64 = 2_000;
+const PACED_PER_SECOND: u64 = 2_000;
+
+/// A fixture that wakes a known number of threads, two ways, and prints what
+/// the kernel said it did.
+const WAKERS_FIXTURE_SOURCE: &str = r#"/* burst <waiters> <rounds>: one FUTEX_WAKE of every waiter per round.
+   paced <round_trips> <per_second>: two threads ping-pong at that rate.
+   Each prints what the kernel said it did: `woken=` is the sum of FUTEX_WAKE's
+   return values, `round_trips=` the pipe round trips completed. */
+#define _GNU_SOURCE
+#include <limits.h>
+#include <linux/futex.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+static _Atomic int word;
+static _Atomic int parked;
+static int rounds;
+
+static long futex(_Atomic int *addr, int op, int val) {
+    return syscall(SYS_futex, addr, op, val, NULL, NULL, 0);
+}
+
+static void *waiter(void *unused) {
+    (void)unused;
+    for (int generation = 0; generation < rounds; generation++) {
+        atomic_fetch_add(&parked, 1);
+        while (atomic_load(&word) == generation)
+            futex(&word, FUTEX_WAIT_PRIVATE, generation);
+    }
+    return NULL;
+}
+
+static int there[2], back[2];
+
+static void *peer(void *unused) {
+    (void)unused;
+    char byte;
+    while (read(there[0], &byte, 1) == 1)
+        if (write(back[1], "y", 1) != 1)
+            break;
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "burst") == 0) {
+        int waiters = atoi(argv[2]);
+        rounds = atoi(argv[3]);
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN);
+        pthread_t *threads = calloc(waiters, sizeof *threads);
+        for (int i = 0; i < waiters; i++)
+            if (pthread_create(&threads[i], &attr, waiter, NULL) != 0) {
+                fprintf(stderr, "could not start thread %d\n", i);
+                return 1;
+            }
+        long woken = 0;
+        for (int generation = 0; generation < rounds; generation++) {
+            while (atomic_load(&parked) < waiters * (generation + 1))
+                sched_yield();
+            /* Every waiter has said it is about to wait; give the last of
+               them time to be queued in the kernel. One that is not is not
+               woken and not counted: it sees the new generation and moves on. */
+            struct timespec settle = {0, 20 * 1000 * 1000};
+            nanosleep(&settle, NULL);
+            atomic_store(&word, generation + 1);
+            woken += futex(&word, FUTEX_WAKE_PRIVATE, INT_MAX);
+        }
+        for (int i = 0; i < waiters; i++)
+            pthread_join(threads[i], NULL);
+        printf("woken=%ld\n", woken);
+        return 0;
+    }
+    if (argc == 4 && strcmp(argv[1], "paced") == 0) {
+        long trips = atol(argv[2]), rate = atol(argv[3]);
+        if (pipe(there) || pipe(back))
+            return 1;
+        pthread_t answering;
+        pthread_create(&answering, NULL, peer, NULL);
+        struct timespec next;
+        clock_gettime(CLOCK_MONOTONIC, &next);
+        long step = 1000000000L / rate, done = 0;
+        char byte;
+        for (long i = 0; i < trips; i++) {
+            next.tv_nsec += step;
+            while (next.tv_nsec >= 1000000000L) {
+                next.tv_nsec -= 1000000000L;
+                next.tv_sec++;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+            if (write(there[1], "x", 1) != 1 || read(back[0], &byte, 1) != 1)
+                break;
+            done++;
+        }
+        close(there[1]);
+        pthread_join(answering, NULL);
+        printf("round_trips=%ld\n", done);
+        return 0;
+    }
+    fprintf(stderr, "usage: burst <waiters> <rounds> | paced <round_trips> <per_second>\n");
+    return 2;
+}
+"#;
+
+fn wakers_fixture() -> Result<String, String> {
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_c("wakers", WAKERS_FIXTURE_SOURCE))
+        .clone()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// What a run's terminal text says about its size and its losses: the events
+/// it kept, the ones it dropped, and the loss line itself.
+fn events_and_drops(text: &str) -> (u64, Option<u64>, Option<String>) {
+    let seen = text
+        .lines()
+        .find(|line| line.contains(" events over "))
+        .and_then(|line| line.split_whitespace().next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no `N events over` line:\n{text}"));
+    let loss = text
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("LOSS:") || line.starts_with("no loss"))
+        .map(str::to_owned);
+    let dropped = loss.as_deref().and_then(|line| {
+        if line.starts_with("no loss") {
+            return Some(0);
+        }
+        line.strip_prefix("LOSS:")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    });
+    (seen, dropped, loss)
+}
+
+/// The number a fixture printed as `name=<n>`.
+fn printed_count(text: &str, name: &str) -> u64 {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{name}=")))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the fixture did not print `{name}=`:\n{text}"))
+}
+
 /// A collector that loses three percent and says nothing produces wrong
 /// numbers that look right.
 ///
-/// The workload drives more wakeups through the ring than it can hold between
-/// drains. What is checked is the invariant: the loss is counted, it reaches
-/// the output with a reason that names what filled, and the events plus the
-/// drops still account for the round trips the workload performed.
+/// The ring is filled on every machine, not only on one slower than its
+/// drain: a single `FUTEX_WAKE` makes `BURST_WAITERS` threads runnable inside
+/// one system call, which is 3.5 times what the ring holds between two drains,
+/// and the kernel writes one record per wakeup while it walks them. How many it
+/// woke is the system call's own return value, summed by the program and
+/// printed: that is the ground truth the events and the drops together have to
+/// reach. What is checked is that the ring did overflow, that the loss is in
+/// the terminal with the reason that names the ring, and that nothing was lost
+/// uncounted.
 ///
-/// What is *not* checked, though it is what the scenario is for, is that the
-/// event count alone falls short of the workload. Run on its own it does, by
-/// a fifth -- the measured runs are in `docs/scenarios/sched.md`. Run inside
-/// this suite it sometimes does not, because a contended interpreter lock adds
-/// wakeups of its own and the workload's two-per-round-trip stops being the
-/// rate. A test cannot demand a shortfall whose size the machine decides, so
-/// the number lives in the document and the invariant lives here.
+/// This used to be a pipe ping-pong in Python, which outran the drain on an
+/// idle machine and not on a loaded one, so the test skipped when the ring
+/// never filled, and its terminal check, made on a second run, asked a run that
+/// dropped nothing to explain a drop (flaky tally #3).
 #[test]
 fn an_overflowing_wakeup_ring_says_what_it_could_not_hold() {
-    if !have("python3") {
-        eprintln!("skipped: this machine has no `python3`, and no shell workload reaches the wakeup rate that fills the ring");
-        return;
-    }
-    let output = session("sched-wakeup-loss.yml", &["--format", "json"]);
+    let fixture = match wakers_fixture() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let (waiters, rounds) = (BURST_WAITERS.to_string(), BURST_ROUNDS.to_string());
+    let output = omn(&[
+        "sched.wakeup",
+        "-m",
+        "trace",
+        "-e",
+        "summary",
+        "--",
+        &fixture,
+        "burst",
+        &waiters,
+        &rounds,
+    ]);
     let text = spoken(&output);
     if unprivileged(&text) {
         eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
         return;
     }
     assert_eq!(exit_code(&output), 0, "{text}");
-
-    let results = results(&output);
-    let result = labelled(&results, "wakeups-under-overflow");
-    let seen = events_seen(result);
-    let lost = dropped(result);
-    let expected = 2 * LOSS_PAIRS * LOSS_ROUNDS;
-
-    if lost == 0 {
-        // A machine that drains faster than this workload can fill is a
-        // machine that cannot serve this scenario, and says which. It still has
-        // to have counted at least the workload, or nothing here was measured:
-        // the floor is all the workload guarantees, since a contended
-        // interpreter lock adds wakeups of its own and those are real wakeups
-        // of the target too (flaky tally #3).
-        assert!(
-            seen as f64 >= expected as f64 * (1.0 - TOLERANCE),
-            "nothing was dropped and the count is short of the workload: saw {seen}, expected \
-             at least about {expected}\n{text}"
-        );
-        eprintln!(
-            "skipped: this machine drained the 256 KiB wakeup ring faster than {LOSS_PAIRS} pipe \
-             ping-pong pairs could fill it, so there was no overflow to report"
-        );
-        return;
-    }
-
+    let woken = printed_count(&text, "woken");
     assert!(
-        (seen + lost) as f64 >= expected as f64 * (1.0 - TOLERANCE),
-        "the events and the drops together still do not account for the workload: \
-         {seen} seen plus {lost} dropped against about {expected}"
+        woken > WAKEUP_RING_RECORDS,
+        "the burst woke {woken} threads, which the {WAKEUP_RING_RECORDS}-record ring could \
+         hold, so it proves nothing:\n{text}"
+    );
+    let (seen, dropped, loss) = events_and_drops(&text);
+    let loss = loss.unwrap_or_else(|| panic!("the run printed no loss line:\n{text}"));
+    let dropped = dropped.unwrap_or_else(|| panic!("the loss line has no count: {loss}"));
+    assert!(
+        dropped > 0,
+        "{woken} wakeups in {BURST_ROUNDS} system calls, each more than the ring holds, and \
+         nothing was dropped: {loss}\n{text}"
+    );
+    assert!(
+        seen + dropped >= woken,
+        "the kernel woke {woken} threads and the run accounts for {seen} seen plus {dropped} \
+         dropped: a loss went uncounted\n{text}"
     );
     assert!(
         seen > 0,
         "a run that lost events must still carry what it did see:\n{text}"
     );
+    assert!(
+        text.contains("ring was full"),
+        "the loss is counted and not explained:\n{text}"
+    );
+}
 
-    // The count alone would leave a reader guessing at a kernel they cannot
-    // see. A loss has to name what filled.
-    let terminal = spoken(&session("sched-wakeup-loss.yml", &[]));
+/// Zero loss under a moderate load, and the loss line still there to say so.
+///
+/// The load is defined by its rate: `PACED_ROUND_TRIPS` pipe round trips at
+/// `PACED_PER_SECOND`, paced by an absolute-deadline sleep, which is about
+/// 6 000 wakeups a second against the 468 100 the ring drains -- under 1.3 %.
+/// The program counts its own round trips, and each is two wakeups of its own
+/// threads (the answer's, then the driver's), so that many is the floor the
+/// run has to reach. A drop here is the collector losing what it had every room
+/// for; a missing loss line is a run that cannot say whether it lost anything.
+#[test]
+fn a_moderate_wakeup_rate_loses_nothing_and_says_so() {
+    let fixture = match wakers_fixture() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let drained_per_second = WAKEUP_RING_RECORDS * 1000 / WAKEUP_DRAIN_MS;
     assert!(
-        terminal.contains("LOSS:"),
-        "a run that dropped events did not say so in the terminal:\n{terminal}"
+        3 * PACED_PER_SECOND * 50 < drained_per_second,
+        "the load is no longer moderate: {} wakeups a second against {drained_per_second}",
+        3 * PACED_PER_SECOND
+    );
+    let (trips, rate) = (PACED_ROUND_TRIPS.to_string(), PACED_PER_SECOND.to_string());
+    let output = omn(&[
+        "sched.wakeup",
+        "-m",
+        "trace",
+        "-e",
+        "summary",
+        "--",
+        &fixture,
+        "paced",
+        &trips,
+        &rate,
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let done = printed_count(&text, "round_trips");
+    assert_eq!(
+        done, PACED_ROUND_TRIPS,
+        "the program did not finish its round trips:\n{text}"
+    );
+    let (seen, dropped, loss) = events_and_drops(&text);
+    let loss = loss.unwrap_or_else(|| panic!("the run printed no loss line:\n{text}"));
+    assert_eq!(
+        dropped,
+        Some(0),
+        "{PACED_ROUND_TRIPS} round trips at {PACED_PER_SECOND} a second are under 1.3 % of what \
+         the ring drains, and the run dropped some: {loss}\n{text}"
     );
     assert!(
-        terminal.contains("ring was full") || terminal.contains("longer than the"),
-        "the loss is counted and not explained:\n{terminal}"
+        seen >= 2 * done,
+        "{done} round trips are at least {} wakeups of the program's threads, and the run kept \
+         {seen}:\n{text}",
+        2 * done
     );
+    // A concession the run makes is one sentence, not two joined by the
+    // indentation of the line they were written on.
+    for line in text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("degraded:"))
+    {
+        assert!(
+            !line.contains("   "),
+            "a note carries its source's indentation: {line}"
+        );
+    }
 }
 
 // -------------------------------------------------------------- the refusals

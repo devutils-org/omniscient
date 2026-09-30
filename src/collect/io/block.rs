@@ -123,6 +123,31 @@ pub struct Prepare {
     /// not run. Applying it here is what makes the resolver's claim true of the
     /// numbers; what it is not yet true of is the cost, which the run says.
     pub filter: Option<FilterExpr>,
+    /// Count the latencies into a log2 histogram in the kernel rather than
+    /// publishing a record per request: see [`histogram_is_enough`].
+    pub in_kernel_histogram: bool,
+}
+
+/// Whether a request of `io.latency` is answered whole by a histogram the
+/// kernel builds, one row per `(device, log2 bucket)`.
+///
+/// Only when a log2 histogram is everything it asks for: one `hist` emit, in
+/// `trace`, with no filter and no key but the device. Anything else needs the
+/// requests one at a time -- `raw`, `topk` and a linear histogram read each
+/// value, `summary` its exact minimum and maximum, a filter each request's
+/// fields, and a key other than `dev` (above all `blk`, which the `scoped_eq`
+/// join reads) is something a row keyed by device does not carry.
+///
+/// The one thing this cannot see is a session's join: a join names sources, not
+/// requests, and reaches no collector. A `hist`-only `io.latency` in a session
+/// that joins it `via: blk` is answered with rows that carry no `blk`, and the
+/// run's note says so (filed to the validator in `docs/open-findings.md`).
+pub fn histogram_is_enough(request: &crate::request::Request) -> bool {
+    use crate::request::{Emit, HistScale, KeyKind};
+    request.mode == Mode::Trace
+        && request.filter.is_none()
+        && matches!(request.emit.as_slice(), [Emit::Hist(HistScale::Log2)])
+        && request.keys.iter().all(|key| *key == KeyKind::Dev)
 }
 
 impl Prepared for Prepare {
@@ -167,12 +192,9 @@ impl Prepared for Prepare {
             }
         };
 
-        Ok(Box::new(BlockCollector::new(
-            measure,
-            self.mode,
-            submitter,
-            self.filter,
-        )))
+        let mut collector = BlockCollector::new(measure, self.mode, submitter, self.filter);
+        collector.in_kernel_histogram = self.in_kernel_histogram && measure == Measure::Latency;
+        Ok(Box::new(collector))
     }
 }
 
@@ -230,6 +252,14 @@ pub struct BlockCollector {
     /// Whether this kernel's completion reports a negative errno rather than a
     /// `blk_status_t` (5.15), which decides what the attribute is called.
     status_is_errno: bool,
+    /// Whether the programs count into a kernel-side histogram.
+    in_kernel_histogram: bool,
+    /// What the histogram held at the end: the requests it counted, and the
+    /// rows they were reported as.
+    histogram_requests: u64,
+    histogram_rows: u64,
+    /// Why the histogram's read may have missed a completion, when it may.
+    histogram_caveat: Option<String>,
 }
 
 impl BlockCollector {
@@ -266,7 +296,53 @@ impl BlockCollector {
             carried_request: 0,
             no_request_identity: None,
             status_is_errno: false,
+            in_kernel_histogram: false,
+            histogram_requests: 0,
+            histogram_rows: 0,
+            histogram_caveat: None,
         }
+    }
+
+    /// The kernel-side histogram's rows, as events: one per `(device, log2
+    /// bucket)`, weighed by the requests it counted, with the bucket's low
+    /// bound as the latency -- the value the emit layer's log2 bucketing maps
+    /// back to exactly that bucket -- and the exact total beside it.
+    fn histogram_events(&mut self, rows: Vec<crate::bpf::HistRow>, seq: u64) -> Vec<Event> {
+        let measure = self.measure;
+        let mut events = Vec::with_capacity(rows.len());
+        for (index, row) in rows.into_iter().enumerate() {
+            if row.count == 0 {
+                continue;
+            }
+            let (major, minor) = (row.major(), row.minor());
+            if row.dev == 0 {
+                self.no_device += row.count;
+            }
+            let name = self.device_name(major, minor);
+            self.histogram_requests += row.count;
+            self.histogram_rows += 1;
+            events.push(Event {
+                // A row is the whole run's, so it is stamped when the run
+                // opened, like every other kernel-built histogram's first row.
+                ts_ns: self.opened_ns,
+                ts_err_ns: 0,
+                kind: measure.source_id().to_owned(),
+                keys: vec![KeyValue::dev(major, minor)],
+                attrs: vec![
+                    Attr::uint(measure.value_attr(), row.bucket_low_ns()),
+                    Attr::uint("count", row.count),
+                    Attr::uint(crate::emit::WEIGHT_ATTR, row.count),
+                    Attr::uint("total_ns", row.total_ns),
+                    Attr::uint("bucket", u64::from(row.bucket)),
+                    Attr::text("dev", name),
+                    Attr::uint("dev_major", u64::from(major)),
+                    Attr::uint("dev_minor", u64::from(minor)),
+                ],
+                collector_id: self.id.clone(),
+                seq: seq + index as u64,
+            });
+        }
+        events
     }
 
     /// The name of a device, or the pair itself when nothing names it.
@@ -550,7 +626,11 @@ impl Collector for BlockCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = BlockProgram::load(self.measure.stage(), self.submitter, RING_BYTES)?;
+        let program = if self.in_kernel_histogram {
+            BlockProgram::load_histogram(self.measure.stage(), self.submitter)?
+        } else {
+            BlockProgram::load(self.measure.stage(), self.submitter, RING_BYTES)?
+        };
         self.no_request_identity = program.no_request_identity.clone();
         self.status_is_errno = program.status_is_errno;
         self.program = Some(program);
@@ -574,6 +654,27 @@ impl Collector for BlockCollector {
         // interval that is in no event, because it has no end yet.
         if let Some(program) = self.program.as_ref() {
             self.still_in_flight = program.still_in_flight();
+        }
+        // The histogram is read once, here: the closing program is detached
+        // first, so the read is of rows nothing adds to any more.
+        if let Some(program) = self.program.as_mut().filter(|p| p.is_histogram()) {
+            match program.read_histogram() {
+                Ok((rows, unwaited)) => {
+                    if let Some(caveat) = unwaited {
+                        self.histogram_caveat = Some(caveat);
+                    }
+                    let events = self.histogram_events(rows, u64::MAX / 2);
+                    self.events += events.len() as u64;
+                    trailing.extend(events);
+                }
+                Err(reason) => {
+                    // Every request the rows held is lost, and how many that
+                    // was is not knowable without the read that failed.
+                    self.losses.failed_reads += 1;
+                    self.losses.note(reason);
+                }
+            }
+            self.absorb_counters();
         }
 
         // A counted run has no series: its single event is the whole window,
@@ -607,8 +708,28 @@ impl Collector for BlockCollector {
         self.losses.clone()
     }
 
+    fn facts(&self) -> Vec<String> {
+        if !self.in_kernel_histogram {
+            return Vec::new();
+        }
+        // How the answer was obtained, which is not a concession: the buckets
+        // are the ones the emit layer builds, and the total is exact.
+        vec![format!(
+            "the histogram was built in the kernel: {} requests counted into {} rows of \
+             (device, log2 bucket), read once at the end, and no record per request crossed \
+             to userspace; `latency_ns` on a row is its bucket's low bound and `total_ns` the \
+             exact sum. Rows carry `dev` and no `blk`, `task` or `req` key -- ask for another \
+             emit beside `hist` to have the requests one at a time",
+            self.histogram_requests, self.histogram_rows,
+        )]
+    }
+
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+
+        if let Some(caveat) = &self.histogram_caveat {
+            notes.push(caveat.clone());
+        }
 
         if self.mode == Mode::Count {
             notes.push(format!(
@@ -918,6 +1039,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            in_kernel_histogram: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -940,6 +1062,7 @@ mod tests {
                 measure,
                 mode: Mode::Count,
                 filter: None,
+                in_kernel_histogram: false,
             })
             .attach(&Target::System);
             assert_eq!(
@@ -960,6 +1083,7 @@ mod tests {
             measure: Measure::Latency,
             mode: Mode::Trace,
             filter: None,
+            in_kernel_histogram: false,
         });
         let Err(error) = prepared.attach(&Target::Cgroup("/sys/fs/cgroup".into())) else {
             panic!("a cgroup target must be refused");
@@ -1004,5 +1128,90 @@ mod tests {
             collector.losses().is_clean(),
             "an unpaired close loses nothing"
         );
+    }
+
+    /// The kernel-side histogram answers a request only when a log2 histogram
+    /// is all it asks for: every other emit, a filter, or a key a row keyed by
+    /// device does not carry needs the requests one at a time.
+    #[test]
+    fn only_a_request_for_a_log2_histogram_alone_is_answered_in_the_kernel() {
+        use crate::request::{Emit, HistScale, KeyKind, Request};
+        let request = |emit: Vec<Emit>, keys: Vec<KeyKind>, filter: Option<&str>| Request {
+            source: "io.latency".parse().expect("an id"),
+            target: Target::System,
+            mode: Mode::Trace,
+            emit,
+            keys,
+            filter: filter.map(|text| text.parse().expect("a filter")),
+            duration: None,
+            budget: None,
+            stack: None,
+            backend: None,
+            label: None,
+            window: None,
+        };
+        let log2 = Emit::Hist(HistScale::Log2);
+        assert!(histogram_is_enough(&request(vec![log2], vec![], None)));
+        assert!(histogram_is_enough(&request(
+            vec![log2],
+            vec![KeyKind::Dev],
+            None
+        )));
+        for (emit, keys, filter) in [
+            (vec![log2, Emit::Summary], vec![], None),
+            (vec![log2, Emit::Raw], vec![], None),
+            (
+                vec![Emit::Hist(HistScale::Linear { width: 1000 })],
+                vec![],
+                None,
+            ),
+            (vec![log2], vec![KeyKind::Blk], None),
+            (vec![log2], vec![KeyKind::Task], None),
+            (vec![log2], vec![], Some("bytes > 4096")),
+        ] {
+            let asked = request(emit, keys, filter);
+            assert!(
+                !histogram_is_enough(&asked),
+                "{asked:?} needs the requests one at a time"
+            );
+        }
+        let mut counted = request(vec![log2], vec![], None);
+        counted.mode = Mode::Count;
+        assert!(!histogram_is_enough(&counted));
+    }
+
+    /// A row becomes one event weighed by the requests it counted, at its
+    /// bucket's low bound -- the value the emit layer's log2 bucketing puts
+    /// back in that bucket -- with the exact total beside it, and keyed by the
+    /// device and nothing else.
+    #[test]
+    fn a_histogram_row_is_one_weighted_event_in_its_own_bucket() {
+        let mut collector = collector(Measure::Latency);
+        let row = crate::bpf::HistRow {
+            dev: (259 << 20) | 6,
+            bucket: 15,
+            count: 40,
+            total_ns: 40 * 20_000,
+        };
+        let events = collector.histogram_events(vec![row], 0);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let value = |name: &str| {
+            event
+                .attrs
+                .iter()
+                .find(|attr| attr.name == name)
+                .unwrap_or_else(|| panic!("no `{name}`"))
+                .value
+                .clone()
+        };
+        assert_eq!(value("latency_ns"), crate::event::AttrValue::Uint(1 << 14));
+        assert_eq!(
+            value(crate::emit::WEIGHT_ATTR),
+            crate::event::AttrValue::Uint(40)
+        );
+        assert_eq!(value("total_ns"), crate::event::AttrValue::Uint(800_000));
+        assert_eq!(event.keys, vec![KeyValue::dev(259, 6)]);
+        assert_eq!(collector.histogram_requests, 40);
     }
 }

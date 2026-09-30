@@ -54,6 +54,20 @@ fn a_program_that_blocks_ten_times_shows_ten_context_switches() {
         eprintln!("skipped: this machine refuses unprivileged perf sampling");
         return;
     }
+    // Refused before anything runs: no capability for the eBPF backend, and
+    // `pmu:sw` missing because a context switch is kernel mode and this
+    // machine lets the process count its own user mode only (paranoid 2).
+    if !output.status.success()
+        && (text.contains("has no viable backend on this machine")
+            || text.contains("which happen only in kernel mode"))
+    {
+        let reason = text
+            .lines()
+            .find(|l| l.starts_with("error:"))
+            .unwrap_or(&text);
+        eprintln!("skipped: {reason}");
+        return;
+    }
     assert!(output.status.success(), "{text}");
 
     // Ten waits are ten times this task leaves the cpu. The kernel may add

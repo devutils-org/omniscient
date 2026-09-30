@@ -660,15 +660,46 @@ mod tests {
             eprintln!("skipped the cross-check: no bpftool on this machine");
             return;
         };
-        let dump = String::from_utf8_lossy(&dump.stdout);
-        let expected: Option<u32> = dump
-            .lines()
-            .find(|line| line.contains("VAR 'runqueues'"))
-            .and_then(|line| line.trim_start_matches('[').split(']').next()?.parse().ok());
-        match expected {
-            Some(expected) => assert_eq!(id, expected),
-            None => eprintln!("skipped the cross-check: bpftool could not dump the BTF"),
+        // What bpftool answered, when it did not dump: Ubuntu's `bpftool` is a
+        // wrapper that looks for the tool built for the running kernel and
+        // says which package it wants when that kernel is not the one
+        // `linux-tools` was installed for (a CI runner's `-azure` kernel).
+        let answered = || {
+            let said = String::from_utf8_lossy(&dump.stderr);
+            let said = said
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("nothing on stderr");
+            format!("{}: {said}", dump.status)
+        };
+        if !dump.status.success() {
+            eprintln!(
+                "skipped the cross-check: bpftool could not dump {VMLINUX_BTF} ({})",
+                answered()
+            );
+            return;
         }
+        let text = String::from_utf8_lossy(&dump.stdout);
+        // The variable's own line, `[<id>] VAR 'runqueues' ...`: the per-cpu
+        // DATASEC lists the same name as a member (`type_id=<id> offset=...
+        // (VAR 'runqueues')`), and taking that line first is what made this
+        // cross-check skip on every machine that has bpftool.
+        let expected: Option<u32> = text.lines().find_map(|line| {
+            let (id, rest) = line.strip_prefix('[')?.split_once("] ")?;
+            rest.starts_with("VAR 'runqueues' ")
+                .then(|| id.parse().ok())?
+        });
+        // bpftool dumped the kernel's BTF and it has no `runqueues` variable,
+        // which this reader just found: one of the two is wrong.
+        let expected = expected.unwrap_or_else(|| {
+            panic!(
+                "bpftool dumped {VMLINUX_BTF} ({} lines) with no `VAR 'runqueues'`, which this \
+                 reader found as id {id}",
+                text.lines().count()
+            )
+        });
+        assert_eq!(id, expected);
     }
 
     /// A type this parser does not index still has to be stepped over by

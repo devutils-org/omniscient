@@ -37,6 +37,11 @@
     - "Request pointers get recycled: the key is (ptr, open_ts), not the pointer."
     - "A cold run and a warm run differ by an order of magnitude. Declare which
        one the protocol wants and enforce it."
+    - "`--emit hist` alone, in `trace`, with no filter and no key but `dev`, is
+       built in the kernel: one row per device and log2 bucket, read at the end,
+       and no record per request. Its rows carry no `blk`, `task` or `req` key,
+       so a join or a per-task answer needs another emit beside it, which
+       streams every completion instead."
 
 - id: io.queue
   family: io

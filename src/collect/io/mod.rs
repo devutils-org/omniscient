@@ -98,6 +98,7 @@ pub fn factories() -> Vec<Factory> {
                 measure: Measure::Latency,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                in_kernel_histogram: block::histogram_is_enough(&resolved.request),
             }))
         }),
         Factory::new("io.queue", "bpf:raw_tp", |resolved| {
@@ -105,6 +106,7 @@ pub fn factories() -> Vec<Factory> {
                 measure: Measure::Queue,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                in_kernel_histogram: false,
             }))
         }),
         Factory::new("io.size", "bpf:raw_tp", |resolved| {
@@ -112,6 +114,7 @@ pub fn factories() -> Vec<Factory> {
                 measure: Measure::Size,
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                in_kernel_histogram: false,
             }))
         }),
         // The two layers above the block one, over fentry and bucketed in the
