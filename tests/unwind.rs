@@ -196,36 +196,69 @@ struct Profile {
     collector_cpu_ns: u64,
     /// What the target said its own thread used.
     target_cpu_ns: u64,
+    /// What `omn` and the program it launched used between them, by the
+    /// kernel's account (`wait4`), in microseconds' resolution.
+    tree_cpu_ns: u64,
+}
+
+impl Profile {
+    /// What the tool cost, measured outside it: the kernel's account of the
+    /// whole run less what the program says its own thread used.
+    fn tool_cpu_ns(&self) -> u64 {
+        self.tree_cpu_ns.saturating_sub(self.target_cpu_ns)
+    }
 }
 
 /// Runs `omn cpu.profile` over a build, with a stack mode (`None`: auto).
 fn profile(binary: &Path, batches: &str, stack: Option<&str>, hz: u32) -> Result<Profile, String> {
+    profile_emitting(binary, batches, stack, hz, true)
+}
+
+/// [`profile`], emitting stacks or, for `--stack none` which refuses them,
+/// the hottest functions.
+fn profile_emitting(
+    binary: &Path,
+    batches: &str,
+    stack: Option<&str>,
+    hz: u32,
+    emit_stack: bool,
+) -> Result<Profile, String> {
     static RUN: AtomicUsize = AtomicUsize::new(0);
     let out = scratch().join(format!("run-{}", RUN.fetch_add(1, Ordering::SeqCst)));
     let mut command = Command::new(BINARY);
-    command.args([
-        "cpu.profile",
-        "--mode",
-        &format!("sample@{hz}hz"),
-        "--emit",
-        "stack",
-        "--format",
-        "json",
-        "-o",
-    ]);
+    command.args(["cpu.profile", "--mode", &format!("sample@{hz}hz")]);
+    command.args(["--emit", if emit_stack { "stack" } else { "topk" }]);
+    command.args(["--format", "json", "-o"]);
     command.arg(&out);
     if let Some(stack) = stack {
         command.args(["--stack", stack]);
     }
     command.arg("--").arg(binary).arg(batches);
-    let output = command
+    // Waited for with `wait4` rather than `output`, for the kernel's account
+    // of what `omn` and the program it launched used between them: the cost
+    // the tool reports about itself is held against this, not against itself.
+    let mut child = command
         .stdout(Stdio::null())
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| error.to_string())?;
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if !output.status.success() {
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr was piped")
+        .read_to_string(&mut stderr)
+        .map_err(|error| error.to_string())?;
+    let mut status = 0;
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::wait4(child.id() as i32, &mut status, 0, &mut usage) } < 0 {
+        return Err(format!("wait4: {}", std::io::Error::last_os_error()));
+    }
+    if !(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0) {
         return Err(stderr);
     }
+    let micros = |time: libc::timeval| time.tv_sec as u64 * 1_000_000 + time.tv_usec as u64;
+    let tree_cpu_ns = (micros(usage.ru_utime) + micros(usage.ru_stime)) * 1_000;
     let target_cpu_ns = stderr
         .lines()
         .find_map(|line| line.strip_prefix("cpu_ns="))
@@ -272,6 +305,7 @@ fn profile(binary: &Path, batches: &str, stack: Option<&str>, hz: u32) -> Result
         events: result["events_seen"].as_u64().unwrap_or(0),
         collector_cpu_ns: cost["overhead"]["collector_cpu_ns"].as_u64().unwrap_or(0),
         target_cpu_ns,
+        tree_cpu_ns,
     })
 }
 
@@ -461,6 +495,172 @@ fn dwarf_recovers_the_whole_tree_of_a_build_without_frame_pointers() {
     );
 }
 
+/// A program whose every sample is deeper than the copy, by construction:
+/// `spin` runs at the bottom of `descend` recursed `argv[1]` times, each level
+/// holding a kilobyte of its own, so from `spin` to `main` is `argv[1]`
+/// kilobytes and more of stack.
+const DEEP: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+static volatile uint64_t sink;
+
+__attribute__((noinline)) static void spin(void) {
+    uint64_t x = 1;
+    for (uint64_t i = 0; i < 400000000ULL; i++) x = x * 6364136223846793005ULL + 1;
+    sink += x;
+}
+__attribute__((noinline)) static uint64_t descend(int depth) {
+    volatile char pad[1024];
+    pad[0] = (char)depth;
+    pad[1023] = pad[0];
+    if (depth > 0) return descend(depth - 1) + pad[1023];
+    spin();
+    return pad[1023];
+}
+
+int main(int argc, char **argv) {
+    sink += descend(argc > 1 ? atoi(argv[1]) : 24);
+    struct timespec cpu;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
+    fprintf(stderr, "cpu_ns=%lld\n", (long long)cpu.tv_sec * 1000000000LL + cpu.tv_nsec);
+    return 0;
+}
+"#;
+
+/// The loss `dwarf` declares: a stack deeper than the bytes copied is cut
+/// where the copy ends. The same program recursed 24 levels of a kilobyte each
+/// -- three times the 8 KiB copied -- and 2 levels: every sample of the deep
+/// run is in `spin` under 24 frames of `descend` the copy cannot hold, so
+/// every walk is cut, counted, and said to be; `main` is in none of its
+/// stacks. The shallow run fits the copy, and reaches `main` with no such note.
+#[test]
+fn dwarf_counts_and_says_the_stacks_deeper_than_its_copy() {
+    let directory = scratch();
+    let source = directory.join("deep.c");
+    let binary = directory.join("deep");
+    std::fs::write(&source, DEEP).unwrap();
+    if !Command::new("cc")
+        .args(["-O1", "-fomit-frame-pointer", "-g", "-o"])
+        .arg(&binary)
+        .arg(&source)
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        eprintln!("skipped: no C compiler (`cc`) to build the deep stack with");
+        return;
+    }
+    let run = |depth: &str| match profile(&binary, depth, Some("dwarf"), 999) {
+        Ok(profile) => Some(profile),
+        Err(error) if error.contains("perf_event_paranoid") || error.contains("no viable") => {
+            eprintln!("skipped: this machine would not profile ({error})");
+            None
+        }
+        Err(error) => panic!("omn cpu.profile --stack dwarf over depth {depth} failed: {error}"),
+    };
+    let Some(deep) = run("24") else {
+        return;
+    };
+    let in_spin: u64 = deep
+        .stacks
+        .iter()
+        .filter(|(frames, _)| frames.last().is_some_and(|leaf| plain(leaf) == "spin"))
+        .map(|(_, events)| events)
+        .sum();
+    let total: u64 = deep.stacks.iter().map(|(_, events)| events).sum();
+    assert!(
+        total >= 100 && in_spin * 10 >= total * 9,
+        "the deep run was built to live in `spin`: {in_spin} of {total} samples there"
+    );
+    let reaching_main: u64 = deep
+        .stacks
+        .iter()
+        .filter(|(frames, _)| frames.iter().any(|frame| plain(frame) == "main"))
+        .map(|(_, events)| events)
+        .sum();
+    assert!(
+        reaching_main * 10 <= total,
+        "{reaching_main} of {total} samples reached `main` through 24 KiB of stack from an \
+         8 KiB copy"
+    );
+    // A cut walk holds what the copy held: some levels of `descend`, never
+    // all 24. One whose unwind stopped at the leaf holds none, and is allowed
+    // to be the exception, not the rule.
+    let mut partial = 0;
+    for (frames, events) in &deep.stacks {
+        if frames.last().is_some_and(|leaf| plain(leaf) == "spin") {
+            let levels = frames
+                .iter()
+                .filter(|frame| plain(frame) == "descend")
+                .count();
+            assert!(
+                levels < 24,
+                "all 24 levels were walked from an 8 KiB copy: {frames:?}"
+            );
+            if levels > 0 {
+                partial += events;
+            }
+        }
+    }
+    assert!(
+        partial * 10 >= in_spin * 9,
+        "{partial} of {in_spin} samples in `spin` kept part of the recursion the copy held: {:?}",
+        deep.stacks
+    );
+    let cut = deep
+        .degradations
+        .iter()
+        .chain(&deep.notes)
+        .find(|note| note.contains("deeper than the 8192 bytes copied"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the cut walks are not said: {:?} {:?}",
+                deep.degradations, deep.notes
+            )
+        });
+    let counted: u64 = cut
+        .split_whitespace()
+        .next()
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("the note does not count the cut walks: {cut}"));
+    assert!(
+        counted >= in_spin * 9 / 10 && counted <= total,
+        "the note counts {counted} cut walks where {in_spin} of {total} samples were in `spin` \
+         under 24 KiB of stack: {cut}"
+    );
+
+    let Some(shallow) = run("2") else {
+        return;
+    };
+    let shallow_total: u64 = shallow.stacks.iter().map(|(_, events)| events).sum();
+    let shallow_main: u64 = shallow
+        .stacks
+        .iter()
+        .filter(|(frames, _)| {
+            contains_path(frames, &["main", "descend", "descend", "descend", "spin"])
+        })
+        .map(|(_, events)| events)
+        .sum();
+    assert!(
+        shallow_main * 10 >= shallow_total * 9,
+        "2 KiB of stack fits the copy, and only {shallow_main} of {shallow_total} samples \
+         reached `main`: {:?}",
+        shallow.stacks
+    );
+    assert!(
+        !shallow
+            .degradations
+            .iter()
+            .chain(&shallow.notes)
+            .any(|note| note.contains("deeper than the 8192 bytes copied")),
+        "a stack that fits the copy was said to be cut: {:?} {:?}",
+        shallow.degradations,
+        shallow.notes
+    );
+}
+
 /// The contrast: frame pointers over the same build come back short. Not a
 /// profile of the tree, and said to be one of leaf functions.
 #[test]
@@ -632,46 +832,186 @@ fn each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp() {
         assert!(samples.iter().all(|sample| sample.user_regs.is_some()));
     }
 
-    // Two runs of each, alternated so that the machine's load falls on both:
-    // the modes separate when the cheaper dwarf run still cost more per
-    // sample than the dearer fp run.
+    // The cost of each mode, measured outside the tool: over a steady second
+    // and a half of the target's run, the cpu time the kernel accounts to
+    // `omn`'s threads, against the cpu time it accounts to the target -- the
+    // clock `CLOCK_THREAD_CPUTIME_ID` reads -- which says how many periods,
+    // and so how many samples, that was. Two runs of each, alternated so that
+    // the machine's load falls on both: the modes separate when the cheaper
+    // dwarf run still cost more per sample than the dearer fp run.
     let mut fp = Vec::new();
     let mut dwarf = Vec::new();
     for _ in 0..2 {
         let (Some(one), Some(other)) = (
-            profile_or_skip(Build::NoFp, Some("fp")),
-            profile_or_skip(Build::NoFp, Some("dwarf")),
+            steady_cost(binary, "fp", 1999),
+            steady_cost(binary, "dwarf", 1999),
         ) else {
             return;
         };
         fp.push(one);
         dwarf.push(other);
     }
-    let per_sample =
-        |profile: &Profile| profile.collector_cpu_ns as f64 / profile.events.max(1) as f64 / 1e3;
-    let describe = |runs: &[Profile]| -> String {
+    let describe = |runs: &[SteadyCost]| -> String {
         runs.iter()
             .map(|run| {
                 format!(
-                    "{:.1} us a sample over {} (target thread {:.0} ms)",
-                    per_sample(run),
-                    run.events,
-                    run.target_cpu_ns as f64 / 1e6
+                    "{:.1} us a sample ({:.1} ms of omn over {:.0} ms of the target)",
+                    run.per_sample_ns() / 1e3,
+                    run.tool_ns as f64 / 1e6,
+                    run.target_ns as f64 / 1e6
                 )
             })
             .collect::<Vec<_>>()
             .join(", ")
     };
     eprintln!("fp: {}; dwarf: {}", describe(&fp), describe(&dwarf));
-    assert!(fp.iter().chain(&dwarf).all(|run| run.events > 500));
-    let dearest_fp = fp.iter().map(per_sample).fold(0.0, f64::max);
-    let cheapest_dwarf = dwarf.iter().map(per_sample).fold(f64::MAX, f64::min);
+    let dearest_fp = fp.iter().map(SteadyCost::per_sample_ns).fold(0.0, f64::max);
+    let cheapest_dwarf = dwarf
+        .iter()
+        .map(SteadyCost::per_sample_ns)
+        .fold(f64::MAX, f64::min);
     assert!(
         cheapest_dwarf > dearest_fp,
         "declared high and low, dwarf and fp do not separate: fp {}; dwarf {}",
         describe(&fp),
         describe(&dwarf)
     );
+
+    // The samples and the tool's own figure, over whole runs. The target did
+    // the same work under both modes, and a sample is a period of its own
+    // clock: the samples delivered are what that clock says ran, with a run's
+    // partial first and last periods and the load of five other streams well
+    // inside a tenth. What the tool reports it cost cannot exceed what the
+    // kernel counts for the run beyond the target (`wait4`, whole run, less
+    // the target's own clock), at the microsecond resolution of `wait4`.
+    for mode in ["fp", "dwarf"] {
+        let Some(run) = profile_or_skip(Build::NoFp, Some(mode)) else {
+            return;
+        };
+        let expected = run.target_cpu_ns as f64 / (1e9 / 1999.0);
+        let said = format!(
+            "{mode}: {} samples, the target's clock says {:.0} ms = {expected:.0} periods; the \
+             tool says it cost {:.1} ms, the kernel counts {:.1} ms beyond the target",
+            run.events,
+            run.target_cpu_ns as f64 / 1e6,
+            run.collector_cpu_ns as f64 / 1e6,
+            run.tool_cpu_ns() as f64 / 1e6
+        );
+        eprintln!("{said}");
+        assert!(
+            (run.events as f64) > expected * 0.9 && (run.events as f64) < expected * 1.1,
+            "{said}"
+        );
+        assert!(
+            run.collector_cpu_ns <= run.tool_cpu_ns() + 1_000_000,
+            "{said}"
+        );
+    }
+}
+
+/// What `omn` cost over a steady stretch of its target's run, both by the
+/// kernel's account.
+#[derive(Debug)]
+struct SteadyCost {
+    /// Cpu time of `omn`'s threads over the stretch.
+    tool_ns: u64,
+    /// Cpu time of the target over the same stretch.
+    target_ns: u64,
+    hz: u32,
+}
+
+impl SteadyCost {
+    /// The tool's cpu per sample: the target's cpu over the stretch is that
+    /// many periods of the sampling clock, and each period is one sample.
+    fn per_sample_ns(&self) -> f64 {
+        let samples = self.target_ns as f64 * f64::from(self.hz) / 1e9;
+        self.tool_ns as f64 / samples.max(1.0)
+    }
+}
+
+/// The cpu time of every thread of `pid`, from each one's `schedstat`: the
+/// kernel's nanoseconds on a cpu, the same account `CLOCK_THREAD_CPUTIME_ID`
+/// reads.
+fn cpu_of(pid: u32) -> Option<u64> {
+    let mut total = 0;
+    for task in std::fs::read_dir(format!("/proc/{pid}/task")).ok()? {
+        let text = std::fs::read_to_string(task.ok()?.path().join("schedstat")).ok()?;
+        total += text.split_whitespace().next()?.parse::<u64>().ok()?;
+    }
+    Some(total)
+}
+
+/// The child of `parent` whose command name is `name`, once it has exec'd.
+fn child_named(parent: u32, name: &str) -> Option<u32> {
+    std::fs::read_dir("/proc").ok()?.find_map(|entry| {
+        let pid: u32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (head, tail) = stat.rsplit_once(") ")?;
+        let comm = head.split_once(" (")?.1;
+        let ppid: u32 = tail.split_whitespace().nth(1)?.parse().ok()?;
+        (ppid == parent && name.starts_with(comm) && !comm.is_empty()).then_some(pid)
+    })
+}
+
+/// Runs `omn cpu.profile --stack <stack>` over the nofp build for about three
+/// seconds and measures it from outside over a second and a half in the
+/// middle, where neither the tool's start nor its symbolizing at the end is.
+fn steady_cost(binary: &Path, stack: &str, hz: u32) -> Option<SteadyCost> {
+    let out = scratch().join(format!("steady-{stack}-{}", std::process::id()));
+    let name = binary.file_name()?.to_str()?.to_owned();
+    let mut omn = Command::new(BINARY)
+        .args([
+            "cpu.profile",
+            "--mode",
+            &format!("sample@{hz}hz"),
+            "--emit",
+            "stack",
+            "--format",
+            "json",
+            "--stack",
+            stack,
+            "-o",
+        ])
+        .arg(&out)
+        .arg("--")
+        .arg(binary)
+        .arg("3000")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("omn runs");
+    let start = std::time::Instant::now();
+    let target = loop {
+        if let Some(pid) = child_named(omn.id(), &name) {
+            break pid;
+        }
+        if omn.try_wait().expect("wait").is_some() || start.elapsed() > Duration::from_secs(10) {
+            let _ = omn.kill();
+            let _ = omn.wait();
+            eprintln!("skipped: the target of `omn --stack {stack}` was never seen running");
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let before = (cpu_of(omn.id()), cpu_of(target));
+    std::thread::sleep(Duration::from_millis(1500));
+    let after = (cpu_of(omn.id()), cpu_of(target));
+    let status = omn.wait().expect("wait");
+    assert!(status.success(), "omn --stack {stack} failed: {status}");
+    match (before, after) {
+        ((Some(tool0), Some(target0)), (Some(tool1), Some(target1))) if target1 > target0 => {
+            Some(SteadyCost {
+                tool_ns: tool1.saturating_sub(tool0),
+                target_ns: target1 - target0,
+                hz,
+            })
+        }
+        _ => panic!(
+            "the target ran out before the stretch ended: {before:?} {after:?}; it is built to \
+             run about three seconds"
+        ),
+    }
 }
 
 /// Launches `binary`, samples it with `callchain` from its first instruction
@@ -748,13 +1088,20 @@ fn user_only_stacks_carry_no_kernel_frame_and_leave_the_system_calls_out() {
         &source,
         r#"
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
     long n = argc > 1 ? atol(argv[1]) : 300000;
     int fd = open("/dev/null", O_WRONLY);
     char byte = 0;
     for (long i = 0; i < n; i++) write(fd, &byte, 1);
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
+    fprintf(stderr, "user_us=%ld system_us=%ld\n",
+            usage.ru_utime.tv_sec * 1000000L + usage.ru_utime.tv_usec,
+            usage.ru_stime.tv_sec * 1000000L + usage.ru_stime.tv_usec);
     return 0;
 }
 "#,
@@ -771,7 +1118,15 @@ int main(int argc, char **argv) {
         return;
     }
     let count = |callchain| {
-        let samples = sample_launched_args(&binary, callchain, "600000")?;
+        let (samples, stderr) = sample_launched_args(&binary, callchain, "600000")?;
+        let field = |name: &str| -> u64 {
+            stderr
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| panic!("the program did not report {name}: {stderr}"))
+        };
+        let own = (field("user_us=") * 1_000, field("system_us=") * 1_000);
         let kernel_frames: usize = samples
             .iter()
             .filter_map(omn::stack::RawStack::of)
@@ -781,13 +1136,39 @@ int main(int argc, char **argv) {
             .iter()
             .filter(|sample| sample.cpu_mode == CpuMode::Kernel)
             .count();
-        Some((samples.len(), kernel_frames, in_kernel))
+        Some((samples.len(), kernel_frames, in_kernel, own))
     };
-    let Some((user_samples, user_kernel_frames, user_in_kernel)) =
+    let Some((user_samples, user_kernel_frames, user_in_kernel, (user_ns, system_ns))) =
         count(Callchain::FramePointers { kernel: false })
     else {
         return;
     };
+    // The program's own account (`getrusage`) of where its time went is the
+    // reference, at any paranoia: user-only samples cover the user time and
+    // leave the system time out. A sample is 100 us of cpu clock; the split
+    // between user and system time is the kernel's tick-sampled estimate, so
+    // the slack is generous and the assertion is the separation.
+    let sampled_ns = user_samples as u64 * 100_000;
+    eprintln!(
+        "user half: {user_samples} samples = {} ms; the program says {} ms user, {} ms system",
+        sampled_ns / 1_000_000,
+        user_ns / 1_000_000,
+        system_ns / 1_000_000
+    );
+    assert!(
+        system_ns > user_ns * 2,
+        "the workload was meant to live in the kernel: {user_ns} ns user, {system_ns} ns system"
+    );
+    assert!(
+        sampled_ns * 2 < user_ns + system_ns,
+        "user-only samples covered {sampled_ns} ns of a program that used {user_ns} ns user \
+         and {system_ns} ns system: the system time was not left out"
+    );
+    assert!(
+        sampled_ns * 2 > user_ns && sampled_ns < user_ns * 2 + 20_000_000,
+        "user-only samples covered {sampled_ns} ns where the program says it used {user_ns} ns \
+         in user mode"
+    );
     assert_eq!(
         user_kernel_frames, 0,
         "a user-only stack carried kernel frames"
@@ -803,7 +1184,7 @@ int main(int argc, char **argv) {
         );
         return;
     }
-    let (both_samples, both_kernel_frames, both_in_kernel) =
+    let (both_samples, both_kernel_frames, both_in_kernel, _) =
         count(Callchain::FramePointers { kernel: true }).expect("both halves open here");
     eprintln!(
         "both halves: {both_samples} samples, {both_in_kernel} in the kernel, {both_kernel_frames} \
@@ -819,11 +1200,24 @@ int main(int argc, char **argv) {
     );
 }
 
-fn sample_launched_args(binary: &Path, callchain: Callchain, arg: &str) -> Option<Vec<Sample>> {
+/// Launches `binary arg` sampled with `callchain`, and hands back the samples
+/// and what the program wrote on its standard error.
+fn sample_launched_args(
+    binary: &Path,
+    callchain: Callchain,
+    arg: &str,
+) -> Option<(Vec<Sample>, String)> {
     let mut child = Command::new(binary)
         .arg(arg)
+        .stderr(Stdio::piped())
         .spawn()
         .expect("the fixture was just built");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr_pipe.read_to_string(&mut text);
+        text
+    });
     let pid = child.id() as i32;
     let spec = omn::perf::SampleSpec::software(CPU_CLOCK, 100_000, callchain);
     let mut event = match SampledEvent::open(&spec, Scope::Process(pid), 512) {
@@ -853,32 +1247,128 @@ fn sample_launched_args(binary: &Path, callchain: Callchain, arg: &str) -> Optio
             samples.push(sample);
         }
     });
-    Some(samples)
+    let stderr = reader.join().unwrap_or_default();
+    Some((samples, stderr))
 }
 
-/// The resolver's own words, at the kernel's default: where the machine
-/// refuses the kernel half, the choice is user-only and says so. On a machine
-/// that allows it, the choice takes both halves and says nothing.
+/// Whether the kernel lets the `omn` binary profile the kernel, read from what
+/// the kernel itself decides by (`perf_allow_kernel`): `perf_event_paranoid`
+/// at 1 or below, or a process that holds `CAP_PERFMON` or `CAP_SYS_ADMIN`.
+/// Nothing of the tool is asked: the paranoia is read from `/proc`, the
+/// capabilities from the binary's `security.capability` attribute and this
+/// process's credentials. `Err` is a case this cannot tell, said by the caller.
+fn kernel_allowed_to_the_binary() -> Result<(bool, String), String> {
+    let paranoid: i32 = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .map_err(|error| format!("cannot read perf_event_paranoid: {error}"))?
+        .trim()
+        .parse()
+        .map_err(|error| format!("perf_event_paranoid is not a number: {error}"))?;
+    if paranoid <= 1 {
+        return Ok((true, format!("perf_event_paranoid {paranoid}")));
+    }
+    if unsafe { libc::geteuid() } == 0 {
+        return Ok((true, format!("perf_event_paranoid {paranoid}, run as root")));
+    }
+    const CAP_SYS_ADMIN: u32 = 21;
+    const CAP_PERFMON: u32 = 38;
+    let status = std::fs::read_to_string("/proc/self/status").map_err(|error| error.to_string())?;
+    let bounding = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapBnd:"))
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        .ok_or("no CapBnd in /proc/self/status")?;
+    let path = std::ffi::CString::new(BINARY).unwrap();
+    let name = std::ffi::CString::new("security.capability").unwrap();
+    let mut raw = [0u8; 24];
+    let len = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            raw.as_mut_ptr().cast(),
+            raw.len(),
+        )
+    };
+    if len < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            return Ok((
+                false,
+                format!("perf_event_paranoid {paranoid}, and {BINARY} carries no capability"),
+            ));
+        }
+        return Err(format!("cannot read {BINARY}'s capabilities: {error}"));
+    }
+    if len < 20 {
+        return Err(format!(
+            "{BINARY}'s capability attribute is {len} bytes, not a v2 or v3 one"
+        ));
+    }
+    let word = |at: usize| u32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
+    let effective = word(0) & 1 == 1;
+    let permitted = u64::from(word(4)) | (u64::from(word(12)) << 32);
+    let granted = permitted & bounding;
+    let capable = granted & (1 << CAP_PERFMON | 1 << CAP_SYS_ADMIN) != 0;
+    if capable && !effective {
+        return Err(format!(
+            "{BINARY} is permitted CAP_PERFMON or CAP_SYS_ADMIN but not with the effective bit, \
+             which only a program that raises its own capabilities uses"
+        ));
+    }
+    Ok((
+        capable,
+        format!(
+            "perf_event_paranoid {paranoid}, {BINARY} {} CAP_PERFMON or CAP_SYS_ADMIN",
+            if capable { "holds" } else { "holds neither" }
+        ),
+    ))
+}
+
+/// The resolver's own words, held against the kernel's rule rather than
+/// against the probe the chooser asks: where the paranoia and the binary's
+/// capabilities refuse the kernel, the choice is user-only and says so, for a
+/// mode with stacks and for `--stack none` alike -- a sampler without stacks
+/// still has to leave the kernel out to be opened at all. Where they allow it,
+/// the choice takes the kernel too and says nothing.
 #[test]
 fn the_choice_says_user_only_exactly_when_the_machine_refuses_the_kernel() {
     let Some(binary) = build(Build::Leaf) else {
         return;
     };
-    let Ok(profile) = profile(binary, "50", None, 999) else {
-        return;
+    let (allowed, why) = match kernel_allowed_to_the_binary() {
+        Ok(answer) => answer,
+        Err(error) => {
+            eprintln!("skipped: cannot tell independently whether the kernel is refused: {error}");
+            return;
+        }
     };
-    let said = profile
-        .degradations
-        .iter()
-        .chain(&profile.notes)
-        .any(|note| note.contains("stacks are user-only"));
-    assert_eq!(
-        said,
-        !omn::perf::kernel_callchain_allowed(),
-        "{:?} {:?}",
-        profile.degradations,
-        profile.notes
-    );
+    eprintln!("kernel profiling allowed to the binary: {allowed} ({why})");
+    for (stack, words) in [
+        (None, "stacks are user-only"),
+        (Some("none"), "samples are user-only"),
+    ] {
+        let profile = match profile_emitting(binary, "50", stack, 999, stack.is_none()) {
+            Ok(profile) => profile,
+            Err(error) => panic!(
+                "cpu.profile --stack {stack:?} was refused where the kernel {} ({why}): {error}",
+                if allowed {
+                    "is allowed"
+                } else {
+                    "is refused and user-only samples are what it should take"
+                }
+            ),
+        };
+        let said = profile
+            .degradations
+            .iter()
+            .chain(&profile.notes)
+            .any(|note| note.contains(words));
+        assert_eq!(
+            said, !allowed,
+            "--stack {stack:?}, {why}: {:?} {:?}",
+            profile.degradations, profile.notes
+        );
+        assert!(profile.events > 0, "--stack {stack:?}: no sample at all");
+    }
 }
 
 // ---------------------------------------------------------------------------

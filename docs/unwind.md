@@ -24,7 +24,10 @@ file's `stack` field are other streams' files (filed below); `lbr` has no
 collector because no cpu here offers a branch call stack to exercise one
 against; `sframe` has no kernel to ask; the paranoid-2 path is checked here as
 far as a machine at paranoid -1 can check it, and by the CI's next run for the
-rest.
+rest; the resolved file does not carry the unwind choice yet (P's and R's
+files), so items 1, 3 and 4 say it in the profile's notes and degradations.
+The adversarial review of the branch, and what came of each finding, is under
+"Review" below.
 
 ---
 
@@ -204,15 +207,39 @@ kernel: stacks are user-only, and a sample taken while the task ran in the
 kernel is not delivered, so time spent in system calls is missing from this
 profile"*.
 
+**`--stack none` too.** A profile without stacks is still a sampler, and at
+paranoid 2 the kernel refuses an unprivileged sampler that includes it
+whatever it asks for. The first version set `user_only` only for a mode with a
+stack, so `--stack none` opened a cpu-clock event without `exclude_kernel` and
+would have been refused with `EACCES` (found by reading the code; this machine
+is at -1). Now `choose` sets `user_only` for every mode, `ProfileCollector::spec`
+sets `SampleSpec::exclude_kernel` from it, and the degradation says *"samples
+are user-only"* for `none`. The unit test
+`a_user_only_choice_excludes_the_kernel_even_without_a_stack` holds the event
+for `none`, `fp` and `dwarf`, both ways.
+
 The `callchain` requirement string is still answered by P's `capabilities.rs`,
 which calls `callchain_supported`, so the probe opens what the collector will
 open. Ground truth here (`tests/unwind.rs`,
 `user_only_stacks_carry_no_kernel_frame_and_leave_the_system_calls_out`): a
 program that makes 600 000 one-byte `write`s to `/dev/null`, sampled both ways.
-User-only: no kernel frame and no kernel-mode sample at all. Both halves: most
-samples in the kernel, and more than twice the user-only count for the same
-work. **The CI's next run at paranoid 2 is the rest of the check**: the probe,
-the choice and the note on a machine that actually refuses.
+User-only: no kernel frame and no kernel-mode sample at all, and -- at any
+paranoia, so this half runs at paranoid 2 as well -- the user-only samples are
+held to the program's own `getrusage`: they cover its user time (within a
+factor of two and 20 ms, the user/system split being the kernel's tick-sampled
+estimate) and less than half of its user plus system time. Measured: 237
+samples = 23 ms, where the program said 17 ms user and 84 ms system. Both
+halves, where the machine allows them: most samples in the kernel, and more
+than twice the user-only count for the same work.
+
+`the_choice_says_user_only_exactly_when_the_machine_refuses_the_kernel` is held
+to the kernel's own rule (`perf_allow_kernel`), read independently of the
+chooser: `/proc/sys/kernel/perf_event_paranoid`, the test's euid, the
+`security.capability` attribute of `target/debug/omn` (`CAP_PERFMON` or
+`CAP_SYS_ADMIN`, with the effective bit, masked by the bounding set). It runs
+both `--stack auto` and `--stack none`, and a refusal of either is a failure,
+not a skip. **The CI's next run at paranoid 2 is the rest of the check**: the
+probe, the choice and the note on a machine that actually refuses.
 
 ## 4. Names, from debuginfod
 
@@ -319,9 +346,10 @@ of the samples taken plus two points for the callers' own loops.
 | `fp_over_a_build_without_frame_pointers_...` | nofp | fp | most spin samples broken; the note says "built without them" |
 | `auto_chooses_by_how_the_target_was_built_...` | all four | auto | fp+leaf, fp+leaf, dwarf, dwarf, each with why |
 | `a_mode_this_machine_cannot_serve_...` | leaf | lbr, sframe | refused, naming `pmu:branch_call_stack` / `kernel:sframe` |
-| `each_mode_copies_what_it_declares_...` | nofp | fp+leaf, dwarf | the copy is min(declared, stack top − sp) in ≥ 90 % of samples, the stack top read from the target's own `[stack]` mapping; dwarf costs more per sample than fp, in two alternated runs each |
-| `user_only_stacks_...` | writes | fp, user half | no kernel frame; fewer than half the samples of both halves |
-| `the_choice_says_user_only_exactly_when_...` | leaf | auto | the note iff the machine refuses the kernel |
+| `dwarf_counts_and_says_the_stacks_deeper_than_its_copy` | deep (24 levels of 1 KiB), shallow (2) | dwarf | the loss path: deep, ≥ 90 % of samples in `spin`, ≤ 10 % reach `main`, no walk holds all 24 levels, ≥ 90 % keep part of them, and the degradation counts the cut walks (≥ 90 % of the `spin` samples); shallow, ≥ 90 % reach `main` through `descend` ×3 and nothing is said to be cut |
+| `each_mode_copies_what_it_declares_...` | nofp | fp+leaf, dwarf | the copy is min(declared, stack top − sp) in ≥ 90 % of samples, the stack top read from the target's own `[stack]` mapping; dwarf costs more per sample than fp in two alternated runs each, measured from outside (below); the samples are the target's own clock divided by the period, within 10 %; the tool's reported cost does not exceed the kernel's count for the run beyond the target |
+| `user_only_stacks_...` | writes | fp, user half | no kernel frame; the samples cover the program's own user time and leave its system time out (`getrusage`); fewer than half the samples of both halves |
+| `the_choice_says_user_only_exactly_when_...` | leaf | auto, none | the note iff the kernel's rule, read from `/proc` and the binary's capabilities, refuses the kernel; neither refused |
 | `a_ring_that_overflows_...` | two threads | fp | per-ring drops are the burner's |
 | `a_stripped_build_is_named_from_debuginfod_...` | strip, nofp | dwarf | as in 4 |
 
@@ -330,36 +358,50 @@ the kernel copies 256 bytes per sample under `fp+leaf` and min(8192, the
 stack's depth) under `dwarf` -- 2344 bytes for the calltree's main thread,
 whose stack is that deep -- but the ring holds the full 8192 plus registers
 either way, which is what makes `dwarf` fill the rings about a hundred times
-faster than a ten-frame `fp` chain. What the collector spends per sample,
-fixed costs included: 15.6 µs under `fp`, 25.6 µs under `dwarf` over 1840
-samples; the target's own thread time for the same work 913 ms and 911 ms, so
-the copy in the target's context is below this measurement's resolution.
+faster than a ten-frame `fp` chain. What the tool spends per sample is
+measured from outside it: over a steady 1.5 s in the middle of a 3 s run, the
+cpu time the kernel accounts to `omn`'s threads (`/proc/<pid>/task/*/schedstat`)
+against the target's own (the account `CLOCK_THREAD_CPUTIME_ID` reads), whose
+nanoseconds divided by the period are the samples taken. Measured: **14.4 and
+14.8 µs a sample under `fp`, 27.1 and 22.3 µs under `dwarf`** (42.8 / 44.1 ms
+and 80.2 / 66.2 ms of `omn` over about 1485 ms of the target). The target's
+own thread time for the same work is 919 ms and 899 ms in whole runs, so the
+copy in the target's context is below this measurement's resolution.
+
+**The tool's own cost figure is not the tool's cost.** Over whole runs,
+`cost.json`'s `collector_cpu_ns` says 26 ms (`fp`) and 46 ms (`dwarf`) where
+`wait4` counts 986 ms and 1016 ms of `omn` beyond the target. The same run with
+`--stack none --emit topk` costs about 60 ms beyond the target, so the rest
+follows the stacks, and most of it comes after the target has exited (wall
+time 1.9 s against 0.97 s). The likely cause is symbolizing in a debug build,
+but that was not measured. The test holds the reported figure only as a lower
+bound. Filed in `docs/open-findings.md` (below).
 
 ## The last check
 
-On `a195314`, the steps of `make check` with the tests run `--no-fail-fast`
-(`make` only stops at the first red binary, and the session index is always the
-first): clippy `--all-targets -D warnings` clean, `cargo fmt --check` clean, and
-the tests red in exactly these:
+On the review fixes (the commit after `3d6ccf7`): one `make check`, red at the
+first binary as always (the session index). Then one `cargo test --workspace
+--no-fail-fast`, clippy `--all-targets -D warnings` and `cargo fmt --check`,
+built with `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0` because `/home` was
+full (below). 45 test binaries green, clippy and fmt clean, the binary still
+carrying `cap_bpf,cap_perfmon`, and exactly two reds:
 
 - `tests/cli.rs` `the_session_indexes_hold_exactly_the_sessions_on_disk`: the
   three sessions below, expected until the coordinator adds their rows.
 - `tests/scenario_cpu.rs` `an_unwinder_this_build_lacks_is_refused_before_the_program_starts`
   (P's file): it expects `--stack dwarf` refused as this build's gap, and
   `dwarf` is served now. Red by design; the change it needs is filed for P.
-- `tests/family_sched.rs`: `a_task_moved_between_two_cpus_is_counted_once_per_move`
-  and `tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them` (#5 and #6
-  of `docs/flaky.md`), and two tests of the same file that panicked on the
-  mutex those two poisoned. The file passed whole when rerun alone.
 
-The run before it, on the same code less the last fixes, also went red once
-each in `scenario_cpu` `a_counted_window_is_the_same_number_in_every_format_that_carries_it`
-(1 038 991 485 instructions for a loop that retires 10⁹), `runner`
-`a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other`
-(windows 11 766 instructions apart) and `triage`
-`an_input_this_machine_cannot_serve_is_dropped_by_name_or_fails_the_question`
-(`cpu_queue` where `cpu` was built, load average 12 to 20); each passed alone,
-none is in a tally, none touches a stack. Written under "for the flaky tally".
+`tests/unwind.rs` 13/13 and `tests/stack_capture.rs` 8/8. The lib tests
+filtered to `profile`, `stack`, `unwind` and `perf` pass 99/99.
+
+On `a195314`, the run before, `family_sched`'s #5 and #6 of `docs/flaky.md`
+went red once and passed alone. The run before that also went red once
+each in `scenario_cpu` `a_counted_window_is_the_same_number_in_every_format_that_carries_it`,
+`runner` `a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other`
+and `triage` `an_input_this_machine_cannot_serve_is_dropped_by_name_or_fails_the_question`.
+Each passed alone, and they are written under "for the flaky tally". None of
+them went red in this run.
 
 **The disk filled twice** during the wave (`/home` at 100 %, six worktrees'
 targets and the main checkout's 22 GB): `rustc` failed with exit 101 and no
@@ -367,6 +409,54 @@ message, then with `No space left on device`. This stream's target was cleared
 and the last run built with `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`,
 which changes no test's behaviour and cuts every test binary to a fraction; the
 coordinator's merge run may want the same.
+
+## Review
+
+An adversarial review of `a195314` and `3d6ccf7` raised nine findings.
+What came of each:
+
+1. **`Cargo.toml` and `Cargo.lock` edited (framehop).** Real, and kept. Item 2
+   of the brief names `framehop` or libdw as the way `dwarf` is served, and a
+   dependency lives only in `Cargo.toml`. No stream owns that file. The
+   alternative, a DWARF unwinder of our own, is what `ROADMAP.md` rules out.
+   The two files change by one dependency line and its lock entries, and
+   nothing else. The coordinator is asked to take it at the merge (filed).
+2. **`src/unwind.yaml` instead of `catalog/unwind.yaml`.** Real, and kept.
+   `Catalog::load_dir` parses every YAML file of the directory as a list of
+   entries. `tests/runner.rs` and `omn --catalog <dir>` load `catalog/` that
+   way, so a mode table there breaks them; no YAML shape can be both a mode
+   table and an empty entry list. The move needs one line in `catalog.rs`,
+   which is R's (filed). Until then the table is data compiled in from
+   `src/`, which keeps the build green.
+3. **The choice does not reach the resolved file.** Real, and still open.
+   `ResolvedRequest` is `resolve.rs` (P's), and `resolved.json` is written by
+   `main.rs` (R's) from the resolution, before any collector runs. None of U's
+   lines can add a field to it. The `StackChoice` serializes and is ready;
+   its content reaches the profile's notes and degradations. Filed for P and R
+   with the exact field.
+4. **`--symbols` cannot be reached.** Real, and still open. The flag is a
+   `Request` field and a `cli.rs` argument, both R's. U owns `StackMode` and
+   its parsing, and folding a second axis into `--stack` would be a second
+   mechanism beside the one the brief asks for. `debuginfod: None` stays until
+   R lands the field, and the one-line change is filed with it.
+5. **`--stack none` refused at paranoid 2.** Real, and **fixed**. See
+   section 3 and `a_user_only_choice_excludes_the_kernel_even_without_a_stack`.
+6. **The user-only test agreed with its own probe.** Real, and **fixed**. The
+   expectation is now the kernel's rule, read from `/proc` and the binary's
+   capabilities. `--stack none` is covered too. At paranoid 2 the user-only
+   half of the other test is now held to the program's own `getrusage`, not
+   only to the absence of kernel frames. The comparison with both halves
+   cannot run where the kernel is refused, and that half remains the CI's.
+7. **The cost was the tool's own figure.** Real, and **fixed**. It is now
+   measured from outside, per sample, against the target's own clock. The
+   tool's figure is held only as a lower bound, and a finding came of it (the
+   cost section of "Ground truth", filed).
+8. **No scenario for `dwarf`'s loss path.** Real, and **fixed**:
+   `dwarf_counts_and_says_the_stacks_deeper_than_its_copy`.
+9. **`scenario_cpu`'s refusal test red on this branch.** Real, and kept red.
+   The file is P's, and the test asserts that `dwarf` is not served, which
+   this stream's work makes false. The change it needs is filed for P, and
+   the coordinator's merge takes both at once.
 
 ## For `DECISIONS.md`
 
@@ -383,6 +473,12 @@ coordinator's merge run may want the same.
 - **`lbr` and `sframe` are declared and not collected.** No machine this project
   runs on offers either; an untested decoder is worse than a refusal.
 - **`framehop` for DWARF**, over libdw: pure Rust, nothing to find at install.
+- **At a paranoia that refuses the kernel, every mode is user-only, `none`
+  included**: the kernel refuses the sampler itself, not only the stack's
+  kernel half.
+- **A mode's cost is measured from outside the tool**: the kernel's account of
+  `omn` against the target's own clock, over a steady stretch. The tool's own
+  figure is held as a lower bound, never as the reference.
 - **`curl` for debuginfod**, over a TLS dependency.
 - **A recovered frame is marked in its label** (` [recovered]`): the label is
   what reaches the results, flame graphs and `omn diff`, and an inferred frame
@@ -405,6 +501,10 @@ Under "Needs from another stream — the fourteenth wave, stream U" in
 - **R** (`src/catalog.rs`): `load_dir` skips (or loads) `unwind.yaml`, so the
   table can move to `catalog/`.
 - **coordinator / D**: `Cargo.toml` gains `framehop` (a file nobody owns).
+- **P** (`tests/scenario_cpu.rs`): the refusal test's list becomes `lbr`,
+  `sframe`.
+- **whoever owns `cost.json`**: a profile with stacks reports about 3 % of the
+  cpu it costs (a finding, measured).
 
 ## Session index rows
 

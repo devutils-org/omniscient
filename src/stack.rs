@@ -1368,8 +1368,11 @@ pub struct StackChoice {
     /// True when the request named the mode and the chooser did not rank.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub forced: bool,
-    /// True when only the user half of each stack is taken, because the
-    /// machine's `perf_event_paranoid` refuses the kernel half to this user.
+    /// True when only the user half of each stack is taken, and only samples
+    /// taken in user mode are delivered, because the machine's
+    /// `perf_event_paranoid` refuses the kernel to this user. Set for every
+    /// mode, `none` included: a sampler with no stack still has to exclude
+    /// the kernel to be opened at all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub user_only: bool,
     /// Every mode looked at, in rank order, with its verdict. Empty when the

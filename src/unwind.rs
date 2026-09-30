@@ -382,18 +382,26 @@ fn kernel_sframe(environment: &Environment) -> Probe {
 pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoice, String> {
     let requested = request.stack.unwrap_or(StackMode::Auto);
     let target = target_image(&request.target);
-    let user_only = requested != StackMode::None && !crate::perf::kernel_callchain_allowed();
+    // Asked for every mode, `none` included: the paranoia that refuses the
+    // kernel half of a stack refuses a sample taken in the kernel too, and a
+    // profile without stacks is still a sampler that has to exclude it.
+    let user_only = !crate::perf::kernel_callchain_allowed();
     let mut choice = if requested.is_concrete() {
         forced(requested, environment, &target)?
     } else {
         ranked(environment, &target)?
     };
-    choice.user_only = user_only && choice.mode != StackMode::None;
+    choice.user_only = user_only;
     if choice.user_only {
+        let what = if choice.mode == StackMode::None {
+            "samples are user-only"
+        } else {
+            "stacks are user-only"
+        };
         choice.degradations.push(format!(
-            "perf_event_paranoid is {}, which refuses this user the kernel: stacks are \
-             user-only, and a sample taken while the task ran in the kernel is not \
-             delivered, so time spent in system calls is missing from this profile",
+            "perf_event_paranoid is {}, which refuses this user the kernel: {what}, and a \
+             sample taken while the task ran in the kernel is not delivered, so time spent \
+             in system calls is missing from this profile",
             paranoid(environment)
         ));
     }

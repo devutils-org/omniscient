@@ -272,6 +272,18 @@ impl ProfileCollector {
         }
     }
 
+    /// The event this profile opens, sampling every `period` ns of cpu.
+    ///
+    /// The paranoia refuses the kernel to the samples, not only to the
+    /// stacks: with no stack at all (`--stack none`) there is no callchain
+    /// whose kernel half drops it, so a user-only choice says so itself.
+    fn spec(&self, period: u64) -> SampleSpec {
+        let mut spec =
+            SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
+        spec.exclude_kernel = self.choice.as_ref().is_some_and(|choice| choice.user_only);
+        spec
+    }
+
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
         let Some(event) = self.event.as_mut() else {
             return;
@@ -406,8 +418,7 @@ impl Collector for ProfileCollector {
             }
         };
 
-        let spec =
-            SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
+        let spec = self.spec(period);
         if let (Some(cpus), Some(cgroup)) = (&self.cpus, &self.cgroup) {
             let event =
                 ThreadSampler::open_cgroup(&spec, &cgroup.directory, cpus, ROOT_RING_PAGES)?;
@@ -667,10 +678,10 @@ fn describe_choice(choice: &StackChoice) -> String {
     format!(
         "stacks unwound by `{}`{}, {how}",
         choice.mode,
-        if choice.user_only {
-            ", user half only"
-        } else {
-            ""
+        match (choice.user_only, choice.mode) {
+            (false, _) => "",
+            (true, crate::request::StackMode::None) => ", user-mode samples only",
+            (true, _) => ", user half only",
         }
     )
 }
@@ -678,6 +689,32 @@ fn describe_choice(choice: &StackChoice) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At `perf_event_paranoid` 2 the kernel refuses an unprivileged sampler
+    /// that includes it, stack or no stack: a user-only choice excludes the
+    /// kernel from the event for every mode, `none` included, where no
+    /// callchain is asked whose kernel half would have dropped it.
+    #[test]
+    fn a_user_only_choice_excludes_the_kernel_even_without_a_stack() {
+        use crate::request::StackMode;
+        for mode in [StackMode::None, StackMode::Fp, StackMode::Dwarf] {
+            for user_only in [false, true] {
+                let mut choice = StackChoice::of(mode);
+                choice.user_only = user_only;
+                let prepare = Prepare {
+                    mode: "sample@99hz".parse().unwrap(),
+                    choice,
+                    debuginfod: None,
+                };
+                let spec = prepare.collector(1, false).spec(1_000_000);
+                assert_eq!(spec.exclude_kernel, user_only, "{mode:?}");
+                assert_eq!(
+                    spec.callchain.kernel(),
+                    !user_only && mode != StackMode::None
+                );
+            }
+        }
+    }
 
     /// The frequency the caller asked for is the frequency the kernel is told,
     /// expressed in the unit this event counts in.

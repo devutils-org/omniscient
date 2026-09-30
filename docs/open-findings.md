@@ -8273,3 +8273,18 @@ a full run at load average 12 to 20 and passed alone, none in a tally:
 `triage::an_input_this_machine_cannot_serve_is_dropped_by_name_or_fails_the_question`
 (verdict `cpu_queue`, runnable, where the fixture was built cpu-bound -- the
 shape of the triage rows R and U reported before).
+
+### A finding for whoever owns `cost.json`: the reported cost of a profile with stacks leaves most of it out
+
+Measured by `tests/unwind.rs` `each_mode_copies_what_it_declares_...` from
+outside the tool (`wait4` over `omn` and its target, less the target's own
+`CLOCK_THREAD_CPUTIME_ID`): a one-second `cpu.profile --emit stack` of the
+calltree fixture at 1999 Hz reports `overhead.collector_cpu_ns` of 26 ms under
+`fp` and 46 ms under `dwarf`, where the kernel counts 986 ms and 1016 ms of
+`omn` beyond the target. With `--stack none --emit topk` the same run costs
+about 60 ms, and the wall time goes from 0.97 s to 1.9 s, so the rest follows
+the stacks and comes mostly after the target has exited. Symbolizing in a
+debug build is the likely cause (not measured further). A reader of `cost.json`
+sees a profile that cost 3 % of its target, where the run cost more than
+the target itself. In the window the per-sample figure is right: 14.5 µs under
+`fp` and 22 to 27 µs under `dwarf`, measured from `schedstat`.
