@@ -345,7 +345,7 @@ about the machine someone who is not the developer meets first:
   README and `DEMO.md` for a stranger. An installed tree with the capabilities
   serves what `target/debug/omn` serves.
 - **U, every way to unwind a stack** (`docs/unwind.md`): unwind modes as a
-  chain (`src/unwind.yaml`) chosen by machine and target; `fp`, `fp+leaf` and
+  chain (`catalog/unwind.yaml`) chosen by machine and target; `fp`, `fp+leaf` and
   `dwarf` (through `framehop`) served and held to a known call tree; `lbr` and
   `sframe` declared, probed and refused by name; user-only stacks at paranoid
   2, `--stack none` included; debuginfod names (the mechanism, not yet the

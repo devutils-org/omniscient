@@ -195,7 +195,7 @@ its events mean rather than about how it is reached:
 ### Unwind modes
 
 A stack is unwound by one of several mechanisms, and they are declared, probed
-and chosen the way backends are: ordered best first in `src/unwind.yaml`
+and chosen the way backends are: ordered best first in `catalog/unwind.yaml`
 (compiled in; it moves to `catalog/` once the loader skips it), each with its
 `requires`, the bytes of user stack the kernel `copies` per sample, a `cost`,
 and what it `degraded`s against the modes above it. The loader holds the table
