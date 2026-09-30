@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! What the `net` family's eBPF programs have in common.
 //!
 //! Five sources, six programs, and the same half-dozen moves in every one of
@@ -34,7 +35,7 @@ use super::syscall;
 /// out of a `sock`, an `sk_buff`, a `Qdisc` or a `net_device` through it. The
 /// declaration covers the instruction streams in the `net_*.rs` files, which is
 /// what the kernel is asking about; `omn` itself stays under its own license.
-pub(super) const LICENSE: &str = "GPL";
+pub(super) const LICENSE: &str = "Dual MIT/GPL";
 
 /// This family's own labels for the shared unrolled log2.
 ///

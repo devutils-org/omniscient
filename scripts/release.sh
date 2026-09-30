@@ -57,6 +57,8 @@ bin/libomn_preload.so
 share/man/man1/omn.1
 share/doc/omn/README.md
 share/doc/omn/install.md
+share/doc/omn/LICENSE-MIT
+share/doc/omn/LICENSE-APACHE
 EOF
 }
 
@@ -69,6 +71,8 @@ source_of() {
         share/man/man1/omn.1) echo man/omn.1 ;;
         share/doc/omn/README.md) echo README.md ;;
         share/doc/omn/install.md) echo docs/install.md ;;
+        share/doc/omn/LICENSE-MIT) echo LICENSE-MIT ;;
+        share/doc/omn/LICENSE-APACHE) echo LICENSE-APACHE ;;
         *) echo "release.sh: no source for $1" >&2; return 1 ;;
     esac
 }

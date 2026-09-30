@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.tcp.connect`: how long a TCP handshake took, from the caller's side.
 //!
 //! The interval opens where the connecting task asks for it and closes where

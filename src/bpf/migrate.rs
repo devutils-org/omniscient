@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `sched_migrate_task` program: a task moved from one cpu to another.
 //!
 //! A migration costs what the task left behind -- its cache footprint on the
@@ -72,7 +73,7 @@ const ROW_VALUE_BYTES: usize = 24;
 
 /// `bpf_probe_read_kernel` is GPL-only, and the task's name and ids come
 /// through it.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, destination cpu)` pair's migrations over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]

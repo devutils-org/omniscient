@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `sched_waking` program: who unblocks whom.
 //!
 //! It attaches to `sched_waking` rather than to `sched_wakeup`, and the
@@ -351,7 +352,7 @@ pub struct WakeupProgram {
 /// reading a field out of a `task_struct` is not possible without it. The
 /// declaration covers the instruction stream in this file, which is what the
 /// kernel is asking about; `omn` itself stays under its own license.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 impl WakeupProgram {
     /// Runs the kernel skipped because one of these programs was already

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.softirq`: how long the kernel spent in a network softirq, per cpu.
 //!
 //! A packet that arrives while no process is asking for it is processed in

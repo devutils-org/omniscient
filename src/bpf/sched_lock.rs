@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `lock:contention_begin` / `lock:contention_end` pair: a thread that had
 //! to wait for a kernel lock.
 //!
@@ -156,7 +157,7 @@ const LOG2: Log2Labels = [
 ];
 
 /// `bpf_get_current_comm` and the stack walker are GPL-only.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, lock kind, stack, bucket)` row's waits over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]

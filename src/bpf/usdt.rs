@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! USDT: the probes a program was built to publish, found in its own ELF notes.
 //!
 //! A statically defined tracepoint in userspace is a `nop` the compiler left at
@@ -1008,7 +1009,7 @@ fn instructions(
 
 /// `bpf_attach_type::BPF_TRACE_UPROBE_MULTI`.
 const BPF_TRACE_UPROBE_MULTI: u32 = 48;
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// Loads a `BPF_PROG_TYPE_KPROBE` program declared for a uprobe-multi link:
 /// `syscall::prog_load_for`, with this file's refusal wording on top.

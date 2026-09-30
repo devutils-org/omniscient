@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The eBPF layer.
 //!
 //! Sixty-two of the catalog's hundred and fifty-five backends are eBPF, so this
@@ -169,7 +170,7 @@ pub fn load_support() -> &'static Support {
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &probe,
             "omn_probe",
-            "GPL",
+            "Dual MIT/GPL",
         ) {
             Ok(_) => Support::Yes,
             Err(error) if error.is_permission() => {
@@ -352,7 +353,7 @@ pub fn raw_tracepoint_attaches(name: &str) -> Support {
         syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
         &probe,
         "omn_rtp_probe",
-        "GPL",
+        "Dual MIT/GPL",
     ) {
         Ok(program) => program,
         Err(error) if error.is_permission() => {

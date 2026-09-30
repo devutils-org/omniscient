@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `sched_switch` program that counts: how often a task left the cpu, and
 //! whether it went or was taken off.
 //!
@@ -78,7 +79,7 @@ const ROW_VALUE_BYTES: usize = 24;
 
 /// `bpf_probe_read_kernel` is GPL-only, and the task's name and ids come
 /// through it.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One task's switches of one kind over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]

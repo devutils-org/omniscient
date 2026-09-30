@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The DRM scheduler's `drm_run_job` / `drm_sched_process_job` pair: how long a
 //! command buffer spent on the GPU.
 //!

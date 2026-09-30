@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.drops`: every packet the kernel threw away, and why.
 //!
 //! `kfree_skb` is the kernel's one free-with-a-reason: `consume_skb` is what it

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! Maps a program and this process share, and how a map is drained.
 //!
 //! The ring buffer in `ring.rs` carries one record per event, which is the

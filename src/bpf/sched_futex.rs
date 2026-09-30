@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `sys_enter` / `sys_exit` pair, narrowed to the futex waits: a thread
 //! that went to sleep in userspace's own lock.
 //!
@@ -169,7 +170,7 @@ const LOG2: Log2Labels = [
     "futex_log2_done",
 ];
 
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(address, task, command, stack, bucket)` row's waits over one drain.
 #[derive(Debug, Clone, PartialEq, Eq)]

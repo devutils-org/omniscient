@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The two network rows of a request: `net_rx` and `net_tx`.
 //!
 //! A child of `request.rs`, declared there with a `#[path]` so that the programs

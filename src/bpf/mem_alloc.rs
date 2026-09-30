@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The allocator programs: what the page and slab allocators handed out.
 //!
 //! Two sources, one shape. `mem.page_alloc` watches `mm_page_alloc` and

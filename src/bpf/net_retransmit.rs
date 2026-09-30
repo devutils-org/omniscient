@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.tcp.retransmit`: a segment the stack decided to send again.
 //!
 //! One tracepoint, `tcp_retransmit_skb`, one record per retransmission. There

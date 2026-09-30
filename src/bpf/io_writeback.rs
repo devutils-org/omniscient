@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The writeback programs: how long the flusher spent, and what it wrote.
 //!
 //! Deferred writeback is the part of a write nobody's program is waiting for.
@@ -45,7 +46,7 @@ const DROP_RING: u32 = 1;
 const UNPAIRED: u32 = 2;
 const DROP_SLOTS: u32 = 3;
 
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One writeback round, as the programs write it and userspace reads it.
 #[repr(C)]

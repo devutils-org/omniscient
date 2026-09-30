@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.socket`: how long a send or a receive took, per socket.
 //!
 //! Both halves of each function, counted in the kernel, and **the two

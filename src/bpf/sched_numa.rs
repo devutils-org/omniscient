@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `sched_stick_numa` tracepoint: the NUMA balancer deciding not to move a
 //! task after all.
 //!
@@ -78,7 +79,7 @@ const ROW_VALUE_BYTES: usize = 24;
 
 /// `bpf_probe_read_kernel` is GPL-only, and the task's name and ids come
 /// through it.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, source cpu, destination cpu)` triple's decisions over one
 /// drain interval.

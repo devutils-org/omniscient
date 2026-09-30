@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.qdisc`: how long a packet waited in a queueing discipline.
 //!
 //! Two tracepoints, and the measurement is the gap between them. `qdisc_enqueue`

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `io.fsync`: how long a program waited for its data to be durable.
 //!
 //! **The function the catalog named is not the one `fsync(2)` calls.** The

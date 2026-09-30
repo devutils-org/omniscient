@@ -182,6 +182,8 @@ install:
 	install -D -m 644 man/omn.1                     $(DESTDIR)$(MAN1DIR)/omn.1
 	install -D -m 644 README.md                     $(DESTDIR)$(DOCDIR)/README.md
 	install -D -m 644 docs/install.md               $(DESTDIR)$(DOCDIR)/install.md
+	install -D -m 644 LICENSE-MIT                   $(DESTDIR)$(DOCDIR)/LICENSE-MIT
+	install -D -m 644 LICENSE-APACHE                $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
 	@echo
 	@echo "installed omn, omn-mcp and the preload shim in $(DESTDIR)$(BINDIR)."
 	@echo "no capability was granted. Without them the eBPF and per-cpu perf backends"
@@ -194,6 +196,7 @@ install:
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/omn $(DESTDIR)$(BINDIR)/omn-mcp $(DESTDIR)$(BINDIR)/libomn_preload.so
 	rm -f $(DESTDIR)$(MAN1DIR)/omn.1 $(DESTDIR)$(DOCDIR)/README.md $(DESTDIR)$(DOCDIR)/install.md
+	rm -f $(DESTDIR)$(DOCDIR)/LICENSE-MIT $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
 	-rmdir $(DESTDIR)$(DOCDIR) 2>/dev/null
 
 # The ground truth for an installed tree: `make install` into a scratch

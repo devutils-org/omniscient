@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The pieces the `sched` programs added in the sixth wave share.
 //!
 //! Four of them -- lock contention, futex waits, interrupt handlers and NUMA

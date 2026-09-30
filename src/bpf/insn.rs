@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! BPF instructions, built in Rust.
 //!
 //! A program here is an array of 64-bit instructions handed to the verifier,

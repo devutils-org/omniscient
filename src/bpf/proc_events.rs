@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The three process-event programs: exec, exit and signal.
 //!
 //! All three are the streaming shape `wakeup.rs` is the worked example for: one
@@ -34,7 +35,7 @@ use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// `bpf_probe_read_kernel` is GPL-only, and every one of these programs reads a
 /// field out of a `task_struct` through it.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// The prototypes these programs are written against, as the kernel publishes
 /// them in its own BTF, with the tracepoint's leading data pointer dropped.

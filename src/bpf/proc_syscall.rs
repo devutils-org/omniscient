@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The syscall latency programs: how long each call into the kernel took.
 //!
 //! Two programs, because no single event is the measurement: `sys_enter` says a
@@ -144,7 +145,7 @@ const PEND_VALUE_BYTES: usize = 16;
 /// `bpf_get_current_comm` is not GPL-only, but `bpf_probe_read_kernel` is and
 /// the rest of this layer declares GPL for it; a program that declared
 /// otherwise would be the one exception nobody expects.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, syscall, bucket)` row's calls over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]

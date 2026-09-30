@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `irq_handler_entry` / `irq_handler_exit` pair, and `softirq_entry` /
 //! `softirq_exit` beside it: time the machine spent
 //! inside hardware interrupt handlers and inside softirqs.
@@ -134,7 +135,7 @@ const LOG2: Log2Labels = [
     "irq_log2_done",
 ];
 
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(cpu, irq, bucket)` row's handler runs over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]

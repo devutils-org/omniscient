@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The pieces the `mem` family's four eBPF programs share.
 //!
 //! `mem_alloc.rs` counts what the page and slab allocators hand out, and
@@ -47,7 +48,7 @@ pub const COMM_BYTES: usize = 16;
 
 /// `bpf_probe_read_kernel` is GPL-only, and so is `bpf_get_current_cgroup_id`
 /// on some kernels. Every program in this family declares GPL for that reason.
-pub const LICENSE: &str = "GPL";
+pub const LICENSE: &str = "Dual MIT/GPL";
 
 /// This family's own labels for the shared unrolled log2.
 ///

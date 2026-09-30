@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `io.syscall` and `io.fs`: two layers of one read, timed by fentry.
 //!
 //! A `read(2)` passes three layers this family keeps apart, and each is the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The names tasks took at `exec`, for the programs that read a name once.
 //!
 //! `sched.offcpu`, `sched.runqlat` and `sched.migrations` read `task_struct.comm`
@@ -36,7 +37,7 @@ const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
 /// How many renamed tasks one drain interval can carry.
 const MAX_RENAMES: u32 = 4096;
 
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// `sched_process_exec(task_struct *, pid_t, linux_binprm *)`.
 const SIGNATURE: [&str; 3] = ["task_struct *", "pid_t", "linux_binprm *"];

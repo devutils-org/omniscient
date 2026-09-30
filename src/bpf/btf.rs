@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The running kernel's own type information, read at load time.
 //!
 //! A BPF program that reads `task_struct->pid` needs the offset of that field

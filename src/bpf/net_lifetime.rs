@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `net.tcp.lifetime`: how long a connection lived, and what crossed it.
 //!
 //! One tracepoint, `inet_sock_set_state`, and two of its transitions. A socket

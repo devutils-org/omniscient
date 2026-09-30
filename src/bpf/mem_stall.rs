@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The stall programs: the kernel doing the allocator's work inside the
 //! allocating thread.
 //!

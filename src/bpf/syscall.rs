@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `bpf()` syscall, as a syscall.
 //!
 //! Each command of `bpf()` reads a different prefix of one big union. Rather
@@ -697,7 +698,12 @@ mod tests {
             crate::bpf::insn::Insn::mov64_imm(0, 0),
             crate::bpf::insn::Insn::exit(),
         ];
-        match prog_load(BPF_PROG_TYPE_RAW_TRACEPOINT, &program, "omn_test", "GPL") {
+        match prog_load(
+            BPF_PROG_TYPE_RAW_TRACEPOINT,
+            &program,
+            "omn_test",
+            "Dual MIT/GPL",
+        ) {
             Ok(_) => eprintln!("this machine grants CAP_BPF: the smallest program loaded"),
             Err(error) => {
                 assert!(

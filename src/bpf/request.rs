@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! A request's identity, carried in the task that is serving it.
 //!
 //! Everything else in this layer is keyed by something a program can compute
@@ -443,7 +444,7 @@ const SWITCH_SIGNATURE: [&str; 4] = ["bool", "task_struct *", "task_struct *", "
 const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 const ARG_PREV_STATE: i16 = 24;
 const TASK_UNINTERRUPTIBLE: i32 = 2;
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// The file descriptors the programs are built against.
 #[derive(Debug, Clone, Copy)]

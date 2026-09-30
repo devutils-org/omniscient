@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The `sched_switch` program: how long a task was not running, and why.
 //!
 //! This is the layer's first aggregating program, and it exists in this shape
@@ -599,7 +600,7 @@ pub struct OffCpuProgram {
 /// `bpf_probe_read_kernel` is GPL-only, and reading a field out of a
 /// `task_struct` is not possible without it. The declaration covers the
 /// instruction stream in this file, which is what the kernel is asking about.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// What one drain found, beside the measurements.
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The block layer programs: what a request cost, and where it spent it.
 //!
 //! A block request passes three moments the kernel publishes by name.
@@ -392,7 +393,7 @@ const OPEN_DROP_KEY: i16 = -56;
 
 /// `bpf_probe_read_kernel` is GPL-only, and every field read out of a
 /// `struct request` comes through it.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// Adds one to a slot of the per-cpu counter array.
 ///

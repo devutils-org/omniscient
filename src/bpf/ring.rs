@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The BPF ring buffer, consumed directly.
 //!
 //! The kernel publishes two pages and the data area through the map's file

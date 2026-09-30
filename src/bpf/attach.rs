@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The other way to attach a program: through `perf_event_open`.
 //!
 //! `BPF_RAW_TRACEPOINT_OPEN` takes a tracepoint's name and needs nothing but
@@ -327,7 +328,7 @@ fn retprobe_bit(pmu: &str) -> Result<u32, String> {
 
 /// Anything reading a kernel structure needs `bpf_probe_read_kernel`, which is
 /// GPL-only, and everything this layer writes does.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// Loads a program of the type this attach kind requires.
 ///

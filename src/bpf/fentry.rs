@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! `bpf:fentry`: a program attached to a kernel function by its BTF type id.
 //!
 //! The fourth attach kind, and the one this project waited three waves for. A
@@ -512,7 +513,7 @@ fn load(
     instructions: &[Insn],
     name: &str,
 ) -> Result<OwnedFd, LoadError> {
-    let license = CString::new("GPL").expect("no interior NUL");
+    let license = CString::new("Dual MIT/GPL").expect("no interior NUL");
     let mut log = vec![0u8; LOG_BYTES];
     let mut attr = TracingLoadAttr {
         prog_type: BPF_PROG_TYPE_TRACING,

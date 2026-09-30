@@ -420,9 +420,10 @@ Under "Needs from another stream", "Stream D, the fourteenth wave", in
   `mem.heap.alloc` is refused with "no collector is written for ...
   `bpf:usdt`" as its first line, and the reason that matters, the shim's
   path, comes second.
-- **Coordinator**: the repository has no `LICENSE` file while `Cargo.toml`
-  says Apache-2.0. A release archive should carry one; `contents` in
-  `release.sh` is where it would go.
+- **Coordinator**: ~~the repository has no `LICENSE` file~~ -- landed after the
+  fifteenth wave: `LICENSE-MIT` and `LICENSE-APACHE`, `MIT OR Apache-2.0`, with
+  `src/bpf/` under `MIT OR GPL-2.0`. A release archive should carry both files;
+  `contents` in `release.sh` is where they go.
 
 ### Matrix cells
 

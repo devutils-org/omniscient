@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR GPL-2.0
 //! The run queue latency programs: how long a task was runnable and not running.
 //!
 //! This is the one source in the family whose whole value is the *difference*
@@ -137,7 +138,7 @@ const QUEUED_VALUE_BYTES: usize = 8;
 
 /// `bpf_probe_read_kernel` is GPL-only, and every field these programs read
 /// comes out of a `task_struct` through it.
-const LICENSE: &str = "GPL";
+const LICENSE: &str = "Dual MIT/GPL";
 
 /// One `(task, cpu, priority, bucket)` row's waits over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
