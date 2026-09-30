@@ -8197,3 +8197,79 @@ on a cpu with a hardware PMU:
 
 `docs/portability.md` is the record once these are read; the log and the cell
 are the run's artifact.
+
+## Needs from another stream — the fourteenth wave, stream U (every way to unwind a stack)
+
+Stream U's deliverable is `docs/unwind.md`. Nothing here blocks it; each item is
+what would let a landed mechanism reach the user.
+
+### To stream R (`src/request.rs`, `src/cli.rs`): `--symbols local|debuginfod`
+
+The client, the cache and the name origins are landed and tested
+(`stack::unwind::{SymbolSource, Debuginfod}`), and nothing reaches them from
+the command line or a session file. Wanted:
+
+```rust
+// src/request.rs, on Request, beside `stack`:
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub symbols: Option<crate::stack::unwind::SymbolSource>, // "local" | "debuginfod"
+
+// src/cli.rs, beside --stack:
+/// Where stack names come from: `local` (default), or `debuginfod` -- the
+/// servers in DEBUGINFOD_URLS, asked by build id for a stripped file.
+#[arg(long, value_name = "SOURCE")]
+symbols: Option<SymbolSource>,
+```
+
+Then the one line of `src/collect/cpu/mod.rs` that is stream U's becomes
+`debuginfod: match resolved.request.symbols { Some(SymbolSource::Debuginfod) =>
+Some(Arc::new(Debuginfod::from_env()?)), _ => None }`.
+
+### To stream R (`src/main.rs`) and stream P (`src/resolve.rs`): the unwind choice in the resolved file
+
+`stack::choose` returns a `StackChoice` (mode, `forced`, `user_only`, every
+mode considered with its `Verdict`, degradations, `copied_stack_bytes`), and it
+serializes. Wanted: `ResolvedRequest` gains
+`#[serde(default, skip_serializing_if = "Option::is_none")] pub stack:
+Option<crate::stack::StackChoice>`, set by `main.rs` (and `triage/engine.rs`)
+for a request whose source emits stacks, so `resolved.json` says how the stacks
+will be unwound and why before the run, the way it says which backend. Until
+then `cpu.profile` says it in its notes.
+
+### To stream R (`src/catalog.rs`): a mode table beside the catalog
+
+`Catalog::load_dir` parses every YAML file of the directory as catalog
+entries, so the unwind mode table cannot be `catalog/unwind.yaml` (the brief's
+name) without breaking every `--catalog <copy of catalog/>` scenario. It is
+`src/unwind.yaml` for now. Wanted: `load_dir` skips `unwind.yaml`; the table
+then moves, and `stack::unwind` loads it from the same directory.
+
+### To the coordinator (`Cargo.toml`, nobody's): `framehop`
+
+`framehop = { version = "0.16", default-features = false, features = ["std"] }`,
+the DWARF unwinder behind `--stack dwarf` and `fp+leaf`. Pure Rust; it pulls
+`gimli`, `arrayvec` and `fallible-iterator`, nothing native. Stream D's release
+build should see it once.
+
+### To stream P (`tests/scenario_cpu.rs`): `--stack dwarf` is served now
+
+`an_unwinder_this_build_lacks_is_refused_before_the_program_starts` asks for
+`dwarf` and `lbr` and expects both refused as this build's gap. `dwarf` is
+served since this wave, so the test goes red on stream U's branch by design.
+Wanted: the list becomes `["lbr", "sframe"]`, and the message accepted is
+`--stack <mode>` with either `not implemented` (a machine that offers it) or
+`cannot be served here` (one that does not -- every machine here, which names
+`pmu:branch_call_stack` / `kernel:sframe`). The marker check stays: both are
+refused before the program starts.
+
+### For the flaky tally
+
+Nothing from stream U's paths. Three tests outside them went red once each in
+a full run at load average 12 to 20 and passed alone, none in a tally:
+`scenario_cpu::a_counted_window_is_the_same_number_in_every_format_that_carries_it`
+(1 038 991 485 instructions counted for a loop that retires 10⁹ -- 3.9 % over),
+`runner::a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other`
+(three tiling windows 11 766 instructions over the whole run's count), and
+`triage::an_input_this_machine_cannot_serve_is_dropped_by_name_or_fails_the_question`
+(verdict `cpu_queue`, runnable, where the fixture was built cpu-bound -- the
+shape of the triage rows R and U reported before).
