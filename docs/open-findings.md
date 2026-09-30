@@ -8283,3 +8283,11 @@ for a cell that grants the capabilities and delegates no cgroup.
   99 %: *"the scenario put 200 packets through a queueing discipline and this
   found 401"*. It passed alone at once. In no tally before; an excess of about
   twice is worth a look by its owner if it recurs.
+- `scenario_sched::an_overflowing_wakeup_ring_says_what_it_could_not_hold`
+  (tally #3) failed in two of stream R's `make check` runs and passed alone
+  both times. What it read, both times: the first run overflowed, and the
+  *second* run -- the one whose terminal text is checked for the explanation
+  -- dropped nothing (`LOSS: 0 dropped, ..., 3 late ticks`), so "the loss is
+  counted and not explained" asked a run with no ring overflow to explain one.
+  The terminal check wants to be made on a run that dropped, or skipped when
+  its own run did not (K's file).
