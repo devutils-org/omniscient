@@ -119,7 +119,8 @@ pub struct TraceArgs {
     #[arg(long, value_name = "NAME", group = "target", conflicts_with = "file")]
     pub iface: Option<String>,
 
-    /// A container, resolved to a cgroup plus a pid namespace.
+    /// A container, measured as the cgroup its runtime says it runs in
+    /// (docker, podman or nerdctl, or OMN_CONTAINER_RUNTIME).
     #[arg(long, value_name = "NAME", group = "target", conflicts_with = "file")]
     pub container: Option<String>,
 

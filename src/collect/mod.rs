@@ -30,6 +30,15 @@ mod runtime;
 mod sched;
 mod task;
 
+/// The one pressure-stall reader, `src/collect/psi.rs`, which `cpu`, `io` and
+/// `mem` all read through, at the path that says it is shared:
+/// `crate::collect::psi`. Its `mod` line is still in `src/collect/mem/mod.rs`
+/// (stream K's), and declaring the file twice is what clippy's
+/// `duplicate_mod` refuses, so the declaration moves here in the one commit
+/// that removes it there -- filed in `docs/open-findings.md` -- and every
+/// reader can take this path meanwhile.
+pub use mem::psi;
+
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::os::fd::RawFd;
@@ -307,6 +316,14 @@ pub struct Collection {
     /// attached for two seconds of a ten-second run is a rate over two.
     #[serde(default)]
     pub window: Watched,
+    /// Whether that window closed at a detach rather than with the run.
+    /// Every window closes where its own collector stopped, and the run stops
+    /// them in turn, so a close earlier than another's is not by itself a
+    /// detach: a join across a source that ran to the end treats it as
+    /// watching to the end, and one across a detached source ends its states
+    /// at the detach.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     /// The part of `losses` each ring lost, for a collector that reads one
     /// ring per key; empty when the losses belong to the whole alike.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -654,6 +671,13 @@ pub struct Overhead {
     /// How many times that code ran inside the target, when it is counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_target_runs: Option<u64>,
+    /// How many of those runs are in `in_target_cpu_ns` at the mean of the
+    /// others rather than as timed: the preload shim's calls a preemption fell
+    /// in, whose spans are the scheduler's slice and not the hook's. Counted
+    /// and said, because an account that silently left them out would read
+    /// low with nothing to show it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub in_target_left_out: u64,
     /// Where `in_target_cpu_ns` came from, or why there is none.
     #[serde(default)]
     pub in_target_from: String,
@@ -700,6 +724,21 @@ impl Overhead {
 pub struct Inside {
     pub cpu_ns: u64,
     pub runs: u64,
+    /// How many of those runs are in `cpu_ns` at an estimate rather than as
+    /// timed: the preload shim's calls a preemption fell in, whose spans were
+    /// the scheduler's, priced at the mean of the others.
+    pub left_out: u64,
+}
+
+impl std::ops::Add for Inside {
+    type Output = Inside;
+    fn add(self, other: Inside) -> Inside {
+        Inside {
+            cpu_ns: self.cpu_ns + other.cpu_ns,
+            runs: self.runs + other.runs,
+            left_out: self.left_out + other.left_out,
+        }
+    }
 }
 
 /// A collector's account of what it spends inside its target, for a
@@ -858,6 +897,7 @@ fn parse_program_fdinfo(text: &str) -> Option<(u32, Inside)> {
         Inside {
             cpu_ns,
             runs: field("run_cnt").unwrap_or(0),
+            left_out: 0,
         },
     ))
 }
@@ -980,10 +1020,7 @@ impl InsideMeter {
                         }
                     }
                 }
-                Ok(last.iter().fold(*sunk, |total, one| Inside {
-                    cpu_ns: total.cpu_ns + one.cpu_ns,
-                    runs: total.runs + one.runs,
-                }))
+                Ok(last.iter().fold(*sunk, |total, one| total + *one))
             }
             InsideMeter::Reported {
                 account,
@@ -991,10 +1028,7 @@ impl InsideMeter {
                 sunk,
             } => {
                 *last = account.read()?;
-                Ok(Inside {
-                    cpu_ns: sunk.cpu_ns + last.cpu_ns,
-                    runs: sunk.runs + last.runs,
-                })
+                Ok(*sunk + *last)
             }
         }
     }
@@ -1010,16 +1044,10 @@ impl InsideMeter {
                         let now = program_run(*fd)
                             .filter(|(now_id, _)| now_id == id)
                             .map_or(*last, |(_, run)| run);
-                        Inside {
-                            cpu_ns: total.cpu_ns + now.cpu_ns,
-                            runs: total.runs + now.runs,
-                        }
+                        total + now
                     }))
             }
-            InsideMeter::Reported { account, sunk, .. } => account.read().map(|now| Inside {
-                cpu_ns: sunk.cpu_ns + now.cpu_ns,
-                runs: sunk.runs + now.runs,
-            }),
+            InsideMeter::Reported { account, sunk, .. } => account.read().map(|now| *sunk + now),
             InsideMeter::Outside(_) => Ok(Inside::default()),
             InsideMeter::Unknown(why) => Err(why.clone()),
         }
@@ -2285,10 +2313,21 @@ fn run_core(
 
     // Whatever the kernel or the shim published between the last tick and the
     // stop still belongs to this run.
-    let ended_s = monotonic_ns().saturating_sub(started_ns) as f64 / 1e9;
+    //
+    // The window closes before any of them is stopped. A drained collector's
+    // last read is inside its own `stop()`, and the run stops them one after
+    // another, so a window closed after the last stop claimed the span after
+    // each earlier collector's last read, where nothing of it could be in a
+    // row: stream S measured 6 of 930 blocks with `sched.offcpu` alone and 71
+    // with five collectors stopping after it. One instant before the first
+    // stop is before every last read, and it is one window for every
+    // collector the run held to the end, as a session's sources share one.
+    let closing_ns = monotonic_ns();
+    let ended_s = closing_ns.saturating_sub(started_ns) as f64 / 1e9;
     for (index, slot) in slots.iter_mut().enumerate() {
         match slot {
             Slot::Attached(collector) => {
+                watched[index].closed_ns = closing_ns;
                 let mut trailing = collector.stop();
                 events[index].append(&mut trailing);
                 let collector_losses = collector.losses();
@@ -2345,14 +2384,12 @@ fn run_core(
     }
 
     let closed_ns = monotonic_ns();
-    for (index, slot) in slots.iter().enumerate() {
-        if matches!(slot, Slot::Attached(_)) {
-            watched[index].closed_ns = closed_ns;
-        } else if !watched[index].attached {
-            // Never attached: a span of nothing, at the end.
-            watched[index].opened_ns = closed_ns;
-            watched[index].closed_ns = closed_ns;
-        }
+    // An attached collector's window closed before the first stop, above; a
+    // detached one's at its detach.
+    for window in watched.iter_mut().filter(|window| !window.attached) {
+        // Never attached: a span of nothing, at the end.
+        window.opened_ns = closed_ns;
+        window.closed_ns = closed_ns;
     }
     let lifetime = child.as_ref().and_then(|child| child.lifetime());
     // Read once the child has been reaped: `getrusage(RUSAGE_CHILDREN)` is what
@@ -2415,6 +2452,7 @@ fn run_core(
                 overhead: overheads[index].clone(),
                 lifetime,
                 window: watched[index],
+                detached: matches!(slot, Slot::Detached(_)),
                 by_ring,
                 facts,
             }
@@ -2940,16 +2978,18 @@ impl<'a> Spending<'a> {
             }
             (_, reading) => reading.clone(),
         };
-        let (in_target_cpu_ns, in_target_runs, in_target_from) = match in_target {
+        let (in_target_cpu_ns, in_target_runs, in_target_left_out, in_target_from) = match in_target
+        {
             Ok(now) => {
                 let counted = !matches!(self.inside[index], InsideMeter::Outside(_));
                 (
                     Some(now.cpu_ns.saturating_sub(since.in_target.cpu_ns)),
                     counted.then(|| now.runs.saturating_sub(since.in_target.runs)),
+                    now.left_out.saturating_sub(since.in_target.left_out),
                     self.inside[index].describes(),
                 )
             }
-            Err(why) => (None, None, why),
+            Err(why) => (None, None, 0, why),
         };
         Overhead {
             collector_cpu_ns,
@@ -2962,6 +3002,7 @@ impl<'a> Spending<'a> {
             measurements: self.measurements,
             in_target_cpu_ns,
             in_target_runs,
+            in_target_left_out,
             in_target_from,
         }
     }
@@ -3950,6 +3991,10 @@ impl Ledger {
         else {
             unreachable!("only an attached request is detached");
         };
+        // Its window closes before its last read, as at the end of the run:
+        // what the stop drains was all written before it returns.
+        let closed_ns = monotonic_ns();
+        self.watched[index].closed_ns = closed_ns;
         let mut trailing = collector.stop();
         self.events[index].append(&mut trailing);
         self.losses[index].absorb(collector.losses());
@@ -3964,10 +4009,10 @@ impl Ledger {
         // programs are still open to be read.
         let _ = spending.inside[index].read();
         drop(collector);
-        let closed_ns = monotonic_ns();
-        self.watched[index].closed_ns = closed_ns;
-        spending.detached(index, closed_ns);
-        self.closed_because[index] = Some(because(self.seconds_in(closed_ns)));
+        // What it cost is weighed up to the end of its stop, which it paid.
+        let stopped_ns = monotonic_ns();
+        spending.detached(index, stopped_ns);
+        self.closed_because[index] = Some(because(self.seconds_in(stopped_ns)));
         slots[index] = Slot::Detached(record);
         // A collection whose target had already gone keeps saying so.
         self.finished[index].get_or_insert(Finished::Window);
@@ -4383,6 +4428,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                 ),
                 lifetime: None,
                 window,
+                detached: false,
                 // A document's losses are those since the one before it, and a
                 // ring's are the run's: they cannot be split per document.
                 by_ring: Vec::new(),
@@ -4694,7 +4740,8 @@ mod tests {
                 812,
                 Inside {
                     cpu_ns: 123_456,
-                    runs: 789
+                    runs: 789,
+                    left_out: 0,
                 }
             ))
         );
@@ -4778,6 +4825,7 @@ mod tests {
                 Ok(Inside {
                     cpu_ns: self.0,
                     runs: 1,
+                    left_out: 0,
                 })
             }
             fn describes(&self) -> String {
@@ -5054,7 +5102,10 @@ mod tests {
         let catalog = Catalog::embedded().unwrap();
         let capabilities = crate::capabilities::Capabilities::detect();
         let request = crate::request::Request {
-            source: "gpu.temp".parse().unwrap(),
+            // `/proc/stat`, which every machine this tool runs on serves: the
+            // refusal is the run's, and a machine with no GPU -- the CI's --
+            // failed here on the resolution before it could say so.
+            source: "cpu.util".parse().unwrap(),
             target: Target::System,
             mode: crate::request::Mode::Poll {
                 interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
@@ -5069,7 +5120,13 @@ mod tests {
             label: None,
             window: None,
         };
-        let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
+        let resolved = match crate::resolve::resolve(&catalog, &capabilities, &request) {
+            Ok(resolved) => resolved,
+            Err(reason) => {
+                eprintln!("skipped: `cpu.util --system` cannot serve here: {reason}");
+                return;
+            }
+        };
         match run(&resolved) {
             Err(CollectError::NoStopCondition) => {}
             // A machine with no GPU cannot get that far, and says so first.

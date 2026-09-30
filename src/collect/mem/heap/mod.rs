@@ -74,7 +74,7 @@ const RING_SLOTS: usize = 1 << 16;
 
 /// The ring's layout, mirrored from `shim/src/lib.rs`'s `ring` module; both
 /// sides pin the numbers in a test.
-const RING_MAGIC: u64 = 0x3267_6e72_5f6e_6d6f;
+const RING_MAGIC: u64 = 0x3367_6e72_5f6e_6d6f;
 const RING_HEAD: usize = 64;
 const RING_TAIL: usize = 128;
 const RING_DROPS: usize = 192;
@@ -83,7 +83,10 @@ const RING_DROPS: usize = 192;
 const RING_SPENT: usize = 256;
 const RING_TIMED: usize = 288;
 const RING_CLOCK: usize = 312;
-const RING_SLOTS_AT: usize = 320;
+/// How many of the timed calls a preemption fell in, per class: counted in
+/// `timed`, with a span the shim could not tell from the scheduler's slice.
+const RING_LEFT_OUT: usize = 320;
+const RING_SLOTS_AT: usize = 384;
 const RING_SLOT_BYTES: usize = 48;
 
 /// The shim times one hooked call in this many per thread (`shim/src/lib.rs`,
@@ -339,6 +342,19 @@ impl Ring {
     }
 }
 
+/// What the timed calls cost, with the ones a preemption fell in priced at the
+/// mean of the others: their spans are the scheduler's, and the hook's own few
+/// hundred nanoseconds in them are most likely what it took in every other
+/// call. With nothing but preempted calls there is no mean, and they add
+/// nothing -- which the count beside it says.
+fn priced(spent_ns: u64, timed: u64, left_out: u64) -> u64 {
+    let measured = timed.saturating_sub(left_out);
+    if measured == 0 {
+        return spent_ns;
+    }
+    (spent_ns as u128 * timed as u128 / measured as u128).min(u64::MAX as u128) as u64
+}
+
 impl Ring {
     /// What the shim says it spent inside the program for `class`, scaled
     /// from the records it timed to all of them.
@@ -346,12 +362,12 @@ impl Ring {
         use std::sync::atomic::Ordering;
         let at = 8 * class.trailing_zeros() as usize;
         let timed = self.word(RING_TIMED + at).load(Ordering::Relaxed);
+        let left_out = self.word(RING_LEFT_OUT + at).load(Ordering::Relaxed);
+        let spent = self.word(RING_SPENT + at).load(Ordering::Relaxed);
         crate::collect::Inside {
-            cpu_ns: self
-                .word(RING_SPENT + at)
-                .load(Ordering::Relaxed)
-                .saturating_mul(SHIM_SAMPLE_EVERY),
+            cpu_ns: priced(spent, timed, left_out).saturating_mul(SHIM_SAMPLE_EVERY),
             runs: timed.saturating_mul(SHIM_SAMPLE_EVERY),
+            left_out: left_out.saturating_mul(SHIM_SAMPLE_EVERY),
         }
     }
 
@@ -504,8 +520,11 @@ impl crate::collect::InsideAccount for ShimAccount {
              wraps, scaled to every call (published in the shared ring's header). What is not \
              in it: the jump into the hook and back, and what the ring's writes do to the \
              program's caches, so this is a lower bound; a clock read cost {clock} ns when the \
-             shim was loaded, and a timed call pays four. Shared by every preload source of \
-             this class on the launch",
+             shim was loaded, and a timed call pays four. A timed call whose own span came to \
+             over 200 us had its thread preempted in it: that span is the scheduler's, so the \
+             call is priced at the mean of the others and counted apart \
+             (`in_target_left_out`). Shared by every preload source of this class on the \
+             launch",
             self.which.activity()
         )
     }
@@ -1078,7 +1097,7 @@ pub(crate) mod tests {
     /// every record from the wrong offset.
     #[test]
     fn the_ring_layout_is_the_one_the_shim_writes() {
-        assert_eq!(RING_MAGIC, 0x3267_6e72_5f6e_6d6f);
+        assert_eq!(RING_MAGIC, 0x3367_6e72_5f6e_6d6f);
         assert_eq!(
             (
                 RING_HEAD,
@@ -1087,10 +1106,11 @@ pub(crate) mod tests {
                 RING_SPENT,
                 RING_TIMED,
                 RING_CLOCK,
+                RING_LEFT_OUT,
                 RING_SLOTS_AT,
                 RING_SLOT_BYTES
             ),
-            (64, 128, 192, 256, 288, 312, 320, 48)
+            (64, 128, 192, 256, 288, 312, 320, 384, 48)
         );
         assert_eq!(SHIM_SAMPLE_EVERY, 17);
         assert!(RING_SLOTS.is_power_of_two());
@@ -1151,6 +1171,22 @@ pub(crate) mod tests {
         assert_eq!((heap.cpu_ns, heap.runs), (8_500, 170));
         let gpu = ring.spent(CLASS_GPU);
         assert_eq!((gpu.cpu_ns, gpu.runs), (0, 0));
+    }
+
+    /// A timed call a preemption fell in is priced at the mean of the others
+    /// and counted: ten timed, two of them preempted, 400 ns over the eight
+    /// others stand for 500 ns over ten, and 34 of the 170 calls are said to
+    /// be priced so.
+    #[test]
+    fn a_preempted_call_is_priced_at_the_mean_of_the_others_and_counted() {
+        use std::sync::atomic::Ordering;
+        let ring = Ring::create().expect("a ring");
+        ring.word(RING_SPENT).fetch_add(400, Ordering::Relaxed);
+        ring.word(RING_TIMED).fetch_add(10, Ordering::Relaxed);
+        ring.word(RING_LEFT_OUT).fetch_add(2, Ordering::Relaxed);
+        let heap = ring.spent(CLASS_HEAP);
+        assert_eq!((heap.cpu_ns, heap.runs, heap.left_out), (8_500, 170, 34));
+        assert_eq!(priced(0, 3, 3), 0, "no mean, nothing added");
     }
 
     /// A slot reserved and never published -- a writer that died between its

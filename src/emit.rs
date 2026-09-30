@@ -1796,6 +1796,7 @@ mod tests {
             overhead: crate::collect::Overhead::default(),
             lifetime: None,
             window: crate::collect::Watched::default(),
+            detached: false,
             by_ring,
             facts: Vec::new(),
         }

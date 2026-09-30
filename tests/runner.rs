@@ -418,6 +418,18 @@ fn resolved(
     mode: Mode,
     duration: Option<&str>,
 ) -> omn::resolve::ResolvedRequest {
+    try_resolved(source, target, mode, duration).expect("the request resolves here")
+}
+
+/// The same, or the resolver's refusal: a counter is refused on a stock
+/// kernel's `perf_event_paranoid` and on a cpu with no hardware PMU, and a
+/// test that needs one says so and stops.
+fn try_resolved(
+    source: &str,
+    target: Target,
+    mode: Mode,
+    duration: Option<&str>,
+) -> Result<omn::resolve::ResolvedRequest, omn::resolve::ResolveError> {
     let catalog = omn::catalog::Catalog::embedded().expect("the embedded catalog loads");
     let capabilities = omn::capabilities::Capabilities::detect();
     let request = Request {
@@ -434,7 +446,7 @@ fn resolved(
         label: None,
         window: None,
     };
-    omn::resolve::resolve(&catalog, &capabilities, &request).expect("the request resolves here")
+    omn::resolve::resolve(&catalog, &capabilities, &request)
 }
 
 fn poll_every(text: &str) -> Mode {
@@ -1116,11 +1128,12 @@ fn windowed(
     mode: Mode,
     window: Option<&str>,
     label: &str,
-) -> omn::resolve::ResolvedRequest {
-    let mut resolved = resolved(source, Target::Launch(argv.to_vec()), mode, None);
+) -> Result<omn::resolve::ResolvedRequest, String> {
+    let mut resolved = try_resolved(source, Target::Launch(argv.to_vec()), mode, None)
+        .map_err(|error| error.to_string())?;
     resolved.request.window = window.map(|text| text.parse().expect("a window"));
     resolved.request.label = Some(label.to_owned());
-    resolved
+    Ok(resolved)
 }
 
 /// The count a `count` collection ended on.
@@ -1139,13 +1152,13 @@ fn instructions_in(collection: &Collection) -> f64 {
 fn count_the_phases(
     argv: &[String],
     windows: [Option<&str>; 4],
-) -> Result<Vec<Collection>, omn::collect::CollectError> {
-    let requests: Vec<_> = ["first", "pause", "second", "whole"]
+) -> Result<Vec<Collection>, String> {
+    let requests = ["first", "pause", "second", "whole"]
         .into_iter()
         .zip(windows)
         .map(|(label, window)| windowed("cpu.instructions", argv, Mode::Count, window, label))
-        .collect();
-    collect::run_all(&requests)
+        .collect::<Result<Vec<_>, _>>()?;
+    collect::run_all(&requests).map_err(|error| error.to_string())
 }
 
 /// A source attached for the first phase counts the first phase and nothing
@@ -1197,7 +1210,7 @@ fn a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other() 
         ],
     ) {
         Ok(collections) => collections,
-        Err(error) if machine_cannot_serve(&error.to_string()) => {
+        Err(error) if machine_cannot_serve(&error) => {
             eprintln!("skipped: this machine will not count instructions here: {error}");
             return;
         }
@@ -1414,7 +1427,7 @@ fn a_counter_attached_late_counts_the_threads_already_running_or_says_it_cannot(
         ],
     ) {
         Ok(collections) => collections,
-        Err(error) if machine_cannot_serve(&error.to_string()) => {
+        Err(error) if machine_cannot_serve(&error) => {
             eprintln!("skipped: this machine will not count instructions here: {error}");
             return;
         }
@@ -2142,4 +2155,196 @@ fn a_counted_window_over_a_polled_counter_ends_with_its_closing_read() {
             N * B
         );
     }
+}
+
+// -------------------------------------------- a window ends where it stopped
+
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the kernel to write into.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// A task that blocks every two milliseconds until it is told to stop, and
+/// logs each sleep on `CLOCK_MONOTONIC` with the kernel's own count of the
+/// voluntary switches it made -- none when the timer expired while it was
+/// preempted, one when it blocked.
+const BLOCKING_WORKLOAD: &str = r#"
+import json, resource, signal, time
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+blocked = lambda: resource.getrusage(resource.RUSAGE_THREAD).ru_nvcsw
+done = []
+signal.signal(signal.SIGUSR1, lambda *_: done.append(1))
+sleeps = []
+import os
+print("ready", os.getpid(), flush=True)
+end = mono() + 60 * 10**9
+while not done and mono() < end:
+    v = blocked(); a = mono(); time.sleep(0.002); b = mono(); sleeps.append([a, b, blocked() - v])
+print(json.dumps(sleeps), flush=True)
+"#;
+
+/// A window closes before its collector's last read, not after the last of the
+/// run's collectors stopped.
+///
+/// A drained collector's last read is inside its `stop()`, and the run stops
+/// its collectors one after another. Before the fourteenth wave every window
+/// closed once all of them had stopped, so what the task did between the
+/// first one's last read and the last one's stop was inside the first one's
+/// window and in none of its rows: stream S measured 6 of 930 blocks with
+/// `sched.offcpu` alone and 71 with five collectors stopping after it. Now
+/// every window the run held to its end closes at one instant before the
+/// first stop.
+///
+/// The truth is the task's: every sleep it logged, with the voluntary
+/// switches the kernel counted for it, that began after the window opened and
+/// ended before it closed is a block `sched.offcpu` read, or one it reports
+/// losing. The task keeps blocking past the end of the run, so the end of the
+/// window is where the difference would be, and four more collectors stop
+/// after `sched.offcpu` to make the gap wide.
+#[test]
+fn a_window_closes_before_its_collector_s_last_read_not_after_the_last_stop() {
+    use std::io::BufRead;
+
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let mut task = Command::new("python3")
+        .args(["-c", BLOCKING_WORKLOAD])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("python3 starts");
+    let mut stdout = std::io::BufReader::new(task.stdout.take().expect("a pipe"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the workload says it is ready");
+    let pid: i32 = line
+        .trim()
+        .strip_prefix("ready ")
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not start: {line:?}"));
+
+    let target = format!("{{pid: {pid}}}");
+    let mut session =
+        String::from("name: five collectors stopping in turn\nduration: 1500ms\nrequests:\n");
+    for (label, source) in [
+        ("blocks", "sched.offcpu"),
+        ("wakeups", "sched.wakeup"),
+        ("waits", "sched.runqlat"),
+        ("moves", "sched.migrations"),
+        ("locks", "sched.lock"),
+    ] {
+        session.push_str(&format!(
+            "  - {{label: {label}, source: {source}, target: {target}, mode: trace, emit: [raw]}}\n"
+        ));
+    }
+    let spawned_ns = monotonic_ns();
+    let output = {
+        use std::io::Write;
+        let mut child = Command::new(BINARY)
+            .args(["-f", "-", "--input-format", "yaml", "--format", "json"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("omn should run");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin is piped")
+            .write_all(session.as_bytes())
+            .expect("the session is written");
+        child.wait_with_output().expect("omn should finish")
+    };
+    // SAFETY: a signal to the child this test started and has not reaped.
+    unsafe { libc::kill(pid, libc::SIGUSR1) };
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).expect("the log");
+    let _ = task.wait();
+
+    if !output.status.success() {
+        let why = stderr(&output);
+        if machine_cannot_serve(&why) || why.contains("CAP_BPF") || why.contains("permission") {
+            eprintln!("skipped: the sched programs are not served here: {why}");
+            return;
+        }
+        panic!("the run failed: {why}");
+    }
+    let sleeps: Vec<[u64; 3]> = serde_json::from_str(rest.trim())
+        .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"));
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a JSON document");
+    let blocks = results_labelled(&document, "blocks");
+    let opened = blocks["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = blocks["window"]["closed_ns"].as_u64().expect("a window");
+    let last_sleep = sleeps.last().map_or(0, |sleep| sleep[1]);
+    if last_sleep <= closed {
+        eprintln!(
+            "skipped: the workload stopped {:.3} s after omn started and the window closed at \
+             {:.3} s: nothing it did straddles the end",
+            last_sleep.saturating_sub(spawned_ns) as f64 / 1e9,
+            closed.saturating_sub(spawned_ns) as f64 / 1e9
+        );
+        return;
+    }
+    let inside: u64 = sleeps
+        .iter()
+        .filter(|sleep| sleep[0] >= opened && sleep[1] <= closed)
+        .map(|sleep| sleep[2])
+        .sum();
+    let ceiling: u64 = sleeps
+        .iter()
+        .filter(|sleep| sleep[0] >= spawned_ns)
+        .map(|sleep| sleep[2])
+        .sum();
+    let lost = blocks["losses"]["dropped"].as_u64().unwrap_or(0);
+    let kept: u64 = blocks["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .filter(|output| output["events"].is_array())
+        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+        .filter(|event| {
+            let attrs = event["attrs"].as_array().cloned().unwrap_or_default();
+            let attr = |name: &str| {
+                attrs
+                    .iter()
+                    .find(|attr| attr["name"] == name)
+                    .map(|attr| attr["value"].clone())
+                    .unwrap_or_default()
+            };
+            attr("tid").as_i64() == Some(pid as i64) && attr("state") == "sleeping"
+        })
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .and_then(|attrs| attrs.iter().find(|attr| attr["name"] == "blocks"))
+                .and_then(|attr| attr["value"].as_u64())
+                .unwrap_or(1)
+        })
+        .sum();
+    eprintln!(
+        "sched.offcpu: {kept} blocks kept, {inside} inside its window by the kernel's count, \
+         {ceiling} since omn started, {lost} reported lost"
+    );
+    assert!(
+        inside > 100,
+        "the task blocked {inside} times inside the window, too few to judge"
+    );
+    assert!(
+        kept + lost >= inside,
+        "the task blocked {inside} times inside `sched.offcpu`'s window by the kernel's own \
+         count, and the source kept {kept} and reported {lost} lost: the window claims a span \
+         its collector did not read"
+    );
+    assert!(
+        kept <= ceiling,
+        "{kept} blocks kept, more than the {ceiling} the task made since omn started"
+    );
 }

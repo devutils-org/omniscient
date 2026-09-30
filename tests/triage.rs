@@ -206,6 +206,20 @@ fn answer(args: &[&str], would_have_checked: &str) -> Option<Answered> {
         );
         return None;
     }
+    // An input the method cannot do without, which this machine cannot serve:
+    // `cpu.profile` on a stock kernel's `perf_event_paranoid`, or on a cpu with
+    // no PMU. The question is refused, rightly, and the refusal is the
+    // machine's -- its reasons follow on the lines after.
+    if !output.status.success()
+        && text.contains("cannot do without")
+        && text.contains("has no viable backend on this machine")
+    {
+        eprintln!(
+            "skipped: `omn {}` would have checked {would_have_checked}, and: {text}",
+            args.join(" ")
+        );
+        return None;
+    }
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -608,7 +622,35 @@ fn the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail() {
     ) else {
         return;
     };
-    assert_eq!(latency.limit(), Some("cpu"), "{}", latency.text);
+    // The median run spins 100 ms and sleeps nothing, so what limits it is a
+    // cpu: its own work on an idle machine, or waiting for one on a machine
+    // whose cpus the rest of the suite holds -- which failed this test at a
+    // load of 20, and is the tool being right about the run it measured. Which
+    // of the two is the kernel's to say, not the load average's: the fixture
+    // reports its main thread's time on a cpu and waiting for one, from
+    // `/proc/thread-self/schedstat`, and the verdict has to name the larger.
+    // Where the two are within a tenth of each other (and 5 ms) the run was
+    // limited by both about equally, and either name is right.
+    let median = latency.answer["median"].as_u64().expect("a median run") as usize;
+    let oncpu = latency.truth_of(median, "oncpu_ns");
+    let queued = latency.truth_of(median, "runq_ns");
+    let expected = if queued > oncpu { "cpu-queue" } else { "cpu" };
+    let close = (queued - oncpu).abs() <= 0.1 * queued.max(oncpu) + 5e6;
+    eprintln!(
+        "the median run (#{}) was on a cpu {oncpu} ns and waited for one {queued} ns, by the \
+         kernel's count; the verdict says {:?}",
+        median + 1,
+        latency.limit()
+    );
+    match latency.limit() {
+        Some(limit) if limit == expected => {}
+        Some("cpu" | "cpu-queue") if close => {}
+        other => panic!(
+            "the median of the same five runs is limited by {other:?}, where the kernel counted \
+             {oncpu} ns on a cpu and {queued} ns waiting for one, which is `{expected}`:\n{}",
+            latency.text
+        ),
+    }
 }
 
 /// The loss path: a profile taken fast enough to lose samples carries its
@@ -920,8 +962,11 @@ fn the_function_whose_cost_doubled_is_the_only_difference() {
             factor,
         ]);
         let text = spoken(&output);
-        if !output.status.success() && text.contains("CAP_PERFMON") {
-            eprintln!("skipped: profiling needs CAP_PERFMON: {text}");
+        if !output.status.success()
+            && (text.contains("CAP_PERFMON")
+                || text.contains("has no viable backend on this machine"))
+        {
+            eprintln!("skipped: this machine does not profile here: {text}");
             return None;
         }
         assert!(output.status.success(), "{text}");

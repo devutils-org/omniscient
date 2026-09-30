@@ -202,11 +202,33 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         Err(rejections) => return Ok(reject(&rejections)),
     };
 
+    // A dump is a document about the request, and a results format cannot
+    // hold one. Asked before the machine is, because the answer does not
+    // depend on it: a stock kernel that refuses `cpu.profile` used to answer
+    // "no viable backend" to a question about the request's spelling.
+    if (args.dump_request || args.dump_resolved || args.no_resolve)
+        && !session.format.renders_documents()
+    {
+        eprintln!(
+            "error: `{}` describes results, not a request: a request dumps as text, json, yaml \
+             or toml",
+            session.format
+        );
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+
     // A session written here for another machine is not resolved here: what
     // this machine can do says nothing about what that one can.
     if args.no_resolve {
         print_session(&catalog, &session, &report, &defaulted, &[])?;
         return Ok(ExitCode::SUCCESS);
+    }
+
+    // A part read from a join is refused before the machine is asked: its
+    // pairs would not be the join's (`Session::check_paired_parts`).
+    if let Err(error) = session.check_paired_parts() {
+        eprintln!("error: {error}");
+        return Ok(ExitCode::from(EXIT_REJECTED));
     }
 
     // Introspection happens once per invocation: every request is resolved
@@ -221,6 +243,34 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         // does not need it. It is set aside with the resolver's reason, and
         // the escalation says so if it names that layer.
         let held = request.window.is_some_and(|window| window.on.is_some());
+        // A container is measured as the cgroup its runtime says it runs in,
+        // which every collector that serves a cgroup can attach to. The
+        // session keeps the container, as asked; the resolved request carries
+        // the cgroup, as measured.
+        let bound;
+        let request = match &request.target {
+            omn::request::Target::Container(name) => match omn::request::find_container(name) {
+                Ok(container) => {
+                    eprintln!(
+                        "note: container `{name}` runs in cgroup {} (pid {}, from `{}`), which \
+                         is what is measured",
+                        container.cgroup.display(),
+                        container.pid,
+                        container.runtime
+                    );
+                    bound = omn::request::Request {
+                        target: omn::request::Target::Cgroup(container.cgroup),
+                        ..request.clone()
+                    };
+                    &bound
+                }
+                Err(reason) => {
+                    eprintln!("error: {reason}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            _ => request,
+        };
         match resolve::resolve(&catalog, &capabilities, request) {
             Ok(resolved) => resolutions.push(resolved),
             Err(error @ resolve::ResolveError::NoViableBackend { .. }) if held => {
@@ -635,6 +685,13 @@ impl MeasuredCost {
         };
         let inside = match (overhead.in_target_cpu_ns, overhead.in_target_runs) {
             (Some(0), None) => String::new(),
+            (Some(ns), Some(runs)) if overhead.in_target_left_out > 0 => format!(
+                ", and {} inside the target over {runs} run(s) of its own code, {} of them \
+                 priced at the mean of the others because a preemption fell in their timed \
+                 span",
+                span(ns),
+                overhead.in_target_left_out
+            ),
             (Some(ns), Some(runs)) => format!(
                 ", and {} inside the target over {runs} run(s) of its own code",
                 span(ns)
@@ -1107,6 +1164,14 @@ fn assemble(
     let mut costs: Vec<MeasuredCost> = Vec::new();
     let mut served_by: Vec<ResolvedRequest> = Vec::new();
 
+    // The sources a detach ended, which is not the same as a window that
+    // closed a little before another's.
+    let detached: std::collections::BTreeSet<String> = collections
+        .iter()
+        .zip(resolved)
+        .filter(|(collection, _)| collection.detached)
+        .map(|(_, resolved)| resolved.request.source.to_string())
+        .collect();
     for (index, collection) in collections.into_iter().enumerate() {
         // The record of how these events were obtained is the request that was
         // serving when they arrived, which a budget may have moved. Handing
@@ -1145,6 +1210,15 @@ fn assemble(
             )
             .or_insert(results.window);
     }
+    // A window that closed with the run rather than at a detach closed before
+    // the collectors were stopped, and what their stops drained is later than
+    // it: to a join such a source watched to the end of the run, and its
+    // states still open then are open, not ended by a detach.
+    for (source, watched) in windows.iter_mut() {
+        if watched.attached && !detached.contains(source) {
+            watched.closed_ns = u64::MAX;
+        }
+    }
     for rule in &session.joins {
         run.joins.push(join::apply_within(rule, &merged, &windows)?);
     }
@@ -1155,11 +1229,14 @@ fn assemble(
         .map(|serving| serving.request.clone())
         .collect();
     for decomposition in &session.decompose {
-        run.decompositions.push(join::decompose(
+        // With the session's joins: a part a join defines (`value: paired`)
+        // names the join by id.
+        run.decompositions.push(join::decompose_with(
             decomposition,
             &served,
             &run.results,
             &merged,
+            &session.joins,
         ));
     }
     Ok((run, costs, served_by))

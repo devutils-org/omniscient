@@ -117,6 +117,9 @@ static void report_close(void) {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
     report_u64("maxrss_kb", (uint64_t)usage.ru_maxrss);
+    /* The kernel's count of the times this process was preempted: what a
+     * test that means to preempt it checks that it did. */
+    report_u64("involuntary", (uint64_t)usage.ru_nivcsw);
     report_u64("cpu_ns", cpu_ns());
     struct timespec res;
     clock_getres(CLOCK_MONOTONIC, &res);

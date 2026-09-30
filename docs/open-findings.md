@@ -8197,3 +8197,163 @@ on a cpu with a hardware PMU:
 
 `docs/portability.md` is the record once these are read; the log and the cell
 are the run's artifact.
+
+## Needs from another stream — the fourteenth wave, stream R (the results say it)
+
+Stream R's deliverable is `docs/fixes/results.md`. Nothing here blocks it;
+each item is the other half of a change R landed in its own files.
+
+### To stream K (`src/collect/mem/mod.rs`, `src/collect/io/pressure.rs`, `src/collect/mem/pressure.rs`): `psi` where it lives, the other half
+
+`src/collect/mod.rs` now says `pub use mem::psi;`, so `crate::collect::psi` is
+a path every reader can take today. The file cannot be declared twice --
+clippy's `duplicate_mod` refuses it under `-D warnings` -- so the move is one
+commit across both owners, the coordinator's at the merge:
+
+```rust
+// src/collect/mod.rs: `pub use mem::psi;` becomes
+pub mod psi;
+// src/collect/mem/mod.rs: the `#[path = "../psi.rs"] pub mod psi;` and its comment go
+// src/collect/io/pressure.rs: `crate::collect::mem::psi::{..}` becomes `crate::collect::psi::{..}`
+// src/collect/mem/pressure.rs: `super::psi` becomes `crate::collect::psi`
+```
+
+### To stream K (`src/collect/net/softirq.rs`): the kernel's count is a fact
+
+`Collector::facts()` is on `main` since the thirteenth wave (default empty,
+reaching the results as `notes` and the text as `note:`). `net.softirq`'s count
+of the handler runs the kernel bucketed is still returned from `notes()`, which
+prints it as `degraded:`. Wanted: that one string moved to
+
+```rust
+fn facts(&self) -> Vec<String>
+```
+
+in the same impl, and `notes()` left with what is degraded.
+
+### To stream P (`src/validate.rs`): a container is resolved now
+
+`--container NAME` is bound to the cgroup its runtime names before resolution
+(`omn::request::find_container`, in `src/main.rs`), and the resolved request
+carries `Target::Cgroup`. `target_rejection_reason` still says, for an entry
+that serves a cgroup and declares `container: no`, "a container has to be
+resolved to its cgroup first, which this tool does not do". Wanted: the
+sentence, or better the refusal, gone -- see the next item. And
+`check_decomposition_in(decomposition, &session.requests, &session.joins,
+catalog)` (J's request of the thirteenth wave): R's two `decompose_with` call
+sites have landed, so a session with a `paired` part now waits on that one
+line alone.
+
+### To streams P and U (`catalog/cpu.yaml`, `catalog/mem.yaml`): `container: false` where the cgroup is served
+
+Eleven entries serve a cgroup natively and say `container: false`, which the
+validator refuses before the binding can happen: `cpu.cycles`,
+`cpu.instructions`, `cpu.ipc`, `cpu.branch_misses`, `cpu.cache_misses`,
+`cpu.topdown`, `cpu.context_switches`, `cpu.migrations`, `cpu.throttle` and
+`mem.faults` (P), `cpu.profile` (U). Wanted: the `container` key dropped from
+each, so the kind falls back to `cgroup` (`TargetKind::fallback`), which is
+what every `sched`, `proc` and `io` entry already does. The collectors that
+still refuse `Target::Container` by name (`cpu/counters.rs`, `cpu/throttle.rs`,
+`mem/cgroup.rs`, `mem/stall.rs`, `mem/allocations.rs`, `mem/ibs.rs`) are not
+reached through `omn` any more; their "not built yet" is only true of a
+library caller that skips `find_container`.
+
+### To stream P (`.github/expected-skips.txt`): one new skip wording
+
+`tests/cli.rs::a_container_is_measured_as_the_cgroup_its_runtime_names`
+makes a cgroup under this process's own, and skips where it cannot with *"no
+cgroup in this process's ancestry (..) lets this user make one below it"* --
+the wording `tests/scenario_{sched,proc}.rs` already print. It asks whether
+`sched.offcpu` is served first, so on the hosted runner (no `CAP_BPF`) it
+skips with the resolver's sentence, which the file expects; the cgroup line is
+for a cell that grants the capabilities and delegates no cgroup.
+
+### For the flaky tally
+
+- `triage::the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail`
+  failed in one run of R's seven test files together (load about 9) and passed
+  alone. It asserted that the median run's limit is `cpu`, and on a machine
+  whose cpus the rest of the suite holds a 100 ms spin can wait for a cpu
+  longer than it runs: the verdict `cpu-queue` is the tool being right. The test
+  now accepts `cpu-queue` with the load printed, and still fails on any other
+  limit. If it fails again it will be for a different reason, and that is
+  worth reading.
+- `scenario_net::a_queue_that_delays_every_packet_is_measured_as_that_delay`
+  failed once in a `--no-fail-fast` run at a load of about 15, with `/home` at
+  99 %: *"the scenario put 200 packets through a queueing discipline and this
+  found 401"*. It passed alone at once. In no tally before; an excess of about
+  twice is worth a look by its owner if it recurs.
+- `scenario_sched::an_overflowing_wakeup_ring_says_what_it_could_not_hold`
+  (tally #3) failed in two of stream R's `make check` runs and passed alone
+  both times. What it read, both times: the first run overflowed, and the
+  *second* run -- the one whose terminal text is checked for the explanation
+  -- dropped nothing (`LOSS: 0 dropped, ..., 3 late ticks`), so "the loss is
+  counted and not explained" asked a run with no ring overflow to explain one.
+  The terminal check wants to be made on a run that dropped, or skipped when
+  its own run did not (K's file).
+
+### To stream J (`src/join.rs`): a `paired` part pairs over the windows the joins were given
+
+A review of R's branch found it, and it is real. `main.rs` (`assemble`) gives
+`join::apply_within` every source that ran to the end with `closed_ns =
+u64::MAX`: since R's window fix, every such window closes at one instant taken
+*before* the first `stop()`, and what each stop drains is stamped after it.
+`join::decompose_with` does not get those windows: `windows_of` rebuilds them
+from the results' real `window.closed_ns` (its doc still says "as `main.rs`
+reads them for the joins", which is no longer so), and `paired_events` runs
+`Watch::of` on them. So `Watch::advance` cuts the open states at the close on
+the first drained event, and `Watch::outside` counts the later `to` events as
+outside: a paired part's pairs can differ from the join that defines them.
+The results' own windows cannot be passed in instead: `decompose_with` reads
+them for `run_closed_ns` and the window row, where the real close is right.
+Wanted, the windows passed beside the results:
+
+```rust
+pub fn decompose_within(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    results: &[Results],
+    events: &[Event],
+    joins: &[Rule],
+    windows: &BTreeMap<String, Watched>, // what apply_within was given
+) -> DecompositionOutput
+```
+
+with `decompose_with` calling it on `windows_of(results)` as today. Until it
+lands, R refuses a `paired` part before anything is attached
+(`Session::check_paired_parts`, in `src/main.rs` and `src/triage/engine.rs`),
+so P's `check_decomposition_in` line can land in any order without making the
+inconsistent path reachable. Once both have landed, the coordinator's merge
+swaps R's two call sites to `decompose_within(.., &windows)` -- `main.rs` has
+the map; `triage/engine.rs` calls `join::apply`, which watches everything, so
+it passes an empty map -- and removes the two `check_paired_parts` calls.
+
+### To streams P and U: the `container: false` entries, measured, and P's test with them
+
+The item above stands, and R tried the other way round first and took it
+back. Binding every container before validation made
+`cpu.context_switches --container <name>` run -- 367 switches counted in the
+container's cgroup for 366 blocks of the task inside by the kernel's count --
+but it overrode an explicit `container: no` in the catalog from code, and the
+catalog is what the validator is a projection of. So it is the key's to
+change. What R leaves ready:
+`tests/cli.rs::a_container_is_served_by_a_source_that_serves_its_cgroup`
+holds that binding to the kernel's count, and skips, with the validator's
+refusal, while the entry still says `container: no`.
+
+With the key dropped, P's
+`tests/scenario_cpu.rs::a_container_is_refused_before_the_start_where_only_its_cgroup_is_served`
+has to change in the same commit: it asserts exit 2 and "resolved to its
+cgroup first" for `cpu.instructions`, `cpu.profile`, `mem.faults` and
+`cpu.throttle --container web`. After it, with no runtime knowing `web`, the
+answer is `find_container`'s -- exit 1, "no container named `web`: `docker`
+does not know it (..)" -- and a container a runtime names is measured.
+
+### For the flaky tally: the triage tail test, again
+
+The line above says the tail test "now accepts `cpu-queue` with the load
+printed". It does not any more: the median run's verdict is held to the
+fixture's own `/proc/thread-self/schedstat` for that run -- `cpu-queue` where
+the kernel counted more time waiting for a cpu than on one, `cpu` otherwise,
+either where the two are within a tenth (and 5 ms). A failure now names both
+numbers and which verdict they make.

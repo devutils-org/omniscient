@@ -423,12 +423,37 @@ impl Drop for Timer {
         if self.started_ns == 0 {
             return;
         }
-        let spent = monotonic_ns()
-            .saturating_sub(self.started_ns)
-            .saturating_sub(self.excluded_ns)
-            .saturating_sub(2 * CLOCK_READ_NS.load(Ordering::Relaxed));
-        ring::spent(self.class, spent);
+        match own_time(
+            monotonic_ns().saturating_sub(self.started_ns),
+            self.excluded_ns,
+            CLOCK_READ_NS.load(Ordering::Relaxed),
+        ) {
+            Some(spent) => ring::spent(self.class, spent),
+            None => ring::left_out(self.class),
+        }
     }
+}
+
+/// A hook's own time over a span longer than this is not the hook's: nothing
+/// the shim does between its clock reads -- a few checks, a record copied
+/// into the ring -- comes within three orders of magnitude of it, and a
+/// preemption of the program's thread inside the span does. One such span
+/// on a two-cpu CI runner, scaled by [`SAMPLE_EVERY`], put a scheduler slice
+/// seventeen times into the account, which came to 610 ms for 396 ms the
+/// program lost.
+const PREEMPTED_NS: u64 = 200_000;
+
+/// What a timed call spent of the shim's own: its span, less the real function
+/// and the two clock reads timing added. `None` for a span the thread was
+/// preempted in: it is none of the hook's, and the ring counts it apart
+/// ([`ring::left_out`]) rather than adding a time slice to the account or
+/// dropping it unsaid. `omn` prices such a turn at the mean of the others and
+/// says how many there were.
+fn own_time(span_ns: u64, excluded_ns: u64, clock_read_ns: u64) -> Option<u64> {
+    let own = span_ns
+        .saturating_sub(excluded_ns)
+        .saturating_sub(2 * clock_read_ns);
+    (own <= PREEMPTED_NS).then_some(own)
 }
 
 /// Writes one allocator record, when the heap was asked for.
@@ -564,7 +589,9 @@ static FLUSH_AT_EXIT: extern "C" fn() = flush_at_exit;
 ///   256  spent  (3 x u64)      nanoseconds the timed calls took, per class
 ///   288  timed  (3 x u64)      how many calls were timed, per class
 ///   312  clock  (u64)          what one clock read costs, as calibrated
-///   320  slots  (SLOT_BYTES each): a sequence word, then the 40-byte record
+///   320  left   (3 x u64)      timed calls a preemption fell in, per class:
+///                              counted in `timed`, their spans in no `spent`
+///   384  slots  (SLOT_BYTES each): a sequence word, then the 40-byte record
 /// ```
 ///
 /// The magic changed with the account: a shim and an `omn` that disagree
@@ -581,14 +608,15 @@ mod ring {
     use super::{Record, RECORD_SIZE};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    pub const MAGIC: u64 = 0x3267_6e72_5f6e_6d6f; // "omn_rng2", little endian
+    pub const MAGIC: u64 = 0x3367_6e72_5f6e_6d6f; // "omn_rng3", little endian
     pub const HEAD: usize = 64;
     pub const TAIL: usize = 128;
     pub const DROPS: usize = 192;
     pub const SPENT: usize = 256;
     pub const TIMED: usize = 288;
     pub const CLOCK: usize = 312;
-    pub const SLOTS: usize = 320;
+    pub const LEFT_OUT: usize = 320;
+    pub const SLOTS: usize = 384;
     pub const SLOT_BYTES: usize = 48;
 
     static BASE: AtomicUsize = AtomicUsize::new(0);
@@ -644,6 +672,19 @@ mod ring {
         }
         let at = 8 * class.trailing_zeros() as usize;
         word(base, SPENT + at).fetch_add(ns, Ordering::Relaxed);
+        word(base, TIMED + at).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts one timed call whose span a preemption fell in: a turn that was
+    /// timed, with no time of the shim's that can be told from the
+    /// scheduler's.
+    pub fn left_out(class: u8) {
+        let base = BASE.load(Ordering::Acquire);
+        if base == 0 {
+            return;
+        }
+        let at = 8 * class.trailing_zeros() as usize;
+        word(base, LEFT_OUT + at).fetch_add(1, Ordering::Relaxed);
         word(base, TIMED + at).fetch_add(1, Ordering::Relaxed);
     }
 
@@ -923,7 +964,7 @@ mod tests {
     /// wrong offset.
     #[test]
     fn the_ring_layout_is_the_one_omn_reads() {
-        assert_eq!(ring::MAGIC, 0x3267_6e72_5f6e_6d6f);
+        assert_eq!(ring::MAGIC, 0x3367_6e72_5f6e_6d6f);
         assert_eq!(
             (
                 ring::HEAD,
@@ -932,15 +973,32 @@ mod tests {
                 ring::SPENT,
                 ring::TIMED,
                 ring::CLOCK,
+                ring::LEFT_OUT,
                 ring::SLOTS,
                 ring::SLOT_BYTES
             ),
-            (64, 128, 192, 256, 288, 312, 320, 48)
+            (64, 128, 192, 256, 288, 312, 320, 384, 48)
         );
         assert_eq!(
             SAMPLE_EVERY, 17,
             "the reader scales the account by seventeen"
         );
         assert_eq!(ring::SLOT_BYTES, 8 + RECORD_SIZE);
+    }
+
+    /// A timed call's own time is its span less the real function and the
+    /// clock reads, and a span a preemption fell in is none of the hook's: it
+    /// is left out, to be counted apart, not zeroed.
+    #[test]
+    fn a_preempted_span_is_left_out_of_the_account() {
+        assert_eq!(own_time(1_000, 600, 20), Some(360));
+        assert_eq!(own_time(500, 600, 20), Some(0), "never below zero");
+        assert_eq!(own_time(PREEMPTED_NS + 640, 600, 20), Some(PREEMPTED_NS));
+        assert_eq!(own_time(PREEMPTED_NS + 641, 600, 20), None);
+        assert_eq!(
+            own_time(4_000_000 + 1_000, 600, 20),
+            None,
+            "a scheduler slice inside the span is the machine's, not the shim's"
+        );
     }
 }
