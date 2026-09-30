@@ -35,6 +35,9 @@ no chip under /sys/class/hwmon (publishes|reports) a temperature
 no physical core here has two hardware threads
 cpufreq
 hardware counter|PMU|performance unit
+# ... as the probe words it for a cpu that publishes no such event: a cloud
+# VM's vcpu, which the CI's runner is (`ENOENT` at the open).
+is not available on this cpu
 # Sources this cell cannot serve. "no viable backend on this machine" is the
 # resolver's own classification -- "the request is valid; it is this machine
 # that cannot serve it" -- and the probes' reasons follow it on lines that a

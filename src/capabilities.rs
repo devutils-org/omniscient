@@ -1059,6 +1059,11 @@ fn probe_pmu(event: &str) -> Probe {
         .or_else(|| sysfs_event(event))
     else {
         return match sysfs_device_state(event) {
+            // A unit that is there may still refuse this process: AMD's op
+            // sampler read available under a sandbox that opens no perf event
+            // at all, and every run of `mem.latency` was refused at the attach.
+            // It is opened the way its collector opens it.
+            Some(Probe::Available) if event == crate::perf::IbsOp::PMU => probe_ibs_op(),
             Some(probe) => probe,
             None => Probe::Unknown(format!(
                 "`pmu:{event}` needs an event encoding this tool does not build yet"
@@ -1123,6 +1128,73 @@ fn probe_pmu(event: &str) -> Probe {
             Probe::Missing(format!("`{event}` is not available on this cpu"))
         }
         _ => Probe::Missing(format!("perf_event_open failed for `{event}`: {error}")),
+    }
+}
+
+/// Opens AMD's op sampler the way `mem.latency`'s collector does: one event
+/// following this process on one cpu, excluding the kernel only where the unit
+/// can (`swfilt`), since without it the unit refuses every `exclude_*` bit --
+/// which is why it needs `perf_event_paranoid` at 1 or below, or CAP_PERFMON.
+fn probe_ibs_op() -> Probe {
+    use perf_event_open_sys::bindings as perf;
+    let Some(unit) = crate::perf::IbsOp::probe() else {
+        return Probe::Missing(format!(
+            "this machine publishes no readable `{}` type under {PMU_DEVICES}",
+            crate::perf::IbsOp::PMU
+        ));
+    };
+    // The unit's own minimum is sixteen ops; a period this long never fires
+    // in the microseconds the event is open.
+    let spec = unit.spec(crate::perf::Rate::Period(1 << 20), true, false);
+    let mut attr: perf::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = spec.kind;
+    attr.size = std::mem::size_of::<perf::perf_event_attr>() as u32;
+    attr.config = spec.config;
+    attr.__bindgen_anon_4.config2 = spec.config2;
+    attr.__bindgen_anon_1.sample_period = 1 << 20;
+    attr.set_disabled(1);
+    if spec.exclude_kernel {
+        attr.set_exclude_kernel(1);
+        attr.set_exclude_hv(1);
+    }
+    let cpu = online_cpus()
+        .ok()
+        .and_then(|cpus| cpus.first().copied())
+        .unwrap_or(0) as i32;
+    // SAFETY: a zeroed attr with its size set, opened on this process.
+    let fd = unsafe {
+        perf_event_open_sys::perf_event_open(
+            &mut attr,
+            0,
+            cpu,
+            -1,
+            perf::PERF_FLAG_FD_CLOEXEC as u64,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: closing a descriptor just opened here.
+        unsafe { libc::close(fd) };
+        return Probe::Available;
+    }
+    let error = std::io::Error::last_os_error();
+    let paranoid =
+        read_trimmed("/proc/sys/kernel/perf_event_paranoid").unwrap_or_else(|| "unknown".into());
+    match error.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) => Probe::Missing(format!(
+            "perf_event_open was refused for `{}` on cpu {cpu}: following a process's ops needs \
+             perf_event_paranoid at 1 or below (it is {paranoid}) or CAP_PERFMON on this \
+             binary{}",
+            crate::perf::IbsOp::PMU,
+            if unit.can_exclude_kernel() {
+                ""
+            } else {
+                ", and this unit has no `swfilt` to leave the kernel's ops out"
+            }
+        )),
+        _ => Probe::Missing(format!(
+            "perf_event_open failed for `{}` on cpu {cpu}: {error}",
+            crate::perf::IbsOp::PMU
+        )),
     }
 }
 
@@ -1444,9 +1516,28 @@ mod tests {
             Ok((value, after - before))
         };
 
-        // Opening user mode only is what paranoid 2 allows everyone, so this
-        // half runs on every machine.
-        let (user_only, kernel_saw) = count(true).expect("a user-mode software counter opens");
+        // Opening user mode only is what paranoid 2 allows everyone; above it
+        // (Ubuntu's 4) nothing opens, and the probe has to say so.
+        let (user_only, kernel_saw) = match count(true) {
+            Ok(counted) => counted,
+            Err(error) => {
+                match super::probe_pmu("PERF_COUNT_SW_CONTEXT_SWITCHES") {
+                    super::Probe::Missing(reason) => {
+                        assert!(reason.contains("perf_event_paranoid"), "{reason}")
+                    }
+                    other => {
+                        panic!("no perf event opens here ({error}), and the probe said {other:?}")
+                    }
+                }
+                eprintln!(
+                    "skipped: this machine opens no perf event for this process ({error}), \
+                     perf_event_paranoid {}",
+                    super::read_trimmed("/proc/sys/kernel/perf_event_paranoid")
+                        .unwrap_or_else(|| "unknown".into())
+                );
+                return;
+            }
+        };
         assert!(
             kernel_saw >= SLEEPS,
             "{SLEEPS} sleeps, and the kernel saw {kernel_saw} switches"

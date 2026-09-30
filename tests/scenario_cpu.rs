@@ -545,8 +545,17 @@ fn last_of(document: &serde_json::Value) -> f64 {
 /// `perf_event_paranoid` above 2 (Debian's and Ubuntu's 4) answers every
 /// counter, even a process's own. A scenario about something else that uses a
 /// counter as its vehicle has nothing to check there.
+///
+/// Or every backend this build collects is missing one, and what was left was
+/// a backend nobody wrote: `cpu.cycles` on a cpu with no hardware PMU (the
+/// CI's runner) resolves to `pmu:sw` and is refused as the build's gap, with
+/// the written `pmu` "passed over" for the event it lacks. That gap is real,
+/// and it is not the one a scenario about the written backend is asking after.
 fn withheld_here(message: &str) -> bool {
     message.contains("has no viable backend on this machine")
+        || (message.contains("no collector is written")
+            && message.contains("was passed over")
+            && message.contains("missing"))
 }
 
 /// Whether a refusal is this machine's limit rather than a refusal of the
@@ -555,6 +564,7 @@ fn machine_cannot_serve(message: &str) -> bool {
     message.contains("no viable backend")
         || message.contains("perf_event_paranoid")
         || message.contains("cannot start collecting")
+        || withheld_here(message)
 }
 
 // ---------------------------------------------------------------------------

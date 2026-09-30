@@ -73,6 +73,17 @@ fn machine_cannot_serve(message: &str) -> bool {
     message.contains("no viable backend")
         || message.contains("cannot start collecting")
         || message.contains("perf_event_paranoid")
+        || written_backend_withheld(message)
+}
+
+/// Every backend this build collects is missing a requirement, and the one the
+/// request reached is a backend nobody wrote: `cpu.cycles` on a cpu with no
+/// hardware PMU (the CI's runner) is refused as the build's gap on `pmu:sw`,
+/// with `pmu` passed over for the event the cpu lacks.
+fn written_backend_withheld(message: &str) -> bool {
+    message.contains("no collector is written")
+        && message.contains("was passed over")
+        && message.contains("missing")
 }
 
 /// A shell loop of `iterations` turns, which is a program whose work scales
@@ -174,7 +185,9 @@ fn sampling_a_counter_is_refused_with_the_mechanism_it_would_need() {
     let message = stderr(&output);
     // The collector's refusal is reached only through a backend the machine
     // offers; `perf_event_paranoid` above 2 withholds every counter.
-    if message.contains("has no viable backend on this machine") {
+    if message.contains("has no viable backend on this machine")
+        || written_backend_withheld(&message)
+    {
         eprintln!("skipped: {message}");
         return;
     }
@@ -583,7 +596,10 @@ fn counting_a_cpu_that_does_not_exist_says_so_rather_than_blaming_privileges() {
     // So does one that has no cycle counter at all, or lets no process count
     // a cpu (the CI's paranoid-2 cell): the refusal is about the machine, and
     // about cpu 0 rather than the cpu asked for.
-    if message.contains("has no viable backend on this machine") && !message.contains("4095") {
+    if (message.contains("has no viable backend on this machine")
+        || written_backend_withheld(&message))
+        && !message.contains("4095")
+    {
         eprintln!("skipped: {message}");
         return;
     }

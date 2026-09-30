@@ -8197,3 +8197,134 @@ on a cpu with a hardware PMU:
 
 `docs/portability.md` is the record once these are read; the log and the cell
 are the run's artifact.
+
+## Needs from another stream — the fourteenth wave, stream P (the stock machine)
+
+Read off the CI's two runs (`omniscient-ci-logs/run1-paranoid4`,
+`run2-paranoid2`) and off a local rehearsal of the `stock` cell: the suite run
+under `systemd-run --user -p SystemCallFilter=~perf_event_open -p
+SystemCallErrorNumber=EACCES`, where every perf event is refused as at
+paranoid 4 and NoNewPrivileges keeps the binary's file capabilities from being
+granted (the sysctl still reads -1 there, so a message quoting it says -1).
+`docs/portability.md`, "The fourteenth wave", has what P changed; below is what
+the two CI cells will still show in other streams' files, one request per
+owner, with the log line.
+
+### To stream R (`tests/runner.rs`, `tests/bench_capabilities.rs`, `src/collect/mod.rs`, `tests/cli.rs`): skip where the machine withholds the source
+
+A cpu with no hardware PMU (the Azure runner's) withholds every `pmu:` counter,
+and each of these unwraps a resolution instead of skipping with it:
+
+- `tests/runner.rs:437`, `a_counter_attached_late_counts_the_threads_already_running_or_says_it_cannot`
+  and `a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other`:
+  *"the request resolves here: NoViableBackend { source_id: "cpu.instructions",
+  rejections: ["  pmu: pmu:PERF_COUNT_HW_INSTRUCTIONS: missing:
+  `PERF_COUNT_HW_INSTRUCTIONS` is not available on this cpu"] }"*.
+- `tests/bench_capabilities.rs:83`, `every_resolved_file_carries_the_prefetcher_state`:
+  *"error: `cpu.instructions` has no viable backend on this machine"*.
+- `src/collect/mod.rs:5072`, `a_system_run_with_nothing_to_stop_it_is_refused`:
+  unwraps a resolution of `gpu.temp` on a machine with no GPU (*"NoViableBackend
+  { source_id: "gpu.temp", ..."*). A source every machine serves
+  (`cpu.util`, `fs:proc`) asks the same question.
+- `tests/cli.rs:765`, `a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_series`:
+  *"error: `power.cstate` has no viable backend on this machine"* (no cpuidle
+  in the VM, no capabilities).
+- `tests/triage.rs` (seven), `tests/encoders.rs` (three) and `tests/cli.rs:400`
+  (`a_result_format_is_refused_for_a_request_dump`) need `cpu.profile`, which
+  paranoid 2 refuses until stream U's user-only callchain lands; paranoid 4
+  refuses it for good. Each should skip on *"has no viable backend on this
+  machine"* rather than fail.
+
+### To stream R (`src/encode.rs`): a rate over joules is watts
+
+`gpu.power --mode count --emit rate` (this wave) is the board's mean draw, and
+the text renderer prints it as *"21.09 J/s"*: `quantity(per_second,
+results.unit)` in the rate arm. Wanted, for `Unit::Joules` alone:
+`quantity(per_second, Unit::Watts)` and no `/s`, so it reads *"21.09 W"*.
+`power.energy`'s rate is the same case.
+
+### To stream R (`src/render.rs`, optional): what "here" says for a build's gap
+
+`resolve::availability` now passes over a backend with no collector, so a source
+viable here only through one (`power.throttle` on this machine: `bpf:raw_tp`
+every requirement available, nobody's collector) reads *"no backend is usable
+on this machine"*. True of this build on this machine, and the backend lines
+say which has no collector; if the one line should say it too, the listing
+can tell the two apart by `collect::implements` over the chain.
+
+### To stream K (`tests/scenario_sched.rs`, `tests/family_sched.rs`): `sched.switches` on `pmu:sw` is missing below CAP_PERFMON now
+
+A context-switch counter opened for user mode only reads zero (the scheduler
+raises it from kernel code), which is what the CI's paranoid-2 cell measured:
+*"the program's four threads counted 400 switches of their own and all five
+406, and the counter that followed every one of them counted 0"*
+(`scenario_sched.rs:1150`). The probe now answers
+`pmu:PERF_COUNT_SW_CONTEXT_SWITCHES` missing wherever kernel mode cannot be
+counted (paranoid 2 or above without CAP_PERFMON), naming why, so these three
+are refused before they run and have to skip on *"has no viable backend"*:
+`scenario_sched.rs:1121` (`a_counted_switch_total_is_the_sum_of_what_each_thread_counted`,
+asserts *"`count` mode is served"*), `scenario_sched.rs:3963`
+(`every_thread_a_program_starts_has_its_switches_counted`) and
+`family_sched.rs:57` (`a_program_that_blocks_ten_times_shows_ten_context_switches`).
+
+### To stream K (`tests/scenario_mem.rs`): the counter sweeps on a cpu with no PMU
+
+- `every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_code`
+  and `..._sampled_sources_...` (`scenario_mem.rs:432`): *"the set of
+  combinations refused with exit 1 has changed"* on the runner and in the
+  rehearsal. The set is this machine's; a cell with no PMU, or no perf at all,
+  refuses more of them with exit 1, which is the right code.
+- `a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` and
+  `the_capability_sweep_session_produces_every_shape_it_asks_for`: *"error:
+  `mem.cache_l1` has no viable backend on this machine"*; skip on it.
+- `a_rate_the_kernel_will_not_sustain_is_refused_or_counted_as_a_loss`
+  (`scenario_mem.rs:3237`) and `a_stack_of_every_process_is_refused_by_the_build_and_the_rest_is_served`
+  (`:3309`), in the rehearsal: `mem.latency` refused for privilege (*"the
+  kernel refused op sampling on cpu 0 (Permission denied)"*), which the test
+  reads as the rate ceiling. `pmu:ibs_op` is now opened by the probe (this
+  wave), so on the CI's cells it reads missing and these are refused before
+  they run.
+- `mem.faults` now samples in user mode where the kernel refuses more
+  (paranoid 2): `the_faults_a_worker_thread_takes_are_traced_to_that_thread`
+  and `the_tool_finds_the_faults_the_program_counted_itself`, which skipped on
+  the runner with *"perf_event_open for page faults on pid ... was refused"*,
+  will run there. Their skip line printed the launch warning first (*"skipped:
+  warning: `json` is one document..."*), which the skip gate cannot read as a
+  reason: print the `error:` line.
+
+### To stream K (`src/bpf/btf.rs:670`): the skip gate cannot read this reason
+
+*"skipped the cross-check: bpftool could not dump the BTF"* is unexpected on
+both cells. Either say what bpftool answered (the runner's `linux-tools` is
+per-kernel and may not match `6.17.0-azure`), or install what it needs.
+
+### To stream J (`tests/cross_memory.rs:147`, `tests/cross_machine.rs`)
+
+- `cross_memory.rs:147` prints *"SKIPPED cross-memory-which-allocation.yml:
+  this machine withholds a source it needs"* with the refusal on the lines
+  after it, unindented, so the skip gate sees no reason and refuses it (twice
+  on each cell). Indent the refusal, or put its first line on the skip line.
+- `cross_machine.rs:807`, `a_guardrail_this_machine_cannot_serve_refuses_the_whole_crossing`,
+  on the runner: *"the refusal must name the guardrail it could not serve:
+  error: `cpu.instructions` has no viable backend on this machine"* -- the
+  crossing was refused, for a source other than the guardrail.
+- `cross_machine.rs:1032` skips with *"the program did not report itself: "*
+  and nothing after it on the runner: say what the program printed, or why it
+  printed nothing.
+
+### For the flaky tally
+
+- `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+  (stream K's): *"only 0 drops were reported"*, twice in a row alone and once
+  in the full suite (*"`NO_SOCKET` accounts for None of the 2004 drops"*) at
+  load 17 to 20, while `omn trace net.drops` by hand saw every one of 50. The
+  scenario starts its sender after `pause(200)`, a sleep standing in for the
+  attach; pattern 2 of `docs/contributing.md`.
+- `scenario_power::a_core_held_busy_never_enters_an_idle_state` (P's): *"no
+  other core reported any residency"* in the full suite at load 20 on 24
+  cores; it asserted another core idled for half the window, which is the
+  machine's state. Fixed here: any residency at all.
+- `family_sched::reads_that_must_reach_the_device_are_uninterruptible_waits`
+  and `collect::io::diskstats::tests::bytes_flushed_to_a_disk_show_up_in_its_counters`:
+  *"No space left on device"* -- `/home` is at 98 % on the development
+  machine (5.8 GB free) with six worktrees' `target/` on it.
