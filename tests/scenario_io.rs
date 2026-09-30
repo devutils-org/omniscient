@@ -193,7 +193,7 @@ fn backing_device(path: &Path) -> Result<Device, String> {
     let table = std::fs::read_to_string("/proc/self/mountinfo")
         .map_err(|error| format!("/proc/self/mountinfo: {error}"))?;
 
-    let mut best: Option<(usize, String)> = None;
+    let mut best: Option<(usize, String, String)> = None;
     for line in table.lines() {
         let Some((before, after)) = line.split_once(" - ") else {
             continue;
@@ -202,6 +202,7 @@ fn backing_device(path: &Path) -> Result<Device, String> {
             Some(point) => point,
             None => continue,
         };
+        let numbers = before.split_whitespace().nth(2).unwrap_or_default();
         let source = match after.split_whitespace().nth(1) {
             Some(source) => source,
             None => continue,
@@ -211,16 +212,16 @@ fn backing_device(path: &Path) -> Result<Device, String> {
         }
         if best
             .as_ref()
-            .is_none_or(|(len, _)| mount_point.len() > *len)
+            .is_none_or(|(len, _, _)| mount_point.len() > *len)
         {
-            best = Some((mount_point.len(), source.to_owned()));
+            best = Some((mount_point.len(), source.to_owned(), numbers.to_owned()));
         }
     }
 
-    let source = best
-        .map(|(_, source)| source)
+    let (source, numbers) = best
+        .map(|(_, source, numbers)| (source, numbers))
         .ok_or_else(|| format!("nothing in the mount table covers {}", path.display()))?;
-    let name = source
+    let named = source
         .strip_prefix("/dev/")
         .ok_or_else(|| format!("`{source}` is not a block device, so it has no counters"))?;
 
@@ -228,7 +229,30 @@ fn backing_device(path: &Path) -> Result<Device, String> {
     // collector reports the disk. Ask sysfs which this is rather than reading
     // the name: `nvme0n1p6` is a partition and `zram0` is not, and no rule
     // about digits and letters gets both right.
-    let sysfs = Path::new("/sys/class/block").join(name);
+    //
+    // The mount source is not always a name sysfs knows: the CI's runner
+    // mounts its root from `/dev/root`, an alias the kernel gives the boot
+    // device. The mount table's own `major:minor` is then the device, and
+    // `/sys/dev/block/<major>:<minor>` names it. (On btrfs that number is the
+    // subvolume's anonymous one and names nothing, which is why the source is
+    // asked first.)
+    let by_number = || {
+        Path::new("/sys/dev/block")
+            .join(&numbers)
+            .canonicalize()
+            .ok()
+            .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+    };
+    let name = if Path::new("/sys/class/block").join(named).exists() {
+        named.to_owned()
+    } else {
+        by_number().ok_or_else(|| {
+            format!(
+                "/sys/class/block/{named} does not exist, and neither does /sys/dev/block/{numbers}"
+            )
+        })?
+    };
+    let sysfs = Path::new("/sys/class/block").join(&name);
     if !sysfs.exists() {
         return Err(format!("/sys/class/block/{name} does not exist"));
     }
@@ -239,7 +263,7 @@ fn backing_device(path: &Path) -> Result<Device, String> {
             .and_then(|path| Some(path.parent()?.file_name()?.to_string_lossy().into_owned()))
             .ok_or_else(|| format!("the disk holding {name} could not be found"))?
     } else {
-        name.to_owned()
+        name
     };
 
     let numbers = std::fs::read_to_string(format!("/sys/class/block/{leaf}/dev"))
@@ -1493,6 +1517,16 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
         eprintln!("skipped: this machine has no block device whose counters are its own");
         return;
     };
+    // Case 4's device has to be real too, or it is case 2 again: the CI's
+    // runner has no `zram0`, which this scenario used to name, and read the
+    // appearing device as one with no `/sys/class/block` entry.
+    let Some(appearing) = real_leaf_devices().into_iter().find(|name| *name != real) else {
+        eprintln!(
+            "skipped: this machine has one block device whose counters are its own ({real}), \
+             and a device that appears mid-run has to be a second one"
+        );
+        return;
+    };
 
     let file = scratch("io-substituted.diskstats");
     let known = |sectors: u64| Counters {
@@ -1551,7 +1585,7 @@ fn substituted_counters_are_converted_exactly_and_their_gaps_are_named() {
         &format!(
             "{}{}",
             diskstats_line(259, 0, &real, known(1024)),
-            diskstats_line(253, 0, "zram0", known(2048))
+            diskstats_line(253, 0, &appearing, known(2048))
         ),
     );
 
@@ -1739,14 +1773,23 @@ fn a_line_left_out_of_the_total_reaches_the_reader_at_a_terminal() {
 
 /// A device on this machine whose counters are its own.
 fn a_real_leaf_device() -> Option<String> {
-    let text = std::fs::read_to_string("/proc/diskstats").ok()?;
+    real_leaf_devices().into_iter().next()
+}
+
+/// Every device in `/proc/diskstats` whose counters are its own: a name
+/// `/sys/class/block` knows, and not a partition.
+fn real_leaf_devices() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string("/proc/diskstats") else {
+        return Vec::new();
+    };
     text.lines()
         .filter_map(|line| line.split_whitespace().nth(2))
-        .find(|name| {
+        .filter(|name| {
             let sysfs = Path::new("/sys/class/block").join(name);
             sysfs.exists() && !sysfs.join("partition").exists()
         })
         .map(str::to_owned)
+        .collect()
 }
 
 /// A counting request written beside a polled one does not decide its rate.
@@ -3937,6 +3980,20 @@ fn attr_i64(event: &BTreeMap<String, serde_json::Value>, name: &str) -> i64 {
         .unwrap_or_else(|| panic!("an event carries `{name}`: {event:?}"))
 }
 
+/// The lookups of every file a result names, as `(pages, calls)` per
+/// `(dev, ino)`: what a failing count prints, so that a lookup credited to
+/// the wrong file and one never counted can be told apart.
+fn lookups_by_file(result: &serde_json::Value) -> BTreeMap<(u64, u64), (u64, u64)> {
+    let mut by_file = BTreeMap::new();
+    for (raw, event) in raw_with_keys(result) {
+        let Some(file) = file_key(&raw) else { continue };
+        let entry = by_file.entry(file).or_insert((0, 0));
+        entry.0 += attr_u64(&event, "lookups");
+        entry.1 += attr_u64(&event, "lookup_calls");
+    }
+    by_file
+}
+
 /// The page counts of every event on one file, summed:
 /// `(lookups, lookup calls, filled, created, value)`, the value being the
 /// source's own -- `misses` or `ahead`.
@@ -4147,24 +4204,50 @@ json.dump(phases, open(account, "w"))
         let became = phase["resident_after"].as_u64().expect("resident")
             - phase["resident_before"].as_u64().expect("resident");
         let (lookups, _, filled, created, ahead) = page_counts(run, file, "ahead");
+        // What the run itself says it did not count: rows the map had no room
+        // for, and runs the kernel skipped because one of these programs was
+        // already running on that cpu. Neither is per file, so the whole of it
+        // is the slack, and a count short by more than it is a silent loss.
+        let lost = losses(run)["dropped"].as_u64().unwrap_or(0);
+        let evidence = || {
+            format!(
+                "\n  the run's losses: {}\n  lookups per file (dev, ino) -> (pages, calls): {:?}",
+                losses(run),
+                lookups_by_file(run)
+            )
+        };
         if how == "random" {
             // A single-page read is a batch of one folio, which the kernel's
-            // early return cannot shorten: exact.
-            assert_eq!(
-                lookups, asked,
-                "random: the workload read {asked} pages and {lookups} lookups were counted"
+            // early return cannot shorten: exact, but for what the run
+            // reported it lost.
+            assert!(
+                lookups <= asked && lookups + lost >= asked,
+                "random: the workload read {asked} pages and {lookups} lookups were counted, \
+                 and the run reported {lost} lost{}",
+                evidence()
             );
+            if lookups < asked {
+                eprintln!(
+                    "note: random: {} of {asked} lookups were not counted, inside the {lost} the \
+                     run reported lost{}",
+                    asked - lookups,
+                    evidence()
+                );
+            }
         } else {
             assert!(
-                lookups <= asked && lookups * 2 >= asked,
+                lookups <= asked && (lookups + lost) * 2 >= asked,
                 "sequential: the workload read {asked} pages and {lookups} lookups were \
-                 counted; cold, a read's first batch may go unseen, and none may be counted twice"
+                 counted; cold, a read's first batch may go unseen, and none may be counted \
+                 twice{}",
+                evidence()
             );
         }
-        assert_eq!(
-            filled, became,
+        assert!(
+            filled <= became && filled + lost >= became,
             "{how}: mincore says {became} pages became resident, and the tool counted {filled} \
-             filled"
+             filled, with {lost} reported lost{}",
+            evidence()
         );
         assert_eq!(created, 0, "{how}: a read creates no page");
         assert_eq!(
@@ -4192,6 +4275,21 @@ json.dump(phases, open(account, "w"))
         ahead_of.insert(how, ahead);
     }
     let (sequential, random) = (ahead_of["sequential"], ahead_of["random"]);
+    // A lossy run's lookups and fills are both floors, and their difference
+    // is then no separation at all: under 48 readers of a cached file this
+    // machine skipped 400 000 runs of these programs in a two-second run, and
+    // one such run read 0 lookups and 1014 pages filled for the sequential
+    // file. The counts above held with the loss as their slack; the
+    // separation is only a measurement when nothing was lost.
+    let lost = losses(run)["dropped"].as_u64().unwrap_or(0);
+    if lost > 0 {
+        eprintln!(
+            "note: the separation is not asserted: the run lost {lost} lookups or fills, so \
+             {sequential} pages ahead of the sequential reader and {random} of the random one \
+             are differences of two lower bounds"
+        );
+        return;
+    }
     assert!(
         sequential > 0,
         "a sequential read of a cold file must be read ahead of: {sequential} pages ahead"
