@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Fails when the suite skipped for a reason this cell is not expected to have.
 #
-#   .github/scripts/skip-gate.sh <test log> <expected skips>
+#   .github/scripts/skip-gate.sh <test log> <expected skips>...
+#
+# Several expected files are read as one: a cell's own list is added to the
+# common one rather than copied from it.
 #
 # A skip in this repository is a line that starts `skipped:` or `SKIPPED`
 # (after indentation), printed by the test that skipped and saying why. The
@@ -17,13 +20,15 @@
 
 set -euo pipefail
 
-log=${1:?usage: skip-gate.sh <test log> <expected skips>}
-expected=${2:?usage: skip-gate.sh <test log> <expected skips>}
+log=${1:?usage: skip-gate.sh <test log> <expected skips>...}
+shift
+[ $# -gt 0 ] || { echo "usage: skip-gate.sh <test log> <expected skips>..." >&2; exit 1; }
 [ -r "$log" ] || { echo "skip-gate: no test log at $log" >&2; exit 1; }
+expected="$*"
 
 patterns=$(mktemp)
 trap 'rm -f "$patterns"' EXIT
-grep -vE '^[[:space:]]*(#|$)' "$expected" > "$patterns"
+cat "$@" | grep -vE '^[[:space:]]*(#|$)' > "$patterns"
 
 # A skip that quotes a refusal puts the refusal's reasons on the indented lines
 # under it -- `error: ... has no viable backend`, then `  bpf:raw_tp: bpf:

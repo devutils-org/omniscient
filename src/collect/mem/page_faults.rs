@@ -138,6 +138,11 @@ pub struct PageFaultCollector {
     /// notes are gathered: the threads followed from the start, and the ones
     /// that appeared while the events were being opened.
     followed: (usize, usize),
+    /// Whether the machine allowed user-mode faults only, so that the faults
+    /// the kernel took on the program's behalf are not in the samples. Set
+    /// before `start` by a test, it is the paranoid-2 path taken on a machine
+    /// that allows more.
+    user_mode_only: bool,
 }
 
 impl PageFaultCollector {
@@ -155,6 +160,7 @@ impl PageFaultCollector {
             throttled: 0,
             sampled_tasks: std::collections::BTreeSet::new(),
             followed: (0, 0),
+            user_mode_only: false,
         }
     }
 
@@ -278,11 +284,38 @@ impl Collector for PageFaultCollector {
             self.event = Some(event);
             return Ok(());
         }
-        let opened = if self.whole_process {
-            ThreadSampler::open_process(&spec, self.pid, RING_PAGES)
+        let open = |spec: &SampleSpec| {
+            if self.whole_process {
+                ThreadSampler::open_process(spec, self.pid, RING_PAGES)
+            } else {
+                crate::perf::online_cpus()
+                    .and_then(|cpus| ThreadSampler::open(spec, &[self.pid], &cpus, RING_PAGES))
+            }
+        };
+        // At `perf_event_paranoid` 2 -- the kernel's default -- a process may
+        // sample another one it owns in user mode only, and an event that asks
+        // for kernel mode as well is refused outright: the CI's paranoid-2 cell
+        // refused `mem.faults` for every launched program. A fault is raised
+        // with the registers of the code that took it, so a user-mode event
+        // still sees every fault the program's own code takes; what it loses is
+        // the faults the kernel takes on the program's behalf, copying into a
+        // buffer it has not touched yet, and the notes say so.
+        let asked = if self.user_mode_only {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
         } else {
-            crate::perf::online_cpus()
-                .and_then(|cpus| ThreadSampler::open(&spec, &[self.pid], &cpus, RING_PAGES))
+            open(&spec)
+        };
+        let opened = match asked {
+            Err(error) if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => {
+                let user_only = SampleSpec {
+                    exclude_kernel: true,
+                    ..spec
+                };
+                let reopened = open(&user_only);
+                self.user_mode_only = reopened.is_ok();
+                reopened.map_err(|_| error)
+            }
+            other => other,
         };
         let event = opened.map_err(|error| {
             format!(
@@ -330,6 +363,15 @@ impl Collector for PageFaultCollector {
     /// one thread, and what they may have missed.
     fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        if self.user_mode_only {
+            notes.push(
+                "this machine would sample page faults in user mode only \
+                 (perf_event_paranoid 2 without CAP_PERFMON), so faults the kernel took on the \
+                 program's behalf -- a read() into a buffer never touched -- are not in these \
+                 samples; every fault the program's own code took is"
+                    .to_owned(),
+            );
+        }
         if let (Some(cpus), Some(cgroup)) = (&self.cpus, &self.cgroup) {
             notes.push(format!(
                 "every task of the cgroup {} was sampled while it ran, one event per cpu on {} \
@@ -391,6 +433,113 @@ impl Collector for PageFaultCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An anonymous mapping of `pages` pages, none of them resident yet.
+    fn fresh_block(pages: usize) -> *mut libc::c_void {
+        // SAFETY: an anonymous mapping of our own; the caller unmaps it.
+        let block = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                pages * 4096,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(block, libc::MAP_FAILED, "the mapping must succeed");
+        block
+    }
+
+    fn landed_in(events: &[Event], block: *mut libc::c_void, pages: usize) -> usize {
+        let base = block as u64;
+        events
+            .iter()
+            .filter(|event| match event.key(crate::request::KeyKind::Mem) {
+                Some(KeyValue::Mem { base: addr, .. }) => {
+                    (base..base + (pages * 4096) as u64).contains(addr)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// The paranoid-2 path, taken here on purpose: sampled in user mode only,
+    /// the faults this thread's own code takes all arrive, and the ones the
+    /// kernel takes for it -- `read()` from `/dev/zero` into pages nobody
+    /// touched -- do not, which is exactly what the note says is lost.
+    ///
+    /// Ground truth is which code touched each block: the first by stores in
+    /// this function, the second only by the kernel's copy. Both blocks are
+    /// fresh mappings of this thread, so no other test can fault inside them.
+    #[test]
+    fn sampled_in_user_mode_the_programs_own_faults_arrive_and_the_kernels_do_not() {
+        const PAGES: usize = 64;
+        let mut collector = PageFaultCollector::new(0, Mode::Trace);
+        collector.user_mode_only = true;
+        if let Err(reason) = collector.start() {
+            eprintln!("skipped: this machine will not sample page faults at all: {reason}");
+            return;
+        }
+        let touched = fresh_block(PAGES);
+        for index in 0..PAGES {
+            // SAFETY: inside the mapping, one byte per page.
+            unsafe { touched.cast::<u8>().add(index * 4096).write_volatile(1) };
+        }
+        let copied = fresh_block(PAGES);
+        let zero = std::fs::File::open("/dev/zero").expect("/dev/zero");
+        let read =
+            unsafe { libc::read(std::os::fd::AsRawFd::as_raw_fd(&zero), copied, PAGES * 4096) };
+        assert_eq!(read, (PAGES * 4096) as isize, "the kernel filled the block");
+
+        let mut events = collector.sample(0).unwrap();
+        events.extend(collector.stop());
+        let (own, kernels) = (
+            landed_in(&events, touched, PAGES),
+            landed_in(&events, copied, PAGES),
+        );
+        // SAFETY: unmapping what was mapped above, after the last read.
+        unsafe {
+            libc::munmap(touched, PAGES * 4096);
+            libc::munmap(copied, PAGES * 4096);
+        }
+        // The same bounds as the kernel-mode test below, for the same reasons
+        // (a multi-size THP fault installs a whole folio).
+        assert!(
+            (PAGES / 16..=PAGES).contains(&own),
+            "{own} user-mode samples landed in the {PAGES} pages this code touched"
+        );
+        assert_eq!(
+            kernels, 0,
+            "{kernels} samples landed in pages only the kernel's copy touched"
+        );
+        let notes = collector.notes().join("\n");
+        assert!(notes.contains("user mode only"), "{notes}");
+        assert!(collector.losses().is_clean(), "{:?}", collector.losses());
+
+        // And the zero is the mode's, not the workload's: where the machine
+        // allows kernel mode, the same copy is seen.
+        let mut both = PageFaultCollector::new(0, Mode::Trace);
+        if both.start().is_err() || both.user_mode_only {
+            eprintln!(
+                "skipped the kernel-mode half: this machine samples page faults in user mode only"
+            );
+            return;
+        }
+        let copied = fresh_block(PAGES);
+        let read =
+            unsafe { libc::read(std::os::fd::AsRawFd::as_raw_fd(&zero), copied, PAGES * 4096) };
+        assert_eq!(read, (PAGES * 4096) as isize, "the kernel filled the block");
+        let mut events = both.sample(0).unwrap();
+        events.extend(both.stop());
+        let kernels = landed_in(&events, copied, PAGES);
+        unsafe { libc::munmap(copied, PAGES * 4096) };
+        assert!(
+            (PAGES / 16..=PAGES).contains(&kernels),
+            "with kernel mode, {kernels} samples landed in the {PAGES} pages the kernel's copy \
+             touched"
+        );
+    }
 
     #[test]
     fn faults_are_reported_at_the_address_that_faulted() {

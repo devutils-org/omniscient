@@ -109,10 +109,15 @@
   caveats:
     - "Correlate with mem.heap.alloc through the mem:[base,len) key (interval join)
        to attribute memory to whoever brings it into existence."
-    - "A fault is not a page, and with the multi-size anonymous THP of recent kernels
-       it is not even proportional to pages: the kernel picks larger folios for larger
-       regions, so zeroing 1 MiB and zeroing 32 MiB both take a few hundred faults.
-       Fault counts say where faults happened, not how much memory was made resident."
+    - "A fault is not a page, and not proportional to pages either: how many
+       faults a range costs depends on how it is backed and where it lands --
+       an 8 MiB mapping cost 515 faults, or 4 when it landed on four aligned
+       huge pages. The THP mode is in the environment. Fault counts say where
+       faults happened, not how much memory was made resident."
+    - "At perf_event_paranoid 2 without CAP_PERFMON a program's faults are sampled in
+       user mode only: every fault its own code takes is there, and the ones the kernel
+       takes on its behalf (a read() into a buffer never touched) are not. The run says
+       when that happened."
 
 - id: mem.page_alloc
   family: mem

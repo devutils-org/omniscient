@@ -289,9 +289,21 @@ impl Availability {
 }
 
 /// Asks what a source could do here, without a request to pin it down.
+///
+/// Only a backend this build collects counts: *available means it attaches*,
+/// and a backend with no collector attaches nowhere. The resolver passes such a
+/// backend over for the next one that is written (`Verdict::Unimplemented`),
+/// and the listing has to agree with it -- `cpu.cycles` on a cpu with no
+/// hardware PMU read "usable through `pmu:sw`", the one backend of its chain
+/// nobody wrote, and every run of it was refused (the CI's second run). Such a
+/// source is out of reach here, and the listing's backend lines say which
+/// requirement is missing and which backend has no collector.
 pub fn availability(entry: &Entry, capabilities: &Capabilities) -> Availability {
     let mut unverified = None;
     for backend in &entry.backends {
+        if !crate::collect::implements(entry.id.as_str(), &backend.id) {
+            continue;
+        }
         let requirements = probe_all(capabilities, backend, None);
         if requirements
             .iter()
@@ -1145,6 +1157,53 @@ mod tests {
                 );
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The CI's second run: on a cpu with no hardware PMU, `cpu.cycles`'s
+    /// written backend (`pmu`) is withheld by the machine and the one left is
+    /// `pmu:sw`, which nobody wrote. The request resolves there and the runner
+    /// refuses it as this build's gap (exit 3) -- true: a collector for it
+    /// would serve this machine -- with the chain saying what the machine
+    /// withheld. The listing is what was wrong: it called the source usable
+    /// through `pmu:sw`, and available means it attaches. Out of reach now.
+    ///
+    /// The machine is made to lack the hardware event by asking for one no
+    /// machine publishes, on the entry's own `pmu` backend, so the collector
+    /// registered for it is the real one.
+    #[test]
+    fn a_source_viable_only_through_a_backend_nobody_wrote_is_not_listed_usable() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"cpu.cycles".parse().unwrap())
+            .expect("cpu.cycles is in the catalog")
+            .clone();
+        assert!(crate::collect::implements("cpu.cycles", "pmu"));
+        assert!(!crate::collect::implements("cpu.cycles", "pmu:sw"));
+        entry.backends[0].requires = vec!["pmu:omnnounit/cycles/".into()];
+        let catalog = Catalog::from_entries(vec![entry.clone()]).unwrap();
+        let capabilities = Capabilities::detect();
+        let sw_clock = capabilities.probe("pmu:PERF_COUNT_SW_CPU_CLOCK", None);
+        if !sw_clock.is_available() {
+            eprintln!("skipped: this machine withholds the software clock too ({sw_clock})");
+            return;
+        }
+        assert_eq!(
+            availability(&entry, &capabilities),
+            Availability::Unavailable
+        );
+
+        let mut request = fixture("cpu.cycles", Target::Pid(vec![std::process::id() as i32]));
+        request.mode = Mode::Count;
+        request.emit = vec!["summary".parse().unwrap()];
+        let resolved = resolve(&catalog, &capabilities, &request).expect("resolves to pmu:sw");
+        assert_eq!(resolved.backend.id, "pmu:sw");
+        match &resolved.chain[0].verdict {
+            Verdict::Rejected(reasons) => assert!(
+                reasons.iter().any(|reason| reason.contains("omnnounit")),
+                "{reasons:?}"
+            ),
+            other => panic!("the withheld backend has to say why: {other:?}"),
         }
     }
 

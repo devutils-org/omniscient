@@ -1,0 +1,22 @@
+# The reasons a test may skip on the `stock` cell, beyond the common ones in
+# .github/expected-skips.txt: the hosted image as shipped, which the `defaults`
+# cell sets back to a stock kernel's defaults. Each line is a privilege this
+# cell does not grant, read off run 36606817052 (docs/portability.md, "The
+# fourteenth wave").
+#
+# Adding a line is a claim about the cell. Say which, above the line.
+
+# perf_event_paranoid 4: every perf event is refused to an unprivileged
+# process, its own counters included, and the probes name the sysctl.
+perf_event_paranoid is [3-9]
+# AppArmor's user-namespace restriction (apparmor_restrict_unprivileged_userns
+# 1): `unshare -Urm` cannot write its uid map, so the scenarios that build a
+# device, a namespace or a /proc/diskstats of their own inside one skip.
+`unshare -Urm` is refused here
+an unprivileged user namespace
+# The job runs in root's service cgroup, which delegates nothing to the
+# runner's user: no cgroup of its own, and no controller below it.
+cannot create a cgroup under
+this user cannot create a cgroup under its own slice
+delegates the (memory|cpu|io|pids) controller to this user
+omn-scenario-[a-z]+` could not be created

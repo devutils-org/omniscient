@@ -719,12 +719,24 @@ fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
     let _together = shared();
     let mut forced = 0;
     let mut here = 0;
+    // What the listing says nobody wrote, among the chains of the sources this
+    // machine serves: each is pinned below and each has to exit 3. The number
+    // is the build's and the machine's together -- the CI's runner has no GPU
+    // and serves `gpu.api` alone, whose one backend is written -- so it is
+    // counted from the listing, not assumed.
+    let mut unwritten = 0;
     for (entry, serves, pair) in probed() {
         let Some((mode, emit)) = pair else { continue };
         if *serves != Serves::Here {
             continue;
         }
         here += 1;
+        unwritten += entry["probes"]
+            .as_array()
+            .expect("the listing carries each backend's probes")
+            .iter()
+            .filter(|probes| probes["collector"] == Value::Bool(false))
+            .count();
         let source = entry["id"].as_str().unwrap().to_owned();
         let mode = spelled(mode);
         for backend in entry["backends"].as_array().expect("a chain") {
@@ -773,9 +785,17 @@ fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
         );
         return;
     }
-    assert!(
-        forced >= 5,
-        "every collected source in this family declares a backend nobody wrote: {forced}"
+    if unwritten == 0 {
+        eprintln!(
+            "skipped: the {here} gpu source(s) this machine serves have a collector for every \
+             backend of their chains, so there is no backend nobody wrote to pin"
+        );
+        return;
+    }
+    assert_eq!(
+        forced, unwritten,
+        "the listing names {unwritten} backend(s) nobody wrote in the chains this machine \
+         serves, and pinning refused {forced} of them as the build's gap"
     );
 }
 
@@ -933,6 +953,69 @@ fn a_program_that_never_touches_the_device_holds_zero_rather_than_nothing() {
             "something is always holding VRAM on a machine with a display"
         );
     }
+}
+
+/// The draw in watts, as `--mode count --emit rate` gives it: the energy
+/// counter's difference over the window it was read across. Ground truth is
+/// the vendor's own tool, sampling the instantaneous draw every 200 ms over
+/// the same window from another process. The two are different mechanisms
+/// (an energy counter and a sampled draw), so the bar is separation rather
+/// than agreement: a factor of two either way, which is what a rate of
+/// millijoules, or a running total summed once a second, would each break.
+#[test]
+fn a_counted_energy_window_divided_by_its_length_is_the_boards_draw() {
+    if let Err(reason) = device() {
+        return eprintln!("skipped: {reason}");
+    }
+    if nvidia_smi("power.draw").is_none() {
+        return eprintln!("skipped: no nvidia-smi to read the board's draw with");
+    }
+    let _together = shared();
+    let sampling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let sampler = {
+        let sampling = sampling.clone();
+        std::thread::spawn(move || {
+            let mut draws = Vec::new();
+            while sampling.load(std::sync::atomic::Ordering::Relaxed) {
+                draws.extend(nvidia_smi("power.draw"));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            draws
+        })
+    };
+    let output = omn(&[
+        "gpu.power",
+        "--system",
+        "--mode",
+        "count",
+        "--emit",
+        "rate",
+        "-d",
+        "2s",
+        "--format",
+        "json",
+    ]);
+    sampling.store(false, std::sync::atomic::Ordering::Relaxed);
+    let draws = sampler.join().expect("the sampler");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let rate = &run["results"][0]["outputs"][0]["series"][0];
+    assert_eq!(rate["events"], 1, "a counted window is one reading: {rate}");
+    assert_eq!(rate["counted_window"], true, "{rate}");
+    let window_s = rate["window_ns"].as_f64().expect("a window") / 1e9;
+    assert!(
+        (1.9..2.5).contains(&window_s),
+        "a two-second window was counted over {window_s} s"
+    );
+    let watts = rate["per_second"].as_f64().expect("a rate");
+    assert!(!draws.is_empty(), "nvidia-smi read nothing");
+    let sampled = draws.iter().sum::<f64>() / draws.len() as f64;
+    assert!(
+        (sampled / 2.0..sampled * 2.0).contains(&watts),
+        "the counted window says {watts:.1} W and nvidia-smi sampled {sampled:.1} W on average \
+         over {} reads",
+        draws.len()
+    );
 }
 
 /// The pair that makes a device figure mean something: the same four sources,

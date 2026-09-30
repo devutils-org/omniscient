@@ -6,10 +6,15 @@
 //! work, and averaging such a run in with the others hides it in the spread.
 //! This collector exists so that a run can be told apart rather than averaged.
 //!
-//! `nr_throttled` and `throttled_usec` appear in `cpu.stat` only once a quota
-//! is set. Their absence means the cgroup has no `cpu.max` and therefore cannot
-//! be throttled, which is a different statement from "was not throttled" -- and
-//! the difference is reported rather than flattened into a zero.
+//! `nr_throttled` and `throttled_usec` appear in `cpu.stat` once the cpu
+//! controller is enabled on the cgroup, quota or not: their absence means the
+//! controller is not, so there is no `cpu.max` at all. With the controller and
+//! `cpu.max` at `max`, the counters are there and can only read zero. Either
+//! way the cgroup cannot be throttled by a quota of its own, which is a
+//! different statement from "was not throttled" -- and the difference is
+//! reported rather than flattened into a zero. (This header said the counters
+//! appeared only with a quota until the CI's delegated cgroup, `cpu.max` at
+//! `max` and every counter present, showed otherwise.)
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -58,6 +63,29 @@ impl Throttling {
             throttled_us: *fields.get("throttled_usec")?,
         })
     }
+}
+
+/// What to say when a cgroup has no quota of its own, so that its counters
+/// cannot move: a zero from it is not a run that was not throttled.
+fn cannot_be_throttled(directory: &Path, has_counters: bool) -> Option<String> {
+    if !has_counters {
+        return Some(format!(
+            "{}/cpu.stat has no throttling counters: the cpu controller is not enabled on this \
+             cgroup, so it has no cpu.max quota and cannot be throttled by one -- which is not \
+             the same as not having been",
+            directory.display()
+        ));
+    }
+    let quota = std::fs::read_to_string(directory.join("cpu.max")).ok()?;
+    if quota.split_whitespace().next() != Some("max") {
+        return None;
+    }
+    Some(format!(
+        "{}/cpu.max is `{}`: no quota is set, so this cgroup cannot be throttled by one and its \
+         counters can only read zero -- which is not the same as not having been",
+        directory.display(),
+        quota.trim()
+    ))
 }
 
 /// Holds the mode until the target is known.
@@ -140,24 +168,13 @@ impl Collector for ThrottleCollector {
 
     fn start(&mut self) -> Result<(), String> {
         let baseline = self.read().map_err(|error| format!("{error:?}"))?;
+        if let Some(note) = cannot_be_throttled(&self.directory, baseline.is_some()) {
+            self.notes.push(note);
+        }
         // A snapshot of these counters is a statement about the cgroup's whole
         // life, which is the only thing a single read can honestly be.
         if self.mode == Mode::Snapshot {
-            if baseline.is_none() {
-                self.notes.push(format!(
-                    "{}/cpu.stat has no throttling counters: no cpu.max quota is set, so this \
-                     cgroup cannot be throttled -- which is not the same as not having been",
-                    self.directory.display()
-                ));
-            }
             return Ok(());
-        }
-        if baseline.is_none() {
-            self.notes.push(format!(
-                "{}/cpu.stat has no throttling counters: no cpu.max quota is set, so this \
-                 cgroup cannot be throttled -- which is not the same as not having been",
-                self.directory.display()
-            ));
         }
         self.previous = baseline;
         Ok(())
@@ -347,8 +364,9 @@ mod tests {
     #[test]
     fn a_cgroup_without_a_quota_says_so_once_rather_than_failing_on_every_tick() {
         let cgroup = FakeCgroup::new("throttle-unquota'd");
-        // The shape of a real `cpu.stat` with no `cpu.max` set: usage, but none
-        // of the three throttling counters.
+        // The shape of a real `cpu.stat` on a cgroup the cpu controller is not
+        // enabled on (no `cpu.max` file at all): usage, but none of the three
+        // throttling counters.
         cgroup.write("usage_usec 262054076\nuser_usec 222854039\nsystem_usec 39200036\n");
         let mut collector = cgroup.collector(POLL);
         collector.start().expect("cpu.stat is readable");
@@ -366,6 +384,39 @@ mod tests {
             notes[0].contains("not the same as not having been"),
             "{notes:?}"
         );
+    }
+
+    /// The CI's delegated cgroup: the cpu controller enabled, `cpu.max` at
+    /// `max`, and every counter in `cpu.stat` at zero. The zeros are the
+    /// cgroup's, and they are reported -- with why they cannot be anything
+    /// else. A cgroup with a quota gets no such note. The shapes are the
+    /// kernel's own: this machine's `app.slice` has the controller, `max
+    /// 100000` and the three counters, and its session scope has none of them.
+    #[test]
+    fn a_cgroup_whose_quota_is_max_reports_its_zeros_and_why_they_are_zeros() {
+        let cgroup = FakeCgroup::new("throttle-max");
+        cgroup.write("usage_usec 10\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n");
+        std::fs::write(cgroup.0.join("cpu.max"), "max 100000\n").expect("cpu.max");
+        let mut collector = cgroup.collector(POLL);
+        collector.start().expect("cpu.stat is readable");
+        let events = collector.sample(0).expect("a read");
+        assert_eq!(
+            events.len(),
+            1,
+            "the zeros are the cgroup's and are reported"
+        );
+        let notes = collector.notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("cpu.max is `max 100000`"), "{notes:?}");
+        assert!(
+            notes[0].contains("not the same as not having been"),
+            "{notes:?}"
+        );
+
+        std::fs::write(cgroup.0.join("cpu.max"), "50000 100000\n").expect("cpu.max");
+        let mut quota = cgroup.collector(POLL);
+        quota.start().expect("cpu.stat is readable");
+        assert!(quota.notes().is_empty(), "{:?}", quota.notes());
     }
 
     #[test]

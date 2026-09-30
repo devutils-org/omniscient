@@ -53,7 +53,8 @@ struct Cell {
     name: String,
     /// `/proc/sys/kernel/osrelease` inside the cell.
     kernel_release: String,
-    /// `caps`, `root`, `nocaps`, `nobtf`, `notracefs`, or `host` for a sweep
+    /// `caps`, `root`, `nocaps`, `stock` (no capabilities, and the hosted
+    /// image's `perf_event_paranoid` 4), `nobtf`, `notracefs`, or `host` for a sweep
     /// run outside a guest.
     config: String,
     uid: u32,
@@ -779,6 +780,14 @@ fn unexplained(sweep: &Sweep) -> Vec<String> {
                     .as_deref()
                     .and_then(|id| source.backend(id));
                 match named {
+                    // Available means it attaches, and a backend nobody wrote
+                    // attaches nowhere: `cpu.cycles` on the CI's cpu with no
+                    // hardware PMU was listed usable through `pmu:sw` and every
+                    // run of it exited 3.
+                    Some(backend) if !backend.collector => out.push(format!(
+                        "{}: usable through `{}`, which has no collector in this build",
+                        source.id, backend.id
+                    )),
                     Some(backend)
                         if backend.requires.iter().all(|r| r.state == State::Available) => {}
                     Some(backend) => out.push(format!(
@@ -800,7 +809,10 @@ fn unexplained(sweep: &Sweep) -> Vec<String> {
                 }
             }
             Here::No => {
-                for backend in &source.backends {
+                // A backend with no collector is out of reach on every machine,
+                // which the listing says beside it; its requirements may all be
+                // here.
+                for backend in source.backends.iter().filter(|b| b.collector) {
                     if !backend.requires.iter().any(|r| r.state == State::Missing) {
                         out.push(format!(
                             "{}: out of reach, but `{}` has nothing missing",
@@ -846,6 +858,7 @@ fn refused_silently(sweep: &Sweep) -> Vec<String> {
                     source.id, run.target
                 ));
             } else if !run.stderr.contains("no viable backend")
+                && !run.stderr.contains("no collector is written")
                 && !run.stderr.contains("cannot")
                 && !run.stderr.contains("missing")
             {
@@ -940,12 +953,28 @@ fn configuration_reasons(sweep: &Sweep) -> Vec<String> {
             "tracefs was unmounted",
         );
     }
-    if sweep.cell.config == "nocaps" {
+    if sweep.cell.config == "nocaps" || sweep.cell.config == "stock" {
         expect(
             &mut out,
             &|needs| needs == "bpf",
             &["CAP_BPF", "permission", "privilege", "capabilit"],
             "the binary carries no capability",
+        );
+    }
+    // The hosted image as shipped: `perf_event_paranoid` 4, a Debian patch
+    // that refuses every perf event to an unprivileged process. Every `pmu:`
+    // requirement is then missing, and says why: the sysctl, or -- on a cpu
+    // that publishes no such event -- that it is not there to be refused.
+    if sweep.cell.config == "stock" {
+        expect(
+            &mut out,
+            &|needs| needs.starts_with("pmu:"),
+            &[
+                "perf_event_paranoid",
+                "publishes no",
+                "not available on this cpu",
+            ],
+            "perf_event_paranoid refuses every perf event",
         );
     }
     out
@@ -1324,14 +1353,45 @@ fn a_source_listed_usable_that_refuses_at_attach_fails_the_cell() {
 }
 
 #[test]
-fn a_backend_without_a_collector_is_not_an_attach_failure() {
-    // Vocabulary: resolved, available, and nothing collects it. The listing's
-    // COLLECTOR column already says so; the matrix is about the kernel.
+fn a_backend_without_a_collector_is_out_of_reach_and_not_an_attach_failure() {
+    // Vocabulary: every requirement here, and nothing collects it. The listing
+    // calls it out of reach and names the backend's missing collector; the run
+    // is the build's refusal (exit 3), not the kernel's.
     let mut cell = honest_cell("7.2", "caps");
     let lock = source(&mut cell, "sched.lock");
+    lock.here = Here::No;
+    lock.here_backend = None;
     lock.backends[0].collector = false;
-    lock.runs[0].code = Some(1);
-    assert!(violations(&cell, &[]).is_empty());
+    lock.runs[0].backend = None;
+    lock.runs[0].code = Some(3);
+    lock.runs[0].stderr =
+        "error: no collector is written for `sched.lock` on backend `bpf:raw_tp` yet".into();
+    assert!(
+        violations(&cell, &[]).is_empty(),
+        "{:#?}",
+        violations(&cell, &[])
+    );
+}
+
+/// The CI's second run: `cpu.cycles` on a cpu with no hardware PMU was listed
+/// usable through `pmu:sw`, the one backend of its chain with no collector, and
+/// every run of it exited 3. Available means it attaches.
+#[test]
+fn a_source_listed_usable_through_a_backend_nobody_wrote_fails_the_cell() {
+    let mut cell = honest_cell("7.2", "caps");
+    let cycles = source(&mut cell, "cpu.cycles");
+    cycles.backends[1].collector = false;
+    cycles.runs[0].code = Some(3);
+    cycles.runs[0].stdout = String::new();
+    cycles.runs[0].stderr =
+        "error: no collector is written for `cpu.cycles` on backend `pmu:sw` yet".into();
+    let found = violations(&cell, &[]);
+    assert!(
+        found
+            .get("every answer has its reason")
+            .is_some_and(|v| v.iter().any(|v| v.contains("no collector in this build"))),
+        "{found:#?}"
+    );
 }
 
 #[test]
@@ -1398,6 +1458,40 @@ fn a_fallback_that_does_not_say_what_it_loses_fails_the_cell() {
     assert_eq!(
         found.keys().copied().collect::<Vec<_>>(),
         ["a fallback says what it loses"]
+    );
+}
+
+/// The hosted image as shipped refuses every perf event: a `pmu:` requirement
+/// that reads available there, or missing without the sysctl's name, is a
+/// probe that did not ask.
+#[test]
+fn a_stock_cell_must_show_every_perf_event_missing_by_the_sysctl() {
+    let mut cell = honest_cell("6.17", "stock");
+    let found = violations(&cell, &[]);
+    assert!(
+        found["a removed requirement is named"]
+            .iter()
+            .any(|v| v.contains("PERF_COUNT_SW_CPU_CLOCK") && v.contains("perf_event_paranoid")),
+        "{found:#?}"
+    );
+    let cycles = source(&mut cell, "cpu.cycles");
+    cycles.backends[0].requires[0].detail =
+        "perf_event_open was refused for `PERF_COUNT_HW_CPU_CYCLES`: perf_event_paranoid is 4"
+            .into();
+    cycles.backends[1].requires[0].state = State::Missing;
+    cycles.backends[1].requires[0].detail =
+        "perf_event_open was refused for `PERF_COUNT_SW_CPU_CLOCK`: perf_event_paranoid is 4"
+            .into();
+    cycles.here = Here::No;
+    cycles.here_backend = None;
+    cycles.runs[0].backend = None;
+    cycles.runs[0].code = Some(1);
+    cycles.runs[0].stdout = String::new();
+    cycles.runs[0].stderr = "error: `cpu.cycles` has no viable backend on this machine".into();
+    assert!(
+        !violations(&cell, &[]).contains_key("a removed requirement is named"),
+        "{:#?}",
+        violations(&cell, &[])
     );
 }
 

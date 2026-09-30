@@ -545,8 +545,17 @@ fn last_of(document: &serde_json::Value) -> f64 {
 /// `perf_event_paranoid` above 2 (Debian's and Ubuntu's 4) answers every
 /// counter, even a process's own. A scenario about something else that uses a
 /// counter as its vehicle has nothing to check there.
+///
+/// Or every backend this build collects is missing one, and what was left was
+/// a backend nobody wrote: `cpu.cycles` on a cpu with no hardware PMU (the
+/// CI's runner) resolves to `pmu:sw` and is refused as the build's gap, with
+/// the written `pmu` "passed over" for the event it lacks. That gap is real,
+/// and it is not the one a scenario about the written backend is asking after.
 fn withheld_here(message: &str) -> bool {
     message.contains("has no viable backend on this machine")
+        || (message.contains("no collector is written")
+            && message.contains("was passed over")
+            && message.contains("missing"))
 }
 
 /// Whether a refusal is this machine's limit rather than a refusal of the
@@ -555,6 +564,7 @@ fn machine_cannot_serve(message: &str) -> bool {
     message.contains("no viable backend")
         || message.contains("perf_event_paranoid")
         || message.contains("cannot start collecting")
+        || withheld_here(message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,12 +1107,20 @@ fn every_mode_and_emit_the_catalog_declares_is_served_or_says_what_is_missing() 
     let mut reachable: BTreeMap<(String, String), bool> = BTreeMap::new();
     // A pair every cell of which this machine withholds (the resolver found
     // every backend missing a requirement) says nothing about the build's
-    // promise, which only a machine that offers the source can check.
+    // promise, which only a machine that offers the source can check. A cell
+    // refused as a request (exit 2: that mode does not produce that emit) is
+    // no evidence either way: it is the same refusal on every machine, and it
+    // is the modes that *can* produce the emit that decide. On the CI's cpu
+    // with no hardware PMU, `cpu.branch_misses` `rate` is reached by `count`
+    // alone, which that cpu withholds, and the two exit-2 cells beside it had
+    // it judged unreachable.
     let judged = |source: &str, emit: &str| {
         found
             .iter()
             .filter(|(cell, _)| cell.source == source && cell.emit == emit)
-            .any(|(_, served)| !matches!(served, Served::Unserved(_, message) if withheld_here(message)))
+            .any(|(_, served)| {
+                !matches!(served, Served::Unserved(code, message) if *code == 2 || withheld_here(message))
+            })
     };
     for (cell, served) in &found {
         let key = (cell.source.clone(), cell.emit.clone());
@@ -1255,22 +1273,48 @@ impl Spinner {
         assert!(name.len() <= 15, "`{name}` is longer than a comm");
         let path = std::env::temp_dir().join(name);
         if !path.exists() {
-            std::fs::copy("/bin/sh", &path).ok()?;
-            let mut mode = std::fs::metadata(&path).ok()?.permissions();
+            // Copied beside the name and renamed onto it, so no test ever
+            // executes a copy another is still writing.
+            let partial = std::env::temp_dir().join(format!(
+                "{name}.{}.{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::copy("/bin/sh", &partial).ok()?;
+            let mut mode = std::fs::metadata(&partial).ok()?.permissions();
             std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
-            std::fs::set_permissions(&path, mode).ok()?;
+            std::fs::set_permissions(&partial, mode).ok()?;
+            std::fs::rename(&partial, &path).ok()?;
         }
         let shell = path.to_str()?;
-        let mut command = match cpu {
-            Some(cpu) => {
-                let mut pinned = Command::new("taskset");
-                pinned.args(["-c", &cpu.to_string(), shell]);
-                pinned
+        // A test thread that forks while this one still holds the copy open
+        // for writing gives its child that descriptor until the child execs,
+        // and executing the copy meanwhile is `ETXTBSY`. The CI's runner, with
+        // its tests in parallel, skipped once with "/bin/sh could not be
+        // copied", which printed no error; this is the likeliest reading, and
+        // any other error is now printed. The window is the other child's
+        // fork-to-exec, so a few retries outlast it.
+        for _ in 0..50 {
+            let mut command = match cpu {
+                Some(cpu) => {
+                    let mut pinned = Command::new("taskset");
+                    pinned.args(["-c", &cpu.to_string(), shell]);
+                    pinned
+                }
+                None => Command::new(shell),
+            };
+            match command.args(["-c", "while :; do :; done"]).spawn() {
+                Ok(child) => return Some(Self { child }),
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    eprintln!("the spinner `{shell}` did not start: {error}");
+                    return None;
+                }
             }
-            None => Command::new(shell),
-        };
-        let child = command.args(["-c", "while :; do :; done"]).spawn().ok()?;
-        Some(Self { child })
+        }
+        None
     }
 
     fn pid(&self) -> String {
@@ -3714,9 +3758,12 @@ struct Split {
 /// than the workload, and the result's own window is held against the child's
 /// `CLOCK_MONOTONIC` stamps. A run whose window opened after the child began,
 /// or closed before it ended, is not a measurement of the child's work, and is
-/// taken again with twice the lead and the window, three times at most -- the
-/// durations only make an ordered run likely; the stamps are what make it one. `None`, having said why, when
-/// the machine cannot serve the request.
+/// taken again, four times at most -- the durations only make an ordered run
+/// likely; the stamps are what make it one. The next lead is not a guess: the
+/// late run's own window says how long `omn` took from its spawn to its open
+/// (near a second for `cpu.profile` at a load of 8, past a doubled 300 ms
+/// under the whole wave's), and the next run waits half as long again as
+/// that. `None`, having said why, when the machine cannot serve the request.
 fn over_a_cgroup(
     source: &str,
     mode: &str,
@@ -3726,7 +3773,8 @@ fn over_a_cgroup(
     let mut lead = Duration::from_millis(300);
     let mut window = Duration::from_secs(6);
     let mut late = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
+        let spawned = monotonic_ns();
         let omn = Command::new(BINARY)
             .args([source, "--cgroup"])
             .arg(&cgroup.path)
@@ -3756,18 +3804,20 @@ fn over_a_cgroup(
         if opened <= split.child_from_ns && split.child_to_ns <= closed {
             return Some((document, split));
         }
+        let startup = Duration::from_nanos(opened.saturating_sub(spawned));
         late.push((
             lead,
             window,
+            startup,
             opened as i64 - split.child_from_ns as i64,
             split.child_to_ns as i64 - closed as i64,
         ));
-        lead *= 2;
-        window *= 2;
+        lead = (lead * 2).max(startup * 3 / 2);
+        window = (window * 2).max(lead * 2 + Duration::from_secs(6));
     }
     panic!(
-        "the window did not hold the child's work in any run (lead, window, ns opened after \
-         the work began, ns closed before it ended): {late:?}"
+        "the window did not hold the child's work in any run (lead, window, omn's spawn to \
+         open, ns opened after the work began, ns closed before it ended): {late:?}"
     );
 }
 

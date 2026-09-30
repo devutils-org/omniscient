@@ -135,6 +135,7 @@ pub fn validate_request(
     check_emits(entry, request, format, &mut rejections, &mut report);
     check_keys(entry, request, &mut rejections);
     check_filter(entry, request, &mut rejections);
+    check_ranking(entry, request, &mut rejections);
     check_stack(entry, request, &mut rejections, &mut report);
     check_backend(entry, request, &mut rejections, &mut report);
     carry_caveats(entry, &mut report);
@@ -246,10 +247,15 @@ fn check_joins(
         }
     }
 
+    // Against the session's joins: a `paired` part reads a join by its id, and
+    // without them it was refused as a decomposition read out of context.
     for decomposition in &session.decompose {
-        if let Err(error) =
-            crate::join::check_decomposition(decomposition, &session.requests, catalog)
-        {
+        if let Err(error) = crate::join::check_decomposition_in(
+            decomposition,
+            &session.requests,
+            &session.joins,
+            catalog,
+        ) {
             rejections.push(Rejection::new(error.to_string()));
         }
     }
@@ -547,6 +553,46 @@ fn check_filter(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection
     }
 }
 
+/// A ranking by an attribute (`topk:N@<attr>`) names one the entry declares.
+///
+/// `filter_fields` is the catalog's one list of attribute names an event of the
+/// source carries, which is what the filter check reads too. An attribute no
+/// event carries ranked every event as `<attr>=?`, one row holding the whole
+/// run, and the results only counted it: that is a request that cannot mean
+/// anything, refused with the names it could have used.
+fn check_ranking(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>) {
+    for emit in &request.emit {
+        let Emit::TopK { by: Some(by), .. } = emit else {
+            continue;
+        };
+        let field = by.as_str();
+        if entry.filter_fields.iter().any(|known| known == field) {
+            continue;
+        }
+        let suggestion = nearest(field, entry.filter_fields.iter().map(String::as_str));
+        let hint = if entry.filter_fields.is_empty() {
+            format!(
+                "`{}` declares no attribute to rank by; `topk:N` ranks by its keys",
+                entry.id
+            )
+        } else {
+            format!(
+                "`{}` can be ranked by {}",
+                entry.id,
+                one_of(entry.filter_fields.iter().map(String::as_str))
+            )
+        };
+        rejections.push(Rejection::with_hint(
+            format!(
+                "`{emit}` ranks `{}` by `{field}`, an attribute it does not declare{}",
+                entry.id,
+                DidYouMean(suggestion)
+            ),
+            hint,
+        ));
+    }
+}
+
 fn check_stack(
     entry: &Entry,
     request: &Request,
@@ -715,6 +761,86 @@ mod tests {
 
     fn reject(request: &Request) -> Vec<Rejection> {
         validate_request(&catalog(), request, OutputFormat::Text).unwrap_err()
+    }
+
+    /// `topk:N@<attr>` over an attribute the entry declares is kept; over one
+    /// it does not, it is refused naming the ones it could have used -- the
+    /// filter check's answer, for a ranking.
+    #[test]
+    fn a_ranking_by_an_attribute_the_entry_does_not_declare_is_refused() {
+        let mut ranked = request(
+            "mem.heap.alloc",
+            Target::Launch(vec!["/bin/true".into()]),
+            "trace",
+            "summary",
+        );
+        ranked.emit = vec!["topk:5@op".parse().unwrap()];
+        assert!(
+            validate_request(&catalog(), &ranked, OutputFormat::Text).is_ok(),
+            "{:?}",
+            validate_request(&catalog(), &ranked, OutputFormat::Text).err()
+        );
+
+        ranked.emit = vec!["topk:5@opp".parse().unwrap()];
+        let rejections = reject(&ranked);
+        let text = format!("{rejections:?}");
+        assert!(text.contains("by `opp`"), "{text}");
+        assert!(text.contains("did you mean `op`"), "{text}");
+        assert!(text.contains("freed_bytes"), "{text}");
+
+        // And a plain ranking, by the keys, asks for no attribute at all.
+        ranked.emit = vec!["topk:5".parse().unwrap()];
+        assert!(validate_request(&catalog(), &ranked, OutputFormat::Text).is_ok());
+    }
+
+    /// A decomposition part read from a join (`value: paired`) is checked
+    /// against the session's joins: with the join declared the session
+    /// validates, and with only another join the part is refused naming the
+    /// join it reads. It used to be refused either way, as a table read
+    /// without the joins.
+    #[test]
+    fn a_part_read_from_a_join_is_checked_against_the_sessions_joins() {
+        let text = |joins: &str| {
+            format!(
+                "requests:\n\
+                 \x20 - {{source: io.syscall, target: system, mode: trace, emit: [summary]}}\n\
+                 \x20 - {{source: io.latency, target: system, mode: trace, emit: [summary]}}\n\
+                 \x20 - {{source: sched.wakeup, target: system, mode: trace, emit: [summary]}}\n\
+                 {joins}\
+                 decompose:\n\
+                 \x20 - id: one-read\n\
+                 \x20   whole: {{from: io.syscall, value: total_ns}}\n\
+                 \x20   parts:\n\
+                 \x20     - {{state: device, from: io.latency, value: latency_ns}}\n\
+                 \x20     - {{state: completion -> wakeup, from: completion-released, value: paired}}\n"
+            )
+        };
+        let session = |joins: &str| {
+            let mut session: Session =
+                serde_norway::from_str(&text(joins)).expect("the session parses");
+            session.apply_defaults();
+            session
+        };
+        let joined = session(
+            "joins:\n\
+             \x20 - {id: completion-released, from: io.latency, to: sched.wakeup, via: task, \
+             match: woke, woken: wakee_tid, waker: waker_tid, window: 1s}\n",
+        );
+        if let Err(rejections) = validate_session(&catalog(), &joined) {
+            panic!("{rejections:?}");
+        }
+        // A join of another name is not the one the part reads.
+        let other = session(
+            "joins:\n\
+             \x20 - {id: something-else, from: io.latency, to: sched.wakeup, via: task, \
+             match: woke, woken: wakee_tid, waker: waker_tid, window: 1s}\n",
+        );
+        let rejections = validate_session(&catalog(), &other).unwrap_err();
+        let text = format!("{rejections:?}");
+        assert!(
+            text.contains("`completion-released` names no join"),
+            "{text}"
+        );
     }
 
     #[test]
