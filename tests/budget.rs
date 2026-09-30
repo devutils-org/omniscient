@@ -777,15 +777,29 @@ impl Timed {
 }
 
 fn timed(name: &str, omn: Option<&[&str]>, workload_args: &[&str]) -> Timed {
+    timed_under(name, omn, &[], workload_args)
+}
+
+/// [`timed`], with the workload started through `wrapper` (`taskset -c 3`),
+/// under `omn` as bare.
+fn timed_under(
+    name: &str,
+    omn: Option<&[&str]>,
+    wrapper: &[&str],
+    workload_args: &[&str],
+) -> Timed {
     let directory = scratch(name);
     std::fs::create_dir_all(&directory).expect("a scratch directory");
     let report = directory.join("report.json");
     let program = workload().expect("the workload was built");
     let program = program.to_string_lossy().into_owned();
+    let mut command: Vec<&str> = wrapper.to_vec();
+    command.push(&program);
+    command.extend_from_slice(workload_args);
     let output = match omn {
         None => {
-            let status = Command::new(&program)
-                .args(workload_args)
+            let status = Command::new(command[0])
+                .args(&command[1..])
                 .env("BENCH_REPORT", &report)
                 .status()
                 .expect("the workload runs");
@@ -796,8 +810,8 @@ fn timed(name: &str, omn: Option<&[&str]>, workload_args: &[&str]) -> Timed {
             let out = directory.join("out");
             let out = out.to_string_lossy().into_owned();
             let mut args: Vec<&str> = request.to_vec();
-            args.extend_from_slice(&["-o", &out, "--", &program]);
-            args.extend_from_slice(workload_args);
+            args.extend_from_slice(&["-o", &out, "--"]);
+            args.extend_from_slice(&command);
             let output = Command::new(BINARY)
                 .args(&args)
                 .env("BENCH_REPORT", &report)
@@ -1043,6 +1057,142 @@ fn what_the_shim_spends_inside_the_target_is_most_of_what_the_program_lost() {
     assert!(
         measured > own,
         "what the shim spent inside the program is in the percentage: {measured} against {own}"
+    );
+}
+
+/// The CI's defect, made on purpose: a thread that is preempted inside a timed
+/// hook call. The workload is pinned to one cpu beside a spinning task pinned
+/// to the same one, so the scheduler takes the cpu from it every slice, and
+/// some of those preemptions land between a timed call's two clock reads.
+/// Before the fix each one added a whole slice, scaled by seventeen, to the
+/// shim's account: on a two-cpu runner, 610 ms for 396 ms the program lost.
+///
+/// Ground truth is the program's own cpu time, which a preemption does not
+/// add to: what the shim says it spent can be no more than what the program
+/// lost against three bare runs under the same neighbour, plus their spread.
+/// And the calls a preemption fell in are counted, not dropped unsaid: with
+/// the kernel's own count of the program's involuntary switches in the
+/// hundreds, which is what shows the case was created here, some runs have
+/// to report some (`in_target_left_out`). Fewer preemptions skip, with the
+/// numbers.
+#[test]
+fn a_preempted_hook_call_is_counted_apart_and_adds_no_time_slice() {
+    if workload().is_none() {
+        return;
+    }
+    let allowed = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            let line = status
+                .lines()
+                .find(|line| line.starts_with("Cpus_allowed_list:"))?
+                .to_owned();
+            let last = line
+                .rsplit([',', '-', ':', '\t', ' '])
+                .next()?
+                .trim()
+                .to_owned();
+            last.parse::<u32>().ok()
+        });
+    let (Some(cpu), true) = (
+        allowed,
+        Command::new("taskset")
+            .arg("-V")
+            .output()
+            .is_ok_and(|output| output.status.success()),
+    ) else {
+        eprintln!("SKIP: no `taskset`, or no cpu list to pin to: {allowed:?}");
+        return;
+    };
+    let cpu = cpu.to_string();
+    let pin: &[&str] = &["taskset", "-c", &cpu];
+    let mut neighbour = Command::new("taskset")
+        .args(["-c", &cpu, "/bin/sh", "-c", "while :; do :; done"])
+        .spawn()
+        .expect("a spinning neighbour");
+    const PAIRS: u64 = 1_000_000;
+    let pairs = PAIRS.to_string();
+    let args = ["async-malloc", "1", pairs.as_str()];
+    let request: &[&str] = &["mem.heap.alloc", "-e", "summary"];
+    let bare: Vec<u64> = (0..3)
+        .map(|i| timed_under(&format!("preempted-bare-{i}"), None, pin, &args).cpu_ns())
+        .collect();
+    let traced: Vec<Timed> = (0..3)
+        .map(|i| timed_under(&format!("preempted-shim-{i}"), Some(request), pin, &args))
+        .collect();
+    let _ = neighbour.kill();
+    let _ = neighbour.wait();
+    let Some(first) = traced[0].cost.as_ref() else {
+        let said = stderr(traced[0].output.as_ref().unwrap());
+        eprintln!("SKIP: `mem.heap.alloc` cannot be served here: {said}");
+        return;
+    };
+    let from = first["overhead"]["in_target_from"]
+        .as_str()
+        .unwrap_or_default();
+    let overhead = |run: &Timed| -> serde_json::Value {
+        run.cost.as_ref().expect("every run records its cost")["overhead"].clone()
+    };
+    let inside: Vec<u64> = traced
+        .iter()
+        .map(|run| {
+            overhead(run)["in_target_cpu_ns"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("the shim's account is read from its ring: {from}"))
+        })
+        .collect();
+    let left_out: Vec<u64> = traced
+        .iter()
+        .map(|run| overhead(run)["in_target_left_out"].as_u64().unwrap_or(0))
+        .collect();
+    let calls: Vec<u64> = traced
+        .iter()
+        .map(|run| overhead(run)["in_target_runs"].as_u64().unwrap_or(0))
+        .collect();
+    let floor = median(bare.clone());
+    let lost: Vec<u64> = traced
+        .iter()
+        .map(|run| run.cpu_ns().saturating_sub(floor))
+        .collect();
+    let spread = bare.iter().max().unwrap() - bare.iter().min().unwrap()
+        + lost.iter().max().unwrap()
+        - lost.iter().min().unwrap();
+    eprintln!(
+        "pinned to cpu {cpu} beside a spinning task: bare cpu {bare:?} ns; lost under the shim \
+         {lost:?} ns; the shim's account {inside:?} ns over {calls:?} calls, {left_out:?} of \
+         them priced because a preemption fell in them; spread {spread} ns"
+    );
+    // The kernel's own count of the preemptions, which the case needs: a
+    // timed span is about one call in seventeen of the hook's time, so a few
+    // hundred preemptions put some inside one.
+    let preempted: Vec<u64> = traced
+        .iter()
+        .map(|run| run.report["involuntary"].as_u64().unwrap_or(0))
+        .collect();
+    eprintln!("the kernel preempted the traced runs {preempted:?} times");
+    if preempted.iter().sum::<u64>() < 300 {
+        eprintln!(
+            "SKIP: the kernel preempted the pinned program {preempted:?} times in three runs, \
+             too few to put one inside a timed hook call (numbers above)"
+        );
+        return;
+    }
+    let most = *lost.iter().max().unwrap();
+    assert!(
+        inside.iter().all(|ns| *ns <= most + spread),
+        "a preemption inside a timed call adds nothing of the scheduler's to the shim's \
+         account: {inside:?} against {lost:?} lost, spread {spread}"
+    );
+    for (count, left) in calls.iter().zip(&left_out) {
+        assert!(
+            left <= count,
+            "the calls priced at the mean are some of the calls: {left} of {count}"
+        );
+    }
+    assert!(
+        left_out.iter().any(|left| *left > 0),
+        "{preempted:?} preemptions and no timed call said to have had one: the calls left \
+         out of the account are counted, never dropped unsaid"
     );
 }
 

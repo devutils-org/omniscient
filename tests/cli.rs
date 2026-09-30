@@ -1059,6 +1059,125 @@ fn a_container_is_measured_as_the_cgroup_its_runtime_names() {
     );
 }
 
+/// `--container` on a source whose catalog entry has no `container` key of its
+/// own, and serves a cgroup: `cpu.context_switches` says `container: no`, and
+/// was refused by the validator before the container was ever bound. The
+/// session is validated again as measured, with its container bound to its
+/// cgroup, so a container is not refused wherever its cgroup is served.
+///
+/// The truth is the task's, as above: the kernel's count of its voluntary
+/// switches over the window. The run counts the cgroup's switches -- the task
+/// inside, which blocks every 2 ms -- and not the same task beside it, which
+/// blocks as often: the count is at least half the task's blocks inside the
+/// window (a counter multiplexed with the other streams' is scaled, which is
+/// what the half is for) and under one and a half times them, where the task
+/// beside would double it.
+#[test]
+fn a_container_is_served_by_a_source_that_serves_its_cgroup() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let served = run(&[
+        "trace",
+        "cpu.context_switches",
+        "--cgroup",
+        "/sys/fs/cgroup",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "--dump-resolved",
+    ]);
+    if !served.status.success() {
+        eprintln!("skipped: {}", stderr(&served));
+        return;
+    }
+    let scope = match Scope::create("container-counted") {
+        Ok(scope) => scope,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let procs = scope.dir.join("cgroup.procs").display().to_string();
+    let inside = Sleeper::start(&procs);
+    let beside = Sleeper::start("-");
+    let name = format!("omn-counted-{}", std::process::id());
+    let bin = std::env::temp_dir().join(format!("omn-runtime-counted-{}", std::process::id()));
+    runtime_knowing(&bin, &[(name.as_str(), inside.pid)]);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(BINARY)
+        .args([
+            "trace",
+            "cpu.context_switches",
+            "--container",
+            &name,
+            "-m",
+            "count",
+            "-e",
+            "summary",
+            "-d",
+            "800ms",
+            "--format",
+            "json",
+        ])
+        .env("PATH", &path)
+        .env_remove("OMN_CONTAINER_RUNTIME")
+        .output()
+        .expect("omn runs");
+    let log = inside.finish();
+    let _ = beside.finish();
+    let _ = std::fs::remove_dir_all(&bin);
+    let said = stderr(&output);
+    assert!(
+        output.status.success(),
+        "a container whose cgroup `cpu.context_switches` serves is not refused:\n{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "container `{name}` runs in cgroup {}",
+            scope.dir.display()
+        )),
+        "the run names the cgroup it measured:\n{said}"
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a JSON document");
+    let result = &document["results"][0];
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+    let counted: f64 = result["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .filter_map(|output| output["series"].as_array())
+        .flatten()
+        .filter_map(|series| series["last"].as_f64())
+        .sum();
+    let blocked: u64 = log
+        .iter()
+        .filter(|sleep| sleep[0] >= opened && sleep[1] <= closed)
+        .map(|sleep| sleep[2])
+        .sum();
+    eprintln!(
+        "cpu.context_switches --container: {counted} switches counted in the cgroup, {blocked} \
+         blocks of the task inside by the kernel's count inside the window"
+    );
+    assert!(
+        blocked > 50,
+        "the task blocked {blocked} times, too few to judge"
+    );
+    assert!(
+        counted >= blocked as f64 / 2.0 && counted <= blocked as f64 * 1.5 + 20.0,
+        "the cgroup's switches are the task inside's, {blocked}, and not the task beside's too: \
+         {counted}"
+    );
+}
+
 /// A container no runtime knows is refused before anything is attached, with
 /// what each runtime asked said; and a machine with no runtime at all says so,
 /// and what to pass instead.

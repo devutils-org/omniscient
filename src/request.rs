@@ -1668,6 +1668,42 @@ pub struct Escalation {
 }
 
 impl Session {
+    /// Refuses a decomposition part read from a join (`value: paired`) before
+    /// anything is attached, because this build cannot give it the pairs the
+    /// run's own join counts.
+    ///
+    /// The run gives its joins a source that ran to the end as watching to the
+    /// end (`main.rs`, `assemble`): its window closes at one instant before
+    /// the first collector is stopped, and what the stops drain is stamped
+    /// after it. `join::decompose_with` rebuilds the windows from the results
+    /// instead, so a paired part would end its open states at that instant
+    /// and count every later `to` event as outside -- pairs that differ from
+    /// the join that defines them. Refused with the reason until the
+    /// decomposition takes the windows the joins were given (filed for stream
+    /// J, fourteenth wave), rather than run and reported different.
+    pub fn check_paired_parts(&self) -> Result<(), String> {
+        let paired = self.decompose.iter().find_map(|decomposition| {
+            decomposition
+                .parts
+                .iter()
+                .find(|part| part.value == crate::join::PAIRED)
+                .map(|part| (decomposition, part))
+        });
+        match paired {
+            None => Ok(()),
+            Some((decomposition, part)) => Err(format!(
+                "decomposition `{}`: part `{}` reads its value from a join (`value: {}`), and \
+                 this build would pair it over windows that close before the collectors' last \
+                 reads, where the run's own join reads a source that ran to the end as \
+                 watching to the end: its pairs could differ from the join's. Read the join's \
+                 own table (`joins:`) for those pairs instead",
+                decomposition.id,
+                part.state,
+                crate::join::PAIRED
+            )),
+        }
+    }
+
     /// Builds a single-request session, the shape a command line produces.
     pub fn single(request: Request, format: OutputFormat, out: Option<PathBuf>) -> Self {
         Self {
@@ -2159,6 +2195,28 @@ requests:
                 .contains("decomposition `across` reads `sched.futex`"),
             "{decomposed}"
         );
+    }
+
+    /// A part read from a join is refused before the run, naming the part,
+    /// and a decomposition without one is not.
+    #[test]
+    fn a_part_read_from_a_join_is_refused_before_the_run() {
+        let session = |part: &str| -> Session {
+            serde_norway::from_str(&format!(
+                "requests:\n  - {{source: io.latency, target: {{launch: [prog]}}, mode: trace}}\n\
+                 decompose:\n  - {{id: one-read, whole: {{from: io.syscall, value: total_ns}}, \
+                 parts: [{{state: device, from: io.latency, value: latency_ns}}, {part}]}}\n"
+            ))
+            .expect("a session")
+        };
+        let paired = session("{state: woken, from: completion-released, value: paired}");
+        let error = paired.check_paired_parts().unwrap_err();
+        assert!(
+            error.contains("decomposition `one-read`: part `woken`") && error.contains("`joins:`"),
+            "{error}"
+        );
+        let plain = session("{state: queued, from: io.latency, value: queue_ns}");
+        assert_eq!(plain.check_paired_parts(), Ok(()));
     }
 
     #[test]

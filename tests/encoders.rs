@@ -1436,3 +1436,202 @@ fn an_overlap_join_reads_the_same_in_text_as_in_its_json() {
         );
     }
 }
+
+/// The text of a `woke` join says, per waker, the pairs and the time from each
+/// completion to the wakeup that followed it, as its JSON does: one run,
+/// rendered both ways.
+///
+/// Ground truth is twofold. The text is read against the run's own JSON: every
+/// row the JSON gives is a row of the text, its `PAIRS` the row's pairs and
+/// its `WAITED` the row's summed distance to the renderer's two decimals, and
+/// the total under the table their sum. And the JSON against the workload: a
+/// program that makes one-page `O_DIRECT` reads one at a time, on a file under
+/// `target/` (a block device, where `/tmp` often is not), and times them on
+/// its own `CLOCK_MONOTONIC`. Each read blocks until its request completes and
+/// the reader is woken, so the pairs are the completions the reader saw, give
+/// or take the few whose wakeup came before the reader slept, and the time
+/// they waited is inside the time the reads took.
+#[test]
+fn a_woke_join_reads_the_same_in_text_as_in_its_json() {
+    if !has_python() {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    const READS: u64 = 300;
+    let directory = scratch("woke");
+    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "target/omn-encoders-woke-{}.bin",
+        std::process::id()
+    ));
+    let script = directory.join("reader.py");
+    std::fs::write(
+        &script,
+        format!(
+            "import mmap, os, sys, time\n\
+             path, n = sys.argv[1], {READS}\n\
+             with open(path, 'wb') as f:\n\
+             \x20   f.write(os.urandom(n * 4096)); f.flush(); os.fsync(f.fileno())\n\
+             g = os.open(path, os.O_RDONLY); os.posix_fadvise(g, 0, 0, os.POSIX_FADV_DONTNEED)\n\
+             f = os.open(path, os.O_RDONLY | os.O_DIRECT)\n\
+             b = mmap.mmap(-1, 4096)\n\
+             t = time.monotonic_ns()\n\
+             for i in range(n):\n\
+             \x20   os.preadv(f, [b], i * 4096)\n\
+             print('omn-reads', n, time.monotonic_ns() - t, file=sys.stderr)\n"
+        ),
+    )
+    .expect("the reader");
+    let session = directory.join("woke.yml");
+    std::fs::write(
+        &session,
+        format!(
+            "name: woke, rendered\nformat: json\nrequests:\n\
+             \x20 - label: device\n    source: io.latency\n    target: &reader\n      launch: \
+             [python3, {script}, {data}]\n    mode: trace\n    emit: [summary]\n\
+             \x20 - {{label: wakeups, source: sched.wakeup, target: *reader, mode: trace, \
+             emit: [summary]}}\n\
+             joins:\n\
+             \x20 - {{id: completion-released, from: io.latency, to: sched.wakeup, via: task, \
+             match: woke, woken: wakee_tid, waker: waker_tid, window: 1s, top: 50}}\n\
+             \x20 - {{id: who-released, from: sched.wakeup, to: io.latency, via: task, \
+             match: wakeup, waker: waker_tid, depth: 2, top: 50}}\n",
+            script = script.display(),
+            data = data.display(),
+        ),
+    )
+    .expect("the session");
+    let output = run(&["-f", session.to_str().unwrap()]);
+    let said = stderr(&output);
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_dir_all(&directory);
+    if !output.status.success() {
+        if said.contains("has no viable backend on this machine") || said.contains("CAP_BPF") {
+            eprintln!("skipped: `io.latency` or `sched.wakeup` is not served here: {said}");
+            return;
+        }
+        if said.contains("Invalid argument") || said.contains("EINVAL") {
+            eprintln!("skipped: this filesystem refuses a one-page O_DIRECT read: {said}");
+            return;
+        }
+        panic!("the session failed: {said}");
+    }
+    let run: RunOutput = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let join = &run.joins[0];
+    let text = encode::run_output(OutputFormat::Text, &run).expect("text");
+
+    // Every row of the JSON is a row of the text, with its pairs and its time.
+    assert!(!join.top.is_empty(), "no pairs at all:\n{text}");
+    let mut shown_total = 0.0;
+    for row in &join.top {
+        let pairs = row.wakeups.unwrap_or(row.matched).max(1);
+        let waited = row.change.as_ref().map_or(0.0, |change| change.delta);
+        shown_total += waited;
+        let line = text
+            .lines()
+            .find(|line| {
+                line.strip_prefix("    ")
+                    .and_then(|rest| rest.strip_prefix(row.key.as_str()))
+                    .is_some_and(|rest| rest.starts_with(' '))
+            })
+            .unwrap_or_else(|| panic!("no row for `{}`:\n{text}", row.key));
+        let fields: Vec<&str> = line[4 + row.key.len()..].split_whitespace().collect();
+        assert_eq!(
+            fields.first().and_then(|field| field.parse::<u64>().ok()),
+            Some(pairs),
+            "`{}`: the text's PAIRS against the JSON's:\n{text}",
+            row.key
+        );
+        let (shown, slack) = fields
+            .get(1)
+            .and_then(|field| read_duration(field))
+            .unwrap_or_else(|| panic!("`{}`: no WAITED:\n{text}", row.key));
+        assert!(
+            (shown - waited).abs() <= slack + 1.0,
+            "`{}`: the text says {shown} ns waited and the JSON {waited}:\n{text}",
+            row.key
+        );
+    }
+    let total_line = text
+        .lines()
+        .find(|line| line.contains("WAITED is from each close"))
+        .unwrap_or_else(|| panic!("no total under the table:\n{text}"));
+    let (total, slack) = total_line
+        .rsplit(": ")
+        .next()
+        .and_then(|tail| read_duration(tail.trim_end_matches(" in all")))
+        .unwrap_or_else(|| panic!("the total is a duration: {total_line}"));
+    assert!(
+        (total - shown_total).abs() <= slack + 1.0,
+        "the total {total} is the rows' {shown_total}:\n{text}"
+    );
+
+    // A chain of two hops is printed whole, with its counts after it: every
+    // key the JSON gives starts a row of the text and is followed by a space.
+    let chains = &run.joins[1];
+    let longest = chains
+        .top
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0);
+    for row in &chains.top {
+        assert!(
+            text.lines().any(|line| line
+                .strip_prefix("    ")
+                .and_then(|rest| rest.strip_prefix(row.key.as_str()))
+                .is_some_and(|rest| rest.starts_with(' '))),
+            "the chain `{}` is not a whole row of the text:\n{text}",
+            row.key
+        );
+    }
+    eprintln!(
+        "{} chains, the longest {longest} characters: {:?}",
+        chains.top.len(),
+        chains
+            .top
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // And the JSON against the reader's own clock.
+    let (reads, read_ns) = said
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.strip_prefix("omn-reads ")?.split_whitespace();
+            Some((
+                fields.next()?.parse::<u64>().ok()?,
+                fields.next()?.parse::<f64>().ok()?,
+            ))
+        })
+        .unwrap_or_else(|| panic!("the reader says what it read: {said}"));
+    let completions = run.results[0].events_seen as u64;
+    let lost = run.results[0].losses.dropped + run.results[1].losses.dropped;
+    let paired: u64 = join.top.iter().map(|row| row.matched).sum();
+    eprintln!(
+        "{reads} reads in {read_ns} ns by the reader's clock; {completions} completions, \
+         {paired} paired, {shown_total} ns from completion to wakeup, {lost} events lost"
+    );
+    if completions < reads * 9 / 10 {
+        eprintln!(
+            "skipped the workload half: {completions} of {reads} reads reached the device, so \
+             the cache answered the rest and they had no completion to pair"
+        );
+        return;
+    }
+    assert!(
+        paired <= completions,
+        "a pair is a completion and its wakeup: {paired} of {completions}"
+    );
+    if lost == 0 {
+        assert!(
+            paired * 10 >= completions * 9,
+            "every read blocks until it is woken: {paired} paired of {completions}"
+        );
+    }
+    assert!(
+        shown_total <= read_ns,
+        "the reads waited {shown_total} ns from completion to wakeup, inside the {read_ns} ns \
+         they took"
+    );
+}

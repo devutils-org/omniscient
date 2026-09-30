@@ -14,11 +14,14 @@ decomposition given the session's joins (3); `--container` bound to the
 cgroup its runtime names (4); the smaller ones and the CI's failures in R's
 files (5).
 
-**Left**: a session with a `paired` part is still refused at validation, by
-P's `validate.rs` (one line, filed by J last wave); the eleven catalog entries
-that say `container: false` where they serve a cgroup (filed for P and U);
-the last line of the `psi` move, which is two owners' at once (filed for K and
-the coordinator).
+**Left**: a session with a `paired` part is refused before the run, by P's
+`validate.rs` and now by R's own `Session::check_paired_parts`, because its
+pairs would be made over other windows than the join's (filed for J, with the
+signature; see "After the review"); the eleven catalog entries that say
+`container: false` are still refused by `omn validate` and the dumps, which
+describe the request as asked (the run path binds first and runs them); the
+last line of the `psi` move, which is two owners' at once (filed for K and the
+coordinator).
 
 ---
 
@@ -126,7 +129,11 @@ there. The JSON is held to the workload, which waits four times on a condition
 nobody signals and brackets each wait on its own clock: 1 000 329 033 ns
 waited, 1 000 223 342 ns credited and none uncredited. The `woke`, chain and
 sentence renderings have unit tests in `encode.rs` against amounts the test
-chose. A `paired` part through `omn` cannot be run on this branch (above).
+chose, and since the review the `woke` table is also held to a real run:
+`tests/encoders.rs::a_woke_join_reads_the_same_in_text_as_in_its_json` (see
+"After the review"). A `paired` part through `omn` cannot be run on this
+branch (above), so the brief's own ground truth for item 3 -- a session whose
+joins define a part, rendered, against its JSON -- is **not landed**.
 
 ## 4. A container is its cgroup
 
@@ -163,10 +170,13 @@ note names exactly the cgroup the test made and the pid the runtime gave;
 window, 0 of the task beside**. `a_container_no_runtime_knows_is_refused_with_what_it_said`
 holds both refusals.
 
-What it leaves: eleven entries that serve a cgroup say `container: false`, and
-the validator refuses them before the binding (filed for P and U, with the
-list). The collectors that refuse `Target::Container` by name are no longer
-reached through `omn`.
+What it left, until the review: eleven entries that serve a cgroup say
+`container: false`, and the validator refused them before the binding. The
+run path now binds first and validates again as measured, so they run
+(`a_container_is_served_by_a_source_that_serves_its_cgroup`, "After the
+review"); `omn validate` and the dumps still refuse them, and the catalog fix
+is still filed for P and U. The collectors that refuse `Target::Container` by
+name are no longer reached through `omn`.
 
 ## 5. The smaller ones, each checked first
 
@@ -195,7 +205,80 @@ reached through `omn`.
 | `runner`, two `cpu.instructions` phase tests | both | `try_resolved`; skip with "will not count instructions here" |
 | `triage`, seven | both | a question refused because its one indispensable input has no viable backend skips with the refusal |
 | `aggregation::...second clean run was not clean` | skip | prints the run's loss lines on the skip's own line |
-| `budget::what_the_shim_spends_inside_the_target_is_most_of_what_the_program_lost` | 2 | **a defect in the shim**: 610 ms accounted for 396 ms lost. A timed call the thread was preempted in added a scheduler slice, seventeen times over. A span over 200 us -- three orders of magnitude past anything a hook does -- adds nothing; the turn still counts as timed |
+| `budget::what_the_shim_spends_inside_the_target_is_most_of_what_the_program_lost` | 2 | **a defect in the shim**: 610 ms accounted for 396 ms lost. A timed call the thread was preempted in added a scheduler slice, seventeen times over. A span over 200 us -- three orders of magnitude past anything a hook does -- is left out of the account, counted, priced at the mean of the others and reported (after the review; the first fix zeroed it unsaid) |
+
+## After the review
+
+An adversarial review of the branch raised seven points. What each came to:
+
+1. **A `paired` part and the run's join read the same windows two ways --
+   real.** `main.rs` gives the joins a source that ran to the end as open to
+   the end; `join::decompose_with` rebuilds the windows from the results,
+   whose close is before the stops' drains, so a paired part would cut its
+   open states and count later wakeups as outside where the join does
+   neither. The fix is J's (`join.rs`; the results' own windows cannot be
+   passed in, `decompose_with` reads them for the window row), filed with the
+   signature. On R's side the path is refused before anything is attached,
+   `Session::check_paired_parts` from `main.rs` and `triage/engine.rs`, so it
+   stays unreachable whichever of P's validator line and J's change lands
+   first. Unit test: `request::tests::a_part_read_from_a_join_is_refused_before_the_run`.
+2. **The shim's fix zeroed a preempted span unsaid -- real.** The ring now
+   counts such calls apart (`LEFT_OUT` at 320, the slots move to 384, magic
+   `omn_rng3` on both sides, pinned by both layout tests); `omn` prices them
+   at the mean of the other timed calls and reports how many
+   (`overhead.in_target_left_out`, and "N of them priced at the mean" in the
+   cost line). Ground truth,
+   `budget::a_preempted_hook_call_is_counted_apart_and_adds_no_time_slice`: the
+   workload pinned to one cpu beside a spinning task pinned to the same one,
+   three bare runs and three under the shim; the kernel's own count of the
+   program's involuntary switches (`ru_nivcsw`, which `workload.c` now
+   reports) shows the case was made, and the program's own cpu time is the
+   bound. Here: 236 to 246 preemptions per run; account 388 to 436 ms against
+   500 to 562 ms lost; 221 to 323 calls priced. **With the fix reverted**
+   (every span added, as before the first fix): account 737 to 1228 ms
+   against 525 to 559 ms lost, and the test fails; with the first fix (zeroed,
+   uncounted) it fails on the count.
+3. **The triage tail test accepted either verdict -- real.** The median run's
+   limit is held to the fixture's own `/proc/thread-self/schedstat` for that
+   run: `cpu-queue` where the kernel counted more waiting for a cpu than
+   running, `cpu` otherwise, either within a tenth and 5 ms. Here: 101.7 ms on
+   a cpu, 17 us queued, `cpu`. No test makes a `latency` run whose median
+   queues on purpose, so the `cpu-queue` branch is checked only when the
+   machine's load makes it so -- against the kernel's count, not the load
+   average, when it does.
+4. **Item 3's ground truth was not run -- real, and still true for a `paired`
+   part**, which cannot run on this branch (1). What can run now does:
+   `encoders::a_woke_join_reads_the_same_in_text_as_in_its_json` launches a
+   reader making 300 one-page `O_DIRECT` reads under `target/`, with
+   `io.latency`, `sched.wakeup`, a `woke` join and a `wakeup` join of depth 2.
+   Every JSON row is a text row with its `PAIRS` and `WAITED`, the total under
+   the table is their sum, and every chain key is printed whole; the JSON is
+   held to the reader's clock (pairs no more than the completions and at least
+   nine in ten of them with nothing lost; the waited time inside the reads'
+   own). Here: 315 completions, 308 paired, 1.3 ms of 6.1 ms. The chains a
+   pid-targeted wakeup source sees are one hop (35 characters); a two-hop
+   chain, which is what the column's width is for, needs a machine-wide
+   source and is still covered by the unit test only.
+5. **`--container` still refused on eleven entries -- real, and fixed on the
+   run path.** `main.rs` binds every container before validation
+   (`bind_containers`, once per name) and validates again as measured a
+   session refused as asked; a refusal either way is the one in the user's
+   terms. `cli::a_container_is_served_by_a_source_that_serves_its_cgroup`:
+   `cpu.context_switches` (`container: no`) on a container a runtime script
+   names, 367 switches counted in its cgroup for 366 blocks of the task inside
+   by the kernel's count, where the same task beside would double it. The old
+   binary refused it at validation ("a container has to be resolved to its
+   cgroup first"). `omn validate` and the dumps still refuse, and the catalog
+   fix stays filed.
+6. **Ownership of `2e1e534` -- not a defect.** The vocabulary commit touches
+   `src/event.rs` (J's), `src/resolve.rs` and `src/validate.rs` (P's) because
+   the brief's item 1 asks for the variants with their arms, and the
+   coordinator merged it to `main` as the wave's foundation (`32033ca`)
+   before P and K rebased on it. Nothing in this pass touches another stream's
+   file; `docs/open-findings.md` is appended to under R's heading.
+7. **No reds, skips not counted -- measured now.** One run of R's seven files
+   with `--nocapture`: one skip, `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+   (`cpu.profile` reports no per-ring losses yet, filed for P last wave).
 
 ## Checks
 
@@ -224,9 +307,18 @@ None: this stream added no session.
   which may exist later -- not exit 2.
 - **A dump's format is checked before resolution**: whether a format can hold
   a request does not depend on the machine.
-- **The shim's account leaves out a timed span over 200 us**: it is a
-  preemption, never the hook, and the account is low by the hook's own
-  sub-microsecond share of that one call rather than high by a time slice.
+- **The shim's account leaves out a timed span over 200 us, and says so**: it
+  is a preemption, never the hook. The ring counts such calls apart (a new
+  header word, `omn_rng3`); `omn` prices them at the mean of the other timed
+  calls and reports how many (`in_target_left_out`, and the cost line), so
+  the account is neither high by a time slice nor low with nothing to show it.
+- **A `paired` decomposition part is refused before the run** until the
+  decomposition pairs over the windows the joins were given: refused with the
+  reason rather than run and reported different from its own join.
+- **A container is bound before validation on the run path**, and a session
+  refused as asked is validated again as measured; the documents about the
+  request as asked (`validate`, `--dump-request`, `--no-resolve`) keep the
+  catalog's answer.
 
 ## Filed for other streams
 
@@ -238,7 +330,10 @@ Under "Needs from another stream — the fourteenth wave, stream R" in
 - P: `validate.rs`'s container sentence, and J's `check_decomposition_in`
   line, which is now all a `paired` session waits on.
 - P and U: `container: false` dropped from the eleven entries that serve a
-  cgroup.
+  cgroup -- now for `omn validate` and the dumps only.
+- J: `join::decompose_within(.., windows)`, so a `paired` part pairs over the
+  windows the joins were given; then the coordinator swaps R's two call sites
+  and drops `check_paired_parts`.
 - P: `.github/expected-skips.txt`, the cgroup-ancestry skip wording.
 - The flaky tally: the triage tail test (changed, see there), and from this
   file's checks, `scenario_net::a_queue_that_delays_every_packet_is_measured_as_that_delay`.

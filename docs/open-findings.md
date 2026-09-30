@@ -8291,3 +8291,60 @@ for a cell that grants the capabilities and delegates no cgroup.
   counted and not explained" asked a run with no ring overflow to explain one.
   The terminal check wants to be made on a run that dropped, or skipped when
   its own run did not (K's file).
+
+### To stream J (`src/join.rs`): a `paired` part pairs over the windows the joins were given
+
+A review of R's branch found it, and it is real. `main.rs` (`assemble`) gives
+`join::apply_within` every source that ran to the end with `closed_ns =
+u64::MAX`: since R's window fix, every such window closes at one instant taken
+*before* the first `stop()`, and what each stop drains is stamped after it.
+`join::decompose_with` does not get those windows: `windows_of` rebuilds them
+from the results' real `window.closed_ns` (its doc still says "as `main.rs`
+reads them for the joins", which is no longer so), and `paired_events` runs
+`Watch::of` on them. So `Watch::advance` cuts the open states at the close on
+the first drained event, and `Watch::outside` counts the later `to` events as
+outside: a paired part's pairs can differ from the join that defines them.
+The results' own windows cannot be passed in instead: `decompose_with` reads
+them for `run_closed_ns` and the window row, where the real close is right.
+Wanted, the windows passed beside the results:
+
+```rust
+pub fn decompose_within(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    results: &[Results],
+    events: &[Event],
+    joins: &[Rule],
+    windows: &BTreeMap<String, Watched>, // what apply_within was given
+) -> DecompositionOutput
+```
+
+with `decompose_with` calling it on `windows_of(results)` as today. Until it
+lands, R refuses a `paired` part before anything is attached
+(`Session::check_paired_parts`, in `src/main.rs` and `src/triage/engine.rs`),
+so P's `check_decomposition_in` line can land in any order without making the
+inconsistent path reachable. Once both have landed, the coordinator's merge
+swaps R's two call sites to `decompose_within(.., &windows)` -- `main.rs` has
+the map; `triage/engine.rs` calls `join::apply`, which watches everything, so
+it passes an empty map -- and removes the two `check_paired_parts` calls.
+
+### To stream P: the `container: false` entries, now for the documents only
+
+`src/main.rs` binds every container to its cgroup *before* validation on the
+run path, and validates again as measured a session refused as asked:
+`cpu.context_switches --container <name>` runs
+(`tests/cli.rs::a_container_is_served_by_a_source_that_serves_its_cgroup`,
+367 switches counted in the cgroup for 366 blocks of the task inside by the
+kernel's count). The eleven entries are still refused where nothing is bound
+-- `omn validate`, `--dump-request`, `--no-resolve`, which describe the request
+as asked and may be for another machine -- so the item above is still wanted,
+for those.
+
+### For the flaky tally: the triage tail test, again
+
+The line above says the tail test "now accepts `cpu-queue` with the load
+printed". It does not any more: the median run's verdict is held to the
+fixture's own `/proc/thread-self/schedstat` for that run -- `cpu-queue` where
+the kernel counted more time waiting for a cpu than on one, `cpu` otherwise,
+either where the two are within a tenth (and 5 ms). A failure now names both
+numbers and which verdict they make.

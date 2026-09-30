@@ -671,6 +671,13 @@ pub struct Overhead {
     /// How many times that code ran inside the target, when it is counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_target_runs: Option<u64>,
+    /// How many of those runs are in `in_target_cpu_ns` at the mean of the
+    /// others rather than as timed: the preload shim's calls a preemption fell
+    /// in, whose spans are the scheduler's slice and not the hook's. Counted
+    /// and said, because an account that silently left them out would read
+    /// low with nothing to show it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub in_target_left_out: u64,
     /// Where `in_target_cpu_ns` came from, or why there is none.
     #[serde(default)]
     pub in_target_from: String,
@@ -717,6 +724,21 @@ impl Overhead {
 pub struct Inside {
     pub cpu_ns: u64,
     pub runs: u64,
+    /// How many of those runs are in `cpu_ns` at an estimate rather than as
+    /// timed: the preload shim's calls a preemption fell in, whose spans were
+    /// the scheduler's, priced at the mean of the others.
+    pub left_out: u64,
+}
+
+impl std::ops::Add for Inside {
+    type Output = Inside;
+    fn add(self, other: Inside) -> Inside {
+        Inside {
+            cpu_ns: self.cpu_ns + other.cpu_ns,
+            runs: self.runs + other.runs,
+            left_out: self.left_out + other.left_out,
+        }
+    }
 }
 
 /// A collector's account of what it spends inside its target, for a
@@ -875,6 +897,7 @@ fn parse_program_fdinfo(text: &str) -> Option<(u32, Inside)> {
         Inside {
             cpu_ns,
             runs: field("run_cnt").unwrap_or(0),
+            left_out: 0,
         },
     ))
 }
@@ -997,10 +1020,7 @@ impl InsideMeter {
                         }
                     }
                 }
-                Ok(last.iter().fold(*sunk, |total, one| Inside {
-                    cpu_ns: total.cpu_ns + one.cpu_ns,
-                    runs: total.runs + one.runs,
-                }))
+                Ok(last.iter().fold(*sunk, |total, one| total + *one))
             }
             InsideMeter::Reported {
                 account,
@@ -1008,10 +1028,7 @@ impl InsideMeter {
                 sunk,
             } => {
                 *last = account.read()?;
-                Ok(Inside {
-                    cpu_ns: sunk.cpu_ns + last.cpu_ns,
-                    runs: sunk.runs + last.runs,
-                })
+                Ok(*sunk + *last)
             }
         }
     }
@@ -1027,16 +1044,10 @@ impl InsideMeter {
                         let now = program_run(*fd)
                             .filter(|(now_id, _)| now_id == id)
                             .map_or(*last, |(_, run)| run);
-                        Inside {
-                            cpu_ns: total.cpu_ns + now.cpu_ns,
-                            runs: total.runs + now.runs,
-                        }
+                        total + now
                     }))
             }
-            InsideMeter::Reported { account, sunk, .. } => account.read().map(|now| Inside {
-                cpu_ns: sunk.cpu_ns + now.cpu_ns,
-                runs: sunk.runs + now.runs,
-            }),
+            InsideMeter::Reported { account, sunk, .. } => account.read().map(|now| *sunk + now),
             InsideMeter::Outside(_) => Ok(Inside::default()),
             InsideMeter::Unknown(why) => Err(why.clone()),
         }
@@ -2967,16 +2978,18 @@ impl<'a> Spending<'a> {
             }
             (_, reading) => reading.clone(),
         };
-        let (in_target_cpu_ns, in_target_runs, in_target_from) = match in_target {
+        let (in_target_cpu_ns, in_target_runs, in_target_left_out, in_target_from) = match in_target
+        {
             Ok(now) => {
                 let counted = !matches!(self.inside[index], InsideMeter::Outside(_));
                 (
                     Some(now.cpu_ns.saturating_sub(since.in_target.cpu_ns)),
                     counted.then(|| now.runs.saturating_sub(since.in_target.runs)),
+                    now.left_out.saturating_sub(since.in_target.left_out),
                     self.inside[index].describes(),
                 )
             }
-            Err(why) => (None, None, why),
+            Err(why) => (None, None, 0, why),
         };
         Overhead {
             collector_cpu_ns,
@@ -2989,6 +3002,7 @@ impl<'a> Spending<'a> {
             measurements: self.measurements,
             in_target_cpu_ns,
             in_target_runs,
+            in_target_left_out,
             in_target_from,
         }
     }
@@ -4726,7 +4740,8 @@ mod tests {
                 812,
                 Inside {
                     cpu_ns: 123_456,
-                    runs: 789
+                    runs: 789,
+                    left_out: 0,
                 }
             ))
         );
@@ -4810,6 +4825,7 @@ mod tests {
                 Ok(Inside {
                     cpu_ns: self.0,
                     runs: 1,
+                    left_out: 0,
                 })
             }
             fn describes(&self) -> String {

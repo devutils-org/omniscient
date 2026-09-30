@@ -167,6 +167,8 @@ pub fn run(
         )
     })?;
 
+    session.check_paired_parts().map_err(Failure::request)?;
+
     let mut resolved = Vec::new();
     for request in &session.requests {
         match resolve::resolve(catalog, capabilities, request) {
