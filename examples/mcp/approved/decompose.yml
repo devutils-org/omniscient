@@ -1,0 +1,51 @@
+# What dominates the program's time: its life split into the states a thread
+# can be in, and what is left over.
+#
+# Three parts, each read from the source that measures that state, and the
+# program's life as the whole:
+#
+#   on-cpu     `cpu.oncpu_time`, the kernel's account per poll, in ticks
+#   runnable   `sched.runqlat`, time it was ready and waiting for a cpu
+#   blocked    `sched.offcpu`, time it slept, less the queue wait after each
+#              wakeup, which `runnable` already holds
+#
+# The residue is the life less the parts, signed and never rounded away: a
+# residue larger than the parts' resolution says a state is missing, and the
+# table prints each row's resolution beside it. The biggest row is what
+# dominates. The two scheduler sources are eBPF, so the session needs
+# `CAP_BPF` and `CAP_PERFMON` on the `omn` binary (`make` grants them); a
+# machine that withholds them says so in `list_approved`.
+name: where the program's time went
+format: json
+
+requests:
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: &program
+      launch: [python3, program.py]
+    mode: poll@50ms
+    emit: [summary]
+    keys: [task]
+
+  - label: runnable
+    source: sched.runqlat
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: blocked
+    source: sched.offcpu
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+decompose:
+  - id: where-the-time-went
+    whole: lifetime
+    parts:
+      - {state: on-cpu, from: cpu.oncpu_time, value: ns, reading: delta}
+      - {state: runnable, from: sched.runqlat, value: total_ns}
+      - {state: blocked, from: sched.offcpu, value: total_ns, less: queued_ns}
+    top: 2

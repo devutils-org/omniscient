@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "omn": {
+      "command": "/path/to/omniscient/target/debug/omn-mcp",
+      "args": [
+        "--dir", "/path/to/runs",
+        "--allow-run", "20s",
+        "--allow-launch", "/path/to/omniscient/examples/mcp/approved"
+      ]
+    }
+  }
+}

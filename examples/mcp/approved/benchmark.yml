@@ -1,0 +1,25 @@
+# Benchmark the program: how long it lived, and how much of that it spent on
+# a cpu.
+#
+# The cheapest session of this directory, and the one every machine serves: it
+# reads `/proc` and the kernel's own account of the program at its exit, and
+# needs no privilege, no perf event and no eBPF. The answer's `lifetime` is
+# the program's life from the moment it was released to the moment it was
+# reaped, with `cpu_ns` from the reap's `rusage`, exact to the microsecond;
+# `cpu.oncpu_time` is the same cpu as the program spent it, poll by poll.
+#
+# Run it several times through `run_session` and compare the lifetimes: that
+# is the benchmark (`docs/mcp.md`, "Comparing two runs").
+#
+# Replace `python3 program.py` with your program's command line. The session
+# runs from this directory, so a relative path is relative to it.
+name: benchmark the program
+format: json
+
+requests:
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target:
+      launch: [python3, program.py]
+    mode: poll@50ms
+    emit: [summary]

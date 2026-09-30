@@ -8197,3 +8197,29 @@ on a cpu with a hardware PMU:
 
 `docs/portability.md` is the record once these are read; the log and the cell
 are the run's artifact.
+
+## Needs from another stream — the fourteenth wave, stream J (an agent benchmarks a program)
+
+### To stream P (`src/validate.rs`): the key check for a rule with no key — landed, declared
+
+`Rule::via` is `Option<KeyKind>` since this wave (`overlap` over machine-wide
+state, `examples/join-overlap-machine.yml`). The type change does not compile
+without the validator's side, so stream J made the five-line edit itself and
+declares it in `docs/families/join.md`: `check_sources` skips the
+`entry.keys.contains(&via)` check when `rule.via` is `None`. The refusal of an
+absent `via` on every match but `overlap` is the engine's (`join::check`,
+`JoinError::NoKey`), which the validator already calls through
+`join::check_in`, so nothing else is wanted there. If stream P reworks those
+lines this wave, the shape to keep is:
+
+```rust
+let Some(via) = rule.via else { continue };
+if !entry.keys.contains(&via) { /* the rejection, naming `via` */ }
+```
+
+### To stream P (`src/catalog.rs`): what `extreme` means, the doc comment
+
+`omn-mcp`'s band now reads "over 20 %, with no bound above", `main.rs`'s
+words, and takes its ceiling from `Cost::worst_case_percent`. `Cost::Extreme`'s
+doc comment still says "Over 10x: kernel replay"; wanted: the same words
+(stream R's thirteenth-wave request, second half).
