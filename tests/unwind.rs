@@ -1680,3 +1680,387 @@ fn a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripp
         "{origins:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `--symbols`, from the command line and the session file.
+
+/// One `omn` run over the call tree, with its environment set: the stacks
+/// root first, and the resolved file. Stderr on failure.
+fn profile_named(
+    session: Option<&Path>,
+    binary: &Path,
+    symbols: Option<&str>,
+    env: &[(&str, &str)],
+) -> Result<(Vec<Vec<String>>, serde_json::Value), String> {
+    profile_noted(session, binary, symbols, env).map(|(stacks, resolved, _)| (stacks, resolved))
+}
+
+/// Stacks root first, the resolved file, and the profile's notes.
+type Noted = (Vec<Vec<String>>, serde_json::Value, Vec<String>);
+
+/// [`profile_named`], with the profile's notes.
+fn profile_noted(
+    session: Option<&Path>,
+    binary: &Path,
+    symbols: Option<&str>,
+    env: &[(&str, &str)],
+) -> Result<Noted, String> {
+    static RUN: AtomicUsize = AtomicUsize::new(0);
+    let out = scratch().join(format!("named-{}", RUN.fetch_add(1, Ordering::SeqCst)));
+    let mut command = Command::new(BINARY);
+    command
+        .env_remove("DEBUGINFOD_URLS")
+        .envs(env.iter().copied());
+    match session {
+        Some(session) => {
+            command.arg("-f").arg(session);
+        }
+        None => {
+            command.args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"]);
+            if let Some(symbols) = symbols {
+                command.args(["--symbols", symbols]);
+            }
+        }
+    }
+    command.args(["--format", "json", "-o"]).arg(&out);
+    if session.is_none() {
+        command.arg("--").arg(binary).arg("300");
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(out.join(name)).expect(name)).expect(name)
+    };
+    let results = read("results.json");
+    let result = &results["results"][0];
+    let table = &result["stacks"];
+    let stacks = result["outputs"][0]["stacks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| {
+            let id = row["stack"].as_u64().expect("a stack id").to_string();
+            table[&id]
+                .as_array()
+                .expect("the table holds every stack an output names")
+                .iter()
+                .map(|frame| frame.as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .collect();
+    let notes = result["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|note| note.as_str().map(str::to_owned))
+        .collect();
+    let resolved = read("resolved.json");
+    let resolved = if resolved.is_array() {
+        resolved[0].clone()
+    } else {
+        resolved
+    };
+    Ok((stacks, resolved, notes))
+}
+
+/// The branches of the call tree, known by construction, that some stack of
+/// a set carries whole. Held to the tree rather than to another profile's
+/// exact set of stacks: under load a few samples come back cut short, in
+/// named and unnamed profiles alike, and those are not about the names.
+fn branches_named(stacks: &[Vec<String>]) -> BTreeSet<&'static str> {
+    BRANCHES
+        .iter()
+        .filter(|(_, path, _)| stacks.iter().any(|frames| contains_path(frames, path)))
+        .map(|(branch, _, _)| *branch)
+        .collect()
+}
+
+/// `--symbols debuginfod` reaches the profile from the command line and from
+/// a session file, and the stripped build comes back in the names of the
+/// unstripped one -- the file this test compiled, whose build id the stripped
+/// copy shares -- fetched from a server on loopback that counts what it is
+/// asked. Without the flag nothing is asked. The resolved file says, before
+/// the run, where the names will come from and which server is asked.
+#[test]
+fn symbols_from_debuginfod_are_asked_for_from_the_command_line_and_the_session_file() {
+    let (Some(stripped), Some(unstripped)) = (build(Build::Strip), build(Build::NoFp)) else {
+        return;
+    };
+    let reference = match profile_named(None, unstripped, None, &[]) {
+        Ok((stacks, _)) => branches_named(&stacks),
+        Err(error) if error.contains("perf_event_paranoid") || error.contains("no viable") => {
+            eprintln!("skipped: this machine would not profile ({error})");
+            return;
+        }
+        Err(error) => panic!("the unstripped build would not profile: {error}"),
+    };
+    assert_eq!(reference.len(), BRANCHES.len(), "{reference:?}");
+
+    let (url, asked, all) = serve(unstripped.to_path_buf());
+    let cache = scratch().join("cli-debuginfod-cache");
+    let _ = std::fs::remove_dir_all(&cache);
+    let cache_text = cache.to_string_lossy().into_owned();
+    let env = [
+        ("DEBUGINFOD_URLS", url.as_str()),
+        ("DEBUGINFOD_CACHE_PATH", cache_text.as_str()),
+    ];
+
+    // Not asked, with a server named: nothing is fetched.
+    let (local, resolved) = profile_named(None, stripped, None, &env).expect("a local profile");
+    assert_eq!(
+        all.load(Ordering::SeqCst),
+        0,
+        "a server was asked without --symbols"
+    );
+    assert!(
+        !local.iter().flatten().any(|frame| plain(frame) == "spin"),
+        "a stripped build named its static functions from nowhere"
+    );
+    assert!(
+        resolved["stack"]["symbols"].is_null(),
+        "{}",
+        resolved["stack"]
+    );
+
+    // Asked on the command line.
+    let (named, resolved) =
+        profile_named(None, stripped, Some("debuginfod"), &env).expect("a named profile");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "one build id, one request");
+    assert_eq!(resolved["request"]["symbols"], "debuginfod");
+    assert_eq!(resolved["stack"]["symbols"], "debuginfod");
+    assert_eq!(
+        resolved["stack"]["symbol_servers"],
+        serde_json::json!([url])
+    );
+    assert_eq!(
+        branches_named(&named),
+        reference,
+        "the stripped build, named from debuginfod through `omn`, does not read as the \
+         unstripped one"
+    );
+
+    // Asked in a session file, with a cache of its own so the server is asked
+    // again rather than the cache answering.
+    let fresh = scratch().join("session-debuginfod-cache");
+    let _ = std::fs::remove_dir_all(&fresh);
+    let fresh_text = fresh.to_string_lossy().into_owned();
+    let session = scratch().join("symbols.yml");
+    std::fs::write(
+        &session,
+        format!(
+            "requests:\n  - source: cpu.profile\n    target: {{launch: [{}, '300']}}\n    \
+             mode: sample@999hz\n    emit: [stack]\n    symbols: debuginfod\n",
+            stripped.display()
+        ),
+    )
+    .unwrap();
+    let (from_file, resolved) = profile_named(
+        Some(&session),
+        stripped,
+        None,
+        &[
+            ("DEBUGINFOD_URLS", url.as_str()),
+            ("DEBUGINFOD_CACHE_PATH", fresh_text.as_str()),
+        ],
+    )
+    .expect("a profile from the session file");
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        2,
+        "the session file did not ask"
+    );
+    assert_eq!(resolved["stack"]["symbols"], "debuginfod");
+    assert_eq!(branches_named(&from_file), reference);
+}
+
+/// Debuginfod asked for with no server to ask is refused before the program
+/// runs, and on a source whose collector would never ask it is refused as
+/// this build's gap rather than accepted and ignored.
+#[test]
+fn symbols_from_debuginfod_with_nowhere_to_ask_are_refused_before_the_program_starts() {
+    let marker = scratch().join("symbols-launched");
+    let _ = std::fs::remove_file(&marker);
+    let output = Command::new(BINARY)
+        .env_remove("DEBUGINFOD_URLS")
+        .args(["cpu.profile", "--mode", "sample@99hz", "--emit", "stack"])
+        .args([
+            "--symbols",
+            "debuginfod",
+            "--",
+            "/bin/sh",
+            "-c",
+            "touch \"$0\"",
+        ])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("no viable backend") {
+        eprintln!("skipped: this machine would not profile ({stderr})");
+        return;
+    }
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("DEBUGINFOD_URLS"), "{stderr}");
+    assert!(
+        !marker.exists(),
+        "the program ran before the refusal: {stderr}"
+    );
+
+    let output = Command::new(BINARY)
+        .env("DEBUGINFOD_URLS", "http://127.0.0.1:9")
+        .args(["io.syscall", "--mode", "trace", "--emit", "summary"])
+        .args([
+            "--symbols",
+            "debuginfod",
+            "--",
+            "/bin/sh",
+            "-c",
+            "touch \"$0\"",
+        ])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("`--symbols debuginfod` is not implemented for `io.syscall`"),
+        "{stderr}"
+    );
+    assert!(
+        !marker.exists(),
+        "the program ran before the refusal: {stderr}"
+    );
+}
+
+/// A choice the run refuses is refused by `--dump-resolved` too, with the same
+/// reason and the same exit code, rather than dumped with no `stack`. The
+/// ground truth is the run's own refusal of the same request, made before the
+/// program it would profile starts (the program creates a file as its first
+/// act, and the file is not there): `--symbols debuginfod` with no
+/// DEBUGINFOD_URLS, and a forced `--stack` mode this machine or build cannot
+/// serve (`lbr` needs an Intel branch call stack, `sframe` a kernel that
+/// unwinds from `.sframe`; whichever this machine refuses is asked).
+#[test]
+fn a_choice_the_run_refuses_is_refused_by_the_dump_with_the_same_reason() {
+    let marker = scratch().join("dump-refused-launched");
+    let mut asked = 0;
+    let cases: [&[&str]; 3] = [
+        &["--symbols", "debuginfod"],
+        &["--stack", "lbr"],
+        &["--stack", "sframe"],
+    ];
+    for extra in cases {
+        let _ = std::fs::remove_file(&marker);
+        let run = |dump: bool| {
+            let mut command = Command::new(BINARY);
+            command
+                .env_remove("DEBUGINFOD_URLS")
+                .args(["cpu.profile", "--mode", "sample@99hz", "--emit", "stack"])
+                .args(extra);
+            if dump {
+                command.args(["--format", "json", "--dump-resolved"]);
+            }
+            command
+                .args(["--", "/bin/sh", "-c", "touch \"$0\""])
+                .arg(&marker)
+                .output()
+                .unwrap()
+        };
+        let ran = run(false);
+        let ran_said = String::from_utf8_lossy(&ran.stderr).into_owned();
+        if ran_said.contains("no viable backend") {
+            eprintln!("skipped: this machine would not profile ({ran_said})");
+            return;
+        }
+        if ran.status.success() {
+            // This machine serves the forced mode: nothing refused to hold
+            // the dump to.
+            eprintln!("not asked: {extra:?} is served here");
+            continue;
+        }
+        assert!(
+            !marker.exists(),
+            "the program ran before {extra:?} was refused"
+        );
+        let dumped = run(true);
+        let dump_said = String::from_utf8_lossy(&dumped.stderr).into_owned();
+        assert_eq!(
+            dumped.status.code(),
+            ran.status.code(),
+            "the dump of {extra:?}: {dump_said}\nthe run: {ran_said}"
+        );
+        assert!(
+            dumped.stdout.is_empty(),
+            "a resolved file was printed for a request the run refuses: {}",
+            String::from_utf8_lossy(&dumped.stdout)
+        );
+        let reason = |said: &str| {
+            said.lines()
+                .find(|line| line.starts_with("error:"))
+                .map(str::to_owned)
+                .unwrap_or_default()
+        };
+        assert_eq!(reason(&dump_said), reason(&ran_said), "{extra:?}");
+        assert!(
+            reason(&dump_said).contains(extra[0]),
+            "the reason names {}: {dump_said}",
+            extra[0]
+        );
+        asked += 1;
+    }
+    assert!(
+        asked >= 1,
+        "DEBUGINFOD_URLS was unset, and nothing was refused"
+    );
+}
+
+/// The unwind choice is in the resolved file before anything runs, and it is
+/// the choice the run then makes: the mode the dump names is the one the
+/// profile's own notes say it used, for a build whose frame pointers this file
+/// decided.
+#[test]
+fn the_resolved_file_says_how_the_stacks_will_be_unwound_before_the_run() {
+    let Some(nofp) = build(Build::NoFp) else {
+        return;
+    };
+    let dump = Command::new(BINARY)
+        .args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"])
+        .args(["--format", "json", "--dump-resolved", "--"])
+        .arg(nofp)
+        .arg("300")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&dump.stderr);
+    if stderr.contains("no viable backend") {
+        eprintln!("skipped: this machine would not profile ({stderr})");
+        return;
+    }
+    assert!(dump.status.success(), "{stderr}");
+    let dumped: serde_json::Value = serde_json::from_slice(&dump.stdout).expect("the dump is json");
+    let dumped = if dumped.is_array() {
+        dumped[0].clone()
+    } else {
+        dumped
+    };
+    let stack = &dumped["stack"];
+    let mode = stack["mode"].as_str().expect("the dump names a mode");
+    assert!(
+        !stack["considered"].as_array().unwrap().is_empty(),
+        "{stack}"
+    );
+    // Built with -fomit-frame-pointer: a mode that walks frame pointers
+    // everywhere is not what auto may pick for it.
+    assert_ne!(mode, "fp", "{stack}");
+    assert_ne!(mode, "fp+leaf", "{stack}");
+
+    // What the collector says it did, in its own notes, after the run.
+    let (_, resolved, notes) = profile_noted(None, nofp, None, &[]).expect("a profile");
+    let used = format!("stacks unwound by `{mode}`");
+    assert!(
+        notes.iter().any(|note| note.starts_with(&used)),
+        "the dump said `{mode}` and the run says {notes:?}"
+    );
+    assert_eq!(resolved["stack"]["mode"], mode, "{}", resolved["stack"]);
+}

@@ -157,7 +157,13 @@ fn catalog(explicit: Option<&Path>) -> anyhow::Result<Catalog> {
     let from_env = std::env::var_os("OMN_CATALOG_DIR").map(PathBuf::from);
     let dir = explicit.map(Path::to_path_buf).or(from_env);
     match dir {
-        Some(dir) => Ok(Catalog::load_dir(&dir)?),
+        Some(dir) => {
+            let catalog = Catalog::load_dir(&dir)?;
+            // The unwind modes beside the entries, when the directory has
+            // them: a catalog under iteration carries its modes too.
+            omn::stack::unwind::use_table_in(&dir).map_err(anyhow::Error::msg)?;
+            Ok(catalog)
+        }
         None => Ok(Catalog::embedded()?),
     }
 }
@@ -229,6 +235,15 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     if let Err(error) = session.check_paired_parts() {
         eprintln!("error: {error}");
         return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+
+    // `--symbols debuginfod` reaches the collectors that name their stacks
+    // through the unwinder; on any other source it would be accepted and
+    // never asked, which is a debuginfod request silently not made. Refused
+    // as this build's gap, before the machine is asked anything.
+    if let Some(refusal) = symbols_not_read(&session) {
+        eprintln!("error: {refusal}");
+        return Ok(ExitCode::from(EXIT_NOT_IMPLEMENTED));
     }
 
     // Introspection happens once per invocation: every request is resolved
@@ -416,6 +431,29 @@ fn override_session_wide(session: &mut Session, args: &TraceArgs) -> Defaulted {
     overridden
 }
 
+/// The first request that asks for debuginfod names from a source whose
+/// collector does not read `--symbols` in this build.
+fn symbols_not_read(session: &Session) -> Option<String> {
+    use omn::stack::unwind::SymbolSource;
+    session.requests.iter().find_map(|request| {
+        (request.symbols == Some(SymbolSource::Debuginfod)
+            && !omn::stack::reads_symbols(request.source.as_str()))
+        .then(|| {
+            format!(
+                "`--symbols debuginfod` is not implemented for `{}`: this build asks debuginfod \
+                 only for the stacks of {}, and this source's are named from the files the \
+                 target mapped. Leave `--symbols` out, or ask for it where it is read",
+                request.source,
+                omn::stack::UNWOUND_BY_CHOICE
+                    .iter()
+                    .map(|(source, _)| format!("`{source}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+    })
+}
+
 /// Whose gap a resolver failure is.
 ///
 /// `NoViableBackend` is the one that moved. Every backend of the chain was
@@ -431,11 +469,21 @@ fn override_session_wide(session: &mut Session, args: &TraceArgs) -> Defaulted {
 /// backend that is not in its chain are misspellings; a filter field no backend
 /// carries is a request that cannot be served anywhere, and the one the
 /// selected backend does not carry names the `--backend force:` that would --
-/// which is a change to the request, not to the machine.
+/// which is a change to the request, not to the machine. A key the selected
+/// backend does not attach is whose the backend that would attach it says:
+/// see [`resolve::KeyElsewhere::whose`].
 fn resolution_is(error: &resolve::ResolveError) -> omn::collect::Whose {
     use omn::collect::Whose;
     match error {
         resolve::ResolveError::NoViableBackend { .. } => Whose::Machine,
+        // Whose it is depends on the backend that would attach the key: one
+        // the request can be pinned to, one this machine cannot run, or one
+        // this build has no collector for.
+        resolve::ResolveError::KeyNotCarried {
+            elsewhere: Some(elsewhere),
+            ..
+        } => elsewhere.whose(),
+        resolve::ResolveError::StackRefused { whose, .. } => *whose,
         _ => Whose::Request,
     }
 }
@@ -455,8 +503,15 @@ fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
             "`omn list {source_id}` names the backends of its chain."
         )),
         resolve::ResolveError::FilterFieldNotCarried { .. } => None,
-        // The message names the `--backend force:` that would attach it.
+        // The message names the backend that would attach it, and either the
+        // `--backend force:` that asks for it or what keeps it out of reach.
         resolve::ResolveError::KeyNotCarried { .. } => None,
+        // The reason is the unwind table's own, and says what it lacks.
+        resolve::ResolveError::StackRefused { .. } => None,
+        resolve::ResolveError::NoBackendDeclares { source_id, .. } => Some(format!(
+            "no machine could serve this; `omn list {source_id}` says which target and mode \
+             each backend serves."
+        )),
     }
 }
 
@@ -833,11 +888,36 @@ fn shared_stdout_warning(session: &Session) -> Option<String> {
 /// collect layer names which of them it is giving. What is left here is the
 /// part a person reads: why the better backends were passed over, and what this
 /// build does have.
-fn refused_at_collect(error: &collect::CollectError, resolved: &[ResolvedRequest]) -> ExitCode {
+fn refused_at_collect(
+    catalog: &Catalog,
+    error: &collect::CollectError,
+    resolved: &[ResolvedRequest],
+) -> ExitCode {
     use omn::collect::Whose;
 
-    eprintln!("error: {error}");
     let refusals = error.each();
+    // A chain that ends on a backend nobody wrote is refused for that
+    // backend, and the backend the reader can do something about is one of
+    // those passed over on the way: led with first, since the first line is
+    // the one read (`docs/open-findings.md`, the fourteenth wave, stream D).
+    let leads: Vec<Option<PassedOver>> = refusals
+        .iter()
+        .map(|refusal| match refusal {
+            collect::CollectError::NoCollector { source_id, backend } => {
+                passed_over_first(catalog, source_id, backend, resolved)
+            }
+            _ => None,
+        })
+        .collect();
+    let lines: Vec<String> = refusals
+        .iter()
+        .zip(&leads)
+        .map(|(refusal, lead)| match lead {
+            Some(lead) => lead.sentence(),
+            None => refusal.to_string(),
+        })
+        .collect();
+    eprintln!("error: {}", lines.join("\n"));
 
     // The selected backend is often the last one standing, and why the better
     // ones were passed over is the answer the reader actually needs: a counter
@@ -849,6 +929,12 @@ fn refused_at_collect(error: &collect::CollectError, resolved: &[ResolvedRequest
     {
         for resolved in resolved {
             for considered in &resolved.chain {
+                let led = leads.iter().flatten().any(|lead| {
+                    lead.source == resolved.request.source.as_str() && lead.backend == considered.id
+                });
+                if led {
+                    continue;
+                }
                 if let omn::resolve::Verdict::Rejected(reasons) = &considered.verdict {
                     eprintln!(
                         "  `{}` was passed over: {}",
@@ -864,6 +950,18 @@ fn refused_at_collect(error: &collect::CollectError, resolved: &[ResolvedRequest
         );
     }
 
+    // A refusal whose every line leads with a backend this build does collect
+    // is not the build's gap: that backend attaches on this build wherever its
+    // requirement is met, so what is missing is this machine's.
+    let machine = leads.iter().all(Option::is_some);
+    if machine {
+        eprintln!(
+            "\nhint: the request is valid, and this build collects it: it is this machine that \
+             lacks what the first line names."
+        );
+        return ExitCode::from(exit_for(Whose::Machine));
+    }
+
     // Only the build's own gap gets a line here. A refusal against a real
     // target has already said what went wrong in its own words, and a second
     // sentence promising the request is fine would be a guess about a message
@@ -875,6 +973,70 @@ fn refused_at_collect(error: &collect::CollectError, resolved: &[ResolvedRequest
         );
     }
     ExitCode::from(exit_for(error.whose()))
+}
+
+/// A backend passed over on the way to one no collector is written for.
+#[derive(Debug, Clone, PartialEq)]
+struct PassedOver {
+    source: String,
+    /// The backend passed over.
+    backend: String,
+    reasons: Vec<String>,
+    /// The backend the chain ended on, which has none.
+    unwritten: String,
+}
+
+impl PassedOver {
+    fn sentence(&self) -> String {
+        format!(
+            "`{}` has no viable backend on this machine: `{}`, which this build collects, was \
+             passed over -- {}; `{}`, the backend left, has no collector written yet",
+            self.source,
+            self.backend,
+            self.reasons.join("; "),
+            self.unwritten
+        )
+    }
+}
+
+/// The backend to lead a no-collector refusal with: of those the chain passed
+/// over, the first this build collects and that serves the request's target
+/// and mode -- the one a reader can make work. `None` when there is none, and
+/// the refusal is the build's alone.
+fn passed_over_first(
+    catalog: &Catalog,
+    source: &str,
+    unwritten: &str,
+    resolved: &[ResolvedRequest],
+) -> Option<PassedOver> {
+    let resolved = resolved.iter().find(|resolved| {
+        resolved.request.source.as_str() == source && resolved.backend.id == unwritten
+    })?;
+    let rejected: Vec<(&str, &Vec<String>)> = resolved
+        .chain
+        .iter()
+        .filter_map(|considered| match &considered.verdict {
+            omn::resolve::Verdict::Rejected(reasons) => Some((considered.id.as_str(), reasons)),
+            _ => None,
+        })
+        .collect();
+    // Only a backend this build collects, passed over for what this machine
+    // lacks rather than for a target or a mode it cannot serve anywhere: the
+    // one line the reader can act on. Anything else keeps the build's own
+    // sentence first, which is then the true one.
+    let entry = catalog.get(&resolved.request.source)?;
+    let (backend, reasons) = rejected.iter().find(|(id, _)| {
+        collect::implements(source, id)
+            && entry
+                .backend(id)
+                .is_some_and(|backend| resolve::serves(entry, backend, &resolved.request))
+    })?;
+    Some(PassedOver {
+        source: source.to_owned(),
+        backend: (*backend).to_owned(),
+        reasons: (*reasons).clone(),
+        unwritten: unwritten.to_owned(),
+    })
 }
 
 /// Runs the session's requests over one window and prints what they produced.
@@ -892,7 +1054,7 @@ fn measure(
     let mut ladder = Ladder::new(catalog, capabilities, resolved);
     let collections = match collect::run_all_within_unserved(resolved, &mut ladder, unserved) {
         Ok(collections) => collections,
-        Err(error) => return Ok(refused_at_collect(&error, resolved)),
+        Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
     };
     let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
 
@@ -1058,7 +1220,7 @@ fn record(
     let (collections, recorded) =
         match collect::record_within(resolved, &mut cheaper, &mut recorder) {
             Ok(done) => done,
-            Err(error) => return Ok(refused_at_collect(&error, resolved)),
+            Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
         };
     drop(recorder);
 
@@ -1231,15 +1393,38 @@ fn assemble(
     for decomposition in &session.decompose {
         // With the session's joins: a part a join defines (`value: paired`)
         // names the join by id.
-        run.decompositions.push(join::decompose_with(
+        run.decompositions.push(decompose_within(
             decomposition,
             &served,
             &run.results,
             &merged,
             &session.joins,
+            &windows,
         ));
     }
     Ok((run, costs, served_by))
+}
+
+/// A decomposition over the windows the joins were given.
+///
+/// The call site's shape once `join::decompose_within` lands (the fourteenth
+/// wave's request to stream J): a `paired` part pairs over the windows
+/// `join::apply_within` was given, not over the ones `decompose_with`
+/// rebuilds from the results. Until then the windows are not read, and
+/// `Session::check_paired_parts` refuses every `paired` part before anything
+/// is attached, so the path where the two would differ is unreachable. The
+/// swap is this one body, `join::decompose_within(.., windows)`, and the
+/// removal of the two `check_paired_parts` calls (`docs/fixes/w15-resolver.md`).
+fn decompose_within(
+    decomposition: &join::Decomposition,
+    requests: &[omn::request::Request],
+    results: &[omn::emit::Results],
+    events: &[omn::event::Event],
+    joins: &[join::Rule],
+    windows: &BTreeMap<String, collect::Watched>,
+) -> join::DecompositionOutput {
+    let _ = windows;
+    join::decompose_with(decomposition, requests, results, events, joins)
 }
 
 /// The backend a collection ended on, which is the one its numbers came from.
@@ -1840,7 +2025,7 @@ mod tests {
             source_id: "io.bytes".into(),
             backend: "fs:proc".into(),
             key: omn::request::KeyKind::Task,
-            elsewhere: Some("tracepoint".into()),
+            elsewhere: Some(resolve::KeyElsewhere::Forceable("tracepoint".into())),
         };
         assert_eq!(resolution_is(&error), omn::collect::Whose::Request);
         // No hint: the message already names what would serve it.
@@ -1860,6 +2045,35 @@ mod tests {
                 .to_string()
                 .contains("no backend of `io.bytes` attaches it"),
             "{nowhere}"
+        );
+        assert_eq!(resolution_is(&nowhere), omn::collect::Whose::Request);
+
+        // A backend nothing collects is the build's gap, and one the machine
+        // cannot run is the machine's; neither is offered as a pin.
+        let unwritten = resolve::ResolveError::KeyNotCarried {
+            source_id: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            key: omn::request::KeyKind::Task,
+            elsewhere: Some(resolve::KeyElsewhere::Unwritten("bpf:raw_tp".into())),
+        };
+        assert_eq!(resolution_is(&unwritten), omn::collect::Whose::Build);
+        assert!(
+            !unwritten.to_string().contains("--backend force:"),
+            "{unwritten}"
+        );
+        let missing = resolve::ResolveError::KeyNotCarried {
+            source_id: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            key: omn::request::KeyKind::Task,
+            elsewhere: Some(resolve::KeyElsewhere::Missing {
+                backend: "bpf:raw_tp".into(),
+                reason: "bpf: missing".into(),
+            }),
+        };
+        assert_eq!(resolution_is(&missing), omn::collect::Whose::Machine);
+        assert!(
+            !missing.to_string().contains("--backend force:"),
+            "{missing}"
         );
     }
 }

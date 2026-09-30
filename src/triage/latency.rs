@@ -159,6 +159,7 @@ impl Ask {
             duration: self.duration,
             budget: None,
             stack: None,
+            symbols: None,
             backend: None,
             label: Some(label.to_owned()),
             window: None,

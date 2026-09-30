@@ -1547,6 +1547,13 @@ pub struct Request {
     pub budget: Option<Budget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<StackMode>,
+    /// Where the stacks' names come from: `local` (the files the target
+    /// mapped, and absent means that) or `debuginfod` (those, then the
+    /// servers in `DEBUGINFOD_URLS` for a stripped file, by build id). A
+    /// network request about what this machine runs, so never made unless a
+    /// request asks for it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<crate::stack::unwind::SymbolSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<BackendOverride>,
     /// A label, used to name this request's output when a session has several.

@@ -36,6 +36,10 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("runtime.yaml", include_str!("../catalog/runtime.yaml")),
 ];
 
+/// The file of the catalog directory that holds the unwind modes rather than
+/// entries: `catalog/unwind.yaml`, read by [`crate::stack::unwind`].
+pub const UNWIND_TABLE: &str = "unwind.yaml";
+
 /// One source: what it measures, and every way it might be measured.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +109,22 @@ impl Entry {
     /// declares one, the entry's otherwise.
     pub fn backend_modes<'a>(&'a self, backend: &'a Backend) -> &'a [ModeKind] {
         backend.modes.as_deref().unwrap_or(&self.modes)
+    }
+
+    /// The keys one backend of this chain attaches to its events: its own
+    /// list when it declares one, the entry's otherwise.
+    pub fn backend_keys<'a>(&'a self, backend: &'a Backend) -> &'a [KeyKind] {
+        backend.keys.as_deref().unwrap_or(&self.keys)
+    }
+
+    /// The backends of this chain that attach a key, in chain order. What a
+    /// rejection names when the selected one does not.
+    pub fn backends_carrying_key(&self, key: KeyKind) -> Vec<&str> {
+        self.backends
+            .iter()
+            .filter(|backend| self.backend_keys(backend).contains(&key))
+            .map(|backend| backend.id.as_str())
+            .collect()
     }
 
     /// The backends of this chain that carry a filterable field, in chain
@@ -230,6 +250,16 @@ pub struct Backend {
     /// the chain, and the loader checks the list is a subset of the entry's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<Vec<ModeKind>>,
+    /// Which of the entry's keys *this* backend attaches to an event.
+    ///
+    /// Absent means all of them, as for `filter_fields`. Present, it is a
+    /// subset: a key the selected backend never attaches makes every join
+    /// over it attribute nothing, so the resolver refuses a request keyed on
+    /// one (`ResolveError::KeyNotCarried`) rather than recording events that
+    /// join to nothing. `/proc/diskstats` knows the device and not the task
+    /// that asked for the I/O: `io.bytes` through `fs:proc` attaches `dev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<KeyKind>>,
 }
 
 /// How two events are tied together into one measurement.
@@ -348,8 +378,8 @@ pub enum Cost {
 
 impl Cost {
     /// The top of the overhead band this cost stands for, as a percentage of
-    /// the target's own cpu. `extreme` is "over 10x" and no percentage bounds
-    /// it.
+    /// the target's own cpu. `extreme` is "over 20 %, with no bound above",
+    /// and no percentage bounds it.
     ///
     /// `free` is documented as "a counter read, about zero", which as a number
     /// has to be *something*: at exactly zero the claim could never be met by
@@ -575,6 +605,37 @@ fn check_backend_filter_fields(entry: &Entry) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// The same two directions for `keys`: a backend cannot attach a key the entry
+/// never offers, and a key the entry offers has to be attached by some backend,
+/// or a request keyed on it is accepted and refused by every resolution.
+fn check_backend_keys(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        let Some(keys) = &backend.keys else {
+            continue;
+        };
+        for key in keys {
+            if !entry.keys.contains(key) {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: backend `{}` attaches the key `{key}`, which the entry \
+                     does not offer, so nobody could ever ask for it",
+                    entry.id, backend.id
+                )));
+            }
+        }
+    }
+    for key in &entry.keys {
+        if entry.backends_carrying_key(*key).is_empty() {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}` offers the key `{key}`, which no backend in its chain \
+                 attaches: a request keyed on it would be accepted and then refused wherever \
+                 it resolved",
+                entry.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The per-backend `modes` lists, in the same two directions as the targets:
 /// a backend cannot serve a mode the entry refuses, and a mode the entry
 /// declares has to be served by some backend, or a request the validator
@@ -670,6 +731,9 @@ impl Catalog {
                 path.extension()
                     .is_some_and(|ext| ext == "yaml" || ext == "yml")
             })
+            // The unwind modes live beside the entries and are not entries:
+            // `crate::stack::unwind` reads that table (`UNWIND_TABLE`).
+            .filter(|path| path.file_name().is_none_or(|name| name != UNWIND_TABLE))
             .collect();
         files.sort();
         if files.is_empty() {
@@ -757,6 +821,7 @@ impl Catalog {
             check_backend_targets(entry)?;
             check_backend_filter_fields(entry)?;
             check_backend_modes(entry)?;
+            check_backend_keys(entry)?;
             check_requirement_globs(entry)?;
         }
         let catalog = Self { entries };
@@ -969,6 +1034,60 @@ mod tests {
         assert!(
             error.contains("no backend in its chain serves it"),
             "{error}"
+        );
+    }
+
+    /// A backend's `keys` is held to the entry's in both directions, the way
+    /// its `filter_fields` is.
+    #[test]
+    fn a_backend_attaching_a_key_its_entry_does_not_offer_is_refused() {
+        let base = catalog().get(&"io.bytes".parse().unwrap()).unwrap().clone();
+
+        let mut entry = base.clone();
+        entry.backends[0].keys = Some(vec![KeyKind::Req]);
+        let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+        assert!(error.contains("attaches the key `req`"), "{error}");
+
+        let mut entry = base.clone();
+        for backend in &mut entry.backends {
+            backend.keys = Some(vec![KeyKind::Dev]);
+        }
+        let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+        assert!(
+            error.contains("no backend in its chain attaches"),
+            "{error}"
+        );
+
+        let mut entry = base;
+        let last = entry.backends.len() - 1;
+        entry.backends[last].keys = Some(vec![KeyKind::Dev]);
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let entry = catalog.get(&"io.bytes".parse().unwrap()).unwrap();
+        assert_eq!(entry.backend_keys(&entry.backends[last]), &[KeyKind::Dev]);
+        assert_eq!(
+            entry.backend_keys(&entry.backends[0]),
+            entry.keys.as_slice()
+        );
+        assert!(!entry
+            .backends_carrying_key(KeyKind::Task)
+            .contains(&entry.backends[last].id.as_str()));
+    }
+
+    /// The unwind table sits beside the entries and is not read as entries:
+    /// a copy of the directory -- what every `--catalog` scenario makes --
+    /// loads as the embedded catalog does.
+    #[test]
+    fn a_copy_of_the_catalog_directory_loads_without_reading_the_unwind_table_as_entries() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+        assert!(
+            source.join(UNWIND_TABLE).is_file(),
+            "the unwind table is in the catalog directory"
+        );
+        let loaded = Catalog::load_dir(&source).expect("the tree's catalog directory loads");
+        let embedded = catalog();
+        assert_eq!(
+            loaded.ids().collect::<BTreeSet<_>>(),
+            embedded.ids().collect::<BTreeSet<_>>()
         );
     }
 

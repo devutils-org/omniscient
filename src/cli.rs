@@ -184,6 +184,11 @@ pub struct TraceArgs {
     #[arg(long, value_name = "MODE", conflicts_with = "file")]
     pub stack: Option<StackMode>,
 
+    /// Where stack names come from: `local` (default), or `debuginfod` -- the
+    /// servers in DEBUGINFOD_URLS, asked by build id for a stripped file.
+    #[arg(long, value_name = "SOURCE", conflicts_with = "file")]
+    pub symbols: Option<crate::stack::unwind::SymbolSource>,
+
     /// Pin a backend instead of resolving one. For the comparison bench only.
     #[arg(long, value_name = "force:ID", conflicts_with = "file")]
     pub backend: Option<BackendOverride>,
@@ -541,6 +546,7 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         duration: args.duration,
         budget: args.budget,
         stack: args.stack,
+        symbols: args.symbols,
         backend: args.backend.clone(),
         label: args.label.clone(),
         window: args.window,

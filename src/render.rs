@@ -721,6 +721,7 @@ mod tests {
             duration: None,
             budget: None,
             stack: None,
+            symbols: None,
             backend: None,
             label: None,
             window: None,

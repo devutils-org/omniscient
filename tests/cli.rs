@@ -1294,3 +1294,615 @@ fn the_session_indexes_hold_exactly_the_sessions_on_disk() {
         );
     }
 }
+
+/// A scratch directory of this test binary's own.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("omn-cli-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    dir
+}
+
+/// What a command prints, trimmed: the machine's answer, asked outside `omn`.
+fn command_line(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+/// Phase 2's exit criterion, held to the machine: `--dump-resolved io.latency
+/// --pid <a live pid>` prints a complete `ResolvedRequest` -- every field the
+/// struct has reads back, and nothing else is there -- and what it says of the
+/// machine is what the machine says of itself when asked another way: the
+/// release from `uname`, the cpu count from `nproc`, sysfs's own files, and a
+/// backend that is the first of its chain whose requirements were answered.
+#[test]
+fn the_resolved_request_for_a_live_pid_is_complete_and_says_what_the_machine_says() {
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("a live process");
+    let pid = child.id().to_string();
+    let output = run(&[
+        "--dump-resolved",
+        "io.latency",
+        "--pid",
+        &pid,
+        "-m",
+        "trace",
+        "-e",
+        "hist",
+        "--format",
+        "json",
+    ]);
+    let _ = child.kill();
+    let _ = child.wait();
+    if output.status.code() == Some(EXIT_UNAVAILABLE) {
+        eprintln!(
+            "skipped: this machine cannot serve io.latency --pid: {}",
+            stderr(&output)
+        );
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let dumped: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    let dumped = if dumped.is_array() {
+        dumped[0].clone()
+    } else {
+        dumped
+    };
+
+    // Complete: the struct reads it back, and writes back the same document.
+    let typed: omn::resolve::ResolvedRequest =
+        serde_json::from_value(dumped.clone()).expect("a ResolvedRequest");
+    assert_eq!(serde_json::to_value(&typed).unwrap(), dumped);
+    for field in ["request", "backend", "chain", "environment"] {
+        assert!(dumped.get(field).is_some(), "no `{field}` in {dumped}");
+    }
+    // The optional ones are absent exactly when they say nothing.
+    assert!(typed.filter.is_none() && dumped.get("filter").is_none());
+    assert!(typed.stack.is_none(), "io.latency takes no stacks");
+    assert_eq!(typed.request.target.first_pid(), Some(pid.parse().unwrap()));
+
+    // The machine, asked outside the tool.
+    let environment = &typed.environment;
+    if let Some(release) = command_line("uname", &["-r"]) {
+        assert_eq!(environment.kernel_release, release);
+        let mut numbers = release.split(|c: char| !c.is_ascii_digit());
+        let major: u32 = numbers.next().unwrap().parse().unwrap();
+        let minor: u32 = numbers.next().unwrap().parse().unwrap();
+        let version = environment.kernel_version.expect("a parsed release");
+        assert_eq!((version.major, version.minor), (major, minor));
+    }
+    if let Some(arch) = command_line("uname", &["-m"]) {
+        assert_eq!(environment.arch, arch);
+    }
+    if let Some(cpus) = command_line("nproc", &[]) {
+        assert_eq!(environment.cpus.to_string(), cpus);
+    }
+    assert_eq!(
+        environment.clocksource,
+        read_trimmed("/sys/devices/system/clocksource/clocksource0/current_clocksource")
+    );
+    assert_eq!(
+        environment.cpu_governor,
+        read_trimmed("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    );
+    assert_eq!(
+        environment.smt,
+        read_trimmed("/sys/devices/system/cpu/smt/control")
+    );
+    assert_eq!(
+        environment.perf_event_paranoid,
+        read_trimmed("/proc/sys/kernel/perf_event_paranoid").and_then(|value| value.parse().ok())
+    );
+    if let Some(line) = read_trimmed("/sys/kernel/mm/transparent_hugepage/enabled") {
+        let selected = line
+            .split('[')
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .map(str::to_owned);
+        assert_eq!(environment.transparent_hugepage, selected);
+    }
+    let vulnerabilities: std::collections::BTreeMap<String, String> =
+        std::fs::read_dir("/sys/devices/system/cpu/vulnerabilities")
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let text = std::fs::read_to_string(entry.path()).ok()?;
+                Some((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    text.trim().to_owned(),
+                ))
+            })
+            .collect();
+    assert_eq!(environment.mitigations, vulnerabilities);
+
+    // The backend: the first of the chain nothing ruled out, every one above
+    // it rejected with a reason, every one below it not reached, and each of
+    // its requirements answered available.
+    let selected = typed
+        .chain
+        .iter()
+        .position(|considered| considered.verdict == omn::resolve::Verdict::Selected)
+        .expect("a selected backend in the chain");
+    assert_eq!(typed.chain[selected].id, typed.backend.id);
+    assert_eq!(typed.backend.rank, selected + 1);
+    for considered in &typed.chain[..selected] {
+        assert!(
+            matches!(&considered.verdict, omn::resolve::Verdict::Rejected(reasons) if !reasons.is_empty()),
+            "{considered:?} is above the selected backend and was not rejected with a reason"
+        );
+    }
+    for considered in &typed.chain[selected + 1..] {
+        assert_eq!(
+            considered.verdict,
+            omn::resolve::Verdict::NotReached,
+            "{considered:?}"
+        );
+    }
+    let catalog = omn::Catalog::embedded().unwrap();
+    let entry = catalog.get(&"io.latency".parse().unwrap()).unwrap();
+    let chain: Vec<&str> = entry.backends.iter().map(|b| b.id.as_str()).collect();
+    let dumped_chain: Vec<&str> = typed.chain.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(
+        dumped_chain, chain,
+        "the chain is the catalog's, in its order"
+    );
+    for requirement in &typed.backend.requirements {
+        assert!(
+            requirement.probe.is_available() || requirement.probe.is_unknown(),
+            "{requirement:?}"
+        );
+        // Two of them the test can ask the machine about itself.
+        if requirement.needs == "btf" {
+            assert!(
+                std::fs::File::open("/sys/kernel/btf/vmlinux").is_ok(),
+                "`btf` answered available and /sys/kernel/btf/vmlinux does not open"
+            );
+        }
+        if let Some(floor) = requirement.needs.strip_prefix("kernel>=") {
+            let mut floor = floor.split('.').map(|part| part.parse::<u32>().unwrap());
+            let floor = (floor.next().unwrap(), floor.next().unwrap_or(0));
+            let version = environment.kernel_version.unwrap();
+            assert!((version.major, version.minor) >= floor, "{requirement:?}");
+        }
+    }
+}
+
+/// A program whose allocations this file decided: exactly 1000 of 77777
+/// bytes, each freed, and it says so itself.
+const ALLOCS: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+int main(void) {
+    int made = 0;
+    for (int i = 0; i < 1000; i++) {
+        volatile char *p = malloc(77777);
+        if (!p) return 1;
+        p[0] = 1;
+        free((void *)p);
+        made++;
+    }
+    fprintf(stderr, "ALLOCS %d\n", made);
+    return 0;
+}
+"#;
+
+/// The summary of the one result of a run's `results.json`, without the key
+/// (a pid, which differs between two runs of one program).
+fn allocation_summary(dir: &std::path::Path) -> (serde_json::Value, serde_json::Value, u64) {
+    let results: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("results.json")).unwrap()).unwrap();
+    let result = &results["results"][0];
+    let mut series = result["outputs"][0]["series"][0].clone();
+    series.as_object_mut().unwrap().remove("key");
+    (
+        series,
+        result["filtered"].clone(),
+        result["events_seen"].as_u64().unwrap(),
+    )
+}
+
+/// Phase 7's exit criterion, held to a workload of known count: a run from
+/// the command line and a run of the session file that command line dumps
+/// give the same numbers, and both are the program's own -- 1000
+/// allocations of 77777 bytes, and the 1000 frees the filter set aside. The
+/// shim sees every call, so the workload's resolution is one allocation, and
+/// the two runs agree to it.
+#[test]
+fn a_session_dumped_from_the_command_line_measures_what_the_command_line_measured() {
+    let dir = scratch("replay");
+    let source = dir.join("allocs.c");
+    std::fs::write(&source, ALLOCS).unwrap();
+    let program = dir.join("allocs");
+    let built = Command::new("cc")
+        .arg("-O0")
+        .arg("-o")
+        .arg(&program)
+        .arg(&source)
+        .status();
+    if !built.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: no C compiler (`cc`) to build the workload with");
+        return;
+    }
+    let program = program.to_string_lossy().into_owned();
+    let asked = [
+        "mem.heap.alloc",
+        "-m",
+        "trace",
+        "-e",
+        "summary",
+        "--filter",
+        "bytes == 77777",
+        "--format",
+        "json",
+    ];
+
+    let from_cli = dir.join("cli");
+    let mut args: Vec<&str> = asked.to_vec();
+    let out = from_cli.to_string_lossy().into_owned();
+    args.extend(["-o", &out, "--", &program]);
+    let cli = run(&args);
+    if !cli.status.success() && stderr(&cli).contains("preload") {
+        eprintln!(
+            "skipped: the preload shim is not here to count allocations: {}",
+            stderr(&cli)
+        );
+        return;
+    }
+    assert!(cli.status.success(), "{}", stderr(&cli));
+    assert!(stderr(&cli).contains("ALLOCS 1000"), "{}", stderr(&cli));
+
+    let mut args: Vec<&str> = asked.to_vec();
+    args.extend(["--dump-request", "--", &program]);
+    let dumped = run(&args);
+    assert!(dumped.status.success(), "{}", stderr(&dumped));
+    let session = dir.join("session.json");
+    std::fs::write(&session, stdout(&dumped)).unwrap();
+
+    let from_file = dir.join("file");
+    let replay = run(&[
+        "-f",
+        &session.to_string_lossy(),
+        "-o",
+        &from_file.to_string_lossy(),
+    ]);
+    assert!(replay.status.success(), "{}", stderr(&replay));
+    assert!(
+        stderr(&replay).contains("ALLOCS 1000"),
+        "{}",
+        stderr(&replay)
+    );
+
+    let (cli_series, cli_filtered, cli_seen) = allocation_summary(&from_cli);
+    let (file_series, file_filtered, file_seen) = allocation_summary(&from_file);
+    // The program's own numbers, first.
+    assert_eq!(cli_series["count"], 1000, "{cli_series}");
+    assert_eq!(cli_series["min"], 77777.0, "{cli_series}");
+    assert_eq!(cli_series["max"], 77777.0, "{cli_series}");
+    assert_eq!(cli_filtered["kept"], 1000, "{cli_filtered}");
+    // Then the replay's, against the command line's.
+    assert_eq!(file_series, cli_series);
+    assert_eq!(file_filtered, cli_filtered);
+    assert_eq!(file_seen, cli_seen);
+    // And the two resolved files resolved the same request the same way.
+    let resolved = |dir: &std::path::Path| -> serde_json::Value {
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("resolved.json")).unwrap())
+                .unwrap();
+        let value = if value.is_array() {
+            value[0].clone()
+        } else {
+            value
+        };
+        serde_json::json!([value["request"], value["backend"]["id"]])
+    };
+    assert_eq!(resolved(&from_file), resolved(&from_cli));
+}
+
+/// A copy of the catalog directory with one line changed, in `OMN_CATALOG_DIR`.
+fn patched_catalog(name: &str, file: &str, from: &str, to: &str) -> std::path::PathBuf {
+    let dir = scratch(name);
+    let mut patched = false;
+    for entry in std::fs::read_dir("catalog").expect("the catalog directory") {
+        let path = entry.unwrap().path();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        if path.file_name().is_some_and(|n| n == file) {
+            assert!(text.contains(from), "`{from}` is not in {file}");
+            text = text.replacen(from, to, 1);
+            patched = true;
+        }
+        std::fs::write(dir.join(path.file_name().unwrap()), text).unwrap();
+    }
+    assert!(patched, "no {file} in the catalog");
+    dir
+}
+
+/// A request keyed on a key the backend does not attach is refused, with
+/// the backend that does. The ground truth is the kernel's file:
+/// `/proc/diskstats` has a line per device and no task in it, and a run keyed
+/// on `task` through it today produces events carrying `dev` alone -- which a
+/// join over `task` would attribute nothing to. Declared (`keys: [dev]` on
+/// `fs:proc`), the same request is refused before anything runs.
+#[test]
+fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does() {
+    if std::fs::metadata("/proc/diskstats").is_err() {
+        eprintln!("skipped: no /proc/diskstats here");
+        return;
+    }
+    let args = [
+        "io.bytes",
+        "--system",
+        "--backend",
+        "force:fs:proc",
+        "-k",
+        "task",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "raw",
+        "-d",
+        "200ms",
+        "--format",
+        "json",
+    ];
+    // Undeclared: accepted, and no event carries a task. Once the shipped
+    // catalog declares it the run is refused here already, which is the
+    // half below.
+    let undeclared = run(&args);
+    if stderr(&undeclared).contains("does not attach") {
+        assert_eq!(undeclared.status.code(), Some(EXIT_REJECTED));
+        return;
+    }
+    assert!(undeclared.status.success(), "{}", stderr(&undeclared));
+    let results: serde_json::Value = serde_json::from_str(&stdout(&undeclared)).unwrap();
+    let events = results["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events")
+        .clone();
+    assert!(!events.is_empty(), "no line of /proc/diskstats was read");
+    for event in &events {
+        let keys = event["keys"].as_array().unwrap();
+        assert!(
+            keys.iter().all(|key| key.get("task").is_none()),
+            "/proc/diskstats named a task: {event}"
+        );
+    }
+
+    // Declared: refused, naming a backend that attaches it, and the refusal
+    // is held to what following it does. A `--backend force:` hint must lead
+    // to a run this build does not refuse as unwritten; a backend named as
+    // unwritten must be one the runner itself refuses as unwritten.
+    let catalog = patched_catalog(
+        "keys",
+        "io.yaml",
+        "targets: {system: native}, filter_fields: [dev],\n       degraded: \"system-wide, per device\"}\n  modes: [count, trace, poll]",
+        "targets: {system: native}, filter_fields: [dev], keys: [dev],\n       degraded: \"system-wide, per device\"}\n  modes: [count, trace, poll]",
+    );
+    let refused = Command::new(BINARY)
+        .env("OMN_CATALOG_DIR", &catalog)
+        .args(args)
+        .output()
+        .unwrap();
+    let message = stderr(&refused);
+    assert!(
+        message.contains("keyed on `task`, which the selected backend `fs:proc` does not attach"),
+        "{message}"
+    );
+    assert!(stdout(&refused).is_empty(), "{}", stdout(&refused));
+    let named = message
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix('`'))
+        .and_then(|rest| rest.split('`').next())
+        .expect("a backend that attaches `task` is named")
+        .to_owned();
+    let forced_arg = format!("force:{named}");
+    let mut forced_args = args.to_vec();
+    forced_args[3] = forced_arg.as_str();
+    let forced = Command::new(BINARY)
+        .env("OMN_CATALOG_DIR", &catalog)
+        .args(&forced_args)
+        .output()
+        .unwrap();
+    let unwritten = |output: &std::process::Output| {
+        output.status.code() == Some(EXIT_NOT_IMPLEMENTED)
+            && stderr(output).contains("no collector is written")
+    };
+    if message.contains(&format!("--backend force:{named}")) {
+        assert_eq!(refused.status.code(), Some(EXIT_REJECTED), "{message}");
+        assert!(
+            !unwritten(&forced),
+            "the hint `--backend force:{named}` leads to an unwritten backend: {}",
+            stderr(&forced)
+        );
+    } else if message.contains("has no collector for it") {
+        assert_eq!(
+            refused.status.code(),
+            Some(EXIT_NOT_IMPLEMENTED),
+            "an unwritten backend is the build's gap: {message}"
+        );
+        assert!(
+            unwritten(&forced),
+            "`{named}` was called unwritten, and forcing it said: {}",
+            stderr(&forced)
+        );
+    } else {
+        assert!(
+            message.contains("this machine cannot run it"),
+            "neither a pin, an unwritten backend nor a missing one: {message}"
+        );
+        assert_eq!(refused.status.code(), Some(EXIT_UNAVAILABLE), "{message}");
+    }
+}
+
+/// A chain that ends on a backend nobody wrote leads its refusal with the
+/// backend passed over on the way, when this build collects that one: the
+/// line the reader can act on. The ground truth is the file system: a copy of
+/// the binary in a directory with no preload shim beside it, which is what
+/// `preload` needs (`preload:shim`).
+#[test]
+fn a_refusal_for_an_unwritten_backend_leads_with_the_one_passed_over() {
+    let dir = scratch("no-shim");
+    let copy = dir.join("omn");
+    std::fs::copy(BINARY, &copy).expect("a copy of the binary");
+    assert!(!dir.join("libomn_preload.so").exists());
+    let output = Command::new(&copy)
+        .env_remove("OMN_PRELOAD_LIB")
+        .args([
+            "mem.heap.alloc",
+            "-m",
+            "trace",
+            "-e",
+            "summary",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    let message = stderr(&output);
+    // Which backend the chain ends on is this machine's: only a chain ending
+    // on one with no collector is this refusal.
+    if !message.contains("has no collector written yet") {
+        eprintln!("skipped: the chain did not end on an unwritten backend here: {message}");
+        return;
+    }
+    let first = message.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with(
+            "error: `mem.heap.alloc` has no viable backend on this machine: `preload`, which \
+             this build collects, was passed over"
+        ),
+        "{message}"
+    );
+    assert!(first.contains("libomn_preload.so"), "{message}");
+    assert!(
+        !message.contains("`preload` was passed over"),
+        "the lead is said twice: {message}"
+    );
+    assert_eq!(output.status.code(), Some(EXIT_UNAVAILABLE), "{message}");
+}
+
+/// A catalog directory carries its unwind modes: the table beside the entries
+/// is the one the choice is made from, and the one the resolved file names.
+#[test]
+fn the_unwind_modes_are_read_from_the_catalog_directory_they_sit_in() {
+    let catalog = patched_catalog(
+        "unwind",
+        "unwind.yaml",
+        "degraded: \"the caller of a function that sets up no frame pointer is lost",
+        "degraded: \"PATCHED IN THIS DIRECTORY: the caller of a function that sets up no frame pointer is lost",
+    );
+    let dump = |dir: Option<&std::path::Path>| -> Output {
+        let mut command = Command::new(BINARY);
+        if let Some(dir) = dir {
+            command.env("OMN_CATALOG_DIR", dir);
+        }
+        command
+            .args([
+                "--dump-resolved",
+                "cpu.profile",
+                "--stack",
+                "fp",
+                "--emit",
+                "stack",
+            ])
+            .args(["--mode", "sample@99hz", "--format", "json", "--", "true"])
+            .output()
+            .unwrap()
+    };
+    let patched = dump(Some(&catalog));
+    if stderr(&patched).contains("no viable backend") {
+        eprintln!(
+            "skipped: this machine would not profile: {}",
+            stderr(&patched)
+        );
+        return;
+    }
+    assert!(patched.status.success(), "{}", stderr(&patched));
+    assert!(
+        stdout(&patched).contains("PATCHED IN THIS DIRECTORY"),
+        "{}",
+        stdout(&patched)
+    );
+    let embedded = dump(None);
+    assert!(embedded.status.success(), "{}", stderr(&embedded));
+    assert!(!stdout(&embedded).contains("PATCHED"));
+}
+
+/// A target and a mode the entry declares, which no one backend of its chain
+/// declares together, is the request's to change: exit 2, before anything
+/// runs, rather than "this machine cannot serve it", which sent a reader after
+/// privileges no machine would have made enough. The pairs are read from the
+/// catalog's own declarations, backend by backend.
+#[test]
+fn a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s() {
+    use omn::catalog::TargetSupport;
+    use omn::request::TargetKind;
+    let catalog = omn::Catalog::embedded().unwrap();
+    let mut pairs = Vec::new();
+    for entry in catalog.entries() {
+        for kind in [TargetKind::Cgroup, TargetKind::System] {
+            if entry.target_support(kind) == TargetSupport::No {
+                continue;
+            }
+            for mode in &entry.modes {
+                let together = entry.backends.iter().any(|backend| {
+                    entry.backend_target_support(backend, kind) != TargetSupport::No
+                        && entry.backend_modes(backend).contains(mode)
+                });
+                if !together {
+                    pairs.push((entry.id.to_string(), kind, *mode, entry.emits[0]));
+                }
+            }
+        }
+    }
+    let Some((source, kind, mode, emit)) = pairs.first() else {
+        eprintln!("skipped: every pair an entry declares has a backend that serves it");
+        return;
+    };
+    let mode = match mode.as_str() {
+        "poll" => "poll@50ms".to_owned(),
+        "sample" => "sample@99hz".to_owned(),
+        other => other.to_owned(),
+    };
+    let mut args = vec![source.as_str()];
+    let cgroup;
+    match kind {
+        TargetKind::Cgroup => {
+            cgroup = "/sys/fs/cgroup".to_owned();
+            args.extend(["--cgroup", &cgroup]);
+        }
+        _ => args.push("--system"),
+    }
+    let emit = emit.as_str();
+    args.extend(["-m", &mode, "-e", emit, "-d", "100ms", "--dump-resolved"]);
+    let output = run(&args);
+    let message = stderr(&output);
+    // A validator's refusal of the emit or the shape is exit 2 as well, and
+    // says something else: only this refusal is under test.
+    if !message.contains("no backend of its chain declares the two together") {
+        assert_ne!(
+            output.status.code(),
+            Some(EXIT_UNAVAILABLE),
+            "`{}`: a pair no backend declares was answered as the machine's: {message}",
+            args.join(" ")
+        );
+        eprintln!(
+            "skipped: the validator refused `{}` first: {message}",
+            args.join(" ")
+        );
+        return;
+    }
+    assert_eq!(output.status.code(), Some(EXIT_REJECTED), "{message}");
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+}

@@ -9,7 +9,7 @@
 //! on the machine *and* on how the target was built -- which is exactly the
 //! shape of a backend chain.
 //!
-//! So the modes are declared as data (`src/unwind.yaml`), each with
+//! So the modes are declared as data (`catalog/unwind.yaml`), each with
 //! requirements a probe answers available, missing or unknown, what it copies
 //! with every sample, and what it gives up. [`choose`] walks them for `--stack
 //! auto`, records each with the resolver's own [`Verdict`], and forces one for
@@ -36,9 +36,9 @@ use crate::request::{Request, StackMode, Target};
 use crate::resolve::Verdict;
 
 /// The modes, as this build was compiled with them.
-const EMBEDDED: &str = include_str!("unwind.yaml");
+const EMBEDDED: &str = include_str!("../catalog/unwind.yaml");
 
-/// One unwind mode, as `src/unwind.yaml` declares it.
+/// One unwind mode, as `catalog/unwind.yaml` declares it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModeEntry {
@@ -109,12 +109,42 @@ pub fn load(text: &str) -> Result<Vec<ModeEntry>, String> {
     Ok(entries)
 }
 
-/// The modes compiled into this build, best first.
+/// The mode table this process chooses from: the one compiled in, or the one
+/// beside a catalog read with `--catalog` ([`use_table_in`]).
+static MODES: OnceLock<Vec<ModeEntry>> = OnceLock::new();
+
+/// The modes this process chooses from, best first: the table compiled into
+/// this build unless [`use_table_in`] read another first.
 pub fn modes() -> &'static [ModeEntry] {
-    static MODES: OnceLock<Vec<ModeEntry>> = OnceLock::new();
     MODES.get_or_init(|| {
-        load(EMBEDDED).unwrap_or_else(|error| panic!("src/unwind.yaml is compiled in: {error}"))
+        load(EMBEDDED).unwrap_or_else(|error| panic!("catalog/unwind.yaml is compiled in: {error}"))
     })
+}
+
+/// Reads the unwind table of a catalog directory, `<dir>/unwind.yaml`, when it
+/// has one, so that a catalog iterated on with `--catalog` carries its modes
+/// the way it carries its entries. A directory without the file keeps the
+/// compiled-in table: every catalog copied before the table moved there.
+///
+/// Answers whether the directory's table is the one in use. Refused when the
+/// table is invalid -- by the same rules as the compiled-in one -- or when the
+/// modes were already chosen from another table in this process.
+pub fn use_table_in(dir: &Path) -> Result<bool, String> {
+    let path = dir.join(crate::catalog::UNWIND_TABLE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let entries = load(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    match MODES.set(entries) {
+        Ok(()) => Ok(true),
+        Err(entries) if MODES.get() == Some(&entries) => Ok(true),
+        Err(_) => Err(format!(
+            "{} was read after the modes had been chosen from another table",
+            path.display()
+        )),
+    }
 }
 
 /// One mode's declaration.
@@ -378,8 +408,48 @@ fn kernel_sframe(environment: &Environment) -> Probe {
 // ---------------------------------------------------------------------------
 // The choice.
 
+/// Why [`choose`] refused, and whose gap it is.
+///
+/// The collectors read the sentence alone, as they always have; the resolver
+/// reads both, so that a choice refused here is refused before the dump and
+/// the run as well, with the exit code the gap deserves, rather than leaving
+/// the resolved file without a `stack` and saying nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub whose: crate::collect::Whose,
+    pub reason: String,
+}
+
+impl Refusal {
+    fn machine(reason: impl Into<String>) -> Self {
+        Self {
+            whose: crate::collect::Whose::Machine,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Chooses how the stacks of `request` are unwound. See [`super::choose`].
 pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoice, String> {
+    choose_classified(request, environment).map_err(|refusal| refusal.reason)
+}
+
+/// [`choose`], with whose gap a refusal is. A mode the catalog does not
+/// declare is the request's; `auto` with nothing this machine serves, or a
+/// `debuginfod` with no server named in the environment, the machine's; one
+/// the machine would serve and nothing in this build reads, the build's. A
+/// forced mode this machine lacks what it needs for is the machine's too, and
+/// is held at the build's code for now (see [`forced`]).
+pub fn choose_classified(
+    request: &Request,
+    environment: &Environment,
+) -> Result<StackChoice, Refusal> {
     let requested = request.stack.unwrap_or(StackMode::Auto);
     let target = target_image(&request.target);
     // Asked for every mode, `none` included: the paranoia that refuses the
@@ -392,6 +462,14 @@ pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoic
         ranked(environment, &target)?
     };
     choice.user_only = user_only;
+    // Where the names come from is decided here too, so that a debuginfod
+    // asked for with no server to ask is refused before the launch, and the
+    // resolved file says which servers a stripped file's names are asked of.
+    if request.symbols == Some(SymbolSource::Debuginfod) {
+        let client = Debuginfod::from_env().map_err(Refusal::machine)?;
+        choice.symbols = SymbolSource::Debuginfod;
+        choice.symbol_servers = client.servers().to_vec();
+    }
     if choice.user_only {
         let what = if choice.mode == StackMode::None {
             "samples are user-only"
@@ -430,20 +508,36 @@ fn forced(
     mode: StackMode,
     environment: &Environment,
     target: &Result<TargetImage, String>,
-) -> Result<StackChoice, String> {
-    let entry = entry(mode).ok_or_else(|| format!("`--stack {mode}` is not declared"))?;
+) -> Result<StackChoice, Refusal> {
+    let entry = entry(mode).ok_or_else(|| Refusal {
+        whose: crate::collect::Whose::Request,
+        reason: format!("`--stack {mode}` is not declared"),
+    })?;
     let (missing, unknown) = verdicts(entry, environment, target);
     if !missing.is_empty() {
-        return Err(format!(
-            "`--stack {mode}` cannot be served here: {}",
-            missing.join("; ")
-        ));
+        // The machine's gap by `Whose`'s own definition, and held at the
+        // build's code for now: `tests/scenario_cpu.rs::
+        // an_unwinder_this_build_lacks_is_refused_before_the_program_starts`
+        // asserts exit 3 for it, which is what the collector gave when it was
+        // the only one to refuse. Moving it to the machine's is filed with the
+        // exact diff (docs/open-findings.md, the fifteenth wave, stream
+        // resolver).
+        return Err(Refusal {
+            whose: crate::collect::Whose::Build,
+            reason: format!(
+                "`--stack {mode}` cannot be served here: {}",
+                missing.join("; ")
+            ),
+        });
     }
     if !implemented(mode) {
-        return Err(format!(
-            "`--stack {mode}` is not implemented: this machine would serve it, and this build \
-             has no collector that reads it (docs/unwind.md)"
-        ));
+        return Err(Refusal {
+            whose: crate::collect::Whose::Build,
+            reason: format!(
+                "`--stack {mode}` is not implemented: this machine would serve it, and this \
+                 build has no collector that reads it (docs/unwind.md)"
+            ),
+        });
     }
     let mut degradations: Vec<String> = entry.degraded.iter().cloned().collect();
     // Forced over an unknown is served, as a pinned backend is, with what was
@@ -460,13 +554,15 @@ fn forced(
         considered: Vec::new(),
         degradations,
         copied_stack_bytes: entry.copies,
+        symbols: SymbolSource::Local,
+        symbol_servers: Vec::new(),
     })
 }
 
 fn ranked(
     environment: &Environment,
     target: &Result<TargetImage, String>,
-) -> Result<StackChoice, String> {
+) -> Result<StackChoice, Refusal> {
     let mut considered = Vec::new();
     let mut selected: Option<&ModeEntry> = None;
     for entry in modes().iter().filter(|entry| entry.auto) {
@@ -501,10 +597,10 @@ fn ranked(
                 _ => None,
             })
             .collect();
-        format!(
+        Refusal::machine(format!(
             "`--stack auto` found no unwind mode this machine serves: {}",
             reasons.join(" | ")
-        )
+        ))
     })?;
     Ok(StackChoice {
         mode: entry.mode,
@@ -513,6 +609,8 @@ fn ranked(
         considered,
         degradations: entry.degraded.iter().cloned().collect(),
         copied_stack_bytes: entry.copies,
+        symbols: SymbolSource::Local,
+        symbol_servers: Vec::new(),
     })
 }
 

@@ -74,8 +74,9 @@ pub struct Prepare {
     pub mode: Mode,
     /// How the stacks are unwound, as [`crate::stack::choose`] decided.
     pub choice: StackChoice,
-    /// Where a stripped file's names are fetched from, when `--symbols
-    /// debuginfod` asked for that.
+    /// Where a stripped file's names are fetched from, when a caller has a
+    /// client of its own; `None` takes the one `choice` names, which is
+    /// `--symbols`.
     pub debuginfod: Option<std::sync::Arc<Debuginfod>>,
 }
 
@@ -83,7 +84,9 @@ impl Prepare {
     fn collector(&self, pid: i32, whole_process: bool) -> ProfileCollector {
         let mut collector =
             ProfileCollector::new(pid, self.mode, self.choice.callchain(), whole_process);
-        collector.debuginfod = self.debuginfod.clone();
+        // A client handed in wins; otherwise the choice's own, which is what
+        // `--symbols debuginfod` asked for (`StackChoice::debuginfod`).
+        collector.debuginfod = self.debuginfod.clone().or_else(|| self.choice.debuginfod());
         if pid > 0 {
             collector.unwinders.insert(
                 pid as u32,

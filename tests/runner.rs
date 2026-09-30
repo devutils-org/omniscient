@@ -442,6 +442,7 @@ fn try_resolved(
         duration: duration.map(|text| text.parse().expect("a duration")),
         budget: None,
         stack: None,
+        symbols: None,
         backend: None,
         label: None,
         window: None,
