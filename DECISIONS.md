@@ -643,6 +643,58 @@ count of what arrived after it. That is where this line would be reopened.
 
 ---
 
+## Settled in the fifteenth wave
+
+What the other five streams settled, from their handoffs
+(`docs/fixes/w15-{engine,kernel,probes,resolver,runner}.md`), each with the
+test that holds it there.
+
+**The engine** (`docs/fixes/w15-engine.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| An integer attribute's form | **One canonical form**: `Uint` when non-negative, `Int` only when negative, and the two equal where they spell the same integer. The wire is unchanged. | Every consumer of the output (`results.json`, ndjson, `omn-mcp`) reads a number as a number; a tag would change every one of them to say what the value already says. `event::tests::a_non_negative_signed_integer_reads_back_as_what_was_written`. |
+| A decomposition row's evidence | **Every row and every whole carries one, except a whole that is a bracket** (the window, the program's life), which contains the key's events and is joined to nothing. A document without it is refused when read, not shown with a dash. | `join::tests::a_row_without_an_evidence_level_is_never_built_and_never_read`. |
+| A join state that matched nothing | **Not kept once it ends**, except for `wakeup`, whose chains count every wakeup. | Peak memory at one million events went from 179 MiB to 97 MiB; `join_engine::a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map`. |
+
+**The kernel programs** (`docs/fixes/w15-kernel.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A backend that serves fewer modes than its chain | **`modes:` on the backend**, so the resolver passes it over with the reason, rather than a factory refusing at the start. | A refusal after the probes said yes is finding 15's shape; the catalog is the one place that can say it before resolution. `net.hwts`: `so_timestamping` is `[trace]`, `netlink:ethtool` is `[poll, snapshot]`. `scenario_net::every_usable_net_source_starts_in_every_mode_that_resolves`. |
+| When `io.latency` builds its histogram in the kernel | **Only when a log2 histogram is the whole request**: one `hist` emit, `trace`, no filter, keys within `dev`. Anything that needs the requests one at a time streams, and the run says which it was in `facts()`. | The choice changes nothing the request asked for. Not taken: the kernel path for `hist` beside `summary`, whose min and max would become bucket bounds, a silent change of meaning. `scenario_io::a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`. |
+| How an overflow test overflows | **By construction**: a burst larger than the ring inside one system call (one `FUTEX_WAKE` of 16 384 threads), the kernel's return value as ground truth, one run. | A test that fills only on a slow machine skips on a fast one (flaky tally #3). `scenario_sched::an_overflowing_wakeup_ring_says_what_it_could_not_hold`. |
+
+**The probes and the validator** (`docs/fixes/w15-probes.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `cpu.cycles` with no hardware PMU (was open) | **Served by the cpu clock** (`pmu:sw`, degraded: *"CPU time, not cycles: blind to DVFS"*), counter name `cpu_clock_ns`. | Every mechanism as a chain, with a fallback that says what it degrades. The cost: a number in the entry's unit that is nanoseconds, said on the `degraded:` line and in the counter's name. `scenario_cpu::a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency`. |
+| A container | **Its cgroup, with no exception**: `container: no` beside a served cgroup is a catalog that does not load (`validate::container_complaints`). | `scenario_cpu::a_container_is_counted_as_the_cgroup_its_runtime_names`. |
+| A (target, mode) pair no backend declares together | **The request's, exit 2, before resolution**, the way a mode the entry does not declare is; the resolver's half is `NoBackendDeclares`, exit 2, and a pinned backend keeps its "pinned" refusal. | `catalog_model::a_target_and_mode_no_backend_declares_together_is_refused_as_the_request`, `tests/cli.rs::a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s`. |
+| A privilege refusal where the file carries the capability | **Names why the kernel withheld it** (a `nosuid` mount, `no_new_privs`, a grant without `e`), and never advises the grant already made. | `portability::a_binary_denied_its_file_capabilities_says_why_instead_of_advising_the_grant`. The attach-time advice (`bpf::permission_advice`) is still the old sentence (filed). |
+| What the resolved record carries | **The privileges and the virtualization**, so a gap between two machines is explained from their two records; a matrix cell carries the hash of the binary that swept it (`cell.build`). | Phase 7's second criterion found the record missing both: 2754 gaps between the cells on disk only they could explain. `portability::every_gap_between_two_cells_is_explained_by_their_resolved_records`. |
+
+**The resolver** (`docs/fixes/w15-resolver.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `--symbols debuginfod` where the collector would not ask | **Refused, exit 3** (the build's gap). Which collectors read it is `stack::UNWOUND_BY_CHOICE`. | A network request silently not made is a degradation nobody was told about. `tests/unwind.rs::symbols_from_debuginfod_with_nowhere_to_ask_are_refused_before_the_program_starts`. |
+| The unwind choice in the resolved file | **Recorded only for the collectors that use it as chosen**; the IBS sources ask `choose` and serve frame pointers, and are left out. | Recording it for them would misstate their stacks. `tests/unwind.rs::the_resolved_file_says_how_the_stacks_will_be_unwound_before_the_run`. |
+| A request keyed on what the selected backend does not attach | **Refused (`KeyNotCarried`), naming the backend that does and what stands between the request and it**; the chain is not walked on to it. The `--backend force:` hint only for a backend that serves the target and mode, is collected and whose requirements this machine has; the exit code is that backend's gap (2, 1 or 3). | Which backend serves is the resolver's decision, and a key is part of the question. `resolve::tests::a_backend_that_attaches_the_key_is_named_for_what_keeps_the_request_from_it`. |
+| A stack choice `choose` refuses | **A resolver refusal (`StackRefused`)**, so `--dump-resolved` refuses what the run would, with its code from `unwind::Refusal::whose`. | `tests/unwind.rs::a_choice_the_run_refuses_is_refused_by_the_dump_with_the_same_reason`. A forced mode this machine cannot serve stays exit 3 until `tests/scenario_cpu.rs` takes the filed change to exit 1. |
+| A no-collector refusal whose passed-over backend is collected and fits | **The machine's (exit 1)**, and it leads the refusal. | The build is not what is missing then; the machine or the install is. `tests/cli.rs::a_refusal_for_an_unwritten_backend_leads_with_the_one_passed_over`. |
+
+**The runner** (`docs/fixes/w15-runner.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What a run cost the machine | **Reported whole, and weighed apart from what it cost the target**: `cost.json` carries this process's cpu before the window (startup, probes, the kernel's symbols) and after it beside the window's; the percentage and `--budget` stay over the window. | None of the rest dilated the target. A one-second profile with stacks said 82 ms where the kernel counted 1062 ms. `budget::what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted`. |
+| A budget's move between backends | **An overlap, as short as the two calls, and announced**, rather than a gap. | A gap's events are counted by nobody and nothing could show them; an overlap is bounded and said. `budget::a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted`. |
+| A bench row over its declared band | **Flagged, not failed; a row missing a column fails the table.** | A band a machine does not keep is a claim to correct; a row with nothing measured is a table that is wrong. `bench_harness::a_row_is_held_to_its_band_on_the_larger_of_its_share_and_its_dilation`. |
+
+---
+
 ## Open
 
 - **An `overlap` rule's `span` that encloses a drained row's occurrences.**
@@ -652,10 +704,22 @@ count of what arrived after it. That is where this line would be reopened.
   have to say which. Leaving it open costs the credit of drained sources:
   41 184 of 41 639 reclaimed pages uncredited on the reclaim crossing, counted
   and said.
-- **Whether a `pmu:sw` collector serves `cpu.cycles`** (cpu time under the
-  name of cycles, a degraded fallback the catalog declares). Leaving it open
-  costs `cpu.cycles` on every machine without a hardware PMU, which is most
-  cloud VMs; it is refused there as the build's gap.
+- **What one series made of two modes means to an emit** (the runner stream's
+  proposal, `docs/fixes/w15-runner.md`). The budget's trace -> hist -> sample
+  ladder needs it before it is built: proposed, a budget may move only onto a
+  mode whose events the request's emits can take (a `hist` of traced events
+  and an in-kernel `hist` merge; a `raw` does not survive the move and is
+  refused up front). Leaving it open costs phase 6's ladder: a budget moves
+  between backends of one mode only.
+- **The budget's denominator in nanoseconds** (the same handoff). Proposed: a
+  launched or pid target's cpu from `schedstat` (nanoseconds on cpu), not
+  `stat` (10 ms ticks). Leaving it open costs every target that burns under a
+  tick per check: `sched.offcpu --budget 5%` over a sleeping python loop ended
+  16 % over its ceiling and was never moved.
+- **Whether the `power` sources are the bench's guardrail** (phase 9), or the
+  harness's own `thermal_throttle` read stays. The probes stream stated why the
+  bench reads the counters directly (`docs/portability.md`, item 4) and filed
+  the call for the runner stream; neither side landed it.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

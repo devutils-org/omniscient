@@ -507,7 +507,7 @@ probes.
 | `--cpu` | core(s) | per-process sources |
 | `--iface` | network interface | everything but `net.*` |
 | `--system` | global | — |
-| `--container` | bound to the cgroup its runtime names (`docker`, `podman`, `nerdctl`, or `OMN_CONTAINER_RUNTIME`), before resolution | same as cgroup, and every entry that says `container: no` |
+| `--container` | bound to the cgroup its runtime names (`docker`, `podman`, `nerdctl`, or `OMN_CONTAINER_RUNTIME`), before resolution | same as cgroup |
 
 **The container trap**: `--cgroup` is not a PID filter. Without the pid namespace,
 events get attributed to the wrong process. Hence the `proc:pidns+pid` key: a

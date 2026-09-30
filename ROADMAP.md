@@ -109,15 +109,26 @@ any code.
       `Span` with id, parent_id and rule_id. Evidence lives on `Correlation` and
       `Attribution` in `src/join.rs`, and no decision records that change.*
       *Fifteenth wave: the decision is recorded (`DECISIONS.md`, "No `Span`
-      struct"). What is left for this box is the coordinator's call: whether
-      a recorded decision stands for the fifth struct.*
-- [~] A unit test proves that a serialized/deserialized `Event` is identical.
+      struct"). Judged at the merge: left `[~]`. A decision is not a struct,
+      and the criterion's "written and documented" is held by no test for any
+      of the five; the four that exist round-trip under
+      `event::tests::an_event_survives_a_round_trip_through_json_and_yaml`
+      and `tests/cli.rs`'s dump tests. The box closes if the criterion is
+      rewritten to the four and the decision, which is a roadmap edit, not a
+      measurement.*
+- [x] A unit test proves that a serialized/deserialized `Event` is identical.
       *Audit, fourteenth wave:
       `an_event_survives_a_round_trip_through_json_and_yaml` round-trips one
       sample with two key kinds, `Uint` and `Text` attrs, and a zero
       `ts_err_ns`. A non-negative `AttrValue::Int` does not survive: the
       untagged enum reads it back as `Uint`.*
-- [ ] A one-page note justifies each key: which boundary it crosses.
+      *Fifteenth wave, proven: `event::tests::an_event_survives_a_round_trip_through_json_and_yaml`
+      now carries every `KeyValue` and `AttrValue` variant, `ts_err_ns` 1250,
+      zero, negative, `i64::MIN`/`MAX` and `u64::MAX`, and compares by `Debug`
+      as well as `==`; `a_non_negative_signed_integer_reads_back_as_what_was_written`
+      holds the canonical integer (`DECISIONS.md`, "Settled in the fifteenth
+      wave").*
+- [x] A one-page note justifies each key: which boundary it crosses.
       *Audit, fourteenth wave: No note exists. Only some of the doc comments on
       `KeyKind` and `KeyValue` say what their key crosses (sock, blk, proc,
       iface, dev, cpu, node), and task, file, gpu and cgroup get no reason at
@@ -126,7 +137,10 @@ any code.
       what it survives and what it does not, and where it is produced. Writing
       it found two things: `proc` has no producer, and `iface` is compared by
       its name alone, so `net.iface`'s `lo/drops` cannot join `net.qdisc`'s
-      `lo`.*
+      `lo`.* *Ticked at the merge: the criterion is a document, and the
+      document exists, every producer named from a grep of `src/collect/**`
+      and every comparison read from `join::identity`. The two findings are
+      filed (`docs/open-findings.md`, stream docs).*
 
 ---
 
@@ -152,18 +166,34 @@ Still **no collector**. We build the machinery that will host them.
 
 ### Exit criteria
 
-- [~] `omn list` shows different sources on two different machines.
+- [x] `omn list` shows different sources on two different machines.
       *Audit, fourteenth wave: Partly: the portability-matrix judges tie each
       cell's listing to a condition the cell sets up (paranoid 4, BTF hidden,
       kernel floor), so listings can only pass by differing. But no test
       directly compares two cells' listings, and the judges skip when no cell is
       on disk.*
-- [~] `omn --dump-request io.latency --pid 1` prints a complete `ResolvedRequest`.
+      *Fifteenth wave, proven:
+      `portability::two_cells_list_different_sources_for_the_condition_between_them`
+      compares the listings of cells one condition apart (caps against root,
+      nobtf, nocaps, notracefs, per kernel, and `here-caps` against
+      `here-nocaps`), and passes on the 22 cells of the 2026-09-30 sweep: 45
+      usable without BTF against 75 to 81 with it, 41 without the
+      capabilities against 71 to 80. It skips loudly without cells.*
+- [x] `omn --dump-request io.latency --pid 1` prints a complete `ResolvedRequest`.
       *Audit, fourteenth wave: Partly: the exact command is run in tests/cli.rs,
       but when it succeeds its output is never inspected, and the
       ResolvedRequest record has since moved to `--dump-resolved` (`--dump-
       request` now prints a session file). No test checks a complete resolved
       record for io.latency --pid.*
+      *Fifteenth wave, proven:
+      `tests/cli.rs::the_resolved_request_for_a_live_pid_is_complete_and_says_what_the_machine_says`
+      dumps `io.latency --pid <a live sleep>`, deserializes it into
+      `ResolvedRequest` and re-serializes it to the same document, and holds
+      the machine it records to the machine asked another way (`uname`,
+      `nproc`, clocksource, governor, SMT, THP, `perf_event_paranoid`, every
+      vulnerability file) and the chain to the catalog's. The command is
+      `--dump-resolved` and the pid a live one, not 1; without the
+      capabilities it skips with the resolver's refusal.*
 - [x] Three invalid combinations fail with three distinct, clear messages.
       *Audit, fourteenth wave: Proven: tests/cli.rs, tests/family_io.rs and
       src/validate.rs refuse more than three invalid combinations (uncore with
@@ -213,11 +243,20 @@ Two collectors only, chosen to exercise the entire plumbing.
       modes lands in the two expected log2 buckets, checked against the thread's
       own voluntary-switch counts. The test launches the program rather than
       attaching by `--pid`.*
-- [~] The loss rate is displayed, and it is zero under moderate load.
+- [x] The loss rate is displayed, and it is zero under moderate load.
       *Audit, fourteenth wave: Partly: the loss is counted and shown (as a count
       next to the events seen, not a rate), and `no loss` is asserted on light
       sched workloads. No test holds zero loss under a defined moderate load,
       and the overflow test skips on a machine that never fills the ring.*
+      *Fifteenth wave, proven:
+      `scenario_sched::a_moderate_wakeup_rate_loses_nothing_and_says_so`
+      defines the load by its rate (about 6 000 wakeups a second against the
+      468 100 the ring drains, asserted under 2 %) and holds the loss line to
+      0 dropped and the kept wakeups to the program's own count;
+      `an_overflowing_wakeup_ring_says_what_it_could_not_hold` fills the ring
+      by construction on every machine, in one run, against `FUTEX_WAKE`'s
+      return values. The loss is still a count beside the events seen, which
+      is the rate's numerator and denominator.*
 - [x] A test with a program that sleeps N ms measures N ms ± 5 %.
       *Audit, fourteenth wave: Proven by `family_sched::a_program_that_sleeps_a_
       known_time_is_off_cpu_for_that_time`: a 400 ms `sleep` is reported as 400
@@ -231,7 +270,8 @@ Two collectors only, chosen to exercise the entire plumbing.
       *Fifteenth wave: the decision is recorded (`DECISIONS.md`, "No reorder
       window"). What the criterion can still ask is that the runner's sort
       holds too: a collector's events handed over reversed, and the
-      collection read back in timestamp order.*
+      collection read back in timestamp order. Judged at the merge: left
+      `[~]`, since no test injects out-of-order events into the runner.*
 
 ---
 
@@ -280,13 +320,20 @@ req:a3f1   total 412 ms
       from `examples/vertical/server.c` under `examples/vertical-one-
       request.yml` and checks every row against the server's and the client's
       own clocks.*
-- [~] Every line carries its evidence level. *`IDENTITY` for every row read by
+- [x] Every line carries its evidence level. *`IDENTITY` for every row read by
       the request id the serving thread carried.*
       *Audit, fourteenth wave:
       `the_network_rows_are_read_by_the_socket_the_server_accepted` holds the
       four thread rows to `IDENTITY` and `net_rx`/`net_tx` to `KEY`, the socket
       cookie being the server's own `SO_COOKIE`. The `block-io` table's rows are
       not checked yet, and a row's evidence is optional in the engine.*
+      *Fifteenth wave, proven:
+      `vertical::the_block_io_rows_carry_the_identity_the_block_requests_read_back`
+      holds the `block-io` rows and whole to `IDENTITY`, the device row's
+      readings equal to the server's own `done_reads`, and
+      `join::tests::a_row_without_an_evidence_level_is_never_built_and_never_read`
+      makes a row without its level impossible to build or read (only a
+      bracket whole, the window or the life, goes without).*
 - [x] The sum of the segments ≈ the client-side measured latency (gap < 10 %).
       *+0.11 % to +0.42 % over six runs, one of them under load; positive every
       time, as it has to be — the loopback and the parse are the client's.*
@@ -329,17 +376,34 @@ Now, and not before: we have three real join types to generalize from.
       through session `joins:` only. No test holds the property, though, and a
       rule cannot choose its tier (kernel, agent or query), so a kernel-side
       boundary is still collector code.*
-- [ ] A load test proves there is no open-state leak over 1 h.
+      *Fifteenth wave: held for the agent tier by
+      `join_engine::a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine`.
+      Left `[~]`: a rule still cannot choose the kernel or query tier.*
+- [~] A load test proves there is no open-state leak over 1 h.
       *Audit, fourteenth wave: Not proven: no join-engine load test of any
       length exists. The open-state balance (`states_balance` in `src/join.rs`)
       is checked on hand-built events of a few states only, and rules are
       applied after the run rather than streamed.*
-- [~] Evictions appear in the user-visible output.
+      *Fifteenth wave, partly:
+      `join_engine::a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map`
+      (1.5 M events, in the suite) holds every count to the generator's, the
+      balance, peak open states equal to the capacity, peak heap linear, and
+      nothing live afterwards. The hour is
+      `join_engine::an_hour_of_joins_leaks_no_state` (`#[ignore]`,
+      `OMN_JOIN_LOAD_SECS`), run for 300 s in debug (24 rounds of two million
+      events, every round's peak equal, nothing live), not for 3600 s. Ticks
+      when `cargo test --release --test join_engine -- --ignored an_hour_of_joins`
+      has run to the end on a quiet machine.*
+- [x] Evictions appear in the user-visible output.
       *Audit, fourteenth wave: Partly: the engine counts expired and overflowed
       states on hand-built inputs (`src/join.rs` tests), and
       `encode::an_eviction_is_never_quietly_absent_from_the_output` renders
       `EVICTED`. No end-to-end `omn` run with a join that really evicts checks
       that the count reaches the output.*
+      *Fifteenth wave, proven:
+      `join_engine::a_join_that_evicts_says_how_many_in_results_json_and_in_the_text`
+      runs `omn` on a session whose join evicts, and finds the count in
+      `results.json` and in the text.*
 
 ---
 
@@ -359,12 +423,20 @@ Now, and not before: we have three real join types to generalize from.
 
 ### Exit criteria
 
-- [ ] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead.
+- [~] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead.
       *Audit, fourteenth wave: Not proven. No test measures `io.latency` under
       an IOPS load. `src/bpf/io.rs` streams every completion instead of building
       a kernel-side histogram, so the join keeps `blk:rq@open_ts`. The only
       measured cost is `docs/bench.md`'s ordinary workload: 3.70 % tool cpu and
       +0.36 % dilation.*
+      *Fifteenth wave, partly: the histogram is built in the kernel when it is
+      the whole request (`scenario_io::a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`,
+      held to the program's own count of its reads, per path, before the two
+      paths are compared). The overhead test is written,
+      `scenario_io::the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`
+      (`#[ignore]`), and not run: it needs `null_blk`, a module load
+      (`STATE.md`, "Needs privilege"). The disk here reaches about 12 000
+      reads a second.*
 - [~] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
@@ -378,6 +450,14 @@ Now, and not before: we have three real join types to generalize from.
       with nowhere cheaper to go names the ceiling. The drain in `degrade` has
       no test that counts events across the move. The only move tested is
       between two polled `mem.rss` backends, not trace to hist to sample.*
+      *Fifteenth wave: the drain across a move counted against a task's own
+      count, and the seam announced
+      (`budget::a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted`:
+      `sched.switches` moved from `pmu:sw` onto `bpf:raw_tp`, nothing dropped,
+      nothing counted twice outside the announced overlap). The mode ladder,
+      trace to hist to sample, is not built: it waits on the open decision
+      "what one series made of two modes means to an emit" (`DECISIONS.md`).
+      Left `[~]`.*
 - [x] A collector can be added and removed mid-session. *A request's `window`,
       tenth wave: one phase of a program counted within +0.17 %, and nothing of
       the other. The join engine's view of a detached source is filed.*
@@ -407,17 +487,35 @@ Now, and not before: we have three real join types to generalize from.
 
 ### Exit criteria
 
-- [~] A CLI session → file → replay produces an equivalent result.
+- [x] A CLI session → file → replay produces an equivalent result.
       *Audit, fourteenth wave: Partly: the request round trip is proven (the CLI
       dump read back through `-f` is byte-identical, in YAML, JSON and TOML:
       `tests/cli.rs`). But no test runs the CLI measurement and its file replay
       against a known workload and compares the results.*
-- [ ] The resolved file is enough to explain a gap between two machines.
+      *Fifteenth wave, proven:
+      `tests/cli.rs::a_session_dumped_from_the_command_line_measures_what_the_command_line_measured`:
+      a C program making exactly 1000 allocations of 77777 bytes, measured
+      from the command line and from the session file that command line
+      dumps; both match the program's own numbers, and the replay's series,
+      filtered counts and events seen equal the command line's exactly.*
+- [~] The resolved file is enough to explain a gap between two machines.
       *Audit, fourteenth wave: Not proven: tests check only that fields such as
       governor, SMT, clocksource and kernel release are present, and only the
       GPU record is checked against sysfs. Microarchitecture, NUMA,
       virtualization and steal time are still in `not_captured`. No test
       explains a gap between two machines from their two resolved files.*
+      *Fifteenth wave, partly:
+      `portability::every_gap_between_two_cells_is_explained_by_their_resolved_records`
+      credits each gap to the cause the refusing probe names, only when the
+      field standing for it differs the way that refuses (judged by
+      `a_gap_is_credited_to_the_cause_the_refusal_names_not_to_any_field_that_differs`).
+      On the 22 cells on disk: 3182 explained (`kernel_btf` 1716, `tracefs`
+      991, `kernel_release` 255, `gpus` 200, `perf_event_paranoid` 20), 83 the
+      build's, and 2754 unrecorded, which only the privileges and the
+      virtualization could explain. The record carries both now
+      (`Environment.privileges`, `.virtualization`), but the cells were swept
+      before it did. Ticks when a sweep with this binary leaves no gap
+      unrecorded (`STATE.md`, "What remains", item 1).*
 
 ---
 
@@ -474,6 +572,13 @@ finally earns its place.
       the tenth wave, 94 pairs in `docs/bench.md`. Only three pairs are checked
       against known counts, and resolution only for three timestamping backends.
       The heap rows and every backend added since still need a rerun.*
+      *Fifteenth wave: the table gains a `band` column, each row held to its
+      declared band on the larger of its share of the target's cpu and its
+      dilation; a row missing a column fails the table, an over row is
+      flagged (`bench_harness::a_row_is_held_to_its_band_on_the_larger_of_its_share_and_its_dilation`,
+      `a_row_with_a_column_missing_is_refused_rather_than_judged`). The
+      table's own run (`tests/bench_backends.rs`, `#[ignore]`) was not rerun.
+      Left `[~]`.*
 - [~] The resolver's choices are confirmed by measurement, or corrected.
       *Confirmed for the seven chains with two served backends. The table's
       correction is to the cost bands: an in-kernel collector's cost is in the
@@ -482,6 +587,8 @@ finally earns its place.
       synthetic rows, and the seven confirmations come from one recorded run.
       The cost-band correction is recorded in `DECISIONS.md`, but no test holds
       the catalog's bands to a measured dilation.*
+      *Fifteenth wave: the band column above is that test, once the bench's
+      table is rerun on a quiet machine. Left `[~]`.*
 - [~] The agent's own cost (CPU, RSS) is measured separately from the dilation of
       the observed process. *Tenth wave: collector cpu from `cost.json`, peak RSS
       from `/proc`, dilation from the workload's own clock.*
@@ -489,6 +596,11 @@ finally earns its place.
       from three independent sources (`cost.json`, VmHWM in `/proc`, the
       workload's own clock), but only in an ignored run that asserts nothing
       about them. The separation is shown in `docs/bench.md`, not in a test.*
+      *Fifteenth wave: the agent's own cpu is now whole in `cost.json`
+      (before, in and after the window), held to the kernel's `wait4` account
+      of `omn` by `budget::what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted`,
+      while the percentage stays over the window. The separation from the
+      dilation is still asserted only in the bench's ignored run. Left `[~]`.*
 
 ---
 
@@ -508,9 +620,12 @@ run they moved in (`examples/bench/harness.rs`, `throttle_count`). On an AMD
 part, which publishes none of those counters, it says a throttled run cannot
 be told from one that was not (`docs/bench.md`, "Environment control").
 Whether the guardrail becomes the `power` sources themselves, or stays the
-harness's own counter read, is the fifteenth wave's probes stream's decision.
-It is pending that stream, and this sentence follows whatever it records in
-`DECISIONS.md`.
+harness's own counter read, was the fifteenth wave's probes stream's to
+decide. It stated why the bench reads the counters directly
+(`docs/portability.md`, "The fifteenth wave", item 4) and filed the call for
+the owner of `examples/bench/harness.rs`; nothing landed on either side, so
+the decision is open (`DECISIONS.md`, "Open") and this sentence stays true
+as written.
 
 **Criterion per added source**: catalog entry + backend + fallback chain + ground
 truth test + automatic appearance in `omn list`.

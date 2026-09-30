@@ -20,7 +20,8 @@ built around the opposite rule:
   target, and says *unknown* rather than zero when it cannot.
 
 Every output below is real: it was run on the development machine (AMD Zen 2,
-24 cpus, Linux 7.2) on 2026-09-29, and only trimmed where marked `…`.
+24 cpus, Linux 7.2) on 2026-10-01, after the fifteenth wave's merge, and only
+trimmed where marked `…`.
 
 To run them yourself: install a release or `make install PREFIX=~/.local`,
 grant the two capabilities with
@@ -39,25 +40,25 @@ it reports its own ground truth as it exits:
 
 ```console
 $ omn latency --objective latency -- target/omn-triage-fixture/workload lock 150 2000
-omn-truth mode=lock … wall_ns=160236395 oncpu_ns=2974760 runq_ns=106790 lock_wait_ns=148473514 locks=150
+omn-truth mode=lock … wall_ns=158021253 oncpu_ns=2721880 runq_ns=34620 lock_wait_ns=146479986 locks=150
 
-  for latency, task:849326 of the run spent most of its time asleep in a pthread mutex
+  for latency, task:2353194 of the run spent most of its time asleep in a pthread mutex
   another thread held: lock-contended: …
 
     STATE              SOURCE          KIND     EVIDENCE      AMOUNT  RESOLUTION   SHARE
-    on-cpu             cpu.profile     sampled  KEY           3.01ms    +-1.00ms   1.8 %
+    on-cpu             cpu.profile     sampled  KEY           2.01ms    +-1.00ms   1.2 %
       …
-    runnable           sched.runqlat   traced   KEY         614.24us       exact   0.4 %
-    blocked: sleeping  sched.offcpu    traced   KEY         159.33ms       exact  97.6 %
-      -> 148.41ms waiting in pthread_mutex_lock over 151 acquisition(s), most of it on the mutex at 0x5562baf8c140 …
-      …
-      -> 93 % of it from one stack, leaf first: … pthread_mutex_lock <- main <- …
-    whole              the program's life           163.29ms    +-9.11ms  100.0 %
-    RESIDUE            whole - parts                339.33us   +-10.12ms
+    runnable           sched.runqlat   traced   KEY         474.86us       exact   0.3 %
+    blocked: sleeping  sched.offcpu    traced   KEY         159.33ms       exact  97.8 %
+      -> 146.43ms waiting in pthread_mutex_lock over 151 acquisition(s), most of it on the mutex at 0x55c99ca97140 …
+      -> 148.32ms waiting in futex(2) over 76 wait(s) [sched.futex KEY]
+      -> 92 % of it from one stack, leaf first: … pthread_mutex_lock … <- main <- …
+    whole              the program's life lifetime -  162.88ms    +-6.23ms 100.0 %
+    RESIDUE            whole - parts                    1.07ms    +-7.24ms
 ```
 
-The program measured **148.47 ms** of lock waiting on its own clock, and `omn`
-found **148.41 ms**, and named the mutex and the stack.
+The program measured **146.48 ms** of lock waiting on its own clock, and `omn`
+found **146.43 ms**, and named the mutex and the stack.
 
 ## 2. Where did a thread's wall clock go? Down to the microsecond
 
@@ -69,18 +70,19 @@ not explain, is printed rather than rounded away:
 $ omn -f examples/join-decompose-compute.yml
 decompose where-the-time-went  per task, in ns
 
-  task:848902
+  task:2353441
     STATE     SOURCE          VALUE     KIND     EVIDENCE      AMOUNT  RESOLUTION   SHARE
-    on-cpu    cpu.profile     samples   sampled  KEY         203.61ms    +-1.00ms  54.3 %
-    runnable  sched.runqlat   total_ns  traced   KEY           1.81ms       exact   0.5 %
-    blocked   sched.offcpu    total_ns  traced   KEY         169.28ms       exact  45.2 %
-    parts                                                    374.70ms
-    whole     the program's life gate to reap                374.78ms    +-5.90ms
-    RESIDUE   whole - parts                                  +75.48us    +-6.90ms
+    on-cpu    cpu.profile     samples   sampled  KEY         198.60ms    +-1.00ms  54.1 %
+    runnable  sched.runqlat   total_ns  traced   KEY           1.69ms       exact   0.5 %
+    blocked   sched.offcpu    total_ns  traced   KEY         166.24ms       exact  45.3 %
+    parts                                                    366.52ms
+    whole     the program's life gate to reap lifetime -     366.76ms    +-9.03ms
+    RESIDUE   whole - parts                                 +237.12us   +-10.04ms
 ```
 
 On-cpu, waiting for a cpu and blocked add up to the program's life to within
-**75 µs**, inside a stated resolution of ±6.9 ms.
+**237 µs**, inside a stated resolution of ±10.0 ms. The whole carries no
+evidence level (`-`): it is the program's life, a bracket joined to nothing.
 
 ## 3. Ask for too much, and it tells you what you lost
 
@@ -91,19 +93,27 @@ $ omn cpu.profile -m sample@100000hz -e stack -d 2s -- python3 -c 'import time
 t=time.time()
 while time.time()-t<3: sum(i*i for i in range(1000))'
 cpu.profile  via pmu:sw  (cpu.profile)
-  179738 events over 2.01s, stopped because the requested duration elapsed
-  LOSS: 19026 dropped, 0 failed reads, 7 late ticks, 0 undecoded, 874 throttled
-    170x the kernel throttled profile sampling: an unknown number of samples in each
+  23183 events over 2.00s, stopped because the requested duration elapsed
+  LOSS: 175754 dropped, 0 failed reads, 2 late ticks, 0 undecoded, 959 throttled
+    184x the kernel throttled profile sampling: an unknown number of samples in each
          throttled period were not taken (see kernel.perf_event_max_sample_rate)
-      2x the profile ring overflowed: samples were taken and never read, so the stacks
+    184x the profile ring overflowed: samples were taken and never read, so the stacks
          here are a biased subset -- the busy phases are the ones that overflow
-  degraded: 45510 of 65330 samples landed in a function that sets up no frame pointer,
-            so the frames under the leaf are not its callers …
+  degraded: stacks unwound by `dwarf`: 8 KiB of user stack is copied with every sample,
+            so the rings fill about a hundred times faster than under frame pointers …
+  note: stacks unwound by `dwarf`, chosen by `--stack auto` over sframe (…) and
+        fp+leaf (target:frame_pointers: missing: /usr/bin/python3 was built without
+        frame pointers …)
+
+  stack
+    >= short by at least 175754 of 198937 events (88.3 % unaccounted for), and by an
+       unknown number more: the kernel throttled this event 959 times …
 ```
 
 A flame graph drawn from this run would look clean. `omn` says that the
-hottest phases are the ones that are missing, and that Python was built
-without frame pointers.
+hottest phases are the ones that are missing, that Python was built without
+frame pointers, and that it unwound the stacks from a copy of them instead --
+which is also why the rings overflowed as often as they did.
 
 ## 4. Ask something meaningless, and it refuses
 
@@ -125,13 +135,13 @@ target, in the target's own context:
 ```console
 $ omn cpu.ipc -m count -e summary -- /bin/sh -c 'i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done'
   summary
-    task:846237 n=1     min 2.099  mean 2.099  max 2.099  last 2.099
-cost: cpu.ipc (count) via `pmu` spent 1.7ms of cpu … against the target's 552.7ms (0.31 %, declared `free`)
+    task:2354601 n=1     min 2.068  mean 2.068  max 2.068  last 2.068
+cost: cpu.ipc (count) via `pmu` spent 950.0us of cpu … against the target's 527.2ms (0.18 %, declared `free`)
 caveat: A ratio, not an amount: a spin loop retires instructions at a high IPC while doing nothing. …
 
 $ omn proc.syscall -m count -e summary -- /bin/sh -c 'for i in $(seq 2000); do : > /dev/null; done'
-cost: proc.syscall (count) via `bpf:raw_tp` spent 954.0us of cpu and an unknown amount inside
-  the target against the target's 23.3ms (4.09 %, declared `extreme`) … the kernel is not timing
+cost: proc.syscall (count) via `bpf:raw_tp` spent 859.0us of cpu and an unknown amount inside
+  the target against the target's 23.3ms (3.68 %, declared `extreme`) … the kernel is not timing
   eBPF programs on this run: `kernel.bpf_stats_enabled` is 0 … `sysctl kernel.bpf_stats_enabled=1`
   before the run makes what the programs spend inside the target measurable
 ```
@@ -147,7 +157,7 @@ zero.
 
 ```console
 $ omn list
-101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+101 sources: 92 usable here, 0 unverified, 9 out of reach on this machine.
 ```
 
 - **Nine families**: `cpu`, `mem`, `io`, `net`, `sched`, `power`, `gpu`, `proc`,
