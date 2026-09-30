@@ -44,8 +44,8 @@ pub struct ResolvedRequest {
     /// source whose collector unwinds through [`crate::stack::choose`]: the
     /// mode, whether it was forced, every mode considered with its verdict,
     /// and what it degrades -- said before the run, the way the backend is.
-    /// Absent for every other source, and for a choice that is refused: the
-    /// collector refuses it before the launch, with the reason.
+    /// Absent for every other source. A choice that is refused is not absent:
+    /// the request is refused, [`ResolveError::StackRefused`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<crate::stack::StackChoice>,
 }
@@ -262,21 +262,112 @@ pub enum ResolveError {
     /// The twin of `FilterFieldNotCarried`, for a key: `--keys task` on a
     /// backend that attaches no task would produce events that join to
     /// nothing, which is refused rather than recorded.
+    ///
+    /// Whose gap it is follows from [`KeyElsewhere`]: a backend the request
+    /// can be pinned to makes it the request's, one only the machine keeps out
+    /// makes it the machine's, and one nothing collects in this build makes it
+    /// the build's -- a `--backend force:` hint that the next run refuses as
+    /// unwritten is not a hint.
     #[error(
         "`{source_id}` is keyed on `{key}`, which the selected backend `{backend}` does not \
-         attach:\n{}",
+         attach:\n  {}",
         .elsewhere.as_ref().map_or_else(
-            || format!("  no backend of `{source_id}` attaches it"),
-            |ids| format!("  `{ids}` does, and `--backend force:{ids}` is how to ask for it"),
+            || format!("no backend of `{source_id}` attaches it"),
+            |elsewhere| elsewhere.to_string(),
         )
     )]
     KeyNotCarried {
         source_id: String,
         backend: String,
         key: KeyKind,
-        /// The backend of the chain that does attach it, when one does.
-        elsewhere: Option<String>,
+        /// The backend of the chain that does attach it, and whether it can be
+        /// asked for here; `None` when no backend attaches it.
+        elsewhere: Option<KeyElsewhere>,
     },
+    /// The selected backend unwinds through [`crate::stack::choose`], and
+    /// the choice is refused: a forced `--stack` mode this machine lacks what
+    /// it needs for or this build does not read, `--stack auto` with nothing
+    /// to pick, `--symbols debuginfod` with no server named. Refused here
+    /// rather than left out of the resolved file, so that `--dump-resolved`
+    /// refuses what the run would, with the same reason and the same code.
+    #[error("`{source_id}` on `{backend}` cannot unwind as asked: {reason}")]
+    StackRefused {
+        source_id: String,
+        backend: String,
+        reason: String,
+        whose: crate::collect::Whose,
+    },
+}
+
+/// A backend of the chain that attaches a key the selected one does not, and
+/// what stands between the request and it.
+///
+/// The first backend that attaches the key is not necessarily one the request
+/// can be moved to: it may serve neither the target nor the mode, this machine
+/// may lack what it needs, or this build may have no collector for it. Naming
+/// it in a `--backend force:` hint regardless sends the reader to a second
+/// refusal. The resolver picks, in chain order, the first backend of the best
+/// kind: one that can be forced, then one only the machine keeps out, then one
+/// only the build does, then one the request's target or mode rules out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyElsewhere {
+    /// Attaches the key, serves the target and mode, is collected by this
+    /// build, and nothing it needs is missing here: pinning it is the fix.
+    Forceable(String),
+    /// Attaches the key and is collected by this build, but this machine lacks
+    /// something it needs.
+    Missing { backend: String, reason: String },
+    /// Attaches the key, and this build has no collector for it.
+    Unwritten(String),
+    /// Attaches the key, and cannot serve the request's target or mode.
+    Unfit { backend: String, reason: String },
+}
+
+impl KeyElsewhere {
+    /// Whose gap the refusal is, per [`crate::collect::Whose`].
+    pub fn whose(&self) -> crate::collect::Whose {
+        use crate::collect::Whose;
+        match self {
+            KeyElsewhere::Forceable(_) | KeyElsewhere::Unfit { .. } => Whose::Request,
+            KeyElsewhere::Missing { .. } => Whose::Machine,
+            KeyElsewhere::Unwritten(_) => Whose::Build,
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            KeyElsewhere::Forceable(_) => 0,
+            KeyElsewhere::Missing { .. } => 1,
+            KeyElsewhere::Unwritten(_) => 2,
+            KeyElsewhere::Unfit { .. } => 3,
+        }
+    }
+}
+
+impl fmt::Display for KeyElsewhere {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyElsewhere::Forceable(id) => {
+                write!(
+                    f,
+                    "`{id}` does, and `--backend force:{id}` is how to ask for it"
+                )
+            }
+            KeyElsewhere::Missing { backend, reason } => write!(
+                f,
+                "`{backend}` does, and this machine cannot run it: {reason}"
+            ),
+            KeyElsewhere::Unwritten(id) => {
+                write!(f, "`{id}` does, and this build has no collector for it yet")
+            }
+            KeyElsewhere::Unfit { backend, reason } => {
+                write!(
+                    f,
+                    "`{backend}` does, and cannot serve this request: {reason}"
+                )
+            }
+        }
+    }
 }
 
 impl From<ResolveError> for ParseError {
@@ -404,7 +495,7 @@ pub fn resolve(
             return Err(refuse(vec![reason]));
         }
         check_filter_fields(entry, backend, request)?;
-        check_keys_carried(entry, backend, request)?;
+        check_keys_carried(entry, backend, request, capabilities)?;
         let requirements = probe_all(capabilities, backend, Some(&request.target));
         let missing: Vec<String> = requirements
             .iter()
@@ -414,7 +505,7 @@ pub fn resolve(
         if !missing.is_empty() && crate::collect::implements(request.source.as_str(), &backend.id) {
             return Err(refuse(missing));
         }
-        return Ok(build(
+        return build(
             entry,
             request,
             backend,
@@ -422,7 +513,7 @@ pub fn resolve(
             true,
             requirements,
             capabilities,
-        ));
+        );
     }
 
     let mut chain = Vec::new();
@@ -470,7 +561,7 @@ pub fn resolve(
 
         if all_checked && implemented {
             check_filter_fields(entry, backend, request)?;
-            check_keys_carried(entry, backend, request)?;
+            check_keys_carried(entry, backend, request, capabilities)?;
             let mut resolved = build(
                 entry,
                 request,
@@ -479,7 +570,7 @@ pub fn resolve(
                 false,
                 requirements,
                 capabilities,
-            );
+            )?;
             resolved.chain = finish_chain(chain, &backend.id, entry, index);
             return Ok(resolved);
         }
@@ -517,7 +608,7 @@ pub fn resolve(
             continue;
         };
         check_filter_fields(entry, backend, request)?;
-        check_keys_carried(entry, backend, request)?;
+        check_keys_carried(entry, backend, request, capabilities)?;
         let mut resolved = build(
             entry,
             request,
@@ -526,7 +617,7 @@ pub fn resolve(
             false,
             requirements,
             capabilities,
-        );
+        )?;
         resolved.chain = chain
             .into_iter()
             .map(|considered| {
@@ -605,7 +696,14 @@ fn build(
     pinned: bool,
     requirements: Vec<Requirement>,
     capabilities: &Capabilities,
-) -> ResolvedRequest {
+) -> Result<ResolvedRequest, ResolveError> {
+    let stack = crate::stack::recorded_choice(request, &backend.id, capabilities.environment())
+        .map_err(|refusal| ResolveError::StackRefused {
+            source_id: request.source.to_string(),
+            backend: backend.id.clone(),
+            reason: refusal.reason,
+            whose: refusal.whose,
+        })?;
     let unverified: Vec<String> = requirements
         .iter()
         .filter(|requirement| requirement.probe.is_unknown())
@@ -623,7 +721,7 @@ fn build(
         ));
     }
 
-    ResolvedRequest {
+    Ok(ResolvedRequest {
         request: request.clone(),
         backend: SelectedBackend {
             id: backend.id.clone(),
@@ -643,8 +741,15 @@ fn build(
         degradations,
         unverified,
         environment: capabilities.environment().clone(),
-        stack: crate::stack::recorded_choice(request, &backend.id, capabilities.environment()),
-    }
+        stack,
+    })
+}
+
+/// Whether a backend of the chain serves the request's target and mode, so
+/// that what could still rule it out is the machine's: its requirements.
+pub fn serves(entry: &Entry, backend: &Backend, request: &Request) -> bool {
+    cannot_serve_target(entry, backend, request.target.kind()).is_none()
+        && cannot_serve_mode(entry, backend, request.mode.kind()).is_none()
 }
 
 /// Why a backend cannot serve a target, or `None` when it can.
@@ -656,13 +761,6 @@ fn build(
 /// `/proc/diskstats` knows the machine and `io.stat` knows a cgroup, and
 /// letting either answer for the other is the worst bug this tool can have --
 /// a number about something else, presented as the one that was asked for.
-/// Whether a backend of the chain serves the request's target and mode, so
-/// that what could still rule it out is the machine's: its requirements.
-pub fn serves(entry: &Entry, backend: &Backend, request: &Request) -> bool {
-    cannot_serve_target(entry, backend, request.target.kind()).is_none()
-        && cannot_serve_mode(entry, backend, request.mode.kind()).is_none()
-}
-
 fn cannot_serve_target(entry: &Entry, backend: &Backend, kind: TargetKind) -> Option<String> {
     match entry.backend_target_support(backend, kind) {
         TargetSupport::Native => None,
@@ -771,21 +869,64 @@ fn check_keys_carried(
     entry: &Entry,
     backend: &Backend,
     request: &Request,
+    capabilities: &Capabilities,
 ) -> Result<(), ResolveError> {
     let attached = entry.backend_keys(backend);
     for key in &request.keys {
         if attached.contains(key) || !entry.keys.contains(key) {
             continue;
         }
-        let elsewhere = entry.backends_carrying_key(*key);
+        let elsewhere = entry
+            .backends_carrying_key(*key)
+            .into_iter()
+            .filter_map(|id| entry.backends.iter().find(|other| other.id == id))
+            .map(|other| key_elsewhere(entry, other, request, capabilities))
+            .min_by_key(KeyElsewhere::rank);
         return Err(ResolveError::KeyNotCarried {
             source_id: request.source.to_string(),
             backend: backend.id.clone(),
             key: *key,
-            elsewhere: elsewhere.first().map(|id| (*id).to_string()),
+            elsewhere,
         });
     }
     Ok(())
+}
+
+/// What stands between the request and a backend that attaches its key. The
+/// build's gap is looked at before the machine's, as the pinned path does: a
+/// backend nobody wrote is unwritten on every machine, and calling it the
+/// machine's would send a reader after privileges for a collector that does
+/// not exist.
+fn key_elsewhere(
+    entry: &Entry,
+    backend: &Backend,
+    request: &Request,
+    capabilities: &Capabilities,
+) -> KeyElsewhere {
+    let unfit = cannot_serve_target(entry, backend, request.target.kind())
+        .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()));
+    if let Some(reason) = unfit {
+        return KeyElsewhere::Unfit {
+            backend: backend.id.clone(),
+            reason,
+        };
+    }
+    if !crate::collect::implements(request.source.as_str(), &backend.id) {
+        return KeyElsewhere::Unwritten(backend.id.clone());
+    }
+    let missing: Vec<String> = probe_all(capabilities, backend, Some(&request.target))
+        .iter()
+        .filter(|requirement| requirement.probe.is_missing())
+        .map(|requirement| format!("{}: {}", requirement.needs, requirement.probe))
+        .collect();
+    if missing.is_empty() {
+        KeyElsewhere::Forceable(backend.id.clone())
+    } else {
+        KeyElsewhere::Missing {
+            backend: backend.id.clone(),
+            reason: missing.join("; "),
+        }
+    }
 }
 
 /// The comparisons of a predicate the backend's program carries: the parts of
@@ -976,12 +1117,13 @@ mod tests {
         }
     }
 
-    /// A key the pinned backend does not attach is refused with the backend
-    /// that does; one it attaches, or one the entry never offers (the
-    /// validator's), is let through.
+    /// A key the pinned backend does not attach is refused, naming the backend
+    /// that does and what stands between the request and it; one it attaches,
+    /// or one the entry never offers (the validator's), is let through.
     #[test]
     fn a_key_the_selected_backend_does_not_attach_is_refused_naming_one_that_does() {
         let embedded = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
         let mut entry = embedded.get(&"io.bytes".parse().unwrap()).unwrap().clone();
         let proc = entry
             .backends
@@ -993,26 +1135,110 @@ mod tests {
         let entry = catalog.get(&"io.bytes".parse().unwrap()).unwrap();
         let mut request = fixture("io.bytes", Target::System);
         request.keys = vec![KeyKind::Task];
-        let error = check_keys_carried(entry, &entry.backends[proc], &request).unwrap_err();
+        let error =
+            check_keys_carried(entry, &entry.backends[proc], &request, &capabilities).unwrap_err();
+        let ResolveError::KeyNotCarried {
+            source_id,
+            backend,
+            key,
+            elsewhere,
+        } = &error
+        else {
+            panic!("not a KeyNotCarried: {error}");
+        };
         assert_eq!(
-            error,
-            ResolveError::KeyNotCarried {
-                source_id: "io.bytes".into(),
-                backend: "fs:proc".into(),
-                key: KeyKind::Task,
-                elsewhere: Some(entry.backends[0].id.clone()),
-            }
+            (source_id.as_str(), backend.as_str(), *key),
+            ("io.bytes", "fs:proc", KeyKind::Task)
         );
+        // The chain's first backend attaches `task`; whether it is offered as
+        // a pin depends on whether this build collects it there, and a pin
+        // hint is never given for one it does not.
+        let first = &entry.backends[0].id;
+        let elsewhere = elsewhere.as_ref().expect("a backend attaches task");
+        if crate::collect::implements("io.bytes", first) {
+            assert!(
+                matches!(elsewhere, KeyElsewhere::Forceable(id) if id == first)
+                    || matches!(elsewhere, KeyElsewhere::Missing { backend, .. } if backend == first),
+                "{elsewhere:?}"
+            );
+        } else {
+            assert!(
+                !matches!(elsewhere, KeyElsewhere::Forceable(_)),
+                "{elsewhere:?}"
+            );
+            assert!(
+                !error.to_string().contains("--backend force:"),
+                "a pin hint for a backend nothing collects: {error}"
+            );
+        }
         request.keys = vec![KeyKind::Dev];
         assert_eq!(
-            check_keys_carried(entry, &entry.backends[proc], &request),
+            check_keys_carried(entry, &entry.backends[proc], &request, &capabilities),
             Ok(())
         );
         request.keys = vec![KeyKind::Req];
         assert_eq!(
-            check_keys_carried(entry, &entry.backends[proc], &request),
+            check_keys_carried(entry, &entry.backends[proc], &request, &capabilities),
             Ok(())
         );
+    }
+
+    /// Each of the four answers about a backend that attaches the key, held
+    /// to what is independently true: `/proc/diskstats` exists on this
+    /// machine (checked with `std::fs`), a path under a directory that does
+    /// not exist does not, `fs:cgroup` declares no system target, and the
+    /// collector registry is what `omn` itself refuses as unwritten.
+    #[test]
+    fn a_backend_that_attaches_the_key_is_named_for_what_keeps_the_request_from_it() {
+        use crate::collect::Whose;
+        let embedded = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let entry = embedded.get(&"io.bytes".parse().unwrap()).unwrap();
+        let by_id = |id: &str| entry.backends.iter().find(|b| b.id == id).unwrap().clone();
+        let request = fixture("io.bytes", Target::System);
+
+        if std::fs::metadata("/proc/diskstats").is_ok() {
+            let answer = key_elsewhere(entry, &by_id("fs:proc"), &request, &capabilities);
+            assert_eq!(answer, KeyElsewhere::Forceable("fs:proc".into()));
+            assert_eq!(answer.whose(), Whose::Request);
+            assert!(answer.to_string().contains("--backend force:fs:proc"));
+        } else {
+            eprintln!("skipped the forceable half: no /proc/diskstats here");
+        }
+
+        let mut absent = by_id("fs:proc");
+        let path = "/omn-no-such-directory/diskstats";
+        assert!(std::fs::metadata(path).is_err());
+        absent.requires = vec![path.to_owned()];
+        let answer = key_elsewhere(entry, &absent, &request, &capabilities);
+        assert!(
+            matches!(&answer, KeyElsewhere::Missing { backend, reason }
+                if backend == "fs:proc" && reason.contains(path)),
+            "{answer:?}"
+        );
+        assert_eq!(answer.whose(), Whose::Machine);
+        assert!(!answer.to_string().contains("--backend force:"), "{answer}");
+
+        let answer = key_elsewhere(entry, &by_id("fs:cgroup"), &request, &capabilities);
+        assert!(
+            matches!(&answer, KeyElsewhere::Unfit { backend, .. } if backend == "fs:cgroup"),
+            "{answer:?}"
+        );
+        assert_eq!(answer.whose(), Whose::Request);
+
+        let unwritten = entry
+            .backends
+            .iter()
+            .find(|b| !crate::collect::implements("io.bytes", &b.id));
+        match unwritten {
+            Some(backend) if serves(entry, backend, &request) => {
+                let answer = key_elsewhere(entry, backend, &request, &capabilities);
+                assert_eq!(answer, KeyElsewhere::Unwritten(backend.id.clone()));
+                assert_eq!(answer.whose(), Whose::Build);
+                assert!(!answer.to_string().contains("--backend force:"), "{answer}");
+            }
+            _ => eprintln!("skipped the unwritten half: every io.bytes backend is collected"),
+        }
     }
 
     #[test]

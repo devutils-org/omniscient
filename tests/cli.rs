@@ -1679,7 +1679,10 @@ fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backe
         );
     }
 
-    // Declared: refused, as the request's, naming a backend that attaches it.
+    // Declared: refused, naming a backend that attaches it, and the refusal
+    // is held to what following it does. A `--backend force:` hint must lead
+    // to a run this build does not refuse as unwritten; a backend named as
+    // unwritten must be one the runner itself refuses as unwritten.
     let catalog = patched_catalog(
         "keys",
         "io.yaml",
@@ -1691,19 +1694,55 @@ fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backe
         .args(args)
         .output()
         .unwrap();
-    assert_eq!(
-        refused.status.code(),
-        Some(EXIT_REJECTED),
-        "{}",
-        stderr(&refused)
-    );
     let message = stderr(&refused);
     assert!(
         message.contains("keyed on `task`, which the selected backend `fs:proc` does not attach"),
         "{message}"
     );
-    assert!(message.contains("--backend force:bpf:raw_tp"), "{message}");
     assert!(stdout(&refused).is_empty(), "{}", stdout(&refused));
+    let named = message
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix('`'))
+        .and_then(|rest| rest.split('`').next())
+        .expect("a backend that attaches `task` is named")
+        .to_owned();
+    let forced_arg = format!("force:{named}");
+    let mut forced_args = args.to_vec();
+    forced_args[3] = forced_arg.as_str();
+    let forced = Command::new(BINARY)
+        .env("OMN_CATALOG_DIR", &catalog)
+        .args(&forced_args)
+        .output()
+        .unwrap();
+    let unwritten = |output: &std::process::Output| {
+        output.status.code() == Some(EXIT_NOT_IMPLEMENTED)
+            && stderr(output).contains("no collector is written")
+    };
+    if message.contains(&format!("--backend force:{named}")) {
+        assert_eq!(refused.status.code(), Some(EXIT_REJECTED), "{message}");
+        assert!(
+            !unwritten(&forced),
+            "the hint `--backend force:{named}` leads to an unwritten backend: {}",
+            stderr(&forced)
+        );
+    } else if message.contains("has no collector for it") {
+        assert_eq!(
+            refused.status.code(),
+            Some(EXIT_NOT_IMPLEMENTED),
+            "an unwritten backend is the build's gap: {message}"
+        );
+        assert!(
+            unwritten(&forced),
+            "`{named}` was called unwritten, and forcing it said: {}",
+            stderr(&forced)
+        );
+    } else {
+        assert!(
+            message.contains("this machine cannot run it"),
+            "neither a pin, an unwritten backend nor a missing one: {message}"
+        );
+        assert_eq!(refused.status.code(), Some(EXIT_UNAVAILABLE), "{message}");
+    }
 }
 
 /// A chain that ends on a backend nobody wrote leads its refusal with the

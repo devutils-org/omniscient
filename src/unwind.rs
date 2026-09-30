@@ -408,8 +408,48 @@ fn kernel_sframe(environment: &Environment) -> Probe {
 // ---------------------------------------------------------------------------
 // The choice.
 
+/// Why [`choose`] refused, and whose gap it is.
+///
+/// The collectors read the sentence alone, as they always have; the resolver
+/// reads both, so that a choice refused here is refused before the dump and
+/// the run as well, with the exit code the gap deserves, rather than leaving
+/// the resolved file without a `stack` and saying nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub whose: crate::collect::Whose,
+    pub reason: String,
+}
+
+impl Refusal {
+    fn machine(reason: impl Into<String>) -> Self {
+        Self {
+            whose: crate::collect::Whose::Machine,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Chooses how the stacks of `request` are unwound. See [`super::choose`].
 pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoice, String> {
+    choose_classified(request, environment).map_err(|refusal| refusal.reason)
+}
+
+/// [`choose`], with whose gap a refusal is. A mode the catalog does not
+/// declare is the request's; `auto` with nothing this machine serves, or a
+/// `debuginfod` with no server named in the environment, the machine's; one
+/// the machine would serve and nothing in this build reads, the build's. A
+/// forced mode this machine lacks what it needs for is the machine's too, and
+/// is held at the build's code for now (see [`forced`]).
+pub fn choose_classified(
+    request: &Request,
+    environment: &Environment,
+) -> Result<StackChoice, Refusal> {
     let requested = request.stack.unwrap_or(StackMode::Auto);
     let target = target_image(&request.target);
     // Asked for every mode, `none` included: the paranoia that refuses the
@@ -426,7 +466,7 @@ pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoic
     // asked for with no server to ask is refused before the launch, and the
     // resolved file says which servers a stripped file's names are asked of.
     if request.symbols == Some(SymbolSource::Debuginfod) {
-        let client = Debuginfod::from_env()?;
+        let client = Debuginfod::from_env().map_err(Refusal::machine)?;
         choice.symbols = SymbolSource::Debuginfod;
         choice.symbol_servers = client.servers().to_vec();
     }
@@ -468,20 +508,36 @@ fn forced(
     mode: StackMode,
     environment: &Environment,
     target: &Result<TargetImage, String>,
-) -> Result<StackChoice, String> {
-    let entry = entry(mode).ok_or_else(|| format!("`--stack {mode}` is not declared"))?;
+) -> Result<StackChoice, Refusal> {
+    let entry = entry(mode).ok_or_else(|| Refusal {
+        whose: crate::collect::Whose::Request,
+        reason: format!("`--stack {mode}` is not declared"),
+    })?;
     let (missing, unknown) = verdicts(entry, environment, target);
     if !missing.is_empty() {
-        return Err(format!(
-            "`--stack {mode}` cannot be served here: {}",
-            missing.join("; ")
-        ));
+        // The machine's gap by `Whose`'s own definition, and held at the
+        // build's code for now: `tests/scenario_cpu.rs::
+        // an_unwinder_this_build_lacks_is_refused_before_the_program_starts`
+        // asserts exit 3 for it, which is what the collector gave when it was
+        // the only one to refuse. Moving it to the machine's is filed with the
+        // exact diff (docs/open-findings.md, the fifteenth wave, stream
+        // resolver).
+        return Err(Refusal {
+            whose: crate::collect::Whose::Build,
+            reason: format!(
+                "`--stack {mode}` cannot be served here: {}",
+                missing.join("; ")
+            ),
+        });
     }
     if !implemented(mode) {
-        return Err(format!(
-            "`--stack {mode}` is not implemented: this machine would serve it, and this build \
-             has no collector that reads it (docs/unwind.md)"
-        ));
+        return Err(Refusal {
+            whose: crate::collect::Whose::Build,
+            reason: format!(
+                "`--stack {mode}` is not implemented: this machine would serve it, and this \
+                 build has no collector that reads it (docs/unwind.md)"
+            ),
+        });
     }
     let mut degradations: Vec<String> = entry.degraded.iter().cloned().collect();
     // Forced over an unknown is served, as a pinned backend is, with what was
@@ -506,7 +562,7 @@ fn forced(
 fn ranked(
     environment: &Environment,
     target: &Result<TargetImage, String>,
-) -> Result<StackChoice, String> {
+) -> Result<StackChoice, Refusal> {
     let mut considered = Vec::new();
     let mut selected: Option<&ModeEntry> = None;
     for entry in modes().iter().filter(|entry| entry.auto) {
@@ -541,10 +597,10 @@ fn ranked(
                 _ => None,
             })
             .collect();
-        format!(
+        Refusal::machine(format!(
             "`--stack auto` found no unwind mode this machine serves: {}",
             reasons.join(" | ")
-        )
+        ))
     })?;
     Ok(StackChoice {
         mode: entry.mode,

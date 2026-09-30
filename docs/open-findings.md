@@ -8765,7 +8765,7 @@ will take once the file exists.
 Stream resolver's handoff is `docs/fixes/w15-resolver.md`. Nothing here blocks
 it; each item is the other half of a change landed in its own files.
 
-### Declared: `symbols: None,` in eleven struct literals outside this stream's files
+### Declared: `symbols: None,` in thirteen struct literals outside this stream's files
 
 `Request` gained `symbols: Option<SymbolSource>` (`--symbols`, stream U's
 request of the fourteenth wave). Rust has no default for a field left out of
@@ -8870,3 +8870,42 @@ makes that edit in a copy of the catalog and holds the refusal to
 `/proc/diskstats`, whose events carry `dev` and no task; with the lines in the
 shipped catalog it takes the refusal half directly. `io.iops`'s `fs:proc` is
 the same case (`keys: [dev]`).
+
+### After review: three more, from the resolver's fixes
+
+**`tests/scenario_cpu.rs` (P's): a forced `--stack` mode this machine cannot
+serve is the machine's gap.** `unwind::Refusal` now says whose a refusal of
+`stack::choose` is, and the resolver refuses with it before the dump and the
+run (`ResolveError::StackRefused`). `--stack lbr` on a machine with no branch
+call stack and `--stack sframe` on a kernel that does not unwind from
+`.sframe` are `Whose::Machine` by its own definition ("the request is fine and
+this machine cannot serve it"), and are held at `Whose::Build` (exit 3) only
+because `an_unwinder_this_build_lacks_is_refused_before_the_program_starts`
+asserts 3 for both. The diff, to take in one commit:
+
+```rust
+// src/unwind.rs, fn forced, the `!missing.is_empty()` branch
+-            whose: crate::collect::Whose::Build,
++            whose: crate::collect::Whose::Machine,
+// (and drop the comment above it that says it is held)
+
+// tests/scenario_cpu.rs, an_unwinder_this_build_lacks_is_refused_before_the_program_starts
+-        assert_eq!(code, 3, "`--stack {stack}` is this build's gap: {message}");
++        let expected = if message.contains("cannot be served here") { 1 } else { 3 };
++        assert_eq!(code, expected, "`--stack {stack}`: {message}");
+```
+
+**`src/triage/engine.rs` (the engine stream's): two resolver refusals whose
+gap is not the request's.** `KeyNotCarried` now carries
+`elsewhere: Option<KeyElsewhere>`, and `StackRefused` a `whose`. The two
+`match error` blocks (lines ~112 and ~177) classify both as `_`. The arms, to
+add before the `_`, mirroring `src/main.rs::resolution_is`:
+
+```rust
+resolve::ResolveError::KeyNotCarried { elsewhere: Some(elsewhere), .. } => elsewhere.whose(),
+resolve::ResolveError::StackRefused { whose, .. } => *whose,
+```
+
+**`STATE.md:348` (the coordinator's): the mode table is `catalog/unwind.yaml`.**
+The line still says "chain (`src/unwind.yaml`)"; the file moved in this
+stream's first commit.

@@ -1934,6 +1934,88 @@ fn symbols_from_debuginfod_with_nowhere_to_ask_are_refused_before_the_program_st
     );
 }
 
+/// A choice the run refuses is refused by `--dump-resolved` too, with the same
+/// reason and the same exit code, rather than dumped with no `stack`. The
+/// ground truth is the run's own refusal of the same request, made before the
+/// program it would profile starts (the program creates a file as its first
+/// act, and the file is not there): `--symbols debuginfod` with no
+/// DEBUGINFOD_URLS, and a forced `--stack` mode this machine or build cannot
+/// serve (`lbr` needs an Intel branch call stack, `sframe` a kernel that
+/// unwinds from `.sframe`; whichever this machine refuses is asked).
+#[test]
+fn a_choice_the_run_refuses_is_refused_by_the_dump_with_the_same_reason() {
+    let marker = scratch().join("dump-refused-launched");
+    let mut asked = 0;
+    let cases: [&[&str]; 3] = [
+        &["--symbols", "debuginfod"],
+        &["--stack", "lbr"],
+        &["--stack", "sframe"],
+    ];
+    for extra in cases {
+        let _ = std::fs::remove_file(&marker);
+        let run = |dump: bool| {
+            let mut command = Command::new(BINARY);
+            command
+                .env_remove("DEBUGINFOD_URLS")
+                .args(["cpu.profile", "--mode", "sample@99hz", "--emit", "stack"])
+                .args(extra);
+            if dump {
+                command.args(["--format", "json", "--dump-resolved"]);
+            }
+            command
+                .args(["--", "/bin/sh", "-c", "touch \"$0\""])
+                .arg(&marker)
+                .output()
+                .unwrap()
+        };
+        let ran = run(false);
+        let ran_said = String::from_utf8_lossy(&ran.stderr).into_owned();
+        if ran_said.contains("no viable backend") {
+            eprintln!("skipped: this machine would not profile ({ran_said})");
+            return;
+        }
+        if ran.status.success() {
+            // This machine serves the forced mode: nothing refused to hold
+            // the dump to.
+            eprintln!("not asked: {extra:?} is served here");
+            continue;
+        }
+        assert!(
+            !marker.exists(),
+            "the program ran before {extra:?} was refused"
+        );
+        let dumped = run(true);
+        let dump_said = String::from_utf8_lossy(&dumped.stderr).into_owned();
+        assert_eq!(
+            dumped.status.code(),
+            ran.status.code(),
+            "the dump of {extra:?}: {dump_said}\nthe run: {ran_said}"
+        );
+        assert!(
+            dumped.stdout.is_empty(),
+            "a resolved file was printed for a request the run refuses: {}",
+            String::from_utf8_lossy(&dumped.stdout)
+        );
+        let reason = |said: &str| {
+            said.lines()
+                .find(|line| line.starts_with("error:"))
+                .map(str::to_owned)
+                .unwrap_or_default()
+        };
+        assert_eq!(reason(&dump_said), reason(&ran_said), "{extra:?}");
+        assert!(
+            reason(&dump_said).contains(extra[0]),
+            "the reason names {}: {dump_said}",
+            extra[0]
+        );
+        asked += 1;
+    }
+    assert!(
+        asked >= 1,
+        "DEBUGINFOD_URLS was unset, and nothing was refused"
+    );
+}
+
 /// The unwind choice is in the resolved file before anything runs, and it is
 /// the choice the run then makes: the mode the dump names is the one the
 /// profile's own notes say it used, for a build whose frame pointers this file

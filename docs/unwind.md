@@ -281,10 +281,9 @@ the unstripped build's. Again with the same client: zero new requests of any
 kind -- the cache answered the one it had, the run remembered the one it did
 not (Arch's `libc.so.6` is stripped, so the client asks for it too).
 
-**Not wired**: `--symbols` itself. The request field and the flag are R's
-(`src/request.rs`, `src/cli.rs`); filed below with the one line in
-`src/collect/cpu/mod.rs` (mine) that reads it, which is `debuginfod: None`
-until then.
+**Wired since the fifteenth wave**: `--symbols` itself, as a flag and a
+`symbols:` field of a session file; the profile builds its client from the
+unwind choice. See "The fifteenth wave" below.
 
 ## 5. The profile's drops, per ring
 
@@ -421,20 +420,26 @@ What came of each:
    alternative, a DWARF unwinder of our own, is what `ROADMAP.md` rules out.
    The two files change by one dependency line and its lock entries, and
    nothing else. The coordinator is asked to take it at the merge (filed).
-2. **`src/unwind.yaml` instead of `catalog/unwind.yaml`.** Real, and kept.
+2. **`src/unwind.yaml` instead of `catalog/unwind.yaml`.** Real, kept in the
+   fourteenth wave, and **closed in the fifteenth**: the table is
+   `catalog/unwind.yaml` now (see "The fifteenth wave" below). As it stood:
    `Catalog::load_dir` parses every YAML file of the directory as a list of
    entries. `tests/runner.rs` and `omn --catalog <dir>` load `catalog/` that
    way, so a mode table there breaks them; no YAML shape can be both a mode
    table and an empty entry list. The move needs one line in `catalog.rs`,
    which is R's (filed). Until then the table is data compiled in from
    `src/`, which keeps the build green.
-3. **The choice does not reach the resolved file.** Real, and still open.
+3. **The choice does not reach the resolved file.** Real, open in the
+   fourteenth wave, and **closed in the fifteenth**: `ResolvedRequest.stack`
+   (see "The fifteenth wave" below). As it stood:
    `ResolvedRequest` is `resolve.rs` (P's), and `resolved.json` is written by
    `main.rs` (R's) from the resolution, before any collector runs. None of U's
    lines can add a field to it. The `StackChoice` serializes and is ready;
    its content reaches the profile's notes and degradations. Filed for P and R
    with the exact field.
-4. **`--symbols` cannot be reached.** Real, and still open. The flag is a
+4. **`--symbols` cannot be reached.** Real, open in the fourteenth wave,
+   and **closed in the fifteenth** (see "The fifteenth wave" below). As it
+   stood: The flag is a
    `Request` field and a `cli.rs` argument, both R's. U owns `StackMode` and
    its parsing, and folding a second axis into `--stack` would be a second
    mechanism beside the one the brief asks for. `debuginfod: None` stays until
@@ -460,11 +465,11 @@ What came of each:
 
 ## For `DECISIONS.md`
 
-- **The mode table is `src/unwind.yaml`, not `catalog/unwind.yaml`.**
-  `Catalog::load_dir` parses every YAML file in the catalog directory as catalog
-  entries, and three scenarios copy the whole directory for `--catalog`
-  (`tests/triage.rs`, `scenario_cpu.rs`, `scenario_proc.rs`); a mode table
-  there breaks all three. Moving it is one line in `catalog.rs` (filed).
+- **The mode table is `catalog/unwind.yaml`** (superseding the fourteenth
+  wave's `src/unwind.yaml`). `Catalog::load_dir` passes over
+  `catalog::UNWIND_TABLE`, so the three scenarios that copy the whole
+  directory for `--catalog` (`tests/triage.rs`, `scenario_cpu.rs`,
+  `scenario_proc.rs`) copy the table with the entries and still load.
 - **`auto` is decided by the target as well as the machine.** `fp+leaf` for a
   build with frame pointers, `dwarf` for one without: the cheap mode where it
   loses nothing, the expensive one only where the cheap one would be a profile
@@ -563,3 +568,16 @@ The three items filed above for R and P are closed; the handoff is
   their stacks. Held by
   `tests/unwind.rs::the_resolved_file_says_how_the_stacks_will_be_unwound_before_the_run`
   against the profile's own note of the mode it used.
+- **A refused choice is a refused request, in the dump as in the run.**
+  `stack::recorded_choice` used to turn a refusal of `choose` into an absent
+  `stack`, so `--dump-resolved --symbols debuginfod` with no
+  `DEBUGINFOD_URLS` printed a resolved file the run then refused. The resolver
+  now refuses it (`ResolveError::StackRefused`), with `choose`'s own reason
+  and a code from `unwind::Refusal::whose`: the machine's for `debuginfod`
+  with no server named and for `auto` with nothing served, the build's for a
+  mode nobody reads, the request's for one the table does not declare. A
+  forced mode this machine lacks what it needs for is the machine's by
+  `Whose`'s definition and is held at the build's code (3), which is what
+  `tests/scenario_cpu.rs` asserts; the change is filed. Held by
+  `tests/unwind.rs::a_choice_the_run_refuses_is_refused_by_the_dump_with_the_same_reason`,
+  against the run's own refusal of the same request.

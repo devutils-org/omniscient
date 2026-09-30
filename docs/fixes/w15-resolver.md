@@ -142,7 +142,7 @@ citing the two tests below.
 ## Files outside this stream's list
 
 `Request` gained a field, and Rust has no default for a field left out of a
-literal. Eleven `Request { .. }` literals outside this stream's files each
+literal. Thirteen `Request { .. }` literals outside this stream's files each
 gained exactly one line, `symbols: None,`, after `stack:`:
 
 - `src/collect/mod.rs` (seven test fixtures)
@@ -185,6 +185,16 @@ failed passed when rerun alone, once.
   `unwind`, the lib tests of `catalog`, `resolve`, `stack`, `request`, `cli`
   and `collect::cpu::profile`, and `catalog_model`).
 
+- **Third run, after the review's fixes.** `make check` failed at
+  `cross_compute::a_lossy_profile_marks_its_row...` (`sched.runqlat` 16.0 ms
+  against the kernel's 25.1 ms), load average 16. The one
+  `--no-fail-fast` run then failed `scenario_sched::one_known_number_of_round_trips...`
+  (3071 waits for 2000) and `triage::a_verdict_read_off_a_lossy_profile...`,
+  and passed `cross_compute`. All three passed alone, once, and none touches a
+  path this branch changed. Clippy (`--workspace --all-targets -D warnings`)
+  and fmt are clean. While iterating, `unwind::fp_leaf_recovers...` failed once
+  in a run of `tests/unwind.rs` and passed alone.
+
 For the flaky tally: `scenario_proc::defect_1_the_first_reading...` failed in
 both full runs (8 polls against 7, filtered against unfiltered) and passed
 alone. `scenario_proc::a_known_number_of_calls_and_an_injected_delay...`
@@ -201,6 +211,8 @@ counted 9 of 10 sleeps once.
 | the unwind modes read from a `--catalog` directory | `tests/cli.rs::the_unwind_modes_are_read_from_the_catalog_directory_they_sit_in` |
 | `Backend.keys` and its loader check | `catalog::tests::a_backend_attaching_a_key_its_entry_does_not_offer_is_refused` |
 | `KeyNotCarried` from the resolver | `resolve::tests::a_key_the_selected_backend_does_not_attach_is_refused_naming_one_that_does`; `tests/cli.rs::a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does` (held to `/proc/diskstats`, whose events carry no task) |
+| `KeyNotCarried` names a backend the request can be moved to, or says what keeps it out: pinnable (exit 2), missing on this machine (exit 1), unwritten in this build (exit 3), or unfit for the target or mode (exit 2) | `resolve::tests::a_backend_that_attaches_the_key_is_named_for_what_keeps_the_request_from_it` (held to `std::fs` on `/proc/diskstats` and on a path that does not exist, and to `fs:cgroup`'s declared targets); the CLI test above now follows the hint it prints and checks the run it leads to |
+| a stack choice the run refuses is refused by `--dump-resolved`, with the same reason and exit code | `tests/unwind.rs::a_choice_the_run_refuses_is_refused_by_the_dump_with_the_same_reason` (held to the run's own refusal, made before the program starts) |
 | the refusal's first line | `tests/cli.rs::a_refusal_for_an_unwritten_backend_leads_with_the_one_passed_over` (a binary with no shim beside it) |
 | phase 2: a complete `ResolvedRequest`, checked against the machine | `tests/cli.rs::the_resolved_request_for_a_live_pid_is_complete_and_says_what_the_machine_says` |
 | phase 7: CLI, then its file, gives the same numbers as the program's own | `tests/cli.rs::a_session_dumped_from_the_command_line_measures_what_the_command_line_measured` |
@@ -236,11 +248,20 @@ Nothing. The tests above ran with the capabilities `make` grants, at
 - **The resolved file records the unwind choice only for collectors that use
   it as chosen.** The IBS sources ask `choose` and then serve frame pointers,
   so recording the choice for them would misstate their stacks.
-- **A request keyed on a key the selected backend does not attach is refused
-  (exit 2), naming the backend that does attach it.** The chain is not walked
-  on to that backend. This is the same rule as a filter field, for the same
-  reason: which backend serves is the resolver's decision, and a key is part
-  of the question.
+- **A request keyed on a key the selected backend does not attach is
+  refused, naming the backend that does attach it and what stands between
+  the request and it.** The chain is not walked on to that backend: which
+  backend serves is the resolver's decision, and a key is part of the
+  question. The `--backend force:` hint is given only for a backend that
+  serves the target and mode, that this build collects, and whose
+  requirements this machine does not lack; the exit code is that backend's
+  gap (request 2, machine 1, build 3). Among several, chain order within the
+  best kind: forceable, then missing, then unwritten, then unfit.
+- **A stack choice `choose` refuses is a resolver refusal
+  (`ResolveError::StackRefused`)**, so the dump refuses what the run would.
+  Its code is `unwind::Refusal::whose`; a forced mode this machine cannot
+  serve is held at exit 3 until `tests/scenario_cpu.rs` takes the filed
+  change to exit 1.
 - **A no-collector refusal is the machine's (exit 1) when the backend passed
   over is one this build collects and that fits the request.** In that case
   the build is not what is missing; the machine or the install is.
@@ -256,17 +277,63 @@ Nothing. The tests above ran with the capabilities `make` grants, at
 Under "Needs from another stream — the fifteenth wave, stream resolver" in
 `docs/open-findings.md`:
 
-- the eleven `symbols: None,` lines, declared;
+- the thirteen `symbols: None,` lines, declared;
 - `src/collect/mod.rs`: `pub mod net`, `pub mod psi`,
   `ProgramStats::for_run` onto `bpf::enable_run_time_stats`;
 - J (`src/join.rs`): `decompose_within`, then the coordinator's swap;
-- `src/triage/engine.rs`: `NoBackendDeclares` should map to `Whose::Request`;
+- `src/triage/engine.rs`: `NoBackendDeclares` should map to `Whose::Request`,
+  and `KeyNotCarried` / `StackRefused` to the `whose` they carry;
+- `tests/scenario_cpu.rs` with `src/unwind.rs`: a forced `--stack` mode this
+  machine cannot serve moves from exit 3 to exit 1, in one commit;
+- the coordinator: `STATE.md:348` still says `src/unwind.yaml`;
 - the coordinator: `CATALOG.md:198` and `DECISIONS.md:443` should name
   `catalog/unwind.yaml`;
 - `src/collect/cpu/mod.rs` (optional): the factory could take
   `resolved.stack`;
 - `catalog/io.yaml`: `keys:` on `io.bytes`'s `fs:proc` and `fs:cgroup`, and
   on `io.iops`'s `fs:proc`.
+
+## Review, after the first two commits
+
+Six findings. Five were real and are fixed in the third commit; the sixth is
+a test run, not a defect.
+
+1. **`KeyNotCarried` named a backend this build cannot collect.** Real. The
+   hint was the chain's first backend that attaches the key, so with the
+   patched catalog it said `--backend force:bpf:raw_tp`, and following it gave
+   "no collector is written for `io.bytes` on backend `bpf:raw_tp`", exit 3.
+   `elsewhere` is now a `KeyElsewhere` that says whether the backend can be
+   forced, is missing something here, is unwritten, or cannot serve the
+   target or mode. Only the first gets a `--backend force:` line, and the exit
+   code follows it. The CLI test now follows the hint it is given and holds
+   the next run to it.
+2. **A refused stack choice vanished from the resolved file.** Real.
+   `recorded_choice` returns the refusal now, and the resolver refuses with
+   it (`StackRefused`), with `choose`'s own reason. `env -u DEBUGINFOD_URLS
+   omn --dump-resolved cpu.profile ... --symbols debuginfod -- true` is
+   refused with exit 1 and prints nothing to stdout. The same goes for a forced
+   `--stack lbr` or `sframe` this machine cannot serve (exit 3, held; see For
+   DECISIONS.md).
+3. **`serves` took `cannot_serve_target`'s doc comment.** Real. `serves`
+   now sits above that doc block.
+4. **"Eleven" `symbols: None,` lines.** Real: thirteen (seven in
+   `src/collect/mod.rs`, six elsewhere). Corrected here and in
+   `docs/open-findings.md`. The only other edits outside the owned list are
+   the ones in `src/collect/cpu/profile.rs`, which is owned.
+5. **`docs/unwind.md` said things this stream made false.** Real. Lines 284,
+   424, 431, 437 and the "For DECISIONS.md" line now say that each item closed
+   in the fifteenth wave, and point to its section. That section gains the
+   refusal of item 2. `STATE.md:348` is not this stream's, so it is filed.
+6. **The reviewer's test run.** Not a defect. It confirmed that the new tests
+   take their full paths with the capabilities present.
+
+Still open from this, in this stream's own file: `FilterFieldNotCarried`
+picks its `elsewhere` the old way, as the first backend that carries the
+field, with no check that it is collected or runnable here. This is the
+same shape as item 1. Nobody has reproduced a wrong hint from it, and this
+stream did not survey the shipped catalog for a case that would produce
+one. The same helper (`key_elsewhere`) would fix it. It was left unchanged
+because there is no case to test it against.
 
 ## Session index rows
 

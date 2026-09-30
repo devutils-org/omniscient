@@ -1415,19 +1415,25 @@ pub fn reads_symbols(source: &str) -> bool {
 }
 
 /// The unwind choice to record beside a resolved backend, for a collector that
-/// unwinds through [`choose`] ([`UNWOUND_BY_CHOICE`]); `None` for every other,
-/// and for a choice [`choose`] refuses -- that refusal is the collector's, made
-/// before the launch with its own reason and exit code.
+/// unwinds through [`choose`] ([`UNWOUND_BY_CHOICE`]); `Ok(None)` for every
+/// other.
+///
+/// A choice [`choose`] refuses is an error here, not an absent field: the
+/// resolver refuses the request with it, so that `--dump-resolved` refuses what
+/// the run would, with the same reason, rather than printing a resolved file
+/// that silently has no `stack`.
 pub fn recorded_choice(
     request: &Request,
     backend: &str,
     environment: &Environment,
-) -> Option<StackChoice> {
-    UNWOUND_BY_CHOICE
+) -> Result<Option<StackChoice>, unwind::Refusal> {
+    if !UNWOUND_BY_CHOICE
         .iter()
         .any(|(source, id)| *source == request.source.as_str() && *id == backend)
-        .then(|| choose(request, environment).ok())
-        .flatten()
+    {
+        return Ok(None);
+    }
+    unwind::choose_classified(request, environment).map(Some)
 }
 
 fn is_zero_u32(value: &u32) -> bool {

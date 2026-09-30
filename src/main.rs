@@ -469,11 +469,21 @@ fn symbols_not_read(session: &Session) -> Option<String> {
 /// backend that is not in its chain are misspellings; a filter field no backend
 /// carries is a request that cannot be served anywhere, and the one the
 /// selected backend does not carry names the `--backend force:` that would --
-/// which is a change to the request, not to the machine.
+/// which is a change to the request, not to the machine. A key the selected
+/// backend does not attach is whose the backend that would attach it says:
+/// see [`resolve::KeyElsewhere::whose`].
 fn resolution_is(error: &resolve::ResolveError) -> omn::collect::Whose {
     use omn::collect::Whose;
     match error {
         resolve::ResolveError::NoViableBackend { .. } => Whose::Machine,
+        // Whose it is depends on the backend that would attach the key: one
+        // the request can be pinned to, one this machine cannot run, or one
+        // this build has no collector for.
+        resolve::ResolveError::KeyNotCarried {
+            elsewhere: Some(elsewhere),
+            ..
+        } => elsewhere.whose(),
+        resolve::ResolveError::StackRefused { whose, .. } => *whose,
         _ => Whose::Request,
     }
 }
@@ -493,8 +503,11 @@ fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
             "`omn list {source_id}` names the backends of its chain."
         )),
         resolve::ResolveError::FilterFieldNotCarried { .. } => None,
-        // The message names the `--backend force:` that would attach it.
+        // The message names the backend that would attach it, and either the
+        // `--backend force:` that asks for it or what keeps it out of reach.
         resolve::ResolveError::KeyNotCarried { .. } => None,
+        // The reason is the unwind table's own, and says what it lacks.
+        resolve::ResolveError::StackRefused { .. } => None,
         resolve::ResolveError::NoBackendDeclares { source_id, .. } => Some(format!(
             "no machine could serve this; `omn list {source_id}` says which target and mode \
              each backend serves."
@@ -2012,7 +2025,7 @@ mod tests {
             source_id: "io.bytes".into(),
             backend: "fs:proc".into(),
             key: omn::request::KeyKind::Task,
-            elsewhere: Some("tracepoint".into()),
+            elsewhere: Some(resolve::KeyElsewhere::Forceable("tracepoint".into())),
         };
         assert_eq!(resolution_is(&error), omn::collect::Whose::Request);
         // No hint: the message already names what would serve it.
@@ -2032,6 +2045,35 @@ mod tests {
                 .to_string()
                 .contains("no backend of `io.bytes` attaches it"),
             "{nowhere}"
+        );
+        assert_eq!(resolution_is(&nowhere), omn::collect::Whose::Request);
+
+        // A backend nothing collects is the build's gap, and one the machine
+        // cannot run is the machine's; neither is offered as a pin.
+        let unwritten = resolve::ResolveError::KeyNotCarried {
+            source_id: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            key: omn::request::KeyKind::Task,
+            elsewhere: Some(resolve::KeyElsewhere::Unwritten("bpf:raw_tp".into())),
+        };
+        assert_eq!(resolution_is(&unwritten), omn::collect::Whose::Build);
+        assert!(
+            !unwritten.to_string().contains("--backend force:"),
+            "{unwritten}"
+        );
+        let missing = resolve::ResolveError::KeyNotCarried {
+            source_id: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            key: omn::request::KeyKind::Task,
+            elsewhere: Some(resolve::KeyElsewhere::Missing {
+                backend: "bpf:raw_tp".into(),
+                reason: "bpf: missing".into(),
+            }),
+        };
+        assert_eq!(resolution_is(&missing), omn::collect::Whose::Machine);
+        assert!(
+            !missing.to_string().contains("--backend force:"),
+            "{missing}"
         );
     }
 }
