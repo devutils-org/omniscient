@@ -862,6 +862,23 @@ and `triage::the_session_a_question_is_asked_through_is_an_ordinary_session`.
 Everything else green, with `target/debug/omn` carrying `cap_bpf,cap_perfmon`
 throughout; clippy (`--all-targets -D warnings`) and `cargo fmt --check` clean.
 
+After the review's fixes (`a1bfd7c`): the first `make check` died linking,
+`ld terminated with signal 7` with `/home` at 66 MB free; this worktree's
+`target/debug/incremental` (1.8 GB, rebuilt on demand) was removed and the
+check rerun with `CARGO_INCREMENTAL=0`. It went red in `scenario_net` at a
+load of 12, four tests short of events the kernel's own counters had --
+`every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason` (12 drops of
+the datagrams sent; also seen once alone earlier, then green alone),
+`the_ebpf_leg_of_the_sweep_answers_with_every_emit_it_promised`
+(`connections` produced nothing), `a_queue_that_delays_every_packet_is_measured_as_that_delay`
+(0 of 200) and `every_segment_the_kernel_resent_is_one_this_run_saw` (#flaky,
+2 of 3). None is a test this change touched; `scenario_net` alone right after
+was 39 of 39, and the one `cargo test --workspace --no-fail-fast` after it was
+green throughout (46 test binaries), with clippy and `cargo fmt --check`
+clean and `target/debug/omn` carrying `cap_bpf,cap_perfmon`. The first three
+are for the flaky tally: an eBPF count short under load, the shape of the
+preempted program's skipped runs (filed for the coordinator).
+
 A warning for whoever runs a wave on this machine next: with `/home` full,
 moving `target/debug` to `/tmp` looks like a way out and is not one. `/tmp`
 is mounted `nosuid`, so file capabilities on a binary there are ignored, every
