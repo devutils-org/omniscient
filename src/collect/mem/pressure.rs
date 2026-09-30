@@ -377,6 +377,10 @@ full avg10=0.98 avg60=1.87 avg300=2.76 total=903210
             .and_then(|value| value.as_f64())
             .unwrap_or(0.0);
 
+        if let Some(reason) = scratch.no_swap_room(2 * TOUCHED.saturating_sub(LIMIT)) {
+            eprintln!("skipped: {reason}");
+            return;
+        }
         assert!(scratch.write("memory.max", &LIMIT.to_string()));
         collector.sample(2).expect("a read before the work starts");
         let mut child = scratch.spawn_toucher(TOUCHED);

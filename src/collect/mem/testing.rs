@@ -66,6 +66,46 @@ impl Scratch {
         std::fs::write(self.path.join(file), value).is_ok()
     }
 
+    /// Why a child of this cgroup could not push `needed` bytes out to swap,
+    /// or `None` when it could: the free room the swap devices have, and the
+    /// `memory.swap.max` of this cgroup and every ancestor that has one.
+    ///
+    /// A limited cgroup that touches more than its limit either swaps or is
+    /// killed, and a child that is killed never reports that it finished --
+    /// which on the CI's second runner read as *"the child never finished
+    /// touching its memory"* after thirty seconds, three times, and as a
+    /// zero-filled cgroup holding 23 MB of swap where it had 160 MB to hold.
+    /// Both are the machine's swap, not the collector; this says so with the
+    /// numbers, before anything is forked.
+    pub fn no_swap_room(&self, needed: u64) -> Option<String> {
+        let free = free_swap();
+        if free < needed {
+            return Some(format!(
+                "this machine cannot serve a cgroup that has to swap: its swap devices have \
+                 {free} bytes free and a child of a limited cgroup has to push about {needed} \
+                 out (/proc/swaps)"
+            ));
+        }
+        let mut at = Some(self.path.as_path());
+        while let Some(dir) = at {
+            let Ok(text) = std::fs::read_to_string(dir.join("memory.swap.max")) else {
+                break;
+            };
+            if let Ok(limit) = text.trim().parse::<u64>() {
+                if limit < needed {
+                    return Some(format!(
+                        "this machine cannot serve a cgroup that has to swap: {}/memory.swap.max \
+                         is {limit} bytes and a child of a limited cgroup has to push about \
+                         {needed} out",
+                        dir.display()
+                    ));
+                }
+            }
+            at = dir.parent();
+        }
+        None
+    }
+
     /// Forks a process into this cgroup, has it touch `bytes` of anonymous
     /// memory, and returns once every page of it has been written.
     ///
@@ -254,6 +294,22 @@ impl Toucher {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         // SAFETY: reading the first byte of our own shared mapping.
         while unsafe { handshake.cast::<u8>().read_volatile() } == 0 {
+            // A child that died is said to have died, with how, rather than
+            // waited on for thirty seconds and reported as slow.
+            let mut status = 0;
+            // SAFETY: a non-blocking wait on our own child.
+            if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == pid {
+                let events = join
+                    .and_then(|procs| procs.parent())
+                    .and_then(|dir| std::fs::read_to_string(dir.join("memory.events")).ok())
+                    .unwrap_or_default();
+                panic!(
+                    "the child died before it finished touching its memory (wait status \
+                     {status:#x}, signal {}); its cgroup's memory.events: {}",
+                    libc::WTERMSIG(status),
+                    events.split_whitespace().collect::<Vec<_>>().join(" ")
+                );
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the child never finished touching its memory"
@@ -323,4 +379,21 @@ fn page_size() -> usize {
     } else {
         4096
     }
+}
+
+/// The free room on every swap device, in bytes: `/proc/swaps`' size less
+/// its used, summed. Zero where there is none or it cannot be read.
+pub(super) fn free_swap() -> u64 {
+    let Ok(text) = std::fs::read_to_string("/proc/swaps") else {
+        return 0;
+    };
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let size: u64 = fields.get(2)?.parse().ok()?;
+            let used: u64 = fields.get(3)?.parse().ok()?;
+            Some(size.saturating_sub(used) * 1024)
+        })
+        .sum()
 }

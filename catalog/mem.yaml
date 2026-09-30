@@ -230,7 +230,7 @@
     - {id: "pmu", requires: ["pmu:L1-dcache-load-misses", "pmu:L1-dcache-loads"], cost: free}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -250,7 +250,7 @@
          missed, not loads only, and what each vendor puts in it differs"}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -270,7 +270,7 @@
     - {id: "pmu", requires: ["pmu:dTLB-load-misses", "pmu:iTLB-load-misses"], cost: free}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -363,7 +363,7 @@
   modes: [sample, poll]
   emits: [topk, hist, raw, summary, timeline]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
-  keys: [task, mem, cpu]
+  keys: [node, task, mem, cpu]
   filter_fields: [comm, cpu, node]
   determinism: low
   caveats:
@@ -381,7 +381,7 @@
     - {id: "fs:sys:damon", requires: ["damon"], cost: low}
     - {id: "fs:sys:page_idle", requires: ["/sys/kernel/mm/page_idle/bitmap", "/proc/[pid]/pagemap"], cost: low,
        degraded: "expensive scan, perturbs reclaim"}
-    - {id: "fs:proc:clear_refs", requires: ["/proc/[pid]/smaps_rollup"], cost: high,
+    - {id: "fs:proc:clear_refs", requires: ["/proc/[pid]/smaps_rollup", "writable:/proc/[pid]/clear_refs"], cost: high,
        targets: {pid: native, tid: native, launch: native},
        degraded: "one number for the whole process, not which pages: the kernel's referenced bits are cleared and Referenced: is read back, so the working set is a size and not a set"}
   modes: [poll]
@@ -406,10 +406,9 @@
        an unprivileged reader of /proc/[pid]/pagemap is handed zeroed page frame
        numbers, which index nothing."
     - "clear_refs also needs /proc/[pid]/clear_refs to be writable, which it is
-       for this user's own processes and is not for anyone else's. It is not in
-       the requirements above because a requirement is probed by reading, and
-       clear_refs is write-only; the refusal happens at attach instead, and says
-       so."
+       for this user's own processes and is not for anyone else's: the
+       requirement asks it with access(W_OK), so a process this user may not
+       write is refused by the resolver, before anything is attached."
 
 - id: mem.reclaim
   family: mem

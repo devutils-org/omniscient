@@ -165,9 +165,14 @@ fn unavailable(output: &Output) -> Option<String> {
         !message.contains("heap shim was not found"),
         "the heap sources need the preload shim: build with `make`, not `cargo build`\n{message}"
     );
+    // The resolver's own word for a machine's limit is the widest of these:
+    // the CI's second runner has no hardware PMU, and `mem.cache_l1` was
+    // refused there with "`L1-dcache-load-misses` is not available on this
+    // cpu" under it.
     let withheld = message.contains("not readable")
         || message.contains("perf_event_paranoid")
-        || message.contains("no such file");
+        || message.contains("no such file")
+        || message.contains("has no viable backend on this machine");
     withheld.then_some(message)
 }
 
@@ -328,6 +333,11 @@ struct Combination {
     /// backends need, anywhere in it: the first `error:` line says only that
     /// no backend is viable, and the lines after it say why.
     for_want_of_capabilities: bool,
+    /// Whether the resolver itself refused it -- *"has no viable backend on
+    /// this machine"* -- before anything was launched: every backend's probe
+    /// answered missing, which is the machine's answer by the resolver's own
+    /// classification rather than a build's gap that exits 1.
+    withheld_by_the_resolver: bool,
 }
 
 fn spelled(mode: &str) -> &'static str {
@@ -386,6 +396,8 @@ fn sweep(sources: &[&str]) -> Vec<Combination> {
                     reason,
                     for_want_of_capabilities: said.contains("CAP_BPF")
                         || said.contains("CAP_PERFMON"),
+                    withheld_by_the_resolver: said
+                        .contains("has no viable backend on this machine"),
                 });
             }
         }
@@ -399,9 +411,33 @@ fn sweep(sources: &[&str]) -> Vec<Combination> {
 
 /// Every combination refused as a machine limit, written as the sweep prints
 /// them, for the sources one test covers.
+///
+/// A combination the resolver refused is left out and printed: D5 is a
+/// refusal raised *after* the resolver chose a backend, for a reason that is
+/// the build's. The CI's runners -- no hardware PMU, `perf_event_paranoid` 2
+/// and 4 -- refused every cache source and most of `mem.faults` at the
+/// resolver, which is the machine answering, and the list read 31 there.
 fn blamed_on_the_machine(walked: &[Combination]) -> Vec<String> {
+    let withheld: Vec<String> = walked
+        .iter()
+        .filter(|combination| combination.withheld_by_the_resolver)
+        .map(|combination| {
+            format!(
+                "{} {} {}",
+                combination.source, combination.mode, combination.emit
+            )
+        })
+        .collect();
+    if !withheld.is_empty() {
+        eprintln!(
+            "note: {} combinations have no viable backend on this machine and are not asked \
+             about here: {withheld:?}",
+            withheld.len()
+        );
+    }
     let mut named: Vec<String> = walked
         .iter()
+        .filter(|combination| !combination.withheld_by_the_resolver)
         .filter(|combination| combination.exit == EXIT_NO_VIABLE_BACKEND)
         .map(|combination| {
             format!(

@@ -123,7 +123,10 @@ impl Collector for NumaCollector {
                     ts_ns,
                     ts_err_ns: 0,
                     kind: "mem.numa".to_owned(),
-                    keys: vec![KeyValue::task(self.pid)],
+                    // The node first: one event per node is the source's
+                    // shape (its first caveat), and a series keyed by the
+                    // task alone folded every node of a process into one.
+                    keys: vec![KeyValue::node(node), KeyValue::task(self.pid)],
                     attrs,
                     collector_id: self.id.clone(),
                     seq,
@@ -316,6 +319,22 @@ mod tests {
             !nodes.is_empty(),
             "a resident process is on at least one node (online: {online})"
         );
+        // Keyed by the node, first, and the node is one the kernel says is
+        // online -- the second account, from another file.
+        let online = crate::capabilities::parse_cpu_list(online.trim()).unwrap_or_default();
+        for event in &events {
+            let node = event.attr("node").unwrap().as_f64().unwrap() as u32;
+            assert_eq!(
+                event.keys.first(),
+                Some(&KeyValue::node(node)),
+                "an event per node is keyed by its node: {:?}",
+                event.keys
+            );
+            assert!(
+                online.contains(&node),
+                "node {node} is not one /sys/devices/system/node/online names ({online:?})"
+            );
+        }
     }
 
     fn resident_bytes(pid: i32) -> Option<u64> {
