@@ -8702,3 +8702,60 @@ if !entry.keys.contains(&via) { /* the rejection, naming `via` */ }
 words, and takes its ceiling from `Cost::worst_case_percent`. `Cost::Extreme`'s
 doc comment still says "Over 10x: kernel replay"; wanted: the same words
 (stream R's thirteenth-wave request, second half).
+
+## Needs from another stream — the fourteenth wave, stream D (it installs)
+
+Found by installing `omn` and running it from the installed tree
+(`make install-check`, `docs/install.md`).
+
+### To stream P (`src/capabilities.rs`): capabilities on the file, not in the process
+
+A binary on a filesystem mounted `nosuid` keeps `security.capability` and the
+kernel ignores it at exec. Measured on the development machine, whose `/tmp` is
+`nosuid`: `getcap` prints `cap_perfmon,cap_bpf=ep`, `omn list` says 57 usable
+(the unprivileged number, 93 with the capabilities), and every eBPF refusal
+says "Grant them to the binary with `sudo setcap cap_bpf,cap_perfmon+ep
+$(which omn)`" -- the command the user already ran. The probe knows both
+halves: the file's attribute (`getxattr("/proc/self/exe",
+"security.capability")`) and the process's effective set (`CapEff` in
+`/proc/self/status`). Wanted: when the file carries `cap_bpf` or
+`cap_perfmon` and the process does not, the `bpf` and per-cpu perf refusals
+say so -- "the binary carries CAP_BPF, but this process was not given it: the
+filesystem at <mount> is mounted nosuid, or the process runs under
+no_new_privs" -- instead of advising the grant. `findmnt -no OPTIONS -T
+<exe>` is the user's check, and `docs/install.md` names it meanwhile.
+
+### To stream R (`shim/**`, `src/collect/mem/heap/mod.rs`): three things an installed user meets
+
+1. **`aligned_alloc` and `memalign` are not hooked** (only `malloc`, `calloc`,
+   `realloc`, `free` and `posix_memalign` are). `omn mem.heap.alloc -m trace
+   -e summary -- dd if=/dev/zero of=/dev/null bs=64M count=1` reports a largest
+   allocation of 4.0 KiB and "no loss": coreutils allocates dd's 64 MiB
+   buffer with `aligned_alloc`. An allocation the shim cannot see, with no
+   loss reported, is the silent kind. Wanted: hook `aligned_alloc`,
+   `memalign`, `valloc` and `pvalloc` the way `posix_memalign` is, or name them
+   in the entry's caveats.
+2. **The shim-missing refusal advises a build**: "the preload shim was not
+   found at <prefix>/bin/libomn_preload.so; build it with `make` (or `cargo
+   build -p omn-preload`)". From an installed tree the advice is to reinstall,
+   or to keep `libomn_preload.so` beside `omn`. Wanted: name both, e.g.
+   "it ships beside the binary; reinstall, or build it with `make`".
+3. **Optional**: `find_shim` could also look in `<exe dir>/../lib/omn/`, which
+   would let a packager use a conventional layout. `docs/install.md` records
+   why the release keeps the flat `bin/` one meanwhile.
+
+### To stream R (`src/collect/mod.rs`, the "no viable backend" refusal): the reason that matters first
+
+With the shim missing, `omn mem.heap.alloc -m trace -e summary -- true`
+answers first "no collector is written for `mem.heap.alloc` on backend
+`bpf:usdt` yet", then that `preload` was passed over because the shim is not
+at its path. The first line sends the reader to a backend they never asked
+for; the second is the one they can act on. Wanted: when the chain ends on a
+backend with no collector, lead with the first backend passed over and why.
+
+### To the coordinator: a `LICENSE` file
+
+`Cargo.toml` says `license = "Apache-2.0"` and the repository has no
+`LICENSE`. A release archive should carry it; adding it is one line in
+`contents` of `scripts/release.sh` (and one in `make install`), which stream D
+will take once the file exists.
