@@ -5,7 +5,7 @@ this wave there was one way: the kernel's frame-pointer walk, which loses the
 caller of every function that sets up no frame, and which the kernel's default
 `perf_event_paranoid` refused outright because it asked for the kernel half.
 
-**What landed.** The unwind modes are data (`src/unwind.yaml`), probed, ranked
+**What landed.** The unwind modes are data (`catalog/unwind.yaml` since the fifteenth wave, `src/unwind.yaml` before), probed, ranked
 and forced the way backends are (1). Three of them are served, each held to a
 C program whose call tree and shares are known by construction: `fp`, `fp+leaf`
 (the caller of a frameless leaf recovered from its CFI and marked), and `dwarf`
@@ -33,7 +33,7 @@ The adversarial review of the branch, and what came of each finding, is under
 
 ## 1. Unwind modes are data
 
-`src/unwind.yaml` declares each mode like a backend: ordered best first, with
+`catalog/unwind.yaml` declares each mode like a backend: ordered best first, with
 `requires` (each answered available, missing or unknown by `unwind::probe`),
 `copies` (the bytes of user stack the kernel copies per sample), `cost`, and
 `degraded` -- what it gives up relative to the modes above it. The loader
@@ -527,3 +527,39 @@ methods built on a profile with it. `caps` and `root` cells: unchanged
 (`CAP_PERFMON` allows the kernel half). No cell should move for `lbr`/`sframe`
 (missing everywhere), and `perf:user_stack` is available on every kernel the
 matrix boots (it dates from 3.7).
+
+---
+
+## The fifteenth wave: what the fourteenth left, landed (stream "resolver")
+
+The three items filed above for R and P are closed; the handoff is
+`docs/fixes/w15-resolver.md`.
+
+- **The table is `catalog/unwind.yaml`.** `Catalog::load_dir` passes over
+  `catalog::UNWIND_TABLE`, so every `--catalog <copy of catalog/>` scenario
+  copies the table with the entries and still loads. A directory named with
+  `--catalog` or `OMN_CATALOG_DIR` carries its own modes:
+  `stack::unwind::use_table_in` reads `<dir>/unwind.yaml` when it is there,
+  by the same loader rules, and the compiled-in table otherwise. Held by
+  `catalog::tests::a_copy_of_the_catalog_directory_loads_without_reading_the_unwind_table_as_entries`
+  and `tests/cli.rs::the_unwind_modes_are_read_from_the_catalog_directory_they_sit_in`.
+- **`--symbols local|debuginfod`** is a `Request` field (`symbols:` in a
+  session file) and a flag. The choice carries it: `StackChoice` gained
+  `symbols` and `symbol_servers`, `choose` refuses `debuginfod` with no
+  `DEBUGINFOD_URLS` before the launch, and `profile::Prepare` builds its client
+  from the choice (`StackChoice::debuginfod`) when none is handed in, so the
+  line of `src/collect/cpu/mod.rs` filed for U is no longer needed. A source
+  whose collector does not read it (`stack::UNWOUND_BY_CHOICE`, `cpu.profile`
+  alone today) is refused with exit 3 rather than accepted and never asked.
+  Held, against a server on loopback that counts its requests and serves the
+  unstripped build whose build id the stripped copy shares, by
+  `tests/unwind.rs::symbols_from_debuginfod_are_asked_for_from_the_command_line_and_the_session_file`
+  and `..._with_nowhere_to_ask_are_refused_before_the_program_starts`.
+- **The choice is in the resolved file.** `ResolvedRequest.stack`, set by the
+  resolver for the collectors that unwind through `choose`, so `--dump-resolved`
+  and `resolved.json` say the mode, every mode considered and why, before the
+  run. The IBS sources are left out on purpose: they serve frame pointers
+  whatever `choose` says, and recording its choice for them would misstate
+  their stacks. Held by
+  `tests/unwind.rs::the_resolved_file_says_how_the_stacks_will_be_unwound_before_the_run`
+  against the profile's own note of the mode it used.

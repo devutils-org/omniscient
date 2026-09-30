@@ -3,7 +3,7 @@
 #   omn -f examples/unwind-auto.yml
 #   omn -f examples/unwind-auto.yml -- ./a-program-built-without-frame-pointers
 #
-# No `stack:` is `--stack auto`: the unwind modes of `src/unwind.yaml` are
+# No `stack:` is `--stack auto`: the unwind modes of `catalog/unwind.yaml` are
 # walked best first, each probed against this machine *and* this target, and
 # the first one served is taken. The note says which and why it passed over
 # the ones above it:

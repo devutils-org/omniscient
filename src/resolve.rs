@@ -40,6 +40,14 @@ pub struct ResolvedRequest {
     pub unverified: Vec<String>,
     /// The machine, as it was when this was resolved.
     pub environment: Environment,
+    /// How the stacks will be unwound and where their names come from, for a
+    /// source whose collector unwinds through [`crate::stack::choose`]: the
+    /// mode, whether it was forced, every mode considered with its verdict,
+    /// and what it degrades -- said before the run, the way the backend is.
+    /// Absent for every other source, and for a choice that is refused: the
+    /// collector refuses it before the launch, with the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::stack::StackChoice>,
 }
 
 impl ResolvedRequest {
@@ -218,6 +226,22 @@ pub enum ResolveError {
         source_id: String,
         rejections: Vec<String>,
     },
+    /// Every backend of the chain was ruled out by what it declares, not by
+    /// what this machine has: the entry serves the target and the mode, and
+    /// no one backend serves the two together. No machine could serve it, so
+    /// it is the request's to change -- `sched.switches --cgroup -m trace`,
+    /// where the one backend that serves a cgroup counts and does not trace.
+    #[error(
+        "`{source_id}` cannot serve a `{target}` target in `{mode}` mode: no backend of its \
+         chain declares the two together:\n{}",
+        .rejections.join("\n")
+    )]
+    NoBackendDeclares {
+        source_id: String,
+        target: TargetKind,
+        mode: ModeKind,
+        rejections: Vec<String>,
+    },
     #[error("`{source_id}` has no backend `{backend}`")]
     UnknownBackend { source_id: String, backend: String },
     #[error(
@@ -380,6 +404,7 @@ pub fn resolve(
             return Err(refuse(vec![reason]));
         }
         check_filter_fields(entry, backend, request)?;
+        check_keys_carried(entry, backend, request)?;
         let requirements = probe_all(capabilities, backend, Some(&request.target));
         let missing: Vec<String> = requirements
             .iter()
@@ -408,6 +433,9 @@ pub fn resolve(
     // cannot serve it at all.
     let mut unimplemented_candidate: Option<(usize, &Backend, Vec<Requirement>)> = None;
 
+    // Whether some backend of the chain declares the request's target and
+    // mode together. None does: no machine could serve it, whatever it had.
+    let mut some_backend_fits = false;
     for (index, backend) in entry.backends.iter().enumerate() {
         let unfit = cannot_serve_target(entry, backend, request.target.kind())
             .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()));
@@ -418,6 +446,7 @@ pub fn resolve(
             });
             continue;
         }
+        some_backend_fits = true;
 
         let requirements = probe_all(capabilities, backend, Some(&request.target));
         let missing: Vec<String> = requirements
@@ -441,6 +470,7 @@ pub fn resolve(
 
         if all_checked && implemented {
             check_filter_fields(entry, backend, request)?;
+            check_keys_carried(entry, backend, request)?;
             let mut resolved = build(
                 entry,
                 request,
@@ -487,6 +517,7 @@ pub fn resolve(
             continue;
         };
         check_filter_fields(entry, backend, request)?;
+        check_keys_carried(entry, backend, request)?;
         let mut resolved = build(
             entry,
             request,
@@ -512,6 +543,27 @@ pub fn resolve(
         return Ok(resolved);
     }
 
+    // Only a pair the entry itself declares, both halves: a mode or a target
+    // the entry refuses is the validator's to answer, in its own words,
+    // before any backend is looked at.
+    let entry_declares = entry.modes.contains(&request.mode.kind())
+        && entry.target_support(request.target.kind()) != TargetSupport::No;
+    if !some_backend_fits && entry_declares {
+        return Err(ResolveError::NoBackendDeclares {
+            source_id: request.source.to_string(),
+            target: request.target.kind(),
+            mode: request.mode.kind(),
+            rejections: chain
+                .into_iter()
+                .map(|considered| match considered.verdict {
+                    Verdict::Rejected(reasons) => {
+                        format!("  {}: {}", considered.id, reasons.join("; "))
+                    }
+                    _ => format!("  {}", considered.id),
+                })
+                .collect(),
+        });
+    }
     Err(ResolveError::NoViableBackend {
         source_id: request.source.to_string(),
         rejections: chain
@@ -591,6 +643,7 @@ fn build(
         degradations,
         unverified,
         environment: capabilities.environment().clone(),
+        stack: crate::stack::recorded_choice(request, &backend.id, capabilities.environment()),
     }
 }
 
@@ -603,6 +656,13 @@ fn build(
 /// `/proc/diskstats` knows the machine and `io.stat` knows a cgroup, and
 /// letting either answer for the other is the worst bug this tool can have --
 /// a number about something else, presented as the one that was asked for.
+/// Whether a backend of the chain serves the request's target and mode, so
+/// that what could still rule it out is the machine's: its requirements.
+pub fn serves(entry: &Entry, backend: &Backend, request: &Request) -> bool {
+    cannot_serve_target(entry, backend, request.target.kind()).is_none()
+        && cannot_serve_mode(entry, backend, request.mode.kind()).is_none()
+}
+
 fn cannot_serve_target(entry: &Entry, backend: &Backend, kind: TargetKind) -> Option<String> {
     match entry.backend_target_support(backend, kind) {
         TargetSupport::Native => None,
@@ -693,6 +753,35 @@ fn check_filter_fields(
             source_id: request.source.to_string(),
             backend: backend.id.clone(),
             field: field.to_owned(),
+            elsewhere: elsewhere.first().map(|id| (*id).to_string()),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a request keyed on a key the selected backend does not attach.
+///
+/// The twin of [`check_filter_fields`], over the other list: `--keys task` on
+/// `io.bytes` resolved onto `/proc/diskstats` would produce events with no
+/// task on them, and a join written over that key would attribute nothing --
+/// the expensive silence, found only when the session is joined later. A key
+/// the entry itself does not offer is the validator's to refuse, before any
+/// backend is chosen, and is let through here.
+fn check_keys_carried(
+    entry: &Entry,
+    backend: &Backend,
+    request: &Request,
+) -> Result<(), ResolveError> {
+    let attached = entry.backend_keys(backend);
+    for key in &request.keys {
+        if attached.contains(key) || !entry.keys.contains(key) {
+            continue;
+        }
+        let elsewhere = entry.backends_carrying_key(*key);
+        return Err(ResolveError::KeyNotCarried {
+            source_id: request.source.to_string(),
+            backend: backend.id.clone(),
+            key: *key,
             elsewhere: elsewhere.first().map(|id| (*id).to_string()),
         });
     }
@@ -880,10 +969,50 @@ mod tests {
             duration: None,
             budget: None,
             stack: None,
+            symbols: None,
             backend: None,
             label: None,
             window: None,
         }
+    }
+
+    /// A key the pinned backend does not attach is refused with the backend
+    /// that does; one it attaches, or one the entry never offers (the
+    /// validator's), is let through.
+    #[test]
+    fn a_key_the_selected_backend_does_not_attach_is_refused_naming_one_that_does() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded.get(&"io.bytes".parse().unwrap()).unwrap().clone();
+        let proc = entry
+            .backends
+            .iter()
+            .position(|backend| backend.id == "fs:proc")
+            .unwrap();
+        entry.backends[proc].keys = Some(vec![KeyKind::Dev]);
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let entry = catalog.get(&"io.bytes".parse().unwrap()).unwrap();
+        let mut request = fixture("io.bytes", Target::System);
+        request.keys = vec![KeyKind::Task];
+        let error = check_keys_carried(entry, &entry.backends[proc], &request).unwrap_err();
+        assert_eq!(
+            error,
+            ResolveError::KeyNotCarried {
+                source_id: "io.bytes".into(),
+                backend: "fs:proc".into(),
+                key: KeyKind::Task,
+                elsewhere: Some(entry.backends[0].id.clone()),
+            }
+        );
+        request.keys = vec![KeyKind::Dev];
+        assert_eq!(
+            check_keys_carried(entry, &entry.backends[proc], &request),
+            Ok(())
+        );
+        request.keys = vec![KeyKind::Req];
+        assert_eq!(
+            check_keys_carried(entry, &entry.backends[proc], &request),
+            Ok(())
+        );
     }
 
     #[test]

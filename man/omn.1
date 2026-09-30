@@ -333,9 +333,27 @@ zero when absent.
 The most documents a recording writes. The run ends with the last.
 .TP
 .BI \-\-stack " MODE"
-.BR fp ", " dwarf ", " lbr " or " none .
+.BR auto " (default), " fp ", " fp+leaf ", " dwarf ", " lbr ", " sframe " or " none .
+.B auto
+takes the first mode of the unwind table this machine and this target serve,
+and the resolved file says which and why.
 .B dwarf
 copies the stack on every sample: far more volume and cost than frame pointers.
+.TP
+.BI \-\-symbols " SOURCE"
+Where stack names come from:
+.B local
+(default), the files the target mapped, or
+.BR debuginfod :
+those first, then the servers in
+.B DEBUGINFOD_URLS
+for a stripped file, asked by its build id and kept in the debuginfod cache.
+A request about what this machine runs, so never made unless asked for.
+Read by
+.B cpu.profile
+in this build; on any other source it is refused with exit code 3.
+In a session file, a request's
+.BR symbols: .
 .SS Output
 .TP
 .BI \-\-format " FORMAT"
@@ -704,7 +722,23 @@ The request is valid and nothing in this build collects it yet.
 .SH ENVIRONMENT
 .TP
 .B OMN_CATALOG_DIR
-Load the catalog from this directory instead of the one compiled in.
+Load the catalog from this directory instead of the one compiled in, and the
+unwind modes from its
+.I unwind.yaml
+when it has one.
+.TP
+.B DEBUGINFOD_URLS
+The debuginfod servers
+.B \-\-symbols debuginfod
+asks, space separated, in order. Unset or empty, that request is refused
+before the target starts.
+.TP
+.B DEBUGINFOD_CACHE_PATH
+Where fetched debug files are kept; else
+.IR $XDG_CACHE_HOME/debuginfod_client ,
+else
+.IR ~/.cache/debuginfod_client ,
+the cache elfutils, gdb and perf share.
 .TP
 .B OMN_PRELOAD_LIB
 Path to the heap shim, when it is not beside the binary.

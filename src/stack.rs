@@ -1386,6 +1386,48 @@ pub struct StackChoice {
     /// declares it: the cost that is not a word per frame.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub copied_stack_bytes: u32,
+    /// Where the stacks' names come from: `--symbols`. `local` is left out
+    /// of the record, as the default.
+    #[serde(default, skip_serializing_if = "is_local")]
+    pub symbols: unwind::SymbolSource,
+    /// The debuginfod servers a stripped file's names are asked of, in the
+    /// order they are asked: `DEBUGINFOD_URLS` when the choice was made.
+    /// Empty unless `symbols` is `debuginfod`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbol_servers: Vec<String>,
+}
+
+fn is_local(source: &unwind::SymbolSource) -> bool {
+    *source == unwind::SymbolSource::Local
+}
+
+/// The collectors that unwind through [`choose`] and read its choice as it is,
+/// by `(source, backend)`: the ones whose [`StackChoice`] goes in the resolved
+/// file, and the ones `--symbols debuginfod` reaches. The IBS sources also ask
+/// [`choose`] and then serve frame pointers whatever it chose, so writing its
+/// choice down for them would say something their stacks are not.
+pub const UNWOUND_BY_CHOICE: &[(&str, &str)] = &[("cpu.profile", "pmu:sw")];
+
+/// Whether `source` names its stacks through a collector that reads
+/// `--symbols` in this build, on any backend.
+pub fn reads_symbols(source: &str) -> bool {
+    UNWOUND_BY_CHOICE.iter().any(|(id, _)| *id == source)
+}
+
+/// The unwind choice to record beside a resolved backend, for a collector that
+/// unwinds through [`choose`] ([`UNWOUND_BY_CHOICE`]); `None` for every other,
+/// and for a choice [`choose`] refuses -- that refusal is the collector's, made
+/// before the launch with its own reason and exit code.
+pub fn recorded_choice(
+    request: &Request,
+    backend: &str,
+    environment: &Environment,
+) -> Option<StackChoice> {
+    UNWOUND_BY_CHOICE
+        .iter()
+        .any(|(source, id)| *source == request.source.as_str() && *id == backend)
+        .then(|| choose(request, environment).ok())
+        .flatten()
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -1404,7 +1446,20 @@ impl StackChoice {
             considered: Vec::new(),
             degradations: Vec::new(),
             copied_stack_bytes: unwind::entry(mode).map_or(0, |entry| entry.copies),
+            symbols: unwind::SymbolSource::Local,
+            symbol_servers: Vec::new(),
         }
+    }
+
+    /// The debuginfod client this choice asks for, over elfutils' cache:
+    /// `None` unless `--symbols debuginfod` was chosen.
+    pub fn debuginfod(&self) -> Option<Arc<unwind::Debuginfod>> {
+        (self.symbols == unwind::SymbolSource::Debuginfod).then(|| {
+            Arc::new(unwind::Debuginfod::new(
+                self.symbol_servers.clone(),
+                unwind::default_cache(),
+            ))
+        })
     }
 
     /// What the kernel is asked to hand over at every sample.
@@ -2234,6 +2289,7 @@ mod tests {
             duration: None,
             budget: None,
             stack,
+            symbols: None,
             backend: None,
             label: None,
             window: None,

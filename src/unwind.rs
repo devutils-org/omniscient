@@ -9,7 +9,7 @@
 //! on the machine *and* on how the target was built -- which is exactly the
 //! shape of a backend chain.
 //!
-//! So the modes are declared as data (`src/unwind.yaml`), each with
+//! So the modes are declared as data (`catalog/unwind.yaml`), each with
 //! requirements a probe answers available, missing or unknown, what it copies
 //! with every sample, and what it gives up. [`choose`] walks them for `--stack
 //! auto`, records each with the resolver's own [`Verdict`], and forces one for
@@ -36,9 +36,9 @@ use crate::request::{Request, StackMode, Target};
 use crate::resolve::Verdict;
 
 /// The modes, as this build was compiled with them.
-const EMBEDDED: &str = include_str!("unwind.yaml");
+const EMBEDDED: &str = include_str!("../catalog/unwind.yaml");
 
-/// One unwind mode, as `src/unwind.yaml` declares it.
+/// One unwind mode, as `catalog/unwind.yaml` declares it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModeEntry {
@@ -109,12 +109,42 @@ pub fn load(text: &str) -> Result<Vec<ModeEntry>, String> {
     Ok(entries)
 }
 
-/// The modes compiled into this build, best first.
+/// The mode table this process chooses from: the one compiled in, or the one
+/// beside a catalog read with `--catalog` ([`use_table_in`]).
+static MODES: OnceLock<Vec<ModeEntry>> = OnceLock::new();
+
+/// The modes this process chooses from, best first: the table compiled into
+/// this build unless [`use_table_in`] read another first.
 pub fn modes() -> &'static [ModeEntry] {
-    static MODES: OnceLock<Vec<ModeEntry>> = OnceLock::new();
     MODES.get_or_init(|| {
-        load(EMBEDDED).unwrap_or_else(|error| panic!("src/unwind.yaml is compiled in: {error}"))
+        load(EMBEDDED).unwrap_or_else(|error| panic!("catalog/unwind.yaml is compiled in: {error}"))
     })
+}
+
+/// Reads the unwind table of a catalog directory, `<dir>/unwind.yaml`, when it
+/// has one, so that a catalog iterated on with `--catalog` carries its modes
+/// the way it carries its entries. A directory without the file keeps the
+/// compiled-in table: every catalog copied before the table moved there.
+///
+/// Answers whether the directory's table is the one in use. Refused when the
+/// table is invalid -- by the same rules as the compiled-in one -- or when the
+/// modes were already chosen from another table in this process.
+pub fn use_table_in(dir: &Path) -> Result<bool, String> {
+    let path = dir.join(crate::catalog::UNWIND_TABLE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let entries = load(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    match MODES.set(entries) {
+        Ok(()) => Ok(true),
+        Err(entries) if MODES.get() == Some(&entries) => Ok(true),
+        Err(_) => Err(format!(
+            "{} was read after the modes had been chosen from another table",
+            path.display()
+        )),
+    }
 }
 
 /// One mode's declaration.
@@ -392,6 +422,14 @@ pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoic
         ranked(environment, &target)?
     };
     choice.user_only = user_only;
+    // Where the names come from is decided here too, so that a debuginfod
+    // asked for with no server to ask is refused before the launch, and the
+    // resolved file says which servers a stripped file's names are asked of.
+    if request.symbols == Some(SymbolSource::Debuginfod) {
+        let client = Debuginfod::from_env()?;
+        choice.symbols = SymbolSource::Debuginfod;
+        choice.symbol_servers = client.servers().to_vec();
+    }
     if choice.user_only {
         let what = if choice.mode == StackMode::None {
             "samples are user-only"
@@ -460,6 +498,8 @@ fn forced(
         considered: Vec::new(),
         degradations,
         copied_stack_bytes: entry.copies,
+        symbols: SymbolSource::Local,
+        symbol_servers: Vec::new(),
     })
 }
 
@@ -513,6 +553,8 @@ fn ranked(
         considered,
         degradations: entry.degraded.iter().cloned().collect(),
         copied_stack_bytes: entry.copies,
+        symbols: SymbolSource::Local,
+        symbol_servers: Vec::new(),
     })
 }
 

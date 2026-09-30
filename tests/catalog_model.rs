@@ -64,6 +64,7 @@ fn request(source: &str, target: Target) -> Request {
         duration: None,
         budget: None,
         stack: None,
+        symbols: None,
         backend: None,
         label: None,
         window: None,

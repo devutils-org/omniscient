@@ -8759,3 +8759,114 @@ backend with no collector, lead with the first backend passed over and why.
 `LICENSE`. A release archive should carry it; adding it is one line in
 `contents` of `scripts/release.sh` (and one in `make install`), which stream D
 will take once the file exists.
+
+## Needs from another stream — the fifteenth wave, stream resolver
+
+Stream resolver's handoff is `docs/fixes/w15-resolver.md`. Nothing here blocks
+it; each item is the other half of a change landed in its own files.
+
+### Declared: `symbols: None,` in eleven struct literals outside this stream's files
+
+`Request` gained `symbols: Option<SymbolSource>` (`--symbols`, stream U's
+request of the fourteenth wave). Rust has no default for a field left out of
+a literal, so every `Request { .. }` written field by field stops compiling
+without it. One line was added after `stack:` in each, and nothing else:
+`src/collect/mod.rs` (seven test fixtures, lines ~4930 to ~6007),
+`src/render.rs:714`, `src/validate.rs:750`, `src/triage/latency.rs:152`,
+`src/triage/saturate.rs:125`, `tests/catalog_model.rs:55`,
+`tests/runner.rs:435`. A merge conflict there is that one line.
+
+### To whoever owns `src/collect/mod.rs`: `net`, `psi` and `BPF_ENABLE_STATS` (K's, the fourteenth wave)
+
+Not this stream's file this wave, so filed with the exact lines:
+
+```rust
+// src/collect/mod.rs
+pub mod net;                 // was `mod net;`; then `bpf/attach.rs:206` calls
+                             // `crate::collect::net::probe` and `mem::net_probe` goes (K)
+pub mod psi;                 // was `pub use mem::psi;`, in one commit with K's three lines
+                             // (the fourteenth wave, stream R, first item)
+
+// ProgramStats::for_run, the `libc::syscall(libc::SYS_bpf, BPF_ENABLE_STATS, ..)` block:
+match crate::bpf::enable_run_time_stats() {
+    Ok(fd) => return ProgramStats::On(Some(fd)),
+    Err(error) => { /* the same `sysctl` / `errno` sentence, from `error` */ }
+}
+// and the two local constants BPF_ENABLE_STATS / BPF_STATS_RUN_TIME go.
+```
+
+### To stream J (`src/join.rs`): `decompose_within`, and then the coordinator's swap
+
+`src/main.rs` calls a local `decompose_within(decomposition, &served,
+&run.results, &merged, &session.joins, &windows)` now, whose body calls
+`join::decompose_with` and ignores the windows. Once J lands
+
+```rust
+pub fn decompose_within(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    results: &[Results],
+    events: &[Event],
+    joins: &[Rule],
+    windows: &BTreeMap<String, Watched>,
+) -> DecompositionOutput
+```
+
+the remaining diff is: in `src/main.rs`, the local function's body becomes
+`join::decompose_within(decomposition, requests, results, events, joins,
+windows)` (or the call site calls it directly and the local function goes);
+`src/triage/engine.rs:220` calls `join::decompose_within(.., &BTreeMap::new())`
+(it applies its joins with `join::apply`, which watches everything); and both
+`check_paired_parts` calls go -- `src/main.rs:~229` and
+`src/triage/engine.rs:170` -- with
+`request::tests::a_part_read_from_a_join_is_refused_before_the_run`.
+
+### To whoever owns `src/triage/engine.rs`: the new resolver refusal is the request's
+
+`ResolveError::NoBackendDeclares` (a target and a mode the entry declares and
+no one backend declares together; K's request of the fourteenth wave) is
+answered as the request's by `omn` (exit 2). `engine.rs:112` maps every
+resolver error but `NoViableBackend` to `Whose::Build` ("a catalog this build
+was not given"); wanted there, one arm:
+`resolve::ResolveError::NoBackendDeclares { .. } => Whose::Request`.
+`engine.rs:177` already answers it as the request's.
+
+### To the coordinator (`CATALOG.md`, `DECISIONS.md`): the unwind table moved
+
+`src/unwind.yaml` is `catalog/unwind.yaml` now (`git mv`), and
+`Catalog::load_dir` passes over it. `CATALOG.md:198` and `DECISIONS.md:443`
+still name `src/unwind.yaml`; the `DECISIONS.md` row "Where the table lives"
+becomes: **`catalog/unwind.yaml`, compiled in, and read from a `--catalog`
+directory when it has one** -- because `load_dir` skips `catalog::UNWIND_TABLE`
+and `stack::unwind::use_table_in` reads it.
+
+### To whoever owns `src/collect/cpu/mod.rs` (optional)
+
+`ResolvedRequest.stack` now carries the `StackChoice` for `cpu.profile`, made
+by the resolver. The `pmu:sw` factory still calls `stack::choose` again, which
+is right while the choice's refusal has to be the factory's (it is the one
+that classifies whose it is); if the two should never differ, the factory can
+take `resolved.stack.clone()` when it is `Some`, and call `choose` only for
+the refusal. `debuginfod: None` there stays: `profile::Prepare` builds the
+client from the choice.
+
+### To whoever owns `catalog/io.yaml`: the keys `io.bytes`'s backends attach
+
+`Backend.keys` exists now, the loader holds it to the entry's `keys` in both
+directions (`check_backend_keys`), and the resolver refuses a request keyed on
+a key the selected backend does not attach (`ResolveError::KeyNotCarried`,
+exit 2, naming the backend that does). No entry declares it yet, so nothing is
+refused on the shipped catalog. The one the field was asked for, from the
+entry's own caveat ("fs:proc attaches dev alone and fs:cgroup dev and
+cgroup"):
+
+```yaml
+    - {id: "fs:cgroup", ..., filter_fields: [dev], keys: [dev, cgroup], ...}
+    - {id: "fs:proc",   ..., filter_fields: [dev], keys: [dev], ...}
+```
+
+`tests/cli.rs::a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does`
+makes that edit in a copy of the catalog and holds the refusal to
+`/proc/diskstats`, whose events carry `dev` and no task; with the lines in the
+shipped catalog it takes the refusal half directly. `io.iops`'s `fs:proc` is
+the same case (`keys: [dev]`).
