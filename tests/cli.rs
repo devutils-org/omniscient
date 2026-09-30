@@ -771,33 +771,331 @@ fn a_filter_on_a_field_no_event_carries_says_so_instead_of_returning_an_empty_se
     );
 }
 
-/// A source the catalog says can be system-wide, whose collector can only watch
-/// one process, has to say which of the two is missing. Watching one process
-/// and labelling the result "system" is the failure this refusal exists for.
+// ================================================ a container is its cgroup
+
+/// A cgroup this test makes and removes, under the nearest cgroup of this
+/// process's own ancestry this user may write -- on a systemd machine, the
+/// session's own scope.
+struct Scope {
+    dir: std::path::PathBuf,
+}
+
+impl Scope {
+    fn create(name: &str) -> Result<Self, String> {
+        let own = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+            })
+            .ok_or("this process is not in a cgroup2 hierarchy")?;
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let mut parent = root.join(own.trim().trim_start_matches('/'));
+        loop {
+            let dir = parent.join(format!("omn-{name}-{}", std::process::id()));
+            if std::fs::create_dir(&dir).is_ok() {
+                return Ok(Self { dir });
+            }
+            if parent == root || !parent.pop() {
+                break;
+            }
+        }
+        Err(format!(
+            "no cgroup in this process's ancestry ({}) lets this user make one below it",
+            own.trim()
+        ))
+    }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// A task that blocks every two milliseconds until SIGUSR1, after moving
+/// itself into the cgroup whose `cgroup.procs` it is given (or staying where it
+/// is, given `-`), and logs each sleep on `CLOCK_MONOTONIC` with the voluntary
+/// switches the kernel counted for it.
+const SLEEPER: &str = r#"
+import json, os, resource, signal, sys, time
+if sys.argv[1] != "-":
+    with open(sys.argv[1], "w") as f:
+        f.write(str(os.getpid()))
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+blocked = lambda: resource.getrusage(resource.RUSAGE_THREAD).ru_nvcsw
+done = []
+signal.signal(signal.SIGUSR1, lambda *_: done.append(1))
+print("ready", os.getpid(), flush=True)
+sleeps = []
+end = mono() + 60 * 10**9
+while not done and mono() < end:
+    v = blocked(); a = mono(); time.sleep(0.002); b = mono(); sleeps.append([a, b, blocked() - v])
+print(json.dumps(sleeps), flush=True)
+"#;
+
+struct Sleeper {
+    child: std::process::Child,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    pid: i32,
+}
+
+impl Sleeper {
+    fn start(procs: &str) -> Self {
+        use std::io::BufRead;
+        let mut child = Command::new("python3")
+            .args(["-c", SLEEPER, procs])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python3 starts");
+        let mut stdout = std::io::BufReader::new(child.stdout.take().expect("a pipe"));
+        let mut line = String::new();
+        stdout
+            .read_line(&mut line)
+            .expect("the task says it is ready");
+        let pid = line
+            .trim()
+            .strip_prefix("ready ")
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or_else(|| panic!("the task did not start: {line:?}"));
+        Self { child, stdout, pid }
+    }
+
+    /// Stops it, and returns its log: `[start, end, voluntary switches]` per
+    /// sleep.
+    fn finish(mut self) -> Vec<[u64; 3]> {
+        // SAFETY: a signal to the child this test started and has not reaped.
+        unsafe { libc::kill(self.pid, libc::SIGUSR1) };
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut self.stdout, &mut rest).expect("the log");
+        let _ = self.child.wait();
+        serde_json::from_str(rest.trim())
+            .unwrap_or_else(|error| panic!("the log is not json ({error}): {rest}"))
+    }
+}
+
+/// A container runtime on `PATH` that knows the containers it is given, as
+/// `docker inspect --format '{{.State.Pid}}' <name>` answers, and no other.
+fn runtime_knowing(dir: &std::path::Path, containers: &[(&str, i32)]) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).expect("a directory for the runtime");
+    let mut script = String::from("#!/bin/sh\n[ \"$1\" = inspect ] || exit 2\ncase \"$4\" in\n");
+    for (name, pid) in containers {
+        script.push_str(&format!("  {name}) echo {pid} ;;\n"));
+    }
+    script.push_str("  *) echo \"Error: No such object: $4\" >&2; exit 1 ;;\nesac\n");
+    let path = dir.join("docker");
+    std::fs::write(&path, script).expect("the runtime is written");
+    let mut permissions = std::fs::metadata(&path).expect("it is there").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&path, permissions).expect("it is executable");
+    path
+}
+
+/// `--container` is measured as the cgroup its runtime says it runs in.
+///
+/// Every `sched` and `proc` program serves a cgroup since the thirteenth wave,
+/// and a container was still refused, because nothing turned a container's
+/// name into its cgroup. Now the tool asks the runtime the way a user would
+/// (`docker inspect --format '{{.State.Pid}}' <name>`, then that pid's
+/// `/proc/<pid>/cgroup`), and the runtime here is a script on `PATH` that
+/// knows one container: a task this test put in a cgroup it made. That is
+/// what a container is to the kernel, a cgroup with processes in it, and it
+/// needs no image.
+///
+/// The truth is the task's. Its sleeps inside the window, by the kernel's own
+/// count of its voluntary switches, are blocks `sched.offcpu --container` has
+/// to find, and the same task beside the cgroup, sleeping the same way, is in
+/// no row: the container is its cgroup and nothing else.
 #[test]
-fn a_collector_that_needs_a_process_refuses_a_system_target_with_the_reason() {
-    // The machine is served since the twelfth wave and a cgroup since the
-    // thirteenth, one sampling event per cpu (`scenario_cpu` holds both to a
-    // workload). A container is the target nothing resolves to a cgroup yet,
-    // and the refusal has to say so by name rather than sample something else.
-    let output = run(&[
-        "mem.faults",
-        "--container",
-        "omn-no-such-container",
-        "--mode",
-        "sample@997hz",
-        "--emit",
+fn a_container_is_measured_as_the_cgroup_its_runtime_names() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    // Asked first, so that a machine that cannot serve the source says that
+    // rather than what its cgroups are: the CI's hosted runner has neither.
+    let served = run(&[
+        "trace",
+        "sched.offcpu",
+        "--cgroup",
+        "/sys/fs/cgroup",
+        "-m",
+        "trace",
+        "-e",
         "raw",
-        "--duration",
-        "200ms",
+        "--dump-resolved",
     ]);
-    assert!(!output.status.success());
-    let complaint = stderr(&output);
+    if !served.status.success() {
+        eprintln!("skipped: {}", stderr(&served));
+        return;
+    }
+    let scope = match Scope::create("container") {
+        Ok(scope) => scope,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let procs = scope.dir.join("cgroup.procs").display().to_string();
+    let inside = Sleeper::start(&procs);
+    let beside = Sleeper::start("-");
+    let name = format!("omn-web-{}", std::process::id());
+    let bin = std::env::temp_dir().join(format!("omn-runtime-{}", std::process::id()));
+    runtime_knowing(&bin, &[(name.as_str(), inside.pid)]);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(BINARY)
+        .args([
+            "trace",
+            "sched.offcpu",
+            "--container",
+            &name,
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "-d",
+            "800ms",
+            "--format",
+            "json",
+        ])
+        .env("PATH", &path)
+        .env_remove("OMN_CONTAINER_RUNTIME")
+        .output()
+        .expect("omn runs");
+    let (pid_inside, pid_beside) = (inside.pid, beside.pid);
+    let log = inside.finish();
+    let _ = beside.finish();
+    let _ = std::fs::remove_dir_all(&bin);
+    let said = stderr(&output);
+    let cgroup = scope.dir.display().to_string();
     assert!(
-        complaint.contains("mem.faults")
-            && complaint.contains("per container")
+        said.contains(&format!(
+            "container `{name}` runs in cgroup {cgroup} (pid {pid_inside}"
+        )),
+        "the run names the cgroup the runtime's pid is in:\n{said}"
+    );
+    if !output.status.success() {
+        if said.contains("has no viable backend on this machine") {
+            eprintln!("skipped: the container was found, and {said}");
+            return;
+        }
+        panic!("the run failed: {said}");
+    }
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a JSON document");
+    let result = &document["results"][0];
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+    let events: Vec<serde_json::Map<String, serde_json::Value>> = result["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .filter_map(|output| output["events"].as_array())
+        .flatten()
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .expect("attributes")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().expect("a name").to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let of = |pid: i32| {
+        events
+            .iter()
+            .filter(|event| {
+                event.get("tid").and_then(serde_json::Value::as_i64) == Some(pid as i64)
+            })
+            .filter(|event| {
+                event.get("state").and_then(serde_json::Value::as_str) == Some("sleeping")
+            })
+            .map(|event| {
+                event
+                    .get("blocks")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1)
+            })
+            .sum::<u64>()
+    };
+    let blocked: u64 = log
+        .iter()
+        .filter(|sleep| sleep[0] >= opened && sleep[1] <= closed)
+        .map(|sleep| sleep[2])
+        .sum();
+    let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let (kept, strays) = (of(pid_inside), of(pid_beside));
+    eprintln!(
+        "sched.offcpu --container: {kept} blocks of the task inside, {blocked} by the kernel's \
+         count inside the window, {strays} of the task beside, {lost} lost"
+    );
+    assert!(
+        blocked > 50,
+        "the task blocked {blocked} times, too few to judge"
+    );
+    assert!(
+        kept + lost >= blocked,
+        "the task in the container blocked {blocked} times inside the window and the run kept \
+         {kept}, reporting {lost} lost"
+    );
+    assert_eq!(
+        strays, 0,
+        "the same task beside the container is in no row of it"
+    );
+}
+
+/// A container no runtime knows is refused before anything is attached, with
+/// what each runtime asked said; and a machine with no runtime at all says so,
+/// and what to pass instead.
+#[test]
+fn a_container_no_runtime_knows_is_refused_with_what_it_said() {
+    let bin = std::env::temp_dir().join(format!("omn-runtime-none-{}", std::process::id()));
+    let runtime = runtime_knowing(&bin, &[]);
+    let asked = |runtime: &str| {
+        Command::new(BINARY)
+            .args([
+                "trace",
+                "mem.cgroup",
+                "--container",
+                "omn-no-such-container",
+                "-m",
+                "poll",
+                "-e",
+                "raw",
+                "-d",
+                "200ms",
+            ])
+            .env("OMN_CONTAINER_RUNTIME", runtime)
+            .output()
+            .expect("omn runs")
+    };
+
+    let output = asked(runtime.to_str().expect("a path"));
+    let complaint = stderr(&output);
+    assert_eq!(output.status.code(), Some(EXIT_UNAVAILABLE), "{complaint}");
+    assert!(
+        complaint.contains("no container named `omn-no-such-container`")
+            && complaint.contains("No such object: omn-no-such-container"),
+        "the refusal names the container and what the runtime said: {complaint}"
+    );
+
+    let output = asked("/nonexistent/omn-runtime");
+    let complaint = stderr(&output);
+    let _ = std::fs::remove_dir_all(&bin);
+    assert_eq!(output.status.code(), Some(EXIT_UNAVAILABLE), "{complaint}");
+    assert!(
+        complaint.contains("none of `/nonexistent/omn-runtime` is installed")
             && complaint.contains("--cgroup"),
-        "the refusal should name the source, the target it cannot follow and what to pass instead: {complaint}"
+        "a machine with no runtime says so, and what to pass instead: {complaint}"
     );
 }
 

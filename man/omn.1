@@ -202,7 +202,14 @@ Cores, written the way the kernel writes them:
 A network interface.
 .TP
 .BI \-\-container " NAME"
-A container, resolved to a cgroup plus a pid namespace.
+A container, measured as the cgroup it runs in. The runtime is asked for the
+container's init process
+.RB ( "docker inspect \-\-format '{{.State.Pid}}'" " NAME, then " podman ,
+.BR nerdctl ),
+and that process's
+.I /proc/<pid>/cgroup
+names the cgroup; the run says which it found. A name no runtime knows, or a
+stopped container, is refused before anything is attached.
 .TP
 .B \-\-system
 The whole machine.
@@ -701,6 +708,13 @@ Load the catalog from this directory instead of the one compiled in.
 .TP
 .B OMN_PRELOAD_LIB
 Path to the heap shim, when it is not beside the binary.
+.TP
+.B OMN_CONTAINER_RUNTIME
+The one container runtime to ask for
+.BR \-\-container ,
+in place of
+.BR docker ", " podman " and " nerdctl
+in that order.
 .TP
 .B NO_COLOR
 Set and non-empty, or

@@ -106,7 +106,8 @@ pub enum Target {
     Cgroup(PathBuf),
     Cpu(CpuSet),
     Iface(String),
-    /// A container name or id, resolved to a cgroup plus a pid namespace.
+    /// A container name or id, measured as its cgroup: [`find_container`]
+    /// binds it before resolution.
     Container(String),
     System,
 }
@@ -174,6 +175,143 @@ impl Target {
             Target::System => TargetKind::System,
         }
     }
+}
+
+/// A container, found where its runtime says it runs.
+///
+/// The one question of the request model that the machine answers, and it is
+/// asked before resolution: every collector that serves a cgroup serves a
+/// container once the container is its cgroup, and the resolver and the
+/// catalog then treat it as the cgroup it is (`TargetKind::fallback`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Container {
+    /// The name or id it was asked by.
+    pub name: String,
+    /// The runtime that answered, as it is run: `docker`, `podman`, or the
+    /// command `OMN_CONTAINER_RUNTIME` names.
+    pub runtime: String,
+    /// Its init process, as the host numbers it.
+    pub pid: i32,
+    /// The cgroup that process is in, under the cgroup2 mount.
+    pub cgroup: PathBuf,
+}
+
+/// The environment variable naming the one container runtime to ask, where
+/// the machine has several or keeps one off `PATH`.
+pub const CONTAINER_RUNTIME_VARIABLE: &str = "OMN_CONTAINER_RUNTIME";
+
+/// The runtimes asked, in order, when the variable names none. Each answers
+/// `inspect --format '{{.State.Pid}}' <name>` the same way.
+pub const CONTAINER_RUNTIMES: [&str; 3] = ["docker", "podman", "nerdctl"];
+
+/// The cgroup a container runs in, from its runtime (`docker inspect`,
+/// `podman inspect`), read off the container's init pid's `/proc/<pid>/cgroup`.
+pub fn cgroup_of_container(name: &str) -> Result<PathBuf, String> {
+    find_container(name).map(|container| container.cgroup)
+}
+
+/// The container `name`, asked of each runtime this machine has until one
+/// knows it; the error names every runtime asked and what each said.
+pub fn find_container(name: &str) -> Result<Container, String> {
+    let runtimes: Vec<String> = match std::env::var(CONTAINER_RUNTIME_VARIABLE) {
+        Ok(runtime) if !runtime.trim().is_empty() => vec![runtime.trim().to_owned()],
+        _ => CONTAINER_RUNTIMES
+            .iter()
+            .map(|one| (*one).to_owned())
+            .collect(),
+    };
+    let mut said = Vec::new();
+    for runtime in &runtimes {
+        let output = match std::process::Command::new(runtime)
+            .args(["inspect", "--format", "{{.State.Pid}}", name])
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                said.push(format!("`{runtime}` could not be run: {error}"));
+                continue;
+            }
+        };
+        let first_line = |bytes: &[u8]| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("")
+                .to_owned()
+        };
+        if !output.status.success() {
+            let complaint = first_line(&output.stderr);
+            said.push(format!(
+                "`{runtime}` does not know it ({})",
+                if complaint.is_empty() {
+                    output.status.to_string()
+                } else {
+                    complaint
+                }
+            ));
+            continue;
+        }
+        let answer = first_line(&output.stdout);
+        let pid: i32 = answer.parse().map_err(|_| {
+            format!("`{runtime} inspect` answered `{answer}` for container `{name}`, not a pid")
+        })?;
+        if pid <= 0 {
+            return Err(format!(
+                "container `{name}` is not running: `{runtime}` reports no process for it, and a \
+                 stopped container has no cgroup to measure"
+            ));
+        }
+        let cgroup = cgroup_of_pid(pid).map_err(|reason| {
+            format!("container `{name}` runs as pid {pid} (`{runtime}`), and {reason}")
+        })?;
+        return Ok(Container {
+            name: name.to_owned(),
+            runtime: runtime.clone(),
+            pid,
+            cgroup,
+        });
+    }
+    if said.is_empty() {
+        return Err(format!(
+            "container `{name}` cannot be found: none of {} is installed here to ask. Pass \
+             `--cgroup` with the cgroup it runs in, or name its runtime in {}",
+            runtimes
+                .iter()
+                .map(|one| format!("`{one}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            CONTAINER_RUNTIME_VARIABLE
+        ));
+    }
+    Err(format!("no container named `{name}`: {}", said.join("; ")))
+}
+
+/// The cgroup2 directory a process is in, from `/proc/<pid>/cgroup`'s unified
+/// line, under wherever this machine mounts the unified hierarchy.
+fn cgroup_of_pid(pid: i32) -> Result<PathBuf, String> {
+    let file = format!("/proc/{pid}/cgroup");
+    let text = std::fs::read_to_string(&file)
+        .map_err(|error| format!("{file} cannot be read: {error}"))?;
+    let relative = text
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| format!("{file} has no cgroup2 line: the machine runs cgroup v1 alone"))?;
+    let mount = cgroup2_mount().unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
+    Ok(mount.join(relative.trim().trim_start_matches('/')))
+}
+
+/// Where the unified hierarchy is mounted, from this process's `mountinfo`.
+fn cgroup2_mount() -> Option<PathBuf> {
+    let text = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    text.lines().find_map(|line| {
+        let (before, after) = line.split_once(" - ")?;
+        (after.split_whitespace().next()? == "cgroup2")
+            .then(|| before.split_whitespace().nth(4).map(PathBuf::from))
+            .flatten()
+    })
 }
 
 impl fmt::Display for Target {

@@ -221,6 +221,34 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         // does not need it. It is set aside with the resolver's reason, and
         // the escalation says so if it names that layer.
         let held = request.window.is_some_and(|window| window.on.is_some());
+        // A container is measured as the cgroup its runtime says it runs in,
+        // which every collector that serves a cgroup can attach to. The
+        // session keeps the container, as asked; the resolved request carries
+        // the cgroup, as measured.
+        let bound;
+        let request = match &request.target {
+            omn::request::Target::Container(name) => match omn::request::find_container(name) {
+                Ok(container) => {
+                    eprintln!(
+                        "note: container `{name}` runs in cgroup {} (pid {}, from `{}`), which \
+                         is what is measured",
+                        container.cgroup.display(),
+                        container.pid,
+                        container.runtime
+                    );
+                    bound = omn::request::Request {
+                        target: omn::request::Target::Cgroup(container.cgroup),
+                        ..request.clone()
+                    };
+                    &bound
+                }
+                Err(reason) => {
+                    eprintln!("error: {reason}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            _ => request,
+        };
         match resolve::resolve(&catalog, &capabilities, request) {
             Ok(resolved) => resolutions.push(resolved),
             Err(error @ resolve::ResolveError::NoViableBackend { .. }) if held => {
