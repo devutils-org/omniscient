@@ -33,6 +33,12 @@ a `realloc` to zero bytes frees without returning another block.
   said *"reallocarray: 7 ... 14 counted"*.
 - `a_program_that_allocates_its_buffer_aligned_shows_that_buffer_as_its_largest`:
   `dd bs=64M count=1`, whose largest bucket has to reach 64 MiB.
+- `a_failed_realloc_leaves_its_block_live_where_a_realloc_to_zero_frees_it`:
+  a program holds a 256 MiB and a 128 MiB block, asks the first to grow to
+  `1 << 62` bytes (glibc refuses anything past `PTRDIFF_MAX`) and the second to
+  shrink to zero, and checks both NULLs itself. `mem.heap.live`'s last value
+  has to be at least 256 MiB and under 384 MiB. Against the old condition:
+  *"live at the end: 411161"*.
 
 Also in `src/collect/mem/heap/mod.rs` (D's two requests): `find_shim` looks
 beside the binary and then in `<exe dir>/../lib/omn/`. When the shim is in
@@ -58,6 +64,14 @@ excludes startup by design, and `cost.json` said nothing about startup.
   opening of the span `collector_cpu_ns` weighs;
 - `after_window_cpu_ns`: from the end of that span to the collection being
   handed back.
+
+`before_window_cpu_ns` is "before this collection's span", not "before the
+target ran". For a collection open from the start they are the same thing. For
+one attached mid-run (`attaching` resets its `since`), or detached and
+reopened, it also holds what the other collections' windows cost before this
+one's opened. So `tool_cpu_ns()` is a process total that every collection of a
+run carries, up to its own hand-back: the entries of a `cost.json` array are
+compared, never summed. The field docs say so.
 
 `Overhead::tool_cpu_ns()` is the sum of the two and `collector_cpu_ns`. The
 percentage and the budget are unchanged: none of the startup is dilation (see
@@ -183,10 +197,47 @@ synthetic rows (`bench_harness::a_row_is_held_to_its_band_on_the_larger_of_its_s
   - `unwind::a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripped_one_is`
     (one branch of the call tree was not sampled).
 
+- Review pass: `recorder::a_recording_is_held_to_its_budget_over_a_rolling_span_not_the_whole_run`
+  failed once in a run of the stream's own test files (`closed_ns > spun`,
+  `tests/recorder.rs:666`). It is already in the flaky tally
+  (`docs/open-findings.md`, around line 7304), and it passed alone at once.
+  The new realloc test passed, and failed against the old condition.
+- Review pass, `make check` once: red on
+  `collect::tests::the_runner_closes_the_window` ("it came 9889259 ns early",
+  in the fourteenth wave's list for the flaky tally), which passed alone at
+  once. Then `cargo test --workspace --no-fail-fast` once, at load 12 to 18 on
+  24 cpus: **2078 passed, 3 failed, 8 ignored**. Clippy and fmt clean,
+  `target/debug/omn` still carries `cap_bpf,cap_perfmon`. Rerun alone once:
+  - `scenario_sched::a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them`
+    ("17 involuntary switches of its own and the program 25, with 0 lost"):
+    passed.
+  - `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`
+    (tally #21, a machine-wide counter other streams move): failed again.
+  - `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`
+    (in no tally): failed again, *"fp 14.9 us a sample ..., 30.4 us a sample;
+    dwarf 26.6 us ..., 32.4 us"*. fp's two runs differ by a factor of two, so
+    the band is the machine's load and not a mode. The test measures `omn`'s
+    cpu from outside it, and this branch changes nothing on the sampling path
+    (its `collect/mod.rs` changes are the budget's move, `cost.json`'s fields
+    and `ProgramStats`). Filed for the flaky tally below.
+
+## Review, fifteenth wave
+
+1. The recorder flake: real but not new, see "Checks". Nothing changed.
+2. The failed-realloc claim had no test: fixed, with
+   `aggregation::a_failed_realloc_leaves_its_block_live_where_a_realloc_to_zero_frees_it`
+   (item 1).
+3. `before_window_cpu_ns`'s doc said "before the target ran": fixed. The doc
+   now says "before this collection's span", and `tool_cpu_ns` says it is a
+   process total that is never summed across collections (item 2). The filed
+   request for the `cost:` line was reworded to match.
+
 ## Landed, each with its test
 
 1. The aligned allocators hooked (`aggregation::every_aligned_entry_point_is_seen_at_the_size_its_caller_asked_for`,
    `aggregation::a_program_that_allocates_its_buffer_aligned_shows_that_buffer_as_its_largest`).
+   A failed `realloc` no longer reported as a free
+   (`aggregation::a_failed_realloc_leaves_its_block_live_where_a_realloc_to_zero_frees_it`).
    The shim found under `lib/omn/`, and a refusal that advises a reinstall
    (`heap::tests::the_shim_is_found_beside_the_binary_or_under_lib_omn_and_its_absence_advises_both`).
 2. `cost.json`'s `before_window_cpu_ns`, `after_window_cpu_ns` and
@@ -283,6 +334,13 @@ from the `--no-fail-fast` run, each of which passed alone:
 cache tests under THP `always` (*"the TLB counter saw 103138 misses"*, *"8 of
 29 of the small walk's loads did"*), and `unwind::a_stripped_build_...` are in
 no tally.
+
+- For the flaky tally (not this stream's files):
+  `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`
+  (`tests/unwind.rs:873`) failed twice in a row at load 12 to 18, with fp's
+  two runs 14.9 and 30.4 us a sample: a separation the load erases. Worth
+  holding under a quiet machine, or comparing per-sample cost within one
+  interleaved run.
 
 ## Session index rows
 

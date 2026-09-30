@@ -8787,9 +8787,14 @@ Wanted, in `MeasuredCost::line`, after the window's figure and only when it is
 larger than the window's:
 
 ```rust
-format!(", and {} before the window opened (startup, probes, the tables the run reads first)",
+format!(", and {} before this collection's window opened (startup, probes, the tables the run reads first)",
         span(overhead.before_window_cpu_ns))
 ```
+
+The figure is the process's cpu when this collection's span opened, so for a
+collection attached mid-run it also holds the other collections' windows, and
+`tool_cpu_ns()` is a process total every collection carries: print it per
+collection, never summed over them.
 
 A profile with stacks in a debug build reads 1 s before the window and 80 ms in
 it (`tests/budget.rs`,

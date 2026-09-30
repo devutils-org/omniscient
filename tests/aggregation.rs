@@ -1057,3 +1057,64 @@ fn a_program_that_allocates_its_buffer_aligned_shows_that_buffer_as_its_largest(
         "dd allocated a {BLOCK}-byte buffer and the largest bucket counted is {largest:?}: {buckets:?}"
     );
 }
+
+/// Ground truth for a realloc that fails, against one that frees.
+///
+/// A realloc that returns NULL for a size it cannot serve leaves the block where
+/// it was, still the caller's; one to zero bytes gives the block back and
+/// returns NULL too. The two return the same thing and mean opposite things,
+/// and the shim once reported both as a free, so a program that survived a
+/// failed realloc was shown holding less than it held. The program below holds
+/// two blocks it never writes to, of sizes far above anything the interpreter
+/// allocates: it asks the first to grow past `PTRDIFF_MAX`, which glibc refuses
+/// before touching it, and shrinks the second to zero. It checks both NULLs
+/// itself. What is live at the end is then the first block and not the
+/// second: at least `KEPT`, and less than `KEPT + GIVEN_BACK`.
+#[test]
+fn a_failed_realloc_leaves_its_block_live_where_a_realloc_to_zero_frees_it() {
+    const KEPT: u64 = 256 * MIB;
+    const GIVEN_BACK: u64 = 128 * MIB;
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = format!(
+        "import ctypes, time\n\
+         libc = ctypes.CDLL(None)\n\
+         P, S = ctypes.c_void_p, ctypes.c_size_t\n\
+         libc.malloc.restype = P\n\
+         libc.malloc.argtypes = [S]\n\
+         libc.realloc.restype = P\n\
+         libc.realloc.argtypes = [P, S]\n\
+         kept = libc.malloc({KEPT})\n\
+         given = libc.malloc({GIVEN_BACK})\n\
+         assert kept and given\n\
+         assert libc.realloc(kept, 1 << 62) is None\n\
+         assert libc.realloc(given, 0) is None\n\
+         time.sleep(0.3)\n"
+    );
+    let session = format!(
+        "format: json\nrequests:\n  \
+         - source: mem.heap.live\n    \
+         target: {{launch: [python3, -c, {}]}}\n    \
+         mode: poll@50ms\n    emit: [summary]\n",
+        serde_json::Value::from(program)
+    );
+    let output = run_session(&session);
+    assert_ran(&output);
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let result = &run["results"][0];
+    assert_eq!(
+        result["losses"]["dropped"], 0,
+        "the shim dropped nothing: {run}"
+    );
+    let series = &result["outputs"][0]["series"][0];
+    let last = series["last"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("a last value: {run}"));
+    assert!(
+        (KEPT as f64..(KEPT + GIVEN_BACK) as f64).contains(&last),
+        "the program ends holding the {KEPT}-byte block its failed realloc left in place and \
+         not the {GIVEN_BACK}-byte one it reallocated to zero; live at the end: {last}"
+    );
+}

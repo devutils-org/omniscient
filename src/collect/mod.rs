@@ -691,17 +691,21 @@ pub struct Overhead {
     /// Where `in_target_cpu_ns` came from, or why there is none.
     #[serde(default)]
     pub in_target_from: String,
-    /// This process's cpu before the span `collector_cpu_ns` weighs: its
-    /// start, the catalog, the probes, the attach, and whatever table the run
-    /// was going to need and read then so that no drain would pay for it --
-    /// the kernel's symbols, for a profile with stacks, which a debug build
-    /// parses in the better part of a second. `getrusage(RUSAGE_SELF)` at the
-    /// span's opening.
+    /// This process's cpu before this collection's span opened -- the span
+    /// `collector_cpu_ns` weighs -- and not before the target ran.
+    /// `getrusage(RUSAGE_SELF)` at the span's opening. For a collection open
+    /// from the target's start that is the tool's own preparation: its start,
+    /// the catalog, the probes, the attach, and whatever table the run was
+    /// going to need and read then so that no drain would pay for it -- the
+    /// kernel's symbols, for a profile with stacks, which a debug build parses
+    /// in the better part of a second. For one attached mid-run, or detached
+    /// and reopened, it also holds what every other collection's window cost
+    /// before this one's opened.
     ///
-    /// Outside the percentage on purpose: the target was not running yet, so
-    /// none of it is dilation. Reported, because a reader told a profile cost
-    /// 3 % of its target, where the run cost the machine more than the target
-    /// did, has been told something false (finding U-cost, fourteenth wave).
+    /// Outside the percentage on purpose: none of it is this collection's
+    /// dilation. Reported, because a reader told a profile cost 3 % of its
+    /// target, where the run cost the machine more than the target did, has
+    /// been told something false (finding U-cost, fourteenth wave).
     #[serde(default)]
     pub before_window_cpu_ns: u64,
     /// This process's cpu after the span `collector_cpu_ns` weighs, up to the
@@ -738,6 +742,10 @@ impl Overhead {
     /// start to the collection being handed back: before the window, in it,
     /// and after. What a `wait4` over the tool reports, less its target and
     /// the formatting of the results.
+    ///
+    /// A process total, not this collection's share: every collection of one
+    /// run carries the same figure, up to when each was handed back, so the
+    /// figures of a run's collections are compared, never summed.
     pub fn tool_cpu_ns(&self) -> u64 {
         self.before_window_cpu_ns + self.collector_cpu_ns + self.after_window_cpu_ns
     }
