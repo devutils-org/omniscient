@@ -158,21 +158,30 @@
   summary: "Context switches"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=6.1"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
-    # A cgroup-scoped perf event is not written: the collector follows a
-    # thread or serves the machine. No backend of this entry has a collector
-    # for a cgroup or a container, so neither is a target it declares; the
-    # `sched_switch` program that would serve one is a decision about which
-    # backend answers every other target too (docs/families/kernel.md).
+    # First for every target it serves, because on the question both answer --
+    # how many times a task left the cpu -- an inherited counter is exact and
+    # free, and a program costs a run on every switch of the machine
+    # (DECISIONS.md, the fourteenth wave). It follows threads and cpus, and
+    # nothing inside a cgroup.
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
        targets: {system: native, pid: native, tid: native, cpu: native, launch: native},
        degraded: "one sample per switch for the observed task, with no second party:
                   it says a switch happened and when, never what ran next or why
                   the task left the cpu"}
+    # The `sched_switch` program, counting in the kernel per task and kind:
+    # what serves a cgroup, and what tells a voluntary switch from an
+    # involuntary one by the kernel's own rule, for anyone who forces it.
+    # `count` only: `trace` is a per-switch event, which the `woke` join from
+    # `sched.wakeup` needs, and `pmu:sw` records.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "kernel>=6.1"], cost: low,
+       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native, container: no},
+       filter_fields: [comm, pid], equivalent: true, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low,
+       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native, container: no},
+       filter_fields: [comm, pid], equivalent: true}
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
-  targets: {system: native, pid: native, tid: native, cpu: native, launch: native}
+  targets: {system: native, pid: native, tid: native, cpu: native, launch: native, cgroup: native, container: no}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu]
   determinism: low
@@ -180,7 +189,10 @@
     - "A switch count is a symptom, not a cause: a voluntary switch is a task
        blocking on something and an involuntary one is the scheduler taking the
        cpu away. Only a `sched_switch` backend can tell them apart, because only
-       it sees the outgoing task's state; `pmu:sw` counts both as one."
+       it sees the outgoing task's state; `pmu:sw` counts both as one. A cgroup
+       is served by the `sched_switch` program, whose rows carry `kind`
+       (voluntary or involuntary, by the kernel's own nvcsw rule); `--backend
+       force:bpf:raw_tp -m count` asks it for any other target."
 
 - id: sched.migrations
   family: sched

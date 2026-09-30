@@ -9,8 +9,9 @@
 //! wakeup, which is what lets blocked time be attributed to whoever ended it.
 //! `sched.offcpu` goes through the same layer and counts in the kernel rather
 //! than streaming, because a switch-heavy workload produces more events than
-//! the measurement is worth. `sched.switches` goes through `perf_event_open`,
-//! needs no privileges, and can only say that a switch happened.
+//! the measurement is worth. `sched.switches` goes through `perf_event_open`
+//! first, and can only say that a switch happened; the `sched_switch` program
+//! behind it counts a cgroup's, and says which were voluntary.
 //!
 //! `sched.mutex` is the one that is not in the kernel at all: the preload shim
 //! the heap sources use, pointed at `pthread_mutex_lock`, so it sees the
@@ -25,6 +26,7 @@ mod mutex_usdt;
 mod numa_balance;
 mod offcpu;
 mod runqlat;
+mod switch_count;
 mod switches;
 mod wakeup;
 
@@ -127,7 +129,15 @@ pub fn factories() -> Vec<Factory> {
                 emits: resolved.request.emit.clone(),
             }))
         }),
+        Factory::new("sched.switches", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(switch_count::Prepare {
+                mode: resolved.request.mode,
+                // Applied per drained row; see `migrations::Prepare`.
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
+            kernel_mode_counted()?;
             match resolved.request.mode {
                 // Counted, not sampled: the same software counter
                 // `cpu.context_switches` reads, one inherited counter per
@@ -140,4 +150,40 @@ pub fn factories() -> Vec<Factory> {
             }
         }),
     ]
+}
+
+/// Whether this process may count what happens in kernel mode, asked the way
+/// `pmu:sw` counts: one context-switch counter on this process.
+///
+/// A context switch is kernel mode and nothing else. Where
+/// `perf_event_paranoid` is 2 -- the kernel's default, and the CI's second
+/// runner -- an unprivileged process may open a counter for user mode only,
+/// the counter layer reopens it that way and notes that kernel-mode events are
+/// not in the count, and for this event that is every event: the runner's
+/// `sched.switches -m count` read 0 for a program whose threads counted 406
+/// switches of their own. A sampled run was refused at start with `EACCES`
+/// instead. Both are refused here, before anything is launched, with the
+/// reason, because a zero that is really "not allowed to look" is the wrong
+/// number this project is built against.
+fn kernel_mode_counted() -> Result<(), String> {
+    let counter = crate::perf::Counter::software(
+        "context_switches",
+        perf_event_open_sys::bindings::PERF_COUNT_SW_CONTEXT_SWITCHES,
+    );
+    let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_else(|_| "unreadable".to_owned());
+    match crate::perf::CounterGroup::open(&[counter], crate::perf::Scope::Process(0)) {
+        Ok(group) if !group.kernel_excluded() => Ok(()),
+        Ok(_) => Err(format!(
+            "`pmu:sw` counts context switches, which happen only in kernel mode, and this \
+             process may count its own user mode only (`perf_event_paranoid` is {paranoid}): \
+             every count would be zero. Lower it to 1, grant CAP_PERFMON, or give the binary \
+             CAP_BPF and CAP_PERFMON for the `bpf:*` backends ahead of this one"
+        )),
+        Err(error) => Err(format!(
+            "`pmu:sw` cannot open a context-switch counter on this process ({error}; \
+             `perf_event_paranoid` is {paranoid})"
+        )),
+    }
 }
