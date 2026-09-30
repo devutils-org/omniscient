@@ -4176,17 +4176,20 @@ fn the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted() {
     );
 }
 
-/// `--stack dwarf` is this build's gap, refused with the gap's code before the
-/// program it would profile is started.
+/// `--stack lbr` and `--stack sframe` are refused with the gap's code before
+/// the program they would profile is started: as not implemented where the
+/// machine offers the mechanism, and as not servable here where it does not
+/// (`pmu:branch_call_stack`, `kernel:sframe`). `dwarf` is served since the
+/// fourteenth wave, so it is no longer asked here.
 ///
-/// The factory refuses it, which runs before the launch. The ground truth that
+/// The factory refuses them, which runs before the launch. The ground truth that
 /// the refusal came first is the program's own: it creates a file as its first
 /// act, and the file is not there.
 #[test]
 fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
-    let marker = std::env::temp_dir().join(format!("omn-dwarf-started-{}", std::process::id()));
+    let marker = std::env::temp_dir().join(format!("omn-unwinder-started-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
-    for stack in ["dwarf", "lbr"] {
+    for stack in ["lbr", "sframe"] {
         let (code, message) = run(&[
             "cpu.profile",
             "-m",
@@ -4207,7 +4210,9 @@ fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
         }
         assert_eq!(code, 3, "`--stack {stack}` is this build's gap: {message}");
         assert!(
-            message.contains(&format!("--stack {stack}")) && message.contains("not implemented"),
+            message.contains(&format!("--stack {stack}"))
+                && (message.contains("not implemented")
+                    || message.contains("cannot be served here")),
             "{message}"
         );
         assert!(
