@@ -18,11 +18,11 @@
 //! names the sysctl and the capability, and nothing falls back to counting
 //! this process instead.
 //!
-//! **A container is not served here.** A container is a cgroup once it has
-//! been resolved to one, and nothing in this tool resolves a container name to
-//! a cgroup directory yet. A container target falls back to `cgroup` in the
-//! catalog's model, so the entries this collector serves say `container: no`,
-//! and the validator refuses it by name before anything starts.
+//! **A container is served as its cgroup.** `omn` binds `--container NAME` to
+//! the cgroup its runtime names before resolution (`request::find_container`),
+//! so what reaches this collector is `Target::Cgroup`. A container target
+//! falls back to `cgroup` in the catalog's model, and the entries this
+//! collector serves declare nothing for it.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};

@@ -15,7 +15,7 @@ use std::fmt;
 use crate::catalog::{Catalog, Entry, TargetSupport, Unit};
 use crate::error::{nearest, one_of, DidYouMean};
 use crate::format::{FormatStatus, OutputFormat};
-use crate::request::{Emit, EmitKind, Mode, Request, Session, StackMode, TargetKind};
+use crate::request::{Emit, EmitKind, Mode, ModeKind, Request, Session, StackMode, TargetKind};
 
 /// A rejected request, with the reason and, where one exists, the way out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +132,7 @@ pub fn validate_request(
 
     check_target(entry, request, &mut rejections);
     check_mode(entry, request, &mut rejections);
+    check_pair(entry, request, &mut rejections);
     check_emits(entry, request, format, &mut rejections, &mut report);
     check_keys(entry, request, &mut rejections);
     check_filter(entry, request, &mut rejections);
@@ -316,6 +317,43 @@ pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
             ));
         }
     }
+    complaints.extend(container_complaints(catalog));
+    complaints
+}
+
+/// A container is measured as the cgroup its runtime names: `omn` binds
+/// `--container` to that cgroup before resolution (`request::find_container`),
+/// so a source, or a backend, that serves a cgroup serves the container too.
+/// Saying `container: no` beside a served cgroup refuses, in the validator, a
+/// request every collector would have served -- which is what eleven entries
+/// did until the fifteenth wave. The key is left out, and the kind falls back
+/// to `cgroup`.
+fn container_complaints(catalog: &Catalog) -> Vec<String> {
+    let refuses = |targets: &std::collections::BTreeMap<TargetKind, TargetSupport>| {
+        targets.get(&TargetKind::Container) == Some(&TargetSupport::No)
+            && targets
+                .get(&TargetKind::Cgroup)
+                .is_some_and(|support| *support != TargetSupport::No)
+    };
+    let mut complaints = Vec::new();
+    for entry in catalog.entries() {
+        if refuses(&entry.targets) {
+            complaints.push(format!(
+                "catalog entry `{}` serves a cgroup and declares `container: no`, but a \
+                 container is measured as the cgroup its runtime names: drop the key",
+                entry.id
+            ));
+        }
+        for backend in &entry.backends {
+            if backend.targets.as_ref().is_some_and(refuses) {
+                complaints.push(format!(
+                    "backend `{}` of `{}` serves a cgroup and declares `container: no`, but a \
+                     container is measured as the cgroup its runtime names: drop the key",
+                    backend.id, entry.id
+                ));
+            }
+        }
+    }
     complaints
 }
 
@@ -365,14 +403,6 @@ fn target_rejection_reason(entry: &Entry, kind: TargetKind) -> String {
                 .to_owned()
         }
         TargetKind::Iface => format!("`{}` is not a network interface source", entry.id),
-        // A container is a cgroup once something has resolved it to one, which
-        // is why the kind falls back to `cgroup`; an entry that serves the
-        // cgroup and says `container: no` is saying nothing resolves it.
-        TargetKind::Container if entry.target_support(TargetKind::Cgroup) != TargetSupport::No => {
-            "a container has to be resolved to its cgroup first, which this tool does not do; \
-             pass --cgroup with the container's cgroup path"
-                .to_owned()
-        }
         TargetKind::Cpu => "this source is not attributable to a single core".to_owned(),
         _ => format!("the catalog declares no `{kind}` support for this source"),
     }
@@ -388,6 +418,95 @@ fn check_mode(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>)
         format!(
             "this source supports {}",
             one_of(entry.modes.iter().map(|mode| mode.as_str()))
+        ),
+    ));
+}
+
+/// Refuses a (target, mode) pair that the entry accepts one half at a time
+/// and no backend of its chain declares together.
+///
+/// The entry's `targets` and `modes` are each the union over the chain, so a
+/// request can pass both checks above and still name a pair no backend
+/// serves: `sched.switches --cgroup -m trace`, where `pmu:sw` traces and does
+/// not follow a cgroup, and the two programs follow a cgroup and only count.
+/// The resolver used to walk that chain and answer "no viable backend on this
+/// machine", exit 1 -- the machine's -- when every line under it was the
+/// catalog's and no machine could serve it. It is the request's, exit 2,
+/// before anything is resolved. A pinned backend is judged alone by
+/// [`check_backend`], which is the pin's point.
+fn check_pair(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>) {
+    let kind = request.target.kind();
+    let mode = request.mode.kind();
+    if request.backend.is_some()
+        || entry.target_support(kind) == TargetSupport::No
+        || !entry.modes.contains(&mode)
+    {
+        return;
+    }
+    let serves_target = |backend: &&crate::catalog::Backend| {
+        entry.backend_target_support(backend, kind) != TargetSupport::No
+    };
+    if entry
+        .backends
+        .iter()
+        .filter(serves_target)
+        .any(|backend| entry.backend_modes(backend).contains(&mode))
+    {
+        return;
+    }
+    let mut modes_for_target: Vec<ModeKind> = Vec::new();
+    for backend in entry.backends.iter().filter(serves_target) {
+        for served in entry.backend_modes(backend) {
+            if !modes_for_target.contains(served) {
+                modes_for_target.push(*served);
+            }
+        }
+    }
+    let targets_for_mode: Vec<&str> = TargetKind::ALL
+        .into_iter()
+        .filter(|candidate| {
+            entry.backends.iter().any(|backend| {
+                entry.backend_target_support(backend, *candidate) != TargetSupport::No
+                    && entry.backend_modes(backend).contains(&mode)
+            })
+        })
+        .map(|candidate| candidate.as_str())
+        .collect();
+    rejections.push(Rejection::with_hint(
+        format!(
+            "`{}` cannot be observed in `{mode}` mode per {kind}: no backend of its chain \
+             declares both, so no machine could serve it ({})",
+            entry.id,
+            entry
+                .backends
+                .iter()
+                .map(|backend| {
+                    let per = if entry.backend_target_support(backend, kind) == TargetSupport::No {
+                        format!("not per {kind}")
+                    } else {
+                        format!("per {kind}")
+                    };
+                    format!(
+                        "`{}` {per}, in {}",
+                        backend.id,
+                        one_of(entry.backend_modes(backend).iter().map(|m| m.as_str()))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        format!(
+            "per {kind} it serves {}; `{mode}` is served per {}",
+            if modes_for_target.is_empty() {
+                "no mode".to_owned()
+            } else {
+                one_of(modes_for_target.iter().map(|m| m.as_str()))
+            },
+            if targets_for_mode.is_empty() {
+                "no target".to_owned()
+            } else {
+                one_of(targets_for_mode.into_iter())
+            }
         ),
     ));
 }
@@ -973,6 +1092,132 @@ mod tests {
             "the catalog makes {} promise(s) no build can keep:\n  {}",
             complaints.len(),
             complaints.join("\n  ")
+        );
+    }
+
+    /// `sched.switches --cgroup -m trace`: the entry follows a cgroup and
+    /// traces, one backend at a time, and none of its three does both. The
+    /// refusal is the request's, naming each backend's half, and the two
+    /// pairs a backend does declare are not refused.
+    #[test]
+    fn a_target_and_mode_no_backend_declares_together_are_refused_as_the_request() {
+        let cgroup = || Target::Cgroup("/sys/fs/cgroup".into());
+        let traced = request("sched.switches", cgroup(), "trace", "raw");
+        let rejections = reject(&traced);
+        let said = rejections
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            said.contains("no backend of its chain declares both"),
+            "{said}"
+        );
+        assert!(
+            said.contains("`pmu:sw` not per cgroup") && said.contains("`bpf:raw_tp` per cgroup"),
+            "{said}"
+        );
+        for served in [
+            request("sched.switches", cgroup(), "count", "summary"),
+            request("sched.switches", Target::Pid(vec![1]), "trace", "raw"),
+        ] {
+            if let Err(rejections) = validate_request(&catalog(), &served, OutputFormat::Text) {
+                assert!(
+                    !rejections
+                        .iter()
+                        .any(|r| r.message.contains("declares both")),
+                    "{rejections:?}"
+                );
+            }
+        }
+    }
+
+    /// Every pair the validator refuses as the catalog's is one the resolver,
+    /// walking the chain on this machine, finds no backend for either: the
+    /// refusal moves the answer earlier and to exit 2, and never refuses a
+    /// request that would have resolved. The resolver's walk is the witness,
+    /// written separately and asked separately.
+    #[test]
+    fn a_pair_refused_as_the_catalogs_would_not_have_resolved_on_this_machine() {
+        let catalog = catalog();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let mut refused = 0;
+        for entry in catalog.entries() {
+            for kind in entry.supported_targets() {
+                let target = match kind {
+                    TargetKind::Launch => Target::Launch(vec!["/bin/true".into()]),
+                    TargetKind::Pid => Target::Pid(vec![std::process::id() as i32]),
+                    TargetKind::Tid => Target::Tid(vec![std::process::id() as i32]),
+                    TargetKind::Cgroup => Target::Cgroup("/sys/fs/cgroup".into()),
+                    TargetKind::System => Target::System,
+                    TargetKind::Cpu => Target::Cpu("0".parse().unwrap()),
+                    TargetKind::Iface => Target::Iface("lo".into()),
+                    // Bound to a cgroup before resolution, never resolved as such.
+                    TargetKind::Container => continue,
+                };
+                for mode in &entry.modes {
+                    let spelled = match mode {
+                        ModeKind::Poll => "poll@100ms".to_owned(),
+                        ModeKind::Sample => "sample@99hz".to_owned(),
+                        other => other.as_str().to_owned(),
+                    };
+                    let Some(emit) = entry
+                        .emits
+                        .iter()
+                        .find(|emit| mode.valid_emits().contains(emit))
+                    else {
+                        continue;
+                    };
+                    let mut asked = request(entry.id.as_str(), target.clone(), &spelled, "raw");
+                    asked.emit = vec![emit.as_str().parse().unwrap()];
+                    let mut rejections = Vec::new();
+                    check_pair(entry, &asked, &mut rejections);
+                    if rejections.is_empty() {
+                        continue;
+                    }
+                    refused += 1;
+                    match crate::resolve::resolve(&catalog, &capabilities, &asked) {
+                        Err(crate::resolve::ResolveError::NoViableBackend { .. }) => {}
+                        other => panic!(
+                            "`{}` per {kind} in `{mode}` is refused as the catalog's ({}), and \
+                             the resolver answered {other:?}",
+                            entry.id, rejections[0]
+                        ),
+                    }
+                }
+            }
+        }
+        eprintln!("{refused} (source, target, mode) triples are refused as the catalog's");
+        assert!(
+            refused > 0,
+            "no pair of the catalog is refused, so this checked nothing"
+        );
+    }
+
+    /// A container is its cgroup: every entry that serves a cgroup accepts a
+    /// container at the validator, and a `container: no` beside a served
+    /// cgroup is a catalog that does not load.
+    #[test]
+    fn a_container_is_accepted_wherever_its_cgroup_is_served() {
+        let catalog = catalog();
+        for entry in catalog.entries() {
+            let cgroup = entry.target_support(TargetKind::Cgroup) != TargetSupport::No;
+            let container = entry.target_support(TargetKind::Container) != TargetSupport::No;
+            assert_eq!(cgroup, container, "`{}`", entry.id);
+        }
+        let mut entry = catalog
+            .get(&"cpu.instructions".parse().unwrap())
+            .unwrap()
+            .clone();
+        entry
+            .targets
+            .insert(TargetKind::Container, TargetSupport::No);
+        let refusal = Catalog::from_entries(vec![entry])
+            .expect_err("the loader refuses it")
+            .to_string();
+        assert!(
+            refusal.contains("container: no") && refusal.contains("drop the key"),
+            "{refusal}"
         );
     }
 

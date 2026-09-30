@@ -1192,3 +1192,139 @@ wave). What should change, and how to see it:
 | `ci-6.17-stock` (`stock`, new) | the next push | every `pmu:` requirement missing by the sysctl; the suite fails only in the filed rows; the gate passes with both expected files |
 | 5.15, 6.1, 6.6, 7.2 under `nocaps` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs nocaps` | where the guest's `perf_event_paranoid` is 2 or above (`cell.sh` prints it; this host's `/etc/sysctl.d/99-perf.conf` sets -1, and whether a guest applies it is not checked here), the switch and migration counters read missing rather than attaching and counting zero; at 1 or below nothing changes; `mem.faults` attaches either way; judges pass |
 | the same four under `caps` | `scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 host --configs caps` | no source changes except those listed above as leaving usable through an unwritten backend (`power.throttle` where `thermal_throttle` is absent, and the like); the new judge (no usable-through-unwritten) passes |
+
+## The fifteenth wave
+
+What stream probes changed, each with the test that holds it; the handoff is
+`docs/fixes/w15-probes.md`.
+
+### 1. A container is served wherever its cgroup is
+
+`omn` binds `--container NAME` to the cgroup its runtime names before
+resolution (stream R, the fourteenth wave), and eleven entries still said
+`container: no` beside a served cgroup, so the validator refused the
+container first: `cpu.cycles`, `.instructions`, `.ipc`, `.branch_misses`,
+`.cache_misses`, `.topdown`, `.context_switches`, `.migrations`, `.throttle`,
+`cpu.profile` and `mem.faults`. The key is gone from those, from the three
+`mem.cache_*` entries (the same counter group) and from `sched.switches` and
+its two programs (which serve a cgroup in `count`). A container falls back to
+`cgroup` in every one; the validator's *"which this tool does not do"* is gone;
+and the loader refuses a catalog that says `container: no` beside a served
+cgroup (`validate::container_complaints`).
+
+- `scenario_cpu::a_container_is_counted_as_the_cgroup_its_runtime_names`: a
+  cgroup made here, a `sleep` in it that a runtime script names as the
+  container, and `cpu.instructions --container` counts the child's 10^8
+  retired instructions inside it and none of the parent's 10^9 beside it.
+- `scenario_cpu::a_container_is_asked_of_its_runtime_where_its_cgroup_is_served`:
+  `cpu.instructions`, `cpu.profile`, `mem.faults` and `cpu.throttle
+  --container web` against a runtime that knows no container answer exit 1
+  with the runtime's own *"No such object: web"*, never *"per container"*.
+- `tests/cli.rs::a_container_is_served_by_a_source_that_serves_its_cgroup`
+  (R's) runs instead of skipping: 388 switches counted in the container's
+  cgroup, 385 blocks of the task inside by the kernel's count.
+
+### 2. A pair no backend declares is the request's; capabilities the kernel withheld are named
+
+- **A (target, mode) pair the entry accepts one half at a time and no backend
+  declares together is exit 2**, before resolution, naming each backend's
+  half: `sched.switches --cgroup -m trace` read *"has no viable backend on
+  this machine"*, exit 1, and now reads *"no backend of its chain declares
+  both, so no machine could serve it (`pmu:sw` not per cgroup, in count,
+  trace; `bpf:raw_tp` per cgroup, in count; ...)"*. It is the only such
+  triple in the catalog today.
+  `validate::tests::a_target_and_mode_no_backend_declares_together_are_refused_as_the_request`,
+  and `a_pair_refused_as_the_catalogs_would_not_have_resolved_on_this_machine`,
+  which holds every refused triple to the resolver's own walk on this machine.
+- **A binary whose file capabilities the kernel did not grant says so.** The
+  probe reads the file's `security.capability` and the process's `CapEff`;
+  where the file carries `CAP_BPF` or `CAP_PERFMON` and the process lacks it,
+  a privilege refusal names why instead of advising the `setcap` already run:
+  the `nosuid` mount (from `mountinfo`, with `findmnt -no OPTIONS -T <exe>`),
+  `no_new_privs`, or a grant without `e`.
+  `capabilities::tests::a_mount_is_nosuid_exactly_when_statvfs_says_so` holds
+  the mount reading to `statvfs`'s `ST_NOSUID`;
+  `a_binary_s_file_capabilities_are_read_as_getcap_prints_them` the decoding
+  to `getcap`; `portability::a_binary_denied_its_file_capabilities_says_why_instead_of_advising_the_grant`
+  runs the real binary under `PR_SET_NO_NEW_PRIVS`. The attach-time advice in
+  `src/bpf/mod.rs` is filed (not this stream's file). A `nosuid` mount cannot
+  be tested end to end without root: copying a file's capabilities needs
+  `CAP_SETFCAP`.
+- `.github/expected-skips.txt`: the cgroup-ancestry skip wording in, the
+  `/sys/class/block/root` line out.
+
+### 3. `cpu.cycles` on a cpu with no hardware PMU
+
+Served, through the `pmu:sw` backend the catalog already declared degraded
+(*"CPU time, not cycles: blind to DVFS"*): the kernel's cpu clock, in the same
+counter group and window, under the counter name `cpu_clock_ns`, with the
+degradation in the result. On a cloud VM with no PMU `cpu.cycles` now measures
+where it was refused as the build's gap (exit 3). Decided for the chain rather
+than for a refusal by name: `DECISIONS.md`'s open line said leaving it open
+cost `cpu.cycles` on most cloud VMs, and the project's line is every mechanism
+as a chain, with a fallback that says what it degrades. The unit stays the
+entry's (`count`), which is the price: a reader who ignores the `degraded:`
+line reads nanoseconds as cycles, at one gigahertz.
+
+- `counters::tests::the_cpu_clock_fallback_counts_the_nanoseconds_the_thread_ran`:
+  50 ms of the thread's own `CLOCK_THREAD_CPUTIME_ID`, counted to a tenth.
+- `scenario_cpu::a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency`:
+  through the binary, 400 ms more of burned cpu counted 400 ms more to 15 %,
+  and the hardware counter over the fallback is the core's frequency, within
+  cpufreq's range (4.2 GHz here).
+
+### 4. The bench's guardrail and `power.*`
+
+Not changed here, and why. `ROADMAP.md` phase 9 says `power` has been
+collected unconditionally since phase 8 as a guardrail. What the bench does
+(`examples/bench/harness.rs`, the runner stream's) is read
+`/sys/devices/system/cpu/cpu*/thermal_throttle/{core,package}_throttle_count`
+before and after each repetition and invalidate the repetition if the sum
+moved -- the very files `power.throttle`'s `fs:sys` backend reads, and none of
+`power.freq`, `power.energy` or `power.temp`. The direct read is defensible (a
+polled source reads a sysfs file per cpu per tick inside the window it
+guards, and the bench resolves 1 % differences), but it is not "`power.*`
+collected", and a machine without the counters -- this AMD one, any VM --
+answers `None` in the bench where the resolver would name the missing file.
+Filed for the runner stream with a signature (`docs/open-findings.md`, the
+fifteenth wave, stream probes): run `power.throttle` over each repetition, or
+keep the read and correct the phase 9 sentence.
+
+### 5. Two cells compared directly, and the resolved file held to a gap
+
+- `portability::two_cells_list_different_sources_for_the_condition_between_them`
+  (phase 2): for every guest, the cell that withholds (`nocaps`, `nobtf`,
+  `notracefs`, `caps` against `root`) lists no source the one that grants
+  does not, the capability and BTF pairs list strictly fewer, and every
+  source usable only where the condition is granted names it in the
+  withholding cell's reason. On the cells on disk: 41 against 71 to 78 for
+  `nocaps`/`caps`, 45 against 75 to 81 for `nobtf`/`root`, 52 against 92 for
+  `here-nocaps`/`here-caps`.
+- `portability::every_gap_between_two_cells_is_explained_by_their_resolved_records`
+  (phase 7): over every two of the 21 cells, each source whose availability
+  differs has requirements that answered differently, and a field of the two
+  resolved records that differs and can explain them: `kernel_release`
+  (1740), `kernel_btf` (1336), `gpus` (296), `tracefs` (105),
+  `perf_event_paranoid` (24). **473 are not explained yet** -- 335 only the
+  privileges could explain, 138 the privileges or the virtualization -- because
+  the resolved record carried neither. It does now: `Environment.privileges`
+  (uid, the effective capabilities this tool asks for, `no_new_privs`, what
+  the file carries that the process was not given) and
+  `Environment.virtualization` (`none`, or the firmware's name for the
+  machine), held to `capget` and `systemd-detect-virt --vm`. The test counts
+  those and says so until the matrix is swept again; with new cells a gap
+  only a missing field explains fails. `a_gap_is_explained_only_by_a_recorded_field_that_differs`
+  judges the judge on planted cells.
+- A cell now records its `build` (a hash of the binary that swept it): two
+  cells differing by what the build answers (a probe not written, a listing
+  rule) are the build's difference, not the machine's, and are held only
+  between cells of one build. Cells on disk predate it: 217 such differences
+  between cells swept on 2026-09-29 and 2026-09-30.
+
+### The matrix cells this change should move
+
+| Cells | What should change |
+|---|---|
+| every cell | `environment.privileges`, `environment.virtualization` and `cell.build` recorded; `every_gap_...` explains the 473 it counts as unrecorded today, or fails naming the ones it cannot |
+| every guest | nothing for `cpu.cycles`: the guests expose the host's PMU and stay on `pmu`; `pmu:sw` now reads `collector written` in the listing |
+| `ci-6.17-*` | `cpu.cycles` served on the runner's vcpu, `pmu:sw`, with the degradation |

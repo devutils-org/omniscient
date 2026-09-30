@@ -102,7 +102,7 @@
        degraded: "x86 only for this tracepoint"}
   modes: [count, sample, trace]
   emits: [summary, rate, hist, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
   keys: [task, mem, cgroup, cpu]
   filter_fields: [comm, addr]
   determinism: medium
@@ -235,7 +235,7 @@
     - {id: "pmu", requires: ["pmu:L1-dcache-load-misses", "pmu:L1-dcache-loads"], cost: free}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -255,7 +255,7 @@
          missed, not loads only, and what each vendor puts in it differs"}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low
@@ -275,7 +275,7 @@
     - {id: "pmu", requires: ["pmu:dTLB-load-misses", "pmu:iTLB-load-misses"], cost: free}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
-  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: no}
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: low

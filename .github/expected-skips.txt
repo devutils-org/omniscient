@@ -53,6 +53,10 @@ serves neither backend
 root-only|readable only by root
 # A cgroup controller the runner's service manager did not delegate to it.
 is not delegated to
+# ... or no cgroup at all: a cell that grants the capabilities and delegates
+# no cgroup to this user, where a test that makes one below its own says so
+# (tests/cli.rs, scenario_sched, scenario_proc).
+no cgroup in this process's ancestry \(.*\) lets this user make one below it
 # Counters a cpu does not have: top-down's issue slots (Intel from Icelake, AMD
 # from Zen 4), a cache event the cpu does not publish.
 this cpu (publishes no|has no) (slots|issue-slot)
@@ -66,10 +70,3 @@ the second clean run was not clean
 was already stalled on I/O
 AnonHugePages moved from [0-9]+ to [0-9]+ huge pages
 has no partially mapped huge pages right now
-
-# Filed, not expected: a test that cannot find the device it runs on. The build
-# directory is on /dev/root, which the scenario looks up by that name under
-# /sys/class/block; the device is there under its own name. Filed for stream N
-# in docs/open-findings.md (the thirteenth wave, stream P); remove this line
-# when it lands.
-the build directory is not on a block device \(/sys/class/block/root does not exist\)

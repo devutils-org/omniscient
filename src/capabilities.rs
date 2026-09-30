@@ -217,9 +217,301 @@ pub struct Environment {
     /// Absent only from files written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefetchers: Option<Prefetchers>,
+    /// What this process may do, as the kernel granted it: the difference
+    /// between two runs on one machine is as often the binary's capabilities
+    /// as the machine, and a resolved file that did not say so could not
+    /// explain it (ROADMAP phase 7, "the resolved file is enough to explain a
+    /// gap between two machines").
+    ///
+    /// Absent only from files written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileges: Option<Privileges>,
+    /// Whether this is a virtual machine, and which: `none` where the cpu
+    /// reports no hypervisor, otherwise what the firmware names it (`QEMU
+    /// Standard PC (Q35 + ICH9, 2009)`). A guest and its host differ by
+    /// devices -- hwmon, RAPL, a PTP clock, cpufreq -- that no other field
+    /// here names.
+    ///
+    /// Absent only from files written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualization: Option<String>,
     /// What is deliberately not captured yet, so its absence is not read as
     /// "this machine has none of it".
     pub not_captured: Vec<String>,
+}
+
+/// The privileges this process holds, read from the kernel's own account of
+/// it (`/proc/self/status`), and what the binary's file carries that the
+/// process was not given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Privileges {
+    /// The effective user id.
+    pub uid: u32,
+    /// The capabilities this tool's mechanisms ask for, of those in the
+    /// effective set, by name (`CAP_BPF`, `CAP_PERFMON`, ...). Root holds all
+    /// of them; a binary granted `cap_bpf,cap_perfmon+ep` holds those two.
+    pub effective: Vec<String>,
+    /// `NoNewPrivs`: set by a sandbox, and the reason a binary's file
+    /// capabilities are not granted at exec.
+    pub no_new_privs: bool,
+    /// The binary carries capabilities this process was not given, and why:
+    /// a `nosuid` mount, `no_new_privs`, or a grant without `e`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<String>,
+}
+
+/// The capabilities a mechanism of this tool asks for, by number and name.
+/// The list is what `Privileges::effective` reports from, so a capability
+/// nothing here uses does not make two records differ.
+const CAPABILITIES_ASKED: [(u32, &str); 9] = [
+    (1, "CAP_DAC_OVERRIDE"),
+    (2, "CAP_DAC_READ_SEARCH"),
+    (12, "CAP_NET_ADMIN"),
+    (13, "CAP_NET_RAW"),
+    (17, "CAP_SYS_RAWIO"),
+    (19, "CAP_SYS_PTRACE"),
+    (21, "CAP_SYS_ADMIN"),
+    (38, "CAP_PERFMON"),
+    (39, "CAP_BPF"),
+];
+
+/// `CAP_PERFMON` and `CAP_BPF`: the two `make` grants to the binary.
+const GRANTED_TO_THE_BINARY: [(u32, &str); 2] = [(39, "CAP_BPF"), (38, "CAP_PERFMON")];
+
+/// One hexadecimal capability set of `/proc/<pid>/status` (`CapEff:`,
+/// `CapPrm:`), and `NoNewPrivs:`.
+fn status_field<'a>(status: &'a str, field: &str) -> Option<&'a str> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))
+        .map(str::trim)
+}
+
+fn capability_set(status: &str, field: &str) -> Option<u64> {
+    u64::from_str_radix(status_field(status, field)?, 16).ok()
+}
+
+/// What the binary's file carries, from its `security.capability` attribute:
+/// the permitted set and whether it is effective at exec. `None` where the
+/// file carries none, or the attribute cannot be read.
+///
+/// The layout is the kernel's `vfs_cap_data` (`linux/capability.h`): a
+/// `magic_etc` word whose top byte is the revision (2 or 3) and whose bit 0 is
+/// the effective flag, then the permitted and inheritable words of the low
+/// and the high half. Revision 1 has one half, and no capability above 31.
+fn file_capabilities(path: &Path) -> Option<(u64, bool)> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let name = c"security.capability";
+    let mut buffer = [0u8; 24];
+    // SAFETY: both strings are NUL-terminated and the buffer's length is given.
+    let length = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if length < 12 {
+        return None;
+    }
+    decode_file_capabilities(&buffer[..length as usize])
+}
+
+fn decode_file_capabilities(data: &[u8]) -> Option<(u64, bool)> {
+    let word = |index: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            data.get(index * 4..index * 4 + 4)?.try_into().ok()?,
+        ))
+    };
+    let magic = word(0)?;
+    let effective = magic & 1 == 1;
+    let low = u64::from(word(1)?);
+    let high = match magic & 0xff00_0000 {
+        0x0100_0000 => 0,
+        0x0200_0000 | 0x0300_0000 => u64::from(word(3)?),
+        _ => return None,
+    };
+    Some((low | high << 32, effective))
+}
+
+/// The mount a path is on and whether it is `nosuid`, from a `mountinfo`
+/// text: the longest mount point that is a prefix of the path, and its
+/// per-mount options (the sixth field).
+fn mount_of(mountinfo: &str, path: &Path) -> Option<(PathBuf, bool)> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let point = PathBuf::from(unescape_mount(fields.get(4)?));
+            let options = fields.get(5)?;
+            path.starts_with(&point)
+                .then(|| (point, options.split(',').any(|option| option == "nosuid")))
+        })
+        .max_by_key(|(point, _)| point.as_os_str().len())
+}
+
+/// `mountinfo` writes a space, a tab, a newline and a backslash in a path as
+/// three octal digits after a backslash.
+fn unescape_mount(field: &str) -> String {
+    let mut out = String::new();
+    let mut chars = field.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let digits: String = chars.clone().take(3).collect();
+            if digits.len() == 3 {
+                if let Ok(code) = u8::from_str_radix(&digits, 8) {
+                    out.push(code as char);
+                    chars.nth(2);
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Why this process lacks capabilities the binary's own file carries, or
+/// `None` when it lacks none of `CAP_BPF` and `CAP_PERFMON` that the file
+/// grants.
+///
+/// A binary on a `nosuid` filesystem keeps `security.capability`, `getcap`
+/// prints it, and the kernel ignores it at exec; a process under
+/// `no_new_privs` is not given it either. Advising `setcap` there tells the
+/// reader to run the command they already ran. Measured by stream D on the
+/// development machine, whose `/tmp` is `nosuid`: `getcap` printed
+/// `cap_perfmon,cap_bpf=ep` and `omn list` said 57 usable, the unprivileged
+/// number.
+pub fn withheld_file_capabilities() -> Option<String> {
+    static ANSWER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            let exe = std::fs::read_link("/proc/self/exe").ok()?;
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+            let file = file_capabilities(&exe);
+            withheld_reason(&exe, file, &status, &mountinfo)
+        })
+        .clone()
+}
+
+/// [`withheld_file_capabilities`] over what it read, so the reasoning can be
+/// held to texts the kernel wrote for another process.
+fn withheld_reason(
+    exe: &Path,
+    file: Option<(u64, bool)>,
+    status: &str,
+    mountinfo: &str,
+) -> Option<String> {
+    let (permitted, effective_flag) = file?;
+    let effective = capability_set(status, "CapEff")?;
+    let withheld: Vec<&str> = GRANTED_TO_THE_BINARY
+        .iter()
+        .filter(|(bit, _)| permitted >> bit & 1 == 1 && effective >> bit & 1 == 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if withheld.is_empty() {
+        return None;
+    }
+    let names = withheld.join(" and ");
+    let carried = format!(
+        "The binary {} carries {names}, but this process was not given {}",
+        exe.display(),
+        if withheld.len() == 1 { "it" } else { "them" }
+    );
+    let no_new_privs = status_field(status, "NoNewPrivs") == Some("1");
+    let why = match mount_of(mountinfo, exe) {
+        Some((point, true)) => format!(
+            "the filesystem at {} is mounted nosuid, and the kernel ignores file capabilities \
+             there (`findmnt -no OPTIONS -T {}`): the grant is done, and it takes effect \
+             from a filesystem mounted without nosuid",
+            point.display(),
+            exe.display()
+        ),
+        _ if no_new_privs => "it runs under no_new_privs (`NoNewPrivs: 1` in \
+             /proc/self/status), which a sandbox or `NoNewPrivileges=yes` sets and which drops \
+             file capabilities at exec: run it outside that sandbox"
+            .to_owned(),
+        _ if !effective_flag => format!(
+            "the file's capabilities are permitted but not effective (granted without `e`): \
+             `sudo setcap cap_bpf,cap_perfmon+ep {}`",
+            exe.display()
+        ),
+        _ => "neither a nosuid mount nor no_new_privs explains it: compare `getcap` on the \
+              binary with `grep Cap /proc/self/status` in the process"
+            .to_owned(),
+    };
+    Some(format!("{carried}: {why}"))
+}
+
+/// This process's privileges, as the kernel reports them.
+fn privileges() -> Option<Privileges> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let effective = capability_set(&status, "CapEff")?;
+    Some(Privileges {
+        uid: current_uid(),
+        effective: CAPABILITIES_ASKED
+            .iter()
+            .filter(|(bit, _)| effective >> bit & 1 == 1)
+            .map(|(_, name)| (*name).to_owned())
+            .collect(),
+        no_new_privs: status_field(&status, "NoNewPrivs") == Some("1"),
+        withheld: withheld_file_capabilities(),
+    })
+}
+
+/// `none` where the cpu reports no hypervisor; otherwise the firmware's name
+/// for the machine, or `a hypervisor` where the firmware says nothing.
+fn virtualization(cpuinfo: &str, vendor: Option<String>, product: Option<String>) -> String {
+    let guest = cpuinfo
+        .lines()
+        .find(|line| line.starts_with("flags"))
+        .is_some_and(|line| line.split_whitespace().any(|flag| flag == "hypervisor"));
+    if !guest {
+        return "none".to_owned();
+    }
+    match (vendor, product) {
+        (Some(vendor), Some(product)) if !product.starts_with(&vendor) => {
+            format!("{vendor} {product}")
+        }
+        (_, Some(product)) => product,
+        (Some(vendor), None) => vendor,
+        (None, None) => "a hypervisor".to_owned(),
+    }
+}
+
+/// Rewrites a privilege refusal where the binary carries what was refused and
+/// the process was not given it: the advice to grant it is replaced by why it
+/// did not take effect.
+fn explain_withheld(probe: Probe) -> Probe {
+    let rewrite = |reason: String| -> String {
+        if !(reason.contains("CAP_BPF") || reason.contains("CAP_PERFMON")) {
+            return reason;
+        }
+        let Some(withheld) = withheld_file_capabilities() else {
+            return reason;
+        };
+        const ADVICE: &str = "Grant them to the binary with";
+        match reason.find(ADVICE) {
+            Some(at) => {
+                let rest = &reason[at..];
+                let after = rest
+                    .find("sudo. ")
+                    .map_or("", |end| &rest[end + "sudo. ".len()..]);
+                format!("{}{withheld}. {after}", &reason[..at])
+                    .trim_end()
+                    .to_owned()
+            }
+            None => format!("{reason}; {withheld}"),
+        }
+    };
+    match probe {
+        Probe::Missing(reason) => Probe::Missing(rewrite(reason)),
+        Probe::Unknown(reason) => Probe::Unknown(rewrite(reason)),
+        available => available,
+    }
 }
 
 /// One graphics device, read from the kernel rather than from a vendor library.
@@ -451,10 +743,20 @@ impl Capabilities {
             mitigations: mitigations(),
             gpus: gpus(),
             prefetchers: Some(prefetchers()),
+            privileges: privileges(),
+            virtualization: std::fs::read_to_string("/proc/cpuinfo")
+                .ok()
+                .map(|cpuinfo| {
+                    virtualization(
+                        &cpuinfo,
+                        read_trimmed("/sys/devices/virtual/dmi/id/sys_vendor"),
+                        read_trimmed("/sys/devices/virtual/dmi/id/product_name"),
+                    )
+                }),
             not_captured: vec![
                 "microarchitecture".into(),
                 "NUMA topology".into(),
-                "virtualization and steal time".into(),
+                "steal time".into(),
                 // The kernel driver behind each GPU is captured above; the
                 // userspace half is not, and a CUDA or ROCm upgrade changes
                 // what a `gpu` measurement means without changing anything
@@ -508,6 +810,10 @@ impl Capabilities {
     /// without one, such a requirement can only be checked for the current
     /// process, which is what `[pid]` means for a self-test.
     pub fn probe(&self, requirement: &str, pid: Option<i32>) -> Probe {
+        explain_withheld(self.probe_requirement(requirement, pid))
+    }
+
+    fn probe_requirement(&self, requirement: &str, pid: Option<i32>) -> Probe {
         if let Some(rest) = requirement.strip_prefix("kernel>=") {
             return match (KernelVersion::parse(rest), self.environment.kernel_version) {
                 (Some(wanted), Some(actual)) if actual >= wanted => Probe::Available,
@@ -2252,6 +2558,176 @@ mod tests {
             fastest < std::time::Duration::from_millis(1),
             "the sysfs walk took {fastest:?}, which is the order of the nvmlInit call it exists \
              to avoid"
+        );
+    }
+
+    /// Whether a path's mount is `nosuid` is read from `mountinfo`, and the
+    /// kernel answers the same question through another call: `statvfs`'s
+    /// `ST_NOSUID`. The two agree for every mount a binary could be on here.
+    #[test]
+    fn a_mount_is_nosuid_exactly_when_statvfs_says_so() {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+        let mut paths: Vec<PathBuf> = ["/", "/proc", "/sys", "/dev", "/dev/shm", "/tmp", "/run"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        paths.push(std::env::current_exe().unwrap());
+        paths.push(std::env::temp_dir());
+        let mut nosuid = 0;
+        for path in paths.iter().filter(|path| path.exists()) {
+            let c_path =
+                std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes()).unwrap();
+            // SAFETY: a NUL-terminated path and a struct for the kernel to fill.
+            let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) }, 0);
+            let kernel = stat.f_flag & libc::ST_NOSUID != 0;
+            let (point, read) = mount_of(&mountinfo, path).expect("every path is on a mount");
+            assert_eq!(
+                read,
+                kernel,
+                "{} is on {}: mountinfo says nosuid {read}, statvfs {kernel}",
+                path.display(),
+                point.display()
+            );
+            nosuid += usize::from(kernel);
+        }
+        assert!(
+            nosuid > 0,
+            "/proc and /sys are nosuid everywhere, and none was found so"
+        );
+    }
+
+    /// The file's attribute is decoded as `getcap` prints it, for the binary
+    /// `make` granted: `cap_bpf` and `cap_perfmon`, effective.
+    #[test]
+    fn a_binary_s_file_capabilities_are_read_as_getcap_prints_them() {
+        let omn = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/omn");
+        let Ok(output) = std::process::Command::new("getcap").arg(&omn).output() else {
+            eprintln!("skipped: no `getcap` on this machine to compare with");
+            return;
+        };
+        let printed = String::from_utf8_lossy(&output.stdout).to_string();
+        let decoded = file_capabilities(&omn);
+        if !printed.contains("cap_bpf") {
+            assert!(
+                decoded.is_none_or(|(permitted, _)| permitted >> 39 & 1 == 0),
+                "getcap prints {printed:?} and the attribute decodes to {decoded:?}"
+            );
+            eprintln!(
+                "skipped the positive half: {} carries no capabilities (run `make`)",
+                omn.display()
+            );
+            return;
+        }
+        let (permitted, effective) = decoded.expect("getcap printed capabilities");
+        for (bit, name) in GRANTED_TO_THE_BINARY {
+            assert_eq!(
+                permitted >> bit & 1 == 1,
+                printed.contains(&name.to_lowercase()),
+                "{name}: getcap prints {printed:?}, decoded {permitted:#x}"
+            );
+        }
+        assert_eq!(
+            effective,
+            printed.contains("=ep") || printed.contains("+ep"),
+            "{printed}"
+        );
+    }
+
+    /// A file that carries the two capabilities, and a process that holds
+    /// neither -- this test's own, by the kernel's `/proc/self/status` -- is
+    /// told which mount withholds them, and never to run `setcap`.
+    #[test]
+    fn a_capability_the_file_carries_and_the_process_lacks_is_explained_by_its_mount() {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        if capability_set(&status, "CapEff").unwrap_or(0) >> 39 & 1 == 1 {
+            eprintln!("skipped: this test process holds CAP_BPF, so nothing is withheld from it");
+            return;
+        }
+        let exe = Path::new("/opt/omn/bin/omn");
+        let file = Some((1u64 << 38 | 1u64 << 39, true));
+        let nosuid = "22 1 0:21 / / rw,relatime - ext4 /dev/root rw\n\
+                      40 22 0:40 / /opt/omn rw,nosuid,nodev - tmpfs tmpfs rw\n";
+        let said = withheld_reason(exe, file, &status, nosuid).expect("both are withheld");
+        assert!(
+            said.contains("CAP_BPF and CAP_PERFMON")
+                && said.contains("/opt/omn is mounted nosuid")
+                && !said.contains("setcap"),
+            "{said}"
+        );
+        let plain = "22 1 0:21 / / rw,relatime - ext4 /dev/root rw\n";
+        let said = withheld_reason(exe, Some((1u64 << 39, false)), &status, plain).unwrap();
+        assert!(said.contains("without `e`"), "{said}");
+        assert_eq!(withheld_reason(exe, None, &status, nosuid), None);
+    }
+
+    /// The effective set recorded is the one `capget` returns, asked of the
+    /// kernel directly rather than through `/proc`.
+    #[test]
+    fn the_privileges_recorded_are_the_ones_capget_returns() {
+        #[repr(C)]
+        struct Header {
+            version: u32,
+            pid: i32,
+        }
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct Data {
+            effective: u32,
+            permitted: u32,
+            inheritable: u32,
+        }
+        let mut header = Header {
+            version: 0x2008_0522, // _LINUX_CAPABILITY_VERSION_3
+            pid: 0,
+        };
+        let mut data = [Data::default(); 2];
+        // SAFETY: a version-3 header and the two words it asks for.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_capget,
+                &mut header as *mut Header,
+                data.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result, 0, "capget: {}", std::io::Error::last_os_error());
+        let effective = u64::from(data[0].effective) | u64::from(data[1].effective) << 32;
+        let recorded = privileges().expect("/proc/self/status is readable");
+        for (bit, name) in CAPABILITIES_ASKED {
+            assert_eq!(
+                effective >> bit & 1 == 1,
+                recorded.effective.iter().any(|held| held == name),
+                "{name}: capget {effective:#x}, recorded {:?}",
+                recorded.effective
+            );
+        }
+        // SAFETY: a read-only query.
+        assert_eq!(recorded.uid, unsafe { libc::geteuid() });
+        // SAFETY: a read-only query of this thread's flag.
+        let flag = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        assert_eq!(recorded.no_new_privs, flag == 1);
+    }
+
+    /// A guest is told from a host the way systemd tells them apart.
+    #[test]
+    fn a_virtual_machine_is_recorded_as_one_where_systemd_detects_one() {
+        let Ok(output) = std::process::Command::new("systemd-detect-virt")
+            .arg("--vm")
+            .output()
+        else {
+            eprintln!("skipped: no `systemd-detect-virt` on this machine to compare with");
+            return;
+        };
+        let systemd = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let recorded = Capabilities::detect()
+            .environment()
+            .virtualization
+            .clone()
+            .expect("/proc/cpuinfo is readable");
+        assert_eq!(
+            systemd == "none",
+            recorded == "none",
+            "systemd-detect-virt says {systemd:?}, the record {recorded:?}"
         );
     }
 

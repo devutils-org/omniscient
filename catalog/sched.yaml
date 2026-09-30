@@ -174,14 +174,14 @@
     # `count` only: `trace` is a per-switch event, which the `woke` join from
     # `sched.wakeup` needs, and `pmu:sw` records.
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "kernel>=6.1"], cost: low,
-       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native, container: no},
+       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
        filter_fields: [comm, pid], equivalent: true, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low,
-       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native, container: no},
+       modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
        filter_fields: [comm, pid], equivalent: true}
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
-  targets: {system: native, pid: native, tid: native, cpu: native, launch: native, cgroup: native, container: no}
+  targets: {system: native, pid: native, tid: native, cpu: native, launch: native, cgroup: native}
   keys: [task, cgroup, cpu]
   filter_fields: [comm, pid, cpu]
   determinism: low

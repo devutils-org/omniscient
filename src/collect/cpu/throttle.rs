@@ -106,11 +106,12 @@ impl Prepared for Prepare {
                 }
                 Ok(Box::new(ThrottleCollector::new(directory, self.0)))
             }
-            Target::Container(_) => Err(
-                "a container has to be resolved to its cgroup first, which is not built yet; \
-                 pass `--cgroup` with the path"
-                    .to_owned(),
-            ),
+            // `omn` binds a container to its cgroup before resolution; only a
+            // library caller that skips `request::find_container` gets here.
+            Target::Container(name) => Err(format!(
+                "container `{name}` was handed over unbound: bind it to its cgroup with \
+                 `request::find_container` first, or pass `--cgroup` with the path"
+            )),
             other => Err(format!(
                 "throttling is a property of a cgroup, and a {} target names none: the CFS \
                  quota that throttles is set per cgroup",
