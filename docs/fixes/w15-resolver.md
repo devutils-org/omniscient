@@ -158,6 +158,38 @@ one line. There was no alternative: a field in `Request` was what U asked
 for, and any other home for `--symbols` would have broken as many literals
 (`Session`) or changed the meaning of an existing field.
 
+## Checks
+
+`make check` was red twice on this branch, both times at load averages of 15
+to 30, with six streams and a VM sweep sharing the machine. Every test that
+failed passed when rerun alone, once.
+
+- **First run.** Failed:
+  - `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads...`;
+  - `--no-fail-fast`: the `scenario_net` pair already in the tally,
+    `scenario_proc::defect_1/2`, `recorder::two_bursts...`,
+    `cross_memory::the_resident_size...`, three `scenario_mem`, two
+    `triage`, `unwind::fp_leaf...` and `dwarf_recovers...`, and
+    `profile::tests::a_profile_of_the_machine...`.
+
+  Three were this branch's, and they were fixed before the second run:
+  - `family_io`, `scenario_io::each_refusal...` and `scenario_power`'s two
+    tests were a refusal lead that also fired for a backend passed over for
+    its target or mode. It now fires only for a collected backend that fits
+    the request, and says "has no viable backend on this machine" with it.
+  - The new debuginfod test compared exact stack sets. Under load a few cut
+    stacks broke that, so it now checks the branches of the known tree.
+- **Second run.** Failed: `scenario_proc::a_known_number_of_calls...` (9 of 10
+  sleeps) and `defect_1`, both poll-timing tests outside this stream's paths.
+  Clippy and fmt are clean. This branch's own files all pass (`cli`,
+  `unwind`, the lib tests of `catalog`, `resolve`, `stack`, `request`, `cli`
+  and `collect::cpu::profile`, and `catalog_model`).
+
+For the flaky tally: `scenario_proc::defect_1_the_first_reading...` failed in
+both full runs (8 polls against 7, filtered against unfiltered) and passed
+alone. `scenario_proc::a_known_number_of_calls_and_an_injected_delay...`
+counted 9 of 10 sleeps once.
+
 ## Landed, each with its test
 
 | What | Test |
