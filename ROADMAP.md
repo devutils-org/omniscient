@@ -62,6 +62,13 @@ To be recalled at every phase — these are the project's natural drifts:
 
 **Output**: a filled-in `DECISIONS.md`. Every line settled, with the reason.
 
+*Fifteenth wave: three of these lines were amended in `DECISIONS.md` after the
+code answered them differently. The language is Rust with no libbpf: the
+programs are assembled in Rust and relocated from the kernel's BTF at load.
+There is no single kernel floor: each backend carries its own `kernel>=`, and
+5.15 is served. And the privileges line now covers user-mode perf events at
+`perf_event_paranoid` 2 (`DECISIONS.md`, "Settled in the fifteenth wave").*
+
 ---
 
 ## Phase 1 — Event model and request schema
@@ -79,6 +86,10 @@ any code.
    (pointer + open timestamp), **interval**.
 3. **`Span` struct**: `id`, `parent_id`, `start/end`, `keys`, `rule_id`,
    `evidence` ∈ {`IDENTITY`, `KEY`, `WAKEUP`, `TEMPORAL`}.
+   *Decided, not built: evidence lives on `join::Correlation` (one rule) and
+   `join::Attribution` (one upstream state), and the tree is a decomposition.
+   A span per matched event would be unbounded (`DECISIONS.md`, "Settled in
+   the fifteenth wave", "No `Span` struct").*
 4. **`Request` struct**: `source`, `target`, `mode`, `emit`, `keys`, `filter`,
    `budget`. A single object built by the CLI, the YAML file, or the API.
 5. **`ResolvedRequest` struct**: the request plus the selected backend, pushed-down
@@ -97,6 +108,9 @@ any code.
       `Event`, the typed keys, `Request` and `ResolvedRequest`. There is no
       `Span` with id, parent_id and rule_id. Evidence lives on `Correlation` and
       `Attribution` in `src/join.rs`, and no decision records that change.*
+      *Fifteenth wave: the decision is recorded (`DECISIONS.md`, "No `Span`
+      struct"). What is left for this box is the coordinator's call: whether
+      a recorded decision stands for the fifth struct.*
 - [~] A unit test proves that a serialized/deserialized `Event` is identical.
       *Audit, fourteenth wave:
       `an_event_survives_a_round_trip_through_json_and_yaml` round-trips one
@@ -108,6 +122,11 @@ any code.
       `KeyKind` and `KeyValue` say what their key crosses (sock, blk, proc,
       iface, dev, cpu, node), and task, file, gpu and cgroup get no reason at
       all.*
+      *Fifteenth wave: `docs/keys.md`, each key with the boundary it crosses,
+      what it survives and what it does not, and where it is produced. Writing
+      it found two things: `proc` has no producer, and `iface` is compared by
+      its name alone, so `net.iface`'s `lo/drops` cannot join `net.qdisc`'s
+      `lo`.*
 
 ---
 
@@ -177,6 +196,12 @@ Two collectors only, chosen to exercise the entire plumbing.
 5. **Reordering**: ring buffers are per-CPU, events arrive unsorted. Bounded
    window + **watermark**: finalize nothing until every collector has passed T.
    This assumes a minimum pipeline latency.
+   *Decided otherwise: no window and no watermark. Each collection is sorted
+   when its window closes, and the join engine sorts what it merges, opening
+   side first at an equal instant. A drain's lateness is unbounded, so any
+   watermark would drop or misplace what came after it. What that costs a
+   live stream is in `DECISIONS.md`, "Settled in the fifteenth wave", "No
+   reorder window".*
 6. **Symbolization**: frame pointers first. DWARF/ORC later (blazesym or libdw).
    Do not write your own DWARF unwinder.
 
@@ -203,6 +228,10 @@ Two collectors only, chosen to exercise the entire plumbing.
       (`join::input_order_does_not_change_the_answer`). The runner sorts each
       collection after the fact, and there is no watermark to validate. No
       decision records that the sort replaces the watermark.*
+      *Fifteenth wave: the decision is recorded (`DECISIONS.md`, "No reorder
+      window"). What the criterion can still ask is that the runner's sort
+      holds too: a collector's events handed over reversed, and the
+      collection read back in timestamp order.*
 
 ---
 
@@ -471,8 +500,17 @@ because the skeleton exists.
 Suggested order: rest of `cpu` and `mem` → extended `io` and low-level `net` →
 `proc` → advanced `mem` (bandwidth, c2c, wss) → `gpu` → `runtime` → `cpu.flow`.
 
-`power` is not in that list: it has been collected unconditionally since phase 8
-as a guardrail.
+`power` is not in that list because it was meant to be collected
+unconditionally from phase 8 on, as a guardrail. **That is not what exists.**
+The bench does not run `omn power.*` beside a measurement. Its harness reads
+the kernel's `thermal_throttle` counters around every repetition and drops a
+run they moved in (`examples/bench/harness.rs`, `throttle_count`). On an AMD
+part, which publishes none of those counters, it says a throttled run cannot
+be told from one that was not (`docs/bench.md`, "Environment control").
+Whether the guardrail becomes the `power` sources themselves, or stays the
+harness's own counter read, is the fifteenth wave's probes stream's decision.
+It is pending that stream, and this sentence follows whatever it records in
+`DECISIONS.md`.
 
 **Criterion per added source**: catalog entry + backend + fallback chain + ground
 truth test + automatic appearance in `omn list`.
@@ -554,8 +592,18 @@ about.
 
 Two constraints that fall out of the rest of this file:
 
-- **It reads; it does not run.** Boundary 5 applies to this surface too: a model
-  may ask for a measurement and may not change the machine.
+- **It measures only what its operator allowed, and never changes the
+  machine.** Boundary 5 applies to this surface too. `omn-mcp` reads by
+  default: the catalog, the runs a directory holds, and the sweep the `omn`
+  binary answers. It runs a session only when the person who started it
+  passed `--allow-run DURATION`, for at most that duration, with a budget
+  required and output kept under the server's directory. It runs a session
+  that launches a program only when that session is a file in the directory
+  the person passed with `--allow-launch DIR`, which needs `--allow-run`
+  beside it. That file is run as written, program, arguments, environment and
+  working directory included, and nothing in a tool call changes it. A model
+  chooses which approved session runs and when, never what runs (`DECISIONS.md`,
+  the twelfth and thirteenth waves; `docs/mcp.md`).
 - **Every number it is handed carries what it is missing.** Finding 37's
   `Shortfall` exists for a reader taking a p99 off a lossy run, and a model is
   that reader with less judgement, not more.

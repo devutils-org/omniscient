@@ -1,150 +1,189 @@
-# The open requests, as of the twelfth wave
+# The open requests, as of the fifteenth wave
 
-State of `main` at f7b6a92 (2026-09-25). Every `### To ...` heading, every request bullet in an untitled `## Needs from another stream` section, and every numbered finding that asks for something, judged against the current code. Owners are the twelfth wave's `BRIEF.md` ownership table (R, V, W, D, M); "nobody" means a file outside every stream's set, which falls to the coordinator. A line number may appear more than once when one heading carries several requests.
+State of `main` at d1f0182 (2026-09-30), after the fourteenth wave's merge.
+The twelfth wave's snapshot (f7b6a92) judged every request in
+`docs/open-findings.md` up to the eleventh wave's sections. It left 122 rows
+OPEN or PARTLY, and each of them is judged again here against the code. The
+requests filed since, under the twelfth, thirteenth and fourteenth waves'
+headings, are judged below them. A line number is the line of
+`docs/open-findings.md` the request starts at. That file is append-only, so
+the number stays valid.
 
-Counts: LANDED 149, OPEN 95, PARTLY 27, SUPERSEDED 5.
+`docs/open-findings.md` never marks a request closed, which is why this file
+exists. It is a dated snapshot, made by reading each request against the code.
+The next brief is written from it, and it is redone rather than kept up to
+date. Owners are left out: the fifteenth wave's streams did not exist when
+these were filed, and whoever owns a row's file owns the row.
 
-`docs/open-findings.md` is append-only, and nothing in it marks a request
-closed, so after eleven waves nobody could tell what was still wanted. This is
-a dated snapshot, made by reading each request against the code: the next
-brief is written from it, and it is redone rather than kept up to date.
+Counts, in rows of the tables below (a row may carry several line numbers
+that ask for one thing): of what the snapshot left open, **67 landed and 4
+superseded, 17 partly done and 17 still open**; of what was filed since, 12
+landed, 1 superseded, 1 partly done and 20 open. Every line number the
+snapshot left open appears in one of the first two tables.
 
-**Closed by the coordinator since the snapshot** (twelfth wave, on `main`):
-510 (the sudoers line: the recipe tries the absolute path first, the line is
-escaped), 1360 (finding 19: measured at 1.2 s, the cache not needed), and the
-documentation rows 168's `CATALOG.md` half, 1078, 1336, 1889, 2089, 2257,
-2341, 4699, and 5256's `tests/cross_io.rs` and example halves. Stream M's
-request for the evidence ladder in `src/join.rs` landed too. The rows owned by
-R, V, W and D are with those streams now.
+## Still open
 
-## OPEN and PARTLY
+| line | status | request | file | what is left, and where |
+|---|---|---|---|---|
+| 546 (§11) | OPEN | `family_proc::a_count_without_its_limit...` fails on an index | `tests/family_proc.rs` | `run["results"][0]["outputs"][0]["events"][0]` (`:143`) is read before anything asserts an event exists; the failure is `expect("attributes")`, not "no event" |
+| 973 | OPEN | a `gpu` line in the text environment dump | `src/render.rs` | `push_environment` (`:185`) prints kernel, clocks, BTF, cgroup2, tracefs and paranoia, and not the cards the resolved file carries |
+| 1040 | PARTLY | `emitted_fields(source_id, backend)`, the catalog's filter fields crossed against the build | `src/collect/mod.rs` | per-collector `every_filter_field_the_catalog_declares_is_on_an_event` tests only; no `emitted_fields`, no sweep over the whole catalog |
+| 1503 | PARTLY | 23. one PSI reader | `src/collect/mod.rs` | one reader now (`src/collect/psi.rs`), declared as `collect::mem::psi` (`src/collect/mem/mod.rs:17`) and imported by `io/pressure.rs` through `mem`; declaring it in `collect/mod.rs` is filed again at 8067 and 8206 |
+| 1649 | PARTLY | 26. readers of `cpu/online` | `src/collect/power/sysfs.rs` | `capabilities::online_cpus` (`src/capabilities.rs:1396`) is used by `perf.rs` and `bpf/attach.rs:637`; `power/sysfs.rs:85` still reads its own, under a root it is given for tests |
+| 1809, 2301 | PARTLY | 29. the cost bands in `catalog.rs` | `src/main.rs`, `src/catalog.rs` | `Cost::worst_case_percent` moved (`src/catalog.rs:361`); the bands' words are still `band` in `src/main.rs:786` |
+| 1889 | PARTLY | `docs/families/cpu.md`'s stale passages | `docs/families/cpu.md` | "Needs from the shared layer" items 2 to 4 (`:238-248`) still ask for exit 3 for an unbuilt mode, a rate over `enabled_ns` and stack capture; all three exist |
+| 2056 | PARTLY | a missing value is not a non-numeric one | `src/emit.rs` | `stack` counts absent values as unmeasured now (`:1446`); `timeline_by` (`:1109`) and `rate_by` (`:1128`) still call `value_of` and fail the run with `NotNumeric` |
+| 2102 | OPEN | a series whose interest is its variation | `src/render.rs` | no first-value-then-deltas rendering |
+| 2265 | OPEN | `chrome` carries raw events | `src/render.rs` | `:505` says "`chrome` carries timelines"; `OutputFormat::accepts` (`src/format.rs:195`) takes `timeline` and `raw` |
+| 2280 | OPEN | the `Budget` doc comment | `src/request.rs` | `:1249` still says the resolver degrades `trace` to in-kernel `hist` to `sample`; the budget degrades at the runner and says which (`tests/budget.rs`) |
+| 2341 | PARTLY | ROADMAP ticks, CATALOG flag table | `ROADMAP.md` | the `CATALOG.md` half is gone; phase 6's "Exceeding the budget produces an announced degradation" is still `[~]` (`ROADMAP.md`, phase 6), the coordinator's to tick |
+| 2493 | PARTLY | `check_catalog` in the loader, and `Backend.keys` | `src/catalog.rs` | the loader runs `check_catalog` (`:766`); a backend declares no `keys` |
+| 2539, 7803 | PARTLY | refuse a key the selected backend cannot attach | `src/resolve.rs`, `src/catalog.rs` | `ResolveError::KeyNotCarried` exists (`src/resolve.rs:249`) and `main.rs` classifies it; nothing raises it until `Backend.keys` exists |
+| 2693 | OPEN | `UnsupportedTarget` carries its reason apart | `src/collect/mod.rs` | still `{ source_id, target }` with the reason inside `target` (`:121`) |
+| 2716 | OPEN | `Filtered.near_misses` | `src/collect/mod.rs`, `src/encode.rs` | nothing named `near_miss` in `src/` |
+| 2883 | OPEN | the profile scenario takes the machine | `tests/scenario_cpu.rs` | every test takes `may_load_the_machine()`, the read side of `MACHINE` (`:1810`); nothing takes the write side |
+| 3092 | PARTLY | a timeline point carries its error bar | `src/emit.rs`, `catalog/gpu.yaml` | stated as a degradation; `Point` is still `{ offset_ns, value }` (`src/emit.rs:363`), and `gpu.engine_busy` still emits `[timeline, summary]`, no `raw` |
+| 3119 | OPEN | a caveat true of two modes of three | `catalog/net.yaml` | *"These are counters, so a run reports the increment..."* unchanged at `:208` and `:368`, with no snapshot wording |
+| 3760 | PARTLY | BTF members behind anonymous unions, for the `net` callers | `src/bpf/net_drops.rs` | `net.tcp.lifetime` and `.retransmit` carry the remote endpoint (`src/bpf/net_lifetime.rs:105-140`); `net.drops` still reads no `skb->protocol`, `skb_iif` or `dev`, and says why (`:22-28`) |
+| 3972 | PARTLY | `direction` as a filter field | `catalog/mem.yaml`, `src/collect/mem/**` | `mem.page_alloc` has it (`:133`); `mem.kmalloc` is `[bytes, comm]` (`:152`) |
+| 4083 | OPEN | `GET_CURRENT_COMM` from `insn.rs` | `src/bpf/proc_syscall.rs` | still a local `extra_helper::GET_CURRENT_COMM` (`:45-54`), called at `:415` |
+| 4292 | OPEN | a bounded read at a `__data_loc` offset | `src/bpf/insn.rs`, `src/bpf/sched_drm.rs` | `attach::tracepoint_layout` flags the field (`src/bpf/attach.rs:535`); no variable-offset read, and `gpu.job`'s ring is the scheduler thread's name (`sched_drm.rs:138`) |
+| 4662 | OPEN | per-range residency of live allocations | `src/collect/mem/heap/live.rs` | its events carry `task` only (`:60`) |
+| 5132 | OPEN | 2.6 MiB of flusher progress beside 90 MiB of kworker writes | `src/collect/io/writeback.rs` | not investigated; a cgroup scope is refused as not built (`:57`) |
+| 5256 | PARTLY | "one run observes one target" is no longer true | tests and examples | gone from `src/main.rs` and `src/encode.rs`; still in `tests/scenario_mem.rs:2098`, `tests/scenario_sched.rs:2307` and seven examples (`mem-allocator-ledger`, `mem-kernel-sweep`, `mem-reclaim-squeeze`, `proc-bpf-sweep`, `net-not-built`, `sched-sweep`, `net-handshake-to-close`), each to be read against `DECISIONS.md`'s "One workload per run" |
+| 5272 | OPEN | the known-instruction scenario overshoots by +0.69 % | `tests/scenario_cpu.rs` | the double-count suspicion is recorded (`docs/flaky.md:138`) and not tested |
+| 5520 | OPEN | `Btf::function`, a function's id and prototype | `src/bpf/btf.rs` | the second parser, `fentry::FunctionIndex`, is still there (`src/bpf/fentry.rs:168`) |
+| 5536 | OPEN | the commands `fentry.rs` issues itself | `src/bpf/syscall.rs` | `fentry.rs` still defines `BPF_PROG_LOAD` and `BPF_RAW_TRACEPOINT_OPEN` (`:68-69`) and calls `bpf()` (`:533`); `syscall::raw_tracepoint_open` still takes a name (`:337`) |
+| 5553 | OPEN | five module lines in `bpf/mod.rs` | `src/bpf/mod.rs`, `src/bpf/attach.rs` | `fentry`, `io_fsync`, `io_vfs`, `net_connect`, `net_socket` still declared by `#[path]` in `attach.rs` (`:61-69`) |
+| 5566 | PARTLY | `GET_CURRENT_TASK` from `insn.rs` | `src/bpf/io_fsync.rs` | still a local constant (`:54`), called at `:349` |
+| 5652 | PARTLY | `count` over a kernel-built histogram | `src/request.rs` | `count` ranks now (`topk`, `:715-720`); it still has no `hist` |
+| 6642 | PARTLY | §47, the shim ring | `docs/bench.md` | the ring's caveat is on `mem.rss`; the bench's heap rows still predate the ring (`STATE.md`, "the bench's second table") |
+| 6871 | PARTLY | one grace period per round, not per source | `src/bpf/map.rs`, `src/collect/mod.rs` | `map::grace_period` is public (`:359`) and each drain waits its own (`:328`, `fentry.rs:1377`); no round-level retire |
 
-| line | status | heading | target file | what is left | owner this wave |
-|---|---|---|---|---|---|
-| 168 (§5) | PARTLY | `count` -> `raw` in the mode x emit matrix | `CATALOG.md` | code allows it (`src/request.rs:548`), but CATALOG.md §12 still lists `count` as `rate`, `summary` only | nobody |
-| 168 (§5) | OPEN | a rate over the counter's own window | `src/emit.rs` | `emit::rate` still divides by `window_ns` (wall clock, `src/emit.rs:957-961`); `enabled_ns` on counted events is unused | R |
-| 250 (§7) | PARTLY | `--pid a,b` measures only `a` | `src/request.rs`, collectors | some collectors take the list (`io/vfs.rs:86`, `mem/ibs.rs:177`, `runtime/usdt.rs:311`, `sched/mutex_usdt.rs:109`, the meter `collect/mod.rs:720`); ~25 call sites still use `Target::first_pid` and silently drop the rest, and nothing refuses a multi-pid request | R (request refusal); W/D for their collectors |
-| 280 (§7) | OPEN | `examples/sched-wakeup.yml` can declare its join | `examples/sched-wakeup.yml` | the file still has no `joins:` block (wakeup joins exist only in the cross-* and join-decompose examples) | nobody |
-| 314 (§8) | OPEN | `HistScale` cannot be serialized; `BucketLayout` duplicates it | `src/request.rs` | `HistScale` (`src/request.rs:683`) still derives no `Serialize`/`Deserialize`; `emit::BucketLayout` (`src/emit.rs:563`) still a copy | R |
-| 323 (§8) | OPEN | `hist:linear:0` parses and should not | `src/request.rs` | `Emit::from_str` (`src/request.rs:628-632`) still accepts width 0; only the emit layer refuses it after the run (`src/emit.rs:728`) | R |
-| 510 (§10) | OPEN | the sudoers line the Makefile documents cannot match | `Makefile`, `CLAUDE.md` | `Makefile:95` still passes relative `$(BINARY)` to `setcap` (no `$(abspath ...)`); the documented line (`Makefile:91`, `CLAUDE.md:104`) still has the unescaped comma | nobody |
-| 546 (§11) | OPEN | `family_proc::a_count_without_its_limit...` panics on an index | `tests/family_proc.rs` | still indexes `["events"][0]` without first asserting the run produced events (`tests/family_proc.rs:143`) | W |
-| 624 | OPEN | stream A: `sched.offcpu --emit hist` needs a log2 bucket in the key | `src/bpf/offcpu.rs` | the totals key is still `(tid, tgid, state, stack)` (`src/bpf/offcpu.rs:119-134`), no bucket; `docs/scenarios/sched.md` defect 1 still "half fixed" | D |
-| 660 | OPEN | `sched.offcpu` (and `sched.wakeup`) declare `system: native` with an all-eBPF chain | `catalog/sched.yaml` | `targets` still `system: native` on both entries | V (catalog file) -- overlaps W's P8 (line 7121) |
-| 710 (§12) | OPEN | symbols are not demangled | `src/stack.rs` (symbolizer) | no demangler in `src/` or `Cargo.toml` | nobody |
-| 815 | OPEN | stream B to D: `check_stack` should refuse `dwarf`/`lbr` through `stack::callchain_for` | `src/validate.rs` | `check_stack` still only warns about dwarf cost (`src/validate.rs:579-583`); refusal happens only in the collector (`src/stack.rs:991`) | W |
-| 885 | PARTLY | `SampledEvent::throttled()` accumulator | `src/perf.rs` | no accumulator in `src/perf.rs`; both known producers count `Record::Throttle` themselves (`mem/page_faults.rs:168-178`, `sched/switches.rs:133-151`), so a new sampling collector must still remember to | W |
-| 957 | OPEN | `Unit::Watts` | `src/catalog.rs` | `enum Unit` (`src/catalog.rs:354-366`) has no `Watts` | W |
-| 973 | OPEN | `render.rs`: a `gpu` line in the text environment dump | `src/render.rs` | `push_environment` (`src/render.rs:156-194`) still prints no `Environment::gpus` | R |
-| 1040 | PARTLY | `emitted_fields(source_id, backend)` to cross the catalog's claim against the build | `src/collect/mod.rs` | per-collector tests `every_filter_field_the_catalog_declares_is_on_an_event` exist in ~16 collectors (e.g. `src/collect/sched/runqlat.rs:414`), but no `emitted_fields` and no catalog-wide sweep | R |
-| 1078 | OPEN | `CATALOG.md` §1 documents a schema that has grown (per-backend `targets`/`filter_fields`) | `CATALOG.md` | §1 (`CATALOG.md:71-124`) now documents `equivalent`/`drained` but still not per-backend `targets` and `filter_fields` | nobody |
-| 1241 | PARTLY | 16. every `bpf` backend credited with a filter | `src/resolve.rs`, `src/collect/mod.rs` | Collectors now apply the predicate themselves over drained rows (`src/collect/{sched,io,net,mem,proc,runtime}/mod.rs` read `request.filter`), but `placement()` still decides by `backend.id.starts_with("bpf")` (`src/resolve.rs:530`), so the resolved file still says `kernel`. Same ask as 2034 and 6972 (`filter_in_program`) | W |
-| 1336 | PARTLY | 18. two false claims about kernel-side histograms | `src/validate.rs`, `docs/bpf-layer.md` | Warning conditioned (`budget_moves_hist`, `src/validate.rs:382`) and log2 bullet moved (`docs/bpf-layer.md:209`); but `docs/bpf-layer.md:195` still lists "fentry and USDT" as missing although `src/bpf/fentry.rs` and `src/bpf/usdt.rs` exist | nobody |
-| 1360 | OPEN | 19. symbolising a machine-wide run, 2 min per second | `src/stack.rs` | Module cache is still per process (`Symbolizer.modules`, `src/stack.rs:357`, one `Symbolizer::for_process` per tgid in `sched/offcpu.rs:274`, `lock.rs`, `futex.rs`); no cache by binary, no lazy resolve, no bound | nobody |
-| 1392 | OPEN | 20. `comm` is the name at row creation | `src/bpf/runqlat.rs`, `offcpu.rs`, `migrate.rs` | No re-read at exec, no `sched_process_exec` correction in those programs; first rows of a launch still say `comm=omn` | D |
-| 1422 | OPEN | 21. a requirement can only be probed by reading (`writable:`) | `src/capabilities.rs` | No `writable:` prefix, no `access(W_OK)` probe; `mem.wss` still checks `clear_refs` at attach | V |
-| 1469 | OPEN | 22. a NUMA node has no key | `src/event.rs` | No `KeyValue::Node` / `KeyKind::Node` (enum at `src/event.rs:89`) | nobody |
-| 1503 | OPEN | 23. the PSI reader exists twice | `src/collect/mod.rs` (new `psi` module) | Still two copies, `src/collect/io/pressure.rs` and `src/collect/mem/pressure.rs`; no shared `psi` module | R (module in `collect/`), D (the two callers) |
-| 1598 | PARTLY | 25. `pmu:` glob; qualified form answers vaguely | `src/capabilities.rs`, `src/catalog.rs` | Globs gone from the catalog (`catalog/io.yaml:232`); still no loader assertion refusing `*`, and a qualified `pmu:cpu/x` that is absent still answers Unknown (`sysfs_device_state` returns `None` on `/`, `src/capabilities.rs:853`) | V (probe), W (loader check) |
-| 1649 | OPEN | 26. two readers of `cpu/online` | `src/capabilities.rs` | Now four copies: `perf.rs:1986`, `collect/power/sysfs.rs:85`, `bpf/attach.rs:560`, `bpf/syscall.rs:593` | V |
-| 1735 | OPEN | 28. cost band per backend, run cost is per rate | `src/catalog.rs`, `CATALOG.md`, `DECISIONS.md` | The decision (per-unit cost vs a band stated at a rate) is not taken; nothing in `DECISIONS.md` or `catalog.rs` | nobody (decision), then W |
-| 1809 | OPEN | 29. `Cost::Free` had no number (bands belong in `catalog.rs`) | `src/catalog.rs` | Bands still in `src/main.rs:611` `worst_case_percent`; same ask as 2301 | W |
-| 1845 | OPEN | 31. instrumentation inside the target charged to it | `shim/`, `src/collect/mem/heap/`, `src/collect/mod.rs` (`Overhead`) | No `in_target_cpu_ns` on `Overhead` (`src/collect/mod.rs:542`); the shim publishes no cpu time | D (shim side), R (`Overhead` field) |
-| 1889 | OPEN | Needs: update `docs/families/cpu.md` (4 passages) | `docs/families/cpu.md` | All four passages still stale (lines 189-231: topdown "unverified", oncpu_time "Wave 2", cpu key and per-cpu counting still listed as needs) | nobody |
-| 1889 | OPEN | Needs: coordinator, finding 10 sudoers `abspath` | `Makefile` | `BINARY = target/$(PROFILE)/omn` still relative, `sudo -n setcap $(CAPS) $(BINARY)` (`Makefile:22,95`) cannot match the absolute sudoers rule | nobody |
-| 1959 | OPEN | To `capabilities.rs`: probe hook for `net` (ethtool) | `src/capabilities.rs`, `src/collect/net/mod.rs` | No `collect::net::probe`; `ethtool` still deliberately unanswered (`src/capabilities.rs:998`), so `net.hwts` / `net.iface netlink` read unverified | V (+D for `net/mod.rs`) |
-| 2034 | OPEN | To `resolve.rs`: `placement()` wrong about `af_packet` | `src/resolve.rs`, `src/catalog.rs` | No `kernel_filter` / `filter_in_program` on `Backend`; placement still by id prefix (`src/resolve.rs:530`) | W |
-| 2056 | PARTLY | To `emit.rs`: a missing value is not a non-numeric one | `src/emit.rs` | `measured()` counts absent values as unmeasured in summary/hist/topk (`src/emit.rs:922`, 307fa56); `timeline`, `rate` and `stack` still call `value_of` and fail the run with `NotNumeric` (`src/emit.rs:946,966,1203`) | R |
-| 2089 | OPEN | To `CATALOG.md`: the `net.hwts` row | `CATALOG.md` | Row unchanged (`CATALOG.md:254`), silent about the `netlink:ethtool` backend | nobody |
-| 2102 | OPEN | To `render.rs`: a series whose interest is its variation | `src/render.rs` | No first-value-then-deltas rendering | R |
-| 2127 | OPEN | 33. `Results.period_ns` for pprof | `src/emit.rs` | No `period_ns` on `Results`; pprof `period` still zero (`src/encode.rs:1560`) | R |
-| 2127 | PARTLY | 33. a ratio/temperature profile sums what cannot be added | `src/validate.rs` / catalog loader | `check_catalog` refuses `rate` over a non-additive unit (`src/validate.rs:290`) but not `stack` | W |
-| 2257 | OPEN | To `README.md` and `DECISIONS.md`: formats "not written" | `README.md`, `DECISIONS.md` | Both still say it (`README.md:174`, `DECISIONS.md:20` "ndjson, folded ... declared") | nobody |
-| 2265 | OPEN | To `render.rs`: `chrome` carries raw events | `src/render.rs` | Still "`chrome` carries timelines" (`src/render.rs:476`) | R |
-| 2280 | OPEN | To `request.rs`: `Budget` doc comment | `src/request.rs` | Doc still says "The resolver degrades ... `trace` to in-kernel `hist` to `sample`" (`src/request.rs:895`) | R |
-| 2301 | OPEN | To `catalog.rs`: `Cost::worst_case_percent` / `band` | `src/catalog.rs` | Still in `src/main.rs:611,625` | W |
-| 2316 | OPEN | To stream D (`emit.rs`): `Results.overhead` and `served_by` | `src/emit.rs`, `src/encode.rs` | Neither field on `Results` (`src/emit.rs:85`); cost still printed separately (`src/main.rs:829`) | R |
-| 2341 | PARTLY | To the coordinator (ROADMAP ticks, CATALOG flag table, STATE item 5) | `ROADMAP.md`, `CATALOG.md` | STATE "not enforced" item is gone; `CATALOG.md:440` still says "the resolver degrades", and ROADMAP phase 6 "Exceeding the budget produces an announced degradation" is still unticked | nobody |
-| 2374 | PARTLY | To D (`switches.rs`) and E (`page_faults.rs`): `not_built` | `src/collect/sched/switches.rs` | `page_faults.rs` superseded (count is served by the counting group, `page_faults.rs:19,208`); `switches.rs:177` still returns a bare `Err(String)` for `count`, not `collect::not_built`, so it exits 1 | D |
-| 2420 | OPEN | To `resolve.rs`: a backend that cannot serve the requested mode (mem D7) | `src/resolve.rs`, `src/catalog.rs` | Modes still per entry (`src/catalog.rs:54`), `Backend` has no modes; same as P7 at 7107 | W |
-| 2467 | OPEN | To `request.rs`: `count` mode must be able to rank | `src/request.rs` | `ModeKind::Count => &[Rate, Summary, Raw]` (`src/request.rs:548`), no `TopK` | R |
-| 2493 | OPEN | To `catalog.rs`: `check_catalog` in the loader, and `Backend.keys` | `src/catalog.rs` | `check_catalog` still runs only from a unit test (`src/validate.rs:813`); no `keys` field, `backend_keys`, `check_backend_keys` | W |
-| 2539 | OPEN | To `resolve.rs`: refuse a key the backend cannot attach | `src/resolve.rs`, `src/error.rs` | No `check_keys_carried` / `KeyNotCarried` | W |
-| 2585 | PARTLY | To F (`net/iface.rs`): one event per counter kind (net 5) | `src/collect/net/iface.rs` | Hidden counters now stated in notes (`iface.rs:69`, `hidden`); series still errors only, no split by counter | D |
-| 2600 | OPEN | To C (`emit.rs`): a ranking over an attribute (runtime 1) | `src/emit.rs` | `topk_by` groups by key axes only (`src/emit.rs:1140`), not by an attribute | R |
-| 2619 | OPEN | To E (`collect/mem/`): a counted window for `mem.swap` | `src/collect/mem/`, `catalog/mem.yaml` | `mem.swap` still `modes: [poll, snapshot]`, no `rate` (`catalog/mem.yaml:461`) | D (collector), V (catalog line) |
-| 2641 | OPEN | To D (`sched/offcpu.rs`): `TOTAL_OF_ATTR` closes sched 1 | `src/collect/sched/offcpu.rs` | No collector emits `TOTAL_OF_ATTR`; `docs/scenarios/sched.md:584` still "half fixed" | D |
-| 2693 | OPEN | To A (`collect/mod.rs`, `error.rs`): mem D4 `UnsupportedTarget` reason | `src/collect/mod.rs` | Variant still `{ source_id, target }` with the reason inside `target` (`src/collect/mod.rs:112,1243`) | R |
-| 2716 | OPEN | To A (`collect/mod.rs`): `Filtered.near_misses` (net 6) | `src/collect/mod.rs`, `src/encode.rs` | No `near_misses` anywhere | R |
-| 2745 | OPEN | To F (`collect/net/`): `daddr` carries the port (net 6) | `src/collect/net/netlink.rs` / `tcp_rtt.rs` | `render` still appends `:port` (`src/collect/net/netlink.rs:65,72`), no caveat in `catalog/net.yaml` | D |
-| 2755 | OPEN | To `request.rs`: `topk:N@attr` (runtime 1, io 7) | `src/request.rs`, `src/emit.rs`, `src/validate.rs` | `Emit::TopK(u32)` (`src/request.rs:586`), no `by` | R (request/emit), W (validate check) |
-| 2883 | OPEN | To `tests/scenario_cpu.rs`: profile scenario takes the shared lock | `tests/scenario_cpu.rs` | Still `may_load_the_machine()` (`tests/scenario_cpu.rs:1025`) | W |
-| 2915 | OPEN | From stream A: a unit test that fails under load (`what_a_run_reports_spending_is_the_cpu_it_actually_burned`) | `src/collect/mod.rs` | Test still stops on a 200 ms wall deadline (`until(deadline_ns)`, src/collect/mod.rs:3673) and panics on `NOTHING_WAS_BURNED`; stop condition should be `spun_ns >= 200 ms`. Still in the flaky tally (docs/scenarios/cross-machine.md:465, open-findings.md:6678) | R |
-| 2947 | OPEN | From stream A: a counted window rounds up to the tick (`-m count -d 600ms` observes 1.0002 s) | `src/collect/mod.rs` | `pace_of` still gives `Mode::Count` `DEFAULT_POLL_INTERVAL` (src/collect/mod.rs:2317-2320) and the drive loop's sleep (mod.rs:2572-2590) does not include the run deadline in `next_due_ns`; a counted request's window should end at its duration | R |
-| 3054 | PARTLY | To stream C, `src/emit.rs`: a series cannot be split by which counter it is (net 5) | `src/emit.rs` | Landed: collector states the omission as a degradation (docs/scenarios/net.md:793 "half fixed"). Left: no `Event.series` / sub-series; `SeriesKey::by` groups only by `KeyKind` (src/emit.rs:182) | R |
-| 3092 | PARTLY | To stream C, `src/emit.rs`: a timeline point cannot carry its error bar (gpu 1) | `src/emit.rs` (or `catalog/gpu.yaml`) | Landed: error bar stated as a degradation (docs/scenarios/gpu.md:401 "half fixed"). Left: `Point` has no `ts_err_ns` (src/emit.rs:330-335) and `gpu.engine_busy` still does not declare `raw` (catalog/gpu.yaml emits `[timeline, summary]`) | R (emit.rs) or V (gpu.yaml) |
-| 3119 | OPEN | To stream B, `catalog/net.yaml`: a caveat now true of two modes of three | `catalog/net.yaml` | Old caveat "These are counters, so a run reports the increment..." still at catalog/net.yaml:208 and :370; snapshot wording not added | V |
-| 3139 | OPEN | To stream B / whoever takes §1: modes are declared per entry, not per backend | `src/catalog.rs`, `src/validate.rs` | `Backend` has no `modes` field (src/catalog.rs:154-205); validator checks only `entry.modes` (src/validate.rs:277,354); `gpu.engine_busy --mode count` on NVML still accepted | W |
-| 3713 | OPEN | Sixth wave A item 5: a block key the plug's cached clock cannot collapse | `src/event.rs`, `src/join.rs` | `KeyValue::Blk { ptr, open_ts }` unchanged (src/event.rs:113); no third component; also listed under "Left" in docs/families/shared-layer.md | nobody |
-| 3760 | PARTLY | To `src/bpf/btf.rs`: member lookup that walks anonymous members (net callers) | `src/bpf/btf.rs` -> `src/bpf/net_*.rs` | Mechanism landed (`Btf::member_offset` src/bpf/btf.rs:181, finding 41). Left: callers -- `net.tcp.lifetime`/`retransmit` still report only the local endpoint (src/bpf/net_lifetime.rs:22-30, src/collect/net/lifetime.rs:204), `net.drops` reads no `skb->protocol`/`skb_iif`/`dev` (src/bpf/net_drops.rs:24) | D |
-| 3796 | PARTLY | To `src/bpf/btf.rs`: the names of an enum's members | `src/bpf/btf.rs` -> `src/collect/net/drops.rs` | `Btf::enum_variant` landed (src/bpf/btf.rs:290, used by io_pagecache.rs:275). Left: `net.drops` still reports the reason as a bare number and its doc comment still says BTF enums cannot be read (src/collect/net/drops.rs:14-21) | D |
-| 3883 | OPEN | To `src/emit.rs`: a ranking over an attribute, met a second time (`net.drops` topk by reason) | `src/emit.rs`, `src/request.rs` | `Emit::TopK(u32)` only (src/request.rs:586); no `topk:N@<attr>`; `topk_by` groups by key axes (src/emit.rs:799) | R |
-| 3892 | OPEN | To `src/emit.rs` and `src/render.rs`: a note is not always a degradation | `src/emit.rs`, `src/encode.rs` | `Results` has only `degradations` (src/emit.rs:133); collector notes are still folded into it (src/emit.rs:750-752) | R |
-| 3972 | OPEN | `catalog/mem.yaml`: `direction` is not a filter field (page_alloc/kmalloc frees) | `src/collect/mem/**` (reframed in shared-layer.md "Something else") | Neither option taken: `mem.page_alloc` filter_fields `[order, comm]`, `mem.kmalloc` `[bytes, comm]`; frees still counted into a note, not events | D |
-| 4083 | PARTLY | To `src/bpf/insn.rs`: two helper numbers | `src/bpf/insn.rs` | Landed (insn.rs:94, :110). Left: `src/bpf/proc_syscall.rs:42-52` still declares a local `extra_helper::GET_CURRENT_COMM` and calls it at :382 | D |
-| 4168 | OPEN | To `src/bpf/attach.rs`/`map.rs`: narrow a program to a cgroup (proc) | `src/bpf/*`, `src/collect/proc/**` | No `CURRENT_TASK_UNDER_CGROUP`/`CGROUP_ARRAY`; `proc.exec/exit/signals` still refuse cgroup/container "needs a helper the eBPF layer does not have yet" (src/collect/proc/events.rs:168, :574) though catalog declares `cgroup: bpf_only` (catalog/proc.yaml). `GET_CURRENT_CGROUP_ID` exists only in src/bpf/mem_program.rs:41 | W (proc collectors) + D/V (eBPF layer) |
-| 4292 | OPEN | To `src/bpf/`: a bounded read at an offset the verifier has not seen (`__data_loc`) | `src/bpf/` (insn), `src/bpf/sched_drm.rs` | `attach::tracepoint_layout` flags `__data_loc` (attach.rs:543) but no variable-offset ctx read; `gpu.job` still carries the scheduler thread name (sched_drm.rs:138-143) | nobody (shared insn layer); D for sched_drm.rs |
-| 4304 | PARTLY | To stream B, `catalog/sched.yaml`: `sched.irq` promises the soft half | `catalog/sched.yaml`, `src/bpf/sched_irq.rs` | Catalog half landed as "say what it measures": summary is now "Time spent in hard interrupt handlers" (catalog/sched.yaml:285). Left: soft half not attached (src/bpf/sched_irq.rs:22-23) | D |
-| 4328 | OPEN | To `src/bpf/` and `src/collect/mod.rs`: no `sched` source serves a cgroup | `src/collect/sched/**`, `src/bpf/sched_*.rs` | catalog/sched.yaml still declares `cgroup: bpf_only` on six entries; collectors still reject any non-pid target (e.g. src/collect/sched/runqlat.rs:70-78); no cgroup-path-to-id resolution in the sched path | D |
-| 4662 | OPEN | per-range residency of live allocations | `src/collect/mem/heap/` | `mem.heap.live` publishes no per-range `KeyValue::Mem` event with `resident`; `pagemap.rs` has `resident` but only over freed ranges (catalog dropped `mem` instead, D2) | D |
-| 4699 | PARTLY | the mTHP explanation is contradicted by measurement (D4) | `src/encode.rs`, `catalog/mem.yaml`, `DECISIONS.md` | encode.rs note fixed (`src/encode.rs:330`); `catalog/mem.yaml:108` caveat still says "the kernel picks larger folios for larger regions", and `DECISIONS.md:62` still credits multi-size THP | V (catalog), nobody (DECISIONS.md) |
-| 4900 | OPEN | P3 defect 1: `sched.wakeup`/`sched.offcpu` apply the filter or refuse it | `src/collect/sched/wakeup.rs`, `offcpu.rs` | no predicate in either collector; `tests/cross_io.rs:1345` `the_scheduler_half_ignores_a_filter_and_says_nothing` still asserts the defect (re-filed at line 6925) | D |
-| 4927 | OPEN | P3 defect 2: a thread target that compares the thread | `src/collect/sched/*.rs` | `wakeup.rs:48` still hands `first_pid()` to a tgid filter; only `futex.rs` has a `Thread` variant; `tests/cross_io.rs:1402` still pins the defect | D |
-| 4968 | OPEN | P3: a match that pairs a close with the next wakeup of its task (`woke`) | `src/join.rs`, `src/catalog.rs` | no `Woke` variant in `MatchKind` (`src/catalog.rs:228-239`) | nobody (join.rs), W (catalog.rs) |
-| 4988 | PARTLY | P3: a decomposition (segments by join, whole `io.syscall`) | `src/request.rs`, `src/join.rs`, `src/encode.rs` | `decompose:` with `by` and residue landed (`src/join.rs:1576`, 2850c5d); a part defined by a join (`join: halves`, `completion-released`) and a traced enclosing span as whole are not | nobody (join.rs) |
-| 5032 | PARTLY | P4: a match kind whose evidence is `TEMPORAL` (`Overlap`) | `src/join.rs`, `src/catalog.rs` | TEMPORAL is now produced (`between`, `within_key`); the window-overlap match with a shared split, keyless for machine state, does not exist | nobody (join.rs), W (catalog.rs) |
-| 5099 | OPEN | P4: a per-tick read of a counting PMU event | `src/collect/cpu/`, `catalog/cpu.yaml` | `cpu.instructions` still `modes: [count, sample]`, `cpu.cycles` `[count]` (`catalog/cpu.yaml:28,47`); no `poll` | W (collector), V (catalog) |
-| 5132 | OPEN | P4: 2.6 MiB of flusher progress beside 90 MiB of kworker writes | `src/collect/io/writeback.rs` | never investigated; cgroup scope still refused as not built (`writeback.rs:55`) | D |
-| 5256 | OPEN | "one run observes one target" is no longer true | comments in `src/main.rs`, `src/encode.rs`, tests, example | comments still there: `src/main.rs:742`, `src/encode.rs:1978`, `tests/cross_io.rs:686`, `tests/scenario_mem.rs:2033`, `tests/scenario_sched.rs:2133`, `examples/cross-machine-frequency.yml:54,81` | R (main.rs, encode.rs), D (scenario_mem/sched), nobody (cross_io.rs, example) |
-| 5272 | OPEN | known-instruction scenario flaps under load (+0.69 %, double count suspected) | `tests/scenario_cpu.rs` | not investigated; only a `may_load_the_machine()` guard (`tests/scenario_cpu.rs:350`) | W |
-| 5285 | PARTLY | `uprobe` PMU needs CAP_SYS_ADMIN, add uprobe-multi attach | `src/bpf/attach.rs`, `src/capabilities.rs` | Attach half is superseded: it lives in `syscall::link_uprobe_multi` (src/bpf/syscall.rs:386) and `usdt.rs:1060-1096`. The probe half is still open: `attach::probe_type_support("uprobe")` (src/bpf/attach.rs:199-211) still answers from the PMU `type` file, so `uprobe` reads available where every open gets EACCES. This overlaps P3 (line 7067) | V |
-| 5353 | PARTLY | `insn.rs`: five encodings and a helper (USDT) | `src/bpf/insn.rs` | `add64_reg`, `lsh64_imm` and `PROBE_READ_USER` landed (insn.rs:150,155,101). `arsh64_imm`, `or64_imm` and `ld_imm64` are still local in `usdt.rs` `mod local` (usdt.rs:769-778), justified as single-caller. But `or64_imm` is now written a second time in `request_net.rs:159` | nobody |
-| 5372 | OPEN | `resolve.rs`: the kernel placement is true for part of a filter | `src/resolve.rs` | `placement()` (resolve.rs:530) still credits every `bpf*` backend with "evaluates predicates in the program". USDT's `comm` predicate runs in the collector. This overlaps line 6972 ("where a predicate actually runs") | W |
-| 5520 | OPEN | `btf.rs`: a function's type id and prototype | `src/bpf/btf.rs` | There is no `Btf::function`. The second BTF parser `fentry::FunctionIndex` is still in place (src/bpf/fentry.rs:168-331) | V |
-| 5536 | OPEN | `syscall.rs`: four commands `fentry.rs` issues itself | `src/bpf/syscall.rs` | There is no `prog_load_tracing` with `attach_btf_id`: `prog_load_for` (syscall.rs:290) has no btf id. `raw_tracepoint_open` still takes `&str` (syscall.rs:337). `map_update` is still `#[cfg(test)]` (syscall.rs:461). There is no `prog_info`. `fentry.rs` still issues `BPF_PROG_LOAD`, `RAW_TRACEPOINT_OPEN` and `OBJ_GET_INFO_BY_FD` itself (fentry.rs:68-69,504,554) | nobody |
-| 5553 | OPEN | `bpf/mod.rs`: five module lines | `src/bpf/mod.rs`, `src/bpf/attach.rs` | `fentry`, `io_fsync`, `io_vfs`, `net_connect` and `net_socket` are still declared with `#[path]` in `attach.rs` (attach.rs:57-69), and none of them is in `mod.rs` | V |
-| 5566 | PARTLY | `insn.rs`: one width, three instructions, two helpers | `src/bpf/insn.rs` | `BPF_H`, `add64_reg`, `lsh64_imm`, `jge_reg` and `GET_SOCKET_COOKIE` landed (insn.rs:40,150,155,235,99). `GET_CURRENT_TASK` (35) is still local in `io_fsync.rs:54` | nobody |
-| 5642 | OPEN | `tests/family_sched.rs`: a fixed attach delay | `tests/family_sched.rs` | `a_task_moved_between_two_cpus_is_counted_once_per_move` still sleeps a fixed 800 ms before moving the task (family_sched.rs:882) | D |
-| 5652 | OPEN | `request.rs`: `count` on a kernel-built histogram | `src/request.rs` | `ModeKind::Count` still admits only rate, summary and raw (request.rs:548). There is no hist or topk for a counted drained histogram. Not blocking | R |
-| 5659 | PARTLY | To the coordinator (stream T): session rows, `docs/bpf-layer.md`, `CATALOG.md`, `STATE.md` | `examples/README.md`, `GUIDE.md`, `docs/bpf-layer.md`, `CATALOG.md` | The four session rows landed. `docs/bpf-layer.md:190-199` "What is not here yet" still lists fentry and USDT as missing. `CATALOG.md` does not name the `fentry:<function>` requirement class | nobody |
-| 6181 | OPEN | Stream H: three left from the fifth wave -- (a) `count` refuses `topk` | `src/request.rs` | `ModeKind::valid_emits` still gives `Count => [Rate, Summary, Raw]` (src/request.rs:548); no `TopK` arm | R |
-| 6181 | OPEN | Stream H: three left -- (b) the counted window rounds up to the runner's tick | `src/collect/mod.rs` | the run deadline is still not among the wake-up times (`next_due_ns`, src/collect/mod.rs:2572-2590) and `pace_of` still falls back to `DEFAULT_POLL_INTERVAL` for `count` (src/collect/mod.rs:2319), so `-d 600ms` observes about 1 s | R |
-| 6181 | OPEN | Stream H: three left -- (c) the spending test drives to a wall deadline | `src/collect/mod.rs` (test) | `what_a_run_reports_spending_is_the_cpu_it_actually_burned` (src/collect/mod.rs:3662) still uses `until(monotonic_ns() + 200 ms)`; it only panics with NOTHING_WAS_BURNED instead of driving to a cpu deadline | R |
-| 6602 | OPEN | §47: cost bands describe the tool's cpu; an in-kernel collector's cost is in the target | `src/collect/mod.rs` (budget, `cost.json`), `catalog/*.yaml` | `cost.json` and `--budget` do not read the target's dilation (no "dilat" anywhere in `src/`); raw-tp per-event bands not revisited (`sched.futex` `bpf:raw_tp` still `cost: med`, catalog/sched.yaml:223) | R (budget), V (bands) |
-| 6642 | PARTLY | §47 "Answered on main": the shim ring (two things left) | `catalog/mem.yaml`, `catalog/sched.yaml`, `docs/bench.md` | ring caveat landed in catalog/sched.yaml:263 only; catalog/mem.yaml has no "up to 3 MiB of `mem.rss` is the ring" caveat; bench heap rows still predate the ring (docs/bench.md:379 says "these rows want one more rerun") | V (mem.yaml caveat); nobody (bench rerun) |
-| 6739 | OPEN | held request that does not resolve is an unserved layer, not a failed run | `src/main.rs`, `src/collect/mod.rs` | main.rs:208-224 still returns at the first `ResolveError`; no `Unserved` / `run_all_within_unserved` | R |
-| 6832 | OPEN | same drain race in `io_pagecache.rs`, `net_qdisc.rs`, `net_softirq.rs` | `src/bpf/io_pagecache.rs`, `net_qdisc.rs`, `net_softirq.rs` | all three still `Hash::create` their row map (io_pagecache.rs:610, net_qdisc.rs:351, net_softirq.rs:347); none on `map::Rows` | D (BRIEF D item 2) |
-| 6857 | OPEN | fentry last drain's 1 ms is not a grace period | `src/bpf/fentry.rs` | still `sleep(from_millis(1))` at fentry.rs:1343 | D (BRIEF D item 3) |
-| 6871 | OPEN | one grace period per round, not per source | `src/bpf/map.rs`, `src/collect/mod.rs` | no `retire`/`take`, `grace_period` still private (map.rs:354), no `Collector::retire` | D (map.rs) + R (collector trait/round loop) |
-| 6891 | OPEN | `stack` over `mem.latency` fails one run in ten | `src/collect/mem/ibs.rs`, `tests/scenario_mem.rs` | not diagnosed; ibs.rs still emits `latency_cycles` conditionally, error at emit.rs:726 still reachable | D (BRIEF D item 5) |
-| 6925 | OPEN | three `sched` sources apply no filter | `src/collect/sched/mod.rs` (+ wakeup/offcpu/migrations collectors) | factories at sched/mod.rs:36, 39, 57 still pass no `filter` | D |
-| 6952 | OPEN | `sched.switches` sampling event that follows threads | `src/collect/sched/switches.rs` | still `SampledEvent::open_software` (switches.rs:187), no `ThreadSampler` | D (BRIEF D item 4) |
-| 6972 | OPEN | where a predicate actually runs (`filter_in_program`) | `src/catalog.rs`, `src/resolve.rs`, `catalog/*.yaml` | no `filter_in_program` key anywhere in `src/` or `catalog/` | W (BRIEF W item 2) |
-| 6989 | OPEN | §48: a wakeup from an interrupt credited to the interrupted task | `src/bpf/wakeup.rs` | no `preempt_count` / `HARDIRQ_MASK` read in wakeup.rs | D (BRIEF D item 1) |
-| 7028 | OPEN | P1: check the prototype in the probe | `src/bpf/mod.rs`, catalogs | `raw_tracepoint_support(name)` (bpf/mod.rs:153) takes a bare name; `KNOWN_DEFECTS` P1 entries still in tests/portability.rs:1563,1570 | V |
-| 7049 | OPEN | P2: a BTF field the program reads | `src/capabilities.rs`, `src/bpf/mod.rs`, `catalog/net.yaml` | no `btf_member:` requirement class / `btf_member_support`; KNOWN_DEFECTS portability.rs:1579 | V |
-| 7067 | OPEN | P3: `uprobe` requirement below 6.6 | `src/capabilities.rs`, `src/bpf/mod.rs` | `uprobe` still answered by the PMU's existence; KNOWN_DEFECTS portability.rs:1586 | V |
-| 7079 | OPEN | P4: USDT backends need BTF | `catalog/runtime.yaml` | `bpf:usdt` still `requires: ["uprobe", "bpf"]` (runtime.yaml:15, 78, 104); KNOWN_DEFECTS portability.rs:1593 | V |
-| 7087 | OPEN | P5: `net.request` below 6.6 | `src/bpf/request.rs`, `catalog/net.yaml` | no fallback, no `kernel>=6.6` in net.yaml; KNOWN_DEFECTS portability.rs:1600 | V |
-| 7096 | OPEN | P6: NVML library without its driver | `catalog/gpu.yaml` or `src/collect/gpu/mod.rs` | no `/proc/driver/nvidia/version` requirement, probe does not call `nvmlInit_v2`; KNOWN_DEFECTS portability.rs:1607 | V |
-| 7107 | OPEN | P7: a collector that refuses the mode | `src/resolve.rs`, `src/collect/mod.rs` | no `Factory::modes`; KNOWN_DEFECTS portability.rs:1620-1641 (four entries) | W |
-| 7121 | OPEN | P8: `system: native` refused | `src/collect/cpu/profile.rs`, `src/collect/mem/page_faults.rs`, `src/collect/sched/` | KNOWN_DEFECTS portability.rs:1648-1662 (three entries) | W (cpu, page_faults), D (sched half) |
-| 7130 | OPEN | P9: a per-task probe for a per-cpu event | `src/resolve.rs` | KNOWN_DEFECTS portability.rs:1669 | W |
-| 7139 | OPEN | P10: two requirements that name the wrong thing | `catalog/power.yaml`, `catalog/mem.yaml` | power.yaml:56 still requires `/sys/devices/system/cpu/cpufreq`; `mem.swap` `fs:cgroup` requires nothing about `pswpin` | V |
-| 7150 | OPEN | five tests fail without capabilities, and a skip with no reason | `tests/vertical.rs`, `tests/scenario_mem.rs`, `tests/scenario_proc.rs`, `tests/scenario_gpu.rs` | tests unchanged since the matrix merge; vertical.rs:921, 997, 1104 still print `stderr.lines().next()` | W (vertical.rs, scenario_proc.rs x2, skip reason), D (scenario_mem.rs), V (scenario_gpu.rs) |
-| 7182 | PARTLY | `make matrix`, and when to push the workflow | `Makefile`, `.github/workflows/ci.yml` | `make matrix` landed (Makefile:130, 25e65f7); the workflow has never been pushed (4ca6aa4 is on no remote branch; main is 13 ahead of origin/main) | nobody (coordinator's push; `.github/**` is V's to adjust) |
+## Landed or superseded since the twelfth wave's snapshot
 
-## LANDED and SUPERSEDED
+| line | status | request | where |
+|---|---|---|---|
+| 168 (§5) | LANDED | `count` -> `raw` in the mode x emit matrix | `CATALOG.md:526` |
+| 168 (§5) | LANDED | a rate over the counter's own window | `emit::rate_by` reads `enabled_ns` (`src/emit.rs:1138`) |
+| 250 (§7) | LANDED | `--pid a,b` measures only `a` | refused where a collector follows one process (`Target::narrowed_to_one`, `src/collect/mod.rs:2026`; `DECISIONS.md`, the thirteenth wave) |
+| 280 (§7) | LANDED | `examples/sched-wakeup.yml` declares its join | its `joins:` block |
+| 314 (§8) | LANDED | `HistScale` serializable, `BucketLayout` not a copy | one type (`src/request.rs:939`; `src/emit.rs:734`) |
+| 323 (§8) | LANDED | `hist:linear:0` refused | `Emit::from_str` (`src/request.rs:814`) |
+| 510 (§10), 1889 | LANDED | the sudoers line, `$(abspath)` | `Makefile:97`, `:107` |
+| 624 | LANDED | `sched.offcpu --emit hist` with a log2 bucket in the key | `KEY_BUCKET` (`src/bpf/offcpu.rs:161`) |
+| 660, 7121 | LANDED | `system: native` on an all-eBPF chain (P8) | retired from `KNOWN_DEFECTS` (`docs/portability.md`, "P7/P8/P9 entries retired") |
+| 710 (§12) | LANDED | symbols demangled | `rustc-demangle` and `cpp_demangle` (`Cargo.toml`) |
+| 815 | SUPERSEDED | `check_stack` refuses `dwarf` and `lbr` | `dwarf` is served; the unwind chooser refuses a forced mode it cannot serve, by name (`src/stack.rs`, `src/unwind.yaml`) |
+| 885 | LANDED | `SampledEvent::throttled()` | `src/perf.rs:822` |
+| 957 | LANDED | `Unit::Watts` | `src/encode.rs:1864` |
+| 1078 | LANDED | `CATALOG.md` §1: per-backend `targets` and `filter_fields` | `CATALOG.md:119` |
+| 1241, 2034, 5372, 6972 | LANDED | where a predicate runs (`filter_in_program`) | `Backend::filter_in_program` (`src/resolve.rs:703`); `DECISIONS.md`, "Where a predicate runs" |
+| 1336, 5659 | LANDED | `docs/bpf-layer.md` no longer lists fentry and USDT as missing | "What is not here yet" (`docs/bpf-layer.md:235`); `fentry:` in `CATALOG.md:135` |
+| 1360 | LANDED | 19. symbolising a machine-wide run | measured at 1.2 s, the cache not needed (open-findings 7307) |
+| 1392 | LANDED | 20. `comm` at row creation | `src/bpf/proc_renames.rs` (`docs/families/kernel.md`, §3) |
+| 1422 | LANDED | 21. `writable:` | `src/capabilities.rs:530` |
+| 1469 | LANDED | 22. a NUMA node key | `KeyValue::Node` (`src/event.rs:150`) |
+| 1598 | LANDED | 25. `pmu:` glob; the qualified form | `check_requirement_globs` (`src/catalog.rs:467`); `sysfs_device_state` answers missing for an absent unit (`src/capabilities.rs:950`) |
+| 1735 | LANDED | 28. a band per backend against a cost per rate | `DECISIONS.md`, "How a cost band is chosen" (the thirteenth wave) |
+| 1845 | LANDED | 31. instrumentation inside the target charged to it | `Overhead::in_target_cpu_ns` (`src/collect/mod.rs:670`) |
+| 1959 | LANDED | the `ethtool` probe | `collect::net` probes (`src/collect/net/mod.rs:29-43`) |
+| 2089 | LANDED | `CATALOG.md`'s `net.hwts` row | names `netlink:ethtool` (`CATALOG.md:361`) |
+| 2127 | LANDED | 33. `Results.period_ns` for pprof | `src/encode.rs:2032` |
+| 2127 | LANDED | 33. `stack` over a unit that does not add | `check_catalog` (`src/validate.rs:310`) |
+| 2257 | LANDED | formats "not written" | `DECISIONS.md:20`, every format with its encoder |
+| 2316 | LANDED | `Results.overhead`, `served_by` | `src/emit.rs:152`, `:157` |
+| 2374 | SUPERSEDED | `sched.switches -m count` through `not_built` | `count` is handed to `counters::SCHED_SWITCHES` (`src/collect/sched/mod.rs:139-148`); the branch in `switches.rs:241` is no longer reached |
+| 2420, 7107 | LANDED | a backend that cannot serve the mode (P7) | `Backend.modes` (`src/catalog.rs:232`) |
+| 2467, 6181 (a) | LANDED | `count` ranks | `ModeKind::Count` admits `topk` (`src/request.rs:715-720`) |
+| 2585, 3054 | LANDED | one series per counter kind (net 5) | `iface:<name>/<kind>` (`src/collect/net/iface.rs:41-46`); `DECISIONS.md`, "Counter kinds that are different failures" |
+| 2600, 2755, 3883 | LANDED | a ranking over an attribute | `Emit::TopK { k, by }` (`src/request.rs:762`) |
+| 2619 | LANDED | a counted window for `mem.swap` | `modes: [poll, snapshot, count]` (`catalog/mem.yaml:483`) |
+| 2641 | SUPERSEDED | `TOTAL_OF_ATTR` closes sched 1 | the bucket is in the key and the row carries its `weight` (`src/collect/sched/offcpu.rs:387-388`) |
+| 2745 | LANDED | `daddr` carries the port | the port is its own field (`src/collect/net/netlink.rs:56-64`) |
+| 2915, 6181 (c) | LANDED | the spending test drives to a wall deadline | driven to 200 ms of spun cpu (`src/collect/mod.rs:5522`) |
+| 2947, 6181 (b) | LANDED | a counted window rounds up to the tick | the run's deadline is among the wake-up times (`src/collect/mod.rs:3741-3743`) |
+| 3139 | LANDED | modes per backend | `Backend.modes` (`src/catalog.rs:232`); `DECISIONS.md`, "A backend's modes" |
+| 3713 | SUPERSEDED | a block key the plug's cached clock cannot collapse | decided instead: two lives under one scope are paired by order and rated `TEMPORAL` within the key, counted in `states.scope_collapsed` (`DECISIONS.md`, the thirteenth wave) |
+| 3796 | LANDED | an enum's member names, for `net.drops` | `btf.enum_variant("skb_drop_reason", ..)` (`src/collect/net/drops.rs:261`) |
+| 3892 | LANDED | a note is not always a degradation | `Collector::facts()`, reaching results as `notes` (open-findings 7937) |
+| 4168, 4328 | LANDED | a program narrowed to a cgroup; `sched` serving a cgroup | `insn::Whose::Cgroup`, `push_task_filter` (open-findings 8036); `DECISIONS.md`, "What `--cgroup` means" |
+| 4304 | LANDED | `sched.irq` promises the soft half | `softirq_entry`/`softirq_exit` attached (`src/bpf/sched_irq.rs:1-3`) |
+| 4699 | LANDED | the mTHP explanation | `catalog/mem.yaml` and `DECISIONS.md`, "What the measurement taught" |
+| 4900, 6925 | LANDED | the `sched` sources apply the filter | every factory passes `request.filter` (`src/collect/sched/mod.rs:60-107`) |
+| 4927 | LANDED | a thread target compares the thread | `DECISIONS.md`, "A thread and a process target" |
+| 4968 | LANDED | `woke` | `MatchKind::Woke` (`src/join.rs:880`) |
+| 4988 | LANDED | a decomposition part a join defines, a measured whole | `value: paired` from a `woke` join; `Whole::Measured` (`src/join.rs:2336`) |
+| 5032 | LANDED | a match whose evidence is `TEMPORAL` over a shared split | `overlap`, keyless over machine state (`join::MACHINE`) |
+| 5099 | LANDED | a per-tick read of a counting PMU event | `cpu.instructions`, `cpu.cycles`: `modes: [count, poll, sample]` (`catalog/cpu.yaml:13`, `:28`) |
+| 5285, 7067 | LANDED | the `uprobe` probe below 6.6 (P3) | `docs/portability.md`, P3 "On cells" |
+| 5353 | LANDED | `insn.rs` encodings for USDT | `Insn::or64_imm` (`src/bpf/insn.rs:200`); no `mod local` left in `usdt.rs` |
+| 5642 | LANDED | a fixed attach delay in `family_sched` | the task is moved until the run ends, and the moves inside the window are counted |
+| 6602 | LANDED | §47, cost in the target | `cost.json` and `--budget` weigh `in_target`; bands follow the bench's dilation (`DECISIONS.md`, the thirteenth wave) |
+| 6739 | LANDED | a held request that does not resolve is an unserved layer | `collect::Unserved` (`src/main.rs:238`) |
+| 6832 | LANDED | the drain race in `io_pagecache`, `net_qdisc`, `net_softirq` | `Rows::create` (`io_pagecache.rs:623`, `net_qdisc.rs:363`, `net_softirq.rs:359`) |
+| 6857 | LANDED | fentry's last drain waits a grace period | `map::grace_period` (`src/bpf/fentry.rs:1377`) |
+| 6891 | LANDED | `stack` over `mem.latency` | `measured()` in `stack` (`src/emit.rs:1446`) |
+| 6952 | LANDED | `sched.switches` follows threads | `ThreadSampler` (`src/collect/sched/switches.rs:23`, `:77`) |
+| 6989 | LANDED | §48, a wakeup from an interrupt | `preempt_count`, `HARDIRQ_MASK` (`src/bpf/wakeup.rs:92-94`) |
+| 7028 | LANDED | P1, the prototype in the probe | `docs/portability.md`, P1 |
+| 7049 | LANDED | P2, `btf_member:` | `docs/portability.md`, P2 |
+| 7079 | LANDED | P4, USDT needs BTF | `docs/portability.md`, P4 |
+| 7087 | LANDED | P5, `net.request` below 6.6 | `docs/portability.md`, P5 |
+| 7096 | LANDED | P6, NVML without its driver | `docs/portability.md`, P6 |
+| 7130 | LANDED | P9, a per-task probe for a per-cpu event | retired from `KNOWN_DEFECTS` |
+| 7139 | LANDED | P10, two requirements that named the wrong thing | `docs/portability.md`, P10; the guest's single root cgroup is decided "not a probe defect" |
+| 7150 | LANDED | tests that failed without capabilities, a skip with no reason | skip lines give the refusal (`tests/vertical.rs:166-177`), gated by `.github/scripts/skip-gate.sh` |
+| 7182 | LANDED | `make matrix`, and the workflow pushed | `.github/workflows/ci.yml` is on `origin/main`, and the CI has run on both cells |
+
+## Filed since the snapshot
+
+The twelfth, thirteenth and fourteenth waves' "Needs from another stream"
+sections (`docs/open-findings.md`, line 7210 onward). A heading whose request
+landed at its own wave's merge is not repeated here unless something of it is
+left.
+
+| line | status | request | file | what is left, and where |
+|---|---|---|---|---|
+| 7221 | LANDED | `omn list --format json` carries the sweep | | `here` on each entry (`src/main.rs:1537`); `omn-mcp` still has `parse_sweep` over the text (`mcp/src/binary.rs:299`), which can go |
+| 7331, 7344 | LANDED | `Btf::var_id`; `THIS_CPU_PTR`, `load_btf_id` | | `src/bpf/btf.rs:168`; `src/bpf/insn.rs:126`, `:299`. `wakeup.rs` keeps a test-only `var_id` over the raw blob (`:673`) |
+| 7377 | LANDED | a waker of 0 is not always the idle task | | `interrupt (hardirq)` chains (`src/encode.rs:441`) |
+| 7451 | LANDED | what `proc.syscall`'s comparison skipped | | `SKIPPED_BY_PREDICATE` (`src/bpf/proc_syscall.rs:84`) |
+| 7469 | LANDED | who applied a predicate | | `AppliedBy` in the text (`src/render.rs:166-168`) |
+| 7581, 7843 | LANDED | `CATALOG.md` §1's requirement notations | | `btf_member:`, `writable:` and the prototypes (`CATALOG.md:135-160`) |
+| 7605 | SUPERSEDED | the `cgroup`/`container` targets nothing serves | | the fourteenth wave's `container: no`, and its removal from the eleven entries that serve a cgroup, filed at 8247 and 8331 (below) |
+| 7930 | PARTLY | `ProgramStats::for_run` onto `bpf::enable_run_time_stats` | `src/collect/mod.rs` | the re-export exists (`src/bpf/mod.rs:109`); `for_run` still issues `BPF_ENABLE_STATS` itself (`src/collect/mod.rs:761`, `:825`) |
+| 7944 | LANDED | two bench tests share a report file | | the name carries a per-call counter (`examples/bench/harness.rs:777`) |
+| 8030 | LANDED | `SCHED_SWITCHES` is used | | `src/collect/cpu/counters.rs:246` |
+| 8067, 8206 | OPEN | declare `psi` where it lives | `src/collect/mod.rs`, `src/collect/mem/mod.rs` | `pub mod psi` is still in `mem/mod.rs:17`; moved in one commit with K's three lines |
+| 8131 | LANDED | `topk` back into `net.bytes` | | `emits: [rate, timeline, summary, topk]` (`catalog/net.yaml:130`) |
+| 8221 | LANDED | the kernel's count is a fact (`net.softirq`) | | `facts()` holds both of the kernel's counts (`src/collect/net/softirq.rs:495`) |
+| 8234, 8247, 8331 | OPEN | `container: no` dropped where a cgroup is served | `catalog/cpu.yaml`, `catalog/mem.yaml`, `src/validate.rs`, `tests/scenario_cpu.rs` | ten `container: no` in `catalog/cpu.yaml`; the entries and the refusal test change in one commit |
+| 8261, 8623 | OPEN | `.github/expected-skips.txt`: the cgroup-ancestry wording in, `/sys/class/block/root` out | `.github/expected-skips.txt` | the `/sys/class/block/root` line is still there (`:75`) |
+| 8295 | OPEN | `join::decompose_within(.., windows)`, so a `paired` part pairs over the joins' windows | `src/join.rs` | no `decompose_within`; `Session::check_paired_parts` still refuses before the run (`src/request.rs:1684`) |
+| 8366 | OPEN | `--symbols local\|debuginfod` | `src/request.rs`, `src/cli.rs` | the mechanism is landed; no flag in `src/cli.rs` |
+| 8388 | OPEN | the unwind choice in the resolved file | `src/main.rs`, `src/resolve.rs` | `STATE.md`, "What remains", item 2 |
+| 8399 | OPEN | the mode table beside the catalog | `src/catalog.rs` | still `src/unwind.yaml`, because `load_dir` parses every file of `catalog/` as entries |
+| 8437 | OPEN | `cost.json` for a profile with stacks leaves most of it out | `src/collect/mod.rs` | 26 ms reported where the kernel counts 986 ms (`STATE.md`) |
+| 8489 | OPEN | a rate over joules printed as watts | `src/encode.rs` | the rate line still appends `/s` to the unit (`:1267`) |
+| 8497 | OPEN | "here" names a build's gap (optional) | `src/render.rs` | |
+| 8546 | OPEN | *"bpftool could not dump the BTF"* gives no reason | `src/bpf/btf.rs` | `:670` unchanged |
+| 8552 | OPEN | skip lines the gate cannot read | `tests/cross_memory.rs:147`, `tests/cross_machine.rs:807`, `:1032` | `STATE.md`, "What remains", item 2 |
+| 8588 | LANDED | a context switch is kernel mode | | the probe opens without `exclude_kernel` for the kernel-only events (`counted_only_in_kernel`, `src/capabilities.rs:1040`), and the counter refuses rather than notes (`src/collect/cpu/counters.rs:681`) |
+| 8612 | OPEN | a (target, mode) pair no backend declares is the request's, exit 2 | `src/resolve.rs` or `src/validate.rs` | `sched.switches --cgroup -m trace` reads as the machine's |
+| 8631 | OPEN | two lines for `collect/mod.rs`: `pub mod net`, `ProgramStats::for_run` | `src/collect/mod.rs` | `mod net` is private (`:26`) |
+| 8642 | OPEN | a preempted program skips every run behind it | `docs/bpf-layer.md` | the coordinator's; `STATE.md` lists it unscheduled |
+| 8658 | OPEN | three `mcp` protocol tests fail rather than skip without capabilities | `mcp/tests/protocol.rs` | |
+| 8711 | OPEN | capabilities on the file, not in the process; a `nosuid` mount | `src/capabilities.rs` | nothing says `nosuid` in `src/` |
+| 8728 | OPEN | the shim hooks `aligned_alloc`, `memalign`, `valloc`, `pvalloc`; its refusal; `find_shim` under `lib/omn/` | `shim/**`, `src/collect/mem/heap/mod.rs` | the shim replaces `posix_memalign` (`shim/src/lib.rs:852`) and none of the four; `dd bs=64M` reads a largest allocation of 4 KiB and no loss, **a silent loss** |
+| 8747 | OPEN | the "no viable backend" refusal leads with the backend passed over | `src/collect/mod.rs` | |
+| 8756 | OPEN | a `LICENSE` file | the repository root | none; `Cargo.toml` says Apache-2.0 |
+| (STATE) | LANDED | `CLAUDE.md`'s *"86 usable sources and 51"* | `CLAUDE.md` | 92 and 51, this wave |
+
+## Landed by the twelfth wave's snapshot
+
+The snapshot's own rows, as it judged them at f7b6a92. They are kept as
+written; a line number in them is the one it had then.
 
 | line | status | heading | evidence |
 |---|---|---|---|
@@ -305,11 +344,9 @@ R, V, W and D are with those streams now.
 
 ## Requests filed more than once
 
-- Lines 510 and 1889 ask for the same fix: the sudoers line and `$(abspath)` in the `Makefile`.
-- Finding 16, line 2034, line 5372 and line 6972 ask for the same thing: `placement()` in `src/resolve.rs:530` still decides where a predicate runs from the backend id's `bpf` prefix. That is W's.
-- Line 2420 and P7 (line 7107) are the same request: the resolver still selects a backend that cannot serve the mode.
-- Line 2301 and finding 29 are the same request: the cost bands in `src/main.rs:611` should move to `src/catalog.rs`.
-- Line 4900 and line 6925 are the same request: the `sched` sources apply no filter. That is D's.
-- Line 5285 (the probe half) and P3 (line 7067) are the same request: the `uprobe` probe. That is V's.
-- Lines 2915/2947 and 6181 repeat the fifth wave's `count` window and the wall-deadline spending test. Those are R's.
-- Lines 1336 and 5659 are the same request: `docs/bpf-layer.md` still lists fentry and USDT as missing.
+- 1809 and 2301: the cost bands. The number moved to `src/catalog.rs`, the words did not.
+- 2539 and 7803: `KeyNotCarried`, waiting on `Backend.keys` (2493).
+- 1503, 8067 and 8206: the one PSI reader, declared where it lives.
+- 7930 and 8631: `ProgramStats::for_run` onto `bpf::enable_run_time_stats`.
+- 4083 and 5566: two helpers still local to their programs (`GET_CURRENT_COMM`, `GET_CURRENT_TASK`), one line each in `src/bpf/insn.rs`.
+- 5520 and 5536: `fentry.rs` keeps its own BTF parser and its own `bpf()` calls; both go through the shared layer, or neither does.

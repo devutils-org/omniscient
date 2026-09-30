@@ -12,7 +12,7 @@ paid for across every collector written since. That is the point of the file.
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Language | Rust | The correlator, not the collectors, is where the complexity lives: bounded open-state maps, a watermark reorder buffer, interval joins. Rust also gives CO-RE eBPF through libbpf-rs without a second language for the userspace side. |
+| Language | Rust | The correlator, not the collectors, is where the complexity lives: bounded open-state maps, interval and keyed joins, decompositions with a signed residue. *Amended in the fifteenth wave:* this line first said Rust gives CO-RE eBPF through libbpf-rs; the project uses no libbpf at all. It assembles its programs as instruction arrays (`src/bpf/insn.rs`) and relocates them from the running kernel's BTF at load (`src/bpf/btf.rs`), "Settled in the fifteenth wave" below. |
 | Clock | `CLOCK_MONOTONIC`, single domain | Non-negotiable per the roadmap. `perf_event_open` sets `use_clockid` + `clockid` explicitly; eBPF uses `bpf_ktime_get_ns()` only, never `bpf_ktime_get_boot_ns()`, which includes suspend time. Device domains (GPU, NIC) calibrate explicitly and carry a non-zero `ts_err_ns`. |
 | Scope | Single machine | Inter-machine clock drift is a different class of problem from local correlation. Fleet scope is not refused, it is deferred. |
 | Request surfaces | CLI and session file, one model | Both build the same `Request`. `--dump-request` prints a runnable session file, which is what keeps the two from drifting; an end-to-end test asserts the round trip. |
@@ -89,8 +89,8 @@ written against.
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Kernel floor | 6.1 | `lock:contention_*` exists from 6.1, and requiring it removes both the futex + uprobe fallback for `sched.lock` and the untested no-BTF path, where CO-RE relocations would have to degrade into something nobody exercises. A floor is a claim the project can keep: 5.15 would mean shipping two shapes of half the chains to cover one LTS that leaves support before this tool has a second family of eBPF backends. Below 6.1 the affected sources are refused by name, with the version, never quietly degraded. |
-| Privileges | `CAP_BPF` + `CAP_PERFMON` | The eBPF backends need those two capabilities; root also works, because root has them. An unprivileged run is refused with the capability that is missing, never resolved onto a lesser backend that answers a different question. This keeps one chain shape to reason about and to test, which is the cost the open line was weighing: a second, unprivileged shape doubles the resolver's test matrix while making every result depend on who ran it. |
+| Kernel floor | **No single floor: each backend states the kernel it needs** (`kernel>=5.8`, `kernel>=6.1`, `kernel>=6.8`), probed and refused by name like any other requirement. *Amended in the fifteenth wave.* | First settled as 6.1, so that `sched.lock` could rely on `lock:contention_*` and nobody would write a second shape of half the chains for 5.15. Both halves stopped being true: the floor was never enforced as a floor -- a requirement on each backend is what the resolver reads, and 33 eBPF backends say `kernel>=5.8`, five say `kernel>=6.1`, one says `kernel>=6.8` -- and since the thirteenth wave the programs read every prototype shape they know, so 5.15 is served ("Settled in the fifteenth wave" below). What the original line protected still holds: below a backend's version its source is refused with the version (`kernel>=6.1: missing: kernel 5.15 is older than 6.1`), never quietly degraded. |
+| Privileges | `CAP_BPF` + `CAP_PERFMON`, on the binary | The eBPF backends need those two capabilities; root also works, because root has them. Without them each source is served only as its chain allows, and a backend that needs them is refused with the capability that is missing. *Amended in the fifteenth wave:* this line said an unprivileged run is never resolved onto a lesser backend. Since the fourteenth wave a perf event raised with the program's own registers is opened user-mode only at `perf_event_paranoid` 2, and says what that loses -- which is the same backend asked a stated subset of the question, not a lesser backend; "Settled in the fifteenth wave" below. |
 | Attach through raw tracepoints first | `BPF_RAW_TRACEPOINT_OPEN`, with `bpf:tp` behind it | A classic tracepoint program is attached by reading the numeric event id from tracefs, which is mounted and unreadable on a normal machine — including the development one, where `/sys/kernel/tracing/events/sched` is `Permission denied` at uid 1000. A raw tracepoint needs only BTF and the event name, so `bpf:raw_tp` has strictly fewer requirements than `bpf:tp` and is ordered ahead of it. The two see the same events; the difference is what must be readable to attach, so the fallback declares `equivalent: true`. |
 
 ---
@@ -493,6 +493,153 @@ and `docs/mcp.md` the launch rules and their refusals.
 | `sched.switches` per cgroup (was open) | **A `sched_switch` program, second in the chain, in `count` mode**, serving every target and reached first for a cgroup; `pmu:sw` stays first wherever it serves, and `trace` stays `pmu:sw`'s. The program's rows carry the kernel's voluntary/involuntary split (`--backend force:bpf:raw_tp -m count`). | On the question both answer, an inherited counter is exact and free and the program costs a run on every switch of the machine; the `woke` join needs a per-switch event. The first chain ordered by cost where two backends answer the same question and one answers more: "the backend that answers best first" holds for the question asked. |
 | A loss counted over the whole machine | **Not slack for one workload's count.** A scenario whose count an eBPF program's skipped runs would excuse holds the count exact in a run that lost nothing, repeats until one does, and says so when none did. | The read-ahead lookup lost 395 000 to 477 000 runs against a shortfall of 3 to 15 of 256: as slack, it would hide a silent loss in the drain. |
 | A sweep leg on a machine that withholds one source | **Leaves out that source, printed, and asks the rest**, not the whole leg. | Skipping the leg left every other source of it untested wherever `net.hwts` was missing. |
+
+---
+
+## Settled in the fifteenth wave: what the first lines became
+
+Five things the code settled and this file never said. Three are Phase 0 lines
+whose reasons no longer held, amended in place above; two are Phase 1 and
+Phase 3 tasks the engine answered differently from the roadmap. The fourteenth
+wave's audit of `ROADMAP.md` found each one; every reason below was read off
+the code.
+
+| Decision | Choice | Reason |
+|---|---|---|
+| How an eBPF program is built | **Assembled in Rust as an instruction array and relocated from the running kernel's BTF at load.** No libbpf, no clang, no object file, no `vmlinux.h`. | The same relocation compile-time CO-RE performs, done a few milliseconds later against the kernel that will run the program, so an offset cannot be stale. `omn` stays one binary: building it needs Rust and nothing else, and running it needs no libbpf (`docs/install.md`). It talks to `bpf()` itself, which is boundary 4's rule one layer down. |
+| The kernel a source needs | **A `kernel>=` requirement on each backend that needs one**, probed like the rest, and no floor for the tool. | A backend is refused below its own version, by name, and the others still serve. 5.15 is served: 86 sources usable in a 5.15.221 guest with the capabilities, against 89 on 7.2 (`docs/portability.md`). |
+| A perf event at `perf_event_paranoid` 2 without `CAP_PERFMON` | **Opened user-mode only when the program's own registers raise it, and noted; refused when only kernel code raises it.** | A user-mode page fault, instruction or profile sample is the program's own. A context switch or a migration never happens in user mode, so a user-mode count of it is zero. |
+| The roadmap's `Span` struct | **Not written.** Evidence lives on `join::Correlation` (per rule) and `join::Attribution` (per upstream state). A decomposition's rows are the tree a span would have built. | What the engine emits is aggregated and bounded. A span per matched event would be a record per event. |
+| Reordering | **No bounded window and no watermark. Each collection is sorted by timestamp after the fact**, and a join sorts what it merges. | Every output is a document over a closed window, so waiting for the close costs nothing the document was not already waiting for. A sort is exact at any lateness. |
+
+**The eBPF layer.** `ROADMAP.md`'s Phase 0 table offered Rust with libbpf-rs,
+C with libbpf, or Go with cilium/ebpf, with CO-RE mandatory. CO-RE's purpose is
+kept and its mechanism is not. `src/bpf/btf.rs` reads `/sys/kernel/btf/vmlinux`
+and answers two questions: where is this field, and does this type exist.
+`src/bpf/insn.rs` writes the offsets into the instructions while `Program`
+resolves jumps by label. A field the kernel does not have is an error naming
+the type and the field, never a guessed offset. The costs, stated in
+`docs/bpf-layer.md`: a program is written as instructions, and a mistake comes
+back as a verifier log rather than a compiler error, which is why `LoadError`
+carries the log. And the parser is the project's own. `fentry.rs` has a
+second one, `FunctionIndex` (`docs/open-requests.md`, line 5520). Without BTF
+the raw-tracepoint and fentry backends read *unverified*, and none of them is
+chosen (the `nobtf` cells of the matrix). That is CO-RE's "mandatory", enforced
+by the probe.
+
+**The kernel floor.** The 6.1 floor was never a floor in the code.
+`capabilities.rs` answers `kernel>=<version>` per requirement, and the
+resolver reads requirements per backend. In the catalog today:
+
+- `kernel>=5.8` is on 33 eBPF backends. 5.8 is the release that added
+  `BPF_MAP_TYPE_RINGBUF`, which these programs publish through, and `CAP_BPF`
+  and `CAP_PERFMON`. That is the kernel's history; the catalog lines do not say
+  it, so this line does.
+- `kernel>=6.1` is on five: the three `sched` programs written against the
+  four-argument `sched_switch` (`runqlat`, `offcpu`, `switches`'s count), and
+  `sched.lock`'s two backends, which need `lock:contention_*`.
+- `kernel>=6.8` is on one, `mem.thp`'s `fs:sys` (its `fs:proc` fallback serves
+  older kernels).
+
+The thirteenth wave's stream N made the `io`, `net` and `mem` programs read
+every prototype shape they know ("A tracepoint whose prototype moved on an
+older kernel", above). With the capabilities the matrix attaches 77 sessions
+on 5.15 and 100 on 7.2, and each difference in the listings is a requirement
+the catalog wrote, answered by name (`docs/portability.md`). The matrix has no kernel between 5.15 and 6.1,
+so whether the five 6.1 backends would serve a 5.18 is not known. They keep
+6.1 until a cell says otherwise. The original line's other argument, one
+fewer shape to test, is now paid on purpose: the portability matrix is where
+the second shape is tested (`scripts/matrix.sh`).
+
+**User mode at paranoid 2.** The kernel's default `perf_event_paranoid` is 2.
+At 2, without `CAP_PERFMON`, a process may open a perf event on another process
+it owns only with `exclude_kernel`. The original line refuses
+`mem.faults`, `cpu.instructions` and `cpu.profile` there outright: the
+question needs kernel mode, so answer none of it. The fourteenth wave served
+them instead ("A sampled source where the kernel allows no more", above).
+That choice is not the lesser backend the line ruled out, for three reasons:
+
+- The backend, the event and the target are the same.
+- What is left out is named. `mem.faults` says faults the kernel took on the
+  program's behalf are not there. The counters say *"kernel-mode events are
+  not in this count"* (`src/collect/cpu/counters.rs`). `cpu.profile` says its
+  stacks are the *"user half only"*, or *"user-mode samples only"* without
+  stacks (`src/collect/cpu/profile.rs`).
+- Where user mode would change the answer rather than narrow it, the source is
+  refused, with the sysctl and the capability that would serve it.
+  `counted_only_in_kernel` (`src/capabilities.rs`) lists the events the
+  scheduler raises. `sched.switches -m count` read 0 there against 406.
+
+So the rule the line was protecting is kept: a result depends on who ran it
+only in ways the result states. The line's other fear, a second chain shape
+that doubles the resolver's test matrix, did not come true. The chain is the
+same. What differs is one flag on the event and a note, and the CI's
+`defaults` cell runs at paranoid 2 on every push.
+
+**No `Span` struct.** Phase 1 asked for `Span {id, parent_id, start/end, keys,
+rule_id, evidence}`: one record per link between two events, which chains into
+a tree. The engine keeps and reports something coarser, and on purpose:
+
+- `Correlation` is one rule over one run. It has the rule's id (`rule`), its
+  sides (`from`, `to`), its `evidence` and, when crediting within a key was
+  weaker, `within_key`. It also counts matched, unmatched, keyless and
+  outside-window events, and every state's ending (`StateStats`: opened =
+  closed + expired + overflowed + window_closed + still_open).
+- `Attribution` is one upstream state: its key, its range or scope,
+  `opened_ns` and `closed_ns`, how many downstream events it got, and how it
+  ended. The report keeps the heaviest `rule.top` of them.
+- The tree a `parent_id` chain would build is a decomposition (`decompose:`):
+  a whole, its parts each with an evidence level, and a signed residue.
+
+A span per matched event is a record per event: `examples/allocation-cost.yml`
+attributes 2655 faults in one run (`STATE.md`), and a trace's count grows with
+the run. That is
+unbounded growth in the one place this file requires bounds ("Eviction is data,
+not housekeeping", above). The engine keeps its open states under `capacity`
+and its output under `top`.
+
+What it costs: the results do not link one downstream event to the state it
+was credited to. A reader cannot walk from one page fault to its allocation.
+They see which allocations got the most faults, and how many faults found
+none. If per-event links are ever wanted, they belong in `raw`, as an
+attribute naming the state's key, not in a second struct. A naming hazard,
+recorded so nobody reads it as the roadmap's: `join::Span` exists, and it is a
+decomposition's whole (`window` or `lifetime`), not a link between events.
+
+**No reorder window.** Phase 3 asked for a bounded window and a watermark:
+finalize nothing until every collector has passed T. The runner does neither.
+`run_all` sorts each collection by `ts_ns` when the window closes
+(`src/collect/mod.rs`), and a flight-recorder document is sorted when it is
+cut. The join engine merges its sources and sorts them by timestamp, with the
+opening side first at an equal instant (`join::apply_within`), so a fault at
+an allocation's own nanosecond is not unmatched.
+`join::input_order_does_not_change_the_answer` holds the engine to that. The
+reasons:
+
+- Nothing is final before the window closes anyway. A result is a histogram, a
+  ranking, a join or a decomposition over the whole window. A watermark would
+  let events go out earlier to a consumer that does not exist.
+- A watermark assumes a bounded pipeline latency, and the latency here is
+  unbounded by design. A drained program's rows reach userspace at a drain, a
+  grace period after the program's last write. `net.request` holds a request
+  until the kernel publishes the drain record of its last transmit. The
+  preload shim's stream is drained every 10 ms. A watermark at any bound
+  shorter than the run either drops or misplaces what arrives after it, which
+  is a silent loss. A sort after the fact has no lateness at which it is wrong.
+- The rings do not order events anyway. A perf ring is per cpu. A
+  `BPF_MAP_TYPE_RINGBUF` is one ring in commit order, not timestamp order.
+
+What it costs a live stream: nothing leaves before its window closes. A run's
+document is written at the end, and a recording's at each cut. The runner
+holds every event of the window in memory until then. A recording's
+retention bounds that, and so does the shim's 2^19 records a run; a plain run
+of a busy trace does not bound it. The two things that decide mid-run do not
+need a cross-collector order. The escalation's trigger reads one round's
+states, and the recorder's predicate reads one round of its `on` request. Both
+are evaluated per round. A consumer that wanted events in order *as they
+happen* (`ndjson` written live, or the resident daemon the ninth wave ruled
+out) would need the watermark, and with it a stated lateness bound and a
+count of what arrived after it. That is where this line would be reopened.
 
 ---
 
