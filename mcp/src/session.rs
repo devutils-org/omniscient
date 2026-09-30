@@ -253,13 +253,19 @@ fn validation(catalog: &Catalog, session: &Session) -> (bool, Value) {
 
 /// What a declared cost band means, and what it is not.
 pub fn band(cost: Cost) -> Value {
-    let (range, worst) = match cost {
-        Cost::Free => ("a counter read, about zero", 0.1),
-        Cost::Low => ("under 1 %", 1.0),
-        Cost::Med => ("1 to 5 %", 5.0),
-        Cost::High => ("5 to 20 %", 20.0),
-        Cost::Extreme => ("over 10x: kernel replay", f64::INFINITY),
+    // The words are `omn`'s own (`src/main.rs::band`), and the ceiling is the
+    // catalog's, held once in `Cost::worst_case_percent`. `extreme` is every
+    // cost past 20 %: the bench measured `proc.syscall` at +296 % and the
+    // preload shim at +600 % to +1000 % on an allocation-bound program, and
+    // no band but this one holds them.
+    let range = match cost {
+        Cost::Free => "about zero, under 0.1 %",
+        Cost::Low => "under 1 %",
+        Cost::Med => "1 to 5 %",
+        Cost::High => "5 to 20 %",
+        Cost::Extreme => "over 20 %, with no bound above",
     };
+    let worst = cost.worst_case_percent();
     json!({
         "band": cost.as_str(),
         "declared": range,

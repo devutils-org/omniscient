@@ -1,0 +1,26 @@
+# Where the program's cpu time went, by function.
+#
+# `cpu.profile` samples the program 997 times a second of cpu and walks each
+# sample's stack by its frame pointers. The answer's `topk` names the leaves,
+# `stack` the whole paths, and both count samples: a sample is one period of
+# cpu, so the counts are shares of the program's on-cpu time, not of its life.
+# Blocked time is not in a profile at all -- `decompose.yml` is where it is.
+#
+# The profile is the first thing a stock kernel withholds: at
+# `perf_event_paranoid` 2 or above an unprivileged `perf_event_open` of a
+# sampling event with a callchain is refused. `list_approved` says so, with
+# the machine's reason, before anything runs.
+#
+# A python program's frames are the interpreter's; a compiled program built
+# with frame pointers reads in its own names.
+name: profile the program
+format: json
+
+requests:
+  - label: profile
+    source: cpu.profile
+    target:
+      launch: [python3, program.py]
+    mode: sample@997hz
+    emit: [topk, stack]
+    stack: fp

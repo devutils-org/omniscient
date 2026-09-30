@@ -1,12 +1,281 @@
 # The join engine and the decomposition
 
-Three waves of stream J are recorded here, the newest first. The thirteenth
+Four waves of stream J are recorded here, the newest first. The fourteenth
+wave ran the use case `omn-mcp` was built for end to end and paid the
+engine's last filed edge, a join with no key. The thirteenth
 wave gave the engine the words and the match kinds the crossings asked for,
 and stacks in their source's names. The eleventh wave paid four debts the
 tenth wave found in the engine. Each was a place where the engine said more,
 or less, than it had measured. The eighth wave built the engine's third rung
 (`TEMPORAL`), the decomposition and the chains. Their records follow
 unchanged.
+
+---
+
+# The fourteenth wave — an agent benchmarks a program
+
+| | |
+|---|---|
+| Delivered | the `omn-mcp` walk-through, end to end (`docs/mcp.md`'s first section, `examples/mcp/`); `Rule::via: Option<KeyKind>`, `overlap` with no key, `JoinError::NoKey` and `JoinError::SeveralSeries`, `join::MACHINE`; `omn-mcp`'s band words for `extreme`; the CI's paranoid-2 and paranoid-4 failures in J's files skipping with the machine's reason |
+| Found landed | `Cost::worst_case_percent` (twelfth-wave request to V), now read by `omn-mcp` instead of its copy |
+| Refused, new | a rule with no `via` on every match but `overlap` (`NoKey`, before anything runs); a keyless `overlap` whose `from` source carries several series (`SeveralSeries`, by name, with up to three of them) |
+| Tests | 5 unit tests in `src/join.rs`; `tests/join_engine.rs` +2 (the keyless scenario, the validation refusal) and the task-keyed overlap scenario shared with it; `mcp/tests/walkthrough.rs` (new, 2); `mcp/tests/protocol.rs` 4 changed for the stock machine; `tests/cross_compute.rs` (4 through its runner) and `tests/cross_machine.rs` (1) likewise |
+| Sessions | new `examples/join-overlap-machine.yml`; new `examples/mcp/approved/{benchmark,profile,decompose,triage}.yml` and `program.py`, and the client configuration `examples/mcp/mcp.json` |
+| Files | `src/join.rs`, `mcp/src/session.rs`, `mcp/tests/{protocol,walkthrough,common/mod}.rs`, `tests/{join_engine,cross_compute,cross_machine}.rs`, `docs/mcp.md`, the sessions above; outside, declared below: `src/validate.rs` (`check_joins`, +6/-2) |
+| Machine | 24 cpus, kernel 7.2.6, `CAP_BPF` and `CAP_PERFMON` on the binary, `perf_event_paranoid` -1, loaded by five other streams |
+
+## 1. The use case, end to end
+
+`docs/mcp.md`, "The walk-through", is the deliverable: the person approves a
+directory of sessions (`examples/mcp/approved/`: a launched program's
+benchmark, a profile, a decomposition, the triage's cheap pass), starts the
+server with `--allow-run 20s --allow-launch` on it, and the agent calls
+`list_approved`, `run_session` and `read_run`. The walk-through says, field by
+field, where in `run_session`'s answer a model finds what it needs to compare
+two runs: the benchmark's number (`result.lifetime`), the shortfall
+(`what_it_is_missing`), the evidence level (`evidence_means`), and the spread,
+which is the model's to compute from N answers with the bench's statistics --
+the formula and the gate's two conditions are written there.
+
+The program (`program.py`) computes, sleeps 200 ms and computes again, and
+says what it did on its own clock and from its own `schedstat` on stderr,
+which reaches the agent in `said_by_omn` because the launched program inherits
+`omn`'s stderr. Measured by the test, one run each:
+
+```
+decompose.yml:  life 741.8 ms, the program's own span 726.3 ms, asleep 200.1 ms, on a cpu 524.3 ms
+triage.yml:     the escalation, for latency, named `cpu` at 0.41 s, attaching `profile`
+```
+
+The decomposition's biggest row is `on-cpu`, within one 50 ms poll of the
+program's own account, and `blocked` holds the sleep.
+
+## 2. Measured, not described
+
+`mcp/tests/walkthrough.rs`, against a copy of the approved directory:
+
+- **every number and loss handed over is in the files.** Each served session's
+  `run_session` read-back and its `read_run` (every event) equal the run's
+  `results.json`, `resolved.json` and `cost.json` key by key, less the two
+  documented additions; every non-zero loss is restated first and no zero one
+  is. And the numbers are the program's: each life holds the program's own
+  span; `blocked` holds its sleep; the dominant row is the one the program's
+  figures name.
+- **the spread.** Five `run_session` calls of `benchmark.yml`; the bench's own
+  `Stats` (`examples/bench/harness.rs`, included by path) from the answers
+  equal those from the files to the bit:
+
+  ```
+    WORKLOAD      N   MEDIAN        IQR           CV       RESOLVES   GATE
+    handed         5   579.56ms      196.39ms       27.42 %   43.47 %   REFUSE
+    files          5   579.56ms      196.39ms       27.42 %   43.47 %   REFUSE
+    own clock      5   568.92ms      181.34ms       27.74 %   43.97 %   REFUSE
+  ```
+
+  At five runs on a loaded machine the gate refuses, which is what the
+  walk-through tells an agent to say.
+
+Not rehearsed beside a deliberate load: spinning 24 shells beside the test was
+refused in this session by the environment's permissions. The runs above were
+made beside five other streams' suites.
+
+## 3. `overlap` with no key (`open-requests 5032`, the thirteenth wave's filing)
+
+```yaml
+- {id: waiting-per-pressure-interval, from: mem.pressure, to: sched.futex,
+   match: overlap, value: total_ns, span: total_ns, stamped: start}
+```
+
+`via` absent: every `from` reading is one series, keyed `machine`
+(`join::MACHINE`), and every `to` event -- whatever it is keyed by -- is laid
+across its intervals as a keyed `overlap` lays it across one key's. Nothing
+is counted `keyless`, since no event can lack a key nobody asked for. Two
+refusals keep the absence from meaning anything else:
+
+- **a `from` source that carries several series** (a poll of `io.bytes` or
+  `io.inflight` per device, of `power.freq` per CPU) is refused by name with
+  up to three of them: each series' reading would close the other's interval,
+  and the "interval" would be the gap between two devices. Found at apply
+  time, since a key set is known only from the events. Through the binary,
+  `with_no_key_a_per_cpu_poll_is_refused_with_as_many_series_as_the_machine_has_cpus`
+  holds the count in the refusal to the kernel's own
+  `/sys/devices/system/cpu/online` (24 here: "carried 24 of them (cpu:0,
+  cpu:1, cpu:10)"). (`proc.threads` is not an example: it is one reading per
+  process, so a launched program is one series.)
+- **every other match kind** refuses a rule with no key (`NoKey`, from
+  `join::check`, so before the run, and from `omn --dump-resolved`).
+
+Ground truth, `a_wait_is_split_across_the_machines_readings_with_no_key`: the
+thirteenth wave's four 250 ms waits, laid across the machine's memory
+pressure polled every 100 ms (`examples/join-overlap-machine.yml`); each
+interval is the reading's own `interval_ns`, and each credit is held to the
+overlap of the program's own brackets with it, with the same slack the keyed
+scenario carries. Measured by one run of the session here: ten intervals credited, 100.02 to 99.86 ms for
+the eight inside a wait, 60.1 and 40.4 ms at the two edges -- 1000.23 ms in
+all against four brackets of 250 ms. The separation: the same rule keyed by
+`task` fails on the machine's readings (`MissingKey`), unit-tested.
+
+The crossing that asked, `examples/cross-machine-reclaim-io.yml`, now carries
+the keyless rule itself: `reclaim-per-pressure-interval`, from the machine's
+`mem.pressure` to `mem.reclaim`, `value: pages_reclaimed`, `span: total_ns`,
+`stamped: start` (an event of one episode begins at its stamp and lasts its
+`total_ns`). `tests/cross_machine.rs` runs it in a delegated memory cgroup
+capped at 32 MiB (this machine delegates one under `user@1000.service`; the
+earlier line here that it did not was wrong) and holds it to the cgroup's own
+`memory.stat`: every page the cgroup reclaimed while the program ran is either
+credited to a pressure interval the program's own brackets overlap or counted
+uncredited; credited plus uncredited equals every page the tool saw reclaimed,
+within one; and on a machine where every reclaimed page is the cgroup's, no
+credited page lies outside the program's brackets. Measured, three runs:
+38 519 to 41 644 pages reclaimed, 272 to 455 credited, all inside the
+brackets once the span is the episode's own (with `span: window_ns` 104 of
+376 fell after the program ended -- the drain window encloses an episode, it
+is not one), and 41 184 to 41 864 uncredited.
+
+**What that measures about the engine**: almost all of it is uncredited, by
+design. `mem.reclaim` drains a histogram, and a row of several episodes has no
+one window to place (`several()`), so its amount is counted rather than
+spread. The same holds for every drained source. A row of several episodes
+whose enclosing window -- `[ts, ts + window_ns]` for `mem.reclaim`, stamped at
+its first episode -- fits inside one interval could be credited whole, and
+exactly; the engine cannot tell an enclosing window from a sum of durations
+by the attribute's name, so that needs the rule to say which (open, below).
+
+## 4. The band for `extreme` (R's thirteenth-wave request)
+
+`omn-mcp`'s `band()` now says "over 20 %, with no bound above", `main.rs`'s
+words, and "about zero, under 0.1 %" for `free`, and reads the ceiling from
+`Cost::worst_case_percent` instead of holding a second copy. The catalog's doc
+comment is P's, filed.
+
+## 5. The stock machine in J's files (the CI's two runs)
+
+At `perf_event_paranoid` 4 (run 1) and 2 (run 2) the kernel refuses a
+sampling `perf_event_open` with a callchain, so `cpu.profile` has no viable
+backend, and every session that profiles is refused with exit 1. The tests
+now say so instead of failing:
+
+- `tests/cross_compute.rs`: the runner skips when `omn` exits 1 with *no
+  viable backend on this machine* (or *cannot start collecting* beside
+  `perf_event_paranoid`), printing the machine's lines and what would have
+  been checked. Four tests in both runs.
+- `tests/cross_machine.rs`, `a_guardrail_this_machine_cannot_serve_refuses_the_whole_crossing`:
+  at paranoid 4 the count (`cpu.instructions`) is refused before the
+  guardrail, so the refusal names the count. The test asks the count alone
+  with `--dump-resolved`; if the machine refuses it too, the crossing cannot
+  be created and it skips with that reason; if the count is served, the
+  refusal not naming the guardrail still fails.
+- `mcp/tests/protocol.rs`: three tests skip on the same condition; the plan
+  test checks the plan's refusal against the binary's line for line instead
+  of parsing an empty `--dump-resolved`.
+
+Checked against the CI logs' text (exit status 256, the messages quoted in
+`../omniscient-ci-logs/`); the next push's CI is the check on a stock kernel.
+
+## Declared: the one edit outside stream J's paths
+
+| File | Edit | Why |
+|---|---|---|
+| `src/validate.rs` | `check_joins`: `let Some(via) = rule.via else { continue };` before the key check, and the rejection names `via` for `rule.via` (+6/-2, one line a comment; the message is unchanged) | `Rule::via` became an `Option`, and the validator does not compile without it. It is exactly the validator half filed for P in the thirteenth wave (skip the key check with no key); the other half, refusing an absent `via` elsewhere, is the engine's `NoKey`. Filed for P so the lines are kept if P reworks them. |
+
+## Handoff
+
+- **Done, with scenarios**: the walk-through (items 1 and 2), `overlap` with no
+  key (item 3), the `extreme` band (item 3), the paranoid-4 failures (item 4).
+- **The index rows** (`examples/README.md`, `GUIDE.md`):
+
+  | Session | What it shows |
+  |---|---|
+  | `join-overlap-machine.yml` | A thread's waits laid across the machine's memory-pressure readings with no key: `overlap` over state the machine holds once. |
+
+  `examples/mcp/approved/*.yml` are not read by the index test (it reads
+  `examples/*.yml`); `docs/mcp.md`'s walk-through is their index. A row for
+  `GUIDE.md` pointing at it, if wanted: *"`docs/mcp.md` -- an agent
+  benchmarks a program through `omn-mcp`, and says what dominates its time."*
+- **For `CATALOG.md`** (the join notation): `via` is optional for `overlap`
+  only, and an `overlap` without it reads its `from` source as one series,
+  keyed `machine`.
+- **For `DECISIONS.md`**:
+  - *A join with no key is `overlap`'s alone, and reads one series.* A
+    keyless rule of any other kind is refused before the run; a keyless
+    `overlap` over a source with several series is refused by name at apply
+    time rather than read as one. Chosen over a `machine` key variant because
+    `KeyKind` names what an event carries, and machine-wide state carries
+    nothing.
+  - *The spread of a repeated benchmark is computed by the model, from N
+    answers, and the walk-through says how* (reaffirms the thirteenth wave's
+    no-tool decision, with the use case run).
+  - *The approved sessions live in `examples/mcp/approved/`, the client
+    configuration beside the directory*, since `list_approved` lists every
+    session-shaped file under it, `.json` included.
+- **Filed**: `docs/open-findings.md`, "the fourteenth wave, stream J": P
+  (`src/validate.rs::check_joins`, the declared lines to keep; `src/catalog.rs`,
+  `Cost::Extreme`'s doc comment).
+- **After the adversarial review** (one commit):
+  - the walk-through's floor is per read (20 numbers; `benchmark.yml` writes
+    41), not 500 over the walk-through, which a benchmark-only machine (the
+    paranoid 2 and 4 cells) could never reach;
+  - the validator edit is `check_joins`, +6/-2 with the rejection's format
+    string unchanged, and the filing for P names that function (it said
+    `check_sources`, which does not exist);
+  - the keyless-refusal scenario's `overlap` half now requires the session to
+    resolve (it was passing on an unrelated refusal: `sched.futex` has no
+    `system` target), and `SeveralSeries` has a scenario through the binary
+    held to the kernel's CPU list;
+  - item 3's ground truth is now the crossing that asked, the reclaim
+    crossing, against the cgroup's own `memory.stat` (above);
+  - the guardrail test skips only on the machine's refusal of the count
+    (exit 1, naming `cpu.instructions`, "no viable backend on this machine"
+    or `perf_event_paranoid`), and fails on any other probe error.
+- **Open**: an `overlap` rule attribute saying its `span` *encloses* a
+  drained row's occurrences rather than sums them (`window_ns` on
+  `mem.reclaim`), so a row of several episodes whose window fits in one
+  interval is credited whole. Measured: 41 184 of 41 639 reclaimed pages are
+  uncredited today on the reclaim crossing, counted and said.
+- **Matrix cells this should move** (the coordinator's, at the end of the
+  wave; the judges' commands are `scripts/matrix.sh <cell>`):
+  - `ci-6.17.0-nocaps` at paranoid 4 (the CI's first run): `cross_compute`
+    4 failed -> 4 skipped with the machine's reason; `cross_machine`
+    `a_guardrail_...` failed -> skipped; `omn-mcp` `protocol` 4 failed -> 3
+    skipped and the plan test passing on its refusal half;
+    `walkthrough` new: `benchmark.yml` served, the other three skipped by
+    `list_approved`'s reason, and the per-read floor met (41 numbers per
+    read, measured with a benchmark-only run). Check: the next push's CI, `cargo test -p
+    omn-mcp` and `cargo test --test cross_compute --test cross_machine`.
+  - the paranoid-2 cell (run 2): the same, and `decompose.yml` and
+    `triage.yml` skipped without `CAP_BPF`.
+  - every cell: `join_engine`'s
+    `with_no_key_a_per_cpu_poll_is_refused_with_as_many_series_as_the_machine_has_cpus`
+    passes where `power.freq` reads every online CPU, skips where it has no
+    backend, and fails -- on purpose -- where a backend reads fewer CPUs than
+    `/sys/devices/system/cpu/online` lists: that is a finding about the
+    source, not the join. Check: `cargo test --test join_engine per_cpu`.
+  - `here-caps`, `here-nocaps`: no source's availability changes; on
+    `here-nocaps` the walk-through serves `benchmark.yml` and `profile.yml`
+    (paranoid -1) and skips the two eBPF sessions.
+- **The suite, after the review's fixes**: `make check` red only at the
+  session-index test (`join-overlap-machine.yml`, the row above); the
+  `cargo test --workspace --no-fail-fast` after it: **2010 passed, 1 failed
+  (that index test), 8 ignored**; clippy (workspace, all targets) and `cargo
+  fmt --check` clean.
+- **The suite, before the review**: on this branch with `main` merged (streams R's and U's
+  foundations), with the capabilities, beside five other streams. Own files:
+  `cargo test --lib join` (81), `tests/{join_engine, cross_compute,
+  cross_machine}.rs` and `-p omn-mcp` (protocol 10, walkthrough 2) pass.
+  `cargo clippy --all-targets -- -D warnings` (both packages) and `cargo fmt
+  --check` are clean. The last `make check` stopped at the session-index test,
+  red for `join-overlap-machine.yml` as expected. The `cargo test --workspace
+  --no-fail-fast` after it: **2005 passed, 5 failed, 8 ignored** -- the index
+  test, and four each rerun alone once:
+  `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`
+  (J's file, unchanged this wave: the uncapped run found 32 pages of reclaim
+  under the cgroup's id where its own count said 0 -- another stream's memory
+  pressure; passed alone), `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`
+  (in the tally; passed), `runner::a_counted_window_over_a_polled_counter_ends_with_its_closing_read`
+  (not in the tally, R's file: no `lo` series; passed alone), and
+  `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`
+  (in the tally, K's file: failed again alone, 883 huge pages against
+  meminfo's 633 to 635 -- left to K, not rerun further).
 
 ---
 

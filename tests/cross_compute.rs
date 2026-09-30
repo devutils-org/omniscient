@@ -94,6 +94,25 @@ fn unprivileged(text: &str) -> bool {
     text.contains("CAP_BPF") || text.contains("CAP_PERFMON")
 }
 
+/// The machine's refusal of a valid session, as `omn` gives it: exit 1, and a
+/// source with no viable backend here or one the kernel refused to open.
+/// `cpu.profile` at `perf_event_paranoid` 2 and 4, the CI's two runs, is the
+/// case: `perf_event_open` refuses a sampling event with a callchain, and
+/// every session of this crossing profiles. Anything else is not the
+/// machine's answer and is left to fail.
+fn withheld(output: &std::process::Output) -> Option<String> {
+    let said = String::from_utf8_lossy(&output.stderr);
+    let machine = output.status.code() == Some(1)
+        && (said.contains("no viable backend on this machine")
+            || (said.contains("cannot start collecting") && said.contains("perf_event_paranoid")));
+    machine.then(|| {
+        said.lines()
+            .filter(|line| line.starts_with("error:") || line.trim_start().starts_with("pmu"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 fn have(program: &str) -> bool {
     Command::new(program)
         .arg("--version")
@@ -139,6 +158,13 @@ fn run(file: &str, needs: &[&str], would_have_checked: &str) -> Option<Run> {
         eprintln!(
             "skipped: {file} needs CAP_BPF and CAP_PERFMON, which this binary does not carry \
              (run `make`, which grants them). It would have checked {would_have_checked}"
+        );
+        return None;
+    }
+    if let Some(reason) = withheld(&output) {
+        eprintln!(
+            "skipped: {file} is valid and this machine cannot serve it. It would have checked \
+             {would_have_checked}. The machine's reason:\n{reason}"
         );
         return None;
     }

@@ -804,10 +804,52 @@ requests:
         String::from_utf8_lossy(&output.stdout)
     );
     let message = stderr(&output);
-    assert!(
-        message.contains("power.throttle"),
-        "the refusal must name the guardrail it could not serve: {message}"
-    );
+    if !message.contains("power.throttle") {
+        // The refusal named something else first. That is the property only
+        // if the count itself is served here: at `perf_event_paranoid` 4 (the
+        // CI's first run) `cpu.instructions` is refused before the guardrail
+        // is reached, and the crossing this test is about -- a count served
+        // beside a guardrail that is not -- cannot be created. Asked alone, so
+        // the machine says which.
+        let count_alone = run_session(
+            "\
+name: the count alone
+duration: 100ms
+requests:
+  - {label: instructions, source: cpu.instructions, target: system, mode: count, emit: [rate]}
+",
+            &["--dump-resolved"],
+        );
+        assert!(
+            !count_alone.status.success(),
+            "the count is served here, and the refusal of the crossing did not name the \
+             guardrail it could not serve: {message}"
+        );
+        // Only the machine's refusal of the count is a reason to skip: exit 1,
+        // naming the count, and saying it has no backend here or that
+        // `perf_event_paranoid` withholds it. Any other failure of the probe
+        // is a failure.
+        let alone = stderr(&count_alone);
+        assert!(
+            count_alone.status.code() == Some(1)
+                && alone.contains("cpu.instructions")
+                && (alone.contains("no viable backend on this machine")
+                    || alone.contains("perf_event_paranoid")),
+            "the crossing's refusal did not name the guardrail ({message}), and the count alone \
+             failed for a reason that is not the machine's refusal of it ({:?}): {alone}",
+            count_alone.status.code()
+        );
+        eprintln!(
+            "skipped: this machine refuses the count itself, so a count served beside a \
+             guardrail it cannot serve is not a crossing it can create. The machine's reason: {}",
+            stderr(&count_alone)
+                .lines()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" / ")
+        );
+        return;
+    }
     eprintln!(
         "refused whole, as it must be: {}",
         message.lines().next().unwrap_or("").trim()
@@ -1057,6 +1099,11 @@ struct ReclaimRun {
 /// fails the assertion rather than weakening it.
 const ATTACH_MARGIN: Duration = Duration::from_millis(700);
 
+/// The session's two joins: the reads of a reclaiming task (KEY), and the
+/// reclaim laid across the machine's pressure intervals with no key (TEMPORAL).
+const KEY_JOIN: &str = "reads-of-a-reclaiming-task";
+const OVERLAP_JOIN: &str = "reclaim-per-pressure-interval";
+
 fn run_reclaim(cgroup: &Cgroup, scratch: &Scratch, limit: &str) -> Result<ReclaimRun, String> {
     cgroup.limit(limit);
     let session = std::fs::read_to_string(example("cross-machine-reclaim-io.yml"))
@@ -1122,6 +1169,14 @@ struct Ladder {
     stalled_ns: u64,
     /// Whether the device poller's ticks bracket the program.
     contained: bool,
+    /// Every page the tool saw reclaimed, whichever cgroup paid.
+    reclaimed_machine_wide: u64,
+    /// The keyless overlap: pages laid across the machine's pressure
+    /// intervals, those in intervals the program's brackets overlap, and those
+    /// it left uncredited.
+    overlap_credited: f64,
+    overlap_in_brackets: f64,
+    overlap_uncredited: f64,
 }
 
 fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
@@ -1157,7 +1212,8 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
     }
 
     let own_key = format!("task:{}", churned.pid);
-    for join in document["joins"].as_array().into_iter().flatten() {
+    let joins = document["joins"].as_array().into_iter().flatten();
+    for join in joins.filter(|join| join["rule"] == KEY_JOIN) {
         assert_eq!(
             join["evidence"], "KEY",
             "an equal task on both sides is KEY evidence, and the join must say so"
@@ -1196,6 +1252,42 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
         .iter()
         .map(|event| attr_u64(event, "stalled_ns"))
         .sum();
+
+    // The keyless overlap: each interval of the machine's pressure and the
+    // reclaim laid across it.
+    ladder.reclaimed_machine_wide = raw_events(result(document, "reclaim"))
+        .iter()
+        .map(|event| attr_u64(event, "pages_reclaimed"))
+        .sum();
+    let overlap = document["joins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|join| join["rule"] == OVERLAP_JOIN)
+        .unwrap_or_else(|| panic!("the session's `{OVERLAP_JOIN}` join reported nothing"));
+    assert_eq!(overlap["evidence"], "TEMPORAL", "{overlap}");
+    assert_eq!(
+        overlap["keyless"].as_u64().unwrap_or(0),
+        0,
+        "with no key, no event can lack it: {overlap}"
+    );
+    for row in overlap["top"].as_array().into_iter().flatten() {
+        assert_eq!(
+            row["key"],
+            omn::join::MACHINE,
+            "one series, the machine's: {row}"
+        );
+        let opened = row["opened_ns"].as_u64().unwrap_or(0);
+        let closed = row["closed_ns"].as_u64().unwrap_or(0);
+        let pages = row["change"]["delta"].as_f64().unwrap_or(0.0);
+        ladder.overlap_credited += pages;
+        // A poll reports what happened since the tick before: the interval
+        // (opened, closed] holds the program if it overlaps its brackets.
+        if closed > churned.write_ns && opened < churned.end_ns {
+            ladder.overlap_in_brackets += pages;
+        }
+    }
+    ladder.overlap_uncredited = overlap["readings"]["uncredited"].as_f64().unwrap_or(0.0);
     ladder
 }
 
@@ -1241,6 +1333,15 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
         mib(ladder.device_read as f64),
         mib(ladder.device_write as f64),
         ladder.stalled_ns as f64 / 1e6
+    );
+    eprintln!(
+        "  no key       {:.0} pages laid across the machine's pressure intervals ({:.0} in those \
+         the program overlapped), {:.0} uncredited (buckets of several episodes), of {} the \
+         tool saw reclaimed",
+        ladder.overlap_credited,
+        ladder.overlap_in_brackets,
+        ladder.overlap_uncredited,
+        ladder.reclaimed_machine_wide
     );
     eprintln!(
         "  residue      {:>7.1} MiB of the device's bytes are on no rung above: other programs, \
@@ -1393,6 +1494,42 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
          for {}: more than the kernel counted is reclaim from somewhere else under this key",
         under.reclaimed_pages,
         capped.pgsteal
+    );
+
+    // The keyless overlap, against the cgroup's own count. The machine's
+    // pressure is one series with no task on it, which no keyed rule can read
+    // (`MissingKey`, unit-tested). Every page the cgroup's memory.stat says it
+    // reclaimed was reclaimed while the program ran, so each is either laid
+    // across an interval the program's own brackets overlap or counted
+    // uncredited -- a drained bucket of several episodes has no one window to
+    // place, and the engine says so rather than spreading it -- and nothing is
+    // accounted that the tool did not see reclaimed somewhere.
+    assert!(
+        under.overlap_in_brackets + under.overlap_uncredited
+            >= (capped.pgsteal - capped.pgsteal / 10) as f64,
+        "the cgroup's memory.stat counted {} pages reclaimed while the program ran, and the \
+         overlap laid {:.0} across the intervals the program overlapped and left {:.0} \
+         uncredited",
+        capped.pgsteal,
+        under.overlap_in_brackets,
+        under.overlap_uncredited
+    );
+    let accounted = under.overlap_credited + under.overlap_uncredited;
+    assert!(
+        (accounted - under.reclaimed_machine_wide as f64).abs() <= 1.0,
+        "the overlap accounts for {accounted:.0} pages ({:.0} credited, {:.0} uncredited) and \
+         the tool saw {} reclaimed: a page is credited or counted, never both or neither",
+        under.overlap_credited,
+        under.overlap_uncredited,
+        under.reclaimed_machine_wide
+    );
+    assert!(
+        (under.overlap_credited - under.overlap_in_brackets).abs() <= 1.0
+            || under.reclaimed_machine_wide > capped.pgsteal + capped.pgsteal / 20 + 1024,
+        "every page the tool saw reclaimed is the cgroup's, and {:.0} of the {:.0} credited \
+         lie in intervals the program did not overlap",
+        under.overlap_credited - under.overlap_in_brackets,
+        under.overlap_credited
     );
 
     // The machine's PSI is not the cgroup's. The root's `some` is an average

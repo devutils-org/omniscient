@@ -14,268 +14,26 @@
 //! These run `target/debug/omn`, which `make` builds and grants its
 //! capabilities to. The server's own tests never relink it.
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+mod common;
 
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+
+use common::*;
 use serde_json::{json, Value};
-
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
-fn omn() -> PathBuf {
-    let path = repo().join("target/debug/omn");
-    assert!(
-        path.is_file(),
-        "{} does not exist: run `make` first, which builds it and grants its capabilities",
-        path.display()
-    );
-    path
-}
-
-/// A directory of its own for each test, emptied first.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("omn-mcp-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// Runs an example session through the real binary, writing JSON to `out`.
-fn run_example(example: &str, out: &Path) -> std::process::Output {
-    let output = Command::new(omn())
-        .current_dir(repo())
-        .args([
-            "-f",
-            &format!("examples/{example}.yml"),
-            "--format",
-            "json",
-            "-o",
-        ])
-        .arg(out)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "omn -f examples/{example}.yml exited {:?}:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
-
-fn read_json(path: &Path) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
-
-struct Client {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next: u64,
-}
-
-impl Client {
-    fn start(args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_omn-mcp"))
-            .current_dir(repo())
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut client = Self {
-            child,
-            stdin,
-            stdout,
-            next: 0,
-        };
-        let init = client.request(
-            "initialize",
-            json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "omn-mcp-tests", "version": "0"},
-            }),
-        );
-        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
-        client.notify("notifications/initialized");
-        client
-    }
-
-    fn over(dir: &Path) -> Self {
-        Self::start(&["--dir", dir.to_str().unwrap()])
-    }
-
-    fn send(&mut self, message: &Value) {
-        let mut line = message.to_string();
-        line.push('\n');
-        self.stdin.write_all(line.as_bytes()).unwrap();
-        self.stdin.flush().unwrap();
-    }
-
-    fn notify(&mut self, method: &str) {
-        self.send(&json!({"jsonrpc": "2.0", "method": method}));
-    }
-
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        self.next += 1;
-        let id = self.next;
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).unwrap();
-        let reply: Value = serde_json::from_str(&line)
-            .unwrap_or_else(|error| panic!("not a JSON-RPC line ({error}): {line}"));
-        assert_eq!(reply["jsonrpc"], "2.0");
-        assert_eq!(reply["id"], id, "{reply}");
-        reply
-    }
-
-    /// A tool call that must succeed; returns its structured content, after
-    /// checking the text content says the same thing.
-    fn call(&mut self, tool: &str, arguments: Value) -> Value {
-        let reply = self.request("tools/call", json!({"name": tool, "arguments": arguments}));
-        let result = &reply["result"];
-        assert_eq!(result["isError"], false, "{tool} refused: {reply}");
-        let text: Value =
-            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(text, result["structuredContent"], "the two contents differ");
-        result["structuredContent"].clone()
-    }
-
-    /// A tool call that must be refused; returns the reason.
-    fn refused(&mut self, tool: &str, arguments: Value) -> String {
-        let reply = self.request("tools/call", json!({"name": tool, "arguments": arguments}));
-        assert_eq!(
-            reply["result"]["isError"], true,
-            "{tool} was expected to refuse: {reply}"
-        );
-        reply["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    }
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Takes out the keys the server documents as its own additions.
-fn strip_additions(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            object.remove("evidence_means");
-            object.remove("elided");
-            for (_, child) in object.iter_mut() {
-                strip_additions(child);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(strip_additions),
-        _ => {}
-    }
-}
-
-/// The first path at which two values differ, for a readable failure.
-fn first_difference(path: &str, left: &Value, right: &Value) -> Option<String> {
-    match (left, right) {
-        (Value::Object(a), Value::Object(b)) => {
-            for key in a.keys().chain(b.keys()) {
-                let (x, y) = (a.get(key), b.get(key));
-                match (x, y) {
-                    (Some(x), Some(y)) => {
-                        if let Some(found) = first_difference(&format!("{path}.{key}"), x, y) {
-                            return Some(found);
-                        }
-                    }
-                    _ => return Some(format!("{path}.{key}: {x:?} against {y:?}")),
-                }
-            }
-            None
-        }
-        (Value::Array(a), Value::Array(b)) => {
-            if a.len() != b.len() {
-                return Some(format!("{path}: {} items against {}", a.len(), b.len()));
-            }
-            a.iter()
-                .zip(b)
-                .enumerate()
-                .find_map(|(i, (x, y))| first_difference(&format!("{path}[{i}]"), x, y))
-        }
-        _ => (left != right).then(|| format!("{path}: {left} against {right}")),
-    }
-}
-
-fn assert_same(what: &str, served: &Value, written: &Value) {
-    if let Some(difference) = first_difference(what, served, written) {
-        panic!("the server changed what omn wrote: {difference}");
-    }
-}
-
-/// Every leaf of a document that is a number, with its path: the count the
-/// comparison covered, so a vacuous equality cannot pass.
-fn numbers(value: &Value) -> usize {
-    match value {
-        Value::Number(_) => 1,
-        Value::Object(object) => object.values().map(numbers).sum(),
-        Value::Array(items) => items.iter().map(numbers).sum(),
-        _ => 0,
-    }
-}
-
-/// Checks a whole `read_run` answer against the three files, key by key.
-fn assert_run_unchanged(answer: &Value, dir: &Path) -> usize {
-    let results = read_json(&dir.join("results.json"));
-    let resolved = read_json(&dir.join("resolved.json"));
-    let cost = read_json(&dir.join("cost.json"));
-    let requests = answer["requests"].as_array().unwrap();
-    assert_eq!(requests.len(), results["results"].as_array().unwrap().len());
-    let mut compared = 0;
-    for (index, request) in requests.iter().enumerate() {
-        let mut result = request["result"].clone();
-        strip_additions(&mut result);
-        assert_same(
-            &format!("results[{index}]"),
-            &result,
-            &results["results"][index],
-        );
-        let mut served = request["resolved"].clone();
-        served["environment"] = answer["environment"].clone();
-        assert_same(&format!("resolved[{index}]"), &served, &resolved[index]);
-        assert_same(&format!("cost[{index}]"), &request["cost"], &cost[index]);
-        compared +=
-            numbers(&results["results"][index]) + numbers(&resolved[index]) + numbers(&cost[index]);
-    }
-    for key in ["joins", "decompositions"] {
-        match results.get(key) {
-            Some(written) => {
-                let mut served = answer[key].clone();
-                strip_additions(&mut served);
-                assert_same(key, &served, written);
-                compared += numbers(written);
-            }
-            None => assert!(answer.get(key).is_none(), "{key} appeared from nowhere"),
-        }
-    }
-    compared
-}
 
 #[test]
 fn every_number_of_a_run_comes_back_unchanged() {
     let dir = scratch("unchanged");
     let run = dir.join("decompose");
-    run_example("join-decompose-compute", &run);
+    if !run_example_or_skip(
+        "join-decompose-compute",
+        &run,
+        "that every number of a six-source run with a join and a decomposition comes back \
+         unchanged",
+    ) {
+        return;
+    }
 
     let mut client = Client::over(&dir);
     let listed = client.call("list_runs", json!({}));
@@ -350,7 +108,13 @@ fn an_answer_cut_short_says_how_short() {
 fn a_lossy_run_answers_with_its_shortfall() {
     let dir = scratch("lossy");
     let run = dir.join("lossy");
-    run_example("cross-compute-lossy-profile", &run);
+    if !run_example_or_skip(
+        "cross-compute-lossy-profile",
+        &run,
+        "that a lossy profile's shortfall survives narrowing",
+    ) {
+        return;
+    }
     let written = read_json(&run.join("results.json"));
     let profile = &written["results"][0];
     let losses = &profile["losses"];
@@ -469,8 +233,13 @@ fn identity_and_temporal_never_read_alike() {
     }
     let server = repo().join("target/omn-vertical/server");
     if server.is_file() {
-        run_example("vertical-one-request", &dir.join("identity"));
-        runs.push(("identity", Evidence::Identity));
+        if run_example_or_skip(
+            "vertical-one-request",
+            &dir.join("identity"),
+            "an IDENTITY join read back",
+        ) {
+            runs.push(("identity", Evidence::Identity));
+        }
     } else {
         eprintln!(
             "SKIP (IDENTITY): {} is not built, so no IDENTITY row can be produced here; `make` \
@@ -702,17 +471,43 @@ fn a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing() {
         .output()
         .unwrap();
     assert!(!marker.exists(), "--dump-resolved ran the program");
-    let resolved: Value = serde_json::from_slice(&dumped.stdout).unwrap();
-    let planned = &plan["resolution"]["requests"][0];
-    assert_eq!(planned["backend"], resolved[0]["backend"]["id"]);
-    assert_eq!(planned["rank_in_chain"], resolved[0]["backend"]["rank"]);
-    assert_eq!(planned["cost"]["band"], resolved[0]["backend"]["cost"]);
-    assert_eq!(planned["degradations"], resolved[0]["degradations"]);
-    assert_eq!(planned["chain"], resolved[0]["chain"]);
-    assert!(planned["cost"]["not"]
-        .as_str()
-        .unwrap()
-        .contains("finding 47"));
+    if let Some(reason) = withheld(&dumped) {
+        // The machine's answer, carried as the binary gave it: which side
+        // refused, and every line it said.
+        let resolution = &plan["resolution"];
+        assert_eq!(resolution["resolved"], false, "{plan}");
+        assert_eq!(resolution["exit"], 1, "{plan}");
+        assert!(
+            resolution["whose"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("the machine"),
+            "{plan}"
+        );
+        let said: Vec<String> = String::from_utf8_lossy(&dumped.stderr)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(resolution["said_by_omn"], json!(said), "{plan}");
+        eprintln!(
+            "SKIP (half): this machine withholds `cpu.profile`, so the plan's backend, rank and \
+             cost were not compared; its refusal was, line for line. The machine's reason:\n\
+             {reason}"
+        );
+    } else {
+        let resolved: Value = serde_json::from_slice(&dumped.stdout).unwrap();
+        let planned = &plan["resolution"]["requests"][0];
+        assert_eq!(planned["backend"], resolved[0]["backend"]["id"]);
+        assert_eq!(planned["rank_in_chain"], resolved[0]["backend"]["rank"]);
+        assert_eq!(planned["cost"]["band"], resolved[0]["backend"]["cost"]);
+        assert_eq!(planned["degradations"], resolved[0]["degradations"]);
+        assert_eq!(planned["chain"], resolved[0]["chain"]);
+        assert!(planned["cost"]["not"]
+            .as_str()
+            .unwrap()
+            .contains("finding 47"));
+    }
     // And it says ahead of time that this one would not go through run_session.
     assert_eq!(plan["through_run_session"]["allowed"], false, "{plan}");
 

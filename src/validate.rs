@@ -214,11 +214,15 @@ fn check_joins(
             let Some(entry) = kind.parse().ok().and_then(|id| catalog.get(&id)) else {
                 continue;
             };
-            if !entry.keys.contains(&rule.via) {
+            // No key: nothing to look for (the engine's `NoKey`).
+            let Some(via) = rule.via else {
+                continue;
+            };
+            if !entry.keys.contains(&via) {
                 rejections.push(Rejection::with_hint(
                     format!(
                         "join `{}` matches on `{}`, which `{kind}` does not carry",
-                        rule.id, rule.via
+                        rule.id, via
                     ),
                     format!(
                         "`{kind}` carries {}",

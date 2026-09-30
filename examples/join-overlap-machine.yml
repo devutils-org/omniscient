@@ -1,0 +1,68 @@
+# How long was this thread waiting in each 100 ms of the machine's memory
+# pressure reading?
+#
+#   omn -f examples/join-overlap-machine.yml
+#
+# `examples/join-overlap-waits.yml` lays a thread's waits across the intervals
+# of a poll of the same thread, and matches the two by the task. Some state has
+# no task to match by: the machine's memory pressure is one number for the
+# whole machine, polled every 100 ms, and what a crossing wants to know is how
+# much of a program's waiting lay in each of its intervals -- whether the
+# program was stalled while the machine was, or beside it.
+#
+# That is `overlap` with no `via`. Every `mem.pressure` reading is one series,
+# covering the interval it states (`interval_ns`); every `sched.futex` wait of
+# the program, whichever task it is, is credited to each interval it overlaps
+# by the share of it that overlaps. The rows are keyed `machine`, the one
+# series. A `from` source that turns out to carry several series -- a poll of
+# `io.bytes` per device, say -- is refused by name, because each device's
+# reading would close the other's interval; every other match kind refuses a
+# rule with no key.
+#
+# The evidence is TEMPORAL, and more so than with a key: the wait and the
+# reading share a clock and nothing else. The pressure of an interval is
+# beside the wait, never its cause.
+#
+# The workload waits four times for 250 ms on a condition nobody signals, and
+# says when each wait began and ended on its own `CLOCK_MONOTONIC`, prefixed
+# `omn-wait` on stderr. `tests/join_engine.rs` computes what each interval
+# should hold from those brackets and the readings' own intervals, and holds
+# the tool to it.
+name: waiting, per interval of the machine's pressure
+format: text
+
+requests:
+  - label: pressure
+    source: mem.pressure
+    target: system
+    mode: poll@100ms
+    emit: [raw]
+
+  - label: waits
+    source: sched.futex
+    target:
+      launch:
+        - python3
+        - -c
+        - |
+          import sys, threading, time
+          nobody = threading.Event()
+          time.sleep(0.15)
+          for _ in range(4):
+              began = time.monotonic_ns()
+              nobody.wait(0.25)
+              ended = time.monotonic_ns()
+              print(f"omn-wait {threading.get_native_id()} {began} {ended}", file=sys.stderr)
+          time.sleep(0.15)
+    mode: trace
+    emit: [raw]
+
+joins:
+  - id: waiting-per-pressure-interval
+    from: mem.pressure
+    to: sched.futex
+    match: overlap
+    value: total_ns
+    span: total_ns
+    stamped: start
+    top: 40

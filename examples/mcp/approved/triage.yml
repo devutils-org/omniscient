@@ -1,0 +1,53 @@
+# Which layer is worth paying for: the triage's cheap pass, escalated.
+#
+# Two requests run for the whole life of the program and cost little: where
+# its main thread blocked (`sched.offcpu`) and what it burned
+# (`cpu.oncpu_time`). Every 200 ms the triage reads them and names the state
+# the main thread's wall clock is going to; named twice in a row, that state's
+# detailed sources are attached -- the profile for `cpu`, the lock sources for
+# `lock` -- and the others let go, so the run pays for one layer at a time.
+# Every held request's notes say when it was attached or let go, and by which
+# reading (`docs/triage.md`, "The escalation").
+#
+# The answer is the cheap pass's summaries, and the detail of whichever layer
+# the program's own time named. For `program.py`, two thirds on a cpu, that
+# is the profile.
+name: triage the program
+format: json
+escalate:
+  objective: latency
+
+requests:
+  - label: blocked
+    source: sched.offcpu
+    target: &program
+      # Longer phases than the other sessions' -- 0.7 s of compute each side
+      # of the sleep -- because a layer is attached only when two readings
+      # 200 ms apart name the same state.
+      launch: [python3, program.py, '8000000', '0.2']
+    mode: trace
+    emit: [summary]
+    keys: [task]
+
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: *program
+    mode: poll@50ms
+    emit: [summary]
+
+  - label: profile
+    source: cpu.profile
+    target: *program
+    mode: sample@997hz
+    emit: [topk]
+    keys: [task]
+    stack: fp
+    window: on cpu
+
+  - label: futex
+    source: sched.futex
+    target: *program
+    mode: trace
+    emit: [summary]
+    keys: [task]
+    window: on lock
