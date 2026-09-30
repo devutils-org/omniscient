@@ -32,8 +32,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::capabilities::Environment;
 use crate::perf::{Callchain, CpuMode, Sample};
-use crate::request::StackMode;
+use crate::request::{Request, StackMode};
+use crate::resolve::Verdict;
 
 /// Which side of the privilege boundary a frame ran on.
 ///
@@ -1051,17 +1053,24 @@ fn read_str(bytes: &[u8], at: usize) -> Option<String> {
     std::str::from_utf8(&rest[..end]).ok().map(str::to_owned)
 }
 
-/// What the kernel should be asked to do for an unwind mode.
+/// What the kernel should be asked to do for a concrete unwind mode.
 ///
-/// Two of the four modes are not implemented, and both say so. Falling back to
-/// frame pointers when `dwarf` was asked for would answer a different question
-/// than the one that was put: a program without frame pointers is exactly the
-/// program someone asks for `dwarf` about, and the fallback would report its
-/// leaf frames as a profile.
+/// The modes this build does not serve say so. Falling back to frame pointers
+/// when `dwarf` was asked for would answer a different question than the one
+/// that was put: a program without frame pointers is exactly the program
+/// someone asks for `dwarf` about, and the fallback would report its leaf
+/// frames as a profile. [`StackMode::Auto`] is not a mode the kernel can be
+/// asked for: [`choose`] turns it into one.
 pub fn callchain_for(mode: StackMode) -> Result<Callchain, String> {
     match mode {
         StackMode::Fp => Ok(Callchain::FramePointers),
         StackMode::None => Ok(Callchain::Off),
+        StackMode::FpLeaf => Err(
+            "`--stack fp+leaf` is not implemented: it needs the user registers and the top of \
+             the user stack with each sample, and the binary's CFI to find the return address \
+             of a frameless leaf"
+                .to_owned(),
+        ),
         StackMode::Dwarf => Err(
             "`--stack dwarf` is not implemented: it needs a real unwinder (blazesym or libdw) \
              reading the target's debug information, and frame pointers instead would report \
@@ -1073,8 +1082,125 @@ pub fn callchain_for(mode: StackMode) -> Result<Callchain, String> {
              sampling shape and hardware this build does not probe for"
                 .to_owned(),
         ),
+        StackMode::Sframe => Err(
+            "`--stack sframe` is not implemented: it needs the kernel to read the binary's \
+             `.sframe` section, which this build does not probe for"
+                .to_owned(),
+        ),
+        StackMode::Auto => Err(
+            "`--stack auto` names no mode the kernel can be asked for: `stack::choose` turns it \
+             into one"
+                .to_owned(),
+        ),
     }
 }
+
+/// One unwind mode the chooser looked at, and what it decided about it.
+///
+/// The same shape as [`crate::resolve::ConsideredBackend`], and the same
+/// vocabulary for the verdict, so a surprising mode is traced back to the
+/// requirement that caused it the way a surprising backend is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsideredMode {
+    pub mode: StackMode,
+    pub verdict: Verdict,
+}
+
+/// The unwind mode a run uses, and why.
+///
+/// What goes in the resolved file beside the backend: the mode, whether it was
+/// forced or chosen, what it asks the kernel for, and, when it was chosen, every
+/// mode passed over with its reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StackChoice {
+    /// The mode used. Always concrete: never [`StackMode::Auto`].
+    pub mode: StackMode,
+    /// True when the request named the mode and the chooser did not rank.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forced: bool,
+    /// True when only the user half of each stack is taken, because the
+    /// machine's `perf_event_paranoid` refuses the kernel half to this user.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_only: bool,
+    /// Every mode looked at, in rank order, with its verdict. Empty when the
+    /// mode was forced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub considered: Vec<ConsideredMode>,
+    /// What this mode gives up relative to the best one, said by the mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degradations: Vec<String>,
+}
+
+impl StackChoice {
+    /// What the kernel is asked to walk at every sample.
+    pub fn callchain(&self) -> Callchain {
+        callchain_for(self.mode).unwrap_or(Callchain::Off)
+    }
+}
+
+/// Chooses how the stacks of `request` are unwound on the machine described by
+/// `environment`.
+///
+/// This is the one entry point every collector that takes a stack goes
+/// through. `request.stack` absent means [`StackMode::Auto`]: the best mode
+/// this machine and this target serve, with every mode passed over and why. A
+/// named mode is forced, and refused with the reason when it cannot be served
+/// -- never degraded to another one silently.
+///
+/// Today the only modes this build serves are `fp` and `none`, so `auto`
+/// always lands on `fp`, and says why it passed over the rest.
+pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoice, String> {
+    let _ = environment;
+    let requested = request.stack.unwrap_or(StackMode::Auto);
+    if requested.is_concrete() {
+        callchain_for(requested)?;
+        return Ok(StackChoice {
+            mode: requested,
+            forced: true,
+            user_only: false,
+            considered: Vec::new(),
+            degradations: Vec::new(),
+        });
+    }
+    let mut considered = Vec::new();
+    let mut selected = None;
+    for mode in AUTO_RANK {
+        let verdict = if selected.is_some() {
+            Verdict::NotReached
+        } else {
+            match callchain_for(mode) {
+                Ok(_) => {
+                    selected = Some(mode);
+                    Verdict::Selected
+                }
+                Err(reason) => Verdict::Rejected(vec![reason]),
+            }
+        };
+        considered.push(ConsideredMode { mode, verdict });
+    }
+    let mode = selected.ok_or_else(|| {
+        "`--stack auto` found no unwind mode this build serves on this machine".to_owned()
+    })?;
+    Ok(StackChoice {
+        mode,
+        forced: false,
+        user_only: false,
+        considered,
+        degradations: Vec::new(),
+    })
+}
+
+/// The modes `auto` walks, best first. `none` is not in it: asking for no
+/// stack is never what `auto` means. The rank is provisional until
+/// `catalog/unwind.yaml` declares it as data; only `fp` is served today, so
+/// the order of the others decides nothing yet.
+const AUTO_RANK: [StackMode; 5] = [
+    StackMode::Dwarf,
+    StackMode::FpLeaf,
+    StackMode::Sframe,
+    StackMode::Lbr,
+    StackMode::Fp,
+];
 
 /// Captures stacks for one run: the table, the symbols, and what it could not
 /// do.
@@ -1538,5 +1664,113 @@ mod tests {
         let read: StackTable = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(read.get(StackId(0)), Some(&stack));
         assert_eq!(read.len(), 1);
+    }
+
+    fn profile_request(stack: Option<StackMode>) -> Request {
+        Request {
+            source: "cpu.profile".parse().unwrap(),
+            target: crate::request::Target::Pid(vec![1]),
+            mode: "sample@99hz".parse().unwrap(),
+            emit: vec!["stack".parse().unwrap()],
+            keys: Vec::new(),
+            filter: None,
+            duration: None,
+            budget: None,
+            stack,
+            backend: None,
+            label: None,
+            window: None,
+        }
+    }
+
+    fn environment() -> Environment {
+        crate::capabilities::Capabilities::detect()
+            .environment()
+            .clone()
+    }
+
+    /// One spelling per mode, the same on the command line and in a file, and
+    /// a misspelling refused with every spelling there is.
+    #[test]
+    fn every_stack_mode_reads_back_from_its_own_spelling() {
+        let spellings: Vec<&str> = StackMode::ALL.iter().map(|mode| mode.as_str()).collect();
+        assert_eq!(
+            spellings,
+            ["fp", "fp+leaf", "dwarf", "lbr", "sframe", "none", "auto"]
+        );
+        for mode in StackMode::ALL {
+            assert_eq!(mode.as_str().parse::<StackMode>().unwrap(), mode);
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+            assert_eq!(serde_json::from_str::<StackMode>(&json).unwrap(), mode);
+        }
+        let error = "fp_leaf".parse::<StackMode>().unwrap_err().to_string();
+        assert!(
+            error.contains("fp+leaf") && error.contains("auto"),
+            "{error}"
+        );
+        assert!(serde_json::from_str::<StackMode>("\"frame\"").is_err());
+        assert!(!StackMode::CONCRETE.contains(&StackMode::Auto));
+        assert!(StackMode::CONCRETE.iter().all(|mode| mode.is_concrete()));
+    }
+
+    /// No `--stack` is `auto`, and `auto` names the mode it chose and every
+    /// mode it passed over with the reason -- never `auto` itself.
+    #[test]
+    fn auto_chooses_a_concrete_mode_and_says_why_it_passed_over_the_others() {
+        for stack in [None, Some(StackMode::Auto)] {
+            let choice = choose(&profile_request(stack), &environment()).unwrap();
+            assert_eq!(choice.mode, StackMode::Fp);
+            assert!(!choice.forced);
+            assert_eq!(choice.callchain(), Callchain::FramePointers);
+            let selected: Vec<StackMode> = choice
+                .considered
+                .iter()
+                .filter(|considered| considered.verdict == Verdict::Selected)
+                .map(|considered| considered.mode)
+                .collect();
+            assert_eq!(selected, [StackMode::Fp]);
+            for considered in &choice.considered {
+                assert!(considered.mode.is_concrete());
+                assert_ne!(considered.mode, StackMode::None);
+                if let Verdict::Rejected(reasons) = &considered.verdict {
+                    assert!(
+                        reasons.iter().all(|reason| !reason.is_empty()),
+                        "{considered:?}"
+                    );
+                }
+            }
+            let json = serde_json::to_string(&choice).unwrap();
+            let read: StackChoice = serde_json::from_str(&json).unwrap();
+            assert_eq!(read, choice);
+        }
+    }
+
+    /// A named mode is forced: served as asked, or refused with the reason,
+    /// never degraded to frame pointers.
+    #[test]
+    fn a_forced_mode_is_served_as_asked_or_refused_with_the_reason() {
+        let environment = environment();
+        for (mode, callchain) in [
+            (StackMode::Fp, Callchain::FramePointers),
+            (StackMode::None, Callchain::Off),
+        ] {
+            let choice = choose(&profile_request(Some(mode)), &environment).unwrap();
+            assert_eq!((choice.mode, choice.forced), (mode, true));
+            assert_eq!(choice.callchain(), callchain);
+            assert!(choice.considered.is_empty());
+        }
+        for mode in [
+            StackMode::FpLeaf,
+            StackMode::Dwarf,
+            StackMode::Lbr,
+            StackMode::Sframe,
+        ] {
+            let error = choose(&profile_request(Some(mode)), &environment).unwrap_err();
+            assert!(
+                error.contains(&format!("--stack {mode}")) && error.contains("not implemented"),
+                "{error}"
+            );
+        }
     }
 }
