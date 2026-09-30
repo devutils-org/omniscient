@@ -18,8 +18,8 @@ files (5).
 `validate.rs` and now by R's own `Session::check_paired_parts`, because its
 pairs would be made over other windows than the join's (filed for J, with the
 signature; see "After the review"); the eleven catalog entries that say
-`container: false` are still refused by `omn validate` and the dumps, which
-describe the request as asked (the run path binds first and runs them); the
+`container: false` where they serve a cgroup, which the validator refuses
+before the binding (filed for P and U, with the test that then holds them); the
 last line of the `psi` move, which is two owners' at once (filed for K and the
 coordinator).
 
@@ -170,13 +170,11 @@ note names exactly the cgroup the test made and the pid the runtime gave;
 window, 0 of the task beside**. `a_container_no_runtime_knows_is_refused_with_what_it_said`
 holds both refusals.
 
-What it left, until the review: eleven entries that serve a cgroup say
-`container: false`, and the validator refused them before the binding. The
-run path now binds first and validates again as measured, so they run
-(`a_container_is_served_by_a_source_that_serves_its_cgroup`, "After the
-review"); `omn validate` and the dumps still refuse them, and the catalog fix
-is still filed for P and U. The collectors that refuse `Target::Container` by
-name are no longer reached through `omn`.
+What it leaves: eleven entries that serve a cgroup say `container: false`, and
+the validator refuses them before the binding (filed for P and U, with the
+list, and see "After the review" for why R did not bind before validation).
+The collectors that refuse `Target::Container` by name are no longer reached
+through `omn`.
 
 ## 5. The smaller ones, each checked first
 
@@ -259,17 +257,20 @@ An adversarial review of the branch raised seven points. What each came to:
    pid-targeted wakeup source sees are one hop (35 characters); a two-hop
    chain, which is what the column's width is for, needs a machine-wide
    source and is still covered by the unit test only.
-5. **`--container` still refused on eleven entries -- real, and fixed on the
-   run path.** `main.rs` binds every container before validation
-   (`bind_containers`, once per name) and validates again as measured a
-   session refused as asked; a refusal either way is the one in the user's
-   terms. `cli::a_container_is_served_by_a_source_that_serves_its_cgroup`:
+5. **`--container` still refused on eleven entries -- real, and still the
+   catalog's to change.** R bound every container before validation, and
+   validated again as measured a session refused as asked:
    `cpu.context_switches` (`container: no`) on a container a runtime script
-   names, 367 switches counted in its cgroup for 366 blocks of the task inside
-   by the kernel's count, where the same task beside would double it. The old
-   binary refused it at validation ("a container has to be resolved to its
-   cgroup first"). `omn validate` and the dumps still refuse, and the catalog
-   fix stays filed.
+   names counted 367 switches in its cgroup for 366 blocks of the task inside
+   by the kernel's count, where the same task beside would double it. `make
+   check` then failed P's
+   `scenario_cpu::a_container_is_refused_before_the_start_where_only_its_cgroup_is_served`,
+   which pins the catalog's `container: no` as a refusal -- and that is the
+   point: the code was overriding explicit catalog data, which the validator
+   is supposed to be a projection of. Taken back. The test that measured it,
+   `cli::a_container_is_served_by_a_source_that_serves_its_cgroup`, stays, and
+   skips with the validator's refusal until the key is dropped; the filing
+   for P and U now says what P's test becomes with it.
 6. **Ownership of `2e1e534` -- not a defect.** The vocabulary commit touches
    `src/event.rs` (J's), `src/resolve.rs` and `src/validate.rs` (P's) because
    the brief's item 1 asks for the variants with their arms, and the
@@ -315,10 +316,10 @@ None: this stream added no session.
 - **A `paired` decomposition part is refused before the run** until the
   decomposition pairs over the windows the joins were given: refused with the
   reason rather than run and reported different from its own join.
-- **A container is bound before validation on the run path**, and a session
-  refused as asked is validated again as measured; the documents about the
-  request as asked (`validate`, `--dump-request`, `--no-resolve`) keep the
-  catalog's answer.
+- **A container is not bound before validation**: an entry's explicit
+  `container: no` is the catalog's answer, and code overriding it would make
+  the validator stop being a projection of the catalog. The entries' key is
+  what changes (P, U).
 
 ## Filed for other streams
 
@@ -330,7 +331,8 @@ Under "Needs from another stream — the fourteenth wave, stream R" in
 - P: `validate.rs`'s container sentence, and J's `check_decomposition_in`
   line, which is now all a `paired` session waits on.
 - P and U: `container: false` dropped from the eleven entries that serve a
-  cgroup -- now for `omn validate` and the dumps only.
+  cgroup, and P's `scenario_cpu` container-refusal test changed with it (the
+  exact new answer is in the filing).
 - J: `join::decompose_within(.., windows)`, so a `paired` part pairs over the
   windows the joins were given; then the coordinator swaps R's two call sites
   and drops `check_paired_parts`.

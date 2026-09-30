@@ -197,37 +197,9 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         None => cli::to_session(&args, &catalog)?,
     };
 
-    // A container is measured as the cgroup its runtime says it runs in, which
-    // every collector that serves a cgroup can attach to -- including the ones
-    // whose catalog entry has no `container` key of its own. The session keeps
-    // the container, as asked; the requests resolved and run carry the cgroup,
-    // as measured. Not for a document about the request as asked, which may be
-    // for another machine and says what was asked.
-    let bound = if args.no_resolve || args.dump_request {
-        None
-    } else {
-        match bind_containers(&session) {
-            Ok(bound) => bound,
-            Err(reason) => {
-                eprintln!("error: {reason}");
-                return Ok(ExitCode::FAILURE);
-            }
-        }
-    };
-
-    // Validated as asked, and a session refused only for naming a container is
-    // validated again as measured: a container is not refused wherever its
-    // cgroup is served. Refused either way, the refusal is the one in the
-    // user's own terms.
     let report = match validate::validate_session(&catalog, &session) {
         Ok(report) => report,
-        Err(rejections) => match bound
-            .as_ref()
-            .map(|bound| validate::validate_session(&catalog, bound))
-        {
-            Some(Ok(report)) => report,
-            _ => return Ok(reject(&rejections)),
-        },
+        Err(rejections) => return Ok(reject(&rejections)),
     };
 
     // A dump is a document about the request, and a results format cannot
@@ -264,13 +236,41 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     let capabilities = Capabilities::detect();
     let mut resolutions = Vec::new();
     let mut unserved: Vec<collect::Unserved> = Vec::new();
-    for request in &bound.as_ref().unwrap_or(&session).requests {
+    for request in &session.requests {
         // A request held for the escalation (`window: on <layer>`) that this
         // machine cannot serve is not a reason to refuse the run: the session
         // asked for it only in case its layer were named, and the cheap pass
         // does not need it. It is set aside with the resolver's reason, and
         // the escalation says so if it names that layer.
         let held = request.window.is_some_and(|window| window.on.is_some());
+        // A container is measured as the cgroup its runtime says it runs in,
+        // which every collector that serves a cgroup can attach to. The
+        // session keeps the container, as asked; the resolved request carries
+        // the cgroup, as measured.
+        let bound;
+        let request = match &request.target {
+            omn::request::Target::Container(name) => match omn::request::find_container(name) {
+                Ok(container) => {
+                    eprintln!(
+                        "note: container `{name}` runs in cgroup {} (pid {}, from `{}`), which \
+                         is what is measured",
+                        container.cgroup.display(),
+                        container.pid,
+                        container.runtime
+                    );
+                    bound = omn::request::Request {
+                        target: omn::request::Target::Cgroup(container.cgroup),
+                        ..request.clone()
+                    };
+                    &bound
+                }
+                Err(reason) => {
+                    eprintln!("error: {reason}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            _ => request,
+        };
         match resolve::resolve(&catalog, &capabilities, request) {
             Ok(resolved) => resolutions.push(resolved),
             Err(error @ resolve::ResolveError::NoViableBackend { .. }) if held => {
@@ -1240,45 +1240,6 @@ fn assemble(
         ));
     }
     Ok((run, costs, served_by))
-}
-
-/// The session as it is measured: every container target bound to the cgroup
-/// its runtime names, each said on stderr. `None` when the session names no
-/// container; an error when a runtime cannot name one's cgroup, which is a
-/// problem with this run (exit 1), since the container may exist later.
-fn bind_containers(session: &Session) -> Result<Option<Session>, String> {
-    use omn::request::Target;
-    if !session
-        .requests
-        .iter()
-        .any(|request| matches!(request.target, Target::Container(_)))
-    {
-        return Ok(None);
-    }
-    let mut bound = session.clone();
-    let mut found: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    for request in &mut bound.requests {
-        let Target::Container(name) = &request.target else {
-            continue;
-        };
-        let cgroup = match found.get(name) {
-            Some(cgroup) => cgroup.clone(),
-            None => {
-                let container = omn::request::find_container(name)?;
-                eprintln!(
-                    "note: container `{name}` runs in cgroup {} (pid {}, from `{}`), which is \
-                     what is measured",
-                    container.cgroup.display(),
-                    container.pid,
-                    container.runtime
-                );
-                found.insert(name.clone(), container.cgroup.clone());
-                container.cgroup
-            }
-        };
-        request.target = Target::Cgroup(cgroup);
-    }
-    Ok(Some(bound))
 }
 
 /// The backend a collection ended on, which is the one its numbers came from.

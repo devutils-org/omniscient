@@ -8328,17 +8328,26 @@ swaps R's two call sites to `decompose_within(.., &windows)` -- `main.rs` has
 the map; `triage/engine.rs` calls `join::apply`, which watches everything, so
 it passes an empty map -- and removes the two `check_paired_parts` calls.
 
-### To stream P: the `container: false` entries, now for the documents only
+### To streams P and U: the `container: false` entries, measured, and P's test with them
 
-`src/main.rs` binds every container to its cgroup *before* validation on the
-run path, and validates again as measured a session refused as asked:
-`cpu.context_switches --container <name>` runs
-(`tests/cli.rs::a_container_is_served_by_a_source_that_serves_its_cgroup`,
-367 switches counted in the cgroup for 366 blocks of the task inside by the
-kernel's count). The eleven entries are still refused where nothing is bound
--- `omn validate`, `--dump-request`, `--no-resolve`, which describe the request
-as asked and may be for another machine -- so the item above is still wanted,
-for those.
+The item above stands, and R tried the other way round first and took it
+back. Binding every container before validation made
+`cpu.context_switches --container <name>` run -- 367 switches counted in the
+container's cgroup for 366 blocks of the task inside by the kernel's count --
+but it overrode an explicit `container: no` in the catalog from code, and the
+catalog is what the validator is a projection of. So it is the key's to
+change. What R leaves ready:
+`tests/cli.rs::a_container_is_served_by_a_source_that_serves_its_cgroup`
+holds that binding to the kernel's count, and skips, with the validator's
+refusal, while the entry still says `container: no`.
+
+With the key dropped, P's
+`tests/scenario_cpu.rs::a_container_is_refused_before_the_start_where_only_its_cgroup_is_served`
+has to change in the same commit: it asserts exit 2 and "resolved to its
+cgroup first" for `cpu.instructions`, `cpu.profile`, `mem.faults` and
+`cpu.throttle --container web`. After it, with no runtime knowing `web`, the
+answer is `find_container`'s -- exit 1, "no container named `web`: `docker`
+does not know it (..)" -- and a container a runtime names is measured.
 
 ### For the flaky tally: the triage tail test, again
 
