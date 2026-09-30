@@ -1,11 +1,39 @@
 # Omniscient
 
-One vocabulary for system observability. A measurement is described along five
-axes — **source**, **target**, **mode**, **emit**, **keys** — and the
-combinations that cannot mean anything are refused rather than answered with a
-number that means something else.
+`omn` measures a Linux program or machine straight from the kernel --
+`perf_event_open`, eBPF, procfs, sysfs, netlink; no `perf`, `bpftrace` or
+`bcc` underneath -- and every number it prints says what it lost, how it was
+obtained, and how far it can be trusted. A request that cannot mean anything
+is refused with the reason instead of answered with a number that means
+something else.
+
+## Install
+
+From a release archive (x86_64, glibc 2.34 or later, Linux 6.1 or later):
 
 ```console
+$ sha256sum --check omn-0.1.0-x86_64-linux-gnu.tar.gz.sha256
+$ tar -xzf omn-0.1.0-x86_64-linux-gnu.tar.gz -C ~/.local --strip-components=1
+$ sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/omn
+```
+
+Or from source, with Rust 1.82 or later:
+
+```console
+$ make install PREFIX=~/.local
+$ sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/omn
+```
+
+The two capabilities are what its eBPF sources need; without them `omn` still
+runs and serves fewer sources, and says which ones and why. `docs/install.md`
+has what each distribution needs and what `perf_event_paranoid` changes.
+
+## Try it
+
+```console
+$ omn list | tail -n 3 | head -n 1
+101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+
 $ omn mem.rss --emit timeline --mode poll@100ms -- ./build.sh
 mem.rss  via fs:proc:smaps_rollup  (mem.rss)
   11 events over 1.10s, stopped because the launched program exited with exit status 0
@@ -19,18 +47,20 @@ mem.rss  via fs:proc:smaps_rollup  (mem.rss)
       +901ms      49.6 MiB
 ```
 
-It talks to `perf_event_open`, `bpf()`, procfs, sysfs and netlink directly. It
-does not wrap `perf`, `bpftrace` or `bcc`, so there is no second output format to
-parse and no second clock in the middle of the pipeline.
+`omn list` is what this machine can serve, probed now; `omn list <source>`
+says why a source is out of reach. `man omn` is the manual, `DEMO.md` is the
+tool in one page, and `GUIDE.md` walks through more than a hundred and fifty
+sessions in `examples/`.
 
-```console
-make          # build, and grant the capabilities a relink drops
-make demo     # the guided tour: eight questions, against this machine
-make man      # the manual page
-```
+---
 
-`GUIDE.md` is where to go next: a hundred and seven sessions, what each one shows, and
-how to run one, a family, or all of them.
+## How it works
+
+A measurement is described along five axes -- **source**, **target**,
+**mode**, **emit**, **keys** -- and the combinations that cannot mean anything
+are refused rather than answered. Because it does not wrap another tool, there
+is no second output format to parse and no second clock in the middle of the
+pipeline.
 
 ## The number no single source can give
 
@@ -145,8 +175,8 @@ joins:
     window: 60s
 ```
 
-YAML, JSON and TOML are all accepted. `GUIDE.md` explains the hundred and seven
-sessions in `examples/` and what each one shows; `examples/README.md` is the
+YAML, JSON and TOML are all accepted. `GUIDE.md` explains the sessions in
+`examples/` and what each one shows; `examples/README.md` is the
 index; `scripts/demo.sh <family>` runs one family's and `make demo-all` runs the
 lot.
 
@@ -169,13 +199,11 @@ kind of incomparable.
 ## Output formats
 
 `text` for a terminal, `json` / `yaml` / `toml` for tooling and for the resolved
-file, `ndjson` for a record stream. The profile and trace formats — `folded`,
-`speedscope`, `pprof`, `chrome` — are declared with the emits they can carry,
-and every declared format has its encoder. A format is declared before it is
-written, so that the surface is stable, and one whose encoder has not landed
-says so rather than approximating something else. A result format only accepts
-the emits it can express: `--emit hist --format folded` is refused, not guessed
-at.
+file, `ndjson` for a record stream, and the profile and trace formats
+`folded`, `speedscope`, `pprof` and `chrome`. All nine are written. Each is
+declared with the emits it can carry and accepts only those:
+`--emit hist --format folded` is refused, not guessed at. `omn formats` lists
+them.
 
 ## Boundaries
 
@@ -230,6 +258,7 @@ They found 63 defects in the fourth wave alone, none worked around, and
 
 | | |
 |---|---|
+| `docs/install.md` | installing, the two capabilities, what a stock distribution serves |
 | `man/omn.1` | the manual page — `make man` |
 | `CATALOG.md` | the vocabulary: axes, backends, families, caveats |
 | `STATE.md` | what works today, and what is left |
@@ -244,10 +273,13 @@ They found 63 defects in the fourth wave alone, none worked around, and
 | `docs/bench.md` | what each source costs, measured on this machine |
 | `docs/portability.md` | the kernel matrix, the degradation runs, the CI |
 
-## Building
+## Building, for development
 
 ```console
+make          # build, and grant the capabilities a relink drops
 make check    # test, clippy and fmt, the way CI would
+make demo     # the guided tour: eight questions, against this machine
+make dist     # the release archive and its checksum, scripts/release.sh
 ```
 
 `make` rather than `cargo build`: the preload shim is a workspace member nothing

@@ -22,6 +22,13 @@ built around the opposite rule:
 Every output below is real: it was run on the development machine (AMD Zen 2,
 24 cpus, Linux 7.2) on 2026-09-29, and only trimmed where marked `…`.
 
+To run them yourself: install a release or `make install PREFIX=~/.local`,
+grant the two capabilities with
+`sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/omn`, and check what your
+machine serves with `omn list`. `docs/install.md` has the details, and what a
+stock distribution serves without them. Several sections run sessions of
+`examples/` or fixtures `make` builds, so run those from the source tree.
+
 ---
 
 ## 1. Why is this program slow? Ask, and it names the cause

@@ -1,0 +1,376 @@
+# Installing omn
+
+What a stock Ubuntu, Fedora or Arch machine needs to run `omn`, and how to
+tell what it then serves. Every number here was measured, on the development
+machine (Arch, Linux 7.2.6, AMD Zen 2) or in the two CI runs on a hosted
+Ubuntu 24.04 runner (Linux 6.17.0-azure); a claim about a distribution neither
+of them is, is marked **(read from its documentation)**.
+
+In short:
+
+```console
+$ tar -xzf omn-0.1.0-x86_64-linux-gnu.tar.gz -C ~/.local --strip-components=1
+$ sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/omn
+$ omn list | tail -n 3 | head -n 1
+101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+```
+
+---
+
+## Getting it
+
+### From a release archive
+
+A release is one archive and its checksum. The archive is a prefix: it holds
+exactly these six files under one top directory, and nothing else
+(`scripts/release.sh list` prints the list the archive is checked against):
+
+```
+bin/omn                    the tool
+bin/omn-mcp                an MCP server over what omn writes (docs/mcp.md)
+bin/libomn_preload.so      the preload shim the mem.heap.*, sched.mutex and gpu.api sources load
+share/man/man1/omn.1       the manual page
+share/doc/omn/README.md
+share/doc/omn/install.md   this file
+```
+
+```console
+$ sha256sum --check omn-0.1.0-x86_64-linux-gnu.tar.gz.sha256
+omn-0.1.0-x86_64-linux-gnu.tar.gz: OK
+$ tar -xzf omn-0.1.0-x86_64-linux-gnu.tar.gz -C ~/.local --strip-components=1
+```
+
+`/usr/local` works the same way, with `sudo`. Keep the three files of `bin/`
+together: `omn` looks for the shim **beside its own executable**, and `omn-mcp`
+looks for `omn` beside its own. A symbolic link to `omn` from elsewhere on the
+`PATH` is fine, since the kernel resolves it and `omn` finds the directory it
+really lives in, but the capabilities have to be granted on the real file:
+`setcap` refuses a symbolic link (measured, libcap 2.78:
+`Invalid file '...' for capability operation`).
+
+The binaries need **glibc 2.34 or later**, which `scripts/release.sh floor`
+reads off the symbols they import. That is Ubuntu 22.04 and later, Debian 12,
+Fedora 35 and later, RHEL 9 and Arch **(read from their documentation)**. They
+need nothing else at run time: no libbpf, no clang, no kernel headers. The eBPF
+programs are assembled by the tool itself.
+
+### From source
+
+Rust 1.82 or later and `make`. A C compiler is only for two demonstration
+fixtures, and its absence is announced, not fatal.
+
+```console
+$ make install PREFIX=~/.local       # or /usr/local, with sudo
+...
+installed omn, omn-mcp and the preload shim in /home/you/.local/bin.
+no capability was granted. Without them the eBPF and per-cpu perf backends
+report what they need instead of collecting; to grant them:
+
+    sudo setcap cap_bpf,cap_perfmon+ep /home/you/.local/bin/omn
+```
+
+It builds with `--release --workspace --locked` (the shim is a workspace
+member nothing depends on, so a plain `cargo build` would not build it) and
+installs the archive's layout. `DESTDIR` is honoured for packaging; the command
+it prints names the final path, which is where a package's post-install step
+has to grant the capabilities. `make uninstall PREFIX=...` removes what it
+installed.
+
+It **grants no capability**, on purpose: that is a decision about your machine,
+and not one `make install` can take for you.
+
+---
+
+## The two capabilities, and why
+
+`omn` reads part of what it serves from files anyone can read (`/proc`, `/sys`,
+cgroups) and from `perf_event_open` on the program you launched: 57 of the 93
+sources the development machine serves need nothing more. The rest come from
+eBPF programs it loads into the kernel, and loading one needs two
+capabilities. The tool asks for exactly those:
+
+| Capability | What it opens |
+|---|---|
+| `CAP_BPF` | `bpf()` itself: loading a program, creating its maps. With `kernel.unprivileged_bpf_disabled` at 1 or 2, as it is here (2, measured) and on every distribution named here **(read from their documentation)**, no program loads without it. |
+| `CAP_PERFMON` | attaching a tracing program, and `perf_event_open` past what `perf_event_paranoid` allows an ordinary user: a whole cpu, the kernel's side of a stack, any counter at paranoid 3 and 4. |
+
+Root has both, so `sudo omn ...` works too; the capabilities are the narrower
+way of saying the same thing (`DECISIONS.md`, "Privileges"). They do not
+include `CAP_SYS_ADMIN`, so a few paths stay out of reach and say so, among
+them tracefs, which is root-only on every machine measured here.
+
+`net.capture` alone needs a third, `CAP_NET_RAW`, which is never granted by
+default: it also lets the binary send arbitrary frames, which is not
+observing. Add it only if you want that source:
+
+```console
+$ sudo setcap cap_bpf,cap_perfmon,cap_net_raw+ep ~/.local/bin/omn
+```
+
+**An unprivileged run is refused, never degraded.** A source whose backends
+all need what the binary does not have is refused with the capability it
+needed and the command that grants it; it is not resolved onto a backend that
+answers a different question. So a machine without the capabilities is not a
+broken install, it is a smaller one, and `omn list` says how much smaller.
+
+### Three ways to lose them without noticing
+
+A file capability is an extended attribute of one file on one filesystem. It
+does not survive the file being rewritten, and some filesystems ignore it.
+
+- **Every reinstall drops it.** Measured: after `make install` over a binary
+  that had it, `getcap` prints nothing. The same after `cp`, `cp -a`, and a
+  `tar` round trip without `--xattrs`. Grant it again after every upgrade.
+- **A filesystem mounted `nosuid` ignores it.** Measured on the development
+  machine, whose `/tmp` is `nosuid`: a binary there with
+  `cap_perfmon,cap_bpf=ep` serves 57 sources, the same as one with none, and
+  tells you to run the `setcap` you already ran. Check with
+  `findmnt -no OPTIONS -T "$(command -v omn)"`, and install on a filesystem
+  without `nosuid` (`/usr/local`, and on most machines `~/.local`).
+- **A container may not be able to hold it.** Docker and Podman leave
+  `CAP_BPF` and `CAP_PERFMON` out of a container's bounding set by default, and
+  a binary whose file capabilities cannot all be granted is refused at exec
+  with `EPERM` **(read from `capabilities(7)` and the Docker documentation;
+  not measured here)**. Run it on the host, or give the container
+  `--cap-add BPF --cap-add PERFMON`.
+
+---
+
+## What `perf_event_paranoid` does
+
+`/proc/sys/kernel/perf_event_paranoid` decides what an unprivileged process may
+ask `perf_event_open` for, and so decides the counting and sampling sources of
+a binary **without** `CAP_PERFMON`. With it, the setting no longer limits
+`omn`.
+
+| Value | Without `CAP_PERFMON` | Who ships it |
+|---|---|---|
+| -1 | everything, every cpu | nobody by default; the development machine is set there |
+| 0 | a process's own counters, and whole cpus | |
+| 1 | a process's own counters, user and kernel | |
+| 2 | a process's own counters, user space only | the upstream kernel's default; Fedora and Arch keep it **(read from their documentation)** |
+| 3, 4 | no `perf_event_open` at all for an ordinary user | a Debian and Ubuntu kernel patch; the Ubuntu runner is at 4, measured |
+
+On the same Ubuntu 24.04 runner, without capabilities, the two CI runs differ
+in this value and in two settings only the test suite uses (`omn list`,
+measured):
+
+| `perf_event_paranoid` | Usable | What moved |
+|---|---|---|
+| 4 (as shipped) | 32 of 101 | |
+| 2 | 38 of 101 | `cpu.cycles`, `cpu.context_switches`, `cpu.migrations`, `mem.faults` and `sched.switches` become usable on a launched program, and `power.temp` |
+
+A cloud VM often has no hardware PMU at all, whatever the setting. The runner
+at paranoid 2 reported `cpu.cycles` usable on a VM with no cycle counter;
+that is a known defect of the probe, being fixed this wave
+(`docs/portability.md`).
+
+To lower it until the next boot, or for good:
+
+```console
+$ sudo sysctl kernel.perf_event_paranoid=2
+$ echo kernel.perf_event_paranoid=2 | sudo tee /etc/sysctl.d/60-perf.conf
+```
+
+You do not need to if you grant `CAP_PERFMON`: lowering the setting widens
+what every program on the machine may do, where the capability widens one
+binary.
+
+---
+
+## The kernel
+
+**Linux 6.1 is the floor** (`DECISIONS.md`, "Kernel floor"). Below it, the
+sources that need a 6.1 tracepoint are refused by name with the version
+(`kernel>=6.1: missing: kernel 5.15 is older than 6.1`), and the rest serve:
+under 5.15, 6.1, 6.6 and 7.2 with the capabilities, `omn list` calls 86, 88,
+88 and 89 sources usable (measured in guests, `docs/portability.md`).
+
+It also wants the kernel's own type information, `/sys/kernel/btf/vmlinux`
+(`CONFIG_DEBUG_INFO_BTF`). Without it the eBPF sources that read kernel
+structures are refused, and a run attaches 53 sessions instead of 100 under
+7.2 (measured in guests, `docs/portability.md`).
+
+| | Kernel | Floor met | BTF |
+|---|---|---|---|
+| Ubuntu 24.04 | 6.8, later with HWE **(read from its documentation)**; the hosted runner is 6.17, measured | yes | yes, measured on the runner |
+| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | only with HWE | yes **(read from its documentation)** |
+| Fedora 40 and later | 6.8 and later **(read from its documentation)** | yes | yes **(read from its documentation)** |
+| Arch | the current stable kernel, 7.2.6 here, measured | yes | yes, measured |
+
+---
+
+## What does this machine serve?
+
+The one-line checks, in the order worth running them:
+
+```console
+$ omn list | tail -n 3 | head -n 1             # the whole answer, in one line
+101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+
+$ getcap "$(command -v omn)"                    # the capabilities, if any
+/home/you/.local/bin/omn cap_perfmon,cap_bpf=ep
+
+$ cat /proc/sys/kernel/perf_event_paranoid
+$ findmnt -no OPTIONS -T "$(command -v omn)"    # nosuid here means no capabilities
+$ omn list cpu                                  # one family: HERE says yes, no or ?
+$ omn list sched.offcpu                         # one source: every backend and what it lacks
+```
+
+What the first line said, measured:
+
+| Machine | Usable of 101 |
+|---|---|
+| development machine, capabilities granted, installed or in `target/` | 93 |
+| development machine, none, or on a `nosuid` mount | 57 |
+| Ubuntu 24.04 hosted runner, none, paranoid 2 | 38 |
+| Ubuntu 24.04 hosted runner, none, paranoid 4 as shipped | 32 |
+
+`?` in the HERE column is not a soft yes: no probe covers that requirement, so
+nothing was checked, and the resolver will not choose it while a verified
+backend exists. `omn list <source>` names each requirement, why it is missing,
+and the command that grants it.
+
+A first real result, needing no capability:
+
+```console
+$ omn mem.rss --mode poll@100ms --emit summary -- python3 -c "import time; b = b'x' * (64 << 20); time.sleep(1)"
+```
+
+`GUIDE.md` in the source tree has more than a hundred sessions of what to ask
+next.
+
+---
+
+## Checking a release
+
+`make install-check` installs into a scratch prefix and runs the installed
+`omn` with the checkout's `target/` renamed out of the way, from an empty
+directory and with `OMN_PRELOAD_LIB` unset, so nothing it finds can come from
+the build tree. `scripts/release.sh verify ARCHIVE` does the same to an
+extracted archive, after checking its checksum and that it holds exactly the
+six paths above. Each check compares against something the workload chose,
+never against what the tool computed another way:
+
+| Check | Against |
+|---|---|
+| `omn --version` | the version in `Cargo.toml` |
+| `omn list` | as many sources as `catalog/*.yaml` declares, with no catalog near the binary: it is compiled in |
+| `mem.rss` on a launched program | a program that writes 64 MiB and holds it peaks at 64 MiB or more; the same program without the write peaks below |
+| `mem.heap.alloc` through the installed shim | a program making one allocation of 64 MiB, then one of 32 MiB: the largest the shim saw is that size, plus at most 64 KiB of the interpreter's header |
+| the shim's path | with the shim moved away, the refusal names `PREFIX/bin/libomn_preload.so` |
+| `omn-mcp` | its capability sweep is answered by `PREFIX/bin/omn` |
+
+A tree without its shim fails three of them, measured, and one byte appended
+to the archive fails its checksum. Two builds of the same commit produce the
+same archive byte for byte: it is written in the listed order, owned by uid 0,
+and dated by the commit. The checks need `python3` for their workloads and
+fail, rather than skip, without it. `.github/workflows/release.yml` runs both
+on a `v*` tag, then attaches the archive and its checksum to the release.
+
+---
+
+## For the coordinator
+
+Stream D's handoff for the fourteenth wave.
+
+### Landed
+
+1. **A release.** `scripts/release.sh` builds
+   `target/dist/omn-<version>-<arch>-linux-gnu.tar.gz` and its `.sha256`, with
+   `list`, `name`, `floor`, `verify ARCHIVE` and `check PREFIX` beside it.
+   `make install PREFIX=...` installs the same layout and prints the `setcap`
+   line for the installed path without running it; `make uninstall`,
+   `make install-check`, `make dist` and `make dist-verify` are new.
+   `.github/workflows/release.yml` builds, verifies and publishes on a `v*`
+   tag, on `ubuntu-22.04` for the lowest glibc floor, and refuses a tag that
+   does not match `Cargo.toml`. `make`, `make check` and the capability step
+   are untouched.
+   **Ground truth**: `make install-check` and `make dist-verify`, both green
+   here: 101 sources listed against 101 entries in `catalog/*.yaml`; `mem.rss`
+   peaks at 73 MiB with 64 MiB written and 9 MiB without; `mem.heap.alloc`
+   sees 67108865 B for a 64 MiB `bytearray` and 33554433 B for 32 MiB; the
+   refusal without the shim names the installed path; `omn-mcp` names the
+   installed `omn`. Negative controls: a tree without its shim fails three
+   checks; one appended byte fails the checksum; two builds of the same tree
+   give the same sha256.
+   Measured on an installed tree with the capabilities granted, on `/home`:
+   93 usable, the same as `target/debug/omn`; `sched.offcpu` attaches; and
+   `mem.heap.alloc` still reads the shim.
+2. **`docs/install.md`**: this file. The kernel floor and BTF, the two
+   capabilities and three ways to lose them (a reinstall, `nosuid`, a
+   container), `perf_event_paranoid` with the CI's two runs as its measured
+   table, the one-line checks, and the release check.
+3. **`README.md` and `DEMO.md` for a stranger.** The README's first screen is
+   what the tool is, how to install it, and one command to try; the long
+   material is below it. `DEMO.md` gains an install paragraph at its top; its
+   outputs are left for the coordinator to regenerate.
+
+**`docs/open-requests.md`, the row for 2257** (README says formats are "not
+written"): `README.md`'s output-formats paragraph now says every format has
+its encoder and no longer describes one "whose encoder has not landed".
+`DECISIONS.md:20` is the coordinator's.
+
+### How it was tested
+
+`bash -n scripts/release.sh`, `make install-check`, `make dist-verify`, the
+negative controls above, and one `make check` after merging `main` (its result
+is in the stream's summary). No Rust source changed, so no module test applies.
+
+### Index rows
+
+None: this stream added no session.
+
+### For `DECISIONS.md`
+
+- **The installed layout is flat: `bin/omn`, `bin/omn-mcp`, `bin/libomn_preload.so`.**
+  `omn` finds the shim beside its own executable and `omn-mcp` finds `omn`
+  beside its own. A `lib/omn/` directory with symbolic links in `bin/` would
+  have put the capability on a file the user does not name, and `setcap`
+  refuses a symbolic link (measured). A shared library in `bin/` is unusual
+  and harmless; if the project wants `lib/omn/`, it is one more directory in
+  `find_shim` (filed for R) and one line of `release.sh`.
+- **Installing grants nothing.** `make install` and the archive print the
+  `setcap` command for the installed path and leave it to the user; the
+  capability step of `make` stays a build-tree convenience. A grant is a
+  decision about the machine, a `DESTDIR` build cannot make it on the final
+  path, and tar does not carry it anyway.
+- **The release is built on the oldest hosted Ubuntu**, because the glibc
+  floor is the newest symbol linked against; `release.sh floor` prints it
+  (2.34 today).
+
+### Filed for another stream
+
+Under "Needs from another stream", "Stream D, the fourteenth wave", in
+`docs/open-findings.md`:
+
+- **P** (`src/capabilities.rs`): a binary on a `nosuid` mount carries its file
+  capabilities and does not get them, and the probe then tells the user to run
+  the `setcap` they already ran.
+- **R** (`shim/**`, `src/collect/mem/heap/mod.rs`): `aligned_alloc` and
+  `memalign` are not hooked, so `dd bs=64M` (coreutils allocates its buffer
+  with `aligned_alloc`) shows a largest allocation of 4 KiB and reports no
+  loss; the shim-missing refusal tells an installed user to "build it with
+  `make`"; and `find_shim` could also look in `<exe>/../lib/omn/`.
+- **R** (`src/collect/mod.rs`, the refusal): with the shim missing,
+  `mem.heap.alloc` is refused with "no collector is written for ...
+  `bpf:usdt`" as its first line, and the reason that matters, the shim's
+  path, comes second.
+- **Coordinator**: the repository has no `LICENSE` file while `Cargo.toml`
+  says Apache-2.0. A release archive should carry one; `contents` in
+  `release.sh` is where it would go.
+
+### Matrix cells
+
+None should move: nothing here changes what a probe answers. A release is
+worth one sweep **from an installed tree** rather than from `target/`, once,
+by the coordinator, and the expected answer is the build tree's:
+
+```console
+$ make install PREFIX=/usr/local && sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/omn
+$ /usr/local/bin/omn list | tail -n 3 | head -n 1     # 93 here, as target/debug/omn
+```
+
+The first stock-kernel cell for a release is `release.yml`'s run on
+`ubuntu-22.04` at the next tag: its `verify` step is the check above, on a
+distribution kernel and without capabilities.
