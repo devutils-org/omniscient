@@ -92,9 +92,22 @@ any code.
 
 ### Exit criteria
 
-- [ ] The five structs are written and documented.
-- [ ] A unit test proves that a serialized/deserialized `Event` is identical.
+- [~] The five structs are written and documented.
+      *Audit, fourteenth wave: Four of the five are written and documented:
+      `Event`, the typed keys, `Request` and `ResolvedRequest`. There is no
+      `Span` with id, parent_id and rule_id. Evidence lives on `Correlation` and
+      `Attribution` in `src/join.rs`, and no decision records that change.*
+- [~] A unit test proves that a serialized/deserialized `Event` is identical.
+      *Audit, fourteenth wave:
+      `an_event_survives_a_round_trip_through_json_and_yaml` round-trips one
+      sample with two key kinds, `Uint` and `Text` attrs, and a zero
+      `ts_err_ns`. A non-negative `AttrValue::Int` does not survive: the
+      untagged enum reads it back as `Uint`.*
 - [ ] A one-page note justifies each key: which boundary it crosses.
+      *Audit, fourteenth wave: No note exists. Only some of the doc comments on
+      `KeyKind` and `KeyValue` say what their key crosses (sock, blk, proc,
+      iface, dev, cpu, node), and task, file, gpu and cgroup get no reason at
+      all.*
 
 ---
 
@@ -120,11 +133,29 @@ Still **no collector**. We build the machinery that will host them.
 
 ### Exit criteria
 
-- [ ] `omn list` shows different sources on two different machines.
-- [ ] `omn --dump-request io.latency --pid 1` prints a complete `ResolvedRequest`.
-- [ ] Three invalid combinations fail with three distinct, clear messages.
-- [ ] No collector exists yet. **If collection code was written here, that is a
+- [~] `omn list` shows different sources on two different machines.
+      *Audit, fourteenth wave: Partly: the portability-matrix judges tie each
+      cell's listing to a condition the cell sets up (paranoid 4, BTF hidden,
+      kernel floor), so listings can only pass by differing. But no test
+      directly compares two cells' listings, and the judges skip when no cell is
+      on disk.*
+- [~] `omn --dump-request io.latency --pid 1` prints a complete `ResolvedRequest`.
+      *Audit, fourteenth wave: Partly: the exact command is run in tests/cli.rs,
+      but when it succeeds its output is never inspected, and the
+      ResolvedRequest record has since moved to `--dump-resolved` (`--dump-
+      request` now prints a session file). No test checks a complete resolved
+      record for io.latency --pid.*
+- [x] Three invalid combinations fail with three distinct, clear messages.
+      *Audit, fourteenth wave: Proven: tests/cli.rs, tests/family_io.rs and
+      src/validate.rs refuse more than three invalid combinations (uncore with
+      --pid, a rate from an instantaneous gauge, a mode/emit mismatch, a results
+      format for a dump...), each with its own message; the uncore refusal also
+      checks that nothing is printed on stdout.*
+- [~] No collector exists yet. **If collection code was written here, that is a
       sequencing error.**
+      *Audit, fourteenth wave: Superseded: a sequencing rule, not a property of
+      the code, and moot since Phase 3 added collectors. The history (33c73bf)
+      shows the skeleton and the first collector landed in the same commit.*
 
 ---
 
@@ -151,10 +182,27 @@ Two collectors only, chosen to exercise the entire plumbing.
 
 ### Exit criteria
 
-- [ ] `omn sched.offcpu --pid X --emit=hist` produces a correct histogram.
-- [ ] The loss rate is displayed, and it is zero under moderate load.
-- [ ] A test with a program that sleeps N ms measures N ms ± 5 %.
-- [ ] Reordering is validated by injecting out-of-order events.
+- [x] `omn sched.offcpu --pid X --emit=hist` produces a correct histogram.
+      *Audit, fourteenth wave: Proven by `scenario_sched::an_off_cpu_histogram_i
+      s_of_blocks_and_finds_both_modes_of_a_bimodal_sleeper`: a sleeper with two
+      modes lands in the two expected log2 buckets, checked against the thread's
+      own voluntary-switch counts. The test launches the program rather than
+      attaching by `--pid`.*
+- [~] The loss rate is displayed, and it is zero under moderate load.
+      *Audit, fourteenth wave: Partly: the loss is counted and shown (as a count
+      next to the events seen, not a rate), and `no loss` is asserted on light
+      sched workloads. No test holds zero loss under a defined moderate load,
+      and the overflow test skips on a machine that never fills the ring.*
+- [x] A test with a program that sleeps N ms measures N ms ± 5 %.
+      *Audit, fourteenth wave: Proven by `family_sched::a_program_that_sleeps_a_
+      known_time_is_off_cpu_for_that_time`: a 400 ms `sleep` is reported as 400
+      ms off cpu within 5 %, with no loss.*
+- [~] Reordering is validated by injecting out-of-order events.
+      *Audit, fourteenth wave: Partly: the join engine is shown to be order-
+      independent on a reversed three-event input
+      (`join::input_order_does_not_change_the_answer`). The runner sorts each
+      collection after the fact, and there is no watermark to validate. No
+      decision records that the sort replaces the watermark.*
 
 ---
 
@@ -199,11 +247,24 @@ req:a3f1   total 412 ms
 
 - [x] The latency budget decomposes on a real server, not a mock. *A TCP
       server on loopback, `examples/vertical-one-request.yml`, ninth wave.*
-- [x] Every line carries its evidence level. *`IDENTITY` for every row read by
+      *Audit, fourteenth wave: `tests/vertical.rs` runs the loopback TCP server
+      from `examples/vertical/server.c` under `examples/vertical-one-
+      request.yml` and checks every row against the server's and the client's
+      own clocks.*
+- [~] Every line carries its evidence level. *`IDENTITY` for every row read by
       the request id the serving thread carried.*
+      *Audit, fourteenth wave:
+      `the_network_rows_are_read_by_the_socket_the_server_accepted` holds the
+      four thread rows to `IDENTITY` and `net_rx`/`net_tx` to `KEY`, the socket
+      cookie being the server's own `SO_COOKIE`. The `block-io` table's rows are
+      not checked yet, and a row's evidence is optional in the engine.*
 - [x] The sum of the segments ≈ the client-side measured latency (gap < 10 %).
       *+0.11 % to +0.42 % over six runs, one of them under load; positive every
       time, as it has to be — the loopback and the parse are the client's.*
+      *Audit, fourteenth wave:
+      `the_segments_sum_to_the_latency_the_client_measured` holds each of five
+      requests within 10 % of the client's own clock; the slow reader is the
+      widest, at about +3 %.*
 - [~] **Ground truth**: a synthetic server with known injected delays (`tc netem`,
       `dm-delay`, `usleep` under a lock) is decomposed correctly. Without that
       test, nothing proves the correlation is right rather than merely plausible.
@@ -233,9 +294,23 @@ Now, and not before: we have three real join types to generalize from.
 
 ### Exit criteria
 
-- [ ] Adding a boundary means adding a rule, zero lines of engine.
+- [~] Adding a boundary means adding a rule, zero lines of engine.
+      *Audit, fourteenth wave: Partly: the engine names no source, and the
+      crossings (`tests/cross_memory.rs`, `tests/cross_io.rs`) add boundaries
+      through session `joins:` only. No test holds the property, though, and a
+      rule cannot choose its tier (kernel, agent or query), so a kernel-side
+      boundary is still collector code.*
 - [ ] A load test proves there is no open-state leak over 1 h.
-- [ ] Evictions appear in the user-visible output.
+      *Audit, fourteenth wave: Not proven: no join-engine load test of any
+      length exists. The open-state balance (`states_balance` in `src/join.rs`)
+      is checked on hand-built events of a few states only, and rules are
+      applied after the run rather than streamed.*
+- [~] Evictions appear in the user-visible output.
+      *Audit, fourteenth wave: Partly: the engine counts expired and overflowed
+      states on hand-built inputs (`src/join.rs` tests), and
+      `encode::an_eviction_is_never_quietly_absent_from_the_output` renders
+      `EVICTED`. No end-to-end `omn` run with a join that really evicts checks
+      that the count reaches the output.*
 
 ---
 
@@ -256,7 +331,12 @@ Now, and not before: we have three real join types to generalize from.
 ### Exit criteria
 
 - [ ] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead.
-- [x] Exceeding the budget produces an **announced** degradation, not a loss.
+      *Audit, fourteenth wave: Not proven. No test measures `io.latency` under
+      an IOPS load. `src/bpf/io.rs` streams every completion instead of building
+      a kernel-side histogram, so the join keeps `blk:rq@open_ts`. The only
+      measured cost is `docs/bench.md`'s ordinary workload: 3.70 % tool cpu and
+      +0.36 % dilation.*
+- [~] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
       serves (`Ladder` in `src/main.rs`), after draining the outgoing
@@ -264,9 +344,19 @@ Now, and not before: we have three real join types to generalize from.
       moved (`degrade` in `src/collect/mod.rs`). With nothing cheaper, the run
       stops and names the ceiling. `tests/budget.rs`,
       `a_run_over_its_ceiling_moves_onto_a_cheaper_backend_and_says_when`.*
+      *Audit, fourteenth wave: Partly proven. `tests/budget.rs` holds the
+      announcement: the note says when and which way the run moved, and a run
+      with nowhere cheaper to go names the ceiling. The drain in `degrade` has
+      no test that counts events across the move. The only move tested is
+      between two polled `mem.rss` backends, not trace to hist to sample.*
 - [x] A collector can be added and removed mid-session. *A request's `window`,
       tenth wave: one phase of a program counted within +0.17 %, and nothing of
       the other. The join engine's view of a detached source is filed.*
+      *Audit, fourteenth wave: Proven by `tests/runner.rs`. Counters attached
+      and detached mid-run, one per phase of a program with a known instruction
+      count, count their own phase within +0.5 % and nothing of the other, and
+      the windows sum to the whole. An eBPF probe attached at 1 s sees exactly
+      the second phase's 26 wakeups. Joins across a detach remain filed.*
 
 ---
 
@@ -288,8 +378,17 @@ Now, and not before: we have three real join types to generalize from.
 
 ### Exit criteria
 
-- [ ] A CLI session → file → replay produces an equivalent result.
+- [~] A CLI session → file → replay produces an equivalent result.
+      *Audit, fourteenth wave: Partly: the request round trip is proven (the CLI
+      dump read back through `-f` is byte-identical, in YAML, JSON and TOML:
+      `tests/cli.rs`). But no test runs the CLI measurement and its file replay
+      against a known workload and compares the results.*
 - [ ] The resolved file is enough to explain a gap between two machines.
+      *Audit, fourteenth wave: Not proven: tests check only that fields such as
+      governor, SMT, clocksource and kernel release are present, and only the
+      GPU record is checked against sysfs. Microarchitecture, NUMA,
+      virtualization and steal time are still in `not_captured`. No test
+      explains a gap between two machines from their two resolved files.*
 
 ---
 
@@ -339,16 +438,28 @@ finally earns its place.
 
 ### Exit criteria
 
-- [x] A cost/resolution/loss table measured for every (source, backend). *94
+- [~] A cost/resolution/loss table measured for every (source, backend). *94
       pairs, after the tenth wave, `docs/bench.md`; the heap sources from a
       rerun.*
-- [x] The resolver's choices are confirmed by measurement, or corrected.
+      *Audit, fourteenth wave: Partly: the table comes from one ignored run in
+      the tenth wave, 94 pairs in `docs/bench.md`. Only three pairs are checked
+      against known counts, and resolution only for three timestamping backends.
+      The heap rows and every backend added since still need a rerun.*
+- [~] The resolver's choices are confirmed by measurement, or corrected.
       *Confirmed for the seven chains with two served backends. The table's
       correction is to the cost bands: an in-kernel collector's cost is in the
       target's dilation, not in the tool's cpu.*
-- [x] The agent's own cost (CPU, RSS) is measured separately from the dilation of
+      *Audit, fourteenth wave: Partly: the verdict rule is unit-tested on
+      synthetic rows, and the seven confirmations come from one recorded run.
+      The cost-band correction is recorded in `DECISIONS.md`, but no test holds
+      the catalog's bands to a measured dilation.*
+- [~] The agent's own cost (CPU, RSS) is measured separately from the dilation of
       the observed process. *Tenth wave: collector cpu from `cost.json`, peak RSS
       from `/proc`, dilation from the workload's own clock.*
+      *Audit, fourteenth wave: Partly: the harness measures the three columns
+      from three independent sources (`cost.json`, VmHWM in `/proc`, the
+      workload's own clock), but only in an ignored run that asserts nothing
+      about them. The separation is shown in `docs/bench.md`, not in a test.*
 
 ---
 
@@ -448,6 +559,78 @@ Two constraints that fall out of the rest of this file:
 - **Every number it is handed carries what it is missing.** Finding 37's
   `Shortfall` exists for a reader taking a p99 off a lossy run, and a model is
   that reader with less judgement, not more.
+
+---
+
+## Phase 12 — Programs nobody wrote for it
+
+Every ground truth so far is a workload written for the test: a `usleep` of
+known length, a known number of I/Os, `calltree.c` with its shares fixed by
+construction. That is what made each collector checkable, and it is also why
+none of the methods above has yet met a program whose behaviour nobody
+designed. A real program brings what the fixtures leave out -- a thread pool,
+frameless libc leaves, a stripped distribution binary, an interpreter's frames,
+I/O and CPU interleaved in one request -- and a method that is right on its
+fixtures and wrong there is the confident wrong suspect this project is built
+against.
+
+So this phase measures nothing new and adds no source. It takes programs that
+were not written for Omniscient and holds the answer to *"why is this slow, for
+this objective"* against a cause known independently of the tool.
+
+**Where the cause comes from.** A real program has no share fixed by
+construction, so the known cause is one of three, in this order of preference:
+
+1. **The program's own account** of where its time went: `sqlite3`'s `.stats`
+   and `EXPLAIN QUERY PLAN`, CPython's `cProfile`, `gcc -ftime-report`,
+   `getrusage` and the kernel's `schedstat` for the process.
+2. **A cause injected from outside the program**, never into it: an input that
+   defeats an index, a file on a `dm-delay` device, a second process holding the
+   lock the program waits on, a working set larger than the page cache. The test
+   harness injects it; the tool never does (boundary 5).
+3. **Two builds of the same program** that differ by one known change, where
+   the difference is the cause.
+
+### Tasks
+
+1. **A case per program**, under `cases/<program>/`: the program and how it was
+   obtained (distribution package, build flags), the sessions, the injected
+   cause, the reference's own account, and the verdict expected for each
+   objective. A case is data, like a catalog entry: adding a program means
+   adding a directory, not code.
+2. **The question asked both ways**: `omn triage` as a person would ask it, and
+   `omn-mcp` as an agent would. The two answers name the same suspect.
+3. **Each verdict says how it knows**: which method answered (USE, TSA, a
+   decomposition, an escalation), the evidence level of each join it relied on,
+   the unwind mode and where each name came from, and what it could not see.
+4. **What a case finds wrong is fixed where it lives.** A case does not carry a
+   workaround: a wrong suspect is a finding against the method, the collector or
+   the unwinder that produced it, filed and fixed in the owning file.
+
+Programs to start from, each available on a stock distribution: `sqlite3` (a
+stripped distribution binary: names from debuginfod), CPython running a pure
+Python loop and an I/O-bound script (interpreted frames the tool cannot read
+yet, so the case checks that it says so), `loganalyzer.c` (parse, aggregate,
+rank, report over 1.5 M lines), a compiler on a known translation unit, a
+small HTTP server under a load generator, and a build (`make -j` on a real
+project), which is many short processes rather than one.
+
+### Exit criteria
+
+- [ ] Six programs, none written for this project, each with at least two known
+      causes, one on the CPU and one off it, and for every case the triage's
+      first suspect is the known cause, for the objective asked.
+- [ ] Every number a verdict cites agrees with the reference's own account,
+      within that account's resolution.
+- [ ] Where the cause is out of the tool's sight (interpreted or JIT frames, a
+      closed GPU), the verdict says so by name. No case ends with a confident
+      wrong suspect.
+- [ ] One case names a stripped distribution binary's functions from
+      debuginfod, and says where each name came from.
+- [ ] Every case runs at `perf_event_paranoid` 2 and says what that cost it:
+      the stacks it lost, the sources it went without.
+- [ ] Adding a seventh program means adding a directory under `cases/`, and
+      zero lines under `src/`.
 
 ---
 
