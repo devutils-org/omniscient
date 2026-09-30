@@ -267,6 +267,10 @@ fn the_resolver_never_selects_a_backend_that_cannot_serve_the_target() {
                     withheld += 1;
                     continue;
                 }
+                // A target served only in a mode other than the one asked
+                // (net.hwts per launch is `trace` alone) is refused before
+                // any backend is selected, so there is nothing to check.
+                Err(ResolveError::NoBackendDeclares { .. }) => continue,
                 Err(other) => panic!("`{}` per {kind}: {other}", entry.id),
             };
             let backend = entry

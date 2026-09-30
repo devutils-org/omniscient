@@ -2041,7 +2041,10 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
     ]);
     let complaint = stderr(&outcome);
     assert!(
-        complaint.contains("`netlink:ethtool` serves `poll`, `snapshot` mode, not `trace`"),
+        // The resolver's wording, or the validator's once a (target, mode)
+        // pair no backend declares is refused before resolution.
+        complaint.contains("`netlink:ethtool` serves `poll`, `snapshot` mode, not `trace`")
+            || complaint.contains("`netlink:ethtool` per iface, in poll, snapshot"),
         "the interface backend should be passed over for its modes, by name: {complaint}"
     );
     // Refused before anything starts: never exit 3 ("started, then found not
