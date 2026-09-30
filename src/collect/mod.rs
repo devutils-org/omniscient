@@ -2373,14 +2373,12 @@ fn run_core(
     }
 
     let closed_ns = monotonic_ns();
-    for index in 0..slots.len() {
-        // An attached collector's window closed before the first stop, above;
-        // a detached one's at its detach.
-        if !watched[index].attached {
-            // Never attached: a span of nothing, at the end.
-            watched[index].opened_ns = closed_ns;
-            watched[index].closed_ns = closed_ns;
-        }
+    // An attached collector's window closed before the first stop, above; a
+    // detached one's at its detach.
+    for window in watched.iter_mut().filter(|window| !window.attached) {
+        // Never attached: a span of nothing, at the end.
+        window.opened_ns = closed_ns;
+        window.closed_ns = closed_ns;
     }
     let lifetime = child.as_ref().and_then(|child| child.lifetime());
     // Read once the child has been reaped: `getrusage(RUSAGE_CHILDREN)` is what
