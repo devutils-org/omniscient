@@ -56,7 +56,7 @@ fn has_python() -> bool {
 fn assert_ran(output: &Output) {
     let message = stderr(output);
     assert!(
-        !message.contains("heap shim was not found"),
+        !message.contains("shim was not found"),
         "these tests need the preload shim: run `make` rather than `cargo build`\n{message}"
     );
     assert!(output.status.success(), "{message}");
@@ -956,5 +956,104 @@ fn a_counted_window_ranks_its_series() {
     assert!(
         rows.len() <= 2 && series >= 1 && series <= events,
         "the ranking holds every series the counted run produced: {ranking}"
+    );
+}
+
+/// Ground truth for every entry point an allocation can take.
+///
+/// glibc serves `aligned_alloc`, `memalign`, `valloc`, `pvalloc`,
+/// and `posix_memalign` on its internal allocator, not through `malloc`, so a
+/// hook on `malloc` alone never sees them: before they were
+/// hooked, `dd bs=64M` reported a largest allocation of 4 KiB and no loss. The
+/// program below allocates a different known count of a different known size
+/// through each one, every size in a log2 bucket of its own and far above
+/// anything the interpreter allocates, and the histogram has to hold each count
+/// in its bucket. A function the shim does not see is a bucket at zero, and the
+/// failure names it. `reallocarray` is in the list because it is the opposite
+/// case -- glibc's calls `realloc`, whose hook sees it -- and a hook of its own
+/// would count it twice, which this test found once.
+#[test]
+fn every_aligned_entry_point_is_seen_at_the_size_its_caller_asked_for() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+
+    // (function, bytes, count). Each size is alone in its log2 bucket.
+    let cases: [(&str, u64, usize); 6] = [
+        ("aligned_alloc", 4 * MIB, 2),
+        ("memalign", 8 * MIB, 3),
+        ("valloc", 16 * MIB, 4),
+        ("pvalloc", 32 * MIB, 5),
+        ("posix_memalign", 64 * MIB, 6),
+        ("reallocarray", 128 * MIB, 7),
+    ];
+    let program = "import ctypes\n\
+         libc = ctypes.CDLL(None)\n\
+         P, S = ctypes.c_void_p, ctypes.c_size_t\n\
+         for f, a in (('aligned_alloc', [S, S]), ('memalign', [S, S]), ('valloc', [S]),\n\
+                      ('pvalloc', [S]), ('reallocarray', [P, S, S])):\n\
+         \x20   getattr(libc, f).restype = P\n\
+         \x20   getattr(libc, f).argtypes = a\n\
+         libc.posix_memalign.restype = ctypes.c_int\n\
+         libc.posix_memalign.argtypes = [ctypes.POINTER(P), S, S]\n\
+         M = 1048576\n\
+         for _ in range(2): assert libc.aligned_alloc(4096, 4 * M)\n\
+         for _ in range(3): assert libc.memalign(4096, 8 * M)\n\
+         for _ in range(4): assert libc.valloc(16 * M)\n\
+         for _ in range(5): assert libc.pvalloc(32 * M)\n\
+         for _ in range(6):\n\
+         \x20   out = P()\n\
+         \x20   assert libc.posix_memalign(ctypes.byref(out), 4096, 64 * M) == 0\n\
+         for _ in range(7): assert libc.reallocarray(None, 128, M)\n";
+
+    let output = run_session(&session("mem.heap.alloc", "hist", program, "json"));
+    assert_ran(&output);
+
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let buckets = buckets(&run);
+    let unseen: Vec<String> = cases
+        .iter()
+        .filter(|(_, bytes, count)| count_at(&buckets, *bytes) != *count as u64)
+        .map(|(function, bytes, count)| {
+            format!(
+                "{function}: {count} of {bytes} bytes made, {} counted",
+                count_at(&buckets, *bytes)
+            )
+        })
+        .collect();
+    assert!(
+        unseen.is_empty(),
+        "every entry point allocated a known count at a known size, and these were not \
+         counted as made:\n  {}\n{buckets:?}",
+        unseen.join("\n  ")
+    );
+}
+
+/// The case that found it: `dd`'s buffer is `bs` bytes, allocated with
+/// `aligned_alloc` by coreutils. Its largest allocation is at least that.
+#[test]
+fn a_program_that_allocates_its_buffer_aligned_shows_that_buffer_as_its_largest() {
+    const BLOCK: u64 = 64 * MIB;
+    if Command::new("dd").arg("--version").output().is_err() {
+        eprintln!("skipped: this machine has no dd to launch");
+        return;
+    }
+    let session = "format: json\nrequests:\n  \
+         - source: mem.heap.alloc\n    \
+         target: {launch: [dd, if=/dev/zero, of=/dev/null, bs=64M, count=1]}\n    \
+         mode: trace\n    emit: [hist]\n";
+    let output = run_session(session);
+    assert_ran(&output);
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let buckets = buckets(&run);
+    let largest = buckets
+        .iter()
+        .rev()
+        .find(|(_, _, count)| *count > 0)
+        .map(|(low, high, _)| (*low, *high));
+    assert!(
+        largest.is_some_and(|(_, high)| high.is_none_or(|high| high > BLOCK)),
+        "dd allocated a {BLOCK}-byte buffer and the largest bucket counted is {largest:?}: {buckets:?}"
     );
 }

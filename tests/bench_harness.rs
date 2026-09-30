@@ -539,3 +539,51 @@ fn pairs_are_matched_by_absolute_time_and_a_merged_or_lost_event_is_not_a_pair()
     assert_eq!(matched[1].tool_gap_ns, None);
     assert_eq!(matched[2].tool_gap_ns, None);
 }
+
+fn stats(values: &[f64]) -> Option<Stats> {
+    Stats::of(values)
+}
+
+/// A row is held to its declared band on the larger of its two costs: an eBPF
+/// program's cost is in the target's dilation, not in the tool's cpu, so a row
+/// whose tool cpu is a tenth of a percent and whose target ran 3 % slower is
+/// over `low`, and flagged.
+#[test]
+fn a_row_is_held_to_its_band_on_the_larger_of_its_share_and_its_dilation() {
+    use omn::catalog::Cost;
+    let cpu = stats(&[1e6, 1e6, 1e6]);
+    assert!(matches!(
+        judge_band(Cost::Low, 3, cpu, stats(&[0.1, 0.1, 0.1]), stats(&[0.03, 0.03, 0.03])),
+        Band::Over(why) if why.contains("dilation") && why.contains("3.00 %")
+    ));
+    assert!(matches!(
+        judge_band(Cost::Low, 3, cpu, stats(&[0.5, 0.5, 0.5]), stats(&[0.002, 0.002, 0.002])),
+        Band::Within(why) if why.contains("share")
+    ));
+    // `extreme` has no bound to break.
+    assert!(matches!(
+        judge_band(Cost::Extreme, 3, cpu, stats(&[900.0; 3]), None),
+        Band::Within(_)
+    ));
+}
+
+/// What makes the table wrong, rather than a band broken: a row with no
+/// completed repetition, no collector cpu, or nothing to hold to a band. The
+/// bench fails on these; it flags the others.
+#[test]
+fn a_row_with_a_column_missing_is_refused_rather_than_judged() {
+    use omn::catalog::Cost;
+    let cpu = stats(&[1e6, 1e6]);
+    assert!(matches!(
+        judge_band(Cost::Low, 0, None, None, None),
+        Band::Missing(_)
+    ));
+    assert!(matches!(
+        judge_band(Cost::Low, 2, None, stats(&[0.5, 0.5]), None),
+        Band::Missing(why) if why.contains("collector cpu")
+    ));
+    assert!(matches!(
+        judge_band(Cost::Free, 2, cpu, None, None),
+        Band::Missing(_)
+    ));
+}

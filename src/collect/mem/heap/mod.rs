@@ -37,7 +37,7 @@ mod state;
 
 use std::cell::RefCell;
 use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::collect::{Collector, Losses, Prepared};
@@ -135,7 +135,13 @@ pub struct Record {
     pub flags: u8,
 }
 
-/// Locates the shim, which must sit next to the binary that loads it.
+/// Where a shim is looked for, relative to the directory of the binary that
+/// loads it, in order: beside it (the build tree and the release's flat
+/// `bin/`), then the conventional `<prefix>/lib/omn/` a packager may prefer.
+const SHIM_PLACES: [&str; 2] = ["libomn_preload.so", "../lib/omn/libomn_preload.so"];
+
+/// Locates the shim: `OMN_PRELOAD_LIB` when it is set, otherwise beside the
+/// binary or in `<exe dir>/../lib/omn/`.
 pub fn find_shim() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("OMN_PRELOAD_LIB") {
         let path = PathBuf::from(path);
@@ -150,19 +156,29 @@ pub fn find_shim() -> Result<PathBuf, String> {
     }
     let executable =
         std::env::current_exe().map_err(|error| format!("cannot find this executable: {error}"))?;
-    let beside = executable
+    let directory = executable
         .parent()
-        .map(|directory| directory.join("libomn_preload.so"))
         .ok_or_else(|| "this executable has no directory".to_owned())?;
-    if beside.exists() {
-        Ok(beside)
-    } else {
-        Err(format!(
-            "the preload shim was not found at {}; build it with `make` (or \
-             `cargo build -p omn-preload`), or point OMN_PRELOAD_LIB at it",
-            beside.display()
-        ))
+    shim_in(directory)
+}
+
+/// The shim under `directory`, or the refusal that names where it was looked
+/// for and what puts it there.
+fn shim_in(directory: &Path) -> Result<PathBuf, String> {
+    let places: Vec<PathBuf> = SHIM_PLACES
+        .iter()
+        .map(|place| directory.join(place))
+        .collect();
+    if let Some(found) = places.iter().find(|place| place.exists()) {
+        return Ok(found.clone());
     }
+    Err(format!(
+        "the preload shim was not found at {} or {}; it ships beside the binary, so \
+         reinstall, or build it with `make` (or `cargo build -p omn-preload`) in a checkout, \
+         or point OMN_PRELOAD_LIB at it",
+        places[0].display(),
+        places[1].display()
+    ))
 }
 
 /// Which source is being served by this shim.
@@ -884,6 +900,40 @@ impl Stream {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A packager's layout (`bin/omn`, `lib/omn/libomn_preload.so`) is found,
+    /// the flat one is preferred when both exist, and a tree with neither is
+    /// refused naming both places and the reinstall that restores them.
+    #[test]
+    fn the_shim_is_found_beside_the_binary_or_under_lib_omn_and_its_absence_advises_both() {
+        let root = std::env::temp_dir().join(format!("omn-shim-{}", std::process::id()));
+        let bin = root.join("bin");
+        let lib = root.join("lib/omn");
+        std::fs::create_dir_all(&bin).expect("a bin directory");
+        std::fs::create_dir_all(&lib).expect("a lib/omn directory");
+
+        let refused = shim_in(&bin).expect_err("nothing is installed yet");
+        assert!(
+            refused.contains("reinstall")
+                && refused.contains(&bin.join("libomn_preload.so").display().to_string())
+                && refused.contains("lib/omn/libomn_preload.so"),
+            "{refused}"
+        );
+
+        std::fs::write(lib.join("libomn_preload.so"), b"").expect("a packaged shim");
+        assert_eq!(
+            shim_in(&bin).expect("the packaged shim"),
+            bin.join("../lib/omn/libomn_preload.so")
+        );
+
+        std::fs::write(bin.join("libomn_preload.so"), b"").expect("a flat shim");
+        assert_eq!(
+            shim_in(&bin).expect("the flat shim"),
+            bin.join("libomn_preload.so")
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleaning up");
+    }
 
     /// A stream fed by a pipe this test writes into, which is the same path the
     /// shim takes: records arrive in whatever chunks the reader happens to get.

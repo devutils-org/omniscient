@@ -23,7 +23,9 @@ pub mod gpu;
 mod io;
 mod launch;
 pub mod mem;
-mod net;
+/// Public for its probes: `net::probe` answers the PTP-clock and ethtool
+/// requirements, which the capability layer asks.
+pub mod net;
 mod power;
 mod proc;
 mod runtime;
@@ -594,6 +596,14 @@ impl Losses {
     }
 }
 
+/// Where a budget moved a collection, and the span in which the backend it
+/// left and the one it moved onto were both observing the target.
+struct Moved {
+    onto: String,
+    overlap_from_ns: u64,
+    overlap_to_ns: u64,
+}
+
 /// Nanoseconds a reader can take in at a glance, for the loss reasons.
 ///
 /// Deliberately not the raw count. "a round of reads took 104754353ns" is a
@@ -681,6 +691,25 @@ pub struct Overhead {
     /// Where `in_target_cpu_ns` came from, or why there is none.
     #[serde(default)]
     pub in_target_from: String,
+    /// This process's cpu before the span `collector_cpu_ns` weighs: its
+    /// start, the catalog, the probes, the attach, and whatever table the run
+    /// was going to need and read then so that no drain would pay for it --
+    /// the kernel's symbols, for a profile with stacks, which a debug build
+    /// parses in the better part of a second. `getrusage(RUSAGE_SELF)` at the
+    /// span's opening.
+    ///
+    /// Outside the percentage on purpose: the target was not running yet, so
+    /// none of it is dilation. Reported, because a reader told a profile cost
+    /// 3 % of its target, where the run cost the machine more than the target
+    /// did, has been told something false (finding U-cost, fourteenth wave).
+    #[serde(default)]
+    pub before_window_cpu_ns: u64,
+    /// This process's cpu after the span `collector_cpu_ns` weighs, up to the
+    /// collection being handed back: what the runner did once the window was
+    /// weighed -- the stacks, the filter, the other requests' tails. What
+    /// formatting the results costs after that is not in it.
+    #[serde(default)]
+    pub after_window_cpu_ns: u64,
 }
 
 impl Overhead {
@@ -703,6 +732,14 @@ impl Overhead {
             _ => observed,
         };
         Some((self.attributed_cpu_ns + inside) as f64 * 100.0 / work as f64)
+    }
+
+    /// Everything this process spent, by its own kernel account, from its
+    /// start to the collection being handed back: before the window, in it,
+    /// and after. What a `wait4` over the tool reports, less its target and
+    /// the formatting of the results.
+    pub fn tool_cpu_ns(&self) -> u64 {
+        self.before_window_cpu_ns + self.collector_cpu_ns + self.after_window_cpu_ns
     }
 
     /// The tool's own share of the target's cpu, as every run before finding
@@ -752,14 +789,6 @@ pub trait InsideAccount {
     /// Where the number comes from, for the record beside it.
     fn describes(&self) -> String;
 }
-
-/// `BPF_ENABLE_STATS` and `BPF_STATS_RUN_TIME`, from `include/uapi/linux/bpf.h`.
-///
-/// Here rather than in `src/bpf/syscall.rs`, which is where a `bpf()` command
-/// belongs: that module is private to `src/bpf/`, and the runner has no way
-/// to reach it without a re-export in `src/bpf/mod.rs` (filed).
-const BPF_ENABLE_STATS: libc::c_long = 32;
-const BPF_STATS_RUN_TIME: u32 = 0;
 
 /// Whether the kernel is counting eBPF programs' run time for this run.
 ///
@@ -817,24 +846,11 @@ impl ProgramStats {
         if bpf_stats_sysctl() == Some(true) {
             return ProgramStats::On(None);
         }
-        let mut kind = BPF_STATS_RUN_TIME;
-        // SAFETY: the attribute is the one `u32` the command reads.
-        let fd = unsafe {
-            libc::syscall(
-                libc::SYS_bpf,
-                BPF_ENABLE_STATS,
-                &mut kind as *mut u32 as *mut libc::c_void,
-                std::mem::size_of::<u32>() as u32,
-            )
+        // The layer's own call (`src/bpf/mod.rs`), not a copy of it here.
+        let error = match crate::bpf::enable_run_time_stats() {
+            Ok(fd) => return ProgramStats::On(Some(fd)),
+            Err(error) => error,
         };
-        if fd >= 0 {
-            use std::os::fd::FromRawFd;
-            // SAFETY: a descriptor the kernel just returned to this process.
-            return ProgramStats::On(Some(unsafe {
-                std::os::fd::OwnedFd::from_raw_fd(fd as RawFd)
-            }));
-        }
-        let error = std::io::Error::last_os_error();
         let sysctl = match bpf_stats_sysctl() {
             Some(_) => "`kernel.bpf_stats_enabled` is 0",
             None => "this kernel has no `kernel.bpf_stats_enabled`",
@@ -2400,7 +2416,7 @@ fn run_core(
     let recorded = recording.map(|recording| {
         recording.recorded(&stopped_because, closed_ns, budget_interval_ns.unwrap_or(0))
     });
-    let collections = slots
+    let mut collections = slots
         .iter()
         .enumerate()
         .map(|(index, slot)| {
@@ -2457,7 +2473,15 @@ fn run_core(
                 facts,
             }
         })
-        .collect();
+        .collect::<Vec<Collection>>();
+    // What the runner spent once each span was weighed, read last so that
+    // before, during and after add up to this process's account.
+    let handed_back_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
+    for collection in &mut collections {
+        let overhead = &mut collection.overhead;
+        overhead.after_window_cpu_ns = handed_back_cpu_ns
+            .saturating_sub(overhead.before_window_cpu_ns + overhead.collector_cpu_ns);
+    }
     Ok((collections, recorded))
 }
 
@@ -2992,6 +3016,8 @@ impl<'a> Spending<'a> {
             Err(why) => (None, None, 0, why),
         };
         Overhead {
+            before_window_cpu_ns: since.self_cpu_ns,
+            after_window_cpu_ns: 0,
             collector_cpu_ns,
             attributed_cpu_ns,
             observed_cpu_ns: observed_cpu_ns
@@ -3075,6 +3101,7 @@ impl<'a> Spending<'a> {
             let Some(percent) = spent.percent() else {
                 continue;
             };
+
             if percent <= ceiling {
                 continue;
             }
@@ -3107,11 +3134,16 @@ impl<'a> Spending<'a> {
             };
             match self.cheaper.next(index, &spent, ceiling) {
                 Some(next) => match self.degrade(index, next, slots, events, losses) {
-                    Ok(onto) => self.notes[index].push(format!(
+                    Ok(moved) => self.notes[index].push(format!(
                         "over budget at {:.2} ms into the run: `{source}` through `{was}` spent \
                          {percent:.2} % of the target's cpu time{inside} against a ceiling of \
-                         {ceiling} %, so it was moved onto `{onto}` for the rest of it",
+                         {ceiling} %, so it was moved onto `{}` for the rest of it; both counted \
+                         from {:.3} ms to {:.3} ms into the run, and what the target did in \
+                         that span can be in both",
                         entered_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
+                        moved.onto,
+                        moved.overlap_from_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
+                        moved.overlap_to_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
                     )),
                     Err(why) => {
                         stop = Some(format!(
@@ -3155,7 +3187,7 @@ impl<'a> Spending<'a> {
         slots: &mut [Slot],
         events: &mut [Vec<Event>],
         losses: &mut [Losses],
-    ) -> Result<String, String> {
+    ) -> Result<Moved, String> {
         let onto = next.backend.id.clone();
         let Slot::Attached(current) = &mut slots[index] else {
             return Err("it is not attached".to_owned());
@@ -3164,18 +3196,26 @@ impl<'a> Spending<'a> {
         let prepared = prepare(&next).map_err(|error| error.to_string())?;
         let account = prepared.inside();
         Target::narrowed_to_one();
+        // The replacement may be counting from its attach, and the outgoing
+        // collector counts until its last read inside `stop`: between the two
+        // both see the target. Stopping first would trade that overlap for a
+        // gap, whose events nobody counts and nothing could show; an overlap
+        // is bounded, and said. Nothing else runs between the replacement's
+        // start and the outgoing's stop, which keeps it to the two calls.
+        let overlap_from_ns = monotonic_ns();
         let mut replacement = prepared.attach(&self.bound[index])?;
         if let Some(named) = Target::narrowed_to_one() {
             return Err(one_process_of_several(&next, named).to_string());
         }
         replacement.start()?;
+        let mut trailing = current.stop();
+        let overlap_to_ns = monotonic_ns();
+        events[index].append(&mut trailing);
+        losses[index].absorb(current.losses());
+
         let programs = programs_since(before.as_ref());
         let meter = InsideMeter::of(&onto, account, programs, &self.program_stats);
         self.inside[index].moved_onto(meter);
-
-        let mut trailing = current.stop();
-        events[index].append(&mut trailing);
-        losses[index].absorb(current.losses());
         losses[index].note(format!(
             "the budget moved this collection from `{}` to `{onto}` mid-run; the series is two \
              backends end to end",
@@ -3189,7 +3229,11 @@ impl<'a> Spending<'a> {
             wall_opened_ns: self.opened_ns,
             ..self.now(index)
         };
-        Ok(onto)
+        Ok(Moved {
+            onto,
+            overlap_from_ns,
+            overlap_to_ns,
+        })
     }
 
     /// Where one collection's account stands at this instant.

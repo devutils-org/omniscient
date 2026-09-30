@@ -216,10 +216,11 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
     table.push_str(&format!("```\n{}```\n", gate_table(&baselines)));
     table.push_str(
         "\n| source | backend | resolver | mode | target | workload | collector cpu | % of \
-         target | dilation | omn peak RSS | events | losses | dropped (throttled) |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+         target | dilation | omn peak RSS | events | losses | dropped (throttled) | band |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     let mut json_rows = Vec::new();
+    let mut flagged: Vec<String> = Vec::new();
     let mut verdicts: BTreeMap<String, Vec<Measured>> = BTreeMap::new();
     for (row, one) in &rows {
         let source = &row.method.source;
@@ -241,6 +242,20 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             _ => None,
         };
         let collector = Stats::of(&one.collector);
+        let band = judge_band(
+            row.declared,
+            one.elapsed.len(),
+            collector,
+            Stats::of(&one.percent),
+            dilation,
+        );
+        match &band {
+            Band::Missing(why) => failures.push(format!(
+                "{source} through `{backend}`: the row is missing a column: {why}"
+            )),
+            Band::Over(why) => flagged.push(format!("{source} through `{backend}`: {why}")),
+            Band::Within(_) => {}
+        }
         if let Some(cost) = collector {
             verdicts.entry(source.clone()).or_default().push(Measured {
                 backend: backend.clone(),
@@ -261,7 +276,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             });
         }
         table.push_str(&format!(
-            "| {source} | {backend} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {source} | {backend} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             if row.chosen { "chosen" } else { "" },
             row.method.mode,
             if row.method.system {
@@ -277,6 +292,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             median(&one.events).map_or("-".into(), |e| format!("{e:.0}")),
             one.losses,
             one.throttled,
+            band.cell().replace('|', "/"),
         ));
         json_rows.push(json!({
             "source": source,
@@ -294,7 +310,19 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             "events": one.events,
             "losses": one.losses,
             "throttled": one.throttled,
+            "declared": row.declared.as_str(),
+            "band": band.cell(),
         }));
+    }
+    if !flagged.is_empty() {
+        table.push_str(&format!(
+            "\n## Over the band the catalog declares\n\n{}\n",
+            flagged
+                .iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
     }
 
     table.push_str("\n## The resolver's choices\n\n| source | verdict |\n|---|---|\n");
@@ -354,6 +382,9 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
         say(format!(
             "the resolver is corrected by measurement: {correction}"
         ));
+    }
+    for line in &flagged {
+        say(format!("over its declared band, and flagged: {line}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

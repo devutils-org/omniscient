@@ -1264,7 +1264,7 @@ fn text(results: &Results) -> String {
                         Some(per_second) => {
                             let _ = writeln!(
                                 out,
-                                "    {:<14} {}{} over {}{}  {}  {}/s",
+                                "    {:<14} {}{} over {}{}  {}  {}",
                                 rate.key,
                                 bound(rate.short.as_ref()),
                                 quantity(rate.total, results.unit),
@@ -1275,7 +1275,7 @@ fn text(results: &Results) -> String {
                                     ""
                                 },
                                 comparison(rate.short.as_ref()),
-                                quantity(per_second, results.unit),
+                                per_second_quantity(per_second, results.unit),
                             );
                         }
                         None => {
@@ -1863,6 +1863,16 @@ fn quantity(value: f64, unit: Unit) -> String {
         Unit::Joules => scaled(value, &[(1e3, "kJ"), (1.0, "J"), (1e-3, "mJ")], "uJ"),
         Unit::Watts => scaled(value, &[(1e3, "kW"), (1.0, "W"), (1e-3, "mW")], "uW"),
         other => format!("{value:.0} {other}"),
+    }
+}
+
+/// A rate in the unit a reader names it by: energy per second is power, so a
+/// rate over joules reads `21.09 W` and not `21.09 J/s`; every other unit keeps
+/// its `/s`.
+fn per_second_quantity(value: f64, unit: Unit) -> String {
+    match unit {
+        Unit::Joules => quantity(value, Unit::Watts),
+        other => format!("{}/s", quantity(value, other)),
     }
 }
 
@@ -3669,6 +3679,34 @@ mod tests {
         let text = decomposition_text(&output);
         assert!(text.contains("not read"), "{text}");
         assert!(text.contains("carried `queued_ns`"), "{text}");
+    }
+
+    /// A board that used 42.18 J over two seconds drew 21.09 W on average, and
+    /// the rate says so in watts; a rate over bytes keeps its `/s`.
+    #[test]
+    fn a_rate_over_joules_is_printed_in_watts() {
+        let rate = |unit: Unit, total: f64| {
+            let mut results = sample();
+            results.unit = unit;
+            results.outputs = vec![Output::Rate {
+                series: vec![crate::emit::SeriesRate {
+                    key: "card1".into(),
+                    events: 20,
+                    total,
+                    per_second: Some(total / 2.0),
+                    window_ns: 2_000_000_000,
+                    counted_window: true,
+                    short: None,
+                }],
+            }];
+            text(&results)
+        };
+        let power = rate(Unit::Joules, 42.18);
+        assert!(power.contains("42.18 J over"), "{power}");
+        assert!(power.contains("21.09 W"), "{power}");
+        assert!(!power.contains("J/s"), "{power}");
+        let bytes = rate(Unit::Bytes, 4096.0);
+        assert!(bytes.trim_end().ends_with("/s"), "{bytes}");
     }
 
     /// The text a person reads carries the same mark the structured formats
