@@ -32,13 +32,14 @@ requests:
         - python3
         - -c
         - |
-          import sys, threading, time
+          import os, sys, threading, time
+          inherited = len(os.listdir('/proc/self/fd')) - 1
           held = [open('/dev/null') for _ in range(17)]
           stop = threading.Event()
           workers = [threading.Thread(target=stop.wait) for _ in range(5)]
           for worker in workers:
               worker.start()
-          sys.stderr.write('HELD 20\nRUNNING 6\n')
+          sys.stderr.write('HELD %d\nRUNNING 6\n' % (inherited + len(held)))
           sys.stderr.flush()
           time.sleep(0.3)
           stop.set()

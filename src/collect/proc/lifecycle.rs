@@ -69,6 +69,15 @@ pub fn departed(pid: i32) -> Option<String> {
 /// The one case that satisfies both after the exec as well is a run whose
 /// target is this binary. That is why the wait below is bounded rather than
 /// unconditional: there, reading late is right and reading never is not.
+///
+/// **And the exec is not one instant.** The kernel points `/proc/<pid>/exe` at
+/// the new image when it installs the new memory map, and only afterwards
+/// renames the task and closes its close-on-exec descriptors. A read in
+/// between sees the new image under the old name and the old descriptors: the
+/// CI's runner, two cpus under a whole suite, read `collect::proc::` -- the
+/// forking test thread's name -- as the first reading of `/bin/sleep`. So a
+/// child whose image has changed and whose name is still one of this
+/// process's own thread names is still inside its exec.
 fn before_exec(pid: i32) -> bool {
     let Some(parent) = parent_of(pid) else {
         return false;
@@ -82,7 +91,28 @@ fn before_exec(pid: i32) -> bool {
         // every run against a process the tool cannot read.
         return false;
     };
-    std::fs::read_link("/proc/self/exe").is_ok_and(|ours| ours == theirs)
+    if std::fs::read_link("/proc/self/exe").is_ok_and(|ours| ours == theirs) {
+        return true;
+    }
+    comm_of(&format!("/proc/{pid}/comm")).is_some_and(|name| our_thread_names().contains(&name))
+}
+
+/// A task's command name, as the kernel keeps it: at most fifteen bytes.
+fn comm_of(path: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(text.trim_end_matches('\n').to_owned())
+}
+
+/// The command name of every thread of this process: what a child forked from
+/// any of them is called until its exec renames it.
+fn our_thread_names() -> Vec<String> {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return Vec::new();
+    };
+    tasks
+        .filter_map(Result::ok)
+        .filter_map(|task| comm_of(&format!("{}/comm", task.path().display())))
+        .collect()
 }
 
 /// The fourth field of `/proc/<pid>/stat`, counted from the closing bracket of

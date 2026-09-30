@@ -36,9 +36,10 @@ requests:
         - python3
         - -c
         - |
-          import sys, time
+          import os, sys, time
+          inherited = len(os.listdir('/proc/self/fd')) - 1
           held = [open('/dev/null') for _ in range(17)]
-          sys.stderr.write('HELD 20\n')
+          sys.stderr.write('HELD %d\n' % (inherited + len(held)))
           sys.stderr.flush()
           time.sleep(0.15)
     mode: poll@50ms

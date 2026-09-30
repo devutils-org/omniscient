@@ -35,11 +35,12 @@ requests:
         - python3
         - -c
         - |
-          import resource, sys, time
+          import os, resource, sys, time
           soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
           resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+          inherited = len(os.listdir('/proc/self/fd')) - 1
           held = [open('/dev/null') for _ in range(30000)]
-          sys.stderr.write('OPEN 30003\n')
+          sys.stderr.write('OPEN %d\n' % (inherited + len(held)))
           sys.stderr.flush()
           time.sleep(0.3)
     # Far below what a 30000-entry directory walk takes, which is the point.

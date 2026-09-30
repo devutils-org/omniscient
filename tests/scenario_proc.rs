@@ -149,10 +149,12 @@ macro_rules! needs_python {
 /// `examples/proc-sweep.yml`: every emit both sources declare, in one run,
 /// against a workload that says what it holds.
 ///
-/// Ground truth: the program opens seventeen files on top of the three every
-/// process starts with and runs five workers beside its main thread, and it
-/// writes `HELD 20` and `RUNNING 6`. The peak of each series must be exactly
-/// that. `max` rather than `last` or `min` deliberately -- see the two defects
+/// Ground truth: the program opens seventeen files on top of the ones it
+/// inherits -- the three every process starts with, and whatever the parent
+/// passed down, counted in its own `/proc/self/fd` before it opens anything --
+/// and runs five workers beside its main thread, and it writes the sum
+/// (`HELD 20` from a terminal) and `RUNNING 6`. The peak of each series must
+/// be exactly that. `max` rather than `last` or `min` deliberately -- see the two defects
 /// pinned below, which own both ends of the series.
 #[test]
 fn the_sweep_reports_the_counts_the_workload_chose_through_every_emit() {
@@ -163,9 +165,14 @@ fn the_sweep_reports_the_counts_the_workload_chose_through_every_emit() {
 
     let held = reported(&output, "HELD ");
     let running = reported(&output, "RUNNING ");
-    assert_eq!(
-        held, 20,
-        "the workload opens seventeen files plus the three every process starts with"
+    // The program counts what it inherited in its own `/proc/self/fd` before
+    // it opens anything, and adds what it opened, because what it inherits is
+    // not its choice: the CI's runner passes two more descriptors down to
+    // every child, and a count of twenty there read twenty-two.
+    assert!(
+        held >= 20,
+        "the workload opens seventeen files on top of at least the three every process starts \
+         with, and reported {held}"
     );
     assert_eq!(running, 6, "five workers and the main thread");
 
@@ -411,8 +418,10 @@ fn the_only_backend_these_sources_have_is_named_and_a_pin_says_it_was_pinned() {
 /// `examples/proc-loss.yml`: a poller that cannot keep up says so.
 ///
 /// Ground truth twice over. The workload raises its own soft limit and opens
-/// exactly 30000 descriptors on top of the three it starts with, and reports
-/// `OPEN 30003`; the peak of the series must be that number exactly. And a
+/// exactly 30000 descriptors on top of the ones it starts with, and reports
+/// what it inherited, read from `/proc/self/fd` before it opened anything,
+/// plus what it opened -- `OPEN 30003` where it inherits only
+/// the standard three; the peak of the series must be that number exactly. And a
 /// 30000-entry directory walk cannot be done in the millisecond the session
 /// asks for, so the run must count the ticks that ran late -- a series whose
 /// spacing is not what it claims is the failure this source can actually have.
@@ -428,7 +437,10 @@ fn a_poller_that_cannot_keep_up_counts_and_names_the_ticks_that_ran_late() {
     let result = result(&doc, "thirty-thousand-handles");
 
     let open = reported(&output, "OPEN ");
-    assert_eq!(open, 30003, "the workload chooses the number it holds");
+    assert!(
+        open >= 30003,
+        "the workload opens 30000 on top of at least its three, and reported {open}"
+    );
     assert_eq!(
         emitted(result, "summary")["series"][0]["max"]
             .as_f64()
@@ -752,9 +764,9 @@ fn defect_1_the_first_reading_of_a_launched_target_is_of_the_program() {
     let polled = session("proc-sweep.yml");
     assert!(polled.status.success(), "{}", stderr(&polled));
     let held = reported(&polled, "HELD ");
-    assert_eq!(
-        held, 20,
-        "the workload opens seventeen files plus its three"
+    assert!(
+        held >= 20,
+        "the workload opens seventeen files on top of at least its three, and reported {held}"
     );
 
     // Five single reads of the same session. Every one of them has to be about
