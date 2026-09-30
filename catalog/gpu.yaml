@@ -91,13 +91,18 @@
     - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu", "hwmon:amdgpu"], cost: free,
        degraded: "instantaneous draw sampled by the poller, not an energy counter: short spikes between two reads are invisible"}
     - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
-  modes: [poll, snapshot]
-  emits: [timeline, raw, summary]
+  modes: [count, poll, snapshot]
+  emits: [timeline, raw, summary, rate]
   targets: {system: native, launch: native}
   keys: []
   filter_fields: [device]
   determinism: low
   caveats:
+    - "The draw in watts is `--mode count --emit rate`: the energy counter's
+       difference over the time between its two reads, one at each end of the
+       window. It is a mean over the window, not a peak; the instantaneous draw
+       NVML samples travels beside every reading as `watts`, under a name that
+       cannot be added up."
     - "A power read through NVML costs about 34 ms of the tool's cpu on this
        driver, measured by the bench: at the default 100 ms poll that is a fifth
        of a core. Poll it slower when that matters more than the resolution."

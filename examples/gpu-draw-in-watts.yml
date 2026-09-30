@@ -1,0 +1,29 @@
+# How many watts the board drew over a window, from its energy counter.
+#
+#   omn -f examples/gpu-draw-in-watts.yml
+#
+# `gpu.power` collects energy, because energy is what the device counts and an
+# integral of a sampled draw is not (`gpu-energy-two-ways.yml`). The draw in
+# watts is that energy over the time it was counted across: `--mode count`
+# reads the counter once at each end of the window, and `rate` divides the
+# difference by the window the counter was read over, not by the run's wall
+# clock. It is a mean over the window, not a peak.
+#
+# What the run reports, on the development machine (an RTX 2080 Ti at idle),
+# beside `nvidia-smi --query-gpu=power.draw` sampled over the same window:
+#
+#   rate   system 42.40 J over 2.01s the counter was enabled  =  21.09 J/s
+#   nvidia-smi: 20.47 W
+#
+# `tests/scenario_gpu.rs`, `a_counted_energy_window_divided_by_its_length_is_the_boards_draw`,
+# holds the two against each other.
+name: the board's draw, in watts
+format: text
+duration: 2s
+
+requests:
+  - label: draw
+    source: gpu.power
+    target: system
+    mode: count
+    emit: [rate]

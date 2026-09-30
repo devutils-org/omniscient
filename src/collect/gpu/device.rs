@@ -102,6 +102,9 @@ impl Prepared for Prepare {
     }
 }
 
+/// The sequence number of the reading that closes a counted window.
+const CLOSING: u64 = u64::MAX / 2;
+
 /// One device, as this run will refer to it.
 struct Device {
     handle: DeviceHandle,
@@ -113,6 +116,9 @@ struct Device {
     /// Energy counter reading when the run started, so every event reports the
     /// energy of this run rather than of everything since the driver loaded.
     energy_base_mj: u64,
+    /// When that reading was taken: the start of a counted window, whose
+    /// length is what `rate` divides the energy by to give watts.
+    energy_base_ns: u64,
 }
 
 /// Reads one number per device per tick.
@@ -167,6 +173,7 @@ impl NvmlCollector {
                 name,
                 uuid,
                 energy_base_mj: 0,
+                energy_base_ns: 0,
             });
         }
 
@@ -223,6 +230,14 @@ impl NvmlCollector {
             .saturating_sub(device.energy_base_mj);
         let mut attrs = self.device_attrs(device, "device");
         attrs.push(float("joules", millijoules as f64 / 1000.0));
+        // A counted window says how long it was: the energy over that, not
+        // over the run's wall clock, is the mean draw in watts.
+        if self.mode == Mode::Count {
+            attrs.push(Attr::uint(
+                "enabled_ns",
+                monotonic_ns().saturating_sub(device.energy_base_ns),
+            ));
+        }
         // The instantaneous draw is what the energy is not: a rate at one
         // instant, useful for seeing a spike, useless for adding up. Both are
         // reported, under names that cannot be confused.
@@ -319,7 +334,10 @@ impl Collector for NvmlCollector {
         // power under the name of energy.
         for device in &mut self.devices {
             match self.nvml.energy_millijoules(device.handle) {
-                Ok(millijoules) => device.energy_base_mj = millijoules,
+                Ok(millijoules) => {
+                    device.energy_base_mj = millijoules;
+                    device.energy_base_ns = monotonic_ns();
+                }
                 Err(error) if error.is_not_supported() => {
                     return Err(format!(
                         "{} has no energy counter (that needs Volta or later); NVML reports \
@@ -353,6 +371,13 @@ impl Collector for NvmlCollector {
         // ends when its target does. Without the split, either the window is
         // rounded up to a whole second or the driver is asked a hundred times
         // for one sample.
+        //
+        // Energy is the exception: a counted window of it is one reading, at
+        // the end, of the energy since the baseline -- a reading a second
+        // would be a running total, and `rate` sums what it is given.
+        if self.mode == Mode::Count && self.metric == Metric::Power && seq != CLOSING {
+            return Ok(Vec::new());
+        }
         if self.mode == Mode::Count {
             let now_ns = monotonic_ns();
             let due = self.last_read_ns.is_none_or(|last| {
@@ -428,7 +453,7 @@ impl Collector for NvmlCollector {
             return Vec::new();
         }
         self.last_read_ns = None;
-        self.sample(u64::MAX / 2).unwrap_or_default()
+        self.sample(CLOSING).unwrap_or_default()
     }
 
     /// What this collector had to give up, in the one place every emit and
