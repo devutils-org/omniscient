@@ -742,7 +742,8 @@ fn forcing_a_net_backend_nothing_implements_names_it_and_exits_three() {
         (
             "net.hwts",
             "so_timestamping",
-            &["--pid", "1", "--mode", "snapshot", "--emit", "summary"],
+            // `trace`, the one mode the per-packet backend declares.
+            &["--pid", "1", "--mode", "trace", "--emit", "summary"],
         ),
     ];
 
@@ -1995,10 +1996,13 @@ fn a_filter_on_a_declared_field_selects_the_connection_the_scenario_made() {
 /// histogram of round trips -- has to come out.
 ///
 /// `net.hwts` cannot: a timestamp per packet is a different backend and nobody
-/// has written it. The message says exactly that, and then the run exits 1,
-/// which is the code for a failure of this run. Recorded in
-/// `docs/scenarios/net.md` under "Defects found": the same refusal about a
-/// *target* was moved to exit 3 and this one about a *mode* was not.
+/// has written it. The interface backend declares `poll` and `snapshot` only,
+/// so a `trace` request of an interface is refused at resolution, naming the
+/// modes the backend does serve -- before the fifteenth wave it resolved onto
+/// that backend and failed at the start, exit 3, which is what the matrix's
+/// `here-caps` cell caught: a source listed usable whose first mode did not
+/// run. The same request of a launched program resolves onto the per-packet
+/// backend and is refused as not built, exit 3.
 #[test]
 fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
     let outcome = omn(&[
@@ -2037,17 +2041,180 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
     ]);
     let complaint = stderr(&outcome);
     assert!(
-        complaint.contains("so_timestamping") && complaint.contains("not built"),
+        complaint.contains("`netlink:ethtool` serves `poll`, `snapshot` mode, not `trace`"),
+        "the interface backend should be passed over for its modes, by name: {complaint}"
+    );
+    // Refused before anything starts: never exit 3 ("started, then found not
+    // built"), which is the listing and the run disagreeing. 1 today; 2 once a
+    // (target, mode) pair no backend declares is the request's (filed to P in
+    // the fourteenth wave).
+    assert!(
+        matches!(code(&outcome), 1 | 2),
+        "a trace of an interface is refused at resolution, not at the start: {complaint}"
+    );
+
+    let outcome = omn(&[
+        "net.hwts",
+        "--mode",
+        "trace",
+        "--duration",
+        "200ms",
+        "--emit",
+        "raw",
+        "--",
+        "true",
+    ]);
+    let complaint = stderr(&outcome);
+    assert!(
+        complaint.contains("so_timestamping") && complaint.contains("no collector is written"),
         "the refusal should name the backend a per-packet answer needs: {complaint}"
     );
     // `DECISIONS.md` settled that "valid, and not built is exit 3, wherever it
-    // is discovered". A mode is the same answer and used to exit 1, which is
-    // defect 7 of docs/scenarios/net.md; the refusal is raised by the factory,
-    // before an interface has been touched, so it can only be about this build.
+    // is discovered" (defect 7 of docs/scenarios/net.md).
     assert_eq!(
         code(&outcome),
         3,
-        "a mode that resolves and is then refused as not built is exit 3: {complaint}"
+        "valid and not built is exit 3: {complaint}"
+    );
+}
+
+/// A source listed usable attaches in every mode that resolves.
+///
+/// The matrix's `here-caps` cell found `net.hwts` listed usable through
+/// `netlink:ethtool` and refused at the start in `trace`, its first mode: the
+/// resolver chose the interface backend for a mode only the per-packet one
+/// makes. The listing, the resolver and the run have to agree, so this asks
+/// every `net` source `omn list` calls ready here, in each of its modes and on
+/// the machine (or `lo`, or a launched `sleep`), what the sweep asks: resolve
+/// it, and if it resolves onto a backend this build collects, run it. A run
+/// that resolved and then did not start is the defect, whatever the source.
+///
+/// The ground truth is the probe's own verdict, independent of the collector:
+/// what it called ready has to start. One refusal is the target's and not the
+/// machine's: `net.request` follows the probes a program carries, and `sleep`
+/// carries none, which it says by name.
+#[test]
+fn every_usable_net_source_starts_in_every_mode_that_resolves() {
+    let listing = omn(&["list", "--format", "json"]);
+    assert_eq!(code(&listing), 0, "{}", stderr(&listing));
+    let catalog: Vec<serde_json::Value> =
+        serde_json::from_str(&stdout(&listing)).expect("the catalog is JSON");
+    let strings = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut ran = 0;
+    let mut ready = 0;
+    let mut failures = Vec::new();
+    for entry in catalog.iter().filter(|e| e["family"] == "net") {
+        let id = entry["id"].as_str().expect("an id");
+        if entry["here"]["availability"] != "ready" {
+            continue;
+        }
+        ready += 1;
+        // Every (target, mode) pair this source refused, and how many
+        // resolved onto a backend this build collects. A source called ready
+        // for which none does is the listing and the run disagreeing as much
+        // as a run that fails to start, so it is a failure too.
+        let mut refusals: Vec<String> = Vec::new();
+        let mut resolved_here = 0;
+        let collected: Vec<String> = entry["probes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|probe| probe["collector"] == true)
+            .filter_map(|probe| probe["backend"].as_str().map(str::to_owned))
+            .collect();
+        let declared = entry["targets"].as_object().cloned().unwrap_or_default();
+        let mut targets: Vec<Vec<&str>> = Vec::new();
+        if declared.contains_key("system") {
+            targets.push(vec!["--system"]);
+        } else if declared.contains_key("iface") {
+            targets.push(vec!["--iface", "lo"]);
+        }
+        if declared.contains_key("launch") {
+            targets.push(vec!["--", "sleep", "0.3"]);
+        }
+        let emits = strings(&entry["emits"]);
+        let emit = ["summary", "hist", "rate", "timeline", "topk", "raw"]
+            .into_iter()
+            .find(|e| emits.iter().any(|x| x == e))
+            .unwrap_or("raw");
+        for target in &targets {
+            for mode in strings(&entry["modes"]) {
+                let head = [id, "-m", &mode, "-e", emit, "-d", "300ms"];
+                let resolve: Vec<&str> = head
+                    .iter()
+                    .copied()
+                    .chain(["--dump-resolved", "--format", "json"])
+                    .chain(target.iter().copied())
+                    .collect();
+                let resolved = omn(&resolve);
+                if code(&resolved) != 0 {
+                    refusals.push(format!(
+                        "`-m {mode} {}` exited {}: {}",
+                        target.join(" "),
+                        code(&resolved),
+                        stderr(&resolved).lines().next().unwrap_or_default()
+                    ));
+                    continue;
+                }
+                let resolved: serde_json::Value =
+                    serde_json::from_str(&stdout(&resolved)).expect("the resolution is JSON");
+                let backend = resolved[0]["backend"]["id"]
+                    .as_str()
+                    .or_else(|| resolved["backend"]["id"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                if !collected.contains(&backend) {
+                    refusals.push(format!(
+                        "`-m {mode} {}` resolved onto `{backend}`, which this build does not collect",
+                        target.join(" ")
+                    ));
+                    continue;
+                }
+                let run: Vec<&str> = head.iter().copied().chain(target.iter().copied()).collect();
+                let outcome = omn(&run);
+                ran += 1;
+                resolved_here += 1;
+                let complaint = stderr(&outcome);
+                if code(&outcome) == 0
+                    || (id == "net.request" && complaint.contains("declares no request"))
+                {
+                    continue;
+                }
+                failures.push(format!(
+                    "omn {} resolved onto `{backend}` and exited {}:\n{}",
+                    run.join(" "),
+                    code(&outcome),
+                    complaint.lines().next().unwrap_or_default()
+                ));
+            }
+        }
+        if resolved_here == 0 {
+            failures.push(format!(
+                "`{id}` is listed ready and no declared mode resolves onto a collected backend \
+                 on {} target(s):\n  {}",
+                targets.len(),
+                refusals.join("\n  ")
+            ));
+        }
+    }
+    if ready == 0 {
+        eprintln!("skipped: `omn list` calls no net source ready on this machine");
+        return;
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} runs a usable source resolved did not start:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 

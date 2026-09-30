@@ -9257,3 +9257,61 @@ it usable through `netlink:ethtool`. Wanted: `netlink:ethtool` declares
 `trace` with that reason in the chain, lands on the unwritten
 `so_timestamping`, and the listing and the run agree.
 
+## Needs from another stream — the fifteenth wave, stream kernel
+
+Stream kernel's handoff is `docs/fixes/w15-kernel.md`. Nothing here blocks it.
+
+### To stream P (`src/validate.rs`) and R (`src/collect/mod.rs`): a join over a histogram the kernel built
+
+`io.latency` with `emit: [hist]` alone (log2, `trace`, no filter, keys ⊆
+`dev`) is now answered by a kernel-side histogram: one event per `(device,
+log2 bucket)`, carrying `dev` and no `blk`, `task` or `req`. A session that
+joins it (`from: io.latency ... via: blk`) gets nothing to join. The collector
+cannot see joins; the validator can. Wanted:
+
+```rust
+// src/collect/mod.rs: `mod io;` becomes
+pub(crate) mod io;
+// src/collect/io/mod.rs (stream kernel's, at the merge): pub use block::histogram_is_enough;
+// src/validate.rs: a join whose `from` or `to` is a request for which
+crate::collect::io::histogram_is_enough(&request) // -> bool
+// holds is refused, exit 2: "`io.latency` asked only for a log2 histogram, which is built in the
+// kernel and carries no `<key>`; add another emit (`summary`) to have the requests one at a time"
+```
+
+### To the owners of five strings: a continuation that lost its `\`
+
+A string continued across lines without its trailing `\` keeps the next
+line's indentation (`"... the waker is the                  interrupt ..."`).
+This stream fixed ten in its own files; five remain, found with
+`grep -rnE '"[^"]*\S {10,}\S[^"]*"' src tests`:
+`src/perf.rs:3457`, `src/collect/cpu/counters.rs:1354` and `:1401`,
+`src/collect/mod.rs:2637` (a user-facing refusal), `tests/scenario_runtime.rs:240`.
+
+### To the coordinator (`docs/scenarios/net.md`, `docs/scenarios/sched.md`, `ROADMAP.md`, the flaky tally)
+
+- `net.md`, defect 7: `net.hwts -m trace` of an interface is now refused at
+  resolution (`netlink:ethtool` declares `poll, snapshot`), exit 1 until P's
+  fourteenth-wave filing makes a pair no backend declares exit 2; a launch is
+  still exit 3.
+- `sched.md`, the loss path: the test fills the ring with a futex burst (C
+  fixture `wakers`), not the Python session, and checks one run.
+- `ROADMAP.md` phase 3, *"The loss rate is displayed, and it is zero under
+  moderate load"*: proven by `scenario_sched::a_moderate_wakeup_rate_loses_nothing_and_says_so`
+  (6 000 wakeups/s against a 468 100/s drain) and the overflow test that no
+  longer skips. Phase 6, *"`io.latency --emit=hist` at 2 M IOPS"*: the
+  histogram is built in the kernel
+  (`scenario_io::a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`);
+  the overhead test is written and `#[ignore]`d on `null_blk`.
+- Flaky tally #3 (`an_overflowing_wakeup_ring_says_what_it_could_not_hold`):
+  closed -- one run that must overflow, checked once.
+
+### To stream P (`.github/expected-skips.txt`): the bpftool skip, with its reason
+
+`bpf::btf::tests::a_variable_is_found_by_the_id_the_kernel_numbers_it_with`
+skips only when `bpftool` exits non-zero, now as *"skipped the cross-check:
+bpftool could not dump /sys/kernel/btf/vmlinux (exit status: N: <bpftool's
+first stderr line>)"*. On the runner that line should name the missing
+`linux-tools-6.17.0-*-azure` package; the pattern `skipped the cross-check:
+bpftool could not dump` is the one to expect. (It used to skip everywhere: the
+dump's `DATASEC` line was read as the variable's.)

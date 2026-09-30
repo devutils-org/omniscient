@@ -68,7 +68,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 pub use insn::{Cgroup, Whose};
-pub use io::{BlockEvent, BlockProgram, Stage, Submitter, NO_OPEN, SCOPE_IS_OURS};
+pub use io::{BlockEvent, BlockProgram, HistRow, Stage, Submitter, NO_OPEN, SCOPE_IS_OURS};
 pub use io_pagecache::{Narrowing as PageCacheNarrowing, PageCacheProgram, PageCacheRow};
 pub use io_writeback::{Writeback, WritebackProgram};
 pub use mem_alloc::{AllocProgram, AllocRow, Allocator};

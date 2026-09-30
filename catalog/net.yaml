@@ -263,12 +263,16 @@
     # tool owns: SO_TIMESTAMPING on it, and the PHC to read its stamps against.
     # It serves a process because a socket belongs to one; an interface does not
     # have a socket, which is why the fallback below exists at all.
+    # A timestamp per packet is `trace`, and only this backend makes one.
     - {id: "so_timestamping", requires: ["so_timestamping", "phc"], cost: free,
-       targets: {pid: native, launch: native}, filter_fields: [dport]}
+       modes: [trace], targets: {pid: native, launch: native}, filter_fields: [dport]}
     # Per interface, over the ethtool netlink family and the PTP character
-    # device. What the card can stamp, and how far its clock is from ours.
+    # device. What the card can stamp, and how far its clock is from ours: a
+    # reading, once or repeated, so `poll` and `snapshot` and never `trace` --
+    # the resolver passes it over for a `trace` request with that reason
+    # rather than resolving onto it and failing at the start.
     - {id: "netlink:ethtool", requires: ["netlink", "ethtool", "phc"], cost: free,
-       targets: {iface: native, system: native}, filter_fields: [iface],
+       modes: [poll, snapshot], targets: {iface: native, system: native}, filter_fields: [iface],
        degraded: "what an interface can timestamp and how far its clock has
                   drifted from CLOCK_MONOTONIC, not the timestamps of individual
                   packets: it says whether a latency measured elsewhere is the

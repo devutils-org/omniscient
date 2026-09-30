@@ -173,7 +173,13 @@ fn unavailable(output: &Output) -> Option<String> {
         || message.contains("perf_event_paranoid")
         || message.contains("no such file")
         || message.contains("has no viable backend on this machine");
-    withheld.then_some(message)
+    // The skip line starts at the refusal: a launch's warnings come first on
+    // stderr (`json` is one document...), and the CI's skip gate reads the
+    // first line as the reason.
+    let from_the_error = message
+        .find("error:")
+        .map_or(message.as_str(), |at| &message[at..]);
+    withheld.then(|| from_the_error.to_owned())
 }
 
 fn has_python() -> bool {

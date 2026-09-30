@@ -239,19 +239,29 @@ impl Collector for WakeupCollector {
         let mut notes = Vec::new();
         if self.interrupts_blind {
             notes.push(
-                "this kernel's preempt count is not where the program looks for it (x86's                  `__preempt_count` or `pcpu_hot`), so a wakeup issued from an interrupt is                  credited to whatever task the interrupt landed on, and for a target it is kept                  as that task's"
+                "this kernel's preempt count is not where the program looks for it (x86's \
+                 `__preempt_count` or `pcpu_hot`), so a wakeup issued from an interrupt is \
+                 credited to whatever task the interrupt landed on, and for a target it is kept \
+                 as that task's"
                     .to_owned(),
             );
         } else if self.from_interrupts > 0 {
             notes.push(format!(
-                "{} wakeup{} issued from an interrupt, softirq or NMI; the waker is the                  interrupt (`waker_tid` 0, `waker_context` says which), not the task it landed                  on, and a target keeps such a wakeup only as its wakee",
+                "{} wakeup{} issued from an interrupt, softirq or NMI; the waker is the \
+                 interrupt (`waker_tid` 0, `waker_context` says which), not the task it landed \
+                 on, and a target keeps such a wakeup only as its wakee",
                 self.from_interrupts,
-                if self.from_interrupts == 1 { " was" } else { "s were" },
+                if self.from_interrupts == 1 {
+                    " was"
+                } else {
+                    "s were"
+                },
             ));
         }
         if self.filtered_in > 0 || self.filtered_out > 0 {
             notes.push(format!(
-                "the filter kept {} wakeups and removed {}; it ran here, over the drained                  records, not in the kernel",
+                "the filter kept {} wakeups and removed {}; it ran here, over the drained \
+                 records, not in the kernel",
                 self.filtered_in, self.filtered_out,
             ));
         }

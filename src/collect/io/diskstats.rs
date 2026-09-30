@@ -173,7 +173,9 @@ impl Prepared for Prepare {
                 PathBuf::from("/proc/diskstats"),
             ))),
             other => Err(format!(
-                "/proc/diskstats counts per device for the whole machine, and a {} target asks                  for something it does not record; use --system, or the eBPF backend once it                  lands",
+                "/proc/diskstats counts per device for the whole machine, and a {} target asks \
+                 for something it does not record; use --system, or the eBPF backend once it \
+                 lands",
                 other.kind()
             )),
         }
@@ -424,7 +426,8 @@ impl Collector for Diskstats {
             Err(error) => {
                 self.losses.failed_reads += 1;
                 self.losses.note(format!(
-                    "the closing read failed ({error:?}), so the last interval of this run is                      missing"
+                    "the closing read failed ({error:?}), so the last interval of this run is \
+                     missing"
                 ));
                 Vec::new()
             }

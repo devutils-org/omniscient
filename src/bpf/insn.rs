@@ -351,12 +351,14 @@ pub fn audit(instructions: &[Insn]) -> Result<(), String> {
             match instructions.get(index + 1) {
                 None => {
                     return Err(format!(
-                        "instruction {index} loads a 64-bit immediate but is the last one; it                          needs a second slot"
+                        "instruction {index} loads a 64-bit immediate but is the last one; it \
+                         needs a second slot"
                     ))
                 }
                 Some(second) if second.code != 0 => {
                     return Err(format!(
-                        "instruction {index} loads a 64-bit immediate and the slot after it is                          an instruction ({:#04x}), not the value's high half",
+                        "instruction {index} loads a 64-bit immediate and the slot after it is \
+                         an instruction ({:#04x}), not the value's high half",
                         second.code
                     ))
                 }
@@ -383,7 +385,8 @@ pub fn audit(instructions: &[Insn]) -> Result<(), String> {
             let target = index as i64 + 1 + insn.off as i64;
             if target < 0 || target >= instructions.len() as i64 {
                 return Err(format!(
-                    "the jump at instruction {index} lands at {target}, outside a program of {}                      instructions",
+                    "the jump at instruction {index} lands at {target}, outside a program of {} \
+                     instructions",
                     instructions.len()
                 ));
             }
@@ -404,7 +407,8 @@ pub fn audit(instructions: &[Insn]) -> Result<(), String> {
         };
         if base == Some(10) && !(-512..0).contains(&insn.off) {
             return Err(format!(
-                "instruction {index} touches the stack at {} bytes from the frame pointer, and                  the stack is the 512 bytes below it",
+                "instruction {index} touches the stack at {} bytes from the frame pointer, and \
+                 the stack is the 512 bytes below it",
                 insn.off
             ));
         }

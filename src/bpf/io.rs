@@ -31,6 +31,14 @@
 //! kernel-side histogram keyed by `(device, bucket)` throws that key away. A
 //! join needs the requests one at a time or it has nothing to join.
 //!
+//! **Except when a histogram is all that was asked for.** `io.latency
+//! --emit hist`, alone, with no filter and no key but the device, is answered by
+//! a closing program that counts each interval into a `(device, log2 bucket)`
+//! row of a hash ([`BlockProgram::load_histogram`]) and publishes nothing:
+//! phase 6's criterion is that load at two million requests a second, where a
+//! record per request is the cost that grows with the workload. The rows are
+//! read once, at the end, after the closing program is detached.
+//!
 //! **The scope comes from the kernel, not from this program.** A request
 //! pointer is freed and handed straight back out, often within a millisecond,
 //! so `blk:<ptr>` alone attributes one request's latency to another; the
@@ -52,7 +60,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use super::insn::{self, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::request::read_request_id;
 use super::ring::{ring_bytes, RingBuffer};
@@ -159,7 +167,26 @@ const DROP_RING: u32 = 1;
 /// saw and could not turn into a measurement -- and reported apart from the
 /// losses because nothing was dropped.
 const UNPAIRED: u32 = 2;
-const DROP_SLOTS: u32 = 3;
+/// A completion the kernel-side histogram had no row for and could not make
+/// one: the map was full. Lost from the histogram, and counted.
+const DROP_HIST: u32 = 3;
+const DROP_SLOTS: u32 = 4;
+
+/// Rows the kernel-side histogram may hold: one per `(device, log2 bucket)`,
+/// so 64 devices each with a completion in every one of 64 buckets. A machine
+/// that uses a tenth of that has an unusual number of disks.
+const MAX_HIST_ROWS: u32 = 4096;
+
+/// A histogram row, as the program writes it: the key is `(dev, bucket)` and
+/// the value `(count, total_ns)`, each word where [`HistRow::decode`] reads it.
+const HIST_KEY_BYTES: usize = 8;
+const HIST_VALUE_BYTES: usize = 16;
+const HIST_VAL_COUNT: i16 = 0;
+const HIST_VAL_TOTAL: i16 = 8;
+
+/// `BPF_NOEXIST`, and the errno an insert gets when another cpu won the race.
+const BPF_NOEXIST: i32 = 1;
+const EEXIST: i32 = 17;
 
 /// `SCOPE_IS_OURS`: the kernel put no `start_time_ns` on this request, so the
 /// scope of its `blk:rq@open_ts` key is this program's own first sighting and
@@ -354,6 +381,9 @@ const EV_REQ: i16 = EVENT + 96;
 const LOOKUP_KEY: i16 = EVENT - 8;
 const PART: i16 = EVENT - 16;
 const CLOSE_DROP_KEY: i16 = EVENT - 24;
+/// The histogram row's key and the value an insert writes, below the rest.
+const HIST_KEY: i16 = EVENT - 32;
+const HIST_VALUE: i16 = EVENT - 48;
 
 /// The open program's stack: the entry it builds, its key, and a drop slot.
 const ENTRY_VALUE: i16 = -40;
@@ -492,6 +522,7 @@ fn open_instructions(
 }
 
 /// The program on the closing tracepoint: subtract, describe, publish.
+#[cfg(test)]
 fn close_instructions(
     btf: &Btf,
     stage: Stage,
@@ -501,6 +532,44 @@ fn close_instructions(
     counters_fd: i32,
     storage_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
+    close_instructions_into(
+        btf,
+        stage,
+        submitter,
+        inflight_fd,
+        Sink::Ring(ring_fd),
+        counters_fd,
+        storage_fd,
+    )
+}
+
+/// Where the closing program puts a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sink {
+    /// One record per request, through the ring: what a join, a filter and
+    /// every emit but a histogram need.
+    Ring(i32),
+    /// One count in a `(dev, log2 bucket)` row of this hash, and the interval
+    /// added to the row's exact total. The requests are not reported one by
+    /// one, so the ring is not written at all.
+    Histogram(i32),
+}
+
+fn close_instructions_into(
+    btf: &Btf,
+    stage: Stage,
+    submitter: Submitter,
+    inflight_fd: i32,
+    sink: Sink,
+    counters_fd: i32,
+    storage_fd: Option<i32>,
+) -> Result<Vec<Insn>, String> {
+    if matches!(sink, Sink::Histogram(_)) && stage.opens_at().is_none() {
+        return Err(format!(
+            "a kernel-side histogram is of an interval, and `{}` alone measures none",
+            stage.closes_at()
+        ));
+    }
     let tracepoint = stage.closes_at();
     let accepted: &[&[&str]] = if tracepoint == "block_rq_complete" {
         &COMPLETE_SIGNATURES
@@ -659,15 +728,22 @@ fn close_instructions(
     );
 
     program.label("publish");
-    program.extend(Insn::load_map_fd(1, ring_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, EVENT as i32));
-    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-    program.push(Insn::mov64_imm(4, 0));
-    program.push(Insn::call(helper::RINGBUF_OUTPUT));
-    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
-    count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_RING, "done");
-    program.jump_to("done", Insn::ja());
+    match sink {
+        Sink::Ring(ring_fd) => {
+            program.extend(Insn::load_map_fd(1, ring_fd));
+            program.push(Insn::mov64_reg(2, R10));
+            program.push(Insn::add64_imm(2, EVENT as i32));
+            program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
+            program.push(Insn::mov64_imm(4, 0));
+            program.push(Insn::call(helper::RINGBUF_OUTPUT));
+            program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+            count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_RING, "done");
+            program.jump_to("done", Insn::ja());
+        }
+        Sink::Histogram(hist_fd) => {
+            count_into_histogram(&mut program, hist_fd, counters_fd);
+        }
+    }
 
     if paired {
         program.label("unpaired");
@@ -708,6 +784,120 @@ fn close_instructions(
     Ok(instructions)
 }
 
+/// Adds the interval at `EV_DELTA` to its `(dev, log2 bucket)` row, then
+/// jumps to `done`.
+///
+/// The bucket is `insn::push_log2_bucket`'s, the numbering the emit layer's
+/// own log2 histogram uses, so a row's low bound travels on its event and the
+/// emit layer puts every request back in the bucket the kernel put it in. The
+/// row is shared by every cpu, so both words are added atomically; a row two
+/// cpus create at once is inserted by one of them (`BPF_NOEXIST`) and added to
+/// by the other, and a full map is a counted loss.
+fn count_into_histogram(program: &mut Program, hist_fd: i32, counters_fd: i32) {
+    const LABELS: insn::Log2Labels = [
+        "hist_b32",
+        "hist_b16",
+        "hist_b8",
+        "hist_b4",
+        "hist_b2",
+        "hist_b1",
+        "hist_bucket",
+    ];
+    // r7 held the request and nothing reads it past here; it is callee-saved,
+    // so the interval survives the helper calls below.
+    program.push(Insn::ldx(BPF_DW, 7, R10, EV_DELTA));
+    insn::push_log2_bucket(program, 7, &LABELS);
+    program.push(Insn::stx(BPF_W, R10, HIST_KEY + 4, 3));
+    program.push(Insn::ldx(BPF_W, 1, R10, EV_DEV));
+    program.push(Insn::stx(BPF_W, R10, HIST_KEY, 1));
+
+    let lookup = |program: &mut Program| {
+        program.extend(Insn::load_map_fd(1, hist_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, HIST_KEY as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    };
+    let add = |program: &mut Program| {
+        program.push(Insn::mov64_imm(1, 1));
+        program.push(Insn::atomic_add(BPF_DW, 0, HIST_VAL_COUNT, 1));
+        program.push(Insn::atomic_add(BPF_DW, 0, HIST_VAL_TOTAL, 7));
+        program.jump_to("done", Insn::ja());
+    };
+
+    lookup(program);
+    program.jump_to("hist_new", Insn::jeq_imm(0, 0, 0));
+    add(program);
+
+    program.label("hist_new");
+    program.push(Insn::st_imm(BPF_DW, R10, HIST_VALUE + HIST_VAL_COUNT, 1));
+    program.push(Insn::stx(BPF_DW, R10, HIST_VALUE + HIST_VAL_TOTAL, 7));
+    program.extend(Insn::load_map_fd(1, hist_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, HIST_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, HIST_VALUE as i32));
+    program.push(Insn::mov64_imm(4, BPF_NOEXIST));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.jump_to("hist_raced", Insn::jeq_imm(0, -EEXIST, 0));
+    count(program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
+    program.jump_to("done", Insn::ja());
+
+    // Another cpu made the row between the lookup and the insert: add to its
+    // row, once, straight-line -- a jump back is a loop the verifier refuses.
+    program.label("hist_raced");
+    lookup(program);
+    program.jump_to("hist_gone", Insn::jeq_imm(0, 0, 0));
+    add(program);
+    program.label("hist_gone");
+    count(program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
+    program.jump_to("done", Insn::ja());
+}
+
+/// One `(device, log2 bucket)` row of the kernel-side latency histogram, over
+/// the whole run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistRow {
+    /// The device, packed the way `block_device.bd_dev` is.
+    pub dev: u32,
+    /// `emit::BucketLayout::Log2`'s numbering.
+    pub bucket: u32,
+    pub count: u64,
+    /// The exact sum of the intervals, which the bucket cannot give back.
+    pub total_ns: u64,
+}
+
+impl HistRow {
+    fn decode(key: &[u8], value: &[u8]) -> Option<Self> {
+        if key.len() < HIST_KEY_BYTES || value.len() < HIST_VALUE_BYTES {
+            return None;
+        }
+        let word = |at: usize| u32::from_ne_bytes(key[at..at + 4].try_into().expect("4"));
+        let long = |at: i16| {
+            let at = at as usize;
+            u64::from_ne_bytes(value[at..at + 8].try_into().expect("8"))
+        };
+        Some(Self {
+            dev: word(0),
+            bucket: word(4),
+            count: long(HIST_VAL_COUNT),
+            total_ns: long(HIST_VAL_TOTAL),
+        })
+    }
+
+    pub fn major(&self) -> u32 {
+        self.dev >> 20
+    }
+
+    pub fn minor(&self) -> u32 {
+        self.dev & ((1 << 20) - 1)
+    }
+
+    pub fn bucket_low_ns(&self) -> u64 {
+        insn::bucket_low_ns(self.bucket)
+    }
+}
+
 /// A loaded, attached pair of programs and the maps between them.
 ///
 /// Dropping it detaches both: the links, the programs and the maps are file
@@ -719,7 +909,12 @@ pub struct BlockProgram {
     open_program: Option<OwnedFd>,
     _open_link: Option<OwnedFd>,
     close_program: OwnedFd,
-    _close_link: OwnedFd,
+    /// Taken when the histogram is read, so the read is of a map nothing
+    /// writes any more.
+    close_link: Option<OwnedFd>,
+    /// The kernel-side histogram, when the closing program counts into one
+    /// rather than publishing a record per request.
+    histogram: Option<Hash>,
     /// Why the programs read no request identity, when they do not: this
     /// kernel would not give them a task-storage map. The measurement is the
     /// same; only `req` is missing from every event, and the run says so.
@@ -736,8 +931,27 @@ impl BlockProgram {
         submitter: Submitter,
         requested_ring_bytes: usize,
     ) -> Result<Self, String> {
+        Self::load_into(stage, submitter, requested_ring_bytes, false)
+    }
+
+    /// The programs with their measurements counted into a kernel-side log2
+    /// histogram, one row per `(device, bucket)`, instead of a ring record per
+    /// request: what `--emit hist` alone needs, at a cost that no longer grows
+    /// with the request rate. Only a paired stage has an interval to bucket.
+    pub fn load_histogram(stage: Stage, submitter: Submitter) -> Result<Self, String> {
+        Self::load_into(stage, submitter, 0, true)
+    }
+
+    fn load_into(
+        stage: Stage,
+        submitter: Submitter,
+        requested_ring_bytes: usize,
+        histogram: bool,
+    ) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
-        let bytes = ring_bytes(requested_ring_bytes);
+        // A histogram run writes no record, and keeps the smallest ring the
+        // kernel makes so the drain has one to find empty.
+        let bytes = ring_bytes(if histogram { 0 } else { requested_ring_bytes });
 
         let ring_map =
             syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_blk_ring")
@@ -767,12 +981,29 @@ impl BlockProgram {
             Err(reason) => (None, Some(reason)),
         };
 
-        let close = close_instructions(
+        let histogram = if histogram {
+            Some(
+                Hash::create(
+                    HIST_KEY_BYTES,
+                    HIST_VALUE_BYTES,
+                    MAX_HIST_ROWS,
+                    "omn_blk_hist",
+                )
+                .map_err(|error| map_failure("block latency histogram", error))?,
+            )
+        } else {
+            None
+        };
+        let sink = match &histogram {
+            Some(map) => Sink::Histogram(map.as_raw_fd()),
+            None => Sink::Ring(ring_map.as_raw_fd()),
+        };
+        let close = close_instructions_into(
             btf,
             stage,
             submitter,
             inflight_fd,
-            ring_map.as_raw_fd(),
+            sink,
             counters.as_raw_fd(),
             storage_fd,
         )?;
@@ -820,7 +1051,8 @@ impl BlockProgram {
             open_program,
             _open_link: open_link,
             close_program,
-            _close_link: close_link,
+            close_link: Some(close_link),
+            histogram,
             no_request_identity,
             status_is_errno,
         })
@@ -837,12 +1069,64 @@ impl BlockProgram {
     }
 
     /// Requests the program could not record because the in-flight map was
-    /// full, and records the ring could not hold.
+    /// full, and completions it could not keep: records the ring could not
+    /// hold, or, counting into a histogram, completions with no row to go in.
     pub fn dropped(&self) -> (u64, u64) {
         (
             self.counters.read(DROP_INFLIGHT),
-            self.counters.read(DROP_RING),
+            self.counters.read(DROP_RING) + self.counters.read(DROP_HIST),
         )
+    }
+
+    /// Whether the closing program counts into a kernel-side histogram.
+    pub fn is_histogram(&self) -> bool {
+        self.histogram.is_some()
+    }
+
+    /// The kernel-side histogram, read once, at the end.
+    ///
+    /// The closing program is detached first and a grace period waited for,
+    /// so nothing is adding to a row while it is read: a completion either
+    /// landed before the detach, and is in a row, or happened after the run's
+    /// window, and is in none. Empty when the programs publish records.
+    ///
+    /// A kernel that withdraws the grace-period wait (`nohz_full`) is read
+    /// anyway, after the detach, and the second value says so: a run of the
+    /// closing program that began before the detach and was preempted could
+    /// still add to a row after it was read.
+    pub fn read_histogram(&mut self) -> Result<(Vec<HistRow>, Option<String>), String> {
+        let Some(map) = &self.histogram else {
+            return Ok((Vec::new(), None));
+        };
+        self.close_link = None;
+        let unwaited = super::map::grace_period().err().map(|error| {
+            format!(
+                "the histogram was read after its program was detached without waiting for \
+                 the runs already under way ({error}); a completion one of them was counting \
+                 may be in no row"
+            )
+        });
+        let drained = map
+            .drain()
+            .map_err(|error| format!("cannot read the block latency histogram: {error}"))?;
+        if drained.vanished > 0 || drained.truncated {
+            return Err(format!(
+                "the block latency histogram's walk lost its place ({} rows vanished{}), so \
+                 its counts are not the requests'",
+                drained.vanished,
+                if drained.truncated {
+                    ", walk truncated"
+                } else {
+                    ""
+                }
+            ));
+        }
+        let rows = drained
+            .entries
+            .iter()
+            .filter_map(|(key, value)| HistRow::decode(key, value))
+            .collect();
+        Ok((rows, unwaited))
     }
 
     /// Runs of these programs the kernel skipped, and counted only for itself.
@@ -1137,6 +1421,73 @@ mod tests {
             1,
             "the only program there is has to carry the comparison"
         );
+    }
+
+    /// A close into the histogram adds to a `(device, bucket)` row in the
+    /// kernel and writes no ring record: the per-request stream is exactly
+    /// what `--emit hist` alone is meant not to pay for.
+    #[test]
+    fn a_histogram_close_writes_no_record_and_counts_its_row_atomically() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = close_instructions_into(
+            btf,
+            Stage::Latency,
+            Submitter::Any,
+            3,
+            Sink::Histogram(7),
+            5,
+            Some(6),
+        )
+        .expect("a program");
+        let helpers = helpers_called(&program);
+        assert!(
+            !helpers.contains(&helper::RINGBUF_OUTPUT),
+            "a histogram run publishes no record per request"
+        );
+        assert!(
+            helpers.contains(&helper::MAP_UPDATE_ELEM),
+            "a new row is inserted"
+        );
+        // `lock xadd` on a doubleword: the count and the total, on each of the
+        // two paths into a row (found, and lost the insert race).
+        const ATOMIC_DW: u8 = 0xdb;
+        let atomics = program.iter().filter(|insn| insn.code == ATOMIC_DW).count();
+        assert_eq!(atomics, 4, "two atomic adds on each path into a row");
+        // A stage with no interval has nothing to bucket.
+        let error = close_instructions_into(
+            btf,
+            Stage::Size,
+            Submitter::Any,
+            -1,
+            Sink::Histogram(7),
+            5,
+            Some(6),
+        )
+        .expect_err("io.size has no interval");
+        assert!(error.contains("measures none"), "{error}");
+    }
+
+    /// The row the program writes is the row the reader decodes: the device
+    /// then the bucket in the key, the count then the total in the value.
+    #[test]
+    fn a_histogram_row_decodes_where_the_program_writes_it() {
+        let mut key = Vec::new();
+        key.extend(((8u32 << 20) | 1).to_ne_bytes());
+        key.extend(13u32.to_ne_bytes());
+        let mut value = Vec::new();
+        value.extend(3u64.to_ne_bytes());
+        value.extend(12_345u64.to_ne_bytes());
+        assert_eq!(key.len(), HIST_KEY_BYTES);
+        assert_eq!(value.len(), HIST_VALUE_BYTES);
+        let row = HistRow::decode(&key, &value).expect("a row");
+        assert_eq!((row.major(), row.minor(), row.bucket), (8, 1, 13));
+        assert_eq!((row.count, row.total_ns), (3, 12_345));
+        assert_eq!(row.bucket_low_ns(), 1 << 12);
+        // And the program's stack slots are laid out the same way.
+        assert_eq!(HIST_VAL_COUNT, 0);
+        assert_eq!(HIST_VAL_TOTAL, 8);
+        assert!(HIST_VALUE + HIST_VALUE_BYTES as i16 <= HIST_KEY);
+        assert!(HIST_KEY + HIST_KEY_BYTES as i16 <= CLOSE_DROP_KEY);
     }
 
     /// The paired stages subtract; the unpaired one has nothing to subtract

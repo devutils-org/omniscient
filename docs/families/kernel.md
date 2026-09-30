@@ -965,3 +965,27 @@ scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 --configs caps
   `net.hwts`, printed, and check the other five and two sources; at paranoid
   2, `sched.switches` through `pmu:sw` is refused with exit 1 (the machine's),
   not 3.
+
+---
+
+# The fifteenth wave — stream kernel
+
+The handoff, with every test and measurement, is `docs/fixes/w15-kernel.md`.
+What changed in the family:
+
+- **`net.hwts` declares its modes per backend**: `so_timestamping` `trace`,
+  `netlink:ethtool` `poll` and `snapshot`. A source listed usable now starts in
+  every mode that resolves, which `scenario_net` asks of every usable `net`
+  source.
+- **`io.latency --emit hist` is built in the kernel** when a log2 histogram is
+  the whole request: `(device, log2 bucket)` rows, read once at the end, no
+  record per request. Equal to the streamed histogram of the same requests,
+  held by `scenario_io`. Anything else still streams, because a join, a filter
+  and every other emit need the requests one at a time.
+- **The wakeup ring's loss path is measured on every machine**: a futex burst
+  of 16 384 waiters overflows it by construction, and a paced 6 000 wakeups a
+  second (1.3 % of what it drains) loses nothing and says so.
+- **The BTF cross-check against bpftool runs**: it had skipped everywhere,
+  reading the per-cpu section's member line as the variable's.
+- Ten notes that carried their source's indentation (a line continuation that
+  lost its `\`) read as one sentence again.
