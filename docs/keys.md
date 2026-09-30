@@ -8,10 +8,12 @@ needs to know what a `bio` or a `malloc` is.
 
 Three rules govern how keys are compared, and they come before the list:
 
-- **A join compares a key's printed form**, `join::identity`, the `Display`
-  of `KeyValue`, and nothing more. So the fields a key carries but does not
-  print take no part in a match. That is `iface`'s index, and `blk`'s open
-  timestamp, which `scoped_eq` reads separately as the scope.
+- **A join compares a key's identity**, `join::identity`, which is the
+  `Display` of `KeyValue` except that `blk` drops its open timestamp, which
+  `scoped_eq` reads separately as the scope (`join::scope`). So the fields a
+  key carries but does not print take no part in a match: that is `iface`'s
+  index. And `blk`'s open timestamp, although printed, is compared only as a
+  scope, never as part of the identity.
 - **Match kinds follow the key.** `mem` is matched by interval, and `blk` by
   scoped equality (`is_scoped`). `wakeup` and `woke` are refused on any key
   but `task`, which they follow from waker to wakee. Every other key is matched by plain equality.

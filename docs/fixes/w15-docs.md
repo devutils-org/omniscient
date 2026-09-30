@@ -68,6 +68,18 @@ test of its own, so the check is the code the document was read against, plus
 `docs/contributing.md` needed nothing. No request in `docs/open-findings.md`
 names it, and nothing in it contradicts the code.
 
+### Review fixes
+
+- `docs/keys.md`, first comparison rule: it said a join compares the `Display`
+  of `KeyValue` and nothing more, so `blk`'s open timestamp takes no part. But
+  `KeyValue::Blk`'s `Display` prints the timestamp (`blk:{ptr:#x}@{open_ts}`,
+  `src/event.rs`); what keeps it out of the identity is the special case in
+  `join::identity` (`src/join.rs`), which formats only `blk:{ptr:#x}`, and
+  `join::scope` reads `open_ts` apart. The rule now says identity is the
+  `Display` except that `blk` drops its open timestamp. The `iface` paragraph
+  was left as is: `Iface`'s `Display` prints the name only, so the index truly
+  is unprinted and uncompared. Checked with `cargo test --test cli`.
+
 ## Open
 
 - **The phase 9 guardrail sentence** is pending the probes stream: whether the
