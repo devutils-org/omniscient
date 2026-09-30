@@ -206,11 +206,8 @@ fn ibs_callchain(
     resolved: &crate::resolve::ResolvedRequest,
 ) -> Result<crate::perf::Callchain, String> {
     let request = &resolved.request;
-    match request.stack {
-        Some(mode) => crate::stack::callchain_for(mode),
-        None if request.emit.contains(&crate::request::Emit::Stack) => {
-            Ok(crate::perf::Callchain::FramePointers)
-        }
-        None => Ok(crate::perf::Callchain::Off),
+    if request.stack.is_none() && !request.emit.contains(&crate::request::Emit::Stack) {
+        return Ok(crate::perf::Callchain::Off);
     }
+    crate::stack::choose(request, &resolved.environment).map(|choice| choice.callchain())
 }

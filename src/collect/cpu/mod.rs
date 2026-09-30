@@ -20,7 +20,6 @@ mod topdown;
 mod util;
 
 use super::Factory;
-use crate::request::StackMode;
 
 /// The collectors this family provides.
 ///
@@ -74,10 +73,10 @@ pub fn factories() -> Vec<Factory> {
             // dwarf` is a refusal with a reason and a refusal belongs before
             // the target is launched.
             Factory::new("cpu.profile", "pmu:sw", |resolved| {
-                let mode = resolved.request.stack.unwrap_or(StackMode::Fp);
+                let choice = crate::stack::choose(&resolved.request, &resolved.environment)?;
                 Ok(Box::new(profile::Prepare {
                     mode: resolved.request.mode,
-                    callchain: crate::stack::callchain_for(mode)?,
+                    callchain: choice.callchain(),
                 }))
             }),
         ])

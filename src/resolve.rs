@@ -18,7 +18,7 @@ use crate::capabilities::{Capabilities, Environment, Probe};
 use crate::catalog::{Backend, Catalog, Cost, Entry, TargetSupport};
 use crate::error::{one_of, ParseError};
 use crate::filter::FilterExpr;
-use crate::request::{ModeKind, Request, Target, TargetKind};
+use crate::request::{KeyKind, ModeKind, Request, Target, TargetKind};
 
 /// A request plus every decision made about it. The lockfile of a measurement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,6 +233,24 @@ pub enum ResolveError {
         backend: String,
         field: String,
         /// The backend of the chain that does carry it, when one does.
+        elsewhere: Option<String>,
+    },
+    /// The twin of `FilterFieldNotCarried`, for a key: `--keys task` on a
+    /// backend that attaches no task would produce events that join to
+    /// nothing, which is refused rather than recorded.
+    #[error(
+        "`{source_id}` is keyed on `{key}`, which the selected backend `{backend}` does not \
+         attach:\n{}",
+        .elsewhere.as_ref().map_or_else(
+            || format!("  no backend of `{source_id}` attaches it"),
+            |ids| format!("  `{ids}` does, and `--backend force:{ids}` is how to ask for it"),
+        )
+    )]
+    KeyNotCarried {
+        source_id: String,
+        backend: String,
+        key: KeyKind,
+        /// The backend of the chain that does attach it, when one does.
         elsewhere: Option<String>,
     },
 }

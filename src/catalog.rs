@@ -418,6 +418,11 @@ pub enum Unit {
     Ratio,
     Hz,
     Joules,
+    /// A power, as the hardware reported it: an instantaneous draw or a mean
+    /// over the device's own window, never an energy. Kept apart from
+    /// `joules` because the two answer different questions -- how much was
+    /// spent, and how fast -- and a rate over a level is not one over a count.
+    Watts,
     Celsius,
     /// Core clock cycles, as the hardware counted them. Kept apart from `ns`
     /// on purpose: converting goes through a clock that moves with load and
@@ -434,6 +439,7 @@ impl Unit {
             Unit::Ratio => "ratio",
             Unit::Hz => "hz",
             Unit::Joules => "joules",
+            Unit::Watts => "watts",
             Unit::Celsius => "celsius",
             Unit::Cycles => "cycles",
         }
@@ -818,13 +824,14 @@ impl FromStr for Unit {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        const ALL: [Unit; 8] = [
+        const ALL: [Unit; 9] = [
             Unit::Ns,
             Unit::Bytes,
             Unit::Count,
             Unit::Ratio,
             Unit::Hz,
             Unit::Joules,
+            Unit::Watts,
             Unit::Celsius,
             Unit::Cycles,
         ];
@@ -845,6 +852,13 @@ mod tests {
 
     fn catalog() -> Catalog {
         Catalog::embedded().expect("the embedded catalog must load")
+    }
+
+    #[test]
+    fn a_power_is_a_unit_of_its_own() {
+        assert_eq!("watts".parse::<Unit>().unwrap(), Unit::Watts);
+        assert_eq!(Unit::Watts.to_string(), "watts");
+        assert_ne!(Unit::Watts, Unit::Joules);
     }
 
     #[test]
