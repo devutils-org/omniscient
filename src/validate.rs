@@ -595,10 +595,18 @@ fn check_stack(
             entry.id
         ));
     }
-    if stack == StackMode::Dwarf {
-        report.push(
-            "dwarf unwinding copies the stack on every sample: expect far more volume and overhead than frame pointers",
-        );
+    // What the mode declares it costs and gives up, from the mode table the
+    // chooser reads, so the validator and the resolved file say one thing.
+    if let Some(declared) = crate::stack::unwind::entry(stack) {
+        if declared.copies > 0 {
+            report.push(format!(
+                "`--stack {stack}` copies {} bytes of user stack with every sample (cost {}): expect more volume and overhead than frame pointers",
+                declared.copies, declared.cost
+            ));
+        }
+        if let Some(degraded) = &declared.degraded {
+            report.push(format!("`--stack {stack}`: {degraded}"));
+        }
     }
 }
 

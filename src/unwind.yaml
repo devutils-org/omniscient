@@ -1,0 +1,73 @@
+# The ways a stack can be unwound, declared the way a catalog entry declares
+# its backends: ordered best first, each with the requirements a probe answers
+# (available, missing or unknown), what it copies with every sample, and what
+# it gives up relative to the modes above it.
+#
+# `--stack auto` -- the default -- walks this list and takes the first mode
+# whose every requirement this machine and this target answer available, and
+# the resolved file keeps every mode it passed over with the reason.
+# `--stack <mode>` forces one: refused where a requirement is missing, served
+# with the unchecked ones written down where it is only unknown.
+#
+# Requirement classes, answered in `src/unwind.rs`:
+#   perf:callchain          the kernel hands this user a frame-pointer walk
+#   perf:user_stack         the kernel copies the user registers and stack
+#   pmu:branch_call_stack   the cpu keeps a call stack in its branch records
+#   kernel:sframe           the kernel unwinds user stacks from `.sframe`
+#   target:frame_pointers   the target's own code sets up frame pointers
+#   target:cfi              the target carries `.eh_frame` or `.debug_frame`
+#   target:sframe           the target carries a `.sframe` section
+#
+# `copies` is the bytes of user stack the kernel copies per sample, on top of
+# the word per frame of any callchain and the three or four words of
+# registers; `docs/unwind.md` has what each costs, measured.
+#
+# Not in `CATALOG.md`'s entry schema, and not in `catalog/`: `Catalog::load_dir`
+# reads every YAML file there as catalog entries (see docs/unwind.md).
+
+- mode: sframe
+  summary: "the kernel walks the user stack from the binary's .sframe section"
+  requires: ["kernel:sframe", "target:sframe", "perf:callchain"]
+  copies: 0
+  cost: low
+
+- mode: fp+leaf
+  summary: "the kernel's frame-pointer walk, and the caller of a frameless leaf recovered from its CFI"
+  requires: ["perf:callchain", "perf:user_stack", "target:frame_pointers", "target:cfi"]
+  copies: 256
+  cost: low
+  degraded: "only the leaf's caller is recovered: a frameless function further
+    down the stack still breaks the chain under it"
+
+- mode: dwarf
+  summary: "the user stack copied with each sample and unwound here from .eh_frame"
+  requires: ["perf:user_stack", "target:cfi"]
+  copies: 8192
+  cost: high
+  degraded: "8 KiB of user stack is copied with every sample, so the rings fill
+    about a hundred times faster than under frame pointers, and a stack deeper
+    than the copy is cut where it ends"
+
+- mode: lbr
+  summary: "the cpu's branch records in call-stack mode"
+  requires: ["pmu:branch_call_stack"]
+  copies: 0
+  cost: low
+  degraded: "the branch records hold 16 to 32 calls: a deeper stack is cut at
+    its root end"
+
+- mode: fp
+  summary: "the kernel's frame-pointer walk"
+  requires: ["perf:callchain"]
+  copies: 0
+  cost: low
+  degraded: "the caller of a function that sets up no frame pointer is lost --
+    every frameless leaf, and whole stacks of a target built without them"
+
+- mode: none
+  summary: "no stacks: each sample is an instruction pointer"
+  requires: []
+  copies: 0
+  cost: free
+  auto: false
+  degraded: "no stack at all"

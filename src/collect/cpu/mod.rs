@@ -76,7 +76,8 @@ pub fn factories() -> Vec<Factory> {
                 let choice = crate::stack::choose(&resolved.request, &resolved.environment)?;
                 Ok(Box::new(profile::Prepare {
                     mode: resolved.request.mode,
-                    callchain: choice.callchain(),
+                    choice,
+                    debuginfod: None,
                 }))
             }),
         ])

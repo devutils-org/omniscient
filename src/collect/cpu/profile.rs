@@ -39,7 +39,8 @@ use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Callchain, Found, Record, SampleSpec, TaskSampler, ThreadSampler};
 use crate::request::{Mode, Target};
-use crate::stack::Unwinder;
+use crate::stack::unwind::Debuginfod;
+use crate::stack::{StackChoice, Unwinder};
 
 const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 
@@ -71,7 +72,27 @@ fn cpu_before(task: Found) -> u64 {
 
 pub struct Prepare {
     pub mode: Mode,
-    pub callchain: Callchain,
+    /// How the stacks are unwound, as [`crate::stack::choose`] decided.
+    pub choice: StackChoice,
+    /// Where a stripped file's names are fetched from, when `--symbols
+    /// debuginfod` asked for that.
+    pub debuginfod: Option<std::sync::Arc<Debuginfod>>,
+}
+
+impl Prepare {
+    fn collector(&self, pid: i32, whole_process: bool) -> ProfileCollector {
+        let mut collector =
+            ProfileCollector::new(pid, self.mode, self.choice.callchain(), whole_process);
+        collector.debuginfod = self.debuginfod.clone();
+        if pid > 0 {
+            collector.unwinders.insert(
+                pid as u32,
+                Unwinder::new(pid, collector.callchain, collector.debuginfod.clone()),
+            );
+        }
+        collector.choice = Some(self.choice.clone());
+        collector
+    }
 }
 
 impl Prepared for Prepare {
@@ -90,7 +111,7 @@ impl Prepared for Prepare {
             _ => None,
         };
         if let Some(cpus) = cpus {
-            let mut collector = ProfileCollector::new(-1, self.mode, self.callchain, false);
+            let mut collector = self.collector(-1, false);
             collector.cpus = Some(cpus);
             return Ok(Box::new(collector));
         }
@@ -98,7 +119,7 @@ impl Prepared for Prepare {
         // to the cgroup's tasks (`cgroup.rs`).
         if let Target::Cgroup(path) = target {
             let cgroup = super::cgroup::Cgroup::resolve(path)?;
-            let mut collector = ProfileCollector::new(-1, self.mode, self.callchain, false);
+            let mut collector = self.collector(-1, false);
             collector.cpus = Some(
                 crate::perf::online_cpus()
                     .map_err(|error| format!("cannot tell which cpus are online: {error}"))?,
@@ -113,14 +134,11 @@ impl Prepared for Prepare {
                 target.kind()
             )
         })?;
-        Ok(Box::new(ProfileCollector::new(
-            pid,
-            self.mode,
-            self.callchain,
-            // A `--tid` target is that task and what it starts. Every other
-            // target that names a process is every thread it has.
-            !matches!(target, Target::Tid(_)),
-        )))
+        // A `--tid` target is that task and what it starts. Every other
+        // target that names a process is every thread it has.
+        Ok(Box::new(
+            self.collector(pid, !matches!(target, Target::Tid(_))),
+        ))
     }
 }
 
@@ -211,6 +229,13 @@ pub struct ProfileCollector {
     found_late: usize,
     unsampled_ns: u64,
     unwinding: bool,
+    /// How the stacks are unwound and why, when a chooser decided it.
+    choice: Option<StackChoice>,
+    debuginfod: Option<std::sync::Arc<Debuginfod>>,
+    /// What each ring lost, by the key its ring belongs to: the task a
+    /// per-task ring follows, the cpu a per-cpu ring is pinned to. Read from
+    /// the sampler at each drain, because `stop` closes it.
+    ring_losses: Vec<(KeyValue, u64)>,
 }
 
 impl ProfileCollector {
@@ -241,6 +266,9 @@ impl ProfileCollector {
             found_late: 0,
             unsampled_ns: 0,
             unwinding: true,
+            choice: None,
+            debuginfod: None,
+            ring_losses: Vec::new(),
         }
     }
 
@@ -258,6 +286,8 @@ impl ProfileCollector {
         let idle = &mut self.idle;
         let mut index = seq;
         let cgroup_key = self.cgroup.as_ref().map(|cgroup| cgroup.key());
+        let callchain = self.callchain;
+        let debuginfod = &self.debuginfod;
         let mut dropped = 0u64;
         let mut undecoded = 0u64;
         event.drain(|record| match record {
@@ -273,12 +303,16 @@ impl ProfileCollector {
                 // Only a sample with a stack needs its process's mappings:
                 // over a machine, reading every process's maps for samples
                 // that carry one address each would cost more than they do.
-                let stack = sample.callchain.as_ref().and_then(|_| {
+                let carries_stack = sample.callchain.is_some() || sample.user_regs.is_some();
+                let stack = carries_stack.then(|| {
                     unwinders
                         .entry(sample.pid)
-                        .or_insert_with(|| Unwinder::for_process(sample.pid as i32))
+                        .or_insert_with(|| {
+                            Unwinder::new(sample.pid as i32, callchain, debuginfod.clone())
+                        })
                         .record(&sample)
                 });
+                let stack = stack.flatten();
                 if let Some(stack) = stack {
                     let run_id = *stack_ids.entry((sample.pid, stack.0)).or_insert_with(|| {
                         stack_origins.push((sample.pid, stack.0));
@@ -308,6 +342,18 @@ impl ProfileCollector {
             Record::Throttle { .. } => {}
             Record::Other { .. } => undecoded += 1,
         });
+        self.ring_losses = match &*event {
+            Sampler::Tasks(sampler) => sampler
+                .lost_by_task()
+                .into_iter()
+                .map(|(tid, lost)| (KeyValue::task(tid), lost))
+                .collect(),
+            Sampler::Cpus(sampler) => sampler
+                .lost_by_cpu()
+                .into_iter()
+                .map(|(cpu, lost)| (KeyValue::cpu(cpu), lost))
+                .collect(),
+        };
         let throttles = event.throttled() - self.throttled;
         self.throttled += throttles;
         if dropped > 0 {
@@ -447,6 +493,40 @@ impl Collector for ProfileCollector {
         self.losses.clone()
     }
 
+    /// Each ring is one task's, or one cpu's, so what it dropped is that
+    /// key's series' loss and no other's.
+    fn losses_by_ring(&self) -> Vec<crate::collect::RingLoss> {
+        self.ring_losses
+            .iter()
+            .map(|(key, lost)| {
+                let mut losses = Losses {
+                    dropped: *lost,
+                    ..Losses::default()
+                };
+                losses.note(format!(
+                    "the ring of {key} overflowed: {lost} samples were taken and never read"
+                ));
+                crate::collect::RingLoss {
+                    key: key.clone(),
+                    losses,
+                }
+            })
+            .collect()
+    }
+
+    fn facts(&self) -> Vec<String> {
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(choice) = &self.choice {
+            facts.push(describe_choice(choice));
+        }
+        for fact in self.unwinders.values().flat_map(Unwinder::facts) {
+            if !facts.contains(&fact) {
+                facts.push(fact);
+            }
+        }
+        facts
+    }
+
     /// Root first, which is the order [`crate::emit::Results::stacks`] stores
     /// and the `folded` format writes.
     fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
@@ -539,6 +619,14 @@ impl Collector for ProfileCollector {
                 if processes == 1 { "was" } else { "were" },
             ));
         }
+        if let Some(choice) = &self.choice {
+            for degradation in &choice.degradations {
+                let note = format!("stacks unwound by `{}`: {degradation}", choice.mode);
+                if !notes.contains(&note) {
+                    notes.push(note);
+                }
+            }
+        }
         if !self.unwinding {
             notes.push(
                 "no unwind mode was asked for, so each sample is one instruction pointer and \
@@ -548,6 +636,43 @@ impl Collector for ProfileCollector {
         }
         notes
     }
+}
+
+/// The unwind mode a profile used and how it came to it, in one line.
+fn describe_choice(choice: &StackChoice) -> String {
+    let how = if choice.forced {
+        "forced by `--stack`".to_owned()
+    } else {
+        let passed: Vec<String> = choice
+            .considered
+            .iter()
+            .filter_map(|considered| match &considered.verdict {
+                crate::resolve::Verdict::Rejected(reasons) => Some(format!(
+                    "{} ({})",
+                    considered.mode,
+                    reasons.first().cloned().unwrap_or_default()
+                )),
+                crate::resolve::Verdict::Unimplemented => {
+                    Some(format!("{} (served here, not built)", considered.mode))
+                }
+                _ => None,
+            })
+            .collect();
+        if passed.is_empty() {
+            "chosen by `--stack auto`".to_owned()
+        } else {
+            format!("chosen by `--stack auto` over {}", passed.join(", "))
+        }
+    };
+    format!(
+        "stacks unwound by `{}`{}, {how}",
+        choice.mode,
+        if choice.user_only {
+            ", user half only"
+        } else {
+            ""
+        }
+    )
 }
 
 #[cfg(test)]
@@ -579,7 +704,7 @@ mod tests {
             Mode::Sample {
                 freq: crate::scalar::Frequency::from_hz(997),
             },
-            Callchain::FramePointers,
+            Callchain::BOTH_HALVES,
             true,
         );
         if collector.start().is_err() {
@@ -661,7 +786,8 @@ mod tests {
             mode: Mode::Sample {
                 freq: Mode::DEFAULT_SAMPLE_FREQ,
             },
-            callchain: Callchain::FramePointers,
+            choice: StackChoice::of(crate::request::StackMode::Fp),
+            debuginfod: None,
         });
         let Err(error) = prepare.attach(&Target::Container("web".into())) else {
             panic!("a container target names no process, no cpu and no cgroup");
@@ -678,7 +804,8 @@ mod tests {
             mode: Mode::Sample {
                 freq: Mode::DEFAULT_SAMPLE_FREQ,
             },
-            callchain: Callchain::Off,
+            choice: StackChoice::of(crate::request::StackMode::None),
+            debuginfod: None,
         });
         let Err(error) = prepare.attach(&Target::Cgroup("/omn-no-such-cgroup".into())) else {
             panic!("a cgroup that does not exist cannot be profiled");
@@ -698,7 +825,8 @@ mod tests {
             mode: Mode::Sample {
                 freq: crate::scalar::Frequency::from_hz(997),
             },
-            callchain: Callchain::Off,
+            choice: StackChoice::of(crate::request::StackMode::None),
+            debuginfod: None,
         });
         let mut collector = prepare
             .attach(&Target::System)
@@ -759,7 +887,7 @@ mod tests {
     /// silently profiling at a default rate nobody asked for.
     #[test]
     fn a_mode_that_is_not_sampling_is_refused_with_the_one_that_is() {
-        let error = ProfileCollector::new(0, Mode::Trace, Callchain::FramePointers, true)
+        let error = ProfileCollector::new(0, Mode::Trace, Callchain::BOTH_HALVES, true)
             .start()
             .unwrap_err();
         assert!(error.contains("--mode sample@99hz"), "{error}");

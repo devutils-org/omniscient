@@ -130,8 +130,12 @@ impl SampleSpec {
     /// decoder reads: the kernel writes them in the order of their bits.
     fn sample_type(&self) -> u64 {
         let mut sample_type = SAMPLE_TYPE;
-        if self.callchain == Callchain::FramePointers {
+        if self.callchain.asks_callchain() {
             sample_type |= sys::bindings::PERF_SAMPLE_CALLCHAIN as u64;
+        }
+        if self.callchain.user_regs() {
+            sample_type |= (sys::bindings::PERF_SAMPLE_REGS_USER
+                | sys::bindings::PERF_SAMPLE_STACK_USER) as u64;
         }
         if self.memory {
             sample_type |= (sys::bindings::PERF_SAMPLE_CPU
@@ -363,6 +367,13 @@ pub struct Sample {
     /// `Some(empty)`: the second means the unwinder was asked and came back
     /// with nothing. [`crate::stack`] is what turns this into frames.
     pub callchain: Option<Vec<u64>>,
+    /// The task's user registers at the sample, when the event asked for
+    /// them. `None` for a sample of a kernel thread, which has none.
+    pub user_regs: Option<UserRegs>,
+    /// The top of the task's user stack, from the stack pointer up, when the
+    /// event asked for it: as many bytes as the kernel could copy, which is
+    /// fewer than asked where the stack is shallower.
+    pub user_stack: Option<Vec<u8>>,
     /// The cpu the sample was taken on, when the event asked for it.
     pub cpu: Option<u32>,
     /// Where the sampled access went and how long it waited, when the event
@@ -392,11 +403,20 @@ impl CpuMode {
     }
 }
 
-/// Whether the kernel is asked to walk the stack at every sample.
+/// What the kernel is asked to hand over at every sample so that its stack can
+/// be unwound.
 ///
 /// This is a request to the kernel, not a post-processing choice: the walk
 /// happens in the interrupt handler, with the sampled task's registers still
 /// live, and nothing afterwards can recover a stack that was not taken then.
+/// Each unwind mode of [`crate::request::StackMode`] is one of these shapes,
+/// and [`crate::stack::choose`] is what picks it.
+///
+/// `kernel` is whether the kernel half of the stack is asked for. It is false
+/// where `perf_event_paranoid` refuses kernel profiling to this user (2, the
+/// kernel's default): the event is then opened with `exclude_kernel`, so a
+/// sample taken while the task ran in the kernel is not delivered at all, and
+/// the stacks that are delivered hold only the task's own frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Callchain {
     /// No stack. A sample is an instruction pointer and nothing else.
@@ -405,10 +425,137 @@ pub enum Callchain {
     /// The kernel walks frame pointers, in kernel mode and then in the target's
     /// own mode, and writes both chains with a marker between them.
     ///
-    /// Cheap -- a few dozen loads per sample -- and worth exactly what the
-    /// target's build is worth: a program compiled without frame pointers has
-    /// no chain to walk and yields its leaf frame alone.
-    FramePointers,
+    /// Cheap -- a word per frame -- and worth exactly what the target's build is
+    /// worth: a program compiled without frame pointers has no chain to walk
+    /// and yields its leaf frame alone.
+    FramePointers { kernel: bool },
+    /// The frame-pointer chain, plus the user registers and the top
+    /// [`LEAF_STACK_BYTES`] of the user stack: enough to find, from the leaf's
+    /// call frame information, the return address a frameless leaf left there
+    /// and which the frame-pointer walk steps over.
+    FramePointersAndLeaf { kernel: bool },
+    /// The user registers and [`COPIED_STACK_BYTES`] of the user stack, for an
+    /// unwinder in this process to walk from `.eh_frame`. The kernel still
+    /// walks its own half, when `kernel`, and not the user one.
+    CopiedStack { kernel: bool },
+}
+
+/// How much of the user stack `fp+leaf` copies with each sample.
+///
+/// A frameless leaf keeps its return address at the stack pointer plus what
+/// the leaf itself pushed or reserved, which for the functions that go
+/// frameless -- small, register-only -- is a few words. 256 bytes is 32 of
+/// them; a leaf that reserved more is reported as not recovered, not guessed.
+pub const LEAF_STACK_BYTES: u32 = 256;
+
+/// How much of the user stack `dwarf` copies with each sample: what `perf
+/// record --call-graph dwarf` copies by default. A stack deeper than this is
+/// unwound as far as the copy reaches, and said to be cut there.
+pub const COPIED_STACK_BYTES: u32 = 8192;
+
+impl Callchain {
+    /// Both halves of the frame-pointer walk, the shape every profile had
+    /// before the unwind modes.
+    pub const BOTH_HALVES: Callchain = Callchain::FramePointers { kernel: true };
+
+    /// Whether the kernel half is asked for.
+    pub fn kernel(self) -> bool {
+        match self {
+            Callchain::Off => false,
+            Callchain::FramePointers { kernel }
+            | Callchain::FramePointersAndLeaf { kernel }
+            | Callchain::CopiedStack { kernel } => kernel,
+        }
+    }
+
+    /// The same shape with the kernel half dropped.
+    pub fn user_only(self) -> Callchain {
+        match self {
+            Callchain::Off => Callchain::Off,
+            Callchain::FramePointers { .. } => Callchain::FramePointers { kernel: false },
+            Callchain::FramePointersAndLeaf { .. } => {
+                Callchain::FramePointersAndLeaf { kernel: false }
+            }
+            Callchain::CopiedStack { .. } => Callchain::CopiedStack { kernel: false },
+        }
+    }
+
+    /// Whether the event is opened with `exclude_kernel`, because the kernel
+    /// half was not asked for.
+    fn excludes_kernel(self) -> bool {
+        self != Callchain::Off && !self.kernel()
+    }
+
+    /// Whether the kernel writes a `PERF_SAMPLE_CALLCHAIN` at all.
+    fn asks_callchain(self) -> bool {
+        match self {
+            Callchain::Off => false,
+            Callchain::FramePointers { .. } | Callchain::FramePointersAndLeaf { .. } => true,
+            Callchain::CopiedStack { kernel } => kernel,
+        }
+    }
+
+    /// The bytes of user stack copied with each sample, zero for none.
+    pub fn user_stack_bytes(self) -> u32 {
+        match self {
+            Callchain::Off | Callchain::FramePointers { .. } => 0,
+            Callchain::FramePointersAndLeaf { .. } => LEAF_STACK_BYTES,
+            Callchain::CopiedStack { .. } => COPIED_STACK_BYTES,
+        }
+    }
+
+    /// Whether the user registers come with each sample.
+    pub fn user_regs(self) -> bool {
+        self.user_stack_bytes() > 0
+    }
+}
+
+/// The user registers an unwinder starts from: the instruction pointer, the
+/// stack pointer and the frame pointer, and on aarch64 the link register.
+///
+/// Only these, because they are the only ones a return address is computed
+/// from in practice (`framehop`'s own reasoning, and `perf`'s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UserRegs {
+    pub ip: u64,
+    pub sp: u64,
+    pub fp: u64,
+    /// aarch64's link register; zero on x86_64, which has none.
+    pub lr: u64,
+}
+
+/// `perf_event_attr.sample_regs_user` for [`UserRegs`], and the order the
+/// kernel writes them in: by bit, lowest first.
+#[cfg(target_arch = "x86_64")]
+const USER_REGS_MASK: u64 = (1 << 6) | (1 << 7) | (1 << 8); // bp, sp, ip
+#[cfg(target_arch = "aarch64")]
+const USER_REGS_MASK: u64 = (1 << 29) | (1 << 30) | (1 << 31) | (1 << 32); // x29, lr, sp, pc
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const USER_REGS_MASK: u64 = 0;
+
+impl UserRegs {
+    fn from_words(words: &[u64]) -> Option<Self> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let [bp, sp, ip] = words.try_into().ok()?;
+            Some(Self {
+                ip,
+                sp,
+                fp: bp,
+                lr: 0,
+            })
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let [fp, lr, sp, ip] = words.try_into().ok()?;
+            Some(Self { ip, sp, fp, lr })
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            let _ = words;
+            None
+        }
+    }
 }
 
 /// The sample fields this reader requests, in the order the kernel writes them.
@@ -560,17 +707,17 @@ impl SampledEvent {
     /// the kernel's build options all have a veto, and only the kernel holds
     /// all three. The event is over the calling process, so the probe measures
     /// nothing and disturbs nothing.
+    ///
+    /// Yes when either shape opens: both halves, or the user half alone. At
+    /// `perf_event_paranoid` 2 -- the kernel's default -- only the second does,
+    /// and a profile of the user's own program is still a profile;
+    /// [`kernel_callchain_allowed`] is what tells the two apart, and
+    /// [`crate::stack::choose`] is where the choice is made and written down.
     pub fn callchain_supported() -> io::Result<()> {
-        Self::open_software_with(
-            sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
-            // Far longer than the probe lives: it is never enabled, and a
-            // period this long would not fire if it were.
-            u64::from(u32::MAX),
-            Scope::Process(0),
-            MIN_RING_PAGES,
-            Callchain::FramePointers,
-        )
-        .map(drop)
+        if kernel_callchain_allowed() {
+            return Ok(());
+        }
+        probe_open(Callchain::FramePointers { kernel: false })
     }
 
     /// Whether this event asks the kernel to unwind.
@@ -796,6 +943,45 @@ fn decode_sample(body: &[u8], misc: u16, sample_type: u64) -> Sample {
         index += 1 + chain.len();
         chain
     });
+    // `abi`, then one word per register in the mask, lowest bit first; no
+    // registers at all for a task with no user half.
+    let user_regs = if asked(b::PERF_SAMPLE_REGS_USER) {
+        let abi = word_at(body, index).unwrap_or(0);
+        index += 1;
+        if abi == 0 {
+            None
+        } else {
+            let count = USER_REGS_MASK.count_ones() as usize;
+            let words: Vec<u64> = (0..count)
+                .map(|offset| word_at(body, index + offset).unwrap_or(0))
+                .collect();
+            index += count;
+            UserRegs::from_words(&words)
+        }
+    } else {
+        None
+    };
+    // `size`, `size` bytes, and -- only when `size` is not zero -- `dyn_size`,
+    // the part of them the kernel actually filled.
+    let user_stack = if asked(b::PERF_SAMPLE_STACK_USER) {
+        let size = word_at(body, index).unwrap_or(0) as usize;
+        index += 1;
+        let start = 8 + index * 8;
+        let data = body
+            .get(start..start + size)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        index += size.div_ceil(8);
+        if size > 0 {
+            let filled = word_at(body, index).unwrap_or(0) as usize;
+            index += 1;
+            Some(data[..filled.min(data.len())].to_vec())
+        } else {
+            Some(Vec::new())
+        }
+    } else {
+        None
+    };
     let weight = asked(b::PERF_SAMPLE_WEIGHT_STRUCT).then(|| {
         let word = word_at(body, index).unwrap_or(0);
         index += 1;
@@ -814,6 +1000,8 @@ fn decode_sample(body: &[u8], misc: u16, sample_type: u64) -> Sample {
         addr,
         cpu_mode: CpuMode::from_misc(misc),
         callchain,
+        user_regs,
+        user_stack,
         cpu,
         access: match (weight, data_src) {
             (Some(weight), Some(data_src)) => Some(MemoryAccess::from_words(weight, data_src)),
@@ -835,6 +1023,83 @@ impl Drop for SampledEvent {
     }
 }
 
+/// Opens a never-enabled cpu-clock event over this process with the given
+/// stack shape, and closes it: the one question only the kernel can answer.
+fn probe_open(callchain: Callchain) -> io::Result<()> {
+    SampledEvent::open_software_with(
+        sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
+        // Far longer than the probe lives: it is never enabled, and a period
+        // this long would not fire if it were.
+        u64::from(u32::MAX),
+        Scope::Process(0),
+        MIN_RING_PAGES,
+        callchain,
+    )
+    .map(drop)
+}
+
+/// Whether this user may have the kernel half of a stack, which is whether it
+/// may profile the kernel at all: `perf_event_paranoid` below 2, or
+/// `CAP_PERFMON`.
+///
+/// Asked once per process and kept: the answer is the machine's, and every
+/// profile of a run asks it.
+pub fn kernel_callchain_allowed() -> bool {
+    static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ANSWER.get_or_init(|| probe_open(Callchain::BOTH_HALVES).is_ok())
+}
+
+/// Whether the kernel will copy the user registers and a slice of the user
+/// stack with each sample, which `fp+leaf` and `dwarf` both need.
+///
+/// `PERF_SAMPLE_REGS_USER` and `PERF_SAMPLE_STACK_USER` are per-architecture
+/// (`HAVE_PERF_USER_STACK_DUMP`), and a kernel that lacks them refuses the
+/// open with `EINVAL` rather than quietly leaving them out.
+pub fn user_stack_supported() -> io::Result<()> {
+    static ANSWER: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            if USER_REGS_MASK == 0 {
+                return Err(format!(
+                    "this build names no user registers for {}",
+                    std::env::consts::ARCH
+                ));
+            }
+            probe_open(Callchain::CopiedStack { kernel: false }).map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(io::Error::other)
+}
+
+/// Whether the cpu keeps a call stack in its branch records that this user
+/// may sample: `PERF_SAMPLE_BRANCH_CALL_STACK`, Intel's LBR call-stack mode
+/// since Haswell.
+///
+/// Asked by opening a cycles event that samples it, over this process and user
+/// mode only. A cpu with no branch records at all, one whose records have no
+/// call-stack mode, and a virtual machine that hides them, all refuse it.
+pub fn branch_call_stack_supported() -> io::Result<()> {
+    let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = sys::bindings::PERF_TYPE_HARDWARE;
+    attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attr.config = sys::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+    attr.__bindgen_anon_1.sample_period = u64::from(u32::MAX);
+    attr.sample_type =
+        (sys::bindings::PERF_SAMPLE_IP | sys::bindings::PERF_SAMPLE_BRANCH_STACK) as u64;
+    attr.branch_sample_type = (sys::bindings::PERF_SAMPLE_BRANCH_USER
+        | sys::bindings::PERF_SAMPLE_BRANCH_CALL_STACK) as u64;
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+    attr.set_disabled(1);
+    let fd = unsafe { sys::perf_event_open(&mut attr, 0, -1, -1, 0) };
+    if fd < 0 {
+        let os = io::Error::last_os_error();
+        return Err(io::Error::new(os.kind(), format!("perf_event_open: {os}")));
+    }
+    unsafe { libc::close(fd) };
+    Ok(())
+}
+
 /// Opens the event a spec describes, without a ring.
 fn open_fd(spec: &SampleSpec, scope: Scope) -> io::Result<RawFd> {
     let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
@@ -850,14 +1115,27 @@ fn open_fd(spec: &SampleSpec, scope: Scope) -> io::Result<RawFd> {
         }
     }
     attr.sample_type = spec.sample_type();
-    if spec.callchain == Callchain::FramePointers {
-        // Both halves are asked for. A kernel chain without a user chain
-        // says a task is in `read`, and never which of its own functions
-        // called it; a user chain without a kernel one cannot tell work
-        // from waiting. `crate::stack` keeps them apart afterwards.
+    if spec.callchain.asks_callchain() {
+        // Both halves are asked for where the machine allows it. A kernel
+        // chain without a user chain says a task is in `read`, and never which
+        // of its own functions called it; a user chain without a kernel one
+        // cannot tell work from waiting. `crate::stack` keeps them apart
+        // afterwards.
         attr.sample_max_stack = max_stack_depth();
+        if !spec.callchain.kernel() {
+            attr.set_exclude_callchain_kernel(1);
+        }
     }
-    if spec.exclude_kernel {
+    if let Callchain::CopiedStack { .. } = spec.callchain {
+        // The user half is unwound here, from the copy; the kernel's own walk
+        // of it would be a second, worse answer to the same question.
+        attr.set_exclude_callchain_user(1);
+    }
+    if spec.callchain.user_regs() {
+        attr.sample_regs_user = USER_REGS_MASK;
+        attr.sample_stack_user = spec.callchain.user_stack_bytes();
+    }
+    if spec.exclude_kernel || spec.callchain.excludes_kernel() {
         attr.set_exclude_kernel(1);
         attr.set_exclude_hv(1);
     }
@@ -1851,6 +2129,17 @@ impl ThreadSampler {
         self.rings.iter().map(SampledEvent::lost).sum()
     }
 
+    /// What each ring lost, by the cpu it is pinned to, for the rings that
+    /// lost anything: the part of [`ThreadSampler::lost`] each cpu's ring owns.
+    pub fn lost_by_cpu(&self) -> Vec<(u32, u64)> {
+        self.rings
+            .iter()
+            .zip(&self.ring_cpus)
+            .map(|(ring, &cpu)| (cpu, ring.lost()))
+            .filter(|(_, lost)| *lost > 0)
+            .collect()
+    }
+
     pub fn undecoded(&self) -> u64 {
         self.rings.iter().map(SampledEvent::undecoded).sum()
     }
@@ -1958,6 +2247,9 @@ pub struct TaskSampler {
     retired_undecoded: u64,
     /// The throttled periods of those rings, kept the same way.
     retired_throttled: u64,
+    /// What those rings lost, by task, kept the same way: a thread that
+    /// overflowed its ring and exited still lost those samples.
+    retired_lost: std::collections::BTreeMap<i32, u64>,
 }
 
 impl TaskSampler {
@@ -1985,6 +2277,7 @@ impl TaskSampler {
             at_open: 0,
             retired_undecoded: 0,
             retired_throttled: 0,
+            retired_lost: std::collections::BTreeMap::new(),
         };
         let tasks = if follows {
             tasks_under(pid)
@@ -2084,6 +2377,19 @@ impl TaskSampler {
                 .sum::<u64>()
     }
 
+    /// What each task's ring lost, for the tasks whose ring lost anything,
+    /// including tasks that have exited: each ring is one task's, so its drops
+    /// are that task's and no other's.
+    pub fn lost_by_task(&self) -> Vec<(i32, u64)> {
+        let mut lost = self.retired_lost.clone();
+        for (tid, ring) in &self.rings {
+            if ring.lost() > 0 {
+                *lost.entry(*tid).or_default() += ring.lost();
+            }
+        }
+        lost.into_iter().collect()
+    }
+
     /// Throttled periods over every ring, including those of tasks that have
     /// exited. See [`SampledEvent::throttled`].
     pub fn throttled(&self) -> u64 {
@@ -2118,6 +2424,9 @@ impl TaskSampler {
             if let Some(ring) = self.rings.remove(&tid) {
                 self.retired_undecoded += ring.undecoded();
                 self.retired_throttled += ring.throttled();
+                if ring.lost() > 0 {
+                    *self.retired_lost.entry(tid).or_default() += ring.lost();
+                }
             }
         }
         samples.sort_by_key(|sample| sample.time_ns);
@@ -2452,6 +2761,92 @@ mod tests {
     use super::*;
 
     const PAGE_FAULTS: u64 = sys::bindings::PERF_COUNT_SW_PAGE_FAULTS as u64;
+
+    /// The user registers and the copied stack sit between the callchain and
+    /// the weight, and the stack is as long as the kernel filled it, not as
+    /// long as it reserved: `dyn_size` after the bytes says how much of them
+    /// are real. A decoder that read `size` as the data, or forgot `dyn_size`,
+    /// would read the weight out of the stack.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn a_copied_stack_is_read_to_what_the_kernel_filled_and_the_fields_after_it_still_line_up() {
+        use sys::bindings as b;
+        let spec = SampleSpec {
+            memory: true,
+            ..SampleSpec::software(0, 1, Callchain::FramePointersAndLeaf { kernel: true })
+        };
+        let mut words = vec![0x401000u64, (7u64 << 32) | 6, 1_000, 0, 5];
+        words.extend([2, 0x401000, 0x402000]); // callchain: two frames
+        words.extend([2, 0x7ffd_0010, 0x7ffd_0000, 0x401000]); // abi, bp, sp, ip
+        let reserved = LEAF_STACK_BYTES as usize;
+        words.push(reserved as u64);
+        let mut stack = vec![0u8; reserved];
+        stack[..8].copy_from_slice(&0x402abcu64.to_ne_bytes());
+        let filled = 40u64;
+        let weight = 309u64 | (512u64 << 32);
+        let data_src = (u64::from(b::PERF_MEM_OP_LOAD) << b::PERF_MEM_OP_SHIFT)
+            | (u64::from(b::PERF_MEM_LVLNUM_RAM) << b::PERF_MEM_LVLNUM_SHIFT);
+        let mut body = vec![0u8; 8];
+        for word in &words {
+            body.extend_from_slice(&word.to_ne_bytes());
+        }
+        body.extend_from_slice(&stack);
+        for word in [filled, weight, data_src] {
+            body.extend_from_slice(&word.to_ne_bytes());
+        }
+        let sample = decode_sample(&body, 0, spec.sample_type());
+        assert_eq!(sample.callchain.as_deref(), Some(&[0x401000, 0x402000][..]));
+        assert_eq!(
+            sample.user_regs,
+            Some(UserRegs {
+                ip: 0x401000,
+                sp: 0x7ffd_0000,
+                fp: 0x7ffd_0010,
+                lr: 0
+            })
+        );
+        let copied = sample.user_stack.expect("the record carries a stack");
+        assert_eq!(copied.len(), filled as usize);
+        assert_eq!(copied[..8], 0x402abcu64.to_ne_bytes());
+        let access = sample
+            .access
+            .expect("the fields after the stack still line up");
+        assert_eq!(access.latency_cycles, 309);
+        assert_eq!(access.source.level(), MemLevel::Ram);
+    }
+
+    /// A copied stack asks for no user callchain from the kernel, and a
+    /// user-only shape opens nothing of the kernel's.
+    #[test]
+    fn each_stack_shape_asks_the_kernel_for_what_its_mode_needs() {
+        use sys::bindings as b;
+        let asks = |callchain: Callchain, bit: u32| {
+            SampleSpec::software(0, 1, callchain).sample_type() & u64::from(bit) != 0
+        };
+        assert!(!asks(Callchain::Off, b::PERF_SAMPLE_CALLCHAIN));
+        assert!(asks(Callchain::BOTH_HALVES, b::PERF_SAMPLE_CALLCHAIN));
+        assert!(!asks(Callchain::BOTH_HALVES, b::PERF_SAMPLE_STACK_USER));
+        let leaf = Callchain::FramePointersAndLeaf { kernel: false };
+        assert!(asks(leaf, b::PERF_SAMPLE_CALLCHAIN) && asks(leaf, b::PERF_SAMPLE_STACK_USER));
+        assert!(!asks(
+            Callchain::CopiedStack { kernel: false },
+            b::PERF_SAMPLE_CALLCHAIN
+        ));
+        assert!(asks(
+            Callchain::CopiedStack { kernel: true },
+            b::PERF_SAMPLE_CALLCHAIN
+        ));
+        assert!(asks(
+            Callchain::CopiedStack { kernel: false },
+            b::PERF_SAMPLE_REGS_USER
+        ));
+        assert_eq!(
+            Callchain::BOTH_HALVES.user_only(),
+            Callchain::FramePointers { kernel: false }
+        );
+        assert!(Callchain::FramePointers { kernel: false }.excludes_kernel());
+        assert!(!Callchain::Off.excludes_kernel());
+    }
 
     fn callchain_of_fixed(body: &[u8]) -> Vec<u64> {
         callchain_of(body, FIXED_FIELDS)
@@ -3146,7 +3541,7 @@ mod tests {
             body
         };
         let spec = SampleSpec {
-            callchain: Callchain::FramePointers,
+            callchain: Callchain::BOTH_HALVES,
             memory: true,
             ..SampleSpec::software(0, 1, Callchain::Off)
         };
