@@ -2600,13 +2600,13 @@ impl TryFrom<UncheckedBreakdown> for Breakdown {
     fn try_from(table: UncheckedBreakdown) -> Result<Self, Self::Error> {
         if let Some(row) = table.rows.iter().find(|row| row.evidence.is_none()) {
             return Err(format!(
-                "the `{}` row of the table for `{}` carries no evidence level: every row says                  what ties it to the key",
+                "the `{}` row of the table for `{}` carries no evidence level: every row says what ties it to the key",
                 row.state, table.key
             ));
         }
         if table.whole.evidence.is_none() && !table.whole.kind.is_bracket() {
             return Err(format!(
-                "the whole of the table for `{}` was read from `{}` and carries no evidence                  level: only a window or a life, which bracket the key, can go without one",
+                "the whole of the table for `{}` was read from `{}` and carries no evidence level: only a window or a life, which bracket the key, can go without one",
                 table.key, table.whole.source
             ));
         }
@@ -5476,14 +5476,36 @@ mod tests {
             let error = serde_json::from_value::<Breakdown>(stripped)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("carries no evidence level"), "{error}");
+            let state = json["rows"][1]["state"].as_str().unwrap().to_owned();
+            assert!(
+                error.contains(&format!(
+                    "the `{state}` row of the table for `{}` carries no evidence level: \
+                     every row says what ties it to the key",
+                    table.key
+                )),
+                "{error}"
+            );
+            assert!(
+                !error.contains("  "),
+                "a run of spaces in the message: {error:?}"
+            );
 
             let mut measured = json;
             measured["whole"]["kind"] = serde_json::json!("traced");
             let error = serde_json::from_value::<Breakdown>(measured)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("only a window or a life"), "{error}");
+            assert!(
+                error.contains(
+                    "carries no evidence level: only a window or a life, which bracket the key, \
+                     can go without one"
+                ),
+                "{error}"
+            );
+            assert!(
+                !error.contains("  "),
+                "a run of spaces in the message: {error:?}"
+            );
         }
     }
 

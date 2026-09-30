@@ -48,6 +48,25 @@ needs to merge it.
    three `mcp/tests/protocol.rs` tests were already answered by `8e4d7d2`
    (the count asked alone; `run_example_or_skip`).
 
+## Review, fixed
+
+1. `TryFrom<UncheckedBreakdown> for Breakdown` (`src/join.rs`): both
+   refusals carried a run of 18 spaces where a line continuation had lost its
+   backslash. Fixed; `join::tests::a_row_without_an_evidence_level_is_never_built_and_never_read`
+   now holds each refusal to its whole sentence and to no run of spaces.
+2. `join_engine::a_program_s_life_is_a_whole_its_three_states_account_for`
+   skipped on every machine: it matched `perf_event_paranoid` on stderr before
+   it read the exit status, and every successful run prints that caveat. It
+   now skips only on a failed run the machine cannot serve, and panics on any
+   other failure. On this machine, with the capabilities on, it runs and passes
+   (the residue inside its resolution) -- its ground truth is checked for the
+   first time since `663be0ad`.
+3. The skip-line layout of item 5, in `tests/join_engine.rs` itself: a
+   `machine_s_reason` puts the lines that say why the machine cannot serve
+   first, on the skip line, and indents the rest under them. Every skip that
+   quoted a stderr uses it (the procfs, wakeup, python-session, offcpu,
+   overlap-half, per-cpu-refusal and both `/sys` power skips).
+
 ## Open, with the measured reason
 
 - **The hour itself**: run here for 300 s in debug (rounds of two million
@@ -80,6 +99,16 @@ rerun alone once: eight passed (`collect::tests::the_runner_closes_the_window`,
 failed in the suite and once alone ("the stripped build, named from
 debuginfod, does not read as the unstripped one"), then passed twice alone:
 for the flaky tally, the unwind stream's.
+
+After the review fixes, one `make check`: red on
+`budget::the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes`
+(in `docs/flaky.md`; shell 62 ms against tool 218 ms at load 14), which passed
+alone once. Then one `cargo test --workspace --no-fail-fast`: 2078 passed, 2
+failed, 9 ignored; both failures outside this stream's files, each passed alone
+once (`scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`,
+already in the tally, and `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`,
+for the net stream's tally). Clippy with `-D warnings` and `cargo fmt --check`
+clean.
 
 ## Needs privilege
 

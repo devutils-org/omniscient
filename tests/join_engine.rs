@@ -44,6 +44,34 @@ fn machine_cannot_serve(message: &str) -> bool {
         || message.contains("cap_bpf")
 }
 
+/// The machine's reason for a skip, laid on the skip line itself.
+///
+/// A run's stderr opens with whatever it warned about first -- a caveat, an
+/// unwinder it lacks -- and a skip line that quotes the whole of it puts the
+/// reason several lines down, unindented, where a reader of skip lines does not
+/// look. So the lines that say why the machine cannot serve come first, the
+/// rest follow indented under them, and a stderr with no such line is quoted
+/// whole, still on one logical line.
+fn machine_s_reason(said: &str) -> String {
+    let lines: Vec<&str> = said
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let (reasons, rest): (Vec<&str>, Vec<&str>) = lines
+        .iter()
+        .partition(|line| machine_cannot_serve(line) || line.contains("error"));
+    let mut laid = String::new();
+    for line in reasons.iter().chain(rest.iter()) {
+        if laid.is_empty() {
+            laid.push_str(line.trim());
+        } else {
+            laid.push_str("\n    ");
+            laid.push_str(line.trim_end());
+        }
+    }
+    laid
+}
+
 /// A process that exists and does nothing, so that reading its procfs entries
 /// is a measurement of something rather than a race against its exit.
 fn helper() -> Child {
@@ -153,7 +181,8 @@ fn an_equal_key_sends_every_event_to_its_own_task_and_none_to_the_other() {
             Err(message) if machine_cannot_serve(&message) => {
                 eprintln!(
                     "skipped: this machine cannot read a process's procfs entries, so there is \
-                     no real two-task stream to attribute: {message}"
+                     no real two-task stream to attribute: {}",
+                    machine_s_reason(&message)
                 );
                 return;
             }
@@ -432,7 +461,8 @@ joins:
                 "skipped: this machine does not grant CAP_BPF, so who woke whom cannot be read \
                  at all. It would have checked that every context switch of a blocking program \
                  is either attributed to a recorded wakeup of that task or counted as \
-                 unattributed, and that no chain names a task nothing woke: {errors}"
+                 unattributed, and that no chain names a task nothing woke: {}",
+                machine_s_reason(&errors)
             );
             return;
         }
@@ -548,7 +578,7 @@ fn session(file: &str, would_have_checked: &str) -> Option<Session> {
             eprintln!(
                 "SKIPPED: {file} needs what this machine does not grant ({}). It would have \
                  checked {would_have_checked}",
-                stderr.lines().next().unwrap_or_default()
+                machine_s_reason(&stderr)
             );
             return None;
         }
@@ -1230,9 +1260,17 @@ fn a_program_s_life_is_a_whole_its_three_states_account_for() {
         .output()
         .expect("omn runs");
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
-    if machine_cannot_serve(&said) || said.contains("CAP_BPF") {
-        eprintln!("skipped: this machine cannot serve the three sources: {said}");
-        return;
+    // A run that succeeds still warns -- the perf_event_paranoid caveat is on
+    // every run's stderr -- so only a failed run is a machine that cannot serve.
+    if !output.status.success() {
+        if machine_cannot_serve(&said) {
+            eprintln!(
+                "skipped: this machine cannot serve the three sources: {}",
+                machine_s_reason(&said)
+            );
+            return;
+        }
+        panic!("the compute decomposition did not run: {said}");
     }
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     let Some(start) = text.find('{') else {
@@ -1306,7 +1344,8 @@ decompose:
         eprintln!(
             "SKIPPED: this machine cannot serve `sched.offcpu`, so the zero it would have \
              checked -- a part keeping blocks longer than the program lived -- is not checked: \
-             {said}"
+             {}",
+            machine_s_reason(&said)
         );
         return;
     }
@@ -1609,7 +1648,8 @@ joins:
     if !output.status.success() && output.status.code() == Some(1) && machine_cannot_serve(&said) {
         eprintln!(
             "SKIP (overlap half): the session is valid and this machine does not serve it, so \
-             only the `eq` refusal was checked. The machine's reason:\n{said}"
+             only the `eq` refusal was checked. The machine's reason: {}",
+            machine_s_reason(&said)
         );
         return;
     }
@@ -1694,7 +1734,8 @@ joins:
     if refusal.is_none() && output.status.code() == Some(1) && machine_cannot_serve(&said) {
         eprintln!(
             "SKIP: this machine does not serve power.freq or sched.futex, so the refusal of \
-             {cpus} series was not checked. The machine's reason:\n{said}"
+             {cpus} series was not checked. The machine's reason: {}",
+            machine_s_reason(&said)
         );
         return;
     }
@@ -2286,9 +2327,7 @@ fn a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine() {
             eprintln!(
                 "SKIPPED the run: this machine serves neither power.freq nor power.cstate \
                  through /sys: {}",
-                said.lines()
-                    .find(|line| line.contains("error"))
-                    .unwrap_or(&said)
+                machine_s_reason(&said)
             );
             return;
         }
@@ -2398,19 +2437,18 @@ fn a_join_that_evicts_says_how_many_in_results_json_and_in_the_text() {
         return;
     }
     let session = cpu_join_session(", capacity: 2, window: 5ms", "100ms");
-    let (out, _) =
-        match run_to_dir("evicts", &session, "json") {
-            Ok(ran) => ran,
-            Err(said) if machine_cannot_serve(&said) => {
-                eprintln!(
+    let (out, _) = match run_to_dir("evicts", &session, "json") {
+        Ok(ran) => ran,
+        Err(said) if machine_cannot_serve(&said) => {
+            eprintln!(
                 "SKIPPED: this machine serves neither power.freq nor power.cstate through /sys: \
                  {}",
-                said.lines().find(|line| line.contains("error")).unwrap_or(&said)
+                machine_s_reason(&said)
             );
-                return;
-            }
-            Err(said) => panic!("the session did not run: {said}"),
-        };
+            return;
+        }
+        Err(said) => panic!("the session did not run: {said}"),
+    };
     let text = std::fs::read_to_string(out.join("results.json")).expect("results.json");
     let document: serde_json::Value = serde_json::from_str(&text).expect("results.json parses");
     let (freq_cpus, freq_events) = cpus_of(&document, "freq");
