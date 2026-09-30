@@ -146,6 +146,10 @@ pub enum KeyValue {
     Cpu {
         cpu: u32,
     },
+    /// A memory node, as the kernel numbers them.
+    Node {
+        node: u32,
+    },
 }
 
 impl KeyValue {
@@ -162,6 +166,10 @@ impl KeyValue {
 
     pub fn cpu(cpu: u32) -> Self {
         KeyValue::Cpu { cpu }
+    }
+
+    pub fn node(node: u32) -> Self {
+        KeyValue::Node { node }
     }
 
     pub fn task(tid: i32) -> Self {
@@ -186,6 +194,7 @@ impl KeyValue {
             KeyValue::Iface { .. } => KeyKind::Iface,
             KeyValue::Dev { .. } => KeyKind::Dev,
             KeyValue::Cpu { .. } => KeyKind::Cpu,
+            KeyValue::Node { .. } => KeyKind::Node,
         }
     }
 }
@@ -205,6 +214,7 @@ impl fmt::Display for KeyValue {
             KeyValue::Iface { name, .. } => write!(f, "iface:{name}"),
             KeyValue::Dev { major, minor } => write!(f, "dev:{major}+{minor}"),
             KeyValue::Cpu { cpu } => write!(f, "cpu:{cpu}"),
+            KeyValue::Node { node } => write!(f, "node:{node}"),
         }
     }
 }

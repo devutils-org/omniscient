@@ -933,10 +933,16 @@ pub enum KeyKind {
     /// twenty-four of them describes no core. This is what makes a per-cpu
     /// series possible rather than a mean with a range beside it.
     Cpu,
+    /// `node:n`, a memory node as the kernel numbers them.
+    ///
+    /// What `mem.numa` counts per: a local and a remote allocation are only
+    /// told apart by the node they landed on, and a sum across nodes is the
+    /// one number that hides the imbalance being asked about.
+    Node,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 12] = [
+    pub const ALL: [KeyKind; 13] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -949,6 +955,7 @@ impl KeyKind {
         KeyKind::Iface,
         KeyKind::Dev,
         KeyKind::Cpu,
+        KeyKind::Node,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -965,6 +972,7 @@ impl KeyKind {
             KeyKind::Iface => "iface",
             KeyKind::Dev => "dev",
             KeyKind::Cpu => "cpu",
+            KeyKind::Node => "node",
         }
     }
 }
@@ -1820,6 +1828,18 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_memory_node_is_a_key_spelled_node() {
+        assert_eq!("node".parse::<KeyKind>().unwrap(), KeyKind::Node);
+        assert_eq!(KeyKind::Node.as_str(), "node");
+        assert_eq!(crate::event::KeyValue::node(1).kind(), KeyKind::Node);
+        assert_eq!(crate::event::KeyValue::node(1).to_string(), "node:1");
+        // Every kind is reachable by its name, and no two share one.
+        for kind in KeyKind::ALL {
+            assert_eq!(kind.as_str().parse::<KeyKind>().unwrap(), kind);
+        }
+    }
 
     #[test]
     fn a_source_splits_into_family_and_metric() {
