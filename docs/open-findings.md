@@ -8759,3 +8759,99 @@ backend with no collector, lead with the first backend passed over and why.
 `LICENSE`. A release archive should carry it; adding it is one line in
 `contents` of `scripts/release.sh` (and one in `make install`), which stream D
 will take once the file exists.
+
+## Needs from another stream — the fifteenth wave, stream runner
+
+Stream runner's record is `docs/fixes/w15-runner.md`. Nothing here blocks it;
+each item is the other half of a change landed in the runner's files.
+
+### To whoever owns `src/main.rs`: the "no viable backend" refusal, the reason that matters first
+
+Stream D's request of the fourteenth wave, above, lands in `src/main.rs:840-865`
+(the `UnimplementedBackend` arm that prints "`X` was passed over"), not in
+`src/collect/mod.rs`, which only carries the error. Still wanted: when the
+chain ends on a backend with no collector, lead with the first backend passed
+over and its reason, then "and no collector is written for `bpf:usdt`". With
+`OMN_PRELOAD_LIB=/nonexistent` the refusal now reads "the preload shim was not
+found at ... or ...; it ships beside the binary, so reinstall, or build it with
+`make` ..." (`src/collect/mem/heap/mod.rs`, `shim_in`), which is the line a
+reader can act on.
+
+### To whoever owns `src/main.rs`: the `cost:` line and what came before the window
+
+`collect::Overhead` carries `before_window_cpu_ns` and `after_window_cpu_ns`
+now, and `Overhead::tool_cpu_ns()` is their sum with `collector_cpu_ns`: what
+the kernel's account of `omn` holds when the collection is handed back.
+`cost.json` has the fields through serde; the one-line summary does not.
+Wanted, in `MeasuredCost::line`, after the window's figure and only when it is
+larger than the window's:
+
+```rust
+format!(", and {} before the window opened (startup, probes, the tables the run reads first)",
+        span(overhead.before_window_cpu_ns))
+```
+
+A profile with stacks in a debug build reads 1 s before the window and 80 ms in
+it (`tests/budget.rs`,
+`what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted`).
+
+### To whoever owns `src/main.rs`: the ladder's pin is not the user's
+
+After a budget moves a collection, its results carry "backend `bpf:raw_tp` was
+pinned, so the chain was not walked: this measures that backend, not what the
+resolver would choose" -- `resolve::resolve` saying so of the `force:` that
+`Ladder::next` (`src/main.rs:607`) put on the request itself. The user pinned
+nothing. Wanted, in `Ladder::next` after the resolve:
+
+```rust
+let mut resolved = resolved;
+resolved.degradations.retain(|note| !note.starts_with(&format!("backend `{id}` was pinned")));
+```
+
+or a `resolve::resolve_onto(catalog, capabilities, request, backend_id)` that
+does not mark the result pinned (P's `resolve.rs`). Seen in every run of
+`budget::a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted`.
+
+### To whoever owns `src/main.rs` and `catalog/*.yaml`: phase 6's trace -> hist -> sample ladder
+
+`ROADMAP.md` phase 6 task 3 names the degradation `trace` -> in-kernel `hist`
+-> `sample`. What is built is a ladder over **backends** of one request's
+mode: `Ladder::candidates` walks the chain below the serving backend by cost
+band, and no entry in `catalog/` has three backends that trace, aggregate in the
+kernel and sample -- the audit's item (b) has no source to be exercised on.
+The runner's half is ready: `collect::Cheaper::next` returns a whole
+`ResolvedRequest`, and `Spending::degrade` prepares whatever it is handed, mode
+included. Wanted, in order: a decision (`DECISIONS.md`, filed in this
+stream's handoff) on what one series made of two modes means to an emit; then
+`Ladder::next` offering the same backend under a cheaper mode of the entry's
+`modes` before the next backend; then an entry that has the three.
+
+### To stream U (`src/collect/cpu/profile.rs:406`): a user-only profile reads the kernel's symbols
+
+`ProfileCollector::start` primes the kernel's symbol table whenever
+`self.callchain != Callchain::Off`, so a profile whose callchain is user-only
+(`{ kernel: false }`, paranoid 2) spends the better part of a second in a debug
+build parsing `/proc/kallsyms` for frames it will never see. Measured here:
+978 ms of `omn`'s cpu before the window for a one-second profile, 82 ms in it.
+Wanted: prime only when the callchain includes the kernel.
+
+### To stream K (`src/collect/mem/mod.rs`, `src/bpf/attach.rs`): `pub mod net` landed
+
+`src/collect/mod.rs` declares `pub mod net;`. `collect::mem::net_probe` can go,
+and `src/bpf/attach.rs:206` calls `crate::collect::net::probe(kind)`.
+`ProgramStats::for_run` calls `crate::bpf::enable_run_time_stats()` and keeps
+no copy of the command.
+
+### To whoever owns `tests/family_mem.rs:58`, `tests/scenario_mem.rs:165`, `tests/cross_memory.rs:130`: the shim check matches nothing
+
+Each asserts `!message.contains("heap shim was not found")`; the message has
+said "the preload shim was not found at ..." since the ninth wave, so the
+check never fires and a missing shim reads as whatever failure follows.
+Wanted: `"shim was not found"`, as `tests/aggregation.rs` now has.
+
+### To whoever owns `examples/gpu-draw-in-watts.yml`, `examples/power-energy.yml`, `docs/scenarios/power.md`: `W`, not `J/s`
+
+A rate over joules prints in watts now (`encode::per_second_quantity`):
+`examples/gpu-draw-in-watts.yml:15`, `examples/power-energy.yml:15` and
+`docs/scenarios/power.md:84,86,345` quote `J/s` in outputs the tool no longer
+prints.

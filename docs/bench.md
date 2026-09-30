@@ -730,6 +730,33 @@ samples of a 200 ms spin at a load average near 9 and passes alone
 (`docs/open-findings.md`, its paragraph at the profile's sample floor).
 Clippy and fmt are clean.
 
+### The band column, fifteenth wave
+
+The table test measured three columns and asserted nothing about them: a row
+whose every repetition failed printed `-` in each cell and the run passed.
+Each row is now held to the cost band its backend declares
+(`harness::judge_band`, `Cost::worst_case_percent`), on the larger of the
+share of the target's cpu `cost.json` reports and the dilation the workload
+measured of itself -- the second is where an in-kernel collector's cost is,
+which is the correction the tenth wave's table made to the bands. Three
+outcomes, in a `band` column of `table.md` and `table.json`:
+
+- **within**: measured, and under the band's ceiling;
+- **over**: measured, and over it. The row is flagged, listed under "Over the
+  band the catalog declares" and said at the end; it does not fail the run,
+  because a band the machine does not keep is a catalog claim to correct, not
+  a table to throw away;
+- **missing**: no repetition completed, none reported its collector cpu, or
+  there is neither a share nor a dilation to hold to a band. The table is
+  wrong, and the test fails naming the row.
+
+The losses column is a count and always present; `missing` is what says it was
+counted over something. Still `#[ignore]`: a quiet machine, through
+`scripts/bench.sh`. The rule is in `make check` on synthetic rows
+(`bench_harness::a_row_is_held_to_its_band_on_the_larger_of_its_share_and_its_dilation`,
+`a_row_with_a_column_missing_is_refused_rather_than_judged`); the second table,
+on a quiet machine, is what exercises it.
+
 ## Exit criteria of phase 8
 
 - [x] *A cost/resolution/loss table measured for every (source, backend).* 94
