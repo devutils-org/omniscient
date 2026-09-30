@@ -21,14 +21,20 @@
 //! results. Aggregating by id rather than by frame list is what keeps a profile
 //! of a deep stack cheaper to sum than it was to collect.
 //!
-//! What is deliberately not here is a DWARF unwinder. Writing one is a project,
-//! not a function, and a wrong one produces confident nonsense; `--stack dwarf`
-//! says it is not implemented rather than quietly unwinding a single frame and
-//! calling it a profile.
+//! How the stack is walked is [`StackMode`], chosen by [`choose`] the way a
+//! backend is chosen, from the modes [`unwind`] declares. Two of them need an
+//! unwinder in this process -- the caller of a frameless leaf under `fp+leaf`,
+//! the whole user stack under `dwarf` -- and that unwinder is `framehop`
+//! reading the target's `.eh_frame`, never one written here: a wrong unwinder
+//! produces confident nonsense.
 
-use std::collections::HashMap;
+#[path = "unwind.rs"]
+pub mod unwind;
+
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -169,7 +175,17 @@ pub struct Frame {
     /// only meaningful inside the process that has since exited.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub offset: u64,
+    /// True when the kernel's walk did not return this frame and an unwinder
+    /// here put it back: the caller of a frameless leaf, read from the leaf's
+    /// call frame information under `fp+leaf`. Marked in [`Frame::label`],
+    /// because a frame that was inferred and one that was walked are not the
+    /// same evidence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovered: bool,
 }
+
+/// What a recovered frame's label ends with.
+pub const RECOVERED_MARK: &str = " [recovered]";
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
@@ -186,6 +202,7 @@ impl Frame {
             symbol: None,
             mangled: None,
             offset: 0,
+            recovered: false,
         }
     }
 
@@ -208,18 +225,24 @@ impl Frame {
             symbol: Some(symbol),
             mangled,
             offset,
+            recovered: false,
         }
     }
 
     /// What a renderer prints for this frame: the symbol if there is one, the
     /// address if there is not. Never a fabricated name.
     pub fn label(&self) -> String {
-        match &self.symbol {
+        let label = match &self.symbol {
             Some(symbol) => symbol.clone(),
             None => match &self.module {
                 Some(module) => format!("{}+{:#x}", basename(module), self.offset),
                 None => format!("{:#x}", self.addr),
             },
+        };
+        if self.recovered {
+            label + RECOVERED_MARK
+        } else {
+            label
         }
     }
 }
@@ -357,7 +380,7 @@ pub struct StackTable {
     /// The raw callchain, markers and all, to the id it was given. Interning on
     /// the addresses rather than on the frames is what makes symbolization
     /// happen once per distinct stack instead of once per sample.
-    by_callchain: HashMap<Vec<u64>, StackId>,
+    by_callchain: HashMap<(Vec<u64>, Vec<usize>), StackId>,
 }
 
 /// The attribute an event carries to name its stack in the table.
@@ -394,13 +417,35 @@ impl StackTable {
         cpu_mode: CpuMode,
         symbols: &mut Symbolizer,
     ) -> StackId {
-        if let Some(id) = self.by_callchain.get(callchain) {
+        self.intern_marked(callchain, cpu_mode, &[], symbols)
+    }
+
+    /// Interns a callchain some of whose user frames were recovered rather
+    /// than walked: `recovered` holds their positions in the user half, leaf
+    /// first. The same addresses with a frame recovered and with it walked
+    /// are two stacks, because they are two different pieces of evidence.
+    pub fn intern_marked(
+        &mut self,
+        callchain: &[u64],
+        cpu_mode: CpuMode,
+        recovered: &[usize],
+        symbols: &mut Symbolizer,
+    ) -> StackId {
+        let key = (callchain.to_vec(), recovered.to_vec());
+        if let Some(id) = self.by_callchain.get(&key) {
             return *id;
         }
         let raw = RawStack::split(callchain, cpu_mode);
+        let mut stack = symbols.symbolize(&raw);
+        let user_start = raw.kernel.len();
+        for &position in recovered {
+            if let Some(frame) = stack.frames.get_mut(user_start + position) {
+                frame.recovered = true;
+            }
+        }
         let id = StackId(self.stacks.len() as u64);
-        self.stacks.push(symbols.symbolize(&raw));
-        self.by_callchain.insert(callchain.to_vec(), id);
+        self.stacks.push(stack);
+        self.by_callchain.insert(key, id);
         id
     }
 }
@@ -450,6 +495,11 @@ pub struct Symbolizer {
     /// frame.
     remapped: bool,
     failed_rereads: u32,
+    /// Where a file with no symbol table of its own gets its names, when
+    /// `--symbols debuginfod` asked for that.
+    debuginfod: Option<Arc<unwind::Debuginfod>>,
+    /// Where each module's names came from, by the path the map named.
+    origins: BTreeMap<PathBuf, unwind::NameOrigin>,
 }
 
 /// How many times a symbolizer goes back to a `/proc/<pid>/maps` that gave it
@@ -471,7 +521,29 @@ impl Symbolizer {
             unmapped: 0,
             remapped: false,
             failed_rereads: 0,
+            debuginfod: None,
+            origins: BTreeMap::new(),
         }
+    }
+
+    /// A symbolizer that asks debuginfod for the names of a file that carries
+    /// no symbol table of its own. See [`unwind::Debuginfod`].
+    pub fn with_debuginfod(pid: i32, debuginfod: Option<Arc<unwind::Debuginfod>>) -> Self {
+        Self {
+            debuginfod,
+            ..Self::for_process(pid)
+        }
+    }
+
+    /// Where each module's names came from, for every module a frame was
+    /// looked up in.
+    pub fn origins(&self) -> &BTreeMap<PathBuf, unwind::NameOrigin> {
+        &self.origins
+    }
+
+    /// The name of the mapping an address falls in, as the maps name it.
+    pub fn module_name(&mut self, addr: u64) -> Option<String> {
+        self.region_of(addr).map(|region| region.name.clone())
     }
 
     /// Re-reads the target's mappings, and says whether there were any.
@@ -568,6 +640,7 @@ impl Symbolizer {
                 symbol: None,
                 mangled: None,
                 offset: file_offset,
+                recovered: false,
             },
         }
     }
@@ -605,10 +678,12 @@ impl Symbolizer {
     }
 
     fn module(&mut self, path: &Path) -> Option<&Module> {
-        self.modules
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Module::read(path))
-            .as_ref()
+        if !self.modules.contains_key(path) {
+            let (module, origin) = Module::read(path, self.debuginfod.as_deref());
+            self.origins.insert(path.to_path_buf(), origin);
+            self.modules.insert(path.to_path_buf(), module);
+        }
+        self.modules.get(path).and_then(Option::as_ref)
     }
 }
 
@@ -793,10 +868,35 @@ struct Function {
 }
 
 impl Module {
-    fn read(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-        let elf = Elf::parse(&bytes)?;
+    /// Reads a mapped file's functions, and says where their names came from.
+    ///
+    /// A file with a `.symtab` names itself. One without -- stripped, as a
+    /// distribution ships its binaries -- has only the exports in `.dynsym`,
+    /// and with a debuginfod client its full table is fetched by build id. The
+    /// debug file's symbols are placed through *this* file's load segments,
+    /// because an address in the target is an offset into the file it mapped.
+    fn read(
+        path: &Path,
+        debuginfod: Option<&unwind::Debuginfod>,
+    ) -> (Option<Self>, unwind::NameOrigin) {
+        let Ok(bytes) = std::fs::read(path) else {
+            return (
+                None,
+                unwind::NameOrigin::None("the file cannot be read".to_owned()),
+            );
+        };
+        let Some(elf) = Elf::parse(&bytes) else {
+            return (
+                None,
+                unwind::NameOrigin::None("not an ELF this build reads".to_owned()),
+            );
+        };
         let mut functions = Vec::new();
+        let mut origin = if elf.has_symtab() {
+            unwind::NameOrigin::SymbolTable
+        } else {
+            unwind::NameOrigin::DynamicSymbols
+        };
         // `.symtab` first and `.dynsym` as well: a stripped library has only
         // the second, an unstripped binary has both, and the union names more
         // than either. Duplicates are harmless -- the same address twice is the
@@ -813,8 +913,48 @@ impl Module {
                 }
             }
         }
+        if let (Some(client), false) = (debuginfod, elf.has_symtab()) {
+            match elf.build_id().map(|id| unwind::hex(&id)) {
+                None => {
+                    origin = unwind::NameOrigin::None(
+                        "stripped, and it carries no build id to ask debuginfod by".to_owned(),
+                    )
+                }
+                Some(build_id) => match client.debuginfo(&build_id) {
+                    Ok((debug_path, fetched)) => {
+                        if let Ok(debug_bytes) = std::fs::read(&debug_path) {
+                            if let Some(debug) = Elf::parse(&debug_bytes) {
+                                for (symbols, strings) in debug.symbol_tables() {
+                                    for symbol in debug.symbols(symbols, strings) {
+                                        if let Some(offset) = elf.file_offset_of(symbol.value) {
+                                            functions.push(Function {
+                                                frame_pointer: sets_up_frame_pointer(
+                                                    &bytes, offset,
+                                                ),
+                                                offset,
+                                                size: symbol.size,
+                                                name: symbol.name,
+                                            });
+                                        }
+                                    }
+                                }
+                                origin = fetched;
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        origin = unwind::NameOrigin::None(format!(
+                            "its dynamic symbols only; debuginfod: {reason}"
+                        ))
+                    }
+                },
+            }
+        }
         if functions.is_empty() {
-            return None;
+            return (
+                None,
+                unwind::NameOrigin::None("it carries no function symbols".to_owned()),
+            );
         }
         functions.sort_by(|left, right| {
             left.offset
@@ -824,7 +964,7 @@ impl Module {
                 // one of them bounds anything.
                 .then(right.size.cmp(&left.size))
         });
-        Some(Self { functions })
+        (Some(Self { functions }), origin)
     }
 
     fn lookup(&self, file_offset: u64) -> Option<(String, u64)> {
@@ -908,13 +1048,19 @@ fn sets_up_frame_pointer(bytes: &[u8], offset: u64) -> Option<bool> {
 struct Elf<'a> {
     bytes: &'a [u8],
     sections: Vec<Section>,
+    /// The section holding the section names, `e_shstrndx`.
+    names: Option<Section>,
     /// `(p_offset, p_filesz, p_vaddr)` of every `PT_LOAD`.
     loads: Vec<(u64, u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Section {
+    /// Offset of the section's name in the section-name table.
+    name: u32,
     kind: u32,
+    /// `sh_addr`: where the section is in the file's own address space.
+    addr: u64,
     offset: u64,
     size: u64,
     link: u32,
@@ -929,6 +1075,7 @@ struct ElfSymbol {
 
 const SHT_SYMTAB: u32 = 2;
 const SHT_DYNSYM: u32 = 11;
+const SHT_NOBITS: u32 = 8;
 const PT_LOAD: u32 = 1;
 const STT_FUNC: u8 = 2;
 
@@ -946,6 +1093,7 @@ impl<'a> Elf<'a> {
         let phnum = read_u16(bytes, 56)? as usize;
         let shentsize = read_u16(bytes, 58)? as usize;
         let shnum = read_u16(bytes, 60)? as usize;
+        let shstrndx = read_u16(bytes, 62)? as usize;
 
         let mut loads = Vec::new();
         for index in 0..phnum {
@@ -964,18 +1112,129 @@ impl<'a> Elf<'a> {
         for index in 0..shnum {
             let at = shoff as usize + index * shentsize;
             sections.push(Section {
+                name: read_u32(bytes, at)?,
                 kind: read_u32(bytes, at + 4)?,
+                addr: read_u64(bytes, at + 16)?,
                 offset: read_u64(bytes, at + 24)?,
                 size: read_u64(bytes, at + 32)?,
                 link: read_u32(bytes, at + 40)?,
                 entry_size: read_u64(bytes, at + 56)?,
             });
         }
+        let names = sections.get(shstrndx).copied();
         Some(Self {
             bytes,
             sections,
+            names,
             loads,
         })
+    }
+
+    /// The section of that name, if the file has one.
+    fn section(&self, name: &str) -> Option<Section> {
+        let names = self.names?;
+        self.sections.iter().copied().find(|section| {
+            read_str(self.bytes, names.offset as usize + section.name as usize).as_deref()
+                == Some(name)
+        })
+    }
+
+    /// A section's bytes, `None` for one that occupies none in the file
+    /// (`SHT_NOBITS`: `.bss`, and every code section of a separate debug file).
+    fn section_data(&self, section: &Section) -> Option<&'a [u8]> {
+        if section.kind == SHT_NOBITS {
+            return None;
+        }
+        self.bytes
+            .get(section.offset as usize..(section.offset + section.size) as usize)
+    }
+
+    /// Whether the file carries a full symbol table rather than only the
+    /// dynamic one.
+    fn has_symtab(&self) -> bool {
+        self.sections
+            .iter()
+            .any(|section| section.kind == SHT_SYMTAB)
+    }
+
+    /// The file offset of the function called `name`, from either table.
+    fn function_offset(&self, name: &str) -> Option<u64> {
+        self.symbol_tables()
+            .into_iter()
+            .find_map(|(table, strings)| {
+                self.symbols(table, strings)
+                    .into_iter()
+                    .find(|symbol| symbol.name == name)
+                    .and_then(|symbol| self.file_offset_of(symbol.value))
+            })
+    }
+
+    /// The virtual address a file offset is loaded at.
+    fn vaddr_of_offset(&self, offset: u64) -> Option<u64> {
+        self.loads
+            .iter()
+            .find(|(start, filesz, _)| (*start..start + filesz).contains(&offset))
+            .map(|(start, _, vaddr)| offset - start + vaddr)
+    }
+
+    /// The GNU build id, from the `NT_GNU_BUILD_ID` note: what a debuginfod
+    /// server indexes a file by.
+    fn build_id(&self) -> Option<Vec<u8>> {
+        const SHT_NOTE: u32 = 7;
+        const NT_GNU_BUILD_ID: u32 = 3;
+        for section in self
+            .sections
+            .iter()
+            .filter(|section| section.kind == SHT_NOTE)
+        {
+            let Some(data) = self.section_data(section) else {
+                continue;
+            };
+            let mut at = 0usize;
+            while at + 12 <= data.len() {
+                let name_size = read_u32(data, at)? as usize;
+                let desc_size = read_u32(data, at + 4)? as usize;
+                let kind = read_u32(data, at + 8)?;
+                let name_at = at + 12;
+                let desc_at = name_at + name_size.div_ceil(4) * 4;
+                if kind == NT_GNU_BUILD_ID
+                    && data.get(name_at..name_at + name_size) == Some(&b"GNU\0"[..])
+                {
+                    return data.get(desc_at..desc_at + desc_size).map(<[u8]>::to_vec);
+                }
+                at = desc_at + desc_size.div_ceil(4) * 4;
+            }
+        }
+        None
+    }
+
+    /// The start of every function `.eh_frame_hdr`'s search table indexes.
+    ///
+    /// Read for the one encoding every Linux toolchain writes there,
+    /// `DW_EH_PE_datarel | DW_EH_PE_sdata4` relative to the header itself;
+    /// `None` for any other rather than a guess at it.
+    fn fde_starts(&self) -> Option<Vec<u64>> {
+        let header = self.section(".eh_frame_hdr")?;
+        let data = self.section_data(&header)?;
+        let (version, pointer_encoding, count_encoding, table_encoding) =
+            (*data.first()?, *data.get(1)?, *data.get(2)?, *data.get(3)?);
+        const DATAREL_SDATA4: u8 = 0x3b;
+        const UDATA4: u8 = 0x03;
+        const PCREL_SDATA4: u8 = 0x1b;
+        if version != 1
+            || pointer_encoding != PCREL_SDATA4
+            || count_encoding != UDATA4
+            || table_encoding != DATAREL_SDATA4
+        {
+            return None;
+        }
+        let count = read_u32(data, 8)? as usize;
+        (0..count)
+            .map(|index| {
+                let relative = read_u32(data, 12 + index * 8)? as i32;
+                Some(header.addr.wrapping_add_signed(i64::from(relative)))
+            })
+            .collect()
     }
 
     /// Every symbol table, with the string table it names its symbols from.
@@ -1053,38 +1312,29 @@ fn read_str(bytes: &[u8], at: usize) -> Option<String> {
     std::str::from_utf8(&rest[..end]).ok().map(str::to_owned)
 }
 
-/// What the kernel should be asked to do for a concrete unwind mode.
+/// What the kernel should be asked to do for a concrete unwind mode, with both
+/// halves of the stack.
 ///
 /// The modes this build does not serve say so. Falling back to frame pointers
-/// when `dwarf` was asked for would answer a different question than the one
-/// that was put: a program without frame pointers is exactly the program
-/// someone asks for `dwarf` about, and the fallback would report its leaf
-/// frames as a profile. [`StackMode::Auto`] is not a mode the kernel can be
-/// asked for: [`choose`] turns it into one.
+/// when `lbr` was asked for would answer a different question than the one
+/// that was put. [`StackMode::Auto`] is not a mode the kernel can be asked
+/// for: [`choose`] turns it into one, and [`StackChoice::callchain`] drops the
+/// kernel half where the machine refuses it.
 pub fn callchain_for(mode: StackMode) -> Result<Callchain, String> {
     match mode {
-        StackMode::Fp => Ok(Callchain::FramePointers),
+        StackMode::Fp => Ok(Callchain::FramePointers { kernel: true }),
+        StackMode::FpLeaf => Ok(Callchain::FramePointersAndLeaf { kernel: true }),
+        StackMode::Dwarf => Ok(Callchain::CopiedStack { kernel: true }),
         StackMode::None => Ok(Callchain::Off),
-        StackMode::FpLeaf => Err(
-            "`--stack fp+leaf` is not implemented: it needs the user registers and the top of \
-             the user stack with each sample, and the binary's CFI to find the return address \
-             of a frameless leaf"
-                .to_owned(),
-        ),
-        StackMode::Dwarf => Err(
-            "`--stack dwarf` is not implemented: it needs a real unwinder (blazesym or libdw) \
-             reading the target's debug information, and frame pointers instead would report \
-             the leaf frames of a program that has none as though they were its stacks"
-                .to_owned(),
-        ),
         StackMode::Lbr => Err(
-            "`--stack lbr` is not implemented: it needs the branch stack, which is a different \
-             sampling shape and hardware this build does not probe for"
+            "`--stack lbr` is not implemented: it is declared and probed, and no cpu this \
+             project runs on offers a branch call stack, so no collector reads one \
+             (docs/unwind.md)"
                 .to_owned(),
         ),
         StackMode::Sframe => Err(
-            "`--stack sframe` is not implemented: it needs the kernel to read the binary's \
-             `.sframe` section, which this build does not probe for"
+            "`--stack sframe` is not implemented: no kernel release through 7.2 unwinds user \
+             stacks from `.sframe`, so there is nothing to ask the kernel for (docs/unwind.md)"
                 .to_owned(),
         ),
         StackMode::Auto => Err(
@@ -1118,8 +1368,11 @@ pub struct StackChoice {
     /// True when the request named the mode and the chooser did not rank.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub forced: bool,
-    /// True when only the user half of each stack is taken, because the
-    /// machine's `perf_event_paranoid` refuses the kernel half to this user.
+    /// True when only the user half of each stack is taken, and only samples
+    /// taken in user mode are delivered, because the machine's
+    /// `perf_event_paranoid` refuses the kernel to this user. Set for every
+    /// mode, `none` included: a sampler with no stack still has to exclude
+    /// the kernel to be opened at all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub user_only: bool,
     /// Every mode looked at, in rank order, with its verdict. Empty when the
@@ -1129,12 +1382,39 @@ pub struct StackChoice {
     /// What this mode gives up relative to the best one, said by the mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degradations: Vec<String>,
+    /// Bytes of user stack the kernel copies with each sample, as the mode
+    /// declares it: the cost that is not a word per frame.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub copied_stack_bytes: u32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 impl StackChoice {
-    /// What the kernel is asked to walk at every sample.
+    /// A mode as though it had been forced, with nothing probed and both
+    /// halves of the stack: what a caller that has already decided -- a test,
+    /// a collector that serves one mode -- hands a collector.
+    pub fn of(mode: StackMode) -> Self {
+        Self {
+            mode,
+            forced: true,
+            user_only: false,
+            considered: Vec::new(),
+            degradations: Vec::new(),
+            copied_stack_bytes: unwind::entry(mode).map_or(0, |entry| entry.copies),
+        }
+    }
+
+    /// What the kernel is asked to hand over at every sample.
     pub fn callchain(&self) -> Callchain {
-        callchain_for(self.mode).unwrap_or(Callchain::Off)
+        let callchain = callchain_for(self.mode).unwrap_or(Callchain::Off);
+        if self.user_only {
+            callchain.user_only()
+        } else {
+            callchain
+        }
     }
 }
 
@@ -1142,86 +1422,58 @@ impl StackChoice {
 /// `environment`.
 ///
 /// This is the one entry point every collector that takes a stack goes
-/// through. `request.stack` absent means [`StackMode::Auto`]: the best mode
-/// this machine and this target serve, with every mode passed over and why. A
-/// named mode is forced, and refused with the reason when it cannot be served
-/// -- never degraded to another one silently.
-///
-/// Today the only modes this build serves are `fp` and `none`, so `auto`
-/// always lands on `fp`, and says why it passed over the rest.
+/// through. `request.stack` absent means [`StackMode::Auto`]: the first mode
+/// of [`unwind::modes`] whose requirements this machine and this target answer
+/// available, with every mode passed over and why. A named mode is forced,
+/// and refused with the reason when it cannot be served -- never degraded to
+/// another one silently. Either way, where `perf_event_paranoid` refuses this
+/// user the kernel, the stacks are user-only and the choice says so.
 pub fn choose(request: &Request, environment: &Environment) -> Result<StackChoice, String> {
-    let _ = environment;
-    let requested = request.stack.unwrap_or(StackMode::Auto);
-    if requested.is_concrete() {
-        callchain_for(requested)?;
-        return Ok(StackChoice {
-            mode: requested,
-            forced: true,
-            user_only: false,
-            considered: Vec::new(),
-            degradations: Vec::new(),
-        });
-    }
-    let mut considered = Vec::new();
-    let mut selected = None;
-    for mode in AUTO_RANK {
-        let verdict = if selected.is_some() {
-            Verdict::NotReached
-        } else {
-            match callchain_for(mode) {
-                Ok(_) => {
-                    selected = Some(mode);
-                    Verdict::Selected
-                }
-                Err(reason) => Verdict::Rejected(vec![reason]),
-            }
-        };
-        considered.push(ConsideredMode { mode, verdict });
-    }
-    let mode = selected.ok_or_else(|| {
-        "`--stack auto` found no unwind mode this build serves on this machine".to_owned()
-    })?;
-    Ok(StackChoice {
-        mode,
-        forced: false,
-        user_only: false,
-        considered,
-        degradations: Vec::new(),
-    })
+    unwind::choose(request, environment)
 }
-
-/// The modes `auto` walks, best first. `none` is not in it: asking for no
-/// stack is never what `auto` means. The rank is provisional until
-/// `catalog/unwind.yaml` declares it as data; only `fp` is served today, so
-/// the order of the others decides nothing yet.
-const AUTO_RANK: [StackMode; 5] = [
-    StackMode::Dwarf,
-    StackMode::FpLeaf,
-    StackMode::Sframe,
-    StackMode::Lbr,
-    StackMode::Fp,
-];
 
 /// Captures stacks for one run: the table, the symbols, and what it could not
 /// do.
 ///
 /// A collector holds one of these and hands it every sample. What it gives back
 /// is an id to put on the event; what it keeps is the table to put beside the
-/// results, and the counts behind [`Unwinder::notes`].
+/// results, and the counts behind [`Unwinder::notes`] and [`Unwinder::facts`].
 pub struct Unwinder {
     table: StackTable,
     symbols: Symbolizer,
+    /// What the samples were asked to carry, which decides how they unwind.
+    callchain: Callchain,
+    /// The unwinder over the target's `.eh_frame`, for `fp+leaf` and `dwarf`.
+    cfi: Option<unwind::Cfi>,
     samples: u64,
     /// Samples whose user half was a single frame: a walk that could not take
     /// even its first step.
     single_frame: u64,
     /// Samples whose leaf function sets up no frame pointer, so the frames
-    /// under it are whatever the register held and not its callers.
-    unwalkable_leaf: u64,
+    /// under it are whatever the register held and not its callers -- by the
+    /// object the leaf is in, because "this target was built without them" is
+    /// a different statement from "libc's `memcpy` was".
+    frameless: BTreeMap<String, u64>,
     /// Samples whose leaf function does set one up. Counted beside the others
     /// because the note below is about the share, and a target that is half
     /// instrumented is a different statement from one that is not at all.
     walkable_leaf: u64,
+    /// Of the frameless-leaf samples, those whose callers came back anyway:
+    /// under `fp+leaf` the caller recovered from the leaf's CFI, under `dwarf`
+    /// an unwind that went past the leaf.
+    recovered: u64,
+    /// Under `fp+leaf`, samples given a caller the kernel's walk skipped,
+    /// whatever the leaf: a leaf with a frame pointer sampled in its prologue
+    /// has not set it up yet.
+    inserted: u64,
+    /// Samples that should have carried the user registers and did not: a
+    /// kernel thread, which has no user half.
+    no_registers: u64,
+    /// How the copied-stack unwinds ended, under `dwarf`.
+    complete: u64,
+    cut_by_copy: u64,
+    failed: u64,
+    depth_limit: u64,
     /// Samples that arrived with no callchain at all.
     empty: u64,
     /// Frames the kernel attributed to itself, over every sample.
@@ -1233,27 +1485,59 @@ pub struct Unwinder {
     /// used to ask at the end whatever it had collected -- a second of wall
     /// clock, flat, for an answer about frames it did not have.
     kernel_frames: u64,
+    /// The target's own executable, as its maps name it.
+    executable: Option<String>,
 }
 
 impl Unwinder {
+    /// Frame pointers, names from the target's own files: what every profile
+    /// had before the unwind modes.
     pub fn for_process(pid: i32) -> Self {
+        Self::new(pid, Callchain::BOTH_HALVES, None)
+    }
+
+    /// An unwinder for samples asked for with `callchain`, naming frames from
+    /// the target's files and, with a client, from debuginfod.
+    pub fn new(
+        pid: i32,
+        callchain: Callchain,
+        debuginfod: Option<Arc<unwind::Debuginfod>>,
+    ) -> Self {
+        let cfi = matches!(
+            callchain,
+            Callchain::FramePointersAndLeaf { .. } | Callchain::CopiedStack { .. }
+        )
+        .then(|| unwind::Cfi::for_process(pid));
         Self {
             table: StackTable::new(),
-            symbols: Symbolizer::for_process(pid),
+            symbols: Symbolizer::with_debuginfod(pid, debuginfod),
+            callchain,
+            cfi,
             samples: 0,
             single_frame: 0,
-            unwalkable_leaf: 0,
+            frameless: BTreeMap::new(),
             walkable_leaf: 0,
+            recovered: 0,
+            inserted: 0,
+            no_registers: 0,
+            complete: 0,
+            cut_by_copy: 0,
+            failed: 0,
+            depth_limit: 0,
             empty: 0,
             kernel_frames: 0,
+            executable: executable(pid),
         }
     }
 
     /// Interns the sample's stack and returns the id to put on its event.
     ///
-    /// `None` when the sample carries no callchain, which is what every sample
-    /// of an event opened with [`Callchain::Off`] looks like.
+    /// `None` when the sample carries no stack, which is what every sample of
+    /// an event opened with [`Callchain::Off`] looks like.
     pub fn record(&mut self, sample: &Sample) -> Option<StackId> {
+        if let Callchain::CopiedStack { .. } = self.callchain {
+            return Some(self.record_copied(sample));
+        }
         let callchain = sample.callchain.as_deref()?;
         self.samples += 1;
         let raw = RawStack::split(callchain, sample.cpu_mode);
@@ -1263,17 +1547,124 @@ impl Unwinder {
         } else if raw.user.len() == 1 {
             self.single_frame += 1;
         }
-        if let Some(&leaf) = raw.user.first() {
-            match self.symbols.keeps_frame_pointer(leaf) {
-                Some(true) => self.walkable_leaf += 1,
-                Some(false) => self.unwalkable_leaf += 1,
-                None => {}
+        let frameless = self.count_leaf(raw.user.first().copied());
+        if let Callchain::FramePointersAndLeaf { .. } = self.callchain {
+            if let Some(chain) = self.recover_leaf_caller(&raw, sample) {
+                self.inserted += 1;
+                if frameless {
+                    self.recovered += 1;
+                }
+                return Some(self.table.intern_marked(
+                    &chain,
+                    sample.cpu_mode,
+                    &[1],
+                    &mut self.symbols,
+                ));
             }
         }
         Some(
             self.table
                 .intern(callchain, sample.cpu_mode, &mut self.symbols),
         )
+    }
+
+    /// Counts the leaf's frame pointer, by the object it is in, and says
+    /// whether it keeps none.
+    fn count_leaf(&mut self, leaf: Option<u64>) -> bool {
+        let Some(leaf) = leaf else {
+            return false;
+        };
+        match self.symbols.keeps_frame_pointer(leaf) {
+            Some(true) => {
+                self.walkable_leaf += 1;
+                false
+            }
+            Some(false) => {
+                let object = self.symbols.module_name(leaf).map_or_else(
+                    || "an unmapped object".to_owned(),
+                    |name| basename(&name).to_owned(),
+                );
+                *self.frameless.entry(object).or_default() += 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The kernel's chain with the leaf's caller put back, when the leaf's
+    /// unwind rule finds a return address the walk did not.
+    ///
+    /// Only when the registers are the ones the chain started from: a sample
+    /// whose user half begins elsewhere is not guessed at.
+    fn recover_leaf_caller(&mut self, raw: &RawStack, sample: &Sample) -> Option<Vec<u64>> {
+        let (regs, stack) = (sample.user_regs?, sample.user_stack.as_deref()?);
+        if raw.user.first() != Some(&regs.ip) || !raw.elsewhere.is_empty() {
+            return None;
+        }
+        let caller = self.cfi.as_mut()?.caller(regs, stack)?;
+        if raw.user.get(1) == Some(&caller) || caller == 0 {
+            return None;
+        }
+        let mut chain = Vec::with_capacity(raw.depth() + 3);
+        if !raw.kernel.is_empty() {
+            chain.push(PERF_CONTEXT_KERNEL);
+            chain.extend(&raw.kernel);
+        }
+        chain.push(PERF_CONTEXT_USER);
+        chain.push(regs.ip);
+        chain.push(caller);
+        chain.extend(&raw.user[1..]);
+        Some(chain)
+    }
+
+    /// A sample whose user half is unwound here, from the stack it carried.
+    fn record_copied(&mut self, sample: &Sample) -> StackId {
+        self.samples += 1;
+        let kernel = sample
+            .callchain
+            .as_deref()
+            .map(|chain| RawStack::split(chain, sample.cpu_mode).kernel)
+            .unwrap_or_default();
+        self.kernel_frames += kernel.len() as u64;
+        let user = match (
+            sample.user_regs,
+            sample.user_stack.as_deref(),
+            self.cfi.as_mut(),
+        ) {
+            (Some(regs), Some(stack), Some(cfi)) => {
+                let walk = cfi.walk(regs, stack);
+                match walk.end {
+                    unwind::WalkEnd::Complete => self.complete += 1,
+                    unwind::WalkEnd::CutByCopy => self.cut_by_copy += 1,
+                    unwind::WalkEnd::Failed => self.failed += 1,
+                    unwind::WalkEnd::DepthLimit => self.depth_limit += 1,
+                }
+                walk.frames
+            }
+            _ => {
+                self.no_registers += 1;
+                Vec::new()
+            }
+        };
+        if kernel.is_empty() && user.is_empty() {
+            self.empty += 1;
+        } else if user.len() == 1 {
+            self.single_frame += 1;
+        }
+        if self.count_leaf(user.first().copied()) && user.len() > 1 {
+            self.recovered += 1;
+        }
+        let mut chain = Vec::with_capacity(kernel.len() + user.len() + 2);
+        if !kernel.is_empty() {
+            chain.push(PERF_CONTEXT_KERNEL);
+            chain.extend(&kernel);
+        }
+        if !user.is_empty() {
+            chain.push(PERF_CONTEXT_USER);
+            chain.extend(&user);
+        }
+        self.table
+            .intern(&chain, sample.cpu_mode, &mut self.symbols)
     }
 
     /// Re-reads the target's mappings, keeping the ones it has when there are
@@ -1285,7 +1676,16 @@ impl Unwinder {
     /// the time its last samples are drained it has often exited. See
     /// [`Symbolizer::refresh`].
     pub fn refresh_symbols(&mut self) -> bool {
-        self.symbols.refresh()
+        let fresh = self.symbols.refresh();
+        if fresh {
+            if let Some(cfi) = self.cfi.as_mut() {
+                cfi.refresh();
+            }
+            if let Some(name) = executable(self.symbols.pid) {
+                self.executable = Some(name);
+            }
+        }
+        fresh
     }
 
     pub fn table(&self) -> &StackTable {
@@ -1296,13 +1696,48 @@ impl Unwinder {
         self.table
     }
 
+    /// Where each module's names came from.
+    pub fn name_origins(&self) -> &BTreeMap<PathBuf, unwind::NameOrigin> {
+        self.symbols.origins()
+    }
+
     /// The share of samples whose leaf function could be walked out of.
     ///
     /// `None` when nothing could be read either way, which is the answer on an
     /// architecture whose prologue this build does not recognise.
     pub fn walkable_share(&self) -> Option<f64> {
-        let known = self.walkable_leaf + self.unwalkable_leaf;
+        let known = self.walkable_leaf + self.unwalkable_leaf();
         (known > 0).then(|| self.walkable_leaf as f64 / known as f64)
+    }
+
+    fn unwalkable_leaf(&self) -> u64 {
+        self.frameless.values().sum()
+    }
+
+    /// Of the samples whose leaf sets up no frame pointer, how many had their
+    /// callers recovered by the mode: `(recovered, frameless)`.
+    pub fn recovered(&self) -> (u64, u64) {
+        (self.recovered, self.unwalkable_leaf())
+    }
+
+    /// The frameless-leaf samples, by object, largest first, as a clause.
+    fn frameless_objects(&self) -> String {
+        let mut objects: Vec<(&String, &u64)> = self.frameless.iter().collect();
+        objects.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+        objects
+            .iter()
+            .map(|(object, count)| format!("{count} in {object}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Whether most frameless leaves are in the target's own executable.
+    fn target_is_frameless(&self) -> bool {
+        let Some(executable) = self.executable.as_deref().map(basename) else {
+            return false;
+        };
+        let own = self.frameless.get(executable).copied().unwrap_or(0);
+        own * 2 > self.unwalkable_leaf()
     }
 
     /// What this capture gave up, in the words a fallback backend uses.
@@ -1312,19 +1747,75 @@ impl Unwinder {
     /// short and confident, naming callers that never called anything, because
     /// the walk followed a register holding something else. So it is reported
     /// as a degradation of the measurement, which is what it is, rather than
-    /// left to be noticed in a flame graph that looks fine.
+    /// left to be noticed in a flame graph that looks fine -- and it names the
+    /// object the frameless functions are in, and says what the mode recovered.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if let Some(share) = self.walkable_share() {
-            if share < 0.5 {
+        let frameless = self.unwalkable_leaf();
+        let known = self.walkable_leaf + frameless;
+        match self.callchain {
+            Callchain::FramePointers { .. } if frameless * 2 > known && known > 0 => {
+                let keeps = self
+                    .executable
+                    .as_deref()
+                    .and_then(|path| unwind::inspect(Path::new(path)).ok())
+                    .and_then(|image| image.frame_pointers)
+                    .is_some_and(|(keeps, _)| keeps);
+                let whose = if self.target_is_frameless() && !keeps {
+                    "this target was built without them and what is here is a profile of leaf \
+                     functions"
+                        .to_owned()
+                } else if self.target_is_frameless() {
+                    "this target keeps frame pointers and its leaf functions do not, as gcc \
+                     builds them from -O1, so each leaf's caller is missing from its stack"
+                        .to_owned()
+                } else {
+                    "most of them are outside the target's own code, which is where the \
+                     callers are lost"
+                        .to_owned()
+                };
                 notes.push(format!(
-                    "{} of {} samples landed in a function that sets up no frame pointer, so the \
-                     frames under the leaf are not its callers: this target was built without \
-                     them and what is here is a profile of leaf functions",
-                    self.unwalkable_leaf,
-                    self.walkable_leaf + self.unwalkable_leaf
+                    "{frameless} of {known} samples landed in a function that sets up no frame \
+                     pointer ({}), so the frames under the leaf are not its callers: {whose}; \
+                     `--stack fp+leaf` recovers the leaf's caller and `--stack dwarf` the whole \
+                     chain",
+                    self.frameless_objects()
                 ));
             }
+            Callchain::FramePointersAndLeaf { .. } if self.recovered < frameless => {
+                notes.push(format!(
+                    "{} of {frameless} samples in a function that sets up no frame pointer ({}) \
+                     kept a leaf whose caller could not be recovered from its CFI: the frames \
+                     under it are not its callers",
+                    frameless - self.recovered,
+                    self.frameless_objects()
+                ));
+            }
+            Callchain::CopiedStack { .. } => {
+                let walks = self.complete + self.cut_by_copy + self.failed + self.depth_limit;
+                if self.cut_by_copy > 0 {
+                    notes.push(format!(
+                        "{} of {walks} stacks were deeper than the {} bytes copied with each \
+                         sample, and are cut where the copy ends: their root frames are missing",
+                        self.cut_by_copy,
+                        crate::perf::COPIED_STACK_BYTES
+                    ));
+                }
+                if self.failed * 20 > walks && self.failed > 0 {
+                    notes.push(format!(
+                        "{} of {walks} stacks stopped where the unwind information ran out or \
+                         did not match the stack: their root frames are missing",
+                        self.failed
+                    ));
+                }
+                if self.depth_limit > 0 {
+                    notes.push(format!(
+                        "{} stacks were deeper than {} frames and are cut there",
+                        self.depth_limit, 127
+                    ));
+                }
+            }
+            _ => {}
         }
         if self.samples > 0 && self.single_frame * 2 > self.samples {
             notes.push(format!(
@@ -1357,6 +1848,70 @@ impl Unwinder {
         }
         notes
     }
+
+    /// What this capture states that is not a concession: what the mode
+    /// recovered, and where the names came from.
+    pub fn facts(&self) -> Vec<String> {
+        let mut facts = Vec::new();
+        let frameless = self.unwalkable_leaf();
+        match self.callchain {
+            Callchain::FramePointersAndLeaf { .. } if self.inserted > 0 => facts.push(format!(
+                "`fp+leaf` recovered the caller of the leaf in {} of {} samples from the leaf's \
+                 CFI ({} of the {frameless} whose leaf sets up no frame pointer: {}); each is \
+                 marked `{}`",
+                self.inserted,
+                self.samples,
+                self.recovered,
+                if frameless > 0 {
+                    self.frameless_objects()
+                } else {
+                    "none".to_owned()
+                },
+                RECOVERED_MARK.trim()
+            )),
+            Callchain::CopiedStack { .. } if self.samples > 0 => facts.push(format!(
+                "`dwarf` unwound {} of {} stacks from the {} bytes copied with each sample to \
+                 their root ({} cut by the copy, {} stopped early); {} of the {frameless} whose \
+                 leaf sets up no frame pointer were unwound past it",
+                self.complete,
+                self.samples,
+                crate::perf::COPIED_STACK_BYTES,
+                self.cut_by_copy,
+                self.failed + self.depth_limit,
+                self.recovered
+            )),
+            _ => {}
+        }
+        let origins = self.symbols.origins();
+        if origins.values().any(|origin| {
+            matches!(
+                origin,
+                unwind::NameOrigin::Debuginfod { .. } | unwind::NameOrigin::None(_)
+            )
+        }) || self.symbols.debuginfod.is_some()
+        {
+            let described: Vec<String> = origins
+                .iter()
+                .map(|(path, origin)| format!("{}: {origin}", basename(&path.to_string_lossy())))
+                .collect();
+            if !described.is_empty() {
+                facts.push(format!("names came from -- {}", described.join("; ")));
+            }
+        }
+        facts
+    }
+}
+
+/// The target's executable as its maps name it, while it is alive.
+fn executable(pid: i32) -> Option<String> {
+    let who = if pid <= 0 {
+        "self".to_owned()
+    } else {
+        pid.to_string()
+    };
+    std::fs::read_link(format!("/proc/{who}/exe"))
+        .ok()
+        .map(|path| path.display().to_string())
 }
 
 #[cfg(test)]
@@ -1487,6 +2042,7 @@ mod tests {
             symbol: Some(name.to_owned()),
             mangled: None,
             offset: 0x20,
+            recovered: false,
         };
         let stack = Stack {
             frames: vec![
@@ -1516,6 +2072,7 @@ mod tests {
             symbol: None,
             mangled: None,
             offset: 0x1234,
+            recovered: false,
         };
         assert_eq!(frame.label(), "libfoo.so+0x1234");
         assert_eq!(frame.to_string(), "+0x1234 (libfoo.so)");
@@ -1715,14 +2272,22 @@ mod tests {
     }
 
     /// No `--stack` is `auto`, and `auto` names the mode it chose and every
-    /// mode it passed over with the reason -- never `auto` itself.
+    /// mode it passed over with the reason -- never `auto` itself. Pid 1's
+    /// binary is not readable by a user, so every requirement on the target
+    /// is unknown, and unknown never counts as available: `auto` lands on the
+    /// one mode that asks nothing of the target.
     #[test]
     fn auto_chooses_a_concrete_mode_and_says_why_it_passed_over_the_others() {
         for stack in [None, Some(StackMode::Auto)] {
             let choice = choose(&profile_request(stack), &environment()).unwrap();
             assert_eq!(choice.mode, StackMode::Fp);
             assert!(!choice.forced);
-            assert_eq!(choice.callchain(), Callchain::FramePointers);
+            assert_eq!(
+                choice.callchain(),
+                Callchain::FramePointers {
+                    kernel: !choice.user_only
+                }
+            );
             let selected: Vec<StackMode> = choice
                 .considered
                 .iter()
@@ -1740,35 +2305,65 @@ mod tests {
                     );
                 }
             }
+            let dwarf = choice
+                .considered
+                .iter()
+                .find(|considered| considered.mode == StackMode::Dwarf)
+                .unwrap();
+            let Verdict::Rejected(reasons) = &dwarf.verdict else {
+                panic!("{dwarf:?}");
+            };
+            assert!(
+                reasons
+                    .iter()
+                    .any(|reason| reason.starts_with("target:cfi: unknown")),
+                "{reasons:?}"
+            );
             let json = serde_json::to_string(&choice).unwrap();
             let read: StackChoice = serde_json::from_str(&json).unwrap();
             assert_eq!(read, choice);
         }
     }
 
-    /// A named mode is forced: served as asked, or refused with the reason,
-    /// never degraded to frame pointers.
+    /// A named mode is forced: served as asked, with what could not be checked
+    /// written down, or refused with the reason -- never degraded to frame
+    /// pointers.
     #[test]
     fn a_forced_mode_is_served_as_asked_or_refused_with_the_reason() {
         let environment = environment();
         for (mode, callchain) in [
-            (StackMode::Fp, Callchain::FramePointers),
+            (StackMode::Fp, Callchain::FramePointers { kernel: true }),
+            (
+                StackMode::FpLeaf,
+                Callchain::FramePointersAndLeaf { kernel: true },
+            ),
+            (StackMode::Dwarf, Callchain::CopiedStack { kernel: true }),
             (StackMode::None, Callchain::Off),
         ] {
             let choice = choose(&profile_request(Some(mode)), &environment).unwrap();
             assert_eq!((choice.mode, choice.forced), (mode, true));
+            let callchain = if choice.user_only {
+                callchain.user_only()
+            } else {
+                callchain
+            };
             assert_eq!(choice.callchain(), callchain);
             assert!(choice.considered.is_empty());
+            if matches!(mode, StackMode::FpLeaf | StackMode::Dwarf) {
+                assert!(
+                    choice
+                        .degradations
+                        .iter()
+                        .any(|degradation| degradation.contains("assumed rather than checked")),
+                    "{choice:?}"
+                );
+            }
         }
-        for mode in [
-            StackMode::FpLeaf,
-            StackMode::Dwarf,
-            StackMode::Lbr,
-            StackMode::Sframe,
-        ] {
+        for mode in [StackMode::Lbr, StackMode::Sframe] {
             let error = choose(&profile_request(Some(mode)), &environment).unwrap_err();
             assert!(
-                error.contains(&format!("--stack {mode}")) && error.contains("not implemented"),
+                error.contains(&format!("--stack {mode}"))
+                    && (error.contains("missing") || error.contains("not implemented")),
                 "{error}"
             );
         }

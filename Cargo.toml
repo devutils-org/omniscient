@@ -25,6 +25,7 @@ toml = "0.9"
 perf-event-open-sys = "7.0.0"
 rustc-demangle = "0.1"
 cpp_demangle = "0.5"
+framehop = { version = "0.16", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "thin"

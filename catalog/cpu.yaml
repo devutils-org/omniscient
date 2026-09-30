@@ -126,8 +126,13 @@
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
-    - "The unwind mode (fp / dwarf / lbr) must be declared: dwarf copies the stack
-       on every sample, with far higher volume and cost."
+    - "The stacks are only as good as the way they were unwound. `--stack auto`
+       picks the best mode this machine and this target serve -- fp+leaf for a
+       build with frame pointers, dwarf for one without -- and the notes say
+       which, and why it passed over the others; dwarf copies 8 KiB of user
+       stack with every sample. Where perf_event_paranoid refuses the kernel
+       (2, the kernel's default) the stacks are user-only, and time the task
+       spent in the kernel is not sampled at all."
     - "A time-based sample counts the time the task held its cpu, including the
        interrupts that ran on it meanwhile, and at high rates those interrupts
        are this profile's own. The kernel's own on-cpu figure leaves interrupt

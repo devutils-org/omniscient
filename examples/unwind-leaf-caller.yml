@@ -1,0 +1,35 @@
+# What does the frame-pointer walk lose, and what does fp+leaf put back?
+#
+#   omn -f examples/unwind-leaf-caller.yml
+#
+# The same program, profiled twice at once: once with the kernel's
+# frame-pointer walk alone, once with the caller of the leaf recovered.
+#
+# A function that sets up no frame pointer -- libc's `memchr`, `strlen` and
+# friends are hand-written and frameless, and gcc makes any leaf frameless from
+# -O1 -- leaves the frame register holding its *caller's* frame, so the walk
+# goes from the leaf straight to its caller's caller. Nothing about the result
+# looks wrong: it is a plausible stack with one frame missing. The `fp` request
+# says so in a note that names the object the frameless functions are in; the
+# `fp+leaf` request copies the user registers and 256 bytes of stack with each
+# sample, reads the leaf's unwind rule from its `.eh_frame`, and puts the
+# missing caller back, marked `[recovered]`, with a note counting how many it
+# recovered.
+name: the leaf's caller, lost and recovered
+format: text
+
+requests:
+  - label: frame pointers
+    source: cpu.profile
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); s=${#i}; done"]
+    mode: sample@997hz
+    emit: [stack]
+    stack: fp
+  - label: frame pointers and the leaf's caller
+    source: cpu.profile
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); s=${#i}; done"]
+    mode: sample@997hz
+    emit: [stack]
+    stack: fp+leaf

@@ -149,7 +149,7 @@ fn sample_process(pid: i32, for_ms: u64) -> Option<Vec<Sample>> {
         1_000_000,
         Scope::Process(pid),
         64,
-        Callchain::FramePointers,
+        Callchain::BOTH_HALVES,
     )
     .ok()?;
     event.enable().expect("enable");
@@ -343,7 +343,7 @@ fn a_blocked_task_shows_the_syscall_it_blocked_in_on_the_other_side_of_the_bound
         1,
         Scope::Process(0),
         64,
-        Callchain::FramePointers,
+        Callchain::BOTH_HALVES,
     ) else {
         eprintln!(
             "skipped: this machine refuses unprivileged perf sampling, so the kernel half \
@@ -517,19 +517,21 @@ fn a_stack_seen_twice_is_stored_once() {
 fn an_unwind_mode_that_is_not_implemented_says_so_rather_than_unwinding_one_frame() {
     assert_eq!(
         omn::stack::callchain_for(StackMode::Fp),
-        Ok(Callchain::FramePointers)
+        Ok(Callchain::FramePointers { kernel: true })
+    );
+    assert_eq!(
+        omn::stack::callchain_for(StackMode::FpLeaf),
+        Ok(Callchain::FramePointersAndLeaf { kernel: true })
+    );
+    assert_eq!(
+        omn::stack::callchain_for(StackMode::Dwarf),
+        Ok(Callchain::CopiedStack { kernel: true })
     );
     assert_eq!(
         omn::stack::callchain_for(StackMode::None),
         Ok(Callchain::Off)
     );
-    for mode in [
-        StackMode::FpLeaf,
-        StackMode::Dwarf,
-        StackMode::Lbr,
-        StackMode::Sframe,
-        StackMode::Auto,
-    ] {
+    for mode in [StackMode::Lbr, StackMode::Sframe, StackMode::Auto] {
         let error = omn::stack::callchain_for(mode).expect_err(
             "none is a mode this build serves, and silently doing frame pointers is the bug",
         );

@@ -1,0 +1,32 @@
+# How were these stacks unwound, and why that way?
+#
+#   omn -f examples/unwind-auto.yml
+#   omn -f examples/unwind-auto.yml -- ./a-program-built-without-frame-pointers
+#
+# No `stack:` is `--stack auto`: the unwind modes of `src/unwind.yaml` are
+# walked best first, each probed against this machine *and* this target, and
+# the first one served is taken. The note says which and why it passed over
+# the ones above it:
+#
+#   note: stacks unwound by `fp+leaf`, chosen by `--stack auto` over sframe
+#         (kernel:sframe: missing: kernel 7.2 does not unwind user stacks
+#         from .sframe ...)
+#
+# The shell is built with frame pointers (its `main` sets one up), so `auto`
+# takes `fp+leaf`: the kernel's frame-pointer walk, with the caller of a
+# frameless leaf -- libc's string functions, hand-written and frameless --
+# recovered from the leaf's CFI and marked `[recovered]`. Point it at a
+# program built with `-fomit-frame-pointer` and it takes `dwarf` instead,
+# saying `fp+leaf (target:frame_pointers: missing: ... was built without frame
+# pointers: `main` sets up no frame pointer)`. At the kernel's default
+# `perf_event_paranoid` 2 it says, too, that the stacks are user-only.
+name: the unwind mode, chosen
+format: text
+
+requests:
+  - label: where the shell's time goes
+    source: cpu.profile
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); s=${#i}; done"]
+    mode: sample@997hz
+    emit: [stack]

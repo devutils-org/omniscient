@@ -209,5 +209,19 @@ fn ibs_callchain(
     if request.stack.is_none() && !request.emit.contains(&crate::request::Emit::Stack) {
         return Ok(crate::perf::Callchain::Off);
     }
-    crate::stack::choose(request, &resolved.environment).map(|choice| choice.callchain())
+    // The IBS sources walk frame pointers and nothing else: their samples are
+    // symbolized by an unwinder that reads no copied stack. So `auto` means
+    // `fp` here, a forced mode that needs more is refused by name, and the
+    // kernel half is always asked for -- IBS is opened only where kernel
+    // profiling is allowed, and its unit refuses the exclude bits.
+    let choice = crate::stack::choose(request, &resolved.environment)?;
+    match choice.mode {
+        crate::request::StackMode::None => Ok(crate::perf::Callchain::Off),
+        crate::request::StackMode::Fp => Ok(crate::perf::Callchain::BOTH_HALVES),
+        other if choice.forced => Err(format!(
+            "`--stack {other}` is not served by the IBS sources: their stacks are the kernel's \
+             frame-pointer walk, so ask for `--stack fp`"
+        )),
+        _ => Ok(crate::perf::Callchain::BOTH_HALVES),
+    }
 }

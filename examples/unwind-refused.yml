@@ -1,0 +1,27 @@
+# What happens when the unwind mode asked for cannot be served?
+#
+#   omn -f examples/unwind-refused.yml
+#
+# It is refused, before the target is launched, with the requirement that is
+# missing -- never quietly served with frame pointers instead, which would
+# answer a different question. On an AMD Zen 2:
+#
+#   error: `--stack lbr` cannot be served here: pmu:branch_call_stack: missing:
+#          this cpu offers no branch call stack to this user (...): LBR
+#          call-stack mode is Intel's, from Haswell; this is AMD Ryzen 9 3900X
+#
+# `--stack sframe` is refused the same way on every kernel through 7.2, which
+# has no SFrame user unwinder (docs/unwind.md says what upstream has). On a
+# machine that does offer the branch records, the refusal is that this build
+# has no collector for them -- also by name.
+name: an unwind mode this machine cannot serve
+format: text
+
+requests:
+  - label: the branch records
+    source: cpu.profile
+    target:
+      launch: [/bin/sh, -c, "i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done"]
+    mode: sample@997hz
+    emit: [stack]
+    stack: lbr
