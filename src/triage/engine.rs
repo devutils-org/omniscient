@@ -167,8 +167,6 @@ pub fn run(
         )
     })?;
 
-    session.check_paired_parts().map_err(Failure::request)?;
-
     let mut resolved = Vec::new();
     for request in &session.requests {
         match resolve::resolve(catalog, capabilities, request) {
@@ -217,12 +215,14 @@ pub fn run(
     }
     let requests: Vec<Request> = resolved.iter().map(|one| one.request.clone()).collect();
     for decomposition in &session.decompose {
-        output.decompositions.push(join::decompose_with(
+        // `join::apply` watches everything, so no window closes early.
+        output.decompositions.push(join::decompose_within(
             decomposition,
             &requests,
             &output.results,
             &events,
             &session.joins,
+            &std::collections::BTreeMap::new(),
         ));
     }
 

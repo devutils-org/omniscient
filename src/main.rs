@@ -230,13 +230,6 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // A part read from a join is refused before the machine is asked: its
-    // pairs would not be the join's (`Session::check_paired_parts`).
-    if let Err(error) = session.check_paired_parts() {
-        eprintln!("error: {error}");
-        return Ok(ExitCode::from(EXIT_REJECTED));
-    }
-
     // `--symbols debuginfod` reaches the collectors that name their stacks
     // through the unwinder; on any other source it would be accepted and
     // never asked, which is a debuginfod request silently not made. Refused
@@ -1393,7 +1386,7 @@ fn assemble(
     for decomposition in &session.decompose {
         // With the session's joins: a part a join defines (`value: paired`)
         // names the join by id.
-        run.decompositions.push(decompose_within(
+        run.decompositions.push(join::decompose_within(
             decomposition,
             &served,
             &run.results,
@@ -1403,28 +1396,6 @@ fn assemble(
         ));
     }
     Ok((run, costs, served_by))
-}
-
-/// A decomposition over the windows the joins were given.
-///
-/// The call site's shape once `join::decompose_within` lands (the fourteenth
-/// wave's request to stream J): a `paired` part pairs over the windows
-/// `join::apply_within` was given, not over the ones `decompose_with`
-/// rebuilds from the results. Until then the windows are not read, and
-/// `Session::check_paired_parts` refuses every `paired` part before anything
-/// is attached, so the path where the two would differ is unreachable. The
-/// swap is this one body, `join::decompose_within(.., windows)`, and the
-/// removal of the two `check_paired_parts` calls (`docs/fixes/w15-resolver.md`).
-fn decompose_within(
-    decomposition: &join::Decomposition,
-    requests: &[omn::request::Request],
-    results: &[omn::emit::Results],
-    events: &[omn::event::Event],
-    joins: &[join::Rule],
-    windows: &BTreeMap<String, collect::Watched>,
-) -> join::DecompositionOutput {
-    let _ = windows;
-    join::decompose_with(decomposition, requests, results, events, joins)
 }
 
 /// The backend a collection ended on, which is the one its numbers came from.
