@@ -405,6 +405,8 @@ fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
             "`omn list {source_id}` names the backends of its chain."
         )),
         resolve::ResolveError::FilterFieldNotCarried { .. } => None,
+        // The message names the `--backend force:` that would attach it.
+        resolve::ResolveError::KeyNotCarried { .. } => None,
     }
 }
 
@@ -1754,5 +1756,33 @@ mod tests {
         assert_eq!(normalized(&["omn", "list", "io"]), ["omn", "list", "io"]);
         assert_eq!(normalized(&["omn", "--help"]), ["omn", "--help"]);
         assert_eq!(normalized(&["omn"]), ["omn"]);
+    }
+    #[test]
+    fn a_key_the_backend_cannot_attach_is_the_request_s_to_change() {
+        let error = resolve::ResolveError::KeyNotCarried {
+            source_id: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            key: omn::request::KeyKind::Task,
+            elsewhere: Some("tracepoint".into()),
+        };
+        assert_eq!(resolution_is(&error), omn::collect::Whose::Request);
+        // No hint: the message already names what would serve it.
+        assert_eq!(resolution_hint(&error), None);
+        let message = error.to_string();
+        assert!(message.contains("`task`"), "{message}");
+        assert!(message.contains("--backend force:tracepoint"), "{message}");
+
+        let nowhere = resolve::ResolveError::KeyNotCarried {
+            source_id: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            key: omn::request::KeyKind::Task,
+            elsewhere: None,
+        };
+        assert!(
+            nowhere
+                .to_string()
+                .contains("no backend of `io.bytes` attaches it"),
+            "{nowhere}"
+        );
     }
 }

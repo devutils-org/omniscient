@@ -324,7 +324,7 @@ pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
 fn adds_up(unit: Unit) -> bool {
     match unit {
         Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
-        Unit::Ratio | Unit::Hz | Unit::Celsius => false,
+        Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius => false,
     }
 }
 
@@ -559,13 +559,13 @@ fn check_stack(
     rejections: &mut Vec<Rejection>,
     report: &mut Report,
 ) {
-    let Some(stack) = request.stack else {
+    let Some(stack) = request.stack.filter(|stack| stack.is_concrete()) else {
         if request
             .emit
             .iter()
             .any(|emit| emit.kind() == EmitKind::Stack)
         {
-            report.push("no --stack given, so the resolver picks an unwind mode: frame pointers where the target has them, none otherwise");
+            report.push("no --stack given (or `auto`), so the resolver picks the best unwind mode this machine and this target serve, and says why it passed over the others");
         }
         return;
     };

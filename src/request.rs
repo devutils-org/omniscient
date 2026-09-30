@@ -933,10 +933,16 @@ pub enum KeyKind {
     /// twenty-four of them describes no core. This is what makes a per-cpu
     /// series possible rather than a mean with a range beside it.
     Cpu,
+    /// `node:n`, a memory node as the kernel numbers them.
+    ///
+    /// What `mem.numa` counts per: a local and a remote allocation are only
+    /// told apart by the node they landed on, and a sum across nodes is the
+    /// one number that hides the imbalance being asked about.
+    Node,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 12] = [
+    pub const ALL: [KeyKind; 13] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -949,6 +955,7 @@ impl KeyKind {
         KeyKind::Iface,
         KeyKind::Dev,
         KeyKind::Cpu,
+        KeyKind::Node,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -965,6 +972,7 @@ impl KeyKind {
             KeyKind::Iface => "iface",
             KeyKind::Dev => "dev",
             KeyKind::Cpu => "cpu",
+            KeyKind::Node => "node",
         }
     }
 }
@@ -996,34 +1004,70 @@ impl fmt::Display for KeyKind {
 /// The mode is part of the request rather than an implementation detail: `dwarf`
 /// copies the stack on every sample, so a profile taken with it is not
 /// comparable in cost to one taken with frame pointers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// The modes are chosen the way backends are: [`StackMode::Auto`] asks
+/// `crate::stack::choose` for the best mode this machine and this target
+/// serve, and any other value forces that mode, refused with the reason where
+/// it cannot be served. One spelling per mode, the same on the command line,
+/// in a session file and in a resolved file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StackMode {
     /// Frame pointers: cheap, needs a build that keeps them.
     Fp,
+    /// Frame pointers, plus the caller of a frameless leaf recovered from the
+    /// return address at the top of the user stack.
+    FpLeaf,
     /// DWARF unwinding from a copied stack: portable, expensive.
     Dwarf,
     /// Last Branch Record: cheap and shallow, hardware-limited depth.
     Lbr,
+    /// The kernel reading the binary's `.sframe` section.
+    Sframe,
     /// No stacks.
     None,
+    /// The best mode this machine and this target serve, chosen and
+    /// explained by `crate::stack::choose`. Never the mode a run used: a
+    /// choice always names a concrete one.
+    Auto,
 }
 
 impl StackMode {
-    pub const ALL: [StackMode; 4] = [
+    pub const ALL: [StackMode; 7] = [
         StackMode::Fp,
+        StackMode::FpLeaf,
         StackMode::Dwarf,
         StackMode::Lbr,
+        StackMode::Sframe,
+        StackMode::None,
+        StackMode::Auto,
+    ];
+
+    /// The modes a run can actually use: every one but [`StackMode::Auto`].
+    pub const CONCRETE: [StackMode; 6] = [
+        StackMode::Fp,
+        StackMode::FpLeaf,
+        StackMode::Dwarf,
+        StackMode::Lbr,
+        StackMode::Sframe,
         StackMode::None,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             StackMode::Fp => "fp",
+            StackMode::FpLeaf => "fp+leaf",
             StackMode::Dwarf => "dwarf",
             StackMode::Lbr => "lbr",
+            StackMode::Sframe => "sframe",
             StackMode::None => "none",
+            StackMode::Auto => "auto",
         }
+    }
+
+    /// Whether this names a mode a run can use, rather than asking for one to
+    /// be chosen.
+    pub fn is_concrete(self) -> bool {
+        self != StackMode::Auto
     }
 }
 
@@ -1046,6 +1090,19 @@ impl FromStr for StackMode {
 impl fmt::Display for StackMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for StackMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StackMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -1820,6 +1877,18 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_memory_node_is_a_key_spelled_node() {
+        assert_eq!("node".parse::<KeyKind>().unwrap(), KeyKind::Node);
+        assert_eq!(KeyKind::Node.as_str(), "node");
+        assert_eq!(crate::event::KeyValue::node(1).kind(), KeyKind::Node);
+        assert_eq!(crate::event::KeyValue::node(1).to_string(), "node:1");
+        // Every kind is reachable by its name, and no two share one.
+        for kind in KeyKind::ALL {
+            assert_eq!(kind.as_str().parse::<KeyKind>().unwrap(), kind);
+        }
+    }
 
     #[test]
     fn a_source_splits_into_family_and_metric() {
