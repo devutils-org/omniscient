@@ -683,8 +683,19 @@ struct OpenState {
 /// the four matches from each growing their own way of leaking.
 struct States<K: Ord + Clone> {
     open: BTreeMap<K, OpenState>,
+    /// The open states by age, oldest first: what expiry and eviction walk,
+    /// so neither costs a pass over every open state on every event. Holds
+    /// exactly the keys of `open`, which only this impl adds to or removes
+    /// from.
+    ages: std::collections::BTreeSet<(u64, K)>,
     stats: StateStats,
     finished: Vec<Attribution>,
+    /// Whether a state that matched nothing is kept once it ends. Only a
+    /// `wakeup` match reads one -- its chain counts every wakeup, matched or
+    /// not -- and every other match drops it when it ranks, so keeping it
+    /// would hold a record of every state of the run until the end for
+    /// nothing: under load, most of the engine's memory.
+    keep_unmatched: bool,
     capacity: usize,
     window_ns: Option<u64>,
 }
@@ -693,8 +704,10 @@ impl<K: Ord + Clone> States<K> {
     fn new(rule: &Rule) -> Self {
         Self {
             open: BTreeMap::new(),
+            ages: std::collections::BTreeSet::new(),
             stats: StateStats::default(),
             finished: Vec::new(),
+            keep_unmatched: rule.match_kind == MatchKind::Wakeup,
             // A capacity of zero would bound nothing: the eviction finds no
             // victim and the map grows anyway.
             capacity: rule.capacity.max(1),
@@ -709,23 +722,38 @@ impl<K: Ord + Clone> States<K> {
     /// task woken again. Overwriting it silently would lose every attribution
     /// it had collected while still counting it as opened.
     fn insert(&mut self, key: K, state: OpenState) {
-        if let Some(previous) = self.open.remove(&key) {
+        if let Some(previous) = self.remove(&key) {
             self.stats.closed += 1;
             self.stats.replaced += 1;
             let at = state.opened_ns;
-            finish(&mut self.finished, previous, Some(at), Outcome::Closed);
+            self.end(previous, Some(at), Outcome::Closed);
         } else if self.open.len() >= self.capacity {
             self.evict_oldest();
         }
+        self.ages.insert((state.opened_ns, key.clone()));
         self.open.insert(key, state);
         self.stats.opened += 1;
         self.stats.peak_open = self.stats.peak_open.max(self.open.len() as u64);
     }
 
+    /// Records how a state ended, when anything will read it.
+    fn end(&mut self, state: OpenState, closed_ns: Option<u64>, outcome: Outcome) {
+        if state.matched > 0 || self.keep_unmatched {
+            finish(&mut self.finished, state, closed_ns, outcome);
+        }
+    }
+
+    /// Takes a state out of the map and out of the age index together.
+    fn remove(&mut self, key: &K) -> Option<OpenState> {
+        let state = self.open.remove(key)?;
+        self.ages.remove(&(state.opened_ns, key.clone()));
+        Some(state)
+    }
+
     fn close(&mut self, key: &K, closed_ns: u64) {
-        if let Some(state) = self.open.remove(key) {
+        if let Some(state) = self.remove(key) {
             self.stats.closed += 1;
-            finish(&mut self.finished, state, Some(closed_ns), Outcome::Closed);
+            self.end(state, Some(closed_ns), Outcome::Closed);
         }
     }
 
@@ -739,16 +767,21 @@ impl<K: Ord + Clone> States<K> {
             return;
         };
         let cutoff = now_ns.saturating_sub(window_ns);
-        let stale: Vec<K> = self
-            .open
+        // The oldest first, and only as far as the cutoff: on most events
+        // nothing has outlived the window and this looks at one entry. Ended
+        // in key order, as they always were, so the attributions come out in
+        // the same order whatever the index.
+        let mut stale: Vec<K> = self
+            .ages
             .iter()
-            .filter(|(_, state)| state.opened_ns < cutoff)
-            .map(|(key, _)| key.clone())
+            .take_while(|(opened_ns, _)| *opened_ns < cutoff)
+            .map(|(_, key)| key.clone())
             .collect();
+        stale.sort();
         for key in stale {
-            if let Some(state) = self.open.remove(&key) {
+            if let Some(state) = self.remove(&key) {
                 self.stats.expired += 1;
-                finish(&mut self.finished, state, None, Outcome::Expired);
+                self.end(state, None, Outcome::Expired);
             }
         }
     }
@@ -756,34 +789,29 @@ impl<K: Ord + Clone> States<K> {
     /// Ends every open state at the instant the `from` source was detached.
     fn window_closed(&mut self, closed_ns: u64) {
         self.stats.window_closed += self.open.len() as u64;
+        self.ages.clear();
         for (_, state) in std::mem::take(&mut self.open) {
-            finish(
-                &mut self.finished,
-                state,
-                Some(closed_ns),
-                Outcome::WindowClosed,
-            );
+            self.end(state, Some(closed_ns), Outcome::WindowClosed);
         }
     }
 
     fn evict_oldest(&mut self) {
-        let oldest = self
-            .open
-            .iter()
-            .min_by_key(|(_, state)| state.opened_ns)
-            .map(|(key, _)| key.clone());
+        // The first by age is the oldest, and among states opened at one
+        // instant the least key, which is the one a scan of the map found.
+        let oldest = self.ages.first().map(|(_, key)| key.clone());
         if let Some(key) = oldest {
-            if let Some(state) = self.open.remove(&key) {
+            if let Some(state) = self.remove(&key) {
                 self.stats.overflowed += 1;
-                finish(&mut self.finished, state, None, Outcome::Overflowed);
+                self.end(state, None, Outcome::Overflowed);
             }
         }
     }
 
     fn finish(mut self) -> (StateStats, Vec<Attribution>) {
         self.stats.still_open = self.open.len() as u64;
+        self.ages.clear();
         for (_, state) in std::mem::take(&mut self.open) {
-            finish(&mut self.finished, state, None, Outcome::StillOpen);
+            self.end(state, None, Outcome::StillOpen);
         }
         (self.stats, self.finished)
     }
@@ -800,7 +828,7 @@ impl States<(String, u64)> {
             .range(from..=through)
             .map(|(id, _)| id.clone())
             .collect();
-        let taken: Vec<OpenState> = ids.iter().filter_map(|id| self.open.remove(id)).collect();
+        let taken: Vec<OpenState> = ids.iter().filter_map(|id| self.remove(id)).collect();
         self.stats.closed += taken.len() as u64;
         taken
     }
@@ -1604,7 +1632,7 @@ fn woke<'a>(
                 keyless += 1;
                 continue;
             };
-            let Some(mut state) = states.open.remove(&tid) else {
+            let Some(mut state) = states.remove(&tid) else {
                 continue;
             };
             if let Some(attr) = rule.waker.as_deref() {
@@ -1623,12 +1651,7 @@ fn woke<'a>(
             if let Some(from) = opener.remove(&tid) {
                 pairs.push((from, event.ts_ns.saturating_sub(state.opened_ns)));
             }
-            finish(
-                &mut states.finished,
-                state,
-                Some(event.ts_ns),
-                Outcome::Closed,
-            );
+            states.end(state, Some(event.ts_ns), Outcome::Closed);
         }
     }
 
@@ -2494,6 +2517,12 @@ impl Kind {
         }
     }
 
+    /// A span that contains the key's events rather than a reading tied to
+    /// the key: the only kind of row that has no evidence level.
+    pub fn is_bracket(self) -> bool {
+        matches!(self, Kind::Window | Kind::Lifetime)
+    }
+
     fn of(mode: Mode) -> Self {
         match mode {
             Mode::Sample { .. } => Kind::Sampled,
@@ -2521,7 +2550,17 @@ pub struct DecompositionOutput {
 }
 
 /// One key's decomposition.
+///
+/// Every row carries its evidence level, and so does a whole that was read
+/// from a source: a line of the table that does not say what ties it to the
+/// key reads as a finding it is not. The engine builds every such row with
+/// one ([`Readout`] rates each by the table's key and the part's `via`), and a
+/// document that arrives without one -- a `results.json` edited, or written by
+/// something else -- is refused when it is read, rather than shown with a `-`.
+/// Only a whole that is a bracket (the run's window, the program's life) has
+/// none, because nothing joins it to the key: it contains the key's events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedBreakdown")]
 pub struct Breakdown {
     pub key: String,
     pub whole: Row,
@@ -2541,6 +2580,47 @@ pub struct Breakdown {
     pub residue_resolution: Option<f64>,
 }
 
+/// A [`Breakdown`] as it is read, before its rows' evidence is checked.
+#[derive(Deserialize)]
+struct UncheckedBreakdown {
+    key: String,
+    whole: Row,
+    rows: Vec<Row>,
+    #[serde(default)]
+    parts: Option<f64>,
+    #[serde(default)]
+    residue: Option<f64>,
+    #[serde(default)]
+    residue_resolution: Option<f64>,
+}
+
+impl TryFrom<UncheckedBreakdown> for Breakdown {
+    type Error = String;
+
+    fn try_from(table: UncheckedBreakdown) -> Result<Self, Self::Error> {
+        if let Some(row) = table.rows.iter().find(|row| row.evidence.is_none()) {
+            return Err(format!(
+                "the `{}` row of the table for `{}` carries no evidence level: every row says                  what ties it to the key",
+                row.state, table.key
+            ));
+        }
+        if table.whole.evidence.is_none() && !table.whole.kind.is_bracket() {
+            return Err(format!(
+                "the whole of the table for `{}` was read from `{}` and carries no evidence                  level: only a window or a life, which bracket the key, can go without one",
+                table.key, table.whole.source
+            ));
+        }
+        Ok(Breakdown {
+            key: table.key,
+            whole: table.whole,
+            rows: table.rows,
+            parts: table.parts,
+            residue: table.residue,
+            residue_resolution: table.residue_resolution,
+        })
+    }
+}
+
 /// One row of a decomposition, or its whole.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Row {
@@ -2550,7 +2630,8 @@ pub struct Row {
     pub value: String,
     pub kind: Kind,
     /// What ties the row to the table's key. KEY for a row whose events carry
-    /// it; absent for the window, which is a bracket rather than a join.
+    /// it; absent only for a whole that is a bracket rather than a join (the
+    /// window, the program's life), which [`Breakdown`] enforces when read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Evidence>,
     /// Absent when it could not be read, and `missing` says why: a row that
@@ -2891,15 +2972,43 @@ pub fn decompose(
 }
 
 /// [`decompose`], knowing the session's joins, which a part read from a join
-/// ([`PAIRED`]) names. The join is applied again here, over the same events
-/// and windows the run's own correlation saw, so the pairs are the ones that
-/// correlation counted.
+/// ([`PAIRED`]) names, and pairing over the windows the results report.
+///
+/// A caller that gave [`apply_within`] other windows than the results' own --
+/// `main.rs` gives a source that ran to the end of the run `closed_ns =
+/// u64::MAX`, since what its stop drained is stamped after its window closed
+/// -- calls [`decompose_within`] with them instead, or a paired part's pairs
+/// are not the join's.
 pub fn decompose_with(
     decomposition: &Decomposition,
     requests: &[Request],
     results: &[Results],
     events: &[Event],
     joins: &[Rule],
+) -> DecompositionOutput {
+    decompose_within(
+        decomposition,
+        requests,
+        results,
+        events,
+        joins,
+        &windows_of(results),
+    )
+}
+
+/// [`decompose_with`], pairing a [`PAIRED`] part over `windows`: the map
+/// [`apply_within`] was given for the session's joins, so the pairs a part
+/// reads are the ones the run's own correlation counted. The results' windows
+/// still say how long each source watched (the window row, and whether a key
+/// it never saw had nothing to see), where the real close is the right one.
+/// An empty map watches everything, as [`apply`] does.
+pub fn decompose_within(
+    decomposition: &Decomposition,
+    requests: &[Request],
+    results: &[Results],
+    events: &[Event],
+    joins: &[Rule],
+    windows: &BTreeMap<String, Watched>,
 ) -> DecompositionOutput {
     let served = |source: &str| {
         requests
@@ -2910,13 +3019,12 @@ pub fn decompose_with(
     // The pairs every joined part reads, made before any readout borrows
     // them: one event per pair, the `from` event's keys and the pair's
     // distance as `paired`.
-    let windows = windows_of(results);
     let pairs: Vec<Option<Paired>> = decomposition
         .parts
         .iter()
         .map(|part| {
             (part.value == PAIRED)
-                .then(|| paired_events(decomposition, part, joins, events, &windows))
+                .then(|| paired_events(decomposition, part, joins, events, windows))
         })
         .collect();
 
@@ -3102,8 +3210,10 @@ pub fn decompose_with(
     }
 }
 
-/// When each source of a run was watching, from its results, as `main.rs`
-/// reads them for the joins: two results of one source by their union.
+/// When each source of a run was watching, from its results' own windows: two
+/// results of one source by their union. `main.rs` starts from the same map
+/// and then opens to the end of the run every window that closed with it,
+/// which is why it calls [`decompose_within`] with its own.
 fn windows_of(results: &[Results]) -> BTreeMap<String, Watched> {
     let mut windows: BTreeMap<String, Watched> = BTreeMap::new();
     for result in results {
@@ -5237,6 +5347,144 @@ mod tests {
             "{row:?}"
         );
         assert_eq!(output.tables[0].rows[0].amount, Some(10.0));
+    }
+
+    /// What `main.rs` does since every window closes before the first stop:
+    /// the joins get a source that ran to the end with `closed_ns =
+    /// u64::MAX`, and the events its stop drained are stamped after the
+    /// results' close. A paired part read over the results' windows cuts the
+    /// open completion at that close and counts the drained wakeup as
+    /// outside; read over the joins' windows, its pairs are the join's.
+    #[test]
+    fn a_paired_part_pairs_over_the_windows_the_joins_were_given() {
+        let spec = decomposition(
+            "{id: one-read, whole: {from: io.syscall, value: total_ns}, parts: [\
+               {state: completion -> wakeup, from: completion-released, value: paired}]}",
+        );
+        let requests = [
+            request("io.syscall", "trace"),
+            request("io.latency", "trace"),
+            request("sched.wakeup", "trace"),
+        ];
+        let joins = [woke_rule()];
+        let closed = |mut results: Results| {
+            results.window = Watched {
+                run_opened_ns: 0,
+                opened_ns: 0,
+                closed_ns: 35,
+                attached: true,
+                attach_ns: None,
+            };
+            results
+        };
+        let results = [
+            closed(result("io.syscall", Unit::Ns, 35)),
+            closed(result("io.latency", Unit::Ns, 35)),
+            closed(result("sched.wakeup", Unit::Count, 35)),
+        ];
+        let wakeup = |ts| {
+            total(
+                ts,
+                "sched.wakeup",
+                7,
+                vec![Attr::uint("wakee_tid", 7), Attr::uint("waker_tid", 3)],
+            )
+        };
+        // The second completion is inside the window; its wakeup, at 39, is
+        // what the stop drained after the close at 35.
+        let events = vec![
+            total(9, "io.latency", 7, vec![Attr::uint("latency_ns", 5)]),
+            wakeup(12),
+            total(30, "io.latency", 7, vec![Attr::uint("latency_ns", 5)]),
+            wakeup(39),
+            total(50, "io.syscall", 7, vec![Attr::uint("total_ns", 50)]),
+        ];
+        let mut windows = windows_of(&results);
+        for watched in windows.values_mut() {
+            watched.closed_ns = u64::MAX;
+        }
+        let join = apply_within(&joins[0], &events, &windows).expect("the join applies");
+        assert_eq!(join.matched, 2, "{join:?}");
+        assert_eq!(join.outside_window, 0);
+
+        let within = decompose_within(&spec, &requests, &results, &events, &joins, &windows);
+        let row = &within.tables[0].rows[0];
+        assert_eq!(row.readings, 2, "the join's two pairs: {row:?}");
+        assert_eq!(row.amount, Some(3.0 + 9.0), "12 - 9 and 39 - 30");
+
+        // Over the results' own windows the drained wakeup is lost to the
+        // part, which is the inconsistency the windows passed beside fix.
+        let with = decompose_with(&spec, &requests, &results, &events, &joins);
+        let row = &with.tables[0].rows[0];
+        assert_eq!(row.readings, 1, "{row:?}");
+        assert_eq!(row.amount, Some(3.0));
+
+        // An empty map watches everything, as `join::apply` does.
+        let everything = decompose_within(
+            &spec,
+            &requests,
+            &results,
+            &events,
+            &joins,
+            &BTreeMap::new(),
+        );
+        assert_eq!(everything.tables[0].rows[0].readings, 2);
+    }
+
+    /// Every row the engine builds says what ties it to the key, whatever
+    /// kind of number it is and whether or not it could be read; and a table
+    /// read back without one is refused, not shown with a dash.
+    #[test]
+    fn a_row_without_an_evidence_level_is_never_built_and_never_read() {
+        let spec = decomposition(
+            "{id: t, whole: window, parts: [\
+               {state: on-cpu, from: cpu.profile, value: samples},\
+               {state: blocked, from: sched.offcpu, value: total_ns},\
+               {state: unread, from: io.latency, value: latency_ns},\
+               {state: joined, from: completion-released, value: paired}]}",
+        );
+        let requests = [
+            request("cpu.profile", "sample@1000hz"),
+            request("sched.offcpu", "trace"),
+        ];
+        let results = [
+            result("cpu.profile", Unit::Count, 10_000_000),
+            result("sched.offcpu", Unit::Ns, 9_000_000),
+        ];
+        let events = vec![
+            total(1, "cpu.profile", 7, vec![Attr::uint("count", 1)]),
+            total(2, "sched.offcpu", 8, vec![Attr::uint("total_ns", 5)]),
+        ];
+        // No joins, so the paired part cannot be read; `io.latency` was not
+        // collected, so neither can that one; and task 8 has no sample.
+        let output = decompose(&spec, &requests, &results, &events);
+        assert_eq!(output.tables.len(), 2);
+        for table in &output.tables {
+            for row in &table.rows {
+                assert!(row.evidence.is_some(), "{row:?}");
+            }
+            assert!(table.whole.kind.is_bracket() && table.whole.evidence.is_none());
+            let json = serde_json::to_value(table).unwrap();
+            let back: Breakdown = serde_json::from_value(json.clone()).expect("a valid table");
+            assert_eq!(&back, table);
+
+            let mut stripped = json.clone();
+            stripped["rows"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("evidence");
+            let error = serde_json::from_value::<Breakdown>(stripped)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("carries no evidence level"), "{error}");
+
+            let mut measured = json;
+            measured["whole"]["kind"] = serde_json::json!("traced");
+            let error = serde_json::from_value::<Breakdown>(measured)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("only a window or a life"), "{error}");
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -1709,4 +1710,773 @@ joins:
         refusal.contains("cpu:") && refusal.contains("via"),
         "the refusal names the key the series differ by and what to write: {refusal}"
     );
+}
+
+// ------------------------------------------------------------ the load test
+
+/// Live heap bytes, and the most there ever were since the last reset, for the
+/// load test's bound on memory. Counted for the whole test binary, which is
+/// why the load test runs itself in a child process of its own: the other
+/// tests' allocations would otherwise be counted as the engine's.
+mod heap {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub struct Counting;
+
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                PEAK.fetch_max(live, Ordering::Relaxed);
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) };
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn live() -> usize {
+        LIVE.load(Ordering::Relaxed)
+    }
+
+    /// Starts a new peak from what is live now.
+    pub fn reset_peak() {
+        PEAK.store(live(), Ordering::Relaxed);
+    }
+
+    pub fn peak() -> usize {
+        PEAK.load(Ordering::Relaxed)
+    }
+}
+
+#[global_allocator]
+static HEAP: heap::Counting = heap::Counting;
+
+/// What the load stream did, counted by the generator as it wrote each event.
+///
+/// Every number here is known by construction, before the engine runs: the
+/// stream is built of segments in each of which exactly one thing can happen
+/// to a state, and every segment but the last leaves the map empty.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Expected {
+    events: u64,
+    opened: u64,
+    closed: u64,
+    replaced: u64,
+    expired: u64,
+    overflowed: u64,
+    matched: u64,
+    unmatched: u64,
+    keyless: u64,
+    /// States open when the `from` source's window closed, and the `to`
+    /// events that came after it for them.
+    left_open: u64,
+}
+
+/// The load test's constants: a window of 10 ms, a map of 1000 states, and a
+/// stream that advances one microsecond per event, so that no segment lasts as
+/// long as the window and every expiry is the one a segment asked for.
+const LOAD_WINDOW_NS: u64 = 10_000_000;
+const LOAD_CAPACITY: u64 = 1000;
+const LOAD_TICK_NS: u64 = 1_000;
+/// States per segment, and how far past the map the overflow segment goes.
+const LOAD_LIVES: u64 = 500;
+const LOAD_OVER: u64 = 200;
+/// How many pointers the block requests are drawn from: fewer than the lives
+/// of one cycle, so every pointer is reissued, cycle after cycle.
+const LOAD_POINTERS: u64 = LOAD_CAPACITY + LOAD_OVER;
+
+fn load_rule() -> Rule {
+    serde_norway::from_str(&format!(
+        "{{id: load, from: blk.rq, to: blk.seg, via: blk, match: scoped_eq, \
+           opens: \"op == 'issue'\", closes: \"op == 'done'\", \
+           window: {}ms, capacity: {LOAD_CAPACITY}}}",
+        LOAD_WINDOW_NS / 1_000_000
+    ))
+    .expect("the load rule")
+}
+
+struct Stream {
+    events: Vec<Event>,
+    ts_ns: u64,
+    expected: Expected,
+    /// Distinguishes the lives of one pointer: the scope a block request is
+    /// stamped with. Never repeats, so no two lives collapse.
+    lives: u64,
+}
+
+impl Stream {
+    fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            ts_ns: 1_000_000_000,
+            expected: Expected::default(),
+            lives: 0,
+        }
+    }
+
+    fn pointer(index: u64) -> u64 {
+        0xffff_8881_0000_0000 + (index % LOAD_POINTERS) * 0x200
+    }
+
+    fn push(&mut self, kind: &str, key: Option<(u64, u64)>, attrs: Vec<Attr>) {
+        self.ts_ns += LOAD_TICK_NS;
+        self.expected.events += 1;
+        let seq = self.expected.events;
+        self.events.push(Event {
+            ts_ns: self.ts_ns,
+            ts_err_ns: 0,
+            kind: kind.to_owned(),
+            keys: key
+                .map(|(ptr, open_ts)| vec![KeyValue::Blk { ptr, open_ts }])
+                .unwrap_or_default(),
+            attrs,
+            collector_id: CollectorId::new(kind),
+            seq,
+        });
+    }
+
+    /// A new life of a pointer: its issue, with a scope no life had before.
+    fn issue(&mut self, ptr: u64) -> (u64, u64) {
+        self.lives += 1;
+        let key = (ptr, self.lives);
+        self.push("blk.rq", Some(key), vec![Attr::text("op", "issue")]);
+        self.expected.opened += 1;
+        key
+    }
+
+    fn done(&mut self, key: (u64, u64)) {
+        self.push("blk.rq", Some(key), vec![Attr::text("op", "done")]);
+    }
+
+    fn segment(&mut self, key: (u64, u64)) {
+        self.push("blk.seg", Some(key), vec![Attr::uint("bytes", 4096)]);
+    }
+
+    /// One of each segment, starting the pointers at `first`.
+    fn cycle(&mut self, first: u64) {
+        let lives = |from: u64| (from..from + LOAD_LIVES).map(Stream::pointer);
+
+        // Closed: issued, one segment each, done.
+        let keys: Vec<_> = lives(first).map(|ptr| self.issue(ptr)).collect();
+        for key in &keys {
+            self.segment(*key);
+        }
+        for key in &keys {
+            self.done(*key);
+        }
+        self.expected.closed += LOAD_LIVES;
+        self.expected.matched += LOAD_LIVES;
+
+        // Reissued: each pointer issued again before it was done, which ends
+        // the first life; a segment of the first life then finds the second
+        // open under its pointer and is not its, and one of the second is.
+        let old: Vec<_> = lives(first + 7).map(|ptr| self.issue(ptr)).collect();
+        let new: Vec<_> = lives(first + 7).map(|ptr| self.issue(ptr)).collect();
+        for key in &old {
+            self.segment(*key);
+        }
+        for key in &new {
+            self.segment(*key);
+        }
+        for key in &new {
+            self.done(*key);
+        }
+        self.expected.closed += 2 * LOAD_LIVES;
+        self.expected.replaced += LOAD_LIVES;
+        self.expected.unmatched += LOAD_LIVES;
+        self.expected.matched += LOAD_LIVES;
+
+        // Expired: issued and never done, then one segment of a pointer no
+        // request holds, two windows later, is the first event past them.
+        for ptr in lives(first + 13) {
+            self.issue(ptr);
+        }
+        self.ts_ns += 2 * LOAD_WINDOW_NS;
+        self.segment((0xdead_0000, 0));
+        self.expected.expired += LOAD_LIVES;
+        self.expected.unmatched += 1;
+
+        // Overflowed: more requests in flight than the map holds, so the
+        // oldest are evicted; their segments find nothing, the rest are done.
+        let keys: Vec<_> = (first..first + LOAD_CAPACITY + LOAD_OVER)
+            .map(|index| self.issue(Stream::pointer(index)))
+            .collect();
+        let (evicted, kept) = keys.split_at(LOAD_OVER as usize);
+        for key in evicted.iter().chain(kept) {
+            self.segment(*key);
+        }
+        for key in kept {
+            self.done(*key);
+        }
+        self.expected.overflowed += LOAD_OVER;
+        self.expected.unmatched += LOAD_OVER;
+        self.expected.matched += LOAD_CAPACITY;
+        self.expected.closed += LOAD_CAPACITY;
+
+        // Keyless: segments of no block request.
+        for _ in 0..LOAD_OVER {
+            self.push("blk.seg", None, vec![Attr::uint("bytes", 512)]);
+        }
+        self.expected.keyless += LOAD_OVER;
+    }
+
+    /// A stream of at least `events` events, ending on requests still in
+    /// flight when the `from` source's window closes, and segments of theirs
+    /// after it. Returns the stream and the instant the window closed.
+    fn load(events: u64) -> (Self, u64) {
+        let mut stream = Stream::new();
+        let mut first = 0;
+        while stream.expected.events < events {
+            stream.cycle(first);
+            first += 311;
+        }
+        let keys: Vec<_> = (0..LOAD_OVER)
+            .map(|index| stream.issue(Stream::pointer(first + index)))
+            .collect();
+        let closed_ns = stream.ts_ns;
+        for key in keys {
+            stream.segment(key);
+        }
+        stream.expected.left_open = LOAD_OVER;
+        (stream, closed_ns)
+    }
+}
+
+fn balances(states: &join::StateStats) -> bool {
+    states.opened
+        == states.closed
+            + states.expired
+            + states.overflowed
+            + states.window_closed
+            + states.still_open
+}
+
+/// One load: the stream built, applied with the `from` source's window
+/// closing before the end and without, and every count held to the
+/// generator's. Returns the heap the two applications needed at their peak,
+/// beyond the stream itself.
+fn one_load(events: u64) -> usize {
+    let rule = load_rule();
+    let started = std::time::Instant::now();
+    let (stream, closed_ns) = Stream::load(events);
+    let built = started.elapsed();
+    let expected = &stream.expected;
+    let mut windows = BTreeMap::new();
+    windows.insert(
+        "blk.rq".to_owned(),
+        omn::collect::Watched {
+            run_opened_ns: 0,
+            opened_ns: 0,
+            closed_ns,
+            attached: true,
+            attach_ns: None,
+        },
+    );
+    windows.insert(
+        "blk.seg".to_owned(),
+        omn::collect::Watched {
+            run_opened_ns: 0,
+            opened_ns: 0,
+            closed_ns: u64::MAX,
+            attached: true,
+            attach_ns: None,
+        },
+    );
+
+    let before = heap::live();
+    heap::reset_peak();
+    let within = join::apply_within(&rule, &stream.events, &windows).expect("the rule applies");
+    let whole = join::apply(&rule, &stream.events).expect("the rule applies");
+    let peak = heap::peak() - before;
+    let applied = started.elapsed() - built;
+
+    for (name, correlation) in [("within", &within), ("whole", &whole)] {
+        let states = &correlation.states;
+        assert!(
+            balances(states),
+            "{name}: the states do not balance: {states:?}"
+        );
+        assert_eq!(states.opened, expected.opened, "{name}: opened");
+        assert_eq!(states.closed, expected.closed, "{name}: closed");
+        assert_eq!(states.replaced, expected.replaced, "{name}: replaced");
+        assert_eq!(
+            states.scope_collapsed, 0,
+            "{name}: every life has its own scope"
+        );
+        assert_eq!(states.expired, expected.expired, "{name}: expired");
+        assert_eq!(states.overflowed, expected.overflowed, "{name}: overflowed");
+        assert_eq!(
+            states.peak_open, LOAD_CAPACITY,
+            "{name}: the map filled, and never held more than it may"
+        );
+        assert_eq!(
+            correlation.unmatched, expected.unmatched,
+            "{name}: unmatched"
+        );
+        assert_eq!(correlation.keyless, expected.keyless, "{name}: keyless");
+    }
+    // Watching to the end, the last requests are still open and their
+    // segments land on them; with the window closed under them, they end at
+    // the close and their segments are outside it.
+    assert_eq!(
+        (whole.states.still_open, whole.states.window_closed),
+        (expected.left_open, 0)
+    );
+    assert_eq!(whole.matched, expected.matched + expected.left_open);
+    assert_eq!(whole.outside_window, 0);
+    assert_eq!(
+        (within.states.still_open, within.states.window_closed),
+        (0, expected.left_open)
+    );
+    assert_eq!(within.matched, expected.matched);
+    assert_eq!(within.outside_window, expected.left_open);
+
+    // Nothing the engine built outlives its answer but the answer, whose
+    // attributions are cut to the rule's `top`.
+    drop((within, whole));
+    let after = heap::live();
+    assert!(
+        after <= before + 64 * 1024,
+        "the engine left {} bytes live after returning",
+        after.saturating_sub(before)
+    );
+    eprintln!(
+        "load: {} events, {} states, peak {:.1} MiB beyond the stream's {:.1} MiB; built in \
+         {built:.1?}, applied twice in {applied:.1?}",
+        expected.events,
+        expected.opened,
+        peak as f64 / (1 << 20) as f64,
+        before as f64 / (1 << 20) as f64
+    );
+    peak
+}
+
+/// Runs one load test in a child process of this binary, alone, so that the
+/// heap it counts is its own.
+fn in_a_child(test: &str, env: &[(&str, &str)]) {
+    if std::env::var_os("OMN_JOIN_LOAD_CHILD").is_some() {
+        return;
+    }
+    let status = Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            test,
+            "--exact",
+            "--test-threads=1",
+            "--nocapture",
+            "--include-ignored",
+        ])
+        .env("OMN_JOIN_LOAD_CHILD", "1")
+        .envs(env.iter().copied())
+        .status()
+        .expect("the test binary runs again");
+    assert!(
+        status.success(),
+        "the load test failed in its child: {status}"
+    );
+}
+
+fn is_child() -> bool {
+    std::env::var_os("OMN_JOIN_LOAD_CHILD").is_some()
+}
+
+/// ROADMAP.md phase 5: no open-state leak, under load.
+///
+/// A million and a half synthetic block-request events of recycled pointers, through a
+/// `scoped_eq` rule with a window and a map smaller than what is in flight:
+/// requests done, reissued before they were done, never done and expired,
+/// evicted from a full map, segments of no request, and requests in flight
+/// when the `from` source's window closes. Every count is held to what the
+/// generator wrote, the open-state balance included, and the map to its
+/// capacity. The memory: the engine holds at most `capacity` open states, and
+/// what it needs besides is its sort of the input and the states it finished,
+/// both linear in the input and released when it returns. A twice longer
+/// stream may take no more than about twice the peak -- a leak per state or a
+/// cost quadratic in the map would -- and nothing is left live afterwards.
+#[test]
+fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map() {
+    in_a_child(
+        "a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map",
+        &[],
+    );
+    if !is_child() {
+        return;
+    }
+    let short = one_load(500_000);
+    let long = one_load(1_000_000);
+    assert!(
+        long < short * 3,
+        "twice the stream took {:.1}x the peak: {long} bytes against {short}",
+        long as f64 / short as f64
+    );
+}
+
+/// The same for an hour, by hand:
+///
+/// ```console
+/// cargo test --release --test join_engine -- --ignored an_hour_of_joins
+/// OMN_JOIN_LOAD_SECS=600 cargo test --release --test join_engine -- --ignored an_hour_of_joins
+/// ```
+///
+/// Rounds of two million events for as long as asked, each held to its own
+/// counts, and the heap after every round held to the first's: an engine that
+/// leaked open states, or anything else, across an hour of rounds grows.
+#[test]
+#[ignore = "an hour long; run by hand"]
+fn an_hour_of_joins_leaks_no_state() {
+    in_a_child("an_hour_of_joins_leaks_no_state", &[]);
+    if !is_child() {
+        return;
+    }
+    let seconds: u64 = std::env::var("OMN_JOIN_LOAD_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3600);
+    let deadline = std::time::Instant::now() + StdDuration::from_secs(seconds);
+    let baseline = heap::live();
+    let mut rounds = 0u64;
+    let mut first_peak = None;
+    while std::time::Instant::now() < deadline {
+        let peak = one_load(2_000_000);
+        let first = *first_peak.get_or_insert(peak);
+        assert!(
+            peak < first * 2,
+            "round {rounds}: the peak grew from {first} to {peak} bytes"
+        );
+        assert!(
+            heap::live() <= baseline + 64 * 1024,
+            "round {rounds}: {} bytes live after the round",
+            heap::live().saturating_sub(baseline)
+        );
+        rounds += 1;
+    }
+    eprintln!("{rounds} rounds of two million events in {seconds} s, nothing left live");
+}
+
+// ------------------------------------------- a boundary is a rule, end to end
+
+/// Two per-cpu polls of the machine that no test or session had joined, with
+/// the join written here and nowhere else. `fs:sys` serves both with no
+/// privilege on a machine with cpufreq and cpuidle.
+fn cpu_join_session(rule: &str, poll: &str) -> String {
+    format!(
+        "name: a boundary no test had joined
+requests:
+  - {{label: freq, source: power.freq, target: system, mode: poll@{poll}, emit: [raw]}}
+  - {{label: idle, source: power.cstate, target: system, mode: poll@{poll}, emit: [raw]}}
+joins:
+  - {{id: freq-idle, from: power.freq, to: power.cstate, via: cpu, match: eq, top: 4096{rule}}}
+"
+    )
+}
+
+/// Runs a session from a file, writing its results to `-o`, and hands back
+/// the directory, or the machine's reason when it cannot serve the sources.
+fn run_to_dir(name: &str, session: &str, format: &str) -> Result<(PathBuf, String), String> {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("join-engine-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let file = directory.join("session.yml");
+    std::fs::write(&file, session).expect("the session is written");
+    let out = directory.join("out");
+    let output = Command::new(BINARY)
+        .args(["-f"])
+        .arg(&file)
+        .args(["--duration", "500ms", "--format", format, "-o"])
+        .arg(&out)
+        .output()
+        .expect("omn runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        return Err(format!("{stdout}{stderr}"));
+    }
+    Ok((out, stdout))
+}
+
+/// Which cpus a run's raw events of one request carried, and how many events.
+fn cpus_of(document: &serde_json::Value, label: &str) -> (std::collections::BTreeSet<u64>, u64) {
+    let mut cpus = std::collections::BTreeSet::new();
+    let mut events = 0;
+    let results = document["results"].as_array().expect("results");
+    let result = results
+        .iter()
+        .find(|result| result["label"] == label)
+        .unwrap_or_else(|| panic!("no request `{label}`"));
+    for output in result["outputs"].as_array().expect("outputs") {
+        if output["emit"] != "raw" {
+            continue;
+        }
+        for event in output["events"].as_array().expect("events") {
+            events += 1;
+            for key in event["keys"].as_array().into_iter().flatten() {
+                if let Some(cpu) = key["cpu"]["cpu"].as_u64() {
+                    cpus.insert(cpu);
+                }
+            }
+        }
+    }
+    (cpus, events)
+}
+
+fn online_set() -> Option<std::collections::BTreeSet<u64>> {
+    let listed = std::fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+    let mut set = std::collections::BTreeSet::new();
+    for range in listed.trim().split(',') {
+        let (first, last) = match range.split_once('-') {
+            Some((first, last)) => (first.parse::<u64>().ok()?, last.parse::<u64>().ok()?),
+            None => {
+                let only = range.parse::<u64>().ok()?;
+                (only, only)
+            }
+        };
+        set.extend(first..=last);
+    }
+    Some(set)
+}
+
+/// ROADMAP.md phase 5: adding a boundary means adding a rule, zero lines of
+/// engine.
+///
+/// Both halves. The engine names no source: not one catalog id is a string
+/// in `src/join.rs` outside its tests, so nothing in it can be a case for a
+/// pair of sources. And a join between two sources no test or session had
+/// joined -- `power.freq` to `power.cstate`, by cpu -- is written in the
+/// session and runs: every attribution is a cpu the kernel lists online
+/// (`/sys/devices/system/cpu/online`, read here), every cpu both sources read
+/// is attributed, and each is credited exactly the `power.cstate` readings of
+/// its own cpu that came after its first frequency reading -- counted here off
+/// the raw events, not off the join.
+#[test]
+fn a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine() {
+    let engine = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/join.rs"))
+        .expect("the engine's source");
+    let engine = engine
+        .split("#[cfg(test)]")
+        .next()
+        .expect("the engine before its tests");
+    let catalog = omn::Catalog::embedded().expect("the embedded catalog loads");
+    let named: Vec<&str> = catalog
+        .entries()
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .filter(|id| engine.contains(&format!("\"{id}\"")))
+        .collect();
+    assert!(
+        named.is_empty(),
+        "the engine names sources, so a boundary between them is code: {named:?}"
+    );
+
+    let Some(online) = online_set() else {
+        eprintln!("SKIPPED the run: /sys/devices/system/cpu/online is unreadable here");
+        return;
+    };
+    let (out, _) = match run_to_dir("boundary", &cpu_join_session("", "100ms"), "json") {
+        Ok(ran) => ran,
+        Err(said) if machine_cannot_serve(&said) => {
+            eprintln!(
+                "SKIPPED the run: this machine serves neither power.freq nor power.cstate \
+                 through /sys: {}",
+                said.lines()
+                    .find(|line| line.contains("error"))
+                    .unwrap_or(&said)
+            );
+            return;
+        }
+        Err(said) => panic!("the session did not run: {said}"),
+    };
+    let document: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("results.json")).expect("results.json"),
+    )
+    .expect("results.json parses");
+    let (freq_cpus, _) = cpus_of(&document, "freq");
+    let (idle_cpus, _) = cpus_of(&document, "idle");
+    let both: std::collections::BTreeSet<u64> =
+        freq_cpus.intersection(&idle_cpus).copied().collect();
+    assert!(!both.is_empty(), "no cpu was read by both sources");
+    assert!(
+        freq_cpus.is_subset(&online) && idle_cpus.is_subset(&online),
+        "a cpu the kernel does not list online: {freq_cpus:?} {idle_cpus:?} against {online:?}"
+    );
+
+    // What each cpu must be credited: its idle readings from its first
+    // frequency reading on, the opening side first at an equal instant.
+    let raw = |label: &str| -> Vec<(u64, u64)> {
+        let result = document["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result["label"] == label)
+            .unwrap();
+        result["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|output| output["emit"] == "raw")
+            .flat_map(|output| output["events"].as_array().unwrap())
+            .filter_map(|event| {
+                let cpu = event["keys"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|key| key["cpu"]["cpu"].as_u64())?;
+                Some((cpu, event["ts_ns"].as_u64()?))
+            })
+            .collect()
+    };
+    let first_freq: BTreeMap<u64, u64> =
+        raw("freq")
+            .into_iter()
+            .fold(BTreeMap::new(), |mut first, (cpu, ts)| {
+                let at = first.entry(cpu).or_insert(ts);
+                *at = (*at).min(ts);
+                first
+            });
+    let mut expected: BTreeMap<String, u64> = BTreeMap::new();
+    let mut before = 0u64;
+    for (cpu, ts) in raw("idle") {
+        match first_freq.get(&cpu) {
+            Some(first) if *first <= ts => *expected.entry(format!("cpu:{cpu}")).or_default() += 1,
+            _ => before += 1,
+        }
+    }
+
+    let join = &document["joins"][0];
+    assert_eq!(join["rule"], "freq-idle");
+    let mut credited: BTreeMap<String, u64> = BTreeMap::new();
+    for attribution in join["top"].as_array().expect("attributions") {
+        *credited
+            .entry(attribution["key"].as_str().expect("a key").to_owned())
+            .or_default() += attribution["matched"].as_u64().expect("matched");
+    }
+    assert_eq!(
+        credited, expected,
+        "each cpu is credited its own idle readings after its first frequency reading"
+    );
+    assert_eq!(join["unmatched"].as_u64(), Some(before), "{join}");
+    assert_eq!(
+        credited.len(),
+        both.len(),
+        "every cpu both sources read is attributed"
+    );
+    let states: join::StateStats =
+        serde_json::from_value(join["states"].clone()).expect("the states");
+    assert!(balances(&states), "{states:?}");
+}
+
+/// ROADMAP.md phase 5: evictions appear in the user-visible output.
+///
+/// The same boundary, with a map of two states and a window of five
+/// milliseconds, over a machine with more cpus than that: each poll reads
+/// every cpu in turn, so each reading evicts the oldest of the two held and
+/// no state is ever replaced by its own cpu's next reading, and the two left
+/// at the end of a poll outlive the window before the next one, 100 ms
+/// later. So, from the kernel's count of online cpus and the rule alone:
+/// nothing closed, the map full at two, both kinds of eviction counted, and
+/// the states balancing. The counts are the ones `results.json` holds, and
+/// the text the tool renders from that document says the same numbers; a run
+/// with the text format says them too, balanced against its own opened count.
+#[test]
+fn a_join_that_evicts_says_how_many_in_results_json_and_in_the_text() {
+    let Some(online) = online_set() else {
+        eprintln!("SKIPPED: /sys/devices/system/cpu/online is unreadable here");
+        return;
+    };
+    if online.len() < 3 {
+        eprintln!(
+            "SKIPPED: {} cpus online, so a map of two holds every cpu and nothing is evicted",
+            online.len()
+        );
+        return;
+    }
+    let session = cpu_join_session(", capacity: 2, window: 5ms", "100ms");
+    let (out, _) =
+        match run_to_dir("evicts", &session, "json") {
+            Ok(ran) => ran,
+            Err(said) if machine_cannot_serve(&said) => {
+                eprintln!(
+                "SKIPPED: this machine serves neither power.freq nor power.cstate through /sys: \
+                 {}",
+                said.lines().find(|line| line.contains("error")).unwrap_or(&said)
+            );
+                return;
+            }
+            Err(said) => panic!("the session did not run: {said}"),
+        };
+    let text = std::fs::read_to_string(out.join("results.json")).expect("results.json");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("results.json parses");
+    let (freq_cpus, freq_events) = cpus_of(&document, "freq");
+    let join = &document["joins"][0];
+    let states: join::StateStats =
+        serde_json::from_value(join["states"].clone()).expect("the states");
+    eprintln!("{} cpus read; {states:?}", freq_cpus.len());
+    assert!(freq_cpus.len() > 2, "{freq_cpus:?}");
+    assert_eq!(
+        states.opened, freq_events,
+        "every frequency reading opens a state"
+    );
+    assert!(balances(&states), "{states:?}");
+    assert_eq!(
+        states.closed, 0,
+        "no cpu is read twice while its state is held"
+    );
+    assert_eq!(states.peak_open, 2);
+    assert!(states.overflowed > 0, "{states:?}");
+    assert!(
+        states.expired > 0 || freq_events <= freq_cpus.len() as u64,
+        "more than one poll ran and nothing outlived a 5 ms window between polls 100 ms apart: \
+         {states:?}"
+    );
+
+    // The text the tool renders from the same document.
+    let output: RunOutput = serde_json::from_str(&text).expect("results.json is a run");
+    let rendered = omn::encode::run_output(omn::format::OutputFormat::Text, &output)
+        .expect("the run renders as text");
+    let said = format!(
+        "EVICTED: {} expired past the window, {} dropped because the map was full",
+        states.expired, states.overflowed
+    );
+    assert!(rendered.contains(&said), "`{said}` is not in:\n{rendered}");
+
+    // And a run in the text format says it, against its own opened count.
+    let (out, stdout) = run_to_dir("evicts-text", &session, "text").expect("the text run");
+    let written = std::fs::read_to_string(out.join("results.txt")).expect("results.txt");
+    for text in [&stdout, &written] {
+        let number = |line: &str, before: &str| -> u64 {
+            let at = line
+                .find(before)
+                .unwrap_or_else(|| panic!("no `{before}` in {line}"));
+            line[..at]
+                .rsplit(|c: char| !c.is_ascii_digit())
+                .find(|word| !word.is_empty())
+                .and_then(|word| word.parse().ok())
+                .unwrap_or_else(|| panic!("no count before `{before}` in {line}"))
+        };
+        let line = |needle: &str| {
+            text.lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no `{needle}` line in:\n{text}"))
+        };
+        let counts = line("states:");
+        let evicted = line("EVICTED:");
+        let opened = number(counts, " opened");
+        let closed = number(counts, " closed");
+        let still = number(counts, " still open");
+        let expired = number(evicted, " expired past the window");
+        let overflowed = number(evicted, " dropped because the map was full");
+        assert!(overflowed > 0, "{evicted}");
+        assert_eq!(
+            opened,
+            closed + still + expired + overflowed,
+            "the text's counts balance: {counts} / {evicted}"
+        );
+    }
 }

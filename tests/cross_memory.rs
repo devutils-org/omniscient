@@ -130,10 +130,32 @@ fn withheld(output: &Output) -> Option<String> {
         !message.contains("heap shim was not found"),
         "the heap sources need the preload shim: build with `make`, not `cargo build`\n{message}"
     );
-    let withheld = message.contains("perf_event_paranoid")
-        || message.contains("not readable")
-        || message.contains("no such file");
-    withheld.then_some(message)
+    let says = |line: &str| {
+        line.contains("perf_event_paranoid")
+            || line.contains("not readable")
+            || line.contains("no such file")
+    };
+    says(&message).then(|| skip_reason(&message, says))
+}
+
+/// A refusal laid out for a skip line: the line that says why first, so it
+/// reads on the `SKIPPED` line itself, and the rest indented under it. A skip
+/// gate that reads the skip line sees the reason there, rather than a skip
+/// with nothing after it and the reason on lines of their own.
+fn skip_reason(message: &str, says: impl Fn(&str) -> bool) -> String {
+    let lines: Vec<&str> = message
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let first = lines.iter().position(|line| says(line)).unwrap_or(0);
+    let mut reason = lines.get(first).map_or("", |line| line.trim()).to_owned();
+    for (index, line) in lines.iter().enumerate() {
+        if index != first {
+            reason.push_str("\n    ");
+            reason.push_str(line.trim_end());
+        }
+    }
+    reason
 }
 
 /// Runs a shipped session, or says loudly why this machine cannot.
@@ -144,7 +166,7 @@ fn measured(name: &str) -> Option<Output> {
     }
     let output = run_example(name);
     if let Some(reason) = withheld(&output) {
-        eprintln!("SKIPPED {name}: this machine withholds a source it needs\n{reason}");
+        eprintln!("SKIPPED {name}: this machine withholds a source it needs: {reason}");
         return None;
     }
     assert!(
@@ -154,6 +176,27 @@ fn measured(name: &str) -> Option<Output> {
         stderr(&output)
     );
     Some(output)
+}
+
+/// The layout the CI's skip gate reads (`docs/open-findings.md`, the
+/// fourteenth wave, stream P): the reason on the skip line, the rest indented.
+#[test]
+fn a_skip_puts_the_machine_s_reason_on_the_skip_line() {
+    let refusal = "resolving mem.faults\n\nerror: `mem.faults` has no viable backend: \
+                   perf_event_paranoid is 4\n  perf:sw: perf_event_paranoid is 4\n";
+    let reason = skip_reason(refusal, |line| line.contains("perf_event_paranoid"));
+    let mut lines = reason.lines();
+    assert_eq!(
+        lines.next(),
+        Some("error: `mem.faults` has no viable backend: perf_event_paranoid is 4")
+    );
+    for line in lines {
+        assert!(line.starts_with("    "), "an unindented line: {line:?}");
+    }
+    assert!(
+        reason.contains("resolving mem.faults"),
+        "nothing is dropped: {reason}"
+    );
 }
 
 // ---------------------------------------------------------------------------

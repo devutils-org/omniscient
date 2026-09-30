@@ -78,7 +78,8 @@ pub fn run_example_or_skip(example: &str, out: &Path, would_have_checked: &str) 
     if let Some(reason) = withheld(&output) {
         eprintln!(
             "SKIP: examples/{example}.yml is valid and this machine cannot serve it, so it \
-             was not checked {would_have_checked}. The machine's reason:\n{reason}"
+             was not checked {would_have_checked}. The machine's reason: {}",
+            on_one_line(&reason)
         );
         return false;
     }
@@ -87,6 +88,19 @@ pub fn run_example_or_skip(example: &str, out: &Path, would_have_checked: &str) 
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A reason laid out for a skip line: its first line on the line itself, so
+/// that a skip gate reading the skip line sees why, and the rest indented
+/// under it.
+pub fn on_one_line(reason: &str) -> String {
+    let mut lines = reason.lines().filter(|line| !line.trim().is_empty());
+    let mut laid = lines.next().unwrap_or("").trim().to_owned();
+    for line in lines {
+        laid.push_str("\n    ");
+        laid.push_str(line.trim_end());
+    }
+    laid
 }
 
 pub fn run_example_as_is(example: &str, out: &Path) -> std::process::Output {

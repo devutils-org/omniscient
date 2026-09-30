@@ -164,7 +164,8 @@ fn run(file: &str, needs: &[&str], would_have_checked: &str) -> Option<Run> {
     if let Some(reason) = withheld(&output) {
         eprintln!(
             "skipped: {file} is valid and this machine cannot serve it. It would have checked \
-             {would_have_checked}. The machine's reason:\n{reason}"
+             {would_have_checked}. The machine's reason: {}",
+            on_one_line(&reason)
         );
         return None;
     }
@@ -1159,4 +1160,17 @@ fn a_wakeup_join_onto_drained_totals_is_refused_because_each_event_holds_many_bl
         "{ROUND_TRIPS} round trips drained every 100 ms put many blocks in each event; {blocks} \
          blocks in {drained} events"
     );
+}
+
+/// A reason laid out for a skip line: its first line on the line itself, so
+/// that a skip gate reading the skip line sees why, and the rest indented
+/// under it.
+fn on_one_line(reason: &str) -> String {
+    let mut lines = reason.lines().filter(|line| !line.trim().is_empty());
+    let mut laid = lines.next().unwrap_or("").trim().to_owned();
+    for line in lines {
+        laid.push_str("\n    ");
+        laid.push_str(line.trim_end());
+    }
+    laid
 }
