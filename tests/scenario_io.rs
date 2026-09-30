@@ -4141,6 +4141,10 @@ fn a_file_read_cold_fills_every_page_and_read_warm_fills_none() {
 /// phase: every row is stamped where its first event happened (finding 44), so
 /// each file's events must fall inside the phase that read it -- one clock
 /// domain, checked against the program's own reading of it.
+///
+/// The counts are held exact only in a run that lost nothing, and the run is
+/// repeated until one does: the run's loss is the kernel's skipped runs over
+/// every task of the machine, which no count of the workload's can be tied to.
 #[test]
 fn a_sequential_read_is_read_ahead_of_and_a_random_one_is_not() {
     if let Some(reason) = no_bpf_here() {
@@ -4180,34 +4184,33 @@ json.dump(phases, open(account, "w"))
         "readahead.py",
         &format!("{RESIDENT}{SEQUENTIAL_THEN_RANDOM}"),
     );
-    let output = run_on_launch(
-        "readahead",
-        &[("ahead", "io.readahead", "trace", "raw, rate")],
-        &[
-            "python3",
-            workload.to_str().expect("a path"),
-            sequential.to_str().expect("a path"),
-            scattered.to_str().expect("a path"),
-            account_path.to_str().expect("a path"),
-        ],
-    );
-    assert!(output.status.success(), "{}", stderr(&output));
-    let did = account(&account_path);
-    let document = json(&output);
-    let run = result(&document, "ahead");
-    let (dev, _) = mounted_device(&sequential);
-    let mut ahead_of = BTreeMap::new();
-    for how in ["sequential", "random"] {
-        let phase = &did[how];
-        let file = (dev, phase["ino"].as_u64().expect("an inode"));
-        let asked = phase["asked"].as_u64().expect("pages asked");
-        let became = phase["resident_after"].as_u64().expect("resident")
-            - phase["resident_before"].as_u64().expect("resident");
-        let (lookups, _, filled, created, ahead) = page_counts(run, file, "ahead");
-        // What the run itself says it did not count: rows the map had no room
-        // for, and runs the kernel skipped because one of these programs was
-        // already running on that cpu. Neither is per file, so the whole of it
-        // is the slack, and a count short by more than it is a silent loss.
+    // The run's `losses.dropped` is not the workload's: most of it is the
+    // kernel's skipped runs of these programs, counted over every task of the
+    // machine, and six streams share it -- 395 000 to 477 000 in a loaded run
+    // against a shortfall of 3 to 15 lookups of 256. As slack it is wide
+    // enough to hide anything, a silent loss in the drain included. So the
+    // counts are held exact in a run that lost nothing, and the run is
+    // repeated until one does; a lossy attempt is checked only for what a
+    // loss cannot excuse -- a page counted twice -- and printed.
+    const ATTEMPTS: usize = 4;
+    let mut lossy = Vec::new();
+    for attempt in 1..=ATTEMPTS {
+        let output = run_on_launch(
+            "readahead",
+            &[("ahead", "io.readahead", "trace", "raw, rate")],
+            &[
+                "python3",
+                workload.to_str().expect("a path"),
+                sequential.to_str().expect("a path"),
+                scattered.to_str().expect("a path"),
+                account_path.to_str().expect("a path"),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let did = account(&account_path);
+        let document = json(&output);
+        let run = result(&document, "ahead");
+        let (dev, _) = mounted_device(&sequential);
         let lost = losses(run)["dropped"].as_u64().unwrap_or(0);
         let evidence = || {
             format!(
@@ -4216,88 +4219,106 @@ json.dump(phases, open(account, "w"))
                 lookups_by_file(run)
             )
         };
-        if how == "random" {
-            // A single-page read is a batch of one folio, which the kernel's
-            // early return cannot shorten: exact, but for what the run
-            // reported it lost.
+        let mut ahead_of = BTreeMap::new();
+        let mut shortfall = Vec::new();
+        for how in ["sequential", "random"] {
+            let phase = &did[how];
+            let file = (dev, phase["ino"].as_u64().expect("an inode"));
+            let asked = phase["asked"].as_u64().expect("pages asked");
+            let became = phase["resident_after"].as_u64().expect("resident")
+                - phase["resident_before"].as_u64().expect("resident");
+            let (lookups, _, filled, created, ahead) = page_counts(run, file, "ahead");
+            // Never over, lossy or not: a loss can only make a count short.
             assert!(
-                lookups <= asked && lookups + lost >= asked,
-                "random: the workload read {asked} pages and {lookups} lookups were counted, \
-                 and the run reported {lost} lost{}",
+                lookups <= asked && filled <= became,
+                "{how}: the workload read {asked} pages and {became} became resident, and the \
+                 tool counted {lookups} looked up and {filled} filled: more than happened{}",
                 evidence()
             );
-            if lookups < asked {
-                eprintln!(
-                    "note: random: {} of {asked} lookups were not counted, inside the {lost} the \
-                     run reported lost{}",
-                    asked - lookups,
+            assert_eq!(created, 0, "{how}: a read creates no page");
+            assert_eq!(
+                ahead,
+                filled as i64 - lookups as i64,
+                "{how}: ahead is the fill minus the lookup"
+            );
+            // Each file's rows were stamped inside the phase that read it.
+            let (begin, end) = (
+                phase["begin"].as_u64().expect("a start"),
+                phase["end"].as_u64().expect("an end"),
+            );
+            for (raw, _) in raw_with_keys(run) {
+                if file_key(&raw) != Some(file) {
+                    continue;
+                }
+                let ts = raw["ts_ns"].as_u64().expect("a timestamp");
+                assert!(
+                    (begin..=end).contains(&ts),
+                    "{how}: a row stamped at {ts} is outside the phase that read the file, \
+                     [{begin}, {end}] by the workload's own CLOCK_MONOTONIC"
+                );
+            }
+            if lost > 0 {
+                shortfall.push(format!(
+                    "{how} {lookups}/{asked} looked up, {filled}/{became} filled"
+                ));
+                continue;
+            }
+            if how == "random" {
+                // A single-page read is a batch of one folio, which the
+                // kernel's early return cannot shorten: exact.
+                assert_eq!(
+                    lookups,
+                    asked,
+                    "random: the workload read {asked} pages and {lookups} lookups were \
+                     counted, in a run that lost nothing{}",
+                    evidence()
+                );
+            } else {
+                assert!(
+                    lookups * 2 >= asked,
+                    "sequential: the workload read {asked} pages and {lookups} lookups were \
+                     counted, in a run that lost nothing; cold, a read's first batch may go \
+                     unseen, but not half of them{}",
                     evidence()
                 );
             }
-        } else {
-            assert!(
-                lookups <= asked && (lookups + lost) * 2 >= asked,
-                "sequential: the workload read {asked} pages and {lookups} lookups were \
-                 counted; cold, a read's first batch may go unseen, and none may be counted \
-                 twice{}",
+            assert_eq!(
+                filled,
+                became,
+                "{how}: mincore says {became} pages became resident, and the tool counted \
+                 {filled} filled, in a run that lost nothing{}",
                 evidence()
             );
+            ahead_of.insert(how, ahead);
         }
-        assert!(
-            filled <= became && filled + lost >= became,
-            "{how}: mincore says {became} pages became resident, and the tool counted {filled} \
-             filled, with {lost} reported lost{}",
-            evidence()
-        );
-        assert_eq!(created, 0, "{how}: a read creates no page");
-        assert_eq!(
-            ahead,
-            filled as i64 - lookups as i64,
-            "{how}: ahead is the fill minus the lookup"
-        );
-
-        // Each file's rows were stamped inside the phase that read it.
-        let (begin, end) = (
-            phase["begin"].as_u64().expect("a start"),
-            phase["end"].as_u64().expect("an end"),
-        );
-        for (raw, _) in raw_with_keys(run) {
-            if file_key(&raw) != Some(file) {
-                continue;
-            }
-            let ts = raw["ts_ns"].as_u64().expect("a timestamp");
-            assert!(
-                (begin..=end).contains(&ts),
-                "{how}: a row stamped at {ts} is outside the phase that read the file, \
-                 [{begin}, {end}] by the workload's own CLOCK_MONOTONIC"
+        if lost > 0 {
+            eprintln!(
+                "note: attempt {attempt} of {ATTEMPTS} lost {lost} runs of the programs, over \
+                 every task of the machine, so its counts are floors and not held exact: {}",
+                shortfall.join("; ")
             );
+            lossy.push(lost);
+            continue;
         }
-        ahead_of.insert(how, ahead);
-    }
-    let (sequential, random) = (ahead_of["sequential"], ahead_of["random"]);
-    // A lossy run's lookups and fills are both floors, and their difference
-    // is then no separation at all: under 48 readers of a cached file this
-    // machine skipped 400 000 runs of these programs in a two-second run, and
-    // one such run read 0 lookups and 1014 pages filled for the sequential
-    // file. The counts above held with the loss as their slack; the
-    // separation is only a measurement when nothing was lost.
-    let lost = losses(run)["dropped"].as_u64().unwrap_or(0);
-    if lost > 0 {
-        eprintln!(
-            "note: the separation is not asserted: the run lost {lost} lookups or fills, so \
-             {sequential} pages ahead of the sequential reader and {random} of the random one \
-             are differences of two lower bounds"
+        let (sequential, random) = (ahead_of["sequential"], ahead_of["random"]);
+        assert!(
+            sequential > 0,
+            "a sequential read of a cold file must be read ahead of: {sequential} pages ahead"
+        );
+        assert!(
+            random * 8 <= sequential,
+            "random reads are read ahead of by next to nothing -- two random pages may sit side \
+             by side -- and a sequential reader by a window: {random} against {sequential}"
         );
         return;
     }
-    assert!(
-        sequential > 0,
-        "a sequential read of a cold file must be read ahead of: {sequential} pages ahead"
-    );
-    assert!(
-        random * 8 <= sequential,
-        "random reads are read ahead of by next to nothing -- two random pages may sit side by \
-         side -- and a sequential reader by a window: {random} against {sequential}"
+    // Every attempt lost runs: the machine is busy enough that a preempted run
+    // of these programs keeps a cpu's recursion guard raised. A difference of
+    // two floors is no separation, and a floor is no exact count.
+    eprintln!(
+        "skipped: the exact counts and the sequential/random separation were not measured: \
+         each of {ATTEMPTS} attempts lost runs of the programs ({lossy:?}), counted over every \
+         task of the machine and not attributable to the workload's reads"
     );
 }
 

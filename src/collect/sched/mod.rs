@@ -137,19 +137,60 @@ pub fn factories() -> Vec<Factory> {
             }))
         }),
         Factory::new("sched.switches", "pmu:sw", |resolved| {
-            kernel_mode_counted()?;
-            match resolved.request.mode {
+            let prepared: Box<dyn super::Prepared> = match resolved.request.mode {
                 // Counted, not sampled: the same software counter
                 // `cpu.context_switches` reads, one inherited counter per
                 // thread read at the end, with no ring and no second party.
-                crate::request::Mode::Count => Ok(Box::new(super::cpu::counters::Prepare::new(
+                crate::request::Mode::Count => Box::new(super::cpu::counters::Prepare::new(
                     &super::cpu::counters::SCHED_SWITCHES,
                     crate::request::Mode::Count,
-                )?)),
-                mode => Ok(Box::new(switches::Prepare(mode))),
-            }
+                )?),
+                mode => Box::new(switches::Prepare(mode)),
+            };
+            Ok(Box::new(KernelModeCounted(prepared)))
         }),
     ]
+}
+
+/// A `pmu:sw` collector that is attached only where this process may count
+/// kernel mode.
+///
+/// Asked at the attach, not in the factory: a factory's refusal is classified
+/// as this build's gap (exit 3, *"the request itself is valid"* on a build
+/// that has it), and this one is the machine's -- a paranoia level, or a
+/// capability the binary does not carry. At the attach nothing of the target
+/// has run yet: a launched program is still held at its gate.
+struct KernelModeCounted(Box<dyn super::Prepared>);
+
+impl super::Prepared for KernelModeCounted {
+    fn launch_environment(&self) -> Vec<(String, String)> {
+        self.0.launch_environment()
+    }
+
+    fn share_launch(&mut self, earlier: &mut dyn super::Prepared) -> bool {
+        self.0.share_launch(earlier)
+    }
+
+    fn shareable(&mut self) -> Option<&mut dyn std::any::Any> {
+        self.0.shareable()
+    }
+
+    fn requires_launch(&self) -> Option<&'static str> {
+        self.0.requires_launch()
+    }
+
+    fn follows_only_later_threads(&self) -> Option<&'static str> {
+        self.0.follows_only_later_threads()
+    }
+
+    fn inside(&self) -> Option<Box<dyn super::InsideAccount>> {
+        self.0.inside()
+    }
+
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn super::Collector>, String> {
+        kernel_mode_counted()?;
+        self.0.attach(target)
+    }
 }
 
 /// Whether this process may count what happens in kernel mode, asked the way
@@ -162,9 +203,14 @@ pub fn factories() -> Vec<Factory> {
 /// not in the count, and for this event that is every event: the runner's
 /// `sched.switches -m count` read 0 for a program whose threads counted 406
 /// switches of their own. A sampled run was refused at start with `EACCES`
-/// instead. Both are refused here, before anything is launched, with the
-/// reason, because a zero that is really "not allowed to look" is the wrong
-/// number this project is built against.
+/// instead. Both are refused here, before the target runs, with the reason,
+/// because a zero that is really "not allowed to look" is the wrong number
+/// this project is built against.
+///
+/// The way out named is the one that makes this backend count. The `bpf:*`
+/// backends of the chain sit behind `pmu:sw`, serve `count` only, and need
+/// `CAP_PERFMON` as well, so granting it is what reaches them too -- and once
+/// it is granted, `pmu:sw` counts kernel mode itself and they are not reached.
 fn kernel_mode_counted() -> Result<(), String> {
     let counter = crate::perf::Counter::software(
         "context_switches",
@@ -178,8 +224,8 @@ fn kernel_mode_counted() -> Result<(), String> {
         Ok(_) => Err(format!(
             "`pmu:sw` counts context switches, which happen only in kernel mode, and this \
              process may count its own user mode only (`perf_event_paranoid` is {paranoid}): \
-             every count would be zero. Lower it to 1, grant CAP_PERFMON, or give the binary \
-             CAP_BPF and CAP_PERFMON for the `bpf:*` backends ahead of this one"
+             every count would be zero. Lower it to 1, or give the binary CAP_PERFMON \
+             (`make` does, on a development checkout)"
         )),
         Err(error) => Err(format!(
             "`pmu:sw` cannot open a context-switch counter on this process ({error}; \

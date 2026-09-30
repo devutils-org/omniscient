@@ -652,7 +652,8 @@ through `bpf:fentry`, every `fentry` and `net_connect` test green -- and, for
 
 `scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not` now
 prints the run's `losses` and the lookups per `(dev, ino)` whenever a count is
-off, and carries `losses.dropped` as its slack.
+off, and holds the counts exact in a run that lost nothing, repeating the run
+(four attempts) until one does.
 
 Then the loss was made on purpose. The session the test writes, run twelve
 times beside 48 processes re-reading a cached file on 24 cpus:
@@ -668,12 +669,29 @@ skipped runs (*"the kernel skipped a run of these programs because one was
 already running on that cpu"*): a raw-tracepoint program runs with migration
 disabled, so one preempted mid-run keeps its per-cpu recursion guard raised
 and every later run on that cpu is skipped until it resumes. No run was short
-without a loss, so `io_pagecache.rs`'s drain is not losing rows silently: this
-is class (b), and the test carries the loss. One loaded run read **0**
-sequential lookups against 1014 pages filled, so under a loss the separation
-between the two readers is a difference of two lower bounds and is not
-asserted (the test says so, with the numbers); the per-file counts are, with
-the loss as slack. Rehearsed under that load three times: green, with the note.
+without a loss, and the one loaded run that lost 416 875 and was exact says
+where a skipped run lands: on whichever task's run it was, across the machine.
+One loaded run read **0** sequential lookups against 1014 pages filled.
+
+That is also why the loss is no slack. It counts every task's skipped runs,
+not the workload's -- 395 000 to 477 000 against a shortfall of 3 to 15 of
+256 -- so `lookups + lost >= asked` holds in any lossy run, and a silent loss
+in `io_pagecache.rs`'s drain would pass beside it. The first version of this
+item carried it as slack, and a review said so; the test now:
+
+- in a run that lost nothing, holds the random reader's lookups to exactly
+  256, both files' fills to exactly what `mincore` saw become resident, the
+  sequential reader's lookups to at least half of 1024 (a read's first batch
+  may go unseen, never counted twice), and the separation between the two
+  readers;
+- in a lossy run, holds only what a loss cannot excuse -- nothing over,
+  `ahead` the fill minus the lookup, every row inside its phase -- prints the
+  counts and the loss, and runs again;
+- after four lossy attempts, says it did not measure the exact counts or the
+  separation, with each attempt's loss, and stops: a skip, loudly, not a pass.
+
+Alone on this machine, the first attempt is clean (3.2 s). A drain that lost
+rows silently fails the first clean attempt.
 
 What the kernel's own structure can still hide -- a read served by
 `filemap_create_folio` after readahead's `__GFP_NORETRY` allocation failed,
@@ -715,7 +733,19 @@ machine's reason where the machine is the cause:
   it, and a switch never happens in user mode. The sampled mode was refused at
   start with `EACCES`. The `pmu:sw` factory now asks first
   (`kernel_mode_counted`) and refuses, before anything is launched, with the
-  paranoia and the three ways out. The probe is P's (filed).
+  paranoia and the two ways out (paranoid 1, or `CAP_PERFMON`). The
+  probe is P's (filed). The first version named a third -- *"CAP_BPF and
+  CAP_PERFMON for the `bpf:*` backends ahead of this one"* -- which a review
+  found wrong twice over: the `bpf:*` backends are *behind* `pmu:sw` in the
+  chain since section 5, and they need `CAP_PERFMON` too, which is exactly
+  what makes `pmu:sw` count kernel mode itself. And the check ran in the
+  factory, whose refusal is classified as the build's (exit 3, *"the request
+  itself is valid ... on a build that has it"*); it now runs at the attach
+  (`KernelModeCounted`, wrapping either `pmu:sw` collector), where an
+  unmarked refusal is the machine's (exit 1) and a launched program is still
+  held at its gate. Not reproducible here (`perf_event_paranoid` is -1, and
+  changing it would move five other streams' measurements); both modes of
+  `pmu:sw` were run through the wrapper and count as before.
 - **`scenario_io`'s eleven skips on `/dev/root`**: a mount source sysfs does
   not know is resolved through the mount table's own `major:minor` and
   `/sys/dev/block/<major>:<minor>`. And
@@ -727,8 +757,15 @@ machine's reason where the machine is the cause:
   have probes now, answered by the collector's own start
   (`hwts::clock_support` and `Ethtool::open`), and `netlink:ethtool` requires
   `phc`. On the runner (`enP33055s1` keeps `/dev/ptp1`, root's alone) the
-  source reads missing, with that sentence; the two sweep legs of
-  `scenario_net` skip on the resolver's word.
+  source reads missing, with that sentence. The two sweep legs of
+  `scenario_net` (`poll`, `snapshot`) first skipped whole on the resolver's
+  word, which left every other source of the leg untested wherever
+  `net.hwts` was missing -- a review's finding. `run_leg` now reads which
+  source the resolver withheld (*"`<source>` has no viable backend on this
+  machine"*), takes its requests out of the session, prints it, and runs the
+  rest; `a_leg_without_a_withheld_source_keeps_every_other_request` checks
+  the pruning here, where `net.hwts` is served: five requests of six and two
+  of three, and each pruned session validates.
 - **`family_net`'s two panics** without a packet socket or a user namespace
   are skips with that reason.
 - **`writable:` for `mem.wss`**: `fs:proc:clear_refs` requires
@@ -860,9 +897,15 @@ since `bpf:raw_tp` is written now).
   (`CATALOG.md` §1's notation list.)
 - **A requirement a collector's own start decides is probed by that start**:
   `phc` by `hwts::clock_support`, `ethtool` by resolving the family.
-- **A scenario whose loss was counted carries it as slack; under a loss, a
-  separation between two lower bounds is not asserted and says so.** The
-  read-ahead lookup was that, not a silent drain.
+- **A loss counted over the whole machine is not slack for one workload's
+  count.** An eBPF program's skipped runs (`fentry::skipped`) are every
+  task's; a scenario whose count they would excuse holds the count exact in a
+  run that lost nothing, repeats the run until one does, and says so when
+  none did. The read-ahead lookup is the first.
+- **A sweep leg leaves out the source the machine cannot serve, not itself.**
+  Like `scenario_mem`'s withheld combinations: printed, and the rest asked.
+- **A factory does not refuse for a machine's reason.** Its refusal is the
+  build's by classification; a check that asks the machine runs at the attach.
 
 ## Filed for another stream
 
@@ -901,4 +944,7 @@ scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 --configs caps
   three, `scenario_mem`'s three, `scenario_net`'s two and `family_net`'s two
   failures now passes or skips with the machine's reason; the `mem` swap and
   pressure tests skip on the runner's swap room, if that is what it was, or
-  say how the child died.
+  say how the child died. `scenario_net`'s two sweep legs run there without
+  `net.hwts`, printed, and check the other five and two sources; at paranoid
+  2, `sched.switches` through `pmu:sw` is refused with exit 1 (the machine's),
+  not 3.
