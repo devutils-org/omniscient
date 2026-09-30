@@ -605,3 +605,300 @@ For `examples/README.md` and `GUIDE.md`, in the `sched` table:
   every target (and a cgroup, and tells voluntary from involuntary), or stays
   on `pmu:sw` with no cgroup. Until decided the catalog declares what is
   served.
+
+---
+
+# The fourteenth wave — stream K (the kernel programs)
+
+The stock machine from the kernel side: what the CI's two runs on Linux 6.17
+(`../omniscient-ci-logs/`, paranoid 4 and paranoid 2, no capabilities) showed
+in the `sched`, `proc`, `io`, `net` and `mem` files, the read-ahead lookup the
+coordinator filed, the requests the thirteenth wave left for S and N, and the
+one open line of `DECISIONS.md`.
+
+## 1. 6.17's prototypes
+
+**`tcp_v4_connect`: the program had both shapes; the requirement and the test
+did not.** The CI logs read the other way round from the filing: 6.17 declares
+`tcp_v4_connect(sock *, sockaddr *, int)`, and it is 7.x (this machine) that
+declares `sockaddr_unsized *`. `net_connect.rs` already accepted both. What
+failed was `the_functions_the_five_sources_time_have_the_prototypes_they_read`,
+which held the kernel to 7.x's shape. Now:
+
+- **An `fentry:` requirement may carry its prototypes**, like a raw
+  tracepoint's: `fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *,
+  sockaddr *, int)` in `catalog/net.yaml`, compared by `fentry::support` in the
+  words `fentry::expect` uses, so a kernel whose prototype the program has
+  never seen reads *missing* in `omn list` instead of failing at attach. A bare
+  name still asks for existence only.
+- `the_catalog_lists_every_shape_of_the_connect_call_the_program_reads` holds
+  `CONNECT_SIGNATURES` and the catalog line to each other;
+  `a_requirement_with_a_prototype_is_missing_when_the_kernel_declares_another`
+  checks the probe against this kernel's own `vfs_read`.
+- The prototype test accepts either shape of `tcp_v4_connect`, by the
+  program's own constant.
+
+**`mem_stall`: landed in the thirteenth wave** (N, `c32243f`): `RECLAIM_BEGIN`
+lists `(gfp_t, int, mem_cgroup *)` and 6.17's `(int, gfp_t)`, the catalog line
+lists both, and the CI's second run (which contains `c32243f`) passed
+`the_running_kernel_declares_the_tracepoints_these_programs_attach_to` on
+6.17. Nothing to do.
+
+Ground truth: this machine (7.2) unchanged -- `net.tcp.connect` still usable
+through `bpf:fentry`, every `fentry` and `net_connect` test green -- and, for
+6.17, the CI's next run.
+
+## 2. The read-ahead lookup: counted, not silent
+
+`scenario_io::a_sequential_read_is_read_ahead_of_and_a_random_one_is_not` now
+prints the run's `losses` and the lookups per `(dev, ino)` whenever a count is
+off, and carries `losses.dropped` as its slack.
+
+Then the loss was made on purpose. The session the test writes, run twelve
+times beside 48 processes re-reading a cached file on 24 cpus:
+
+| run | random lookups of 256 | sequential lookups of 1024 | `losses.dropped` |
+|---|---|---|---|
+| alone | 256 | 1024 | 0 |
+| loaded, 11 of 12 | 241 to 253 | 990 to 1021 | 395 675 to 477 052 |
+| loaded, 1 of 12 | 256 | 1007 | 416 875 |
+
+Every short count came with a counted loss, and the reason is the kernel's
+skipped runs (*"the kernel skipped a run of these programs because one was
+already running on that cpu"*): a raw-tracepoint program runs with migration
+disabled, so one preempted mid-run keeps its per-cpu recursion guard raised
+and every later run on that cpu is skipped until it resumes. No run was short
+without a loss, so `io_pagecache.rs`'s drain is not losing rows silently: this
+is class (b), and the test carries the loss. One loaded run read **0**
+sequential lookups against 1014 pages filled, so under a loss the separation
+between the two readers is a difference of two lower bounds and is not
+asserted (the test says so, with the numbers); the per-file counts are, with
+the loss as slack. Rehearsed under that load three times: green, with the note.
+
+What the kernel's own structure can still hide -- a read served by
+`filemap_create_folio` after readahead's `__GFP_NORETRY` allocation failed,
+which fires `mm_filemap_add_to_page_cache` but returns before
+`mm_filemap_get_pages` -- was not seen here; the slack does not cover it,
+because nothing reports it.
+
+## 3. What the runner showed
+
+Each checked against the CI logs first, and each now a skip with the
+machine's reason where the machine is the cause:
+
+- **`proc::status`'s first reading**: the runner read `collect::proc::` -- the
+  forking test thread's name -- for `/bin/sleep`. An exec is not one instant:
+  `/proc/<pid>/exe` names the new image before the kernel renames the task and
+  closes its close-on-exec descriptors. `lifecycle::before_exec` now also
+  treats a child whose name is still one of this process's thread names as
+  inside its exec (bounded by the same 100 ms deadline, which a program named
+  like one of `omn`'s threads pays). The test prints the collector's own
+  account when it fails.
+- **`scenario_proc`'s descriptor counts** (five tests, 22 against 20 and 30005
+  against 30003): the five `proc-*.yml` workloads count what they inherit in
+  their own `/proc/self/fd` *before* opening anything and add what they
+  opened, and the tests hold the reported count to `>= 20` (`>= 30003`). Not
+  counted after opening: a `listdir` of `/proc/self/fd` holds a descriptor
+  while a 1 ms poller reads it, and read 30004.
+- **The scenarios that assumed paranoid -1**: `scenario_sched`'s two switch
+  tests skip on *"has no viable backend on this machine"* (paranoid 4) and on
+  the new `pmu:sw` refusal (paranoid 2, below);
+  `a_declared_mode_the_build_refuses_says_what_is_missing` no longer exists
+  (the thirteenth wave made `count` served). `scenario_mem`'s counter sweep
+  leaves out, and prints, the combinations the resolver itself withheld --
+  31 on the runners, every cache source (no hardware PMU) and most of
+  `mem.faults` -- because D5 is about a refusal raised after a backend was
+  chosen; the two cache scenarios skip on the resolver's word.
+- **A context switch is kernel mode, found on the way.** At paranoid 2,
+  `sched.switches -m count` read **0** for a program whose threads counted 406
+  switches: the counter layer reopened the counter user-mode only and noted
+  it, and a switch never happens in user mode. The sampled mode was refused at
+  start with `EACCES`. The `pmu:sw` factory now asks first
+  (`kernel_mode_counted`) and refuses, before anything is launched, with the
+  paranoia and the three ways out. The probe is P's (filed).
+- **`scenario_io`'s eleven skips on `/dev/root`**: a mount source sysfs does
+  not know is resolved through the mount table's own `major:minor` and
+  `/sys/dev/block/<major>:<minor>`. And
+  `substituted_counters_are_converted_exactly_and_their_gaps_are_named`
+  named `zram0` as its appearing device, which the runner does not have: it
+  is now a second real leaf device of the machine, and the test skips where
+  there is only one.
+- **`net.hwts` listed usable with no readable PTP clock**: `phc` and `ethtool`
+  have probes now, answered by the collector's own start
+  (`hwts::clock_support` and `Ethtool::open`), and `netlink:ethtool` requires
+  `phc`. On the runner (`enP33055s1` keeps `/dev/ptp1`, root's alone) the
+  source reads missing, with that sentence; the two sweep legs of
+  `scenario_net` skip on the resolver's word.
+- **`family_net`'s two panics** without a packet socket or a user namespace
+  are skips with that reason.
+- **`writable:` for `mem.wss`**: `fs:proc:clear_refs` requires
+  `writable:/proc/[pid]/clear_refs`, and the caveat that said it could not be
+  a requirement says what it is.
+- **`container: no` on `mem.cache_l1`, `_llc`, `_tlb`.** Their `poll` mode
+  (the counters serve it since the thirteenth wave) is not taken: the entries
+  did not ask for it and the sweep would grow by eighteen combinations for a
+  mode no scenario measures.
+- **`attach.rs`'s `online_cpus`** reads `capabilities::online_cpus`, and its
+  own parser is gone.
+- **Found in the CI's second run and not filed**: three `mem` unit tests
+  (`swap`, `pressure`) waited thirty seconds for a child that never finished
+  touching its memory, and the zero-page one read 23 MB of swap where 160 MB
+  were due. A limited cgroup that cannot swap is killed or stalls. The tests
+  now ask first (`Scratch::no_swap_room`: `/proc/swaps`' free room and every
+  `memory.swap.max` up the tree, twice what the child must push out) and skip
+  with the numbers; and a toucher that dies says how, with its cgroup's
+  `memory.events`, instead of timing out.
+
+## 4. The rest filed for S and N
+
+- **`net.softirq`'s kernel count is a fact**: `the kernel's own /proc/softirqs
+  counted ...` and `... handler runs were drained as N rows ...` come from
+  `Collector::facts()` now and reach `notes`, not `degraded:`;
+  `the_kernels_own_softirq_counter_bounds_what_this_run_bucketed` checks both
+  sides.
+- **`mem.numa` is keyed by node**: `KeyValue::node(n)` first on each event,
+  `node` first in the entry's `keys`; `each_node_is_its_own_event` holds the
+  key to the attribute and to `/sys/devices/system/node/online`.
+- **`BPF_ENABLE_STATS`**: `crate::bpf::enable_run_time_stats()`, in
+  `bpf/mod.rs` because `syscall.rs` is R's this wave; R's call can move onto it
+  (filed).
+
+## 5. `sched.switches` per cgroup: decided, and landed
+
+**The `sched_switch` program exists, second in the chain, in `count` mode,
+serving every target and reached first for a cgroup.** `src/bpf/switch_count.rs`
+counts in the kernel per `(task, kind)`, the kind being `__schedule`'s own
+rule -- voluntary when the switch was not a preemption and the state was not
+`TASK_RUNNING` -- so the rows add up to `/proc`'s `nvcsw` and `nivcsw`;
+`src/collect/sched/switch_count.rs` reports one event per task and kind over
+the window. The catalog puts `pmu:sw` first for the targets it can follow and
+`bpf:raw_tp` behind it with `modes: [count]` and a `cgroup` target, so:
+
+- every existing `sched.switches` run costs what it cost: the resolver keeps
+  `pmu:sw` wherever it serves;
+- `--cgroup` is served, by the program, in `count` (278 rows for this
+  session's own cgroup over 200 ms); `--cgroup -m trace` is refused with each
+  backend's reason;
+- the voluntary/involuntary split the caveat promised is reachable anywhere
+  with `--backend force:bpf:raw_tp -m count`.
+
+Why not first everywhere: on the question both backends answer -- how many
+times a task left the cpu -- an inherited counter is exact and free, and the
+program costs a run on every switch of the machine, narrowed after. Why not
+`trace` too: the `woke` join from `sched.wakeup` needs a per-switch event,
+and a counted row per drain is not one. And the reason `pmu:sw` was said to
+be worth having -- no privileges -- is half true on a stock kernel: at
+paranoid 2 it needs `CAP_PERFMON` like the program does (section 3).
+
+Ground truth:
+
+- `a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them`:
+  the switch fixture's four threads each read their own voluntary and
+  involuntary counts; the program's are within the edges of each -- measured
+  102/101, 104/102, 103/101, 102/101 voluntary and 0/0 involuntary.
+- `a_cgroup_has_its_switches_counted_by_kind_and_none_of_the_one_beside_it`:
+  the cgroup workload inside and its copy beside it; no row of the copy, the
+  voluntary count between the sleeps that blocked inside the window (floor,
+  less the counted loss) and the process's own lifetime `ru_nvcsw` (ceiling),
+  the involuntary one under its lifetime `ru_nivcsw` -- measured 1673 in
+  [1668, 1748] and 1778 under 1853, nothing lost.
+
+## Needs from another stream
+
+In `docs/open-findings.md`, "the fourteenth wave, stream K": the kernel-mode
+counters' probe and refusal (P), one line out of `.github/expected-skips.txt`
+(P), `pub mod net` and the statistics call (R), the preempted program's
+skipped runs (the coordinator, `docs/bpf-layer.md`), `omn-mcp`'s three tests
+that fail rather than skip without capabilities (J), and three for the flaky
+tally (P's).
+
+## The suite
+
+One `make check` over the whole change stopped at
+`family_sched::a_task_moved_between_two_cpus_is_counted_once_per_move`, #5 of
+`docs/flaky.md`, which passed alone at once. The one `cargo test --workspace
+--no-fail-fast` after it failed three tests, each with `No space left on
+device` -- `/home` was full, from six streams' builds -- and each passed alone:
+`scenario_sched::a_wakeup_from_an_interrupt_is_not_credited_to_the_task_it_landed_on`,
+`triage::an_escalation_that_cannot_decide_anything_is_refused_before_the_launch`
+and `triage::the_session_a_question_is_asked_through_is_an_ordinary_session`.
+Everything else green, with `target/debug/omn` carrying `cap_bpf,cap_perfmon`
+throughout; clippy (`--all-targets -D warnings`) and `cargo fmt --check` clean.
+
+A warning for whoever runs a wave on this machine next: with `/home` full,
+moving `target/debug` to `/tmp` looks like a way out and is not one. `/tmp`
+is mounted `nosuid`, so file capabilities on a binary there are ignored, every
+eBPF test skips as unprivileged, and nothing says why but the skips; and a
+`target/debug` on disk with `deps` elsewhere makes cargo copy the binary
+rather than hardlink it, which drops the capabilities on every `cargo test`.
+
+## Index rows
+
+No session file was added. Six were changed, and their rows stand:
+`proc-sweep.yml`, `proc-exit.yml`, `proc-one-reading.yml`, `proc-handles.yml`
+and `proc-loss.yml` (the workloads count what they inherit), and
+`sched-forced-backends.yml` (it pins `sched.switches`' `bpf:tp` in `count`,
+since `bpf:raw_tp` is written now).
+
+## For `DECISIONS.md`
+
+- **Closed: `sched.switches` gets a `sched_switch` program, second in the
+  chain.** It serves every target in `count`, and is reached first for a
+  cgroup, which `pmu:sw` cannot follow into; `pmu:sw` stays first wherever it
+  serves, because on the question both answer an inherited counter is exact
+  and free and the program costs a run on every switch of the machine. The
+  program's rows carry the kernel's own voluntary/involuntary split, reachable
+  anywhere with `--backend force:bpf:raw_tp -m count`. `trace` stays `pmu:sw`'s:
+  the `woke` join needs a per-switch event. This is the first chain whose order
+  is set by cost where two backends answer the same question and one answers
+  more; "the backend that answers best first" holds for the question asked.
+- **A counter of a kernel-mode event that the machine lets this process open
+  for user mode only is refused, not noted.** A context switch never happens
+  in user mode, and the count it would give is zero.
+- **An `fentry:` requirement carries its prototypes** like a raw tracepoint's
+  (`fentry:name(a, b)|(c, d)`); a bare name asks for existence only.
+  (`CATALOG.md` §1's notation list.)
+- **A requirement a collector's own start decides is probed by that start**:
+  `phc` by `hwts::clock_support`, `ethtool` by resolving the family.
+- **A scenario whose loss was counted carries it as slack; under a loss, a
+  separation between two lower bounds is not asserted and says so.** The
+  read-ahead lookup was that, not a silent drain.
+
+## Filed for another stream
+
+The items of `docs/open-findings.md`, "the fourteenth wave, stream K":
+P (the kernel-mode counters' probe and refusal; a pair no backend declares worded as the request's; one line out of
+`.github/expected-skips.txt`), R (`pub mod net`; `enable_run_time_stats`),
+the coordinator (`docs/bpf-layer.md`: a preempted program skips every run
+behind it), J (`omn-mcp`'s three tests that fail rather than skip without
+capabilities), and three for the flaky tally (P's `cpu` tests).
+
+## The matrix cells this should move
+
+Not run (the coordinator's, at the end of the wave):
+
+```console
+scripts/matrix.sh here                                   # here-caps, here-nocaps
+scripts/matrix.sh v5.15.221 v6.1.188 v6.6.157 --configs caps
+```
+
+- **Every cell with BTF: `net.tcp.connect`'s `fentry:tcp_v4_connect(...)`**
+  stays *available* (5.15, 6.1, 6.6 and 6.17 declare `sockaddr *`, 7.2
+  `sockaddr_unsized *`); a kernel with a third shape would move it from
+  available to missing, by name.
+- **`here-caps` and every `caps` cell on 6.1 and later: `sched.switches
+  --cgroup -m count`** from refused (no backend declared the target) to served
+  through `bpf:raw_tp`; `sched.switches --cgroup -m trace` stays refused, now
+  with each backend's reason (worded by the resolver as the machine's, which
+  it is not: filed for P). 5.15 is below the program's `kernel>=6.1`.
+- **Any cell whose interfaces keep no readable PTP clock** (every guest, and
+  the CI's runner): `net.hwts` from usable to missing, *"no interface on this
+  machine keeps a readable PTP hardware clock"*; `here-*` unchanged on this
+  machine, whose `/dev/ptp0` and `/dev/ptp1` are the `clock` group's.
+- **The CI cells** (`ci-6.17.0-nocaps`, both configurations), read back by the
+  coordinator: the fentry and `proc::status` unit tests green; `scenario_io`'s
+  eleven `/dev/root` skips gone; `scenario_proc`'s five, `scenario_sched`'s
+  three, `scenario_mem`'s three, `scenario_net`'s two and `family_net`'s two
+  failures now passes or skips with the machine's reason; the `mem` swap and
+  pressure tests skip on the runner's swap room, if that is what it was, or
+  say how the child died.

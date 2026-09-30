@@ -8197,3 +8197,98 @@ on a cpu with a hardware PMU:
 
 `docs/portability.md` is the record once these are read; the log and the cell
 are the run's artifact.
+
+## Needs from another stream — the fourteenth wave, stream K (the kernel programs)
+
+Stream K's record is `docs/families/kernel.md`, "The fourteenth wave". Nothing
+here blocks it; each item is what would let a landed change reach further.
+
+### To stream P (`src/capabilities.rs`, `src/collect/cpu/counters.rs`): a context switch is kernel mode
+
+`PERF_COUNT_SW_CONTEXT_SWITCHES` (and `PERF_COUNT_SW_CPU_MIGRATIONS`) fire
+from the scheduler, with kernel registers, so a counter opened with
+`exclude_kernel` counts **zero** of them. At `perf_event_paranoid` 2 -- the
+kernel's default, the CI's second runner -- an unprivileged open is refused
+until the counter layer reopens it user-mode only, notes *"kernel-mode events
+are not in this count"*, and reports 0: `scenario_sched`'s
+`a_counted_switch_total_is_the_sum_of_what_each_thread_counted` read 0 against
+406 there, and `scenario_cpu`'s
+`a_workload_that_sleeps_a_chosen_number_of_times_is_switched_that_many_times`
+failed the same way. Two changes wanted:
+
+- `probe_pmu`: for these two events, open without `exclude_kernel`, so the
+  probe says *missing* where the count would be zero (available means it
+  attaches, and here it means it counts).
+- `counters::Spec`: a `kernel_only: bool` (true for `SCHED_SWITCHES` and the
+  `cpu.context_switches` / `cpu.migrations` specs), and `attach` refusing,
+  not noting, when `group.kernel_excluded()` and the spec is kernel-only.
+
+Until then `sched.switches` refuses it itself, in the `pmu:sw` factory
+(`src/collect/sched/mod.rs`, `kernel_mode_counted`), before anything is
+launched; `cpu.context_switches` still reads 0 there.
+
+### To stream P (`src/resolve.rs` or `src/validate.rs`): a pair no backend declares is not the machine's
+
+`sched.switches --cgroup -m trace` is refused, rightly, and worded as the
+machine's: *"has no viable backend on this machine"*, exit 1, and *"hint: the
+request is valid; it is this machine that cannot serve it"*. Every line under
+it is the catalog's -- `pmu:sw` does not declare `cgroup`, and `bpf:raw_tp`
+and `bpf:tp` declare `count` only -- so no machine could serve it. Wanted: a
+(target, mode) pair that no backend of the chain declares is refused as the
+request's (exit 2, before resolution), the way a mode the entry does not
+declare is.
+
+### To stream P (`.github/expected-skips.txt`): one line out
+
+`the build directory is not on a block device \(/sys/class/block/root does not
+exist\)` can come out: `tests/scenario_io.rs::backing_device` resolves a mount
+source sysfs does not know through `/sys/dev/block/<major>:<minor>`. The skips
+this stream added on the runners' machines are worded to match lines already
+there (`cannot serve`, `has no viable backend on this machine`, `CAP_NET_RAW`).
+
+### To stream R (`src/collect/mod.rs`): two lines
+
+- `mod net;` to `pub mod net;` (or `pub use net::probe as net_probe;`): the
+  `phc` and `ethtool` probes are answered by `crate::collect::net::probe`,
+  and until `bpf::attach::probe_type_support` can name it the call goes
+  through `crate::collect::mem::net_probe`, a one-line shim in a module this
+  stream owns.
+- `BPF_ENABLE_STATS`: `crate::bpf::enable_run_time_stats() ->
+  std::io::Result<OwnedFd>` exists now (`src/bpf/mod.rs`), and
+  `ProgramStats::for_run` can call it instead of its own `libc::syscall`.
+
+### To the coordinator (`docs/bpf-layer.md`): a preempted program skips every run behind it
+
+A raw-tracepoint program runs with migration disabled, not preemption, and
+the kernel's per-cpu recursion guard (`prog->active`) stays raised while a
+preempted run waits. Every run of the same program on that cpu is then
+skipped, and counted in `recursion_misses`, until the preempted one resumes --
+a whole timeslice of events, not one. Measured with `io.readahead` beside 48
+processes re-reading a cached file on 24 cpus: 377 000 to 478 000 skipped runs
+in a two-second session, and the workload's own lookups short by 3 to 15 of
+256. Every one of those runs counted the loss (`losses.dropped`), so nothing
+was silent; but a program that fires on every page-cache lookup of the
+machine loses the target's events to the machine's load. Narrowing earlier
+does not help (the guard is taken before the program runs); a per-target
+attach (fentry on a function only the target calls) or a shorter program
+does. Not scheduled.
+
+### To stream J (`mcp/tests/protocol.rs`): three tests fail rather than skip without capabilities
+
+`a_lossy_run_answers_with_its_shortfall`, `every_number_of_a_run_comes_back_unchanged`
+and `identity_and_temporal_never_read_alike` panic at `protocol.rs:63` with
+the resolver's *"has no viable backend on this machine"* when `omn` carries
+no `CAP_BPF` (seen here with the binary on a `nosuid` tmpfs, where file
+capabilities do not apply). That is the machine's answer and a skip.
+
+### For the flaky tally
+
+- `scenario_cpu::a_counted_window_is_the_same_number_in_every_format_that_carries_it`
+  (P): *"json reported 1022900789 for a loop that retires 1000000000"*, once in
+  a `--no-fail-fast` run at load 12, and once more alone; passed a third time.
+- `scenario_cpu::a_profile_of_a_cgroup_samples_its_task_and_not_the_one_beside_it`
+  (P): *"the window did not hold the child's work in any run"*, once in the
+  same run; passed alone.
+- `family_cpu::one_session_counts_several_sources_over_one_window` (P): *"the
+  sources report different windows: [61013989, 61057720, 61074080]"*, once;
+  passed alone.
