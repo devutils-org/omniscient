@@ -484,12 +484,22 @@ impl Collector for SoftIrqCollector {
                 self.filtered_in, self.filtered_out,
             ));
         }
+        notes
+    }
+
+    /// What the run states about itself that it did not give up: the
+    /// kernel's own count of the handler runs over a window containing this
+    /// one, and how many runs the kernel bucketed into how many rows. Both
+    /// used to be `notes`, which the text prints as `degraded:` -- a count the
+    /// kernel kept is another party's account, not a concession.
+    fn facts(&self) -> Vec<String> {
+        let mut facts = Vec::new();
         if let Some(ran) = self.kernel_ran() {
             // Both numbers, and the comparison, rather than either alone: the
             // window this collector observed is strictly inside the one the
             // two file reads bound, so its own count can only be the smaller.
             // A run where it is not is a defect and says so here.
-            notes.push(format!(
+            facts.push(format!(
                 "the kernel's own /proc/softirqs counted {ran} handler runs on these vectors \
                  over a window containing this run, and this run bucketed {}{}",
                 self.handlers,
@@ -501,7 +511,7 @@ impl Collector for SoftIrqCollector {
             ));
         }
         if self.handlers > 0 {
-            notes.push(format!(
+            facts.push(format!(
                 "{} softirq handler runs were drained as {} rows of a kernel-side log2 \
                  histogram, each carrying the runs it stands for; a bucket is a factor of two \
                  wide, so every number derived from `duration_ns` is bucketed and `total_ns` is \
@@ -509,7 +519,7 @@ impl Collector for SoftIrqCollector {
                 self.handlers, self.rows,
             ));
         }
-        notes
+        facts
     }
 }
 
@@ -635,15 +645,20 @@ mod tests {
         let mut collector = collector();
         let notes = collector.notes().join(" ");
         assert!(notes.contains("NET_RX"), "{notes}");
+        let facts = collector.facts().join(" ");
         assert!(
-            !notes.contains("handler runs were drained as"),
-            "a run that bucketed nothing has nothing to qualify: {notes}"
+            !facts.contains("handler runs were drained as"),
+            "a run that bucketed nothing has nothing to state: {facts}"
         );
         collector.handlers = 9;
         collector.rows = 2;
+        // What a row stands for is a fact of the run, not a concession: it
+        // reaches `notes`, and the text prints it as `note:`, not `degraded:`.
+        let facts = collector.facts().join(" ");
+        assert!(facts.contains("9 softirq handler runs"), "{facts}");
+        assert!(facts.contains("2 rows"), "{facts}");
         let notes = collector.notes().join(" ");
-        assert!(notes.contains("9 softirq handler runs"), "{notes}");
-        assert!(notes.contains("2 rows"), "{notes}");
+        assert!(!notes.contains("handler runs were drained as"), "{notes}");
     }
 
     /// A handler already running at attach is not a loss, and must not be

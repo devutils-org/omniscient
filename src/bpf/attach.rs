@@ -200,6 +200,15 @@ pub fn probe_type_support(kind: &str) -> Option<Support> {
     if let Some(function) = kind.strip_prefix("fentry:") {
         return Some(fentry::support(function));
     }
+    // Two requirements that are not attach kinds, answered here because this
+    // is the one hook `capabilities.rs` gives the kernel stream's files: the
+    // `net` collectors' own start, asked in advance.
+    if let Some(answer) = crate::collect::mem::net_probe(kind) {
+        return Some(match answer {
+            Ok(()) => Support::Yes,
+            Err(reason) => Support::No(reason),
+        });
+    }
     let read = match kind {
         "kprobe" => kprobe_type(),
         "uprobe" => return Some(uprobe_support().clone()),
@@ -621,49 +630,26 @@ fn current_uid() -> u32 {
 /// there, and the call fails with `ENODEV` rather than being skipped. The
 /// inverse question -- how many slots a per-cpu map has -- is `possible`, and
 /// `syscall::possible_cpus` answers that one.
+///
+/// Read through `capabilities::online_cpus`, the one reader of that file
+/// (finding 26): this layer kept a parser of its own until the fourteenth
+/// wave.
 fn online_cpus() -> Result<Vec<i32>, String> {
-    let path = "/sys/devices/system/cpu/online";
-    let text = fs::read_to_string(path).map_err(|error| {
-        format!("{path} cannot be read, so the online cpus are unknown: {error}")
+    let cpus = crate::capabilities::online_cpus().map_err(|error| {
+        format!(
+            "{} cannot be read, so the online cpus are unknown: {error}",
+            crate::capabilities::ONLINE_CPUS
+        )
     })?;
-    let cpus = parse_cpu_list(&text);
     if cpus.is_empty() {
-        return Err(format!("{path} says `{}`, which names no cpu", text.trim()));
+        return Err(format!("{} names no cpu", crate::capabilities::ONLINE_CPUS));
     }
-    Ok(cpus)
-}
-
-/// Expands a kernel cpu list -- `0-7`, `0,2-3`, `4` -- into the cpus it names.
-fn parse_cpu_list(text: &str) -> Vec<i32> {
-    let mut cpus = Vec::new();
-    for part in text.trim().split(',').filter(|part| !part.is_empty()) {
-        match part.split_once('-') {
-            Some((first, last)) => {
-                if let (Ok(first), Ok(last)) = (first.parse::<i32>(), last.parse::<i32>()) {
-                    cpus.extend(first..=last);
-                }
-            }
-            None => {
-                if let Ok(cpu) = part.parse() {
-                    cpus.push(cpu);
-                }
-            }
-        }
-    }
-    cpus
+    Ok(cpus.into_iter().map(|cpu| cpu as i32).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_cpu_list_names_its_cpus_rather_than_counting_them() {
-        assert_eq!(parse_cpu_list("0-7\n"), vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(parse_cpu_list("0,2-3"), vec![0, 2, 3]);
-        assert_eq!(parse_cpu_list("5"), vec![5]);
-        assert!(parse_cpu_list("").is_empty());
-    }
 
     /// Every cpu the machine reports online has to be opened on, because one
     /// perf event covers one cpu. A machine-wide attach that opened cpu zero

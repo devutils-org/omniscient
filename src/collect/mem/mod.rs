@@ -27,6 +27,19 @@ use crate::bpf::{Allocator, Stall};
 use footprint::{Metric, Source};
 use heap::Which;
 
+/// The `net` family's own probes (`phc`, `ethtool`), reachable from
+/// `bpf::attach::probe_type_support`, which is the hook `capabilities.rs`
+/// gives the kernel stream's files.
+///
+/// Here only because `collect::net` is a private module of a file this
+/// stream does not own, and `collect::mem` is a public one it does: a sibling
+/// may reach it, a module outside `collect` may not. The request for `pub mod
+/// net` is in `docs/open-findings.md` (the fourteenth wave, stream K); once it
+/// lands, the call goes straight to `collect::net::probe` and this goes.
+pub fn net_probe(requirement: &str) -> Option<Result<(), String>> {
+    super::net::probe(requirement)
+}
+
 /// The collectors this family provides.
 ///
 /// Adding a source means adding a line here and a module beside it. No file

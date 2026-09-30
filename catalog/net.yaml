@@ -13,7 +13,7 @@
     # for a RST or a timeout, the connect call's own return for a failure
     # before any packet left. The close runs in softirq, so the stamp carries
     # the caller.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error"], cost: low}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *, sockaddr *, int)", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error"], cost: low}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
@@ -267,7 +267,7 @@
        targets: {pid: native, launch: native}, filter_fields: [dport]}
     # Per interface, over the ethtool netlink family and the PTP character
     # device. What the card can stamp, and how far its clock is from ours.
-    - {id: "netlink:ethtool", requires: ["netlink", "ethtool"], cost: free,
+    - {id: "netlink:ethtool", requires: ["netlink", "ethtool", "phc"], cost: free,
        targets: {iface: native, system: native}, filter_fields: [iface],
        degraded: "what an interface can timestamp and how far its clock has
                   drifted from CLOCK_MONOTONIC, not the timestamps of individual
