@@ -44,6 +44,11 @@ const SESSIONS: [&str; 4] = [
 const ALLOW_RUN: &str = "20s";
 const BUDGET: &str = "25%";
 
+/// The fewest numbers one read of one run may cover: the smallest session,
+/// `benchmark.yml`, writes 41 across its three files (measured), so a read
+/// below 20 is a run that wrote next to nothing.
+const MIN_NUMBERS_PER_READ: usize = 20;
+
 /// `examples/mcp/approved/`, copied: the approved directory the server is started with.
 fn approved_copy(scratch: &Path) -> PathBuf {
     let from = repo().join("examples/mcp/approved");
@@ -182,7 +187,7 @@ fn the_walk_through_hands_over_what_the_runs_wrote_and_what_the_program_did() {
         "the benchmark reads /proc and the reap's rusage, which every machine serves"
     );
 
-    let mut compared = 0;
+    let (mut compared, mut reads) = (0, 0);
     for name in SESSIONS {
         if !served[name] {
             continue;
@@ -200,10 +205,23 @@ fn the_walk_through_hands_over_what_the_runs_wrote_and_what_the_program_did() {
 
         // 3. What it hands over is what the run wrote. `run_session`'s read-back
         // cuts raw events at 100; `read_run` with `max_events: 0` cuts none.
+        // Each read covers the run's numbers, whichever sessions this machine
+        // serves: a benchmark-only machine (the CI's paranoid 2 and 4 cells)
+        // compares 41 per read, so the floor is per read, not per walk-through.
         let read_back = &answer["read_back"];
-        compared += assert_run_unchanged(read_back, &dir);
         let again = client.call("read_run", json!({"run": run, "max_events": 0}));
-        compared += assert_run_unchanged(&again, &dir);
+        for (read, numbers) in [
+            ("run_session", assert_run_unchanged(read_back, &dir)),
+            ("read_run", assert_run_unchanged(&again, &dir)),
+        ] {
+            assert!(
+                numbers >= MIN_NUMBERS_PER_READ,
+                "{name}: {read} compared only {numbers} numbers: the run is not the one this \
+                 test meant"
+            );
+            compared += numbers;
+            reads += 1;
+        }
         assert_eq!(
             again["missing"],
             json!([]),
@@ -269,10 +287,7 @@ fn the_walk_through_hands_over_what_the_runs_wrote_and_what_the_program_did() {
             _ => {}
         }
     }
-    assert!(
-        compared > 500,
-        "only {compared} numbers were compared: the runs are not the ones this test meant"
-    );
+    eprintln!("{compared} numbers compared over {reads} reads of the runs this machine served");
 }
 
 /// The decomposition says what dominates, and the program's own figures agree.

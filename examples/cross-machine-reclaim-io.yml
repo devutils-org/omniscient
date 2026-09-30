@@ -108,3 +108,21 @@ joins:
     via: task
     match: eq
     window: 10s
+
+  # How much of the reclaim lay in each 100 ms of the machine's memory
+  # pressure: whether the program reclaimed while the machine stalled, or
+  # beside it. The machine's PSI is one series with no key, so the rule names
+  # none (`overlap` alone may), and each reclaim episode is laid across the
+  # pressure intervals by the share of it that overlaps each: an event of one
+  # episode is stamped when it began and lasted `total_ns`. A drained bucket of
+  # several episodes has no one window to place, so its pages are counted
+  # uncredited, not spread. The rows are keyed `machine`. TEMPORAL: a reclaim
+  # and a stall in the same interval share a clock and nothing else.
+  - id: reclaim-per-pressure-interval
+    from: mem.pressure
+    to: mem.reclaim
+    match: overlap
+    value: pages_reclaimed
+    span: total_ns
+    stamped: start
+    top: 100

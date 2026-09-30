@@ -1574,8 +1574,8 @@ fn waits_are_split_by_their_overlap(file: &str, what: &str, id: &str, series: Op
 
 /// A rule with no key is `overlap`'s alone. Written for `eq`, it is refused
 /// before anything runs, and the refusal names `via`; the same session with
-/// `overlap` passes validation. Both are asked with `--dump-resolved`, which
-/// validates and resolves and runs nothing.
+/// `overlap` validates and resolves. Both are asked with `--dump-resolved`,
+/// which validates and resolves and runs nothing.
 #[test]
 fn a_rule_with_no_key_is_refused_on_every_match_but_overlap() {
     let session = |kind: &str| {
@@ -1583,7 +1583,7 @@ fn a_rule_with_no_key_is_refused_on_every_match_but_overlap() {
             "name: a machine-wide join
 requests:
   - {{label: pressure, source: mem.pressure, target: system, mode: poll@100ms, emit: [raw]}}
-  - {{label: waits, source: sched.futex, target: system, mode: trace, emit: [raw]}}
+  - {{label: waits, source: sched.futex, target: {LAUNCH}, mode: trace, emit: [raw]}}
 joins:
   - {{id: no-key, from: mem.pressure, to: sched.futex, match: {kind}, value: total_ns}}
 "
@@ -1594,7 +1594,7 @@ joins:
         &["--input-format", "yaml", "--dump-resolved"],
     );
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(!output.status.success(), "an `eq` with no key ran: {said}");
+    assert_eq!(output.status.code(), Some(2), "an `eq` with no key: {said}");
     assert!(
         said.contains("names no key") && said.contains("via"),
         "the refusal says what is missing: {said}"
@@ -1605,8 +1605,108 @@ joins:
         &["--input-format", "yaml", "--dump-resolved"],
     );
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() && output.status.code() == Some(1) && machine_cannot_serve(&said) {
+        eprintln!(
+            "SKIP (overlap half): the session is valid and this machine does not serve it, so \
+             only the `eq` refusal was checked. The machine's reason:\n{said}"
+        );
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "`overlap` with no key is a valid session, and it was refused: {said}"
+    );
     assert!(
         !said.contains("names no key") && !said.contains("does not carry"),
-        "`overlap` with no key is refused as if it needed one: {said}"
+        "`overlap` with no key is warned about as if it needed one: {said}"
+    );
+    // One resolved request per JSON document, each with the backend chosen.
+    let resolved: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&output.stdout)
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .expect("--dump-resolved writes JSON");
+    let labels: Vec<&str> = resolved
+        .iter()
+        .filter(|each| each["backend"]["id"].is_string())
+        .filter_map(|each| each["request"]["label"].as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        ["pressure", "waits"],
+        "both requests resolve: {resolved:?}"
+    );
+}
+
+/// The CPUs this machine has online, as the kernel lists them in
+/// `/sys/devices/system/cpu/online` (`0-23`, `0,2-5`): the ground truth for a
+/// per-cpu source's series, read without `omn`.
+fn online_cpus() -> Option<usize> {
+    let listed = std::fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+    let mut count = 0;
+    for range in listed.trim().split(',') {
+        let (first, last) = match range.split_once('-') {
+            Some((first, last)) => (first.parse::<usize>().ok()?, last.parse::<usize>().ok()?),
+            None => {
+                let only = range.parse::<usize>().ok()?;
+                (only, only)
+            }
+        };
+        count += last - first + 1;
+    }
+    Some(count)
+}
+
+/// With no key, every reading of `from` is one series; a source that carries
+/// one per CPU is refused by name, with the number of series it carried. The
+/// ground truth is the kernel's own list of online CPUs: `power.freq` polled
+/// for the system reads one series per CPU, so the refusal counts exactly as
+/// many, and names the key they differ by.
+#[test]
+fn with_no_key_a_per_cpu_poll_is_refused_with_as_many_series_as_the_machine_has_cpus() {
+    let Some(cpus) = online_cpus() else {
+        eprintln!("SKIP: /sys/devices/system/cpu/online is unreadable here, so there is no count to hold the refusal to");
+        return;
+    };
+    if cpus < 2 {
+        eprintln!(
+            "SKIP: this machine has {cpus} CPU online, so a per-cpu poll is one series and \
+             there is nothing to refuse"
+        );
+        return;
+    }
+    let output = written_session(
+        &format!(
+            "name: a per-cpu poll with no key
+requests:
+  - {{label: freq, source: power.freq, target: system, mode: poll@100ms, emit: [raw]}}
+  - {{label: waits, source: sched.futex, target: {LAUNCH}, mode: trace, emit: [raw]}}
+joins:
+  - {{id: no-key, from: power.freq, to: sched.futex, match: overlap, value: total_ns}}
+"
+        ),
+        &["--input-format", "yaml", "--format", "json"],
+    );
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    let refusal = said
+        .lines()
+        .find(|line| line.contains("names no key, so it reads every"));
+    if refusal.is_none() && output.status.code() == Some(1) && machine_cannot_serve(&said) {
+        eprintln!(
+            "SKIP: this machine does not serve power.freq or sched.futex, so the refusal of \
+             {cpus} series was not checked. The machine's reason:\n{said}"
+        );
+        return;
+    }
+    let refusal = refusal.unwrap_or_else(|| {
+        panic!("a keyless overlap over {cpus} CPUs' readings was not refused: {said}")
+    });
+    assert_eq!(output.status.code(), Some(1), "{said}");
+    assert!(
+        refusal.contains(&format!("carried {cpus} of them")),
+        "the machine has {cpus} CPUs online, and the refusal counts otherwise: {refusal}"
+    );
+    assert!(
+        refusal.contains("cpu:") && refusal.contains("via"),
+        "the refusal names the key the series differ by and what to write: {refusal}"
     );
 }

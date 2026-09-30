@@ -8204,9 +8204,11 @@ are the run's artifact.
 
 `Rule::via` is `Option<KeyKind>` since this wave (`overlap` over machine-wide
 state, `examples/join-overlap-machine.yml`). The type change does not compile
-without the validator's side, so stream J made the five-line edit itself and
-declares it in `docs/families/join.md`: `check_sources` skips the
-`entry.keys.contains(&via)` check when `rule.via` is `None`. The refusal of an
+without the validator's side, so stream J made the edit itself (+6/-2 lines,
+one of them a comment) and declares it in `docs/families/join.md`:
+`check_joins` (around line 216) skips the `entry.keys.contains(&via)` check
+when `rule.via` is `None`, and the rejection's message is unchanged but for
+naming `via` instead of `rule.via`. The refusal of an
 absent `via` on every match but `overlap` is the engine's (`join::check`,
 `JoinError::NoKey`), which the validator already calls through
 `join::check_in`, so nothing else is wanted there. If stream P reworks those

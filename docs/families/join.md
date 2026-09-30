@@ -21,7 +21,7 @@ unchanged.
 | Refused, new | a rule with no `via` on every match but `overlap` (`NoKey`, before anything runs); a keyless `overlap` whose `from` source carries several series (`SeveralSeries`, by name, with up to three of them) |
 | Tests | 5 unit tests in `src/join.rs`; `tests/join_engine.rs` +2 (the keyless scenario, the validation refusal) and the task-keyed overlap scenario shared with it; `mcp/tests/walkthrough.rs` (new, 2); `mcp/tests/protocol.rs` 4 changed for the stock machine; `tests/cross_compute.rs` (4 through its runner) and `tests/cross_machine.rs` (1) likewise |
 | Sessions | new `examples/join-overlap-machine.yml`; new `examples/mcp/approved/{benchmark,profile,decompose,triage}.yml` and `program.py`, and the client configuration `examples/mcp/mcp.json` |
-| Files | `src/join.rs`, `mcp/src/session.rs`, `mcp/tests/{protocol,walkthrough,common/mod}.rs`, `tests/{join_engine,cross_compute,cross_machine}.rs`, `docs/mcp.md`, the sessions above; outside, declared below: `src/validate.rs` (five lines) |
+| Files | `src/join.rs`, `mcp/src/session.rs`, `mcp/tests/{protocol,walkthrough,common/mod}.rs`, `tests/{join_engine,cross_compute,cross_machine}.rs`, `docs/mcp.md`, the sessions above; outside, declared below: `src/validate.rs` (`check_joins`, +6/-2) |
 | Machine | 24 cpus, kernel 7.2.6, `CAP_BPF` and `CAP_PERFMON` on the binary, `perf_event_paranoid` -1, loaded by five other streams |
 
 ## 1. The use case, end to end
@@ -92,11 +92,16 @@ across its intervals as a keyed `overlap` lays it across one key's. Nothing
 is counted `keyless`, since no event can lack a key nobody asked for. Two
 refusals keep the absence from meaning anything else:
 
-- **a `from` source that carries several series** (a poll of `io.bytes` per
-  device, of `proc.threads` per task) is refused by name with up to three of
-  them: each series' reading would close the other's interval, and the
-  "interval" would be the gap between two devices. Found at apply time, since
-  a key set is known only from the events.
+- **a `from` source that carries several series** (a poll of `io.bytes` or
+  `io.inflight` per device, of `power.freq` per CPU) is refused by name with
+  up to three of them: each series' reading would close the other's interval,
+  and the "interval" would be the gap between two devices. Found at apply
+  time, since a key set is known only from the events. Through the binary,
+  `with_no_key_a_per_cpu_poll_is_refused_with_as_many_series_as_the_machine_has_cpus`
+  holds the count in the refusal to the kernel's own
+  `/sys/devices/system/cpu/online` (24 here: "carried 24 of them (cpu:0,
+  cpu:1, cpu:10)"). (`proc.threads` is not an example: it is one reading per
+  process, so a launched program is one series.)
 - **every other match kind** refuses a rule with no key (`NoKey`, from
   `join::check`, so before the run, and from `omn --dump-resolved`).
 
@@ -110,9 +115,31 @@ the eight inside a wait, 60.1 and 40.4 ms at the two edges -- 1000.23 ms in
 all against four brackets of 250 ms. The separation: the same rule keyed by
 `task` fails on the machine's readings (`MissingKey`), unit-tested.
 
-The crossing that asked -- the reclaim crossing's machine-wide PSI -- needs a
-delegated memory cgroup to run, which neither this machine nor the CI's first
-run grants; the workload here is the one whose answer is known independently.
+The crossing that asked, `examples/cross-machine-reclaim-io.yml`, now carries
+the keyless rule itself: `reclaim-per-pressure-interval`, from the machine's
+`mem.pressure` to `mem.reclaim`, `value: pages_reclaimed`, `span: total_ns`,
+`stamped: start` (an event of one episode begins at its stamp and lasts its
+`total_ns`). `tests/cross_machine.rs` runs it in a delegated memory cgroup
+capped at 32 MiB (this machine delegates one under `user@1000.service`; the
+earlier line here that it did not was wrong) and holds it to the cgroup's own
+`memory.stat`: every page the cgroup reclaimed while the program ran is either
+credited to a pressure interval the program's own brackets overlap or counted
+uncredited; credited plus uncredited equals every page the tool saw reclaimed,
+within one; and on a machine where every reclaimed page is the cgroup's, no
+credited page lies outside the program's brackets. Measured, three runs:
+38 519 to 41 644 pages reclaimed, 272 to 455 credited, all inside the
+brackets once the span is the episode's own (with `span: window_ns` 104 of
+376 fell after the program ended -- the drain window encloses an episode, it
+is not one), and 41 184 to 41 864 uncredited.
+
+**What that measures about the engine**: almost all of it is uncredited, by
+design. `mem.reclaim` drains a histogram, and a row of several episodes has no
+one window to place (`several()`), so its amount is counted rather than
+spread. The same holds for every drained source. A row of several episodes
+whose enclosing window -- `[ts, ts + window_ns]` for `mem.reclaim`, stamped at
+its first episode -- fits inside one interval could be credited whole, and
+exactly; the engine cannot tell an enclosing window from a sum of durations
+by the attribute's name, so that needs the rule to say which (open, below).
 
 ## 4. The band for `extreme` (R's thirteenth-wave request)
 
@@ -149,7 +176,7 @@ Checked against the CI logs' text (exit status 256, the messages quoted in
 
 | File | Edit | Why |
 |---|---|---|
-| `src/validate.rs` | `let Some(via) = rule.via else { continue };` before the key check, five lines | `Rule::via` became an `Option`, and the validator does not compile without it. It is exactly the validator half filed for P in the thirteenth wave (skip the key check with no key); the other half, refusing an absent `via` elsewhere, is the engine's `NoKey`. Filed for P so the lines are kept if P reworks them. |
+| `src/validate.rs` | `check_joins`: `let Some(via) = rule.via else { continue };` before the key check, and the rejection names `via` for `rule.via` (+6/-2, one line a comment; the message is unchanged) | `Rule::via` became an `Option`, and the validator does not compile without it. It is exactly the validator half filed for P in the thirteenth wave (skip the key check with no key); the other half, refusing an absent `via` elsewhere, is the engine's `NoKey`. Filed for P so the lines are kept if P reworks them. |
 
 ## Handoff
 
@@ -182,8 +209,29 @@ Checked against the CI logs' text (exit status 256, the messages quoted in
     configuration beside the directory*, since `list_approved` lists every
     session-shaped file under it, `.json` included.
 - **Filed**: `docs/open-findings.md`, "the fourteenth wave, stream J": P
-  (`src/validate.rs`, the declared lines to keep; `src/catalog.rs`,
+  (`src/validate.rs::check_joins`, the declared lines to keep; `src/catalog.rs`,
   `Cost::Extreme`'s doc comment).
+- **After the adversarial review** (one commit):
+  - the walk-through's floor is per read (20 numbers; `benchmark.yml` writes
+    41), not 500 over the walk-through, which a benchmark-only machine (the
+    paranoid 2 and 4 cells) could never reach;
+  - the validator edit is `check_joins`, +6/-2 with the rejection's format
+    string unchanged, and the filing for P names that function (it said
+    `check_sources`, which does not exist);
+  - the keyless-refusal scenario's `overlap` half now requires the session to
+    resolve (it was passing on an unrelated refusal: `sched.futex` has no
+    `system` target), and `SeveralSeries` has a scenario through the binary
+    held to the kernel's CPU list;
+  - item 3's ground truth is now the crossing that asked, the reclaim
+    crossing, against the cgroup's own `memory.stat` (above);
+  - the guardrail test skips only on the machine's refusal of the count
+    (exit 1, naming `cpu.instructions`, "no viable backend on this machine"
+    or `perf_event_paranoid`), and fails on any other probe error.
+- **Open**: an `overlap` rule attribute saying its `span` *encloses* a
+  drained row's occurrences rather than sums them (`window_ns` on
+  `mem.reclaim`), so a row of several episodes whose window fits in one
+  interval is credited whole. Measured: 41 184 of 41 639 reclaimed pages are
+  uncredited today on the reclaim crossing, counted and said.
 - **Matrix cells this should move** (the coordinator's, at the end of the
   wave; the judges' commands are `scripts/matrix.sh <cell>`):
   - `ci-6.17.0-nocaps` at paranoid 4 (the CI's first run): `cross_compute`
@@ -191,14 +239,26 @@ Checked against the CI logs' text (exit status 256, the messages quoted in
     `a_guardrail_...` failed -> skipped; `omn-mcp` `protocol` 4 failed -> 3
     skipped and the plan test passing on its refusal half;
     `walkthrough` new: `benchmark.yml` served, the other three skipped by
-    `list_approved`'s reason. Check: the next push's CI, `cargo test -p
+    `list_approved`'s reason, and the per-read floor met (41 numbers per
+    read, measured with a benchmark-only run). Check: the next push's CI, `cargo test -p
     omn-mcp` and `cargo test --test cross_compute --test cross_machine`.
   - the paranoid-2 cell (run 2): the same, and `decompose.yml` and
     `triage.yml` skipped without `CAP_BPF`.
+  - every cell: `join_engine`'s
+    `with_no_key_a_per_cpu_poll_is_refused_with_as_many_series_as_the_machine_has_cpus`
+    passes where `power.freq` reads every online CPU, skips where it has no
+    backend, and fails -- on purpose -- where a backend reads fewer CPUs than
+    `/sys/devices/system/cpu/online` lists: that is a finding about the
+    source, not the join. Check: `cargo test --test join_engine per_cpu`.
   - `here-caps`, `here-nocaps`: no source's availability changes; on
     `here-nocaps` the walk-through serves `benchmark.yml` and `profile.yml`
     (paranoid -1) and skips the two eBPF sessions.
-- **The suite**: on this branch with `main` merged (streams R's and U's
+- **The suite, after the review's fixes**: `make check` red only at the
+  session-index test (`join-overlap-machine.yml`, the row above); the
+  `cargo test --workspace --no-fail-fast` after it: **2010 passed, 1 failed
+  (that index test), 8 ignored**; clippy (workspace, all targets) and `cargo
+  fmt --check` clean.
+- **The suite, before the review**: on this branch with `main` merged (streams R's and U's
   foundations), with the capabilities, beside five other streams. Own files:
   `cargo test --lib join` (81), `tests/{join_engine, cross_compute,
   cross_machine}.rs` and `-p omn-mcp` (protocol 10, walkthrough 2) pass.
