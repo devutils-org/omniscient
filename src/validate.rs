@@ -318,7 +318,7 @@ pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
 fn adds_up(unit: Unit) -> bool {
     match unit {
         Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
-        Unit::Ratio | Unit::Hz | Unit::Celsius => false,
+        Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius => false,
     }
 }
 

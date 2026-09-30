@@ -1666,6 +1666,7 @@ fn quantity(value: f64, unit: Unit) -> String {
         // units the `power` and `cpu` families report in.
         Unit::Hz => scaled(value, &[(1e9, "GHz"), (1e6, "MHz"), (1e3, "kHz")], "Hz"),
         Unit::Joules => scaled(value, &[(1e3, "kJ"), (1.0, "J"), (1e-3, "mJ")], "uJ"),
+        Unit::Watts => scaled(value, &[(1e3, "kW"), (1.0, "W"), (1e-3, "mW")], "uW"),
         other => format!("{value:.0} {other}"),
     }
 }
@@ -1961,6 +1962,7 @@ fn pprof_unit(unit: Unit) -> (&'static str, bool) {
         Unit::Ratio => ("ratio", false),
         Unit::Hz => ("hertz", false),
         Unit::Joules => ("joules", false),
+        Unit::Watts => ("watts", false),
         Unit::Celsius => ("celsius", false),
         Unit::Cycles => ("cycles", false),
     }
@@ -2508,6 +2510,15 @@ mod tests {
         // The case that read as `0 joules`: a tick's worth of energy.
         assert_eq!(quantity(0.004, Unit::Joules), "4.00 mJ");
         assert_eq!(quantity(0.000_004, Unit::Joules), "4.000 uJ");
+    }
+
+    #[test]
+    fn a_power_reads_in_watts_and_is_not_one_pprof_scales() {
+        assert_eq!(quantity(215.0, Unit::Watts), "215.00 W");
+        assert_eq!(quantity(1_500.0, Unit::Watts), "1.50 kW");
+        assert_eq!(quantity(0.25, Unit::Watts), "250.00 mW");
+        // A level, not an amount: pprof would sum it over a flame graph.
+        assert_eq!(pprof_unit(Unit::Watts), ("watts", false));
     }
 
     #[test]
