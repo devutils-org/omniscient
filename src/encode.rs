@@ -42,13 +42,31 @@ pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, Pa
                 }
                 text.push_str(&self::results(format, results)?);
             }
+            // What each level of evidence the run's tables use establishes,
+            // and what it does not, said once, under the first table that
+            // shows one: a bare `TEMPORAL` reads as a verdict.
+            let levels = evidence_used(output);
+            let mut explained = false;
+            let mut explain = |text: &mut String, shown: bool| {
+                if shown && !explained {
+                    explained = true;
+                    text.push_str(&evidence_text(&levels));
+                }
+            };
             for correlation in &output.joins {
                 text.push('\n');
                 text.push_str(&self::correlation(format, correlation)?);
+                explain(&mut text, true);
             }
             for decomposition in &output.decompositions {
                 text.push('\n');
                 text.push_str(&self::decomposition(format, decomposition)?);
+                let shown = decomposition
+                    .tables
+                    .iter()
+                    .flat_map(|table| table.rows.iter().chain(std::iter::once(&table.whole)))
+                    .any(|row| row.evidence.is_some());
+                explain(&mut text, shown);
             }
             Ok(text)
         }
@@ -85,6 +103,49 @@ pub fn run_output(format: OutputFormat, output: &RunOutput) -> Result<String, Pa
             format.describe()
         ))),
     }
+}
+
+/// Every level of evidence a run's joins and decompositions show, weakest
+/// first.
+fn evidence_used(output: &RunOutput) -> Vec<crate::join::Evidence> {
+    let mut shown: Vec<crate::join::Evidence> = Vec::new();
+    for correlation in &output.joins {
+        shown.push(correlation.evidence);
+        shown.extend(correlation.within_key);
+    }
+    for decomposition in &output.decompositions {
+        for table in &decomposition.tables {
+            shown.extend(
+                table
+                    .rows
+                    .iter()
+                    .chain(std::iter::once(&table.whole))
+                    .filter_map(|row| row.evidence),
+            );
+        }
+    }
+    crate::join::Evidence::LADDER
+        .into_iter()
+        .filter(|level| shown.contains(level))
+        .collect()
+}
+
+/// The sentence of each level: what it establishes, and what it does not.
+fn evidence_text(levels: &[crate::join::Evidence]) -> String {
+    let mut out = String::new();
+    if levels.is_empty() {
+        return out;
+    }
+    out.push('\n');
+    for level in levels {
+        let _ = writeln!(
+            out,
+            "  evidence {level}: {}; it does not establish {}",
+            level.establishes(),
+            level.does_not_establish()
+        );
+    }
+    out
 }
 
 /// Encodes a whole run in the format's own bytes.
@@ -309,6 +370,10 @@ fn correlation_text(correlation: &Correlation) -> String {
         between_text(correlation, &mut out);
         return out;
     }
+    if correlation.match_kind == MatchKind::Overlap {
+        overlap_text(correlation, &mut out);
+        return out;
+    }
 
     let total = correlation.matched + correlation.unmatched;
     let share = if total == 0 {
@@ -372,22 +437,71 @@ fn correlation_text(correlation: &Correlation) -> String {
     let chains = correlation.match_kind == MatchKind::Wakeup;
     let (heading, column) = table_words(correlation.match_kind);
     let _ = writeln!(out, "\n  {heading}");
+    // A chain is as wide as its hops: two of them with an interrupt at the far
+    // end (`interrupt (hardirq) -> task:128611 -> task:128610`) is 46
+    // characters, and a fixed column ran it into the next.
+    let width = correlation
+        .top
+        .iter()
+        .map(|attribution| attribution.key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(44);
     if chains {
         let _ = writeln!(
             out,
-            "    {column:<44} {:>8} {:>8}  LAST",
+            "    {column:<width$} {:>8} {:>8}  LAST",
             "WAKEUPS", "EVENTS"
         );
         for attribution in &correlation.top {
             let _ = writeln!(
                 out,
-                "    {:<44} {:>8} {:>8}  {}",
+                "    {:<width$} {:>8} {:>8}  {}",
                 attribution.key,
                 attribution.wakeups.unwrap_or(1),
                 attribution.matched,
                 outcome(attribution.outcome, correlation.match_kind)
             );
         }
+        return out;
+    }
+    if correlation.match_kind == MatchKind::Woke {
+        // Each row is a waker and what it woke: how many closes it released,
+        // and the time from each close to the wakeup, summed and per pair --
+        // the amount a `paired` decomposition part reads.
+        let _ = writeln!(
+            out,
+            "    {column:<width$} {:>8} {:>12} {:>12}  OUTCOME",
+            "PAIRS", "WAITED", "MEAN"
+        );
+        for attribution in &correlation.top {
+            let pairs = attribution.wakeups.unwrap_or(attribution.matched).max(1);
+            let waited = attribution
+                .change
+                .as_ref()
+                .map_or(0.0, |change| change.delta);
+            let _ = writeln!(
+                out,
+                "    {:<width$} {:>8} {:>12} {:>12}  {}",
+                attribution.key,
+                pairs,
+                duration(waited),
+                duration(waited / pairs as f64),
+                outcome(attribution.outcome, correlation.match_kind)
+            );
+        }
+        let waited: f64 = correlation
+            .top
+            .iter()
+            .filter_map(|attribution| attribution.change.as_ref())
+            .map(|change| change.delta)
+            .sum();
+        let _ = writeln!(
+            out,
+            "\n  WAITED is from each close to the wakeup of its task that followed it, summed over \
+             the rows shown: {} in all",
+            duration(waited)
+        );
         return out;
     }
     if ranged {
@@ -609,6 +723,87 @@ fn between_text(correlation: &Correlation, out: &mut String) {
          it happened. That is consistent with one moving the other, and it does not say which \
          state moved the total, or by how much."
     );
+}
+
+/// The body of an `overlap` correlation: each downstream event's value split
+/// across the upstream readings' intervals it overlapped, by time.
+fn overlap_text(correlation: &Correlation, out: &mut String) {
+    let total = correlation.matched + correlation.unmatched;
+    let share = if total == 0 {
+        0.0
+    } else {
+        100.0 * correlation.matched as f64 / total as f64
+    };
+    let _ = writeln!(
+        out,
+        "  {} of {} `{}` events overlapped an interval of `{}`'s readings ({share:.1} %); {} {}",
+        correlation.matched,
+        total,
+        correlation.to,
+        correlation.from,
+        correlation.unmatched,
+        unmatched_reason(correlation.match_kind)
+    );
+    if correlation.keyless > 0 {
+        let _ = writeln!(
+            out,
+            "  {} more `{}` events carried no value for the key at all, so no reading could hold \
+             them; counted apart, not refused",
+            correlation.keyless, correlation.to
+        );
+    }
+    let Some(readings) = &correlation.readings else {
+        outside_window_text(correlation, out);
+        return;
+    };
+    let amount = |value: f64| magnitude(&readings.value, value);
+    let _ = writeln!(
+        out,
+        "  `{}` split by the share of each event's span inside each interval: credited in all \
+         {}, and {} fell before the first reading of its key or after the last",
+        readings.value,
+        amount(readings.credited),
+        amount(readings.uncredited)
+    );
+    let _ = writeln!(
+        out,
+        "  {} readings were the first of their key, with nothing before them to cover",
+        readings.baselines
+    );
+    outside_window_text(correlation, out);
+    window_closed_text(correlation, out);
+
+    if correlation.top.is_empty() {
+        let _ = writeln!(out, "\n  nothing was credited");
+        return;
+    }
+    let origin = correlation
+        .top
+        .iter()
+        .map(|attribution| attribution.opened_ns)
+        .min()
+        .unwrap_or(0);
+    let ms = |ns: u64| ns.saturating_sub(origin) as f64 / 1e6;
+    let _ = writeln!(
+        out,
+        "\n  heaviest intervals, in ms from the first shown\n    {:<24} {:>10} {:>10} {:>14} {:>8}",
+        "KEY", "FROM", "TO", "CREDITED", "EVENTS"
+    );
+    for attribution in &correlation.top {
+        let credited = attribution
+            .change
+            .as_ref()
+            .map_or(0.0, |change| change.delta);
+        let _ = writeln!(
+            out,
+            "    {:<24} {:>10.1} {:>10.1} {:>14} {:>8}",
+            attribution.key,
+            ms(attribution.opened_ns),
+            ms(attribution.closed_ns.unwrap_or(attribution.opened_ns)),
+            amount(credited),
+            attribution.matched
+        );
+    }
 }
 
 /// A signed amount of what an attribute holds, for reading only: the
@@ -3541,5 +3736,137 @@ mod tests {
             !clean.contains(Shortfall::MARK) && !clean.contains("can be wrong"),
             "a clean run gains nothing, or the mark becomes noise:\n{clean}"
         );
+    }
+
+    /// An `overlap` join prints what it credited: each interval's share of
+    /// the downstream value, where the interval lies, and the readings'
+    /// totals -- credited, uncredited, and the baselines that covered nothing.
+    #[test]
+    fn an_overlap_join_prints_each_interval_s_credited_amount() {
+        let mut correlation = correlated(MatchKind::Overlap, "task:7", 0);
+        correlation.evidence = Evidence::Temporal;
+        correlation.readings = Some(crate::join::Readings {
+            value: "total_ns".into(),
+            reading: crate::join::Reading::Delta,
+            baselines: 1,
+            credited: 180e6,
+            uncredited: 70e6,
+            before_first: 0,
+        });
+        correlation.top[0].opened_ns = 1_000_000_000;
+        correlation.top[0].closed_ns = Some(1_100_000_000);
+        correlation.top[0].change = Some(crate::join::Change {
+            delta: 80e6,
+            opened: 0,
+            closed: 0,
+        });
+        let text = correlation_text(&correlation);
+        assert!(text.contains("CREDITED"), "{text}");
+        assert!(text.contains("+80.00ms"), "the interval's share: {text}");
+        assert!(text.contains("100.0"), "where the interval ends: {text}");
+        assert!(
+            text.contains("credited in all +180.00ms") && text.contains("+70.00ms fell before"),
+            "the readings' totals: {text}"
+        );
+        assert!(text.contains("1 readings were the first"), "{text}");
+        assert!(text.contains("overlapped no reading's interval"), "{text}");
+    }
+
+    /// A `woke` join prints, per waker, how many closes it released and the
+    /// time from each close to the wakeup -- the amount a `paired` part reads.
+    #[test]
+    fn a_woke_join_prints_the_pairs_and_the_time_they_waited() {
+        let mut correlation = correlated(MatchKind::Woke, "task:3 -> task:9", 0);
+        correlation.evidence = Evidence::Wakeup;
+        correlation.top[0].wakeups = Some(4);
+        correlation.top[0].change = Some(crate::join::Change {
+            delta: 4e6,
+            opened: 4,
+            closed: 4,
+        });
+        let text = correlation_text(&correlation);
+        assert!(text.contains("PAIRS") && text.contains("WAITED"), "{text}");
+        let line = text
+            .lines()
+            .find(|line| line.contains("task:3 -> task:9"))
+            .expect("the waker's row");
+        assert!(
+            line.contains(" 4 ") && line.contains("4.00ms") && line.contains("1.00ms"),
+            "four pairs, 4 ms in all, 1 ms each: {line}"
+        );
+        assert!(
+            text.contains("followed by no wakeup of their task"),
+            "{text}"
+        );
+    }
+
+    /// A chain of two hops with an interrupt at its far end is wider than the
+    /// column used to be, and the column grows rather than running into the
+    /// next.
+    #[test]
+    fn a_two_hop_chain_does_not_run_into_the_next_column() {
+        let chain = "interrupt (hardirq) -> task:128611 -> task:128610";
+        let mut correlation = correlated(MatchKind::Wakeup, chain, 0);
+        correlation.top[0].wakeups = Some(12);
+        let text = correlation_text(&correlation);
+        let line = text
+            .lines()
+            .find(|line| line.contains(chain))
+            .expect("the row");
+        let after = &line[line.find(chain).unwrap() + chain.len()..];
+        assert!(after.starts_with(' '), "{line}");
+        let header = text
+            .lines()
+            .find(|line| line.contains("WAKEUPS"))
+            .expect("a header");
+        assert_eq!(
+            header.find("WAKEUPS").map(|at| at + "WAKEUPS".len()),
+            line.find(" 12 ").map(|at| at + " 12".len()),
+            "the count sits under its heading:\n{header}\n{line}"
+        );
+    }
+
+    /// What each level a run's tables use establishes and does not, once per
+    /// run and under the first table that shows a level, for every level
+    /// shown and no other.
+    #[test]
+    fn a_run_says_once_what_each_level_it_shows_establishes() {
+        let mut temporal = correlated(MatchKind::Eq, "req:1", 0);
+        temporal.evidence = Evidence::Temporal;
+        let run = RunOutput {
+            results: vec![sample()],
+            joins: vec![temporal.clone(), temporal],
+            decompositions: vec![decomposed(0.0)],
+        };
+        let text = run_output(OutputFormat::Text, &run).unwrap();
+        for level in [Evidence::Temporal, Evidence::Key] {
+            let sentence = format!(
+                "evidence {level}: {}; it does not establish {}",
+                level.establishes(),
+                level.does_not_establish()
+            );
+            assert_eq!(text.matches(&sentence).count(), 1, "{level}:\n{text}");
+        }
+        for level in [Evidence::Wakeup, Evidence::Identity] {
+            assert!(
+                !text.contains(&format!("evidence {level}:")),
+                "{level} is in no table:\n{text}"
+            );
+        }
+        let first_join_ends = text.find("heaviest keys").expect("the first join");
+        let explained = text.find("evidence TEMPORAL:").expect("the sentence");
+        let second_join = text.rfind("join r  a -> b").expect("the second join");
+        assert!(
+            first_join_ends < explained && explained < second_join,
+            "under the first table that shows a level:\n{text}"
+        );
+        let bare = RunOutput {
+            results: vec![sample()],
+            joins: Vec::new(),
+            decompositions: Vec::new(),
+        };
+        assert!(!run_output(OutputFormat::Text, &bare)
+            .unwrap()
+            .contains("it does not establish"));
     }
 }

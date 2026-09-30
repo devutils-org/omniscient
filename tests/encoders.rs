@@ -1249,3 +1249,124 @@ fn a_format_that_cannot_carry_a_distribution_refuses_it_rather_than_marking_it()
         );
     }
 }
+
+/// A duration as the text renderer writes it (`+80.00ms`, `1.25s`), in
+/// nanoseconds, with the resolution its two decimals carry.
+fn read_duration(text: &str) -> Option<(f64, f64)> {
+    let text = text.trim().trim_start_matches('+');
+    let (sign, text) = match text.strip_prefix('-') {
+        Some(rest) => (-1.0, rest),
+        None => (1.0, text),
+    };
+    for (suffix, factor) in [
+        ("min", 60e9),
+        ("ms", 1e6),
+        ("us", 1e3),
+        ("ns", 1.0),
+        ("s", 1e9),
+    ] {
+        if let Some(number) = text.strip_suffix(suffix) {
+            let value: f64 = number.parse().ok()?;
+            return Some((sign * value * factor, 0.005 * factor));
+        }
+    }
+    None
+}
+
+/// The text of an `overlap` join says what the engine credited, interval by
+/// interval, and what its JSON says: one run, rendered both ways.
+///
+/// Ground truth is twofold. The text is read against the run's own JSON --
+/// every interval the JSON credits is a row of the text with that amount, to
+/// the renderer's two decimals -- and the JSON against the workload: the
+/// program waits four times on a condition nobody signals, and brackets each
+/// wait on its own `CLOCK_MONOTONIC`, so what the join credited and left
+/// uncredited together are what it waited, less what a lost event takes.
+#[test]
+fn an_overlap_join_reads_the_same_in_text_as_in_its_json() {
+    if !has_python() {
+        eprintln!("skipped: the workload is python3, which this machine does not have");
+        return;
+    }
+    let output = run(&["-f", "examples/join-overlap-waits.yml", "--format", "json"]);
+    let said = stderr(&output);
+    if !output.status.success() {
+        if said.contains("has no viable backend on this machine") || said.contains("CAP_BPF") {
+            eprintln!("skipped: `sched.futex` is not served here: {said}");
+            return;
+        }
+        panic!("the session failed: {said}");
+    }
+    let run: RunOutput = serde_json::from_str(&stdout(&output)).expect("one json document");
+    let join = &run.joins[0];
+    let text = omn::encode::run_output(omn::format::OutputFormat::Text, &run).expect("text");
+
+    // Every credited interval is a row, with the amount the JSON gives.
+    let rows: Vec<(String, f64, f64)> = text
+        .lines()
+        .skip_while(|line| !line.contains("CREDITED"))
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (value, slack) = read_duration(fields.get(3)?)?;
+            Some((fields[0].to_owned(), value, slack))
+        })
+        .collect();
+    let credited: Vec<f64> = join
+        .top
+        .iter()
+        .filter_map(|attribution| attribution.change.as_ref().map(|change| change.delta))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        credited.len(),
+        "one row per credited interval:\n{text}"
+    );
+    for ((key, shown, slack), delta) in rows.iter().zip(&credited) {
+        assert!(
+            (shown - delta).abs() <= *slack + 1.0,
+            "{key}: the text says {shown} ns and the JSON {delta}:\n{text}"
+        );
+    }
+    let readings = join
+        .readings
+        .as_ref()
+        .expect("an overlap carries its readings");
+    assert!(
+        text.contains(&format!("{} readings were the first", readings.baselines)),
+        "{text}"
+    );
+    assert!(
+        text.contains("evidence TEMPORAL: ")
+            && text.contains(omn::join::Evidence::Temporal.does_not_establish()),
+        "what the level does not establish, said once:\n{text}"
+    );
+
+    // And the JSON against the workload's own clock.
+    let waited: u64 = said
+        .lines()
+        .filter_map(|line| line.strip_prefix("omn-wait "))
+        .filter_map(|line| {
+            let fields: Vec<u64> = line
+                .split_whitespace()
+                .filter_map(|field| field.parse().ok())
+                .collect();
+            (fields.len() == 3).then(|| fields[2] - fields[1])
+        })
+        .sum();
+    let accounted = readings.credited + readings.uncredited;
+    let lost = run.results[1].losses.dropped;
+    eprintln!(
+        "the program waited {waited} ns by its own clock; credited {} ns, uncredited {} ns, {lost} \
+         waits lost",
+        readings.credited, readings.uncredited
+    );
+    assert!(waited >= 900_000_000, "four waits of 250 ms: {waited} ns");
+    if lost == 0 {
+        assert!(
+            (accounted - waited as f64).abs() <= 0.02 * waited as f64,
+            "credited and uncredited are what the program waited: {accounted} against {waited}"
+        );
+    }
+}

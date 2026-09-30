@@ -1172,11 +1172,14 @@ fn assemble(
         .map(|serving| serving.request.clone())
         .collect();
     for decomposition in &session.decompose {
-        run.decompositions.push(join::decompose(
+        // With the session's joins: a part a join defines (`value: paired`)
+        // names the join by id.
+        run.decompositions.push(join::decompose_with(
             decomposition,
             &served,
             &run.results,
             &merged,
+            &session.joins,
         ));
     }
     Ok((run, costs, served_by))

@@ -215,11 +215,12 @@ pub fn run(
     }
     let requests: Vec<Request> = resolved.iter().map(|one| one.request.clone()).collect();
     for decomposition in &session.decompose {
-        output.decompositions.push(join::decompose(
+        output.decompositions.push(join::decompose_with(
             decomposition,
             &requests,
             &output.results,
             &events,
+            &session.joins,
         ));
     }
 
