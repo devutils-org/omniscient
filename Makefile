@@ -14,7 +14,8 @@
 #   make matrix     the tool under other kernels in KVM (about 70 minutes)
 #   make man        the manual page
 #   make release    the same for an optimised build
-#   make install    an optimised build into $(PREFIX), capabilities left to you
+#   make install    an optimised build into $(PREFIX), capabilities left to you;
+#                   as root it only copies (`make release && sudo make install`)
 #   make install-check  install into a scratch prefix and run it from there
 #   make dist       the release archive and its checksum (scripts/release.sh)
 #
@@ -153,6 +154,13 @@ matrix: build
 # The build is `cargo build --release` without the capability step: a
 # capability granted in target/ would not survive the copy, and granting one
 # on the installed path is the user's decision. So the target says how.
+#
+# As root it does not build. `sudo make install` would run cargo as root,
+# which is usually not on root's PATH under rustup and, when it is, leaves
+# root-owned files in target/ that break the user's next `make`. So a
+# system-wide install is `make release && sudo make install`: the build is the
+# user's, and root only copies it, after `release.sh built` has checked that
+# target/release is not older than its sources.
 # DESTDIR is honoured for packaging, and the command it prints names the path
 # the package will install to, which is where the grant has to happen.
 PREFIX  ?= /usr/local
@@ -162,7 +170,12 @@ MAN1DIR  = $(PREFIX)/share/man/man1
 DOCDIR   = $(PREFIX)/share/doc/omn
 
 install:
-	cargo build --workspace --release --locked
+	@if [ "$$(id -u)" = 0 ]; then \
+	    scripts/release.sh built; \
+	else \
+	    echo "cargo build --workspace --release --locked"; \
+	    cargo build --workspace --release --locked; \
+	fi
 	install -D -m 755 target/release/omn            $(DESTDIR)$(BINDIR)/omn
 	install -D -m 755 target/release/omn-mcp        $(DESTDIR)$(BINDIR)/omn-mcp
 	install -D -m 644 target/release/libomn_preload.so $(DESTDIR)$(BINDIR)/libomn_preload.so

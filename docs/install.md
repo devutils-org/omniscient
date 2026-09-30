@@ -49,7 +49,8 @@ really lives in, but the capabilities have to be granted on the real file:
 `Invalid file '...' for capability operation`).
 
 The binaries need **glibc 2.34 or later**, which `scripts/release.sh floor`
-reads off the symbols they import. That is Ubuntu 22.04 and later, Debian 12,
+reads off the symbols they import, and fails on when a binary needs a newer
+one: `verify` runs it on every archive before it is published. That is Ubuntu 22.04 and later, Debian 12,
 Fedora 35 and later, RHEL 9 and Arch **(read from their documentation)**. They
 need nothing else at run time: no libbpf, no clang, no kernel headers. The eBPF
 programs are assembled by the tool itself.
@@ -60,7 +61,7 @@ Rust 1.82 or later and `make`. A C compiler is only for two demonstration
 fixtures, and its absence is announced, not fatal.
 
 ```console
-$ make install PREFIX=~/.local       # or /usr/local, with sudo
+$ make install PREFIX=~/.local
 ...
 installed omn, omn-mcp and the preload shim in /home/you/.local/bin.
 no capability was granted. Without them the eBPF and per-cpu perf backends
@@ -71,10 +72,34 @@ report what they need instead of collecting; to grant them:
 
 It builds with `--release --workspace --locked` (the shim is a workspace
 member nothing depends on, so a plain `cargo build` would not build it) and
-installs the archive's layout. `DESTDIR` is honoured for packaging; the command
-it prints names the final path, which is where a package's post-install step
-has to grant the capabilities. `make uninstall PREFIX=...` removes what it
-installed.
+installs the archive's layout.
+
+A prefix you cannot write, such as `/usr/local`, is two steps, the build as
+yourself and the copy as root:
+
+```console
+$ make release
+$ sudo make install PREFIX=/usr/local
+the release build in target/release is newer than every source cargo recorded for it
+...
+```
+
+Run as root, `make install` **does not build**: cargo under `sudo` is usually
+not on root's `PATH` with rustup, and when it is, it leaves root-owned files in
+`target/` that break your next `make`. It copies `target/release` instead,
+after checking that each binary is newer than every source cargo recorded for
+it in the `.d` file beside it, and refuses otherwise, naming the file that is
+newer:
+
+```console
+$ touch shim/src/mutex.rs
+$ sudo make install PREFIX=/usr/local
+libomn_preload.so is older than shim/src/mutex.rs; run `make release` as yourself first
+```
+
+`DESTDIR` is honoured for packaging; the command it prints names the final
+path, which is where a package's post-install step has to grant the
+capabilities. `make uninstall PREFIX=...` removes what it installed.
 
 It **grants no capability**, on purpose: that is a decision about your machine,
 and not one `make install` can take for you.
@@ -249,7 +274,8 @@ next.
 directory and with `OMN_PRELOAD_LIB` unset, so nothing it finds can come from
 the build tree. `scripts/release.sh verify ARCHIVE` does the same to an
 extracted archive, after checking its checksum and that it holds exactly the
-six paths above. Each check compares against something the workload chose,
+six paths above, that no binary in it needs a glibc newer than 2.34, and that
+the README and this file it carries still say 2.34. Each check compares against something the workload chose,
 never against what the tool computed another way:
 
 | Check | Against |
@@ -261,8 +287,9 @@ never against what the tool computed another way:
 | the shim's path | with the shim moved away, the refusal names `PREFIX/bin/libomn_preload.so` |
 | `omn-mcp` | its capability sweep is answered by `PREFIX/bin/omn` |
 
-A tree without its shim fails three of them, measured, and one byte appended
-to the archive fails its checksum. Two builds of the same commit produce the
+A number a check prints carries the run's losses beside it when the run had
+any, on a pass as on a failure. A tree without its shim fails three of them,
+measured, and one byte appended to the archive fails its checksum. Two builds of the same commit produce the
 same archive byte for byte: it is written in the listed order, owned by uid 0,
 and dated by the commit. The checks need `python3` for their workloads and
 fail, rather than skip, without it. `.github/workflows/release.yml` runs both
@@ -306,6 +333,37 @@ Stream D's handoff for the fourteenth wave.
    material is below it. `DEMO.md` gains an install paragraph at its top; its
    outputs are left for the coordinator to regenerate.
 
+4. **Three findings of the adversarial review, fixed.**
+   - *The glibc floor is enforced, not printed.* `GLIBC_FLOOR=2.34` in
+     `scripts/release.sh` is the one value; `floor [FILE...]` fails on a
+     binary needing more and names the symbols that do, `build` fails with
+     it, and `verify` runs it on the extracted binaries and fails when the
+     archive's own `README.md` or `install.md` no longer says "glibc 2.34 or
+     later". No objdump is a failure (an unknown floor is not a pass).
+     `release.yml`'s verify step therefore fails on a runner or dependency
+     that raises the floor. **Ground truth**: a C program calling `strlcpy`
+     (a `GLIBC_2.38` symbol, built here) fails with `needs 2.38, above the
+     documented 2.34` and names `strlcpy (GLIBC_2.38)`; a C `main` returning
+     0 and the three release binaries pass at 2.34.
+   - *`sudo make install` no longer runs cargo as root.* As root, `install`
+     only copies, after `release.sh built` checks each artifact against the
+     sources cargo recorded in its own dep-info file (`target/release/*.d`);
+     as a user it builds as before, so `make install-check` is unchanged.
+     The dep-info list and not a directory list, because a directory list
+     names files that are not compiled and would refuse forever: touching
+     `src/triage/workload.c` does not make `make release` relink. **Ground
+     truth**, as uid 0 in a user namespace (`unshare -r`, `PATH` without
+     cargo): the install copies without running cargo, so it writes nothing
+     in `target/` (ownership itself cannot be seen from a user namespace,
+     which maps uid 0 back to the user); after `touch shim/src/mutex.rs` it refuses with
+     `libomn_preload.so is older than shim/src/mutex.rs`; after `make
+     release` it copies again; `touch src/triage/workload.c` does not refuse.
+     Not measured: a real `sudo` (no password-less sudo here).
+   - *Losses show on a pass.* Every `ok` line of checks 3 and 4 prints the
+     run's losses beside the number when there are any. Verified on the
+     helper's output (`123` gives nothing, `123 (the run lost {...})` gives
+     the suffix); a lossy run could not be made to order here.
+
 **`docs/open-requests.md`, the row for 2257** (README says formats are "not
 written"): `README.md`'s output-formats paragraph now says every format has
 its encoder and no longer describes one "whose encoder has not landed".
@@ -313,7 +371,7 @@ its encoder and no longer describes one "whose encoder has not landed".
 
 ### How it was tested
 
-`bash -n scripts/release.sh`, `make install-check`, `make dist-verify`, the
+`bash -n scripts/release.sh`, `make install-check`, `make dist-verify` (after the review fixes too), the
 negative controls above, and one `make check` after merging `main` (its result
 is in the stream's summary). No Rust source changed, so no module test applies.
 
@@ -336,8 +394,14 @@ None: this stream added no session.
   decision about the machine, a `DESTDIR` build cannot make it on the final
   path, and tar does not carry it anyway.
 - **The release is built on the oldest hosted Ubuntu**, because the glibc
-  floor is the newest symbol linked against; `release.sh floor` prints it
-  (2.34 today).
+  floor is the newest symbol linked against, and `release.sh verify` fails
+  above the documented 2.34 rather than printing it. Raising the floor is a
+  decision: change `GLIBC_FLOOR` and the two documents together, or `verify`
+  refuses.
+- **As root, `make install` copies and never builds.** A system-wide install
+  is `make release && sudo make install`. The alternative, building as
+  `$SUDO_USER` from inside the root recipe, depends on that user's `PATH`
+  surviving sudo's `secure_path`, which is exactly what fails with rustup.
 
 ### Filed for another stream
 
@@ -367,7 +431,7 @@ worth one sweep **from an installed tree** rather than from `target/`, once,
 by the coordinator, and the expected answer is the build tree's:
 
 ```console
-$ make install PREFIX=/usr/local && sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/omn
+$ make release && sudo make install PREFIX=/usr/local && sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/omn
 $ /usr/local/bin/omn list | tail -n 3 | head -n 1     # 93 here, as target/debug/omn
 ```
 

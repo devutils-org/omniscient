@@ -4,8 +4,10 @@
 # attached to a GitHub release named after the tag.
 #
 # Built on the oldest hosted Ubuntu there is, because the glibc a binary needs
-# is the newest one it was linked against: the line `glibc floor` below is what
-# docs/install.md promises, and a newer runner would raise it silently.
+# is the newest one it was linked against. docs/install.md promises 2.34, and
+# both the build and the verify step fail when a binary needs more
+# (`GLIBC_FLOOR` in scripts/release.sh), so a newer runner or a dependency
+# linking a newer symbol stops the release instead of raising the floor.
 #
 # No capability is granted here or carried by the archive. The runner's checks
 # are the ones that need none (`omn list`, `mem.rss`, `mem.heap.alloc`), which

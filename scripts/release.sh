@@ -6,9 +6,13 @@
 #   scripts/release.sh                 build target/dist/<name>.tar.gz and its .sha256
 #   scripts/release.sh list            the archive's contents, exactly, one path a line
 #   scripts/release.sh name            the archive's name, without the extension
-#   scripts/release.sh floor           the oldest glibc the built binaries need
+#   scripts/release.sh floor [FILE...] the oldest glibc each binary needs, failing
+#                                      above the documented $GLIBC_FLOOR
+#   scripts/release.sh built           whether target/release is newer than its
+#                                      sources (what `sudo make install` checks)
 #   scripts/release.sh verify ARCHIVE  the checksum, the contents against `list`,
-#                                      and `check` on the extracted tree
+#                                      the glibc floor, and `check` on the
+#                                      extracted tree
 #   scripts/release.sh check PREFIX    run PREFIX/bin/omn with the build tree moved
 #                                      out of the way (what `make install-check` runs)
 #
@@ -27,6 +31,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/target/dist"
+
+# The oldest glibc README.md and docs/install.md promise, as "glibc 2.34 or
+# later". `floor` fails when a binary needs a newer one, and `verify` fails
+# when the documents shipped in the archive promise something else, so the
+# promise and the check cannot drift apart silently.
+GLIBC_FLOOR=2.34
+
 
 version() {
     sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1
@@ -105,20 +116,66 @@ build() {
     glibc_floor
 }
 
-# The oldest glibc the binaries run on: the newest symbol version they need,
+# The oldest glibc each binary runs on: the newest symbol version it needs,
 # weak references left out (the standard library resolves `pidfd_spawnp` and
 # its kind at run time and does without them). A build on a newer distribution
-# raises it, which is why the release workflow builds on the oldest runner it
-# can and prints this line.
+# can raise it, which is why the release workflow builds on the oldest runner
+# it can -- and why this fails, rather than prints, when a binary needs more
+# than $GLIBC_FLOOR: a dependency linking one newer symbol would otherwise
+# break the documented promise with every step green. With no objdump the floor
+# is unknown, and unknown is a failure, not a pass.
 glibc_floor() {
-    command -v objdump >/dev/null || { echo "  glibc floor: unknown (no objdump)"; return; }
-    local binary floor
-    for binary in omn omn-mcp libomn_preload.so; do
-        floor="$(objdump -T "$ROOT/target/release/$binary" \
+    local binaries=("$@")
+    (( ${#binaries[@]} )) || binaries=("$ROOT"/target/release/{omn,omn-mcp,libomn_preload.so})
+    command -v objdump >/dev/null || {
+        echo "glibc floor: unknown, there is no objdump to read it with (binutils)" >&2
+        return 1
+    }
+    local binary floor above=0
+    for binary in "${binaries[@]}"; do
+        [[ -f "$binary" ]] || { echo "glibc floor: no file at $binary" >&2; above=1; continue; }
+        floor="$(objdump -T "$binary" \
             | awk '$2 != "w" && $0 ~ /GLIBC_[0-9]/ { match($0, /GLIBC_[0-9.]+/); print substr($0, RSTART + 6, RLENGTH - 6) }' \
             | sort -uV | tail -n 1)"
-        echo "  glibc floor: $binary needs ${floor:-nothing versioned}"
+        if [[ -n "$floor" && "$(printf '%s\n' "$floor" "$GLIBC_FLOOR" | sort -V | tail -n 1)" != "$GLIBC_FLOOR" ]]; then
+            echo "glibc floor: $(basename "$binary") needs $floor, above the documented $GLIBC_FLOOR" >&2
+            objdump -T "$binary" | awk -v f="GLIBC_$floor" '$2 != "w" && index($0, f) { print "  " $NF " (" f ")" }' >&2
+            above=1
+        else
+            echo "glibc floor: $(basename "$binary") needs ${floor:-nothing versioned}, within $GLIBC_FLOOR"
+        fi
     done
+    return "$above"
+}
+
+# Whether target/release holds a build at least as new as its sources. It is
+# what `make install` checks instead of building when it runs as root: cargo
+# under sudo is usually not on root's PATH, and when it is, it leaves
+# root-owned files in target/ that break the next `make`. So the build is the
+# user's (`make release`), and the install only copies it.
+#
+# The sources of each artifact are the ones cargo itself recorded for it, in
+# the dep-info file beside it (target/release/omn.d and its kind): the files
+# rustc actually read, catalog included. A wider list -- all of src/, say --
+# would name files that are not compiled (src/triage/workload.c), and touching
+# one would refuse forever, since `make release` would not relink for it.
+built() {
+    local artifact depinfo newer
+    for artifact in omn omn-mcp libomn_preload.so; do
+        depinfo="$ROOT/target/release/${artifact%.so}.d"
+        artifact="$ROOT/target/release/$artifact"
+        if [[ ! -f "$artifact" || ! -f "$depinfo" ]]; then
+            echo "no release build at $artifact; run \`make release\` as yourself first" >&2
+            return 1
+        fi
+        newer="$(cut -d: -f2- "$depinfo" | tr ' ' '\n' | grep . \
+            | while read -r source; do [[ ! "$source" -nt "$artifact" ]] || { echo "$source"; break; }; done)"
+        if [[ -n "$newer" ]]; then
+            echo "$(basename "$artifact") is older than ${newer#"$ROOT/"}; run \`make release\` as yourself first" >&2
+            return 1
+        fi
+    done
+    echo "the release build in target/release is newer than every source cargo recorded for it"
 }
 
 verify() {
@@ -141,12 +198,25 @@ verify() {
     fi
     echo "contents: exactly the $(contents | wc -l) paths \`release.sh list\` names"
 
-    # The extracted tree is a prefix of its own, and is checked as one.
-    local scratch
+    # The extracted tree is a prefix of its own, and is checked as one: the
+    # floor its binaries need, the floor its documents promise, and then the
+    # installed-tree checks.
+    local scratch status=0
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/omn-verify.XXXXXX")"
     tar -C "$scratch" -xzf "$archive"
-    check "$scratch/$top"
+    glibc_floor "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so} || status=1
+    local doc
+    for doc in README.md install.md; do
+        if grep -q "glibc $GLIBC_FLOOR or later" "$scratch/$top/share/doc/omn/$doc"; then
+            echo "promise: share/doc/omn/$doc says glibc $GLIBC_FLOOR or later"
+        else
+            echo "verify: share/doc/omn/$doc does not say \"glibc $GLIBC_FLOOR or later\"" >&2
+            status=1
+        fi
+    done
+    check "$scratch/$top" || status=1
     rm -rf "$scratch"
+    return "$status"
 }
 
 # The ground truth for an installed tree. Every check runs PREFIX/bin/omn from
@@ -212,7 +282,7 @@ check() {
     if ! numeric "$rss_big" || ! numeric "$rss_none"; then
         fail "mem.rss: $rss_big / $rss_none"
     elif (( ${rss_big%% *} >= big && ${rss_none%% *} < big )); then
-        pass "mem.rss: peak $((${rss_big%% *} >> 20)) MiB with 64 MiB written, $((${rss_none%% *} >> 20)) MiB without"
+        pass "mem.rss: peak $((${rss_big%% *} >> 20)) MiB$(losses "$rss_big") with 64 MiB written, $((${rss_none%% *} >> 20)) MiB$(losses "$rss_none") without"
     else
         fail "mem.rss: peak $rss_big with 64 MiB written, $rss_none without; expected >= $big and < $big"
     fi
@@ -227,7 +297,7 @@ check() {
         if ! numeric "$seen"; then
             fail "mem.heap.alloc of $size B: $seen"
         elif (( ${seen%% *} >= size && ${seen%% *} < size + slack )); then
-            pass "mem.heap.alloc: largest allocation ${seen%% *} B for one of $size B, through the preload shim"
+            pass "mem.heap.alloc: largest allocation ${seen%% *} B$(losses "$seen") for one of $size B, through the preload shim"
         else
             fail "mem.heap.alloc: largest allocation $seen B for one of $size B; expected [$size, $((size + slack)))"
         fi
@@ -268,10 +338,17 @@ check() {
 # Whether `peak` answered with a number, possibly followed by its losses.
 numeric() { [[ "$1" =~ ^[0-9]+( .*)?$ ]]; }
 
+# The losses `peak` put after its number, with a leading space, or nothing.
+# Every line that prints a number prints them too, a pass as much as a
+# failure: a lossy run in range is still a lossy run, and losses are surfaced
+# always.
+losses() { [[ "$1" != *" "* ]] || echo " ${1#* }"; }
+
 # The largest value a run's summary saw, in bytes, then the run's losses when
 # it had any, or a sentence saying why there is no value. The losses travel
-# with the number so that a check that fails on a lossy run says so: missing
-# the size with events dropped is inconclusive, not wrong.
+# with the number so that every line printing it says so: on a failure,
+# missing the size with events dropped is inconclusive rather than wrong, and
+# on a pass the losses are still shown.
 peak() {
     local source="$1" out="$2"
     shift 2
@@ -299,8 +376,9 @@ case "${1:-build}" in
     build) build ;;
     list) contents ;;
     name) name ;;
-    floor) glibc_floor ;;
+    floor) shift; glibc_floor "$@" ;;
+    built) built ;;
     verify) shift; verify "$@" ;;
     check) shift; check "$@" ;;
-    *) grep '^#   scripts/release.sh\|^#  ' "$0" | head -n 12 >&2; exit 2 ;;
+    *) grep '^#   scripts/release.sh\|^#  ' "$0" | head -n 16 >&2; exit 2 ;;
 esac
