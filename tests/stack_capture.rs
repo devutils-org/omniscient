@@ -523,11 +523,18 @@ fn an_unwind_mode_that_is_not_implemented_says_so_rather_than_unwinding_one_fram
         omn::stack::callchain_for(StackMode::None),
         Ok(Callchain::Off)
     );
-    for mode in [StackMode::Dwarf, StackMode::Lbr] {
-        let error = omn::stack::callchain_for(mode)
-            .expect_err("neither is implemented, and silently doing frame pointers is the bug");
+    for mode in [
+        StackMode::FpLeaf,
+        StackMode::Dwarf,
+        StackMode::Lbr,
+        StackMode::Sframe,
+        StackMode::Auto,
+    ] {
+        let error = omn::stack::callchain_for(mode).expect_err(
+            "none is a mode this build serves, and silently doing frame pointers is the bug",
+        );
         assert!(
-            error.contains("not implemented"),
+            error.contains("not implemented") || mode == StackMode::Auto,
             "`{mode}` failed with something other than an admission: {error}"
         );
     }

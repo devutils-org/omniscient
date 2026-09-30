@@ -553,13 +553,13 @@ fn check_stack(
     rejections: &mut Vec<Rejection>,
     report: &mut Report,
 ) {
-    let Some(stack) = request.stack else {
+    let Some(stack) = request.stack.filter(|stack| stack.is_concrete()) else {
         if request
             .emit
             .iter()
             .any(|emit| emit.kind() == EmitKind::Stack)
         {
-            report.push("no --stack given, so the resolver picks an unwind mode: frame pointers where the target has them, none otherwise");
+            report.push("no --stack given (or `auto`), so the resolver picks the best unwind mode this machine and this target serve, and says why it passed over the others");
         }
         return;
     };
