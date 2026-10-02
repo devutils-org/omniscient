@@ -184,7 +184,20 @@ three ways.
   `rustc` and `lld` died with SIGSEGV and SIGBUS mid-link. This worktree's
   `target/debug/incremental` was removed, and it builds with
   `CARGO_INCREMENTAL=0`.
-- `make check` once: see the commit's message for its result.
+- `make check` once: the lib's 1387 tests and every binary up to
+  `tests/cli.rs` green (`budget` 21 passed, 1 ignored); `cli` red on *"Disk
+  quota exceeded"* writing a copy of the binary. Then one `cargo test
+  --workspace --no-fail-fast`: **2104 passed, 29 failed, 11 ignored**, none
+  in this stream's files (`budget`, `runner`, `triage`, `recorder`,
+  `encoders`, `aggregation`, `cli`, `bench_*` all green). 22 of the 29 are
+  `scenario_io` on *"No space left on device"*; the two `join_engine` ones
+  (`a_join_that_evicts_...`, `a_new_boundary_is_a_rule_...`) passed alone at
+  once; the rest are machine-state scenarios of other streams
+  (`scenario_mem`'s THP and reclaim, `scenario_net`'s `NO_SOCKET` drops,
+  `scenario_proc::defect_1_...`, `scenario_sched`'s forced-switch split).
+  Clippy (`--all-targets -D warnings`) and fmt clean. The worktree's `target`
+  was then `cargo clean`ed to let git write the commit (the disk was at 0):
+  run `make` before using `target/debug/omn` here again.
 
 ## Landed, each with its test
 
