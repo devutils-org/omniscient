@@ -448,7 +448,7 @@
   summary: "Transparent huge pages: promotions and current mode"
   unit: count
   backends:
-    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "kernel>=6.8"], cost: free}
+    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "/proc/vmstat", "kernel>=6.8"], cost: free}
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free,
        degraded: "promotion counters only, not the configured mode"}
   modes: [poll, snapshot]
@@ -471,6 +471,13 @@
        that is a quantity of nothing."
     - "The counters are the machine's. A promotion cannot be attributed to a
        process, which is why the only target is the machine."
+    - "resident_huge_pages is the huge pages mapped whole, by one PMD entry:
+       what /proc/meminfo calls AnonHugePages, and what the TLB sees. It is not
+       every huge folio. A folio whose PMD was split into small entries that
+       still map all of it (an mprotect or mremap of part of it, a fork) is in
+       neither that count nor partially_mapped_huge_pages, and fs:sys carries
+       every folio apart as huge_folios: 494 against 357 whole on the
+       development machine."
 
 - id: mem.swap
   family: mem

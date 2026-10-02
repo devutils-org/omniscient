@@ -127,7 +127,7 @@ fn has_python() -> bool {
 fn withheld(output: &Output) -> Option<String> {
     let message = stderr(output);
     assert!(
-        !message.contains("heap shim was not found"),
+        !message.contains("shim was not found"),
         "the heap sources need the preload shim: build with `make`, not `cargo build`\n{message}"
     );
     let says = |line: &str| {

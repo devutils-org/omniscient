@@ -129,6 +129,28 @@ impl Scratch {
     pub fn spawn_zero_toucher(&self, bytes: u64) -> Toucher {
         Toucher::spawn_filled(Some(&self.path.join("cgroup.procs")), bytes, None, 0)
     }
+
+    /// The same as [`Self::spawn_toucher`], but a child the cgroup throttles
+    /// is not a failure: this returns once every page is written or `within`
+    /// has passed, whichever comes first, and
+    /// [`Toucher::finished_touching`] says which.
+    ///
+    /// For a test of `memory.high`: a cgroup over its high mark sleeps its
+    /// tasks on the way back to user space -- up to two seconds per charge
+    /// batch -- when reclaim cannot keep up, so on a slow swap device the child
+    /// may still be touching long after the thirty seconds a handshake waits.
+    /// A child throttled that way is the stall such a test measures, not a
+    /// child that failed.
+    pub fn spawn_throttled_toucher(&self, bytes: u64, within: std::time::Duration) -> Toucher {
+        Toucher::spawn_within(
+            Some(&self.path.join("cgroup.procs")),
+            bytes,
+            None,
+            0xA5,
+            within,
+            false,
+        )
+    }
 }
 
 impl Drop for Scratch {
@@ -208,6 +230,27 @@ impl Toucher {
     }
 
     fn spawn_filled(join: Option<&Path>, bytes: u64, working: Option<u64>, fill: u8) -> Self {
+        Self::spawn_within(
+            join,
+            bytes,
+            working,
+            fill,
+            std::time::Duration::from_secs(30),
+            true,
+        )
+    }
+
+    /// Forks the child and waits up to `within` for it to have written every
+    /// page; past that, panics if `required`, returns the still-touching child
+    /// otherwise. A child that died panics either way, with how.
+    fn spawn_within(
+        join: Option<&Path>,
+        bytes: u64,
+        working: Option<u64>,
+        fill: u8,
+        within: std::time::Duration,
+        required: bool,
+    ) -> Self {
         let page = page_size();
         // One page, shared with the child, holding the flag that says the
         // memory exists. A sleep would be a guess; this is the fact.
@@ -252,7 +295,13 @@ impl Toucher {
                     -1,
                     0,
                 );
-                if block != libc::MAP_FAILED && working.is_some() {
+                // A block of zeros is small pages too: a huge page that is
+                // all zeros, split under reclaim, can have its zero subpages
+                // remapped to the shared zero page and freed
+                // (`thp_underused_split_page`, 6.12 on), which takes them out
+                // of the cgroup without a swap entry -- and the zero-page test
+                // is about what the swap path does with them.
+                if block != libc::MAP_FAILED && (working.is_some() || fill == 0) {
                     // A walker's pages are small pages, on purpose: the
                     // referenced bit is set when the cpu walks the page tables,
                     // and a working set of eight huge pages stays in the TLB,
@@ -291,7 +340,7 @@ impl Toucher {
             }
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + within;
         // SAFETY: reading the first byte of our own shared mapping.
         while unsafe { handshake.cast::<u8>().read_volatile() } == 0 {
             // A child that died is said to have died, with how, rather than
@@ -310,10 +359,10 @@ impl Toucher {
                     events.split_whitespace().collect::<Vec<_>>().join(" ")
                 );
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the child never finished touching its memory"
-            );
+            if std::time::Instant::now() >= deadline {
+                assert!(!required, "the child never finished touching its memory");
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
@@ -326,6 +375,13 @@ impl Toucher {
 
     pub fn pid(&self) -> i32 {
         self.pid
+    }
+
+    /// Whether the child has written every page it was asked to.
+    pub fn finished_touching(&self) -> bool {
+        // SAFETY: the first byte of our own shared mapping, which only the
+        // child writes.
+        unsafe { self.handshake.cast::<u8>().read_volatile() != 0 }
     }
 
     /// How many times a walker has walked its working set.

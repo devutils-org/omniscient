@@ -78,9 +78,14 @@ struct Counters {
     /// both backends have to reach it or say they cannot.
     resident: Option<u64>,
     /// Huge pages that exist but have had subpages unmapped. Only the per-size
-    /// statistics count them, and they are the whole of the difference between
-    /// what the two backends used to call `resident_huge_pages`.
+    /// statistics count them.
     partially_mapped: Option<u64>,
+    /// Every anonymous huge folio of this size, however it is mapped: whole
+    /// through one PMD, split into page-table entries that still map every
+    /// subpage (an `mprotect` or `mremap` of part of it, a fork), or partially
+    /// unmapped. Only the per-size statistics count it, and it is not
+    /// `resident` minus anything this kernel publishes.
+    huge_folios: Option<u64>,
 }
 
 impl Counters {
@@ -215,31 +220,37 @@ impl Thp {
                 .ok()
                 .and_then(|text| text.trim().parse::<u64>().ok())
         };
-        // `nr_anon` counts every anonymous huge page of this size, whether it
-        // is still whole or has had subpages unmapped;
-        // `nr_anon_transparent_hugepages` in /proc/vmstat -- which is what
-        // `/proc/meminfo` reports as `AnonHugePages` -- counts only the whole
-        // ones. Publishing the first under the same attribute name as the
-        // second made the two backends 8 % apart on this machine and said
-        // nothing about it. The subtraction is the kernel's own arithmetic:
-        // 412 - 30 = 382 here, against vmstat's 382.
+        // `nr_anon` counts every anonymous huge folio of this size, however
+        // it is mapped; `nr_anon_transparent_hugepages` in /proc/vmstat --
+        // which is what `/proc/meminfo` reports as `AnonHugePages` -- counts
+        // the ones mapped by a PMD. Publishing the first under the second's
+        // name made the two backends 8 % apart and said nothing. The fifteenth
+        // wave subtracted `nr_anon_partially_mapped`, which matched on the
+        // day (412 - 30 = 382, against vmstat's 382) and is not the kernel's
+        // arithmetic: a folio whose PMD was split into page-table entries
+        // that still map every subpage is in `nr_anon`, in neither of the
+        // other two. Measured on this machine in the sixteenth wave: 494
+        // folios, 3 partially mapped, 357 PMD-mapped -- 134 apart, every
+        // round. The per-size statistics have no PMD-mapped count, so the
+        // whole-page level is read where the kernel keeps it, and the folios
+        // travel beside it under their own name.
         let allocated = field("nr_anon");
         let partially_mapped = field("nr_anon_partially_mapped");
+        let pmd_mapped = std::fs::read_to_string(&self.vmstat)
+            .ok()
+            .and_then(|text| stat_field(&stat_fields(&text), "nr_anon_transparent_hugepages"));
         let counters = Counters {
             ts_ns: monotonic_ns(),
             fault_alloc: field("anon_fault_alloc"),
             fault_fallback: field("anon_fault_fallback"),
             collapse_alloc: field("collapse_alloc"),
             split: field("split"),
-            // Absent rather than approximated: a kernel that publishes
-            // `nr_anon` without `nr_anon_partially_mapped` cannot say how many
-            // are whole, and answering with the larger count would be the
-            // defect again under a different name.
-            resident: match (allocated, partially_mapped) {
-                (Some(allocated), Some(partial)) => Some(allocated.saturating_sub(partial)),
-                _ => None,
-            },
+            // Absent rather than approximated where /proc/vmstat has no such
+            // line: answering with `nr_anon`, or with `nr_anon` less anything,
+            // would be the defect again under a different name.
+            resident: pmd_mapped,
             partially_mapped,
+            huge_folios: allocated,
         };
         if counters.promotions().is_none() {
             return Err(SampleError::Transient(format!(
@@ -262,9 +273,10 @@ impl Thp {
             collapse_alloc: stat_field(&fields, "thp_collapse_alloc"),
             split: stat_field(&fields, "thp_split_page"),
             resident: stat_field(&fields, "nr_anon_transparent_hugepages"),
-            // /proc/vmstat has no equivalent, and this backend declares that
-            // it sees less than the other rather than guessing.
+            // /proc/vmstat has no equivalent of either, and this backend
+            // declares that it sees less than the other rather than guessing.
             partially_mapped: None,
+            huge_folios: None,
         };
         if counters.promotions().is_none() {
             return Err(SampleError::Transient(format!(
@@ -313,6 +325,9 @@ impl Thp {
         // are.
         if let Some(partially_mapped) = counters.partially_mapped {
             attrs.push(Attr::uint("partially_mapped_huge_pages", partially_mapped));
+        }
+        if let Some(huge_folios) = counters.huge_folios {
+            attrs.push(Attr::uint("huge_folios", huge_folios));
         }
         attrs.extend(self.mode_attrs());
         attrs
@@ -467,18 +482,25 @@ mod tests {
         std::fs::write(stats.join("collapse_alloc"), format!("{collapse_alloc}\n")).unwrap();
     }
 
-    /// The resident count the two backends both answer with is the *fully
-    /// mapped* huge pages, which is what `/proc/vmstat` and `/proc/meminfo`
-    /// publish. `nr_anon` counts the partially mapped ones too, and reporting
-    /// it under the same name as the vmstat counter is what made the two
-    /// backends 8 % apart with nothing saying so.
+    /// The resident count the two backends both answer with is the huge
+    /// pages mapped whole, by a PMD, which is what `/proc/vmstat` and
+    /// `/proc/meminfo` publish. `nr_anon` counts every huge folio, and neither
+    /// it nor it less the partially mapped ones is that number: the three
+    /// counts below are the ones this machine published in the sixteenth
+    /// wave, 134 folios apart.
     #[test]
-    fn the_per_size_statistics_report_whole_huge_pages_and_the_broken_ones_apart() {
+    fn the_per_size_statistics_report_whole_huge_pages_and_the_folios_apart() {
         let root = tree("resident");
         write_stats(&root, 1, 1);
         let stats = root.join("hugepages-2048kB/stats");
-        std::fs::write(stats.join("nr_anon"), "412\n").unwrap();
-        std::fs::write(stats.join("nr_anon_partially_mapped"), "30\n").unwrap();
+        std::fs::write(stats.join("nr_anon"), "494\n").unwrap();
+        std::fs::write(stats.join("nr_anon_partially_mapped"), "3\n").unwrap();
+        let vmstat = root.join("vmstat");
+        std::fs::write(
+            &vmstat,
+            "thp_fault_alloc 1\nnr_anon_transparent_hugepages 357\n",
+        )
+        .unwrap();
 
         let mut collector = Thp::new(
             Source::Sys,
@@ -486,37 +508,45 @@ mod tests {
             2 * 1024 * 1024,
             std::time::Duration::ZERO,
         )
-        .rooted(root.clone(), PathBuf::from(VMSTAT));
+        .rooted(root.clone(), vmstat);
         let events = collector.sample(0).expect("one read");
         let event = &events[0];
         assert_eq!(
             event.attr("resident_huge_pages").unwrap().as_f64(),
-            Some(382.0),
-            "412 huge pages of which 30 are partially mapped is 382 whole ones, which is what \
-             /proc/vmstat's nr_anon_transparent_hugepages counts"
+            Some(357.0),
+            "the whole huge pages are the PMD-mapped ones the kernel counts in \
+             nr_anon_transparent_hugepages, not 494 folios less the 3 partially mapped"
         );
         assert_eq!(
             event.attr("partially_mapped_huge_pages").unwrap().as_f64(),
-            Some(30.0),
-            "and the other 30 travel beside it rather than inside it"
+            Some(3.0),
+            "the partially mapped ones travel beside it rather than inside it"
+        );
+        assert_eq!(
+            event.attr("huge_folios").unwrap().as_f64(),
+            Some(494.0),
+            "and so does every folio, under its own name"
         );
         assert_eq!(
             event.attr("resident_huge_bytes").unwrap().as_f64(),
-            Some(382.0 * 2.0 * 1024.0 * 1024.0)
+            Some(357.0 * 2.0 * 1024.0 * 1024.0)
         );
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A kernel that counts huge pages without counting the partially mapped
-    /// ones cannot say how many are whole. Answering with `nr_anon` there
-    /// would be the same defect under a different kernel version, so the
-    /// attribute is absent -- the rule this collector already follows for
-    /// every counter a kernel does not publish.
+    /// Where /proc/vmstat has no PMD-mapped count, the per-size statistics
+    /// cannot say how many huge pages are whole. Answering with `nr_anon`
+    /// there would be the same defect under a different kernel version, so
+    /// the attribute is absent -- the rule this collector already follows for
+    /// every counter a kernel does not publish -- and the folios still travel
+    /// under their own name.
     #[test]
-    fn a_kernel_that_does_not_count_broken_huge_pages_reports_no_resident_count() {
-        let root = tree("no-partial");
+    fn a_kernel_that_does_not_count_whole_huge_pages_reports_no_resident_count() {
+        let root = tree("no-pmd-count");
         write_stats(&root, 1, 1);
         std::fs::write(root.join("hugepages-2048kB/stats/nr_anon"), "412\n").unwrap();
+        let vmstat = root.join("vmstat");
+        std::fs::write(&vmstat, "thp_fault_alloc 1\n").unwrap();
 
         let mut collector = Thp::new(
             Source::Sys,
@@ -524,14 +554,15 @@ mod tests {
             2 * 1024 * 1024,
             std::time::Duration::ZERO,
         )
-        .rooted(root.clone(), PathBuf::from(VMSTAT));
+        .rooted(root.clone(), vmstat);
         let events = collector.sample(0).expect("one read");
         assert!(
             events[0].attr("resident_huge_pages").is_none(),
-            "412 is every huge page, not the whole ones: {:?}",
+            "412 is every huge folio, not the whole ones: {:?}",
             events[0]
         );
         assert!(events[0].attr("resident_huge_bytes").is_none());
+        assert_eq!(events[0].attr("huge_folios").unwrap().as_f64(), Some(412.0));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -582,13 +613,15 @@ mod tests {
     fn a_counter_this_kernel_does_not_publish_is_absent_rather_than_zero() {
         let root = tree("absent");
         write_stats(&root, 1, 1);
+        let vmstat = root.join("vmstat");
+        std::fs::write(&vmstat, "thp_fault_alloc 1\n").unwrap();
         let mut collector = Thp::new(
             Source::Sys,
             Mode::Snapshot,
             2 * 1024 * 1024,
             std::time::Duration::ZERO,
         )
-        .rooted(root.clone(), PathBuf::from(VMSTAT));
+        .rooted(root.clone(), vmstat);
         let events = collector.sample(0).expect("one read");
         assert!(events[0].attr("split").is_none(), "{:?}", events[0]);
         assert!(events[0].attr("resident_huge_pages").is_none());

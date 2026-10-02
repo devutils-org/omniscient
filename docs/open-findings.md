@@ -9752,3 +9752,48 @@ add the wording as a pattern.
   the mode move's note in `Spending::degrade`: not on this branch -- both call
   `task.rs` code that exists only on `feat/w16-runner`; the diffs are the
   runner's, exact, for the merge.
+
+## Needs from another stream — the sixteenth wave, stream mem
+
+Stream mem's handoff is `docs/fixes/w16-mem.md`. Nothing here blocks it.
+
+### To the owner of `.github/expected-skips.txt`: the user-mode-only page faults
+
+Two skips on the `defaults` cell (paranoid 2, no capabilities) are the machine's
+and are in no pattern: the library test's *"skipped the kernel-mode half: this
+machine samples page faults in user mode only"* (it failed the gate at
+`37f17c8`), and, new this wave, `scenario_mem::the_tool_finds_the_faults_the_program_counted_itself`'s
+*"skipped the exact comparison: this machine samples page faults in user mode
+only, ..."* -- the program's `ru_minflt` counts the faults the kernel took for
+it, and a user-mode event cannot see them. Wanted, one line:
+
+```
+samples page faults in user mode only
+```
+
+Four other lines of that cell's gate failure go away with this stream's fix
+(`docs/scenarios/mem.md`, D14): the two `mem.faults` refusals of
+`scenario_mem` and the two `cross-memory-which-allocation.yml` ones of
+`tests/cross_memory.rs`.
+
+### To the owner of `tests/cross_memory.rs` and the coordinator: `cross-memory-which-allocation.yml` will run on `defaults`
+
+It skipped there because `mem.faults` refused every launched program (D14).
+It now samples in user mode only, so
+`every_large_allocation_is_found_with_its_fate_and_the_faults_the_kernel_counted_for_it`
+and the KEY-join read-back meet a run for the first time on that cell. If it
+compares against a kernel count of faults (`ru_minflt`, `/proc/<pid>/stat`), the
+kernel's share is not in the samples there; the result's `notes` carries
+*"page faults in user mode only"* to branch on, as
+`scenario_mem::sampled_in_user_mode_only` does.
+
+### To the resolver stream (`src/resolve.rs`), for `DECISIONS.md`: a backend that is both unbuilt and unservable here
+
+`net.hwts -m trace -- prog` on the CI's runners exits 1, *"so_timestamping:
+phc: missing"*, because the chain path rejects a backend for missing
+requirements before asking whether it is built; the forced-backend path
+(`resolve.rs`, `if !missing.is_empty() && implements(..)`) asks the other way
+round and would exit 3. This stream's test accepts both, by the machine
+(`scenario_net::no_readable_ptp_clock`), and does not choose. One order for
+both paths is the resolver's to settle; the stream's suggestion is the chain's
+(the machine first: on that runner no build serves it either).

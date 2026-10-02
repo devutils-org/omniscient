@@ -42,8 +42,8 @@ const KINDS: [(&str, Option<usize>, Option<usize>); 5] = [
 /// name cannot contain `/` -- the kernel refuses it -- so the split cannot be
 /// read two ways, and the bare name travels as the `iface` attribute, which is
 /// what the filter field matches.
-fn series(iface: &str, kind: &str) -> KeyValue {
-    KeyValue::iface(0, format!("{iface}/{kind}"))
+fn series(interface: &procfs::Interface, kind: &str) -> KeyValue {
+    KeyValue::iface(interface.index, format!("{}/{kind}", interface.name))
 }
 
 pub struct Prepare(pub Mode);
@@ -156,7 +156,7 @@ impl Collector for IfaceCollector {
                     ts_ns,
                     ts_err_ns: 0,
                     kind: "net.iface".to_owned(),
-                    keys: vec![series(&interface.name, kind)],
+                    keys: vec![series(&interface, kind)],
                     attrs,
                     collector_id: self.id.clone(),
                     seq: index,
@@ -228,7 +228,7 @@ impl IfaceCollector {
                     ts_ns,
                     ts_err_ns: 0,
                     kind: "net.iface".to_owned(),
-                    keys: vec![series(&interface.name, kind)],
+                    keys: vec![series(interface, kind)],
                     attrs,
                     collector_id: self.id.clone(),
                     seq: seq + offset as u64,
@@ -276,6 +276,29 @@ mod tests {
                 Some(0.0),
                 "loopback reported a non-zero `{kind}`"
             );
+        }
+    }
+
+    /// Every series carries the kernel's index for its interface, so a join on
+    /// `iface` can meet a source that reads the index itself. Ground truth from
+    /// another file than the one the counters come from: sysfs's `ifindex`.
+    #[test]
+    fn every_series_carries_the_index_sysfs_gives_its_interface() {
+        let mut collector = Box::new(Prepare(polling()))
+            .attach(&Target::System)
+            .expect("the machine is readable");
+        collector.sample(0).unwrap();
+        let events = collector.sample(1).unwrap();
+        assert!(!events.is_empty(), "the machine has at least loopback");
+        for event in &events {
+            let KeyValue::Iface { index, .. } = &event.keys[0] else {
+                panic!("not an interface key: {:?}", event.keys[0]);
+            };
+            let name = event.attr("iface").expect("the interface").to_string();
+            let Ok(text) = std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex")) else {
+                continue; // removed since the read
+            };
+            assert_eq!(index.to_string(), text.trim(), "`{name}`");
         }
     }
 

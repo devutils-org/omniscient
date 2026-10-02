@@ -162,24 +162,111 @@ fn json(output: &Output) -> serde_json::Value {
 fn unavailable(output: &Output) -> Option<String> {
     let message = stderr(output);
     assert!(
-        !message.contains("heap shim was not found"),
+        !message.contains(SHIM_MISSING),
         "the heap sources need the preload shim: build with `make`, not `cargo build`\n{message}"
     );
-    // The resolver's own word for a machine's limit is the widest of these:
-    // the CI's second runner has no hardware PMU, and `mem.cache_l1` was
-    // refused there with "`L1-dcache-load-misses` is not available on this
-    // cpu" under it.
-    let withheld = message.contains("not readable")
-        || message.contains("perf_event_paranoid")
-        || message.contains("no such file")
-        || message.contains("has no viable backend on this machine");
+    // A run that succeeded was served, whatever its caveats say: the
+    // `mem.faults` caveat names `perf_event_paranoid` on every run, and until
+    // the sixteenth wave that word alone turned a served run into a skip, so
+    // `the_tool_finds_the_faults_the_program_counted_itself` never compared
+    // anything.
+    if output.status.success() {
+        return None;
+    }
     // The skip line starts at the refusal: a launch's warnings come first on
     // stderr (`json` is one document...), and the CI's skip gate reads the
     // first line as the reason.
     let from_the_error = message
         .find("error:")
         .map_or(message.as_str(), |at| &message[at..]);
+    // The resolver's own word for a machine's limit is the widest of these:
+    // the CI's second runner has no hardware PMU, and `mem.cache_l1` was
+    // refused there with "`L1-dcache-load-misses` is not available on this
+    // cpu" under it.
+    let withheld = from_the_error.contains("not readable")
+        || from_the_error.contains("perf_event_paranoid")
+        || from_the_error.contains("no such file")
+        || from_the_error.contains("has no viable backend on this machine");
     withheld.then(|| from_the_error.to_owned())
+}
+
+/// The words the tool uses when the shim is not where it looks
+/// (`collect::mem::heap::shim_in`: *"the preload shim was not found at ..."*).
+/// Until the sixteenth wave the check read "heap shim was not found", which the
+/// tool has not printed since the ninth, so a missing shim read as whatever
+/// failure came after it.
+const SHIM_MISSING: &str = "shim was not found";
+
+/// Runs a copy of the binary from a directory that holds no shim, beside it or
+/// in `../lib/omn/`, with `OMN_PRELOAD_LIB` unset: a build that was not run
+/// through `make`, made on purpose.
+fn run_without_the_shim(args: &[&str]) -> Output {
+    let directory = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("no-shim-{}", std::process::id()))
+        .join("bin");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let copy = directory.join("omn");
+    std::fs::copy(BINARY, &copy).expect("copying the binary");
+    // Ground truth, outside the tool: neither place it looks holds a shim.
+    for place in ["libomn_preload.so", "../lib/omn/libomn_preload.so"] {
+        assert!(
+            !directory.join(place).exists(),
+            "{} exists",
+            directory.join(place).display()
+        );
+    }
+    // `ETXTBSY` is retried: another test thread that forks while the copy
+    // is still open for writing holds that descriptor until its child execs,
+    // and the kernel refuses to run a file someone may still be writing. The
+    // descriptor is close-on-exec, so the refusal ends within a fork-exec of
+    // another test; failed once in this file's parallel run.
+    let mut busy = 0;
+    let output = loop {
+        match Command::new(&copy)
+            .args(args)
+            .env_remove("OMN_PRELOAD_LIB")
+            .output()
+        {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && busy < 100 => {
+                busy += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            other => break other.expect("the copy should run"),
+        }
+    };
+    let _ = std::fs::remove_dir_all(directory.parent().expect("the scratch's parent"));
+    output
+}
+
+/// A missing shim fails the heap tests rather than skipping them, and the
+/// check that says so matches what the tool prints.
+#[test]
+fn a_binary_without_its_shim_fails_the_heap_tests_rather_than_skipping_them() {
+    let output = run_without_the_shim(&["mem.heap.alloc", "-e", "summary", "--", "true"]);
+    assert_ne!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(SHIM_MISSING),
+        "the tool's words for a missing shim changed: {}",
+        stderr(&output)
+    );
+    let caught = std::panic::catch_unwind(|| unavailable(&output));
+    assert!(
+        caught.is_err(),
+        "a missing shim was read as a machine that cannot serve the request"
+    );
+}
+
+/// Whether the run says it sampled page faults in user mode only: the
+/// `perf_event_paranoid` 2 path, where the faults the kernel takes on the
+/// program's behalf are not in the samples (the source's note, in the
+/// result's `notes`).
+fn sampled_in_user_mode_only(result: &serde_json::Value) -> bool {
+    result["notes"].as_array().is_some_and(|notes| {
+        notes
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|note| note.contains("page faults in user mode only"))
+    })
 }
 
 fn has_python() -> bool {
@@ -835,15 +922,30 @@ fn the_tool_finds_the_faults_the_program_counted_itself() {
         "touching 256 MiB has to fault more than {kernels_own} times, or the workload did nothing"
     );
 
-    let traced = result(&json(&output), "faults")["events_seen"]
-        .as_u64()
-        .expect("a count") as f64;
+    let document = json(&output);
+    let faults = result(&document, "faults");
+    let traced = faults["events_seen"].as_u64().expect("a count") as f64;
+    // `ru_minflt` counts the faults the kernel took on the program's behalf
+    // too, and a user-mode-only event cannot see them, so on that path the
+    // bound is widened by their share -- measured at 17 of 1610 for this
+    // workload with `perf stat -e page-faults:u,page-faults:k`, about 1 %;
+    // five points are allowed for it. The kernel's count stays the ground
+    // truth either way: what a user-mode event misses is the kernel's own
+    // faults, not the program's.
+    let user_mode_only = sampled_in_user_mode_only(faults);
+    let bound = if user_mode_only { 0.15 } else { 0.10 };
     let shortfall = (kernels_own - traced) / kernels_own;
     assert!(
-        (0.0..0.10).contains(&shortfall),
+        (0.0..bound).contains(&shortfall),
         "the kernel counted {kernels_own} minor faults for this program and the run traced \
-         {traced}: a shortfall of {:.1} %",
-        shortfall * 100.0
+         {traced}{}: a shortfall of {:.1} %, over the {:.0} % allowed",
+        if user_mode_only {
+            " in user mode only"
+        } else {
+            ""
+        },
+        shortfall * 100.0,
+        bound * 100.0
     );
 }
 
@@ -856,11 +958,11 @@ fn the_tool_finds_the_faults_the_program_counted_itself() {
 /// and sixteen lines have to come in, and a prefetcher decides when a line
 /// arrives, not whether it is needed.
 ///
-/// The TLB is read beside it for the opposite reason. The same scan crosses a
-/// quarter of a million four-kibibyte pages and five hundred and twelve
-/// two-mebibyte ones, so a TLB miss count near the first number would mean the
-/// huge pages are not there -- which is a property of the machine's THP mode,
-/// and why the scenario reads `mem.thp` before believing this one.
+/// The TLB is read for the opposite reason. The same scan crosses a quarter of
+/// a million four-kibibyte pages and five hundred and twelve two-mebibyte
+/// ones, so it is run twice, once advised onto huge pages and once off them,
+/// and the two counts have to separate; the program's own `AnonHugePages` --
+/// not the machine's THP mode -- says which run had them.
 #[test]
 fn a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line() {
     const BYTES_SCANNED: f64 = 128.0 * 1024.0 * 1024.0 * 8.0;
@@ -898,31 +1000,86 @@ fn a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line() {
         "every miss is a load: {loads} loads against {misses} misses"
     );
 
-    let thp_is_on = run(&[
-        "mem.thp", "--system", "-m", "snapshot", "-e", "raw", "--format", "json",
-    ]);
-    let mode = if thp_is_on.status.success() {
-        attrs(&json(&thp_is_on)["results"][0])
-            .get("thp_mode")
-            .and_then(|value| value.as_str().map(str::to_owned))
-    } else {
-        None
-    };
-    match mode.as_deref() {
-        Some("always") => {
-            let tlb = attr_u64(result(&session, "tlb misses"), "count") as f64;
-            assert!(
-                tlb < SMALL_PAGES / 4.0,
-                "with transparent huge pages set to `always`, a scan crossing {SMALL_PAGES} \
-                 four-kibibyte pages must cross far fewer huge ones, and the TLB counter saw \
-                 {tlb} misses"
-            );
+    // The TLB half is a separation, not a threshold. A count asserted against
+    // a fixed quarter of the small pages held on a quiet machine and failed in
+    // this file's own parallel run with the whole buffer on huge pages
+    // (131072 KiB of AnonHugePages, 72296 misses against a bound of 65536):
+    // every time the scan is descheduled, whatever ran on that cpu evicted its
+    // translations, and that cost is the machine's load, not the page size.
+    // So the program scans the same 128 MiB twice, in two runs that differ in
+    // one `madvise`, and each says how much of its memory the kernel gave it
+    // on huge pages. The small-page scan crosses a new four-kibibyte
+    // translation every 4096 bytes, 262144 times over eight passes, more than
+    // any second-level TLB holds -- arithmetic, not a measurement -- and the
+    // huge-page one must miss far less than that same run does. Measured
+    // here at a load average of 96: 26749 to 30897 against 413344 to 448939.
+    let mut scans = Vec::new();
+    for advice in ["MADV_HUGEPAGE", "MADV_NOHUGEPAGE"] {
+        let output = run_written_session(&tlb_scan_session(advice));
+        if let Some(reason) = unavailable(&output) {
+            eprintln!("skipped the TLB half: {reason}");
+            return;
         }
-        other => eprintln!(
-            "skipped the TLB half: this machine's transparent huge page mode is {other:?}, and \
-             the claim is about `always`"
-        ),
+        assert!(output.status.success(), "{advice}: {}", stderr(&output));
+        let huge_kb = stderr(&output)
+            .lines()
+            .find_map(|line| line.strip_prefix("ANON_HUGE_KB=").map(str::to_owned))
+            .and_then(|value| value.trim().parse::<f64>().ok());
+        let Some(huge_kb) = huge_kb else {
+            eprintln!(
+                "skipped the TLB half: this kernel publishes no AnonHugePages in \
+                 /proc/self/smaps_rollup, so which scan had huge pages is unknown"
+            );
+            return;
+        };
+        let tlb = attr_u64(result(&json(&output), "tlb"), "count") as f64;
+        scans.push((advice, huge_kb, tlb));
     }
+    let [(_, huge_kb, huge_tlb), (_, small_kb, small_tlb)] = scans[..] else {
+        unreachable!("two scans were run");
+    };
+    const BUFFER_KB: f64 = 128.0 * 1024.0;
+    if huge_kb < 0.75 * BUFFER_KB || small_kb > 0.25 * BUFFER_KB {
+        eprintln!(
+            "skipped the TLB half: the kernel gave the advised scan {huge_kb} KiB of huge pages \
+             and the other {small_kb} KiB, of a {BUFFER_KB} KiB buffer each, so the two runs do \
+             not differ in the one thing this compares (THP `never`, or no huge page free)"
+        );
+        return;
+    }
+    assert!(
+        small_tlb >= SMALL_PAGES,
+        "a scan of {BYTES_SCANNED} bytes on small pages crosses {SMALL_PAGES} four-kibibyte \
+         translations, and the TLB counter saw only {small_tlb} misses"
+    );
+    assert!(
+        huge_tlb < small_tlb / 4.0,
+        "the same scan on huge pages ({huge_kb} KiB of them) missed the TLB {huge_tlb} times, \
+         against {small_tlb} on small pages: huge pages are what the counter is meant to see"
+    );
+}
+
+/// The scan of `a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line`, on a
+/// mapping advised one way or the other, and the program's own count of its
+/// huge pages printed when the scan is done.
+fn tlb_scan_session(advice: &str) -> String {
+    format!(
+        "\
+name: one gibibyte of reads, {advice}
+format: json
+
+requests:
+  - label: tlb
+    source: mem.cache_tlb
+    target:
+      launch:
+        - python3
+        - -c
+        - \"import mmap, sys\\nsize = 128 << 20\\nm = mmap.mmap(-1, size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)\\nm.madvise(mmap.{advice})\\nfor i in range(0, size, 4096): m[i] = 65\\nfor _ in range(8): m.find(b'Z')\\nhuge = [line.split()[1] for line in open('/proc/self/smaps_rollup') if line.startswith('AnonHugePages:')]\\nprint('ANON_HUGE_KB=' + (huge[0] if huge else '?'), file=sys.stderr)\\n\"
+    mode: count
+    emit: [raw]
+"
+    )
 }
 
 /// Twenty thousand allocations of four thousand and one bytes, exactly.
@@ -1244,6 +1401,7 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     // the endpoints of the whole session were narrower than the level's
     // excursion inside it (the flaky tally's #21).
     let mut brackets = Vec::new();
+    let mut folio_counts = Vec::new();
     for _ in 0..TRIES {
         let level_before = anon_huge_kilobytes();
         let at_one_instant = run_written_session(BOTH_HUGE_PAGE_BACKENDS_AT_ONCE);
@@ -1273,11 +1431,18 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
             "/proc/vmstat has no such counter, and inventing one is the degradation this \
              source declares, in reverse"
         );
+        // Every folio, beside the whole pages: a PMD-mapped page and a
+        // partially mapped one are both folios, and never the same one.
+        let folios = sysfs
+            .get("huge_folios")
+            .and_then(serde_json::Value::as_u64)
+            .expect("`fs:sys` carries the per-size statistics' own folio count");
         pairs.push((
             sysfs["resident_huge_pages"].as_u64().expect("a count"),
             vmstat["resident_huge_pages"].as_u64().expect("a count"),
             partial.expect("read a moment ago"),
         ));
+        folio_counts.push(folios);
     }
     let after = anon_huge_kilobytes();
     let partial = partial.expect("five runs read it");
@@ -1297,28 +1462,24 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
         .expect("five runs");
     let (theirs, ours, partial_then) = pairs[closest];
 
-    if partial == 0 {
-        eprintln!(
-            "skipped the agreement half: this machine has no partially mapped huge pages right \
-             now, so the two backends cannot disagree and nothing here would catch it if they \
-             did. Both said {theirs}"
-        );
-    } else {
-        // The bound is the size of the error plus the size of the machine's own
-        // movement, and both are measured here rather than chosen to pass: the
-        // gap between the two used to be exactly the partially-mapped count,
-        // and the pages themselves move between the two reads of a pair.
-        let bound = partial_then / 2 + drift;
-        assert!(
-            theirs.abs_diff(ours) <= bound,
-            "\nnot one of {TRIES} pairs of reads of one kernel's huge pages, taken one round \
-             apart through the two backends of one source, came within {bound} of each other \
-             ({} for the partially-mapped pages only `fs:sys` sees, {drift} for how far this \
-             machine's own count moved between rounds): {pairs:?}. The difference used to be \
-             exactly the partially-mapped count.\n",
-            partial_then / 2
-        );
-    }
+    // The bound is the machine's own movement between rounds, measured above.
+    // The gap was once exactly the partially-mapped count, and after the
+    // fifteenth wave's subtraction it was the folios whose PMD had been split
+    // into page-table entries -- 134 to 304 of them on this machine, the same
+    // in every round, which no amount of drift explains.
+    assert!(
+        theirs.abs_diff(ours) <= drift,
+        "\nnot one of {TRIES} pairs of reads of one kernel's huge pages, taken one round \
+         apart through the two backends of one source, came within {drift} of each other \
+         (how far this machine's own count moved between rounds): {pairs:?}. A gap the same \
+         in every round is a bias: the two backends are answering different questions.\n"
+    );
+    let folios = folio_counts[closest];
+    assert!(
+        folios + drift >= theirs + partial_then,
+        "{folios} huge folios cannot hold {theirs} mapped whole and {partial_then} partially \
+         mapped: those are two disjoint kinds of folio"
+    );
 
     // Ground truth, and the reason this is not two numbers agreeing on a
     // mistake: `/proc/meminfo` publishes the same count, and it is read here
@@ -3590,6 +3751,21 @@ fn the_faults_a_worker_thread_takes_are_traced_to_that_thread() {
         .filter(|event| event["keys"][0]["task"]["tid"].as_f64() == Some(worker))
         .count() as f64;
     let dropped = result["losses"]["dropped"].as_f64().unwrap_or(0.0);
+    if sampled_in_user_mode_only(result) {
+        // The worker's own number counts faults the kernel took for it as
+        // well, which a user-mode event cannot see. Its own stores it can: one
+        // per page of a mapping advised against huge pages, each a fault the
+        // worker's code took.
+        const PAGES_STORED: f64 = 64.0 * 1024.0 * 1024.0 / 4096.0;
+        assert!(
+            traced + dropped >= PAGES_STORED && traced <= its_own + 64.0,
+            "sampled in user mode only, the run traced {traced} faults to thread {worker} with \
+             {dropped} lost; the worker's own stores took {PAGES_STORED} and it counted \
+             {its_own} in all: {}",
+            result["degradations"]
+        );
+        return;
+    }
     // What the worker took is either traced to it or counted as lost. It
     // faults a few more times after its own read -- formatting and writing the
     // line that carries it -- so the trace may exceed its number by those and

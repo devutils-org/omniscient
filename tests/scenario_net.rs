@@ -2068,6 +2068,28 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         "true",
     ]);
     let complaint = stderr(&outcome);
+    // The per-packet backend needs a PTP hardware clock this process can
+    // read, as well as a collector. Where none can be read the machine is the
+    // first answer, exit 1, with the clock named against the backend -- the
+    // CI's runners keep one, `/dev/ptp1`, root's alone. Ground truth for which
+    // of the two this machine is: opening the character devices ourselves.
+    if let Some(why) = no_readable_ptp_clock() {
+        eprintln!(
+            "note: {why}, so the per-packet backend is this machine's to refuse before it \
+             is the build's"
+        );
+        assert!(
+            complaint.contains("so_timestamping: phc: missing"),
+            "the refusal should name the backend a per-packet answer needs and the clock it \
+             lacks here: {complaint}"
+        );
+        assert_eq!(
+            code(&outcome),
+            1,
+            "a machine with no readable PTP clock cannot serve it: {complaint}"
+        );
+        return;
+    }
     assert!(
         complaint.contains("so_timestamping") && complaint.contains("no collector is written"),
         "the refusal should name the backend a per-packet answer needs: {complaint}"
@@ -2079,6 +2101,47 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         3,
         "valid and not built is exit 3: {complaint}"
     );
+}
+
+/// Why this process can read no interface's PTP hardware clock, or `None`
+/// when it can read one.
+///
+/// The clocks are found the way sysfs links them to a card
+/// (`/sys/class/net/<iface>/device/ptp/ptp<N>`), not the way the tool asks
+/// (ethtool's netlink family), and each is opened here, outside the tool. A
+/// clock no interface is wired to -- a hypervisor's -- stamps no packet and is
+/// left out, as the tool leaves it out.
+fn no_readable_ptp_clock() -> Option<String> {
+    let mut clocks = Vec::new();
+    for iface in std::fs::read_dir("/sys/class/net")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let wired = iface.path().join("device/ptp");
+        for clock in std::fs::read_dir(&wired).into_iter().flatten().flatten() {
+            clocks.push((iface.file_name(), clock.file_name()));
+        }
+    }
+    if clocks.is_empty() {
+        return Some("no interface here is wired to a PTP hardware clock".to_owned());
+    }
+    let mut refused = Vec::new();
+    for (iface, clock) in &clocks {
+        let device = std::path::Path::new("/dev").join(clock);
+        match std::fs::File::open(&device) {
+            Ok(_) => return None,
+            Err(error) => refused.push(format!(
+                "{} keeps {}: {error}",
+                iface.to_string_lossy(),
+                device.display()
+            )),
+        }
+    }
+    Some(format!(
+        "no interface's PTP clock opens for reading ({})",
+        refused.join("; ")
+    ))
 }
 
 /// A source listed usable attaches in every mode that resolves.

@@ -145,6 +145,21 @@ pub struct PageFaultCollector {
     user_mode_only: bool,
 }
 
+/// A refusal in the shape `crate::perf` returns one: the errno's kind, and a
+/// message in place of the number. What the paranoid-2 path is taken with when
+/// a test forces it, so that the forced path and the machine's are one path.
+fn refused_as_perf_says_it() -> std::io::Error {
+    let os = std::io::Error::from_raw_os_error(libc::EACCES);
+    std::io::Error::new(os.kind(), format!("perf_event_open: {os}"))
+}
+
+/// Whether `crate::perf` refused an open for want of privilege, which is what
+/// the user-mode retry answers. By kind: EACCES and EPERM are both
+/// `PermissionDenied`, and the number itself is not kept.
+fn is_refusal(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
 impl PageFaultCollector {
     pub fn new(pid: i32, mode: Mode) -> Self {
         Self {
@@ -300,13 +315,20 @@ impl Collector for PageFaultCollector {
         // still sees every fault the program's own code takes; what it loses is
         // the faults the kernel takes on the program's behalf, copying into a
         // buffer it has not touched yet, and the notes say so.
+        //
+        // The refusal is matched by its kind, not its number: `crate::perf`
+        // wraps the errno in a message (`perf_event_open: Permission denied`),
+        // which keeps the kind and drops `raw_os_error`, and a match on the
+        // number never fired -- the CI's paranoid-2 cell was refused for every
+        // launched program after this retry was written. EACCES and EPERM are
+        // both `PermissionDenied`.
         let asked = if self.user_mode_only {
-            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+            Err(refused_as_perf_says_it())
         } else {
             open(&spec)
         };
         let opened = match asked {
-            Err(error) if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => {
+            Err(error) if is_refusal(&error) => {
                 let user_only = SampleSpec {
                     exclude_kernel: true,
                     ..spec
@@ -434,6 +456,8 @@ impl Collector for PageFaultCollector {
 mod tests {
     use super::*;
 
+    const MIN_TEST_RING: usize = 8;
+
     /// An anonymous mapping of `pages` pages, none of them resident yet.
     fn fresh_block(pages: usize) -> *mut libc::c_void {
         // SAFETY: an anonymous mapping of our own; the caller unmaps it.
@@ -552,6 +576,41 @@ mod tests {
         );
     }
 
+    /// The retry for paranoid 2 has to recognise a refusal the way `crate::perf`
+    /// actually returns one. Until the sixteenth wave it matched the errno, which
+    /// `crate::perf` does not keep, so the retry never ran and the CI's
+    /// paranoid-2 cell refused `mem.faults` for every launched program.
+    ///
+    /// Ground truth from outside this code: pid 1 belongs to root, and the
+    /// kernel lets no unprivileged user open an event on another user's
+    /// process at any `perf_event_paranoid` (`ptrace_may_access`). A test run
+    /// as root, or with `CAP_PERFMON`, is let in, and skips saying so.
+    #[test]
+    fn a_refusal_is_recognised_in_the_shape_perf_returns_it() {
+        let owner =
+            std::fs::metadata("/proc/1").map(|meta| std::os::unix::fs::MetadataExt::uid(&meta));
+        // SAFETY: getuid has no failure mode.
+        let me = unsafe { libc::getuid() };
+        if owner.ok() == Some(me) {
+            eprintln!("skipped: pid 1 belongs to this user, so nothing refuses the open");
+            return;
+        }
+        let spec = SampleSpec::software(perf::PERF_COUNT_SW_PAGE_FAULTS as u64, 1, Callchain::Off);
+        match ThreadSampler::open_process(&spec, 1, MIN_TEST_RING) {
+            Ok(_) => eprintln!(
+                "skipped: this process may sample pid 1 (root, or CAP_PERFMON), so there is no \
+                 refusal to recognise"
+            ),
+            Err(error) => {
+                assert!(
+                    is_refusal(&error),
+                    "a refusal not recognised as one: {error:?}"
+                );
+                assert!(is_refusal(&refused_as_perf_says_it()));
+            }
+        }
+    }
+
     #[test]
     fn faults_are_reported_at_the_address_that_faulted() {
         let mut collector = PageFaultCollector::new(0, Mode::Trace);
@@ -580,6 +639,11 @@ mod tests {
         };
         assert_ne!(block, libc::MAP_FAILED, "the mapping must succeed");
         let base = block as u64;
+        // From here until the unmap the range is this test's alone. Before
+        // it, the same addresses may have been another thread's mapping, whose
+        // faults the process-wide collector saw too -- at addresses inside
+        // this block that this test never wrote.
+        let mapped_at = crate::clock::monotonic_ns();
         for index in 0..PAGES {
             // SAFETY: writing inside the mapping, one byte per page, which is
             // what makes each of them fault in.
@@ -591,15 +655,20 @@ mod tests {
         // SAFETY: unmapping what was mapped above, after the last read of it.
         unsafe { libc::munmap(block, PAGES * page) };
 
-        let inside = events
+        let addresses: Vec<u64> = events
             .iter()
-            .filter(|event| match event.key(crate::request::KeyKind::Mem) {
-                Some(KeyValue::Mem { base: addr, .. }) => {
-                    (base..base + (PAGES * page) as u64).contains(addr)
+            .filter(|event| event.ts_ns >= mapped_at)
+            .filter_map(|event| match event.key(crate::request::KeyKind::Mem) {
+                Some(KeyValue::Mem { base: addr, .. })
+                    if (base..base + (PAGES * page) as u64).contains(addr) =>
+                {
+                    Some(*addr)
                 }
-                _ => false,
+                _ => None,
             })
-            .count();
+            .collect();
+        let inside = addresses.len();
+        let pages: std::collections::BTreeSet<u64> = addresses.iter().copied().collect();
 
         // Neither bound is the page count, and both of the reasons matter.
         //
@@ -612,9 +681,14 @@ mod tests {
         // process.
         //
         // What can be asserted is that the addresses are real. The block sits
-        // where the allocator put it, so samples landing inside it are not
-        // coincidence, and samples exceeding the pages it holds would mean an
-        // address is being reported that was never touched.
+        // where the kernel put it, so samples landing inside it while it was
+        // ours are not coincidence; and this test wrote exactly one byte, the
+        // first, of each page, so a fault inside it at any other offset is an
+        // address that was never touched. The number of events is not bounded
+        // by the pages: one page can fault twice (a fault retried, a page
+        // migrated under compaction), and a run recorded in
+        // docs/scenarios/cross-machine.md saw 65 events in these 64 pages.
+        // The number of distinct pages is.
         assert!(!events.is_empty(), "no page-fault event arrived at all");
         assert!(
             inside >= PAGES / 16,
@@ -622,10 +696,20 @@ mod tests {
              below even one fault per sixteen-page folio",
             events.len()
         );
+        let untouched: Vec<u64> = addresses
+            .iter()
+            .filter(|addr| (**addr - base) % page as u64 != 0)
+            .map(|addr| addr - base)
+            .collect();
         assert!(
-            inside <= PAGES,
-            "{inside} events landed in a block of {PAGES} pages, so an address is being reported \
-             that was never touched"
+            untouched.is_empty(),
+            "faults reported at offsets {untouched:x?} of the block, where nothing was written: \
+             only the first byte of each page was"
+        );
+        assert!(
+            pages.len() <= PAGES,
+            "{} distinct addresses in a block of {PAGES} pages",
+            pages.len()
         );
         assert!(collector.losses().is_clean(), "{:?}", collector.losses());
     }
