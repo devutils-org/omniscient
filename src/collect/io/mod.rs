@@ -20,6 +20,7 @@
 //! what the cheaper one gives up.
 
 mod block;
+pub(crate) use block::histogram_is_enough;
 mod diskstats;
 mod fsync;
 pub(super) mod histogram;

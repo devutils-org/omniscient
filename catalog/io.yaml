@@ -77,9 +77,9 @@
     # cgroup's name, which is the worst thing this tool could do.
     - {id: "fs:cgroup", requires: ["cgroup2:io.stat"], cost: free,
        targets: {cgroup: native, container: native}, filter_fields: [dev],
-       degraded: "per cgroup and device only"}
+       keys: [dev, cgroup], degraded: "per cgroup and device only"}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
-       targets: {system: native}, filter_fields: [dev],
+       targets: {system: native}, filter_fields: [dev], keys: [dev],
        degraded: "system-wide, per device"}
   modes: [count, trace, poll]
   emits: [rate, summary, timeline, topk, raw]
@@ -105,10 +105,10 @@
        with the total; raw is the one that shows which half it was."
     - "The chain carries blk, task, cgroup and dev, and no single backend
        carries all four: fs:proc attaches dev alone and fs:cgroup dev and
-       cgroup. A request keyed on task and resolved onto either of them
-       produces events with no task on them, and a join written over that key
-       attributes nothing. Only the tracepoint backend, which this build does
-       not implement, carries task."
+       cgroup, and each says so in its `keys`. A request keyed on task that
+       resolves onto either of them is refused there, naming the backend
+       that attaches it, rather than answered with events no join over that
+       key could match. Only the tracepoint backends carry task."
 
 - id: io.iops
   family: io
@@ -118,7 +118,7 @@
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
-       targets: {system: native}, filter_fields: [dev],
+       targets: {system: native}, filter_fields: [dev], keys: [dev],
        degraded: "system-wide, per device"}
   modes: [count, poll]
   emits: [rate, summary, timeline, raw]

@@ -9315,3 +9315,114 @@ first stderr line>)"*. On the runner that line should name the missing
 `linux-tools-6.17.0-*-azure` package; the pattern `skipped the cross-check:
 bpftool could not dump` is the one to expect. (It used to skip everywhere: the
 dump's `DATASEC` line was read as the variable's.)
+
+## Needs from another stream — the sixteenth wave, stream io
+
+Stream io's handoff is `docs/fixes/w16-io.md`. Nothing here blocks it.
+
+### To the owner of `src/collect/mem/mod.rs` and `src/collect/mem/pressure.rs`, with the coordinator: `psi` where it lives, in one commit
+
+`src/collect/io/pressure.rs` reads `crate::collect::psi` now (through the
+`pub use` in `src/collect/mod.rs`). The declaration cannot move to
+`src/collect/mod.rs` on this branch alone: `src/collect/mem/mod.rs` still
+declares the file, and two declarations are clippy's `duplicate_mod`. The
+whole move, to land in one commit at the merge:
+
+```rust
+// src/collect/mod.rs (this stream's): the `pub use mem::psi;` and its comment become
+/// The one pressure-stall reader, which `cpu`, `io` and `mem` all read through.
+pub mod psi;
+// src/collect/mem/mod.rs: the `#[path = "../psi.rs"] pub mod psi;` and its comment go
+// src/collect/mem/pressure.rs: `use super::psi::{..}` becomes
+use crate::collect::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
+```
+
+### To the owner of `tests/cli.rs`: the shipped catalog's `KeyNotCarried` is the build's gap, exit 3 -- red until it lands
+
+`catalog/io.yaml` now declares `keys: [dev]` on `io.bytes`'s `fs:proc`, so
+`a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does`
+takes its early branch, which asserts exit 2. The shipped refusal is *"`bpf:raw_tp`
+does, and this build has no collector for it yet"*, exit 3, by
+`KeyElsewhere::whose` (the backend that attaches the key is unwritten) -- the
+test's own later branch says the same (`"has no collector for it"` -> 3). The
+diff, at lines ~1662-1666:
+
+```rust
+    let undeclared = run(&args);
+-    if stderr(&undeclared).contains("does not attach") {
+-        assert_eq!(undeclared.status.code(), Some(EXIT_REJECTED));
+-        return;
+-    }
++    if stderr(&undeclared).contains("does not attach") {
++        let message = stderr(&undeclared);
++        assert!(message.contains("`bpf:raw_tp` does, and this build has no collector for it"), "{message}");
++        assert_eq!(undeclared.status.code(), Some(EXIT_NOT_IMPLEMENTED), "{message}");
++        return;
++    }
+```
+
+The rest of the test (the patched copy) then never runs on the shipped
+catalog; `scenario_io::a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_backend_that_does`
+holds the shipped refusal for `io.bytes` and `io.iops`, both keys, both cells.
+
+### To the owner of `src/emit.rs`: a kernel-built histogram's `sum` is of its buckets' low bounds
+
+A row of `io.latency --emit hist` built in the kernel carries the bucket's low
+bound as `latency_ns`, `weight` = the requests, and the exact `total_ns`.
+`SeriesHist.sum` (and `min`, `max`) is computed from `latency_ns * weight`, so
+the kernel's histogram reports a sum below the stream's for the same requests
+(6 512 640 against 7 913 727 ns, 320 reads) with nothing saying it is a lower
+bound. Wanted, in `hist`'s accumulation: `sum += total_ns` when the event
+carries `total_ns` and a weight, and `min`/`max` left as the bucket bounds they
+are (or named as such). `sched.runqlat`'s rows would want the same.
+
+### To the owner of `src/bpf/io.rs`: one program for both histograms (optional)
+
+`scenario_io::a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`
+now bounds the edge-crossers with a measured skew (`docs/scenarios/io.md`,
+defect 16): two program sets read the clock 120 ns apart at the median, 11.5
+us once. Bit equality between the two histograms needs the stream's close and
+the histogram's close to take one interval -- one program publishing the
+record and counting the row -- which is not a shape this layer has. Only if a
+test is ever to require it.
+
+### To the owners of four tests: skips whose reason is not the machine's (not added to `.github/expected-skips.txt`)
+
+The gate of the run at `37f17c8` (both cells) failed on these, and each is a
+test that quotes something other than what the cell lacks:
+
+- `tests/cli.rs::a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s`:
+  *"skipped: the validator refused `net.hwts --system -m trace ...` first: ...
+  no backend of its chain declares both, so no machine could serve it"*. A
+  refusal no machine could avoid is the request's, and the test's to assert,
+  not a skip.
+- `tests/scenario_cpu.rs::a_container_is_counted_as_the_cgroup_its_runtime_names`:
+  *"skipped: note: container `omn-counted-...` runs in cgroup ..."* -- the
+  first stderr line, a `note:`, quoted as the reason.
+- `tests/scenario_mem.rs::a_counted_run_of_page_faults_is_the_kernels_own_count`:
+  *"skipped: warning: `json` is one document ..."* -- the same, a `warning:`
+  (the refusal under it is the `mem.faults` one stream mem fixed this wave).
+- `tests/unwind.rs::a_ring_that_overflows_is_charged_to_the_task_it_belongs_to_and_no_other`,
+  on `defaults` (paranoid 2): *"skipped: perf_event_open: Permission denied
+  (os error 13)"*, bare. At paranoid 2 a user-mode sample of one's own child
+  opens; either the test asks for the kernel half (and should say the sysctl)
+  or the open is wrong. On `stock` the same line is the cell's, and is in
+  `.github/expected-skips-stock.txt`.
+
+### To the coordinator: the bpftool cross-check, by the workflow
+
+The skip's new wording (*"bpftool could not dump ... WARNING: bpftool not found
+for kernel 6.17.0-1022"*) is not a pattern: `linux-tools-6.17.0-1022-azure` is
+installed and Ubuntu's `/usr/sbin/bpftool` wrapper looks for the binary under
+the version without its flavour. `.github/workflows/ci.yml` now links the
+binary the package installed into `/usr/local/bin`. If the next run still
+skips, the step's `::warning::` says why.
+
+### Answered: the sixteenth wave's requests to `src/collect/mod.rs`
+
+- stream cpu, the late prime of the kernel's symbols for a user-only stack:
+  landed (`late_stacks` checks `resolved.stack`'s `user_only`).
+- stream runner, `task_cpu_ns`/`thread_cpu_of` through `task::process_cpu`, and
+  the mode move's note in `Spending::degrade`: not on this branch -- both call
+  `task.rs` code that exists only on `feat/w16-runner`; the diffs are the
+  runner's, exact, for the merge.

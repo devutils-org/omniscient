@@ -70,3 +70,24 @@ the second clean run was not clean
 was already stalled on I/O
 AnonHugePages moved from [0-9]+ to [0-9]+ huge pages
 has no partially mapped huge pages right now
+# The binary the cell builds carries no capabilities, as the workflow checks:
+# a test with a privileged half says so by name (run 37f17c8, both cells).
+carries no capabilities \(run `make`\)
+# perf_event_paranoid 2 and above: page faults are sampled in user mode only
+# (scenario_mem's kernel-mode half; both cells).
+samples page faults in user mode only
+# One matrix cell on disk, the runner's own: a gap between cells, or a cell
+# that differs by a condition, needs two (tests/portability.rs).
+matrix cell\(s\) under .*, and a gap needs two
+no two cells of one machine differ by a condition the matrix sets
+# The runner's vcpu count: a map sized for two cpus evicts nothing on two.
+[0-9]+ cpus online, so a map of two holds every cpu
+# No GPU: the one gpu source the cell serves has every backend written, so
+# there is no unwritten one to pin.
+gpu source\(s\) this machine serves have a collector for every backend
+# The cloud disk's queue: a device the kernel's own `inflight` file never saw
+# held long enough for a 20 ms gauge (scenario_io's queue-depth half; the
+# spacing and volume halves still run).
+skipped the depth: the kernel's own reads of /sys/block/[^/]+/inflight
+# A kernel whose root cgroup has no io.stat: `fs:cgroup` resolves onto nothing.
+/sys/fs/cgroup/io.stat does not exist here

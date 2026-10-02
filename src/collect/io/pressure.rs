@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
-use crate::collect::mem::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
+use crate::collect::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event};
 use crate::request::{Mode, Target};

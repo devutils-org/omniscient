@@ -70,6 +70,19 @@ jobs:
           # the running kernel's own numbering; Ubuntu ships it per kernel.
           sudo apt-get install -yq --no-install-recommends "linux-tools-$(uname -r)" \
             || echo "::warning::no linux-tools package for $(uname -r), so no bpftool"
+          # Ubuntu's /usr/sbin/bpftool is a wrapper that looks for the binary
+          # under the kernel's version without its flavour, and on the azure
+          # kernel it answers "WARNING: bpftool not found for kernel
+          # 6.17.0-1022" with the package installed (run 37f17c8, both
+          # cells). The binary the package did install goes first on PATH.
+          real=$(find /usr/lib -name bpftool \( -type f -o -type l \) 2>/dev/null \
+            | grep -F "$(uname -r | cut -d- -f1-2)" | head -n 1)
+          if [ -n "$real" ]; then
+            sudo ln -sf "$real" /usr/local/bin/bpftool
+            bpftool version | head -n 1
+          else
+            echo "::warning::linux-tools-$(uname -r) installed no bpftool binary"
+          fi
 
       # The cell is a stock kernel's defaults with no capabilities, which the
       # hosted image is not in three places, each set back here and printed by

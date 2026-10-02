@@ -20,7 +20,7 @@
 
 mod cpu;
 pub mod gpu;
-mod io;
+pub(crate) mod io;
 mod launch;
 pub mod mem;
 /// Public for its probes: `net::probe` answers the PTP-clock and ethtool
@@ -2160,6 +2160,10 @@ fn run_core(
         let request = &resolved.request;
         request.window.is_some_and(|window| window.attaches_late())
             && (request.stack.is_some() || request.emit.contains(&crate::request::Emit::Stack))
+            // A user-only stack never walks into the kernel, so it never
+            // reads the table this pays for (`profile.rs` primes it only for
+            // a callchain with a kernel half).
+            && resolved.stack.as_ref().is_none_or(|choice| !choice.user_only)
     });
     if late_stacks {
         crate::stack::prime_kernel_symbols();
@@ -2666,7 +2670,8 @@ fn blind_to_running_threads(prepared: &dyn Prepared, target: &Target) -> Option<
     let threads = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?.count();
     (threads > 1).then(|| {
         format!(
-            "{reason}, and process {pid} was already running {threads} threads, so a count              from here would be of one of them"
+            "{reason}, and process {pid} was already running {threads} threads, so a count \
+             from here would be of one of them"
         )
     })
 }

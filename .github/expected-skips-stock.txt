@@ -20,3 +20,13 @@ cannot create a cgroup under
 this user cannot create a cgroup under its own slice
 delegates the (memory|cpu|io|pids) controller to this user
 omn-scenario-[a-z]+` could not be created
+# The same sysctl, as the probes word it without "is" (run 37f17c8).
+perf_event_paranoid [3-9]
+# paranoid 4 refuses every perf event to an unprivileged process: the software
+# cpu clock, a context-switch counter on its own pid, a sampling unwinder's
+# open. The tests quote the kernel's refusal, which names nothing else.
+refuses the software cpu clock to this process
+was refused \(Permission denied \(os error 13\)\); check /proc/sys/kernel/perf_event_paranoid
+perf_event_open: Permission denied \(os error 13\)
+# Root's service cgroup, which hands no controller down to the runner's user.
+no ancestor of `/system.slice/[^`]+` that this user owns hands the (cpu|memory|io|pids) controller down
