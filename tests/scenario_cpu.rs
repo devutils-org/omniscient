@@ -4304,9 +4304,10 @@ fn the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted() {
 }
 
 /// `--stack lbr` and `--stack sframe` are refused with the gap's code before
-/// the program they would profile is started: as not implemented where the
-/// machine offers the mechanism, and as not servable here where it does not
-/// (`pmu:branch_call_stack`, `kernel:sframe`). `dwarf` is served since the
+/// the program they would profile is started: as not implemented (the build's,
+/// exit 3) where the machine offers the mechanism, and as not servable here
+/// (the machine's, exit 1) where it does not (`pmu:branch_call_stack`,
+/// `kernel:sframe`). `dwarf` is served since the
 /// fourteenth wave, so it is no longer asked here.
 ///
 /// The factory refuses them, which runs before the launch. The ground truth that
@@ -4335,7 +4336,14 @@ fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
             eprintln!("skipped: {message}");
             return;
         }
-        assert_eq!(code, 3, "`--stack {stack}` is this build's gap: {message}");
+        // A mode this machine cannot serve is the machine's gap (exit 1); one
+        // it would serve and no collector here reads is the build's (exit 3).
+        let expected = if message.contains("cannot be served here") {
+            1
+        } else {
+            3
+        };
+        assert_eq!(code, expected, "`--stack {stack}`: {message}");
         assert!(
             message.contains(&format!("--stack {stack}"))
                 && (message.contains("not implemented")
