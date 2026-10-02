@@ -9358,3 +9358,106 @@ say no kernel (`catalog/sched.yaml:166-180`), so on 5.15 the chain should
 fall to them (`pmu:sw` serves `trace` and `count`, not a cgroup). Not run on
 5.15 by this stream; the end-of-wave matrix sweep answers it, and the row
 changes with it.
+
+## Needs from another stream — the sixteenth wave, stream engine
+
+Stream engine's record is `docs/fixes/w16-engine.md`.
+
+### To whoever owns `src/bpf/mem_stall.rs` and `src/collect/mem/stall.rs`: a tighter enclosing window for a drained stall row
+
+`overlap` rules now take `enclosing: <attr>` (`src/join.rs`, `Rule::enclosing`):
+the attribute of a row of several occurrences holding the length, from its
+stamp, of a window that encloses them all. `mem.reclaim`'s `window_ns` already
+is one (stamped at the first episode, the drain's length reaches past the
+last), and `examples/cross-machine-reclaim-enclosed.yml` uses it, held to
+`memory.stat` by `cross_machine::a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure`.
+It is loose by up to the drain's length, which is why that session reads the
+pressure every second: against `cross-machine-reclaim-io.yml`'s 100 ms
+readings it crosses one almost always. Wanted, to let the 100 ms session
+credit its rows too, in one commit:
+
+- `src/bpf/mem_stall.rs`: `const VALUE_LAST_NS: i16 = 48;`,
+  `ROW_VALUE_BYTES` 56, every stack slot below `ROW_VALUE` moved down 8
+  (`ROW_VALUE -56`, `ROW_KEY -88`, `PID_TGID -96`, `START_KEY -104`,
+  `START_VALUE -112`, `DROP_KEY -116`, `ROWS_SLOT -128`); in
+  `end_instructions`, `Insn::stx(BPF_DW, 0, VALUE_LAST_NS, 8)` after the
+  atomic adds on an existing row, and
+  `Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_LAST_NS, 8)` beside
+  `VALUE_FIRST_NS` on a new one (r8 is the episode's end); `pub last_ns: u64`
+  on `StallRow`, decoded from `VALUE_LAST_NS`, and the byte-accounting test's
+  table.
+- `src/collect/mem/stall.rs`, in `drain_into`:
+  `Attr::uint("enclosing_ns", if row.last_ns > ts_ns { row.last_ns - ts_ns } else { closed_ns.saturating_sub(ts_ns) })`
+  on every row: the last episode's end, or the drain's close when the row has
+  none.
+- Then `enclosing: enclosing_ns` under `reclaim-per-pressure-interval` in
+  `examples/cross-machine-reclaim-io.yml` (the engine's file: the coordinator
+  or the engine stream adds it with the commit above, never before, since a
+  rule naming an attribute a row lacks is refused), and an assertion of half
+  the cgroup's pgsteal credited in `cross_machine::a_memory_limit_turns_...`.
+
+Measured with exactly this applied locally and reverted: 35 225, 40 497 and
+41 909 of 37 657, 40 739 and 42 093 pages the cgroup's `memory.stat` counted
+credited in the program's 100 ms intervals, against 745 of 41 413 with no
+enclosure and 165 of 36 937 with the drain's close.
+
+### To whoever owns `src/collect/proc/status.rs`, `src/collect/mem/footprint.rs` and their catalog entries: carry `proc`
+
+`KeyValue::proc_of(pid) -> Option<KeyValue>` (`src/event.rs`) makes the key:
+the pid namespace's inode and the pid inside it. Wanted: computed once at
+attach (a process does not change pid namespace) and pushed after `task` on
+every event, `keys: vec![KeyValue::task(self.pid)]` becoming
+`std::iter::once(KeyValue::task(self.pid)).chain(self.proc_key.clone()).collect()`
+(`src/collect/proc/status.rs:241`, `src/collect/mem/footprint.rs:260`), and
+`proc` added to those entries' `keys:` in `catalog/proc.yaml` and
+`catalog/mem.yaml`. `docs/keys.md` already describes it as filed.
+
+### To whoever owns `src/main.rs` (`assemble`): the joins' input walked apart
+
+`join::apply_within` over `merged` takes an index of the whole run for every
+rule, because `merged` is the collections laid end to end and is not in order:
+15.3 MiB beyond a million events, against 0.6 MiB for the same events walked
+apart (`join_engine::a_join_under_load_...`, the "as a run hands it over"
+line). `join::apply_merging(rule: &Rule, streams: &[&[Event]], windows:
+&BTreeMap<String, Watched>) -> Result<Correlation, JoinError>` walks the
+collections apart with no index; its answer is the one a stable sort of their
+concatenation gives (`join::tests::streams_walked_apart_meet_in_the_engines_order`).
+Wanted, in `assemble`, with no new copy:
+
+```rust
+let mut bounds = vec![0];
+// in the loop, after `merged.extend(collection.events.iter().cloned());`
+bounds.push(merged.len());
+// before the joins
+let streams: Vec<&[omn::event::Event]> =
+    bounds.windows(2).map(|at| &merged[at[0]..at[1]]).collect();
+// and each join
+run.joins.push(join::apply_merging(rule, &streams, &windows)?);
+```
+
+`decompose_within` can keep `&merged`: it reads each source apart already. The
+clone itself stays linear in the run; ending it needs `emit::aggregate` to
+take the collection by reference.
+
+### To whoever owns `src/collect/net/qdisc.rs`, `capture.rs` and `hwts.rs`: the network namespace beside the index
+
+An `iface` key is compared by its index (`iface#<index>`), and an index is per
+network namespace. `net.qdisc` reads packets of every namespace: 2000 packets
+queued on the lo of an unprivileged namespace (`unshare -rn`, `tc qdisc
+replace dev lo root netem limit 100000`) were all credited by
+`examples/join-iface-qdisc.yml` to this namespace's `iface:lo`, index 1 in
+both. Wanted: the namespace's inode on every kernel-side `iface` key
+(`skb->dev->nd_net.net->ns.inum` in `src/bpf/net_qdisc.rs`, the socket's or
+the device's for `capture.rs` and `hwts.rs`), passed as a third argument once
+`KeyValue::iface` takes one -- the engine stream adds
+`KeyValue::iface_in(netns: u64, index: u32, name)` and the identity
+`iface#<netns>:<index>`, with the tool's own namespace filled in for a named
+producer, on request. Until then `docs/keys.md` says when such a join is
+sound.
+
+### To whoever owns `src/collect/net/iface.rs`: the counter kind in the key's name
+
+No longer in the way of a join: an `iface` key is compared by its index, and the
+name's part after a `/` is not the interface (`docs/keys.md`). It still makes
+five series of one interface, which a sub-series would replace
+(`docs/open-requests.md`, line 3054). Nothing to do this wave.

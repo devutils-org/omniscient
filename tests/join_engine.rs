@@ -136,6 +136,7 @@ fn eq_rule() -> Rule {
         woken: None,
         span: None,
         stamped: None,
+        enclosing: None,
         depth: None,
         value: None,
         reading: None,
@@ -264,6 +265,7 @@ fn wakeup_rule() -> Rule {
         woken: None,
         span: None,
         stamped: None,
+        enclosing: None,
         depth: None,
         value: None,
         reading: None,
@@ -804,16 +806,39 @@ fn the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_prog
     let freed_at = run.reported("FREED ")[0][0]
         .parse::<u64>()
         .expect("a timestamp");
+    // The interpreter's own startup is the third: a first reading taken
+    // before it was ready (a slow VM, CI's `defaults` cell) saw part of it,
+    // and the rise in `live` then includes what it allocated after that
+    // reading -- at most what glibc says it holds once ready.
+    let ready = &run.reported("READY ")[0];
+    let ready_at = ready[0].parse::<u64>().expect("a timestamp");
+    let in_use_when_ready = ready[1].parse::<f64>().expect("bytes");
+    let free_when_ready = ready[2].parse::<f64>().expect("bytes");
+    let resident_when_ready = ready[3].parse::<f64>().expect("bytes");
     let result = run.result("retained");
     let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
-    let last_reading = result["outputs"]
+    let readings: Vec<(u64, f64)> = result["outputs"]
         .as_array()
         .expect("outputs")
         .iter()
         .filter(|output| output["emit"] == "raw")
         .flat_map(|output| output["events"].as_array().into_iter().flatten())
-        .filter_map(|event| event["ts_ns"].as_u64())
-        .max()
+        .filter_map(|event| {
+            let live = event["attrs"]
+                .as_array()?
+                .iter()
+                .find(|attr| attr["name"] == "live")?["value"]
+                .as_f64()?;
+            Some((event["ts_ns"].as_u64()?, live))
+        })
+        .collect();
+    let last_reading = readings.iter().map(|(ts, _)| *ts).max().unwrap_or(0);
+    // The rows' own filter, `live > 0`: the first reading they start from.
+    let first_reading = readings
+        .iter()
+        .filter(|(_, live)| *live > 0.0)
+        .map(|(ts, _)| *ts)
+        .min()
         .unwrap_or(0);
     eprintln!(
         "last reading {:+.1} ms from the last free; the shim dropped {dropped}",
@@ -851,24 +876,57 @@ fn the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_prog
         );
         return;
     }
+    // What the startup after the first reading can add to each row, by the
+    // program's own figures once ready; nothing when the first reading came
+    // after it.
+    let early = first_reading < ready_at;
+    let (startup_live, startup_retained, startup_resident) = if early {
+        (in_use_when_ready, free_when_ready, resident_when_ready)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    if !early {
+        assert!(
+            (live - held).abs() <= INTERPRETER,
+            "the program ends holding {held} bytes it asked for; the live row says {live}"
+        );
+    } else {
+        if in_use_when_ready < 0.0 {
+            eprintln!(
+                "not asserted: the first reading came {:.1} ms before the interpreter was \
+                 ready, and this glibc has no mallinfo2 to say how much of the startup the \
+                 rows include",
+                (ready_at - first_reading) as f64 / 1e6
+            );
+            return;
+        }
+        eprintln!(
+            "the first reading came {:.1} ms before the interpreter was ready: the live row \
+             may include up to the {in_use_when_ready} bytes glibc says it held then",
+            (ready_at - first_reading) as f64 / 1e6
+        );
+        assert!(
+            live >= held - INTERPRETER && live <= held + in_use_when_ready + INTERPRETER,
+            "the program ends holding {held} bytes it asked for, and held {in_use_when_ready} \
+             when it was ready, after the first reading; the live row says {live}"
+        );
+    }
     assert!(
-        (live - held).abs() <= INTERPRETER,
-        "the program ends holding {held} bytes it asked for; the live row says {live}"
-    );
-    assert!(
-        (retained - whole_pages).abs() <= INTERPRETER,
-        "the freed blocks cover {whole_pages} bytes of whole pages; the retained row says \
+        (retained - whole_pages).abs() <= startup_retained + INTERPRETER,
+        "the freed blocks cover {whole_pages} bytes of whole pages (and glibc kept \
+         {startup_retained} free from a startup the rows began inside); the retained row says \
          {retained}"
     );
     let predicted = freed - whole_pages;
     assert!(
-        residue >= -INTERPRETER,
+        residue >= -INTERPRETER - startup_live - startup_retained,
         "a residue of {residue} means more was accounted for than is resident"
     );
     assert!(
-        residue <= predicted + HUGE_PAGE,
+        residue <= predicted + HUGE_PAGE + startup_resident,
         "a residue of {residue} is more than the {predicted} the program predicts plus a huge \
-         page: something resident is in neither row"
+         page (and the {startup_resident} resident bytes of a startup the rows began inside): \
+         something resident is in neither row"
     );
     assert!(
         table.get("residue_resolution").is_none(),
@@ -2001,16 +2059,9 @@ fn balances(states: &join::StateStats) -> bool {
             + states.still_open
 }
 
-/// One load: the stream built, applied with the `from` source's window
-/// closing before the end and without, and every count held to the
-/// generator's. Returns the heap the two applications needed at their peak,
-/// beyond the stream itself.
-fn one_load(events: u64) -> usize {
-    let rule = load_rule();
-    let started = std::time::Instant::now();
-    let (stream, closed_ns) = Stream::load(events);
-    let built = started.elapsed();
-    let expected = &stream.expected;
+/// The load's windows: the requests' source detached before the end, the
+/// segments' watched to it.
+fn load_windows(closed_ns: u64) -> BTreeMap<String, omn::collect::Watched> {
     let mut windows = BTreeMap::new();
     windows.insert(
         "blk.rq".to_owned(),
@@ -2032,6 +2083,75 @@ fn one_load(events: u64) -> usize {
             attach_ns: None,
         },
     );
+    windows
+}
+
+/// The load as a run hands it over: one collection per source, each in
+/// order, and the joins' input either those collections walked apart
+/// (`join::apply_merging`) or laid end to end into one stream that is not in
+/// order (`join::apply_within` over it, which is what `assemble` in
+/// `src/main.rs` does today). Returns the heap each needed at its peak beyond
+/// its input, after holding both answers to the generator's counts.
+fn split_load(events: u64) -> (usize, usize) {
+    let rule = load_rule();
+    let (stream, closed_ns) = Stream::load(events);
+    let expected = stream.expected;
+    let windows = load_windows(closed_ns);
+    let (requests, segments): (Vec<Event>, Vec<Event>) = stream
+        .events
+        .into_iter()
+        .partition(|event| event.kind == "blk.rq");
+
+    let before = heap::live();
+    heap::reset_peak();
+    let apart =
+        join::apply_merging(&rule, &[&requests, &segments], &windows).expect("the rule applies");
+    let merged_peak = heap::peak() - before;
+
+    let laid: Vec<Event> = requests.into_iter().chain(segments).collect();
+    let before = heap::live();
+    heap::reset_peak();
+    let end_to_end = join::apply_within(&rule, &laid, &windows).expect("the rule applies");
+    let laid_peak = heap::peak() - before;
+
+    for (name, correlation) in [("apart", &apart), ("end to end", &end_to_end)] {
+        assert!(
+            balances(&correlation.states),
+            "{name}: {:?}",
+            correlation.states
+        );
+        assert_eq!(correlation.states.opened, expected.opened, "{name}: opened");
+        assert_eq!(correlation.matched, expected.matched, "{name}: matched");
+        assert_eq!(
+            correlation.unmatched, expected.unmatched,
+            "{name}: unmatched"
+        );
+        assert_eq!(
+            correlation.outside_window, expected.left_open,
+            "{name}: outside the window"
+        );
+    }
+    eprintln!(
+        "load as a run hands it over: {} events in two collections; walked apart, peak {:.1} \
+         MiB beyond them; laid end to end, {:.1} MiB",
+        expected.events,
+        merged_peak as f64 / (1 << 20) as f64,
+        laid_peak as f64 / (1 << 20) as f64
+    );
+    (merged_peak, laid_peak)
+}
+
+/// One load: the stream built, applied with the `from` source's window
+/// closing before the end and without, and every count held to the
+/// generator's. Returns the heap the two applications needed at their peak,
+/// beyond the stream itself.
+fn one_load(events: u64) -> usize {
+    let rule = load_rule();
+    let started = std::time::Instant::now();
+    let (stream, closed_ns) = Stream::load(events);
+    let built = started.elapsed();
+    let expected = &stream.expected;
+    let windows = load_windows(closed_ns);
 
     let before = heap::live();
     heap::reset_peak();
@@ -2137,11 +2257,17 @@ fn is_child() -> bool {
 /// evicted from a full map, segments of no request, and requests in flight
 /// when the `from` source's window closes. Every count is held to what the
 /// generator wrote, the open-state balance included, and the map to its
-/// capacity. The memory: the engine holds at most `capacity` open states, and
-/// what it needs besides is its sort of the input and the states it finished,
-/// both linear in the input and released when it returns. A twice longer
-/// stream may take no more than about twice the peak -- a leak per state or a
-/// cost quadratic in the map would -- and nothing is left live afterwards.
+/// capacity. The memory: the engine holds at most `capacity` open states and
+/// the rule's `top` attributions, and walks a stream already in order where it
+/// lies, so what it needs does not grow with the stream: measured, 97.2 MiB
+/// beyond the stream for the million events before the sixteenth wave (an
+/// index of the input and a record of every state that ended), 0.7 MiB after.
+/// A twice longer stream may take no more than the shorter's peak and a
+/// margin, every peak stays under [`LOAD_BOUND`], and nothing is left live
+/// afterwards. And the input as a run hands it over -- one collection per
+/// source, each in order -- walked apart by `apply_merging` stays under the
+/// bound too, while the same collections laid end to end, which is what
+/// `assemble` gives the engine today, cost an index of the whole run.
 #[test]
 fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map() {
     in_a_child(
@@ -2153,18 +2279,47 @@ fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map()
     }
     let short = one_load(500_000);
     let long = one_load(1_000_000);
+    for (events, peak) in [(500_000, short), (1_000_000, long)] {
+        assert!(
+            peak < LOAD_BOUND,
+            "{events} events took {peak} bytes beyond the stream, more than the {LOAD_BOUND} a \
+             map of {LOAD_CAPACITY} states and its top need"
+        );
+    }
     assert!(
-        long < short * 3,
-        "twice the stream took {:.1}x the peak: {long} bytes against {short}",
-        long as f64 / short as f64
+        long < short + LOAD_BOUND / 4,
+        "twice the stream took {long} bytes against {short}: the engine's memory grows with \
+         the run"
+    );
+
+    // The collections of a run, each in order and their concatenation not:
+    // walked apart they cost what one ordered stream does; laid end to end
+    // the engine indexes the whole run, eight bytes an event at least.
+    let (apart, laid) = split_load(1_000_000);
+    assert!(
+        apart < LOAD_BOUND,
+        "two collections walked apart took {apart} bytes beyond them, more than the \
+         {LOAD_BOUND} one ordered stream may"
+    );
+    assert!(
+        laid >= 8 * 1_000_000,
+        "one stream out of order took only {laid} bytes beyond it: the index of a million \
+         references the engine sorts it by is eight megabytes"
     );
 }
 
-/// The same for an hour, by hand:
+/// What one application of the load rule may hold beyond its input: the map
+/// of [`LOAD_CAPACITY`] states with their age index and labels, and the
+/// buffer of attributions it cuts back to the rule's `top`, with room for the
+/// allocator's rounding. Not a calibrated figure: two orders of magnitude
+/// under what the engine held before it was bounded.
+const LOAD_BOUND: usize = 4 << 20;
+
+/// The same for an hour, by hand (`OMN_JOIN_LOAD_SECS` shortens it):
 ///
 /// ```console
 /// cargo test --release --test join_engine -- --ignored an_hour_of_joins
-/// OMN_JOIN_LOAD_SECS=600 cargo test --release --test join_engine -- --ignored an_hour_of_joins
+/// OMN_JOIN_LOAD_SECS=300 cargo test --release --test join_engine -- --ignored an_hour_of_joins
 /// ```
 ///
 /// Rounds of two million events for as long as asked, each held to its own
@@ -2189,8 +2344,8 @@ fn an_hour_of_joins_leaks_no_state() {
         let peak = one_load(2_000_000);
         let first = *first_peak.get_or_insert(peak);
         assert!(
-            peak < first * 2,
-            "round {rounds}: the peak grew from {first} to {peak} bytes"
+            peak < first * 2 && peak < LOAD_BOUND,
+            "round {rounds}: the peak grew from {first} to {peak} bytes (bound {LOAD_BOUND})"
         );
         assert!(
             heap::live() <= baseline + 64 * 1024,
@@ -2515,6 +2670,249 @@ fn a_join_that_evicts_says_how_many_in_results_json_and_in_the_text() {
             opened,
             closed + still + expired + overflowed,
             "the text's counts balance: {counts} / {evicted}"
+        );
+    }
+}
+
+/// What loopback has received and transmitted, in bytes, as the kernel counts
+/// it in `/sys/class/net/lo/statistics`.
+fn loopback_bytes() -> f64 {
+    ["rx_bytes", "tx_bytes"]
+        .iter()
+        .map(|file| {
+            std::fs::read_to_string(format!("/sys/class/net/lo/statistics/{file}"))
+                .expect("every Linux machine has lo")
+                .trim()
+                .parse::<f64>()
+                .expect("a counter")
+        })
+        .sum()
+}
+
+/// Two sources of one interface, joined by it: `net.iface`'s `lo/drops` and
+/// `net.bytes`'s `lo` are one key, by the kernel's index, and the bytes lo
+/// moved while both watched are credited -- at least what the kernel counted
+/// across this test's own burst of datagrams, and at most what it counted
+/// across the whole run. Before the key compared the index, the two names
+/// matched nothing and every reading was uncredited.
+#[test]
+fn two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved() {
+    const DATAGRAMS: usize = 2000;
+    let before_run = loopback_bytes();
+    let run = Command::new(BINARY)
+        .args(["-f", "examples/join-iface-loopback.yml", "--format", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // Well inside the run's two seconds: after the first readings of both
+    // sources, and long before the last.
+    thread::sleep(StdDuration::from_millis(700));
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let to = receiver.local_addr().expect("an address");
+    receiver
+        .set_read_timeout(Some(StdDuration::from_millis(50)))
+        .expect("a timeout");
+    let before_burst = loopback_bytes();
+    let mut buffer = [0u8; 2048];
+    for _ in 0..DATAGRAMS {
+        sender.send_to(&[7u8; 1000], to).expect("a datagram");
+        let _ = receiver.recv_from(&mut buffer);
+    }
+    let burst = loopback_bytes() - before_burst;
+
+    let output = run.wait_with_output().expect("omn should finish");
+    let moved = loopback_bytes() - before_run;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            machine_cannot_serve(&stderr),
+            "the session failed for a reason that is not the machine's:\n{stderr}"
+        );
+        eprintln!(
+            "SKIPPED: {}. It would have checked that two sources of lo join by its index",
+            machine_s_reason(&stderr)
+        );
+        return;
+    }
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("a JSON document");
+    let join = document["joins"]
+        .as_array()
+        .and_then(|joins| {
+            joins
+                .iter()
+                .find(|join| join["rule"] == "lo-moved-while-watched")
+        })
+        .expect("the session's join");
+    let credited = number(&join["readings"]["credited"]);
+    let uncredited = number(&join["readings"]["uncredited"]);
+    eprintln!(
+        "lo moved {burst} bytes in the burst and {moved} over the run; credited {credited}, \
+         uncredited {uncredited}"
+    );
+    assert_eq!(join["evidence"], "TEMPORAL");
+    assert!(
+        burst >= (DATAGRAMS * 2 * 1000) as f64,
+        "the kernel counted {burst} bytes for {DATAGRAMS} datagrams of 1000 bytes, sent and received"
+    );
+    assert!(
+        join["matched"].as_u64().unwrap_or(0) > 0,
+        "no `net.bytes` reading of lo met a `net.iface` state of lo: the key is still \
+         compared by name\n{join}"
+    );
+    assert!(
+        credited >= burst,
+        "the kernel counted {burst} bytes on lo across the burst, inside the run; the join \
+         credited {credited}"
+    );
+    assert!(
+        credited + uncredited <= moved,
+        "the join read {} bytes on lo; the kernel counted {moved} across the whole run",
+        credited + uncredited
+    );
+}
+
+/// What the kernel says lo transmitted, in packets.
+fn loopback_tx_packets() -> f64 {
+    std::fs::read_to_string("/sys/class/net/lo/statistics/tx_packets")
+        .expect("every Linux machine has lo")
+        .trim()
+        .parse::<f64>()
+        .expect("a counter")
+}
+
+/// Two producers of one interface that name it two ways: `net.qdisc` carries
+/// lo's index as the kernel read it off each packet, `net.iface` only the
+/// name `/proc/net/dev` prints, in one series per counter kind (`lo/drops`).
+/// They are one key by the index, so every packet the discipline saw on lo is
+/// laid across lo's readings -- credited to the reading whose interval holds
+/// its drained row, or counted uncredited, never dropped for a key that did
+/// not match -- and at least half of what the kernel counted transmitted on lo
+/// across this test's own burst is credited.
+///
+/// Loopback is `noqueue` unless someone gave it a discipline, and then no
+/// packet of it passes one: the test skips with that reason, which is the
+/// machine's (`tc qdisc replace dev lo root netem limit 100000`, as root,
+/// makes it run; a fifo is bypassed while empty and queues nothing).
+#[test]
+fn a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index() {
+    const DATAGRAMS: usize = 2000;
+    let run = Command::new(BINARY)
+        .args(["-f", "examples/join-iface-qdisc.yml", "--format", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // After the first two readings of lo, and well before the last.
+    thread::sleep(StdDuration::from_millis(1200));
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let to = receiver.local_addr().expect("an address");
+    receiver
+        .set_read_timeout(Some(StdDuration::from_millis(50)))
+        .expect("a timeout");
+    let before_burst = loopback_tx_packets();
+    let mut buffer = [0u8; 2048];
+    for _ in 0..DATAGRAMS {
+        sender.send_to(&[7u8; 100], to).expect("a datagram");
+        let _ = receiver.recv_from(&mut buffer);
+    }
+    let burst = loopback_tx_packets() - before_burst;
+
+    let output = run.wait_with_output().expect("omn should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            machine_cannot_serve(&stderr),
+            "the session failed for a reason that is not the machine's:\n{stderr}"
+        );
+        eprintln!(
+            "SKIPPED: {}. It would have checked that a kernel-indexed and a named producer of \
+             lo join by its index",
+            machine_s_reason(&stderr)
+        );
+        return;
+    }
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("a JSON document");
+    let queued: Vec<&serde_json::Value> = document["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|result| result["label"] == "queued")
+        .flat_map(|result| result["outputs"].as_array().into_iter().flatten())
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| output["events"].as_array().into_iter().flatten())
+        .collect();
+    let packets: f64 = queued
+        .iter()
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .and_then(|attrs| attrs.iter().find(|attr| attr["name"] == "count"))
+                .and_then(|attr| attr["value"].as_f64())
+                .unwrap_or(0.0)
+        })
+        .sum();
+    if packets == 0.0 {
+        eprintln!(
+            "SKIPPED: no packet of lo was queued on this machine: lo is `noqueue` by default, \
+             and a fifo is bypassed while it is empty, so none of the {burst} packets the kernel \
+             counted on lo entered a discipline and `net.qdisc` has nothing to key. \
+             `tc qdisc replace dev lo root netem limit 100000` (as root; `tc qdisc del dev lo \
+             root` undoes it) gives it one that queues. It would have checked that a \
+             kernel-indexed and a named producer of lo join by its index"
+        );
+        return;
+    }
+    let join = document["joins"]
+        .as_array()
+        .and_then(|joins| {
+            joins
+                .iter()
+                .find(|join| join["rule"] == "queued-per-link-reading")
+        })
+        .expect("the session's join");
+    let credited = number(&join["readings"]["credited"]);
+    let uncredited = number(&join["readings"]["uncredited"]);
+    eprintln!(
+        "lo transmitted {burst} packets in the burst; net.qdisc saw {packets} on lo; credited \
+         {credited}, uncredited {uncredited}"
+    );
+    assert_eq!(join["evidence"], "TEMPORAL");
+    assert!(
+        burst >= DATAGRAMS as f64,
+        "the kernel counted {burst} packets transmitted on lo for {DATAGRAMS} datagrams"
+    );
+    assert_eq!(
+        join["keyless"].as_u64().unwrap_or(0),
+        0,
+        "every row of lo carries lo: {join}"
+    );
+    assert!(
+        (credited + uncredited - packets).abs() < 0.5,
+        "net.qdisc saw {packets} packets on lo and the join laid {credited} across lo's readings \
+         and left {uncredited}: a row whose key matched nothing would be in neither"
+    );
+    assert!(
+        packets >= burst,
+        "the kernel transmitted {burst} packets on lo across the burst, and its discipline saw \
+         {packets}"
+    );
+    assert!(
+        credited >= burst / 2.0,
+        "the kernel counted {burst} packets on lo across the burst, inside the run; the join \
+         credited {credited} to lo's readings ({uncredited} uncredited): the two producers' \
+         keys of lo did not meet\n{join}"
+    );
+    for row in join["top"].as_array().into_iter().flatten() {
+        assert!(
+            row["key"] == "iface:lo",
+            "a row of lo's readings is lo's: {row}"
         );
     }
 }

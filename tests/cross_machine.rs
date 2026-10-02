@@ -1122,9 +1122,18 @@ const KEY_JOIN: &str = "reads-of-a-reclaiming-task";
 const OVERLAP_JOIN: &str = "reclaim-per-pressure-interval";
 
 fn run_reclaim(cgroup: &Cgroup, scratch: &Scratch, limit: &str) -> Result<ReclaimRun, String> {
+    run_reclaim_of("cross-machine-reclaim-io.yml", cgroup, scratch, limit)
+}
+
+/// `run_reclaim` with another session beside the same program.
+fn run_reclaim_of(
+    name: &str,
+    cgroup: &Cgroup,
+    scratch: &Scratch,
+    limit: &str,
+) -> Result<ReclaimRun, String> {
     cgroup.limit(limit);
-    let session = std::fs::read_to_string(example("cross-machine-reclaim-io.yml"))
-        .expect("the reclaim session ships");
+    let session = std::fs::read_to_string(example(name)).expect("the reclaim session ships");
     let stolen_before = cgroup.stat("pgsteal_direct") + cgroup.stat("pgsteal_kswapd");
     let stalled_before = cgroup.stalled_us();
     let child = spawn_session(&session, &[]);
@@ -1140,7 +1149,7 @@ fn run_reclaim(cgroup: &Cgroup, scratch: &Scratch, limit: &str) -> Result<Reclai
         return Err(
             if message.contains("CAP_BPF") || message.contains("CAP_PERFMON") {
                 format!(
-                    "`mem.reclaim` and `io.latency` need CAP_BPF and CAP_PERFMON, which `make` \
+                    "the session's eBPF sources need CAP_BPF and CAP_PERFMON, which `make` \
                  grants and every `cargo build` drops: {}",
                     message.lines().next().unwrap_or("").trim()
                 )
@@ -1531,6 +1540,9 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         under.overlap_in_brackets,
         under.overlap_uncredited
     );
+    // A drained bucket placed by its enclosing window rather than left over
+    // is `a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure`:
+    // against 100 ms readings a 100 ms drain crosses one almost always.
     let accounted = under.overlap_credited + under.overlap_uncredited;
     assert!(
         (accounted - under.reclaimed_machine_wide as f64).abs() <= 1.0,
@@ -1615,6 +1627,155 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
          difference is the memory limit's, and it has to show",
         mib(under.identity_bytes as f64),
         mib(free.identity_bytes as f64)
+    );
+}
+
+/// What one `overlap` rule of a run laid across the machine's pressure.
+#[derive(Debug, Default)]
+struct Laid {
+    credited: f64,
+    in_brackets: f64,
+    uncredited: f64,
+}
+
+fn laid(document: &Value, rule: &str, churned: &Churned) -> Laid {
+    let join = document["joins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|join| join["rule"] == rule)
+        .unwrap_or_else(|| panic!("the session's `{rule}` join reported nothing"));
+    let mut laid = Laid {
+        uncredited: join["readings"]["uncredited"].as_f64().unwrap_or(0.0),
+        ..Laid::default()
+    };
+    for row in join["top"].as_array().into_iter().flatten() {
+        let opened = row["opened_ns"].as_u64().unwrap_or(0);
+        let closed = row["closed_ns"].as_u64().unwrap_or(0);
+        let pages = row["change"]["delta"].as_f64().unwrap_or(0.0);
+        laid.credited += pages;
+        if closed > churned.write_ns && opened < churned.end_ns {
+            laid.in_brackets += pages;
+        }
+    }
+    laid
+}
+
+/// `overlap`'s `enclosing`, held to the kernel's count. The program of the
+/// crossing above runs capped, and `mem.reclaim`'s rows are drained every
+/// 100 ms: a row of several episodes carries their summed duration, which has
+/// no one window, and a rule that reads it as a span leaves its pages
+/// uncredited. Naming `enclosing: window_ns` places it by the drain's window
+/// from its first episode, which holds every episode of the row; against
+/// one-second readings of the machine's pressure most of those windows lie
+/// inside one reading, and the row is credited there whole.
+///
+/// The reference is the cgroup's own `memory.stat`: the pages it says it
+/// reclaimed while the program ran were reclaimed inside the program's
+/// brackets, so the readings those brackets overlap must hold at least half of
+/// them once the rows are enclosed (a window crossing one of the three or four
+/// readings of the run stays uncredited, by the rule), and the same rows read
+/// as a sum must hold less. Every page the tool saw is credited or uncredited
+/// under either rule, never both.
+#[test]
+fn a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure() {
+    if Command::new("python3")
+        .arg("--version")
+        .output()
+        .map_or(true, |output| !output.status.success())
+    {
+        eprintln!("skipped: no `python3`, which is the program this crossing runs");
+        return;
+    }
+    let cgroup = match Cgroup::create() {
+        Ok(cgroup) => cgroup,
+        Err(why) => {
+            eprintln!("skipped: the limit cannot be created here: {why}");
+            return;
+        }
+    };
+    let scratch = match scratch() {
+        Ok(scratch) => scratch,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let _alone = alone();
+    let capped = match run_reclaim_of(
+        "cross-machine-reclaim-enclosed.yml",
+        &cgroup,
+        &scratch,
+        &(LIMIT_MIB << 20).to_string(),
+    ) {
+        Ok(run) => run,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    // The condition, from the kernel's own counter before any of the tool's
+    // numbers: the limit made the program reclaim.
+    let reclaimed_at_least = ((WRITTEN_MIB - LIMIT_MIB) << 20) / 4096 / 2;
+    if capped.pgsteal < reclaimed_at_least {
+        eprintln!(
+            "skipped: capped at {LIMIT_MIB} MiB, the cgroup's memory.stat counted only {} pages              reclaimed for {WRITTEN_MIB} MiB written, so there is no reclaim to place",
+            capped.pgsteal
+        );
+        return;
+    }
+    let seen: u64 = raw_events(result(&capped.document, "reclaim"))
+        .iter()
+        .map(|event| attr_u64(event, "pages_reclaimed"))
+        .sum();
+    let summed = laid(
+        &capped.document,
+        "reclaim-per-second-summed",
+        &capped.churned,
+    );
+    let enclosed = laid(
+        &capped.document,
+        "reclaim-per-second-enclosed",
+        &capped.churned,
+    );
+    eprintln!(
+        "memory.stat {} pages reclaimed; the tool saw {seen}; summed: {:.0} in the program's \
+         seconds, {:.0} uncredited; enclosed: {:.0} in the program's seconds, {:.0} uncredited",
+        capped.pgsteal,
+        summed.in_brackets,
+        summed.uncredited,
+        enclosed.in_brackets,
+        enclosed.uncredited
+    );
+    assert!(
+        seen >= capped.pgsteal - capped.pgsteal / 10,
+        "the cgroup's memory.stat counted {} pages reclaimed and the tool saw {seen}",
+        capped.pgsteal
+    );
+    for (rule, laid) in [("summed", &summed), ("enclosed", &enclosed)] {
+        assert!(
+            (laid.credited + laid.uncredited - seen as f64).abs() <= 1.0,
+            "{rule}: {:.0} credited and {:.0} uncredited of the {seen} pages the tool saw: a \
+             page is credited or counted, never both or neither",
+            laid.credited,
+            laid.uncredited
+        );
+    }
+    assert!(
+        enclosed.in_brackets >= (capped.pgsteal / 2) as f64,
+        "the rule names each drained row's enclosing window, and of the {} pages the cgroup's \
+         memory.stat counted only {:.0} were credited to the seconds the program overlapped \
+         ({:.0} uncredited)",
+        capped.pgsteal,
+        enclosed.in_brackets,
+        enclosed.uncredited
+    );
+    assert!(
+        enclosed.uncredited < summed.uncredited,
+        "naming the enclosure left {:.0} pages uncredited, and reading the same rows as a sum \
+         {:.0}: a drained row read by its window can only be placed more often",
+        enclosed.uncredited,
+        summed.uncredited
     );
 }
 

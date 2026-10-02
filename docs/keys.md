@@ -9,11 +9,16 @@ needs to know what a `bio` or a `malloc` is.
 Three rules govern how keys are compared, and they come before the list:
 
 - **A join compares a key's identity**, `join::identity`, which is the
-  `Display` of `KeyValue` except that `blk` drops its open timestamp, which
-  `scoped_eq` reads separately as the scope (`join::scope`). So the fields a
-  key carries but does not print take no part in a match: that is `iface`'s
-  index. And `blk`'s open timestamp, although printed, is compared only as a
-  scope, never as part of the identity.
+  `Display` of `KeyValue` with two exceptions. `blk` drops its open timestamp,
+  which `scoped_eq` reads separately as the scope (`join::scope`): although
+  printed, it is compared only as a scope, never as part of the identity. And
+  `iface` is compared by the kernel's index (`iface#<index>`,
+  `KeyValue::iface_identity`), by its name only when no index was known at the
+  read, and never by a sub-series written after a `/` in the name. `Display`
+  keeps the name, because the name is what a person reads. A reading's own
+  series -- the baseline `between` differences against -- is still every
+  field of the key, so two series of one interface never take each other's
+  previous value.
 - **Match kinds follow the key.** `mem` is matched by interval, and `blk` by
   scoped equality (`is_scoped`). `wakeup` and `woke` are refused on any key
   but `task`, which they follow from waker to wakee. Every other key is matched by plain equality.
@@ -26,14 +31,14 @@ Three rules govern how keys are compared, and they come before the list:
 |---|---|---|---|---|
 | `req` | `req:<id>` | user program to kernel, through the serving task | any hook that runs in that task | a hand-off to another thread; writeback |
 | `task` | `task:<tid>` | every mechanism: procfs, perf, eBPF, the shim | cpu migration, blocking, exec | exit, then reuse; work done by another task; a pid namespace |
-| `proc` | `proc:<pidns>+<pid>` | (produced by nothing yet) | | |
+| `proc` | `proc:<pidns>+<pid>` | containers: a pid namespace and the pid inside it | exec; the namespace's whole life | exit, then reuse; `setns` into another namespace |
 | `file` | `file:<dev>+<ino>` | descriptors, processes, the page cache | renames, hard links, reopening | btrfs subvolumes; inode reuse; the block layer |
 | `sock` | `sock:<cookie>` | softirq processing, `sock_diag` dumps | the socket's whole life | the peer; `accept`; leaving the machine |
 | `blk` | `blk:<ptr>@<open_ts>` | insert, issue and completion, across cpus and IRQ | pointer recycling after completion | reuse inside one plug; bio-based stacked devices |
 | `mem` | `mem:[<base>,<end>)` | allocator (user) to page fault (kernel) | address reuse between a free and the next alloc | a second address space; what a fault fills beyond its address |
 | `gpu` | `gpu:<fence_ctx>+<seqno>` | submitting task, scheduler thread, completion | fence pointer recycling | another fence context (never attached here) |
 | `cgroup` | `cgroup:<id>` | cgroup2 files, a container runtime, kernel programs | tasks moving in and out | deletion and re-creation |
-| `iface` | `iface:<name>` | driver, qdisc, stack, `af_packet`, netlink | nothing the name does not | a rename; another network namespace |
+| `iface` | `iface:<name>`, compared as `iface#<index>` | driver, qdisc, stack, `af_packet`, netlink, `/proc/net/dev` | a rename | deletion and re-creation; another network namespace |
 | `dev` | `dev:<major>+<minor>` | diskstats, the block layer, writeback | a device node's name changing | partition against whole disk; btrfs's anonymous device |
 | `cpu` | `cpu:<n>` | per-core counters, idle and frequency, IRQs | the whole run | a task (it does not follow one) |
 | `node` | `node:<n>` | where an allocation landed | the whole run | a page migrated later |
@@ -69,10 +74,19 @@ on whatever was running. **Processes are keyed `task:<pid>` too**
 (`src/collect/proc/status.rs`, `src/collect/mem/footprint.rs`), so a process's
 series and its main thread's carry the same key.
 
-**`proc`, a process across containers.** Declared so a pid would be
-unambiguous across pid namespaces. **Nothing produces it**, and no catalog
-entry lists it among its keys. `task` stands in, with the namespace limit
-given above.
+**`proc`, a process across containers.** The pid namespace a process lives
+in, by the inode `/proc/<pid>/ns/pid` names, and its pid inside that
+namespace, the last `NSpid` of `/proc/<pid>/status`
+(`KeyValue::proc_of`). Two containers' pid 1 are two keys, and a process is
+never its main thread, which `task:<pid>` is. Kept rather than removed because
+`CATALOG.md` ("The container trap") names it as the answer to `--cgroup` not
+being a pid filter. `KeyValue::proc_of` is the one way to make it, and **no
+collector calls it yet**: the per-process sources (`src/collect/proc/status.rs`,
+`src/collect/mem/footprint.rs`) are to carry it as a second key after `task`,
+and their catalog entries to list it (`docs/open-findings.md`, the sixteenth
+wave, stream engine). Until then `task` stands in, with the namespace limit
+given above. Reading the namespace link takes the access `ptrace` read does,
+so a process of another user has no `proc` key, and says so by having none.
 
 **`file`, device and inode.** From `inode->i_sb->s_dev` and `i_ino`, read at
 the VFS by `io.vfs`, `io.fsync` and `io.pagecache` (`src/collect/io/`). It
@@ -134,15 +148,37 @@ cgroup2 is also the id a kernel program reads for a task's cgroup
 not a task's, so it survives tasks moving in and out. It does not survive the
 group's deletion: a re-created group of the same path has a new id.
 
-**`iface`, a network interface.** Carries the kernel's index and the name, and
-prints the name only. By the first rule above, a join compares the name, and
-the index takes no part. Three consequences. A rename mid-run makes a second
-key, which the doc comment on `KeyValue::Iface` claims otherwise. The index is
-not always filled: `net.bytes` (`src/collect/net/dev.rs`) and `net.iface`
-leave it 0. And `net.iface` writes the counter kind into the name (`lo/drops`,
-`src/collect/net/iface.rs`), so it cannot be joined by `iface` to `net.qdisc`
-or `net.capture`, which write `lo`. The index is per network namespace, and
-the tool reads its own.
+**`iface`, a network interface.** Carries the kernel's index and the name,
+prints the name, and is compared by the index (`iface#<index>`). A producer
+that reads only a name -- `net.bytes` (`src/collect/net/dev.rs`) and
+`net.iface` (`src/collect/net/iface.rs`) read `/proc/net/dev` -- has the index
+filled from the name at the read (`KeyValue::iface`, `if_nametoindex`), while
+the interface exists. So a rename mid-run is one interface, and `net.iface`'s
+`lo/drops`, which carries its counter kind after a `/` for want of a
+sub-series, is `lo`: no Linux interface name holds a `/`, so everything before
+it is the interface. A key whose index stayed 0 -- the interface was gone at
+the read, or lives in another network namespace -- is compared by that name.
+Held by `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved`:
+`net.iface` and `net.bytes` of `lo` joined by `between`, credited at least
+what `/sys/class/net/lo/statistics` counted across the test's own burst and at
+most what it counted across the run; before, the two names matched nothing.
+A producer that carries the kernel's index (`net.qdisc`, `net.capture`,
+`net.hwts`) meets a named one by it: held by
+`join_engine::a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index`,
+`net.qdisc` against `net.iface`, which skips wherever lo queues nothing --
+lo is `noqueue` by default -- and so runs only on a machine whose lo was given
+a discipline that queues (`netem`).
+
+**The index is per network namespace**, and the identity does not say which.
+The tool resolves a name in its own namespace, but `net.qdisc` reads the
+packets of every namespace, and lo is 1 in each: measured, 2000 packets queued
+on the lo of an unprivileged namespace were all credited to this namespace's
+`iface:lo`. Until the kernel-side producers carry the namespace beside the
+index (filed, `docs/open-findings.md`, the sixteenth wave, stream engine), a
+join of a machine-wide interface source with a named one is sound only on a
+machine with one network namespace, or with the kernel-side source targeted at
+an interface that exists only in this one. A deleted and re-created interface
+has a new index, so it is a new key.
 
 **`dev`, a block device.** The major and minor as `/proc/diskstats` writes
 them (`src/collect/io/diskstats.rs`), as `request.part` holds them in the
@@ -168,5 +204,7 @@ kernel's NUMA balancing moves it.
 - **Machine-wide state has no key.** An `overlap` rule over it reads its
   `from` source as one series keyed `machine` (`join::MACHINE`). That is a
   rule's convention, not a `KeyKind`, and it is `TEMPORAL` by construction.
-- **The counter kind of `net.iface`** is carried in the key's name for want of
-  a sub-series. `docs/open-requests.md` has the request for one (line 3054).
+- **The counter kind of `net.iface`** is carried in the key's name, after a
+  `/`, for want of a sub-series. A join no longer sees it (the identity drops
+  it); a series still does. `docs/open-requests.md` has the request for a
+  sub-series (line 3054).

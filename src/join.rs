@@ -200,6 +200,22 @@ pub struct Rule {
     /// the drained `sched.futex` and `sched.offcpu` rows say they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stamped: Option<Stamped>,
+    /// The attribute of a `to` row that stands for several occurrences --
+    /// a drained bucket -- holding the length of a window, from the row's
+    /// stamp and in the direction `stamped` says, that encloses every one of
+    /// them, for an `overlap` match.
+    ///
+    /// `span` on such a row is a sum of durations that may lie anywhere in
+    /// the drain's interval, so by default the row has no window to place and
+    /// its amount is uncredited. Naming `enclosing` says which attribute is a
+    /// window rather than a sum: a row whose enclosing window lies inside one
+    /// interval is credited whole to it -- exactly, since every occurrence is
+    /// inside -- and one whose window crosses an interval's end stays
+    /// uncredited, in `unmatched` and `Readings::uncredited`, because how its
+    /// amount divides between the intervals is not known. A row of one
+    /// occurrence still uses `span`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enclosing: Option<String>,
     /// How many wakeup edges to follow back from a woken task. One by default:
     /// the task that released this one.
     ///
@@ -374,6 +390,11 @@ pub enum JoinError {
         attr: String,
         kind: String,
     },
+    #[error(
+        "rule `{id}` names `enclosing`, which only an `overlap` match reads: a `{match_kind}` \
+         match places no window, and a field it would ignore is refused rather than dropped"
+    )]
+    EnclosingOutsideOverlap { id: String, match_kind: MatchKind },
     #[error(
         "rule `{id}` reads `{attr}` off a `{kind}` event as the task it woke, and the event \
          carries no such attribute holding a task id"
@@ -689,7 +710,10 @@ struct States<K: Ord + Clone> {
     /// from.
     ages: std::collections::BTreeSet<(u64, K)>,
     stats: StateStats,
-    finished: Vec<Attribution>,
+    /// What the states that ended attributed, ranked as they end and held to
+    /// the rule's `top` rather than kept whole: the record of every state of
+    /// a run was most of the engine's memory, and linear in the run.
+    finished: Ranked,
     /// Whether a state that matched nothing is kept once it ends. Only a
     /// `wakeup` match reads one -- its chain counts every wakeup, matched or
     /// not -- and every other match drops it when it ranks, so keeping it
@@ -706,7 +730,7 @@ impl<K: Ord + Clone> States<K> {
             open: BTreeMap::new(),
             ages: std::collections::BTreeSet::new(),
             stats: StateStats::default(),
-            finished: Vec::new(),
+            finished: Ranked::new(rule),
             keep_unmatched: rule.match_kind == MatchKind::Wakeup,
             // A capacity of zero would bound nothing: the eviction finds no
             // victim and the map grows anyway.
@@ -807,7 +831,7 @@ impl<K: Ord + Clone> States<K> {
         }
     }
 
-    fn finish(mut self) -> (StateStats, Vec<Attribution>) {
+    fn finish(mut self) -> (StateStats, Ranked) {
         self.stats.still_open = self.open.len() as u64;
         self.ages.clear();
         for (_, state) in std::mem::take(&mut self.open) {
@@ -834,12 +858,7 @@ impl States<(String, u64)> {
     }
 }
 
-fn finish(
-    finished: &mut Vec<Attribution>,
-    state: OpenState,
-    closed_ns: Option<u64>,
-    outcome: Outcome,
-) {
+fn finish(finished: &mut Ranked, state: OpenState, closed_ns: Option<u64>, outcome: Outcome) {
     let (base, len) = match state.extent {
         Extent::Range { base, len } => (base, len),
         _ => (0, 0),
@@ -864,6 +883,12 @@ fn finish(
 /// costs the measurement. The engine asks it again for itself, so a caller that
 /// forgets cannot produce a wrong answer, only a late one.
 pub fn check(rule: &Rule) -> Result<(), JoinError> {
+    if rule.enclosing.is_some() && rule.match_kind != MatchKind::Overlap {
+        return Err(JoinError::EnclosingOutsideOverlap {
+            id: rule.id.clone(),
+            match_kind: rule.match_kind,
+        });
+    }
     let Some(via) = rule.via else {
         return match rule.match_kind {
             MatchKind::Overlap if rule.value.is_none() => Err(JoinError::NoShareValue {
@@ -1033,27 +1058,141 @@ pub fn apply_within(
     events: &[Event],
     windows: &BTreeMap<String, Watched>,
 ) -> Result<Correlation, JoinError> {
+    apply_merging(rule, &[events], windows)
+}
+
+/// `apply_within` over several streams -- one per collection -- merged by the
+/// engine as it walks them, rather than over one stream made by concatenating
+/// them.
+///
+/// Two streams merge here, and at an equal timestamp the order decides the
+/// answer: an allocation has to be open before a fault inside it can be
+/// attributed, and a wakeup before the work it released. Sorting the opening
+/// side first at each instant is the only ordering that cannot invent an
+/// unmatched event; at an equal instant and side, the earlier stream and then
+/// the earlier event come first, which is the order a stable sort of the
+/// streams laid end to end gives.
+///
+/// A stream already in that order is walked where it lies; one that is not is
+/// walked through an index of references to it, eight bytes an event, which is
+/// the one cost of the engine that grows with the run once its attributions
+/// are bounded (`Ranked`). The streams of a run are usually each in order and
+/// their concatenation is not, so handing them here apart is what keeps a
+/// run's joins from taking that index over the whole run. `woke` takes the
+/// index regardless, because the pairs it hands a decomposition borrow the
+/// events they pair.
+pub fn apply_merging(
+    rule: &Rule,
+    streams: &[&[Event]],
+    windows: &BTreeMap<String, Watched>,
+) -> Result<Correlation, JoinError> {
     check(rule)?;
     let mut watch = Watch::of(rule, windows);
+    let order = |event: &Event| (event.ts_ns, u8::from(event.kind != rule.from));
 
-    // Two streams merge here, and at an equal timestamp the order decides the
-    // answer: an allocation has to be open before a fault inside it can be
-    // attributed, and a wakeup before the work it released. Sorting the opening
-    // side first at each instant is the only ordering that cannot invent an
-    // unmatched event.
-    let mut ordered: Vec<&Event> = events.iter().collect();
-    ordered.sort_by_key(|event| (event.ts_ns, u8::from(event.kind != rule.from)));
+    // The streams out of order, indexed; the others walked where they lie.
+    let indexed: Vec<Option<Vec<&Event>>> = streams
+        .iter()
+        .map(|events| {
+            let in_order = events
+                .windows(2)
+                .all(|pair| order(&pair[0]) <= order(&pair[1]));
+            (!in_order).then(|| {
+                let mut ordered: Vec<&Event> = events.iter().collect();
+                ordered.sort_by_key(|event| order(event));
+                ordered
+            })
+        })
+        .collect();
+    let cursors: Vec<Cursor<'_>> = streams
+        .iter()
+        .zip(&indexed)
+        .map(|(events, index)| match index {
+            Some(index) => Cursor::Refs(index),
+            None => Cursor::Events(events),
+        })
+        .collect();
+    let merged = Merged {
+        cursors,
+        from: &rule.from,
+    };
 
     let mut correlation = match rule.match_kind {
-        MatchKind::Interval => interval(rule, &ordered, &mut watch),
-        MatchKind::Eq | MatchKind::ScopedEq => keyed(rule, &ordered, &mut watch),
-        MatchKind::Wakeup => wakeup(rule, &ordered, &mut watch),
-        MatchKind::Between => between(rule, &ordered, &mut watch),
-        MatchKind::Woke => woke(rule, &ordered, &mut watch).map(|(correlation, _)| correlation),
-        MatchKind::Overlap => overlap(rule, &ordered, &mut watch),
+        MatchKind::Woke => {
+            let ordered: Vec<&Event> = merged.collect();
+            woke(rule, &ordered, &mut watch).map(|(correlation, _)| correlation)
+        }
+        match_kind => walk(match_kind, rule, merged, &mut watch),
     }?;
     correlation.outside_window = watch.outside;
     Ok(correlation)
+}
+
+/// What is left of one stream to walk, in the engine's order.
+#[derive(Clone, Copy)]
+enum Cursor<'a> {
+    Events(&'a [Event]),
+    Refs(&'a [&'a Event]),
+}
+
+impl<'a> Cursor<'a> {
+    fn head(&self) -> Option<&'a Event> {
+        match self {
+            Cursor::Events(events) => events.first(),
+            Cursor::Refs(refs) => refs.first().copied(),
+        }
+    }
+
+    fn advance(&mut self) {
+        match self {
+            Cursor::Events(events) => *events = &events[1..],
+            Cursor::Refs(refs) => *refs = &refs[1..],
+        }
+    }
+}
+
+/// Several streams, each in the engine's order, walked as one: at each step
+/// the stream whose next event comes first, the earlier stream on a tie. Its
+/// state is a cursor per stream, so a match that walks the input twice clones
+/// it rather than the events.
+#[derive(Clone)]
+struct Merged<'a, 'r> {
+    cursors: Vec<Cursor<'a>>,
+    from: &'r str,
+}
+
+impl<'a> Iterator for Merged<'a, '_> {
+    type Item = &'a Event;
+
+    fn next(&mut self) -> Option<&'a Event> {
+        let from = self.from;
+        let order = |event: &Event| (event.ts_ns, u8::from(event.kind != from));
+        let (at, event) = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(at, cursor)| cursor.head().map(|event| (at, event)))
+            .min_by_key(|(at, event)| (order(event), *at))?;
+        self.cursors[at].advance();
+        Some(event)
+    }
+}
+
+/// One match over a stream already in the engine's order.
+fn walk<'a>(
+    match_kind: MatchKind,
+    rule: &Rule,
+    events: impl Iterator<Item = &'a Event> + Clone,
+    watch: &mut Watch,
+) -> Result<Correlation, JoinError> {
+    match match_kind {
+        MatchKind::Interval => interval(rule, events, watch),
+        MatchKind::Eq | MatchKind::ScopedEq => keyed(rule, events, watch),
+        MatchKind::Wakeup => wakeup(rule, events, watch),
+        MatchKind::Between => between(rule, events, watch),
+        MatchKind::Overlap => overlap(rule, events, watch),
+        MatchKind::Woke => unreachable!("`woke` is walked over its references"),
+    }
 }
 
 /// When the `from` source was watching, as one match walks the stream.
@@ -1119,7 +1258,11 @@ impl Watch {
 
 /// An address inside a range: the match that attributes a page fault to the
 /// allocation that owns the page.
-fn interval(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
+fn interval<'a>(
+    rule: &Rule,
+    events: impl Iterator<Item = &'a Event> + Clone,
+    watch: &mut Watch,
+) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let mut states: States<u64> = States::new(rule);
     let (mut matched, mut unmatched) = (0u64, 0u64);
@@ -1197,7 +1340,11 @@ fn interval(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correla
 /// arrives after its request was freed and the pointer reissued carries the
 /// scope of the request it belongs to, so under `scoped_eq` it does not match
 /// and is counted; under `eq` it lands on a stranger.
-fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
+fn keyed<'a>(
+    rule: &Rule,
+    events: impl Iterator<Item = &'a Event> + Clone,
+    watch: &mut Watch,
+) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let scoped = rule.match_kind == MatchKind::ScopedEq;
     let mut states: States<String> = States::new(rule);
@@ -1218,7 +1365,11 @@ fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlatio
                 continue;
             }
             if opens(rule, event) {
-                let label = if scoped { key.to_string() } else { id.clone() };
+                let label = if scoped {
+                    key.to_string()
+                } else {
+                    label_of(key)
+                };
                 let collapsed = scoped
                     && states.open.get(&id).is_some_and(
                         |open| matches!(open.extent, Extent::Scope(held) if held == scope(key)),
@@ -1282,7 +1433,11 @@ fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlatio
 /// whatever task they interrupted, so a waker can be a task that had nothing to
 /// do with it, and a waker of zero is the idle task rather than a task at all.
 /// The evidence level says so, and the chain names what it found.
-fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
+fn wakeup<'a>(
+    rule: &Rule,
+    events: impl Iterator<Item = &'a Event> + Clone,
+    watch: &mut Watch,
+) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let Some(attr) = rule.waker.as_deref() else {
         return Err(JoinError::NoWakerAttribute {
@@ -1395,7 +1550,11 @@ fn wakeup(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlati
 /// interval is the finest thing the clock can tell apart -- splitting a change
 /// between four states that opened in it would be inventing a precision the
 /// evidence does not have.
-fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
+fn between<'a>(
+    rule: &Rule,
+    events: impl Iterator<Item = &'a Event> + Clone,
+    watch: &mut Watch,
+) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
     let Some(attr) = rule.value.as_deref() else {
         return Err(JoinError::NoValueAttribute {
@@ -1409,7 +1568,6 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
     let mut states: States<(String, u64)> = States::new(rule);
     let mut arrived = 0u64;
     let mut last: BTreeMap<String, (u64, f64)> = BTreeMap::new();
-    let mut intervals: Vec<Attribution> = Vec::new();
     let (mut matched, mut unmatched) = (0u64, 0u64);
     let mut readings = Readings {
         value: attr.to_owned(),
@@ -1432,9 +1590,9 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
             if closing || opens(rule, event) {
                 arrived += 1;
                 states.insert(
-                    (key.to_string(), arrived),
+                    (identity(key), arrived),
                     OpenState {
-                        label: key.to_string(),
+                        label: label_of(key),
                         extent: Extent::Change { opening: !closing },
                         opened_ns: event.ts_ns,
                         matched: 0,
@@ -1455,6 +1613,11 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
                 keyless += 1;
                 continue;
             };
+            // The states are filed under the identity, which is what the two
+            // sides share; the reading's own baseline is its series, every
+            // field of the key, so two series of one interface -- a rename,
+            // or two counter kinds -- never take each other's previous value.
+            let id = identity(key);
             let key = key.to_string();
             let value = event
                 .attr(attr)
@@ -1465,7 +1628,7 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
                     kind: event.kind.clone(),
                 })?;
 
-            let pending = states.take_key(&key);
+            let pending = states.take_key(&id);
             let (opened, closed) =
                 pending
                     .iter()
@@ -1502,7 +1665,7 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
             }
             matched += 1;
             readings.credited += delta;
-            intervals.push(Attribution {
+            states.finished.push(Attribution {
                 key,
                 base: 0,
                 len: 0,
@@ -1521,7 +1684,7 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
     }
 
     watch.finish(&mut states);
-    let mut correlation = assemble_with(rule, matched, unmatched, states, intervals);
+    let mut correlation = assemble(rule, matched, unmatched, states);
     correlation.keyless = keyless;
     correlation.readings = Some(readings);
     Ok(correlation)
@@ -1715,7 +1878,11 @@ struct Covered {
 /// Read after the fact rather than as the stream arrives, because an interval
 /// ends at the reading that closes it, and a window that began inside it has
 /// usually ended before that reading comes.
-fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlation, JoinError> {
+fn overlap<'a>(
+    rule: &Rule,
+    events: impl Iterator<Item = &'a Event> + Clone,
+    watch: &mut Watch,
+) -> Result<Correlation, JoinError> {
     let Some(attr) = rule.value.as_deref() else {
         return Err(JoinError::NoShareValue {
             id: rule.id.clone(),
@@ -1736,9 +1903,9 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
     // refused by name before anything is credited.
     if rule.via.is_none() {
         let series: BTreeSet<String> = events
-            .iter()
+            .clone()
             .filter(|event| event.kind == rule.from && opens(rule, event))
-            .map(|event| all_keys(event))
+            .map(all_keys)
             .collect();
         if series.len() > 1 {
             return Err(JoinError::SeveralSeries {
@@ -1750,16 +1917,23 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         }
     }
 
-    // The intervals each key's readings cover, in the order they ended.
+    // The intervals each key's readings cover, in the order they ended, and
+    // what a row calls each key.
     let mut last: BTreeMap<String, u64> = BTreeMap::new();
     let mut intervals: BTreeMap<String, Vec<Covered>> = BTreeMap::new();
-    for event in events.iter().filter(|event| event.kind == rule.from) {
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    for event in events.clone().filter(|event| event.kind == rule.from) {
         let Some(key) = series_of(rule, event) else {
             return Err(missing_key(rule, event));
         };
         if !opens(rule, event) {
             continue;
         }
+        labels.entry(key.clone()).or_insert_with(|| {
+            rule.via
+                .and_then(|via| event.key(via))
+                .map_or_else(|| key.clone(), label_of)
+        });
         let stated = event
             .attr("interval_ns")
             .and_then(AttrValue::as_f64)
@@ -1792,7 +1966,7 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         .collect();
 
     let (mut matched, mut unmatched, mut keyless) = (0u64, 0u64, 0u64);
-    for event in events.iter().filter(|event| event.kind == rule.to) {
+    for event in events.filter(|event| event.kind == rule.to) {
         if watch.outside(event.ts_ns) {
             continue;
         }
@@ -1826,8 +2000,44 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         // unmatched and its amount uncredited, rather than spread over an
         // interval it may not have occupied.
         if several(event) {
-            unmatched += 1;
-            readings.uncredited += value;
+            let Some(enclosing) = rule.enclosing.as_deref() else {
+                unmatched += 1;
+                readings.uncredited += value;
+                continue;
+            };
+            let length = event
+                .attr(enclosing)
+                .and_then(AttrValue::as_f64)
+                .ok_or_else(|| JoinError::MissingSpan {
+                    id: rule.id.clone(),
+                    attr: enclosing.to_owned(),
+                    kind: event.kind.clone(),
+                })?
+                .max(0.0) as u64;
+            let (start_ns, end_ns) = match rule.stamped.unwrap_or(Stamped::End) {
+                Stamped::End => (event.ts_ns.saturating_sub(length), event.ts_ns),
+                Stamped::Start => (event.ts_ns, event.ts_ns.saturating_add(length)),
+            };
+            // The one interval that holds the whole window, `(start, end]`,
+            // if any: intervals of one series do not overlap, so the first
+            // that ends at or after the window's end is the only candidate.
+            let holder = intervals.get_mut(&key).and_then(|list| {
+                let first = list.partition_point(|covered| covered.end_ns < end_ns);
+                list.get_mut(first)
+                    .filter(|covered| covered.start_ns <= start_ns)
+            });
+            match holder {
+                Some(covered) => {
+                    covered.credited += value;
+                    covered.events += 1;
+                    matched += 1;
+                    readings.credited += value;
+                }
+                None => {
+                    unmatched += 1;
+                    readings.uncredited += value;
+                }
+            }
             continue;
         }
         let (start_ns, end_ns) = match rule.stamped.unwrap_or(Stamped::End) {
@@ -1874,14 +2084,14 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
     }
 
     let mut states: States<u8> = States::new(rule);
-    let mut attributed = Vec::new();
     for (key, list) in intervals {
         states.stats.peak_open += 1;
+        let label = labels.get(&key).cloned().unwrap_or(key);
         for covered in list {
             states.stats.opened += 1;
             states.stats.closed += 1;
-            attributed.push(Attribution {
-                key: key.clone(),
+            states.finished.push(Attribution {
+                key: label.clone(),
                 base: 0,
                 len: 0,
                 opened_ns: covered.start_ns,
@@ -1897,7 +2107,7 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
             });
         }
     }
-    let mut correlation = assemble_with(rule, matched, unmatched, states, attributed);
+    let mut correlation = assemble(rule, matched, unmatched, states);
     correlation.keyless = keyless;
     correlation.readings = Some(readings);
     Ok(correlation)
@@ -2017,53 +2227,8 @@ fn assemble<K: Ord + Clone>(
     unmatched: u64,
     states: States<K>,
 ) -> Correlation {
-    assemble_with(rule, matched, unmatched, states, Vec::new())
-}
-
-/// Assembles a correlation from the states and any attributions a match
-/// produced outside them, which `between`'s intervals are.
-fn assemble_with<K: Ord + Clone>(
-    rule: &Rule,
-    matched: u64,
-    unmatched: u64,
-    states: States<K>,
-    extra: Vec<Attribution>,
-) -> Correlation {
-    let (stats, mut finished) = states.finish();
-    finished.extend(extra);
-    match rule.match_kind {
-        MatchKind::Wakeup => finished = by_chain(finished),
-        MatchKind::Woke => finished = by_waker(finished),
-        _ => {}
-    }
-    finished.retain(|attribution| attribution.matched > 0);
-    if matches!(rule.match_kind, MatchKind::Between | MatchKind::Overlap) {
-        // The heaviest interval is the one the total moved most in, either
-        // way: a free that gave 32 MiB back is as much the answer as the
-        // allocation that took it.
-        let size = |attribution: &Attribution| {
-            attribution
-                .change
-                .as_ref()
-                .map_or(0.0, |change| change.delta.abs())
-        };
-        finished.sort_by(|left, right| {
-            size(right)
-                .total_cmp(&size(left))
-                .then(left.opened_ns.cmp(&right.opened_ns))
-        });
-    } else {
-        finished.sort_by(|left, right| {
-            right
-                .matched
-                .cmp(&left.matched)
-                .then(right.wakeups.cmp(&left.wakeups))
-                .then(left.base.cmp(&right.base))
-                .then_with(|| left.key.cmp(&right.key))
-        });
-    }
-    let total_attributed = finished.iter().map(|attribution| attribution.matched).sum();
-    finished.truncate(rule.top);
+    let (stats, ranked) = states.finish();
+    let (finished, total_attributed) = ranked.into_top();
 
     let evidence = evidence(rule);
     // Only `eq` chooses among a key's successive states by the clock.
@@ -2097,85 +2262,188 @@ fn assemble_with<K: Ord + Clone>(
     }
 }
 
-/// Folds a `woke` join's pairs into one row per label -- per waker, when the
-/// rule names one.
+/// How the attributions of one rule are ranked, and how many are kept.
+enum Ranking {
+    /// `wakeup`: folded into one row per chain as they end, unmatched
+    /// wakeups included, since a chain counts every wakeup.
+    Chain,
+    /// `woke`: folded into one row per waker, matched pairs only.
+    Waker,
+    /// `between` and `overlap`: the heaviest change first, either way.
+    Magnitude,
+    /// Every other match: the most matched first.
+    Matched,
+}
+
+/// The attributions of one rule as its states end, bounded.
+///
+/// A folding match keeps one row per label, which is bounded by the labels
+/// (chains, wakers) and not by the run. A ranking match keeps the rows that
+/// can still be among the rule's `top`: once the buffer reaches twice that
+/// (and at least [`RANKED_BUFFER`]), it is sorted and cut back to `top`.
+/// That is exact: the final sort is stable, every cut is the same stable sort,
+/// and a row cut once can never rise above the `top` rows that outranked it.
+/// What `total_attributed` counts is summed as rows arrive, so the cut costs
+/// it nothing.
+struct Ranked {
+    ranking: Ranking,
+    top: usize,
+    rows: Vec<Attribution>,
+    folded: BTreeMap<String, Attribution>,
+    attributed: u64,
+}
+
+/// The fewest rows a ranking match buffers before it cuts back to `top`.
+const RANKED_BUFFER: usize = 1024;
+
+impl Ranked {
+    fn new(rule: &Rule) -> Self {
+        Self {
+            ranking: match rule.match_kind {
+                MatchKind::Wakeup => Ranking::Chain,
+                MatchKind::Woke => Ranking::Waker,
+                MatchKind::Between | MatchKind::Overlap => Ranking::Magnitude,
+                _ => Ranking::Matched,
+            },
+            top: rule.top,
+            rows: Vec::new(),
+            folded: BTreeMap::new(),
+            attributed: 0,
+        }
+    }
+
+    fn push(&mut self, attribution: Attribution) {
+        match self.ranking {
+            Ranking::Chain => fold_chain(&mut self.folded, attribution),
+            Ranking::Waker if attribution.matched > 0 => {
+                fold_waker(&mut self.folded, attribution);
+            }
+            Ranking::Waker => {}
+            Ranking::Magnitude | Ranking::Matched if attribution.matched > 0 => {
+                self.attributed += attribution.matched;
+                self.rows.push(attribution);
+                if self.rows.len() >= (2 * self.top).max(RANKED_BUFFER) {
+                    self.cut();
+                }
+            }
+            Ranking::Magnitude | Ranking::Matched => {}
+        }
+    }
+
+    fn cut(&mut self) {
+        match self.ranking {
+            Ranking::Magnitude => {
+                // The heaviest interval is the one the total moved most in,
+                // either way: a free that gave 32 MiB back is as much the
+                // answer as the allocation that took it.
+                let size = |attribution: &Attribution| {
+                    attribution
+                        .change
+                        .as_ref()
+                        .map_or(0.0, |change| change.delta.abs())
+                };
+                self.rows.sort_by(|left, right| {
+                    size(right)
+                        .total_cmp(&size(left))
+                        .then(left.opened_ns.cmp(&right.opened_ns))
+                });
+            }
+            _ => self.rows.sort_by(|left, right| {
+                right
+                    .matched
+                    .cmp(&left.matched)
+                    .then(right.wakeups.cmp(&left.wakeups))
+                    .then(left.base.cmp(&right.base))
+                    .then_with(|| left.key.cmp(&right.key))
+            }),
+        }
+        self.rows.truncate(self.top);
+    }
+
+    /// The rule's `top` rows, ranked, and what every row attributed.
+    fn into_top(mut self) -> (Vec<Attribution>, u64) {
+        if matches!(self.ranking, Ranking::Chain | Ranking::Waker) {
+            self.rows = std::mem::take(&mut self.folded)
+                .into_values()
+                .filter(|attribution| attribution.matched > 0)
+                .collect();
+            self.attributed = self.rows.iter().map(|row| row.matched).sum();
+        }
+        self.cut();
+        (self.rows, self.attributed)
+    }
+}
+
+/// Folds one of a `woke` join's pairs into its label's row -- its waker's,
+/// when the rule names one.
 ///
 /// Counted over the pairs, spanning the earliest close to the latest wakeup,
 /// and carrying in `change` what a reader of this match wants summed: the time
 /// from each close to the wakeup that followed it, in `delta`, over `opened`
 /// closes of which `closed` were woken -- the same number here, since a state
 /// that no wakeup ended is not folded.
-fn by_waker(finished: Vec<Attribution>) -> Vec<Attribution> {
-    let mut folded: BTreeMap<String, Attribution> = BTreeMap::new();
-    for attribution in finished.into_iter().filter(|a| a.matched > 0) {
-        let waited = attribution
-            .closed_ns
-            .map_or(0, |closed| closed.saturating_sub(attribution.opened_ns))
-            as f64;
-        match folded.get_mut(&attribution.key) {
-            None => {
-                let key = attribution.key.clone();
-                folded.insert(
-                    key,
-                    Attribution {
-                        wakeups: Some(1),
-                        change: Some(Change {
-                            delta: waited,
-                            opened: 1,
-                            closed: 1,
-                        }),
-                        ..attribution
-                    },
-                );
+fn fold_waker(folded: &mut BTreeMap<String, Attribution>, attribution: Attribution) {
+    let waited = attribution
+        .closed_ns
+        .map_or(0, |closed| closed.saturating_sub(attribution.opened_ns)) as f64;
+    match folded.get_mut(&attribution.key) {
+        None => {
+            let key = attribution.key.clone();
+            folded.insert(
+                key,
+                Attribution {
+                    wakeups: Some(1),
+                    change: Some(Change {
+                        delta: waited,
+                        opened: 1,
+                        closed: 1,
+                    }),
+                    ..attribution
+                },
+            );
+        }
+        Some(row) => {
+            row.matched += attribution.matched;
+            row.wakeups = row.wakeups.map(|pairs| pairs + 1);
+            if let Some(change) = row.change.as_mut() {
+                change.delta += waited;
+                change.opened += 1;
+                change.closed += 1;
             }
-            Some(row) => {
-                row.matched += attribution.matched;
-                row.wakeups = row.wakeups.map(|pairs| pairs + 1);
-                if let Some(change) = row.change.as_mut() {
-                    change.delta += waited;
-                    change.opened += 1;
-                    change.closed += 1;
-                }
-                row.opened_ns = row.opened_ns.min(attribution.opened_ns);
-                row.closed_ns = row.closed_ns.max(attribution.closed_ns);
-            }
+            row.opened_ns = row.opened_ns.min(attribution.opened_ns);
+            row.closed_ns = row.closed_ns.max(attribution.closed_ns);
         }
     }
-    folded.into_values().collect()
 }
 
-/// Folds a wakeup join's attributions into one row per chain.
+/// Folds one wakeup's attribution into its chain's row.
 ///
 /// Summed over the events, counted over the wakeups, spanning from the
 /// earliest wakeup to the latest end, and ending the way the latest wakeup
 /// did: the chain is the thing a reader ranks, and the individual wakeups are
 /// what it is made of.
-fn by_chain(finished: Vec<Attribution>) -> Vec<Attribution> {
-    let mut chains: BTreeMap<String, Attribution> = BTreeMap::new();
-    for attribution in finished {
-        match chains.get_mut(&attribution.key) {
-            None => {
-                let key = attribution.key.clone();
-                chains.insert(
-                    key,
-                    Attribution {
-                        wakeups: Some(1),
-                        ..attribution
-                    },
-                );
+fn fold_chain(chains: &mut BTreeMap<String, Attribution>, attribution: Attribution) {
+    match chains.get_mut(&attribution.key) {
+        None => {
+            let key = attribution.key.clone();
+            chains.insert(
+                key,
+                Attribution {
+                    wakeups: Some(1),
+                    ..attribution
+                },
+            );
+        }
+        Some(chain) => {
+            chain.matched += attribution.matched;
+            chain.wakeups = chain.wakeups.map(|wakeups| wakeups + 1);
+            if attribution.opened_ns >= chain.opened_ns {
+                chain.outcome = attribution.outcome;
             }
-            Some(chain) => {
-                chain.matched += attribution.matched;
-                chain.wakeups = chain.wakeups.map(|wakeups| wakeups + 1);
-                if attribution.opened_ns >= chain.opened_ns {
-                    chain.outcome = attribution.outcome;
-                }
-                chain.opened_ns = chain.opened_ns.min(attribution.opened_ns);
-                chain.closed_ns = chain.closed_ns.max(attribution.closed_ns);
-            }
+            chain.opened_ns = chain.opened_ns.min(attribution.opened_ns);
+            chain.closed_ns = chain.closed_ns.max(attribution.closed_ns);
         }
     }
-    chains.into_values().collect()
 }
 
 /// What a match of this kind, on a key of this kind, is worth.
@@ -2212,6 +2480,22 @@ fn stands_for_many(event: &Event) -> bool {
 fn identity(key: &KeyValue) -> String {
     match key {
         KeyValue::Blk { ptr, .. } => format!("blk:{ptr:#x}"),
+        KeyValue::Iface { .. } => key.iface_identity().expect("an iface key has an identity"),
+        other => other.to_string(),
+    }
+}
+
+/// What a row names a state by: the key as a person reads it, less what the
+/// identity leaves out. A block request without its open timestamp, and an
+/// interface by its name -- not the index the identity compares, and not the
+/// sub-series a producer wrote after it.
+fn label_of(key: &KeyValue) -> String {
+    match key {
+        KeyValue::Blk { .. } => identity(key),
+        KeyValue::Iface { .. } => format!(
+            "iface:{}",
+            key.iface_name().expect("an iface key has a name")
+        ),
         other => other.to_string(),
     }
 }
@@ -2277,7 +2561,7 @@ pub const MACHINE: &str = "machine";
 /// one series when the rule names none. `None` is an event without the key.
 fn series_of(rule: &Rule, event: &Event) -> Option<String> {
     match rule.via {
-        Some(via) => event.key(via).map(ToString::to_string),
+        Some(via) => event.key(via).map(identity),
         None => Some(MACHINE.to_owned()),
     }
 }
@@ -3687,6 +3971,7 @@ mod tests {
             woken: None,
             span: None,
             stamped: None,
+            enclosing: None,
             depth: None,
             value: None,
             reading: None,
@@ -4031,6 +4316,7 @@ mod tests {
             woken: None,
             span: None,
             stamped: None,
+            enclosing: None,
             depth: None,
             value: None,
             reading: None,
@@ -4062,6 +4348,122 @@ mod tests {
         assert_eq!(correlation.top[0].matched, 2);
         assert_eq!(correlation.top[1].key, "task:9");
         assert_eq!(correlation.top[1].matched, 1);
+        states_balance(&correlation);
+    }
+
+    /// The streams of a run walked apart, as `assemble` collects them: each
+    /// in order, their concatenation not. The answer is the one worked out by
+    /// hand -- a descriptor at the instant its thread's state opens is inside
+    /// it, one before it is not -- whichever stream comes first, whether a
+    /// stream is out of order itself, and the same as over one sorted stream.
+    #[test]
+    fn streams_walked_apart_meet_in_the_engines_order() {
+        let opened = vec![threads(10, 7), threads(20, 9), threads(30, 7)];
+        let looked_up = vec![
+            descriptors(10, 7),
+            descriptors(15, 9),
+            descriptors(20, 9),
+            descriptors(31, 7),
+        ];
+        let windows = BTreeMap::new();
+        let merged = apply_merging(&eq_rule(), &[&opened, &looked_up], &windows).unwrap();
+        assert_eq!((merged.matched, merged.unmatched), (3, 1));
+        states_balance(&merged);
+
+        let reversed = apply_merging(&eq_rule(), &[&looked_up, &opened], &windows).unwrap();
+        assert_eq!(reversed, merged);
+        let mut shuffled = looked_up.clone();
+        shuffled.reverse();
+        let indexed = apply_merging(&eq_rule(), &[&opened, &shuffled], &windows).unwrap();
+        assert_eq!(indexed, merged);
+        let concatenated: Vec<Event> = looked_up.iter().chain(&opened).cloned().collect();
+        assert_eq!(apply(&eq_rule(), &concatenated).unwrap(), merged);
+    }
+
+    fn link(ts_ns: u64, kind: &str, key: KeyValue, value: u64) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: kind.to_owned(),
+            keys: vec![key],
+            attrs: vec![Attr::uint("bytes", value), Attr::uint("frames", value)],
+            collector_id: CollectorId::new(kind),
+            seq: 0,
+        }
+    }
+
+    /// An interface is one key by the kernel's index, whatever its name says:
+    /// `net.iface`'s `lo/drops` is `lo`, a rename mid-run is still the same
+    /// interface, and the same name on another index is another one. With no
+    /// index known at the read, the name before its sub-series is compared.
+    #[test]
+    fn an_interface_is_one_key_by_its_index_across_a_rename_and_a_sub_series() {
+        let mut rule = eq_rule();
+        rule.via = Some(KeyKind::Iface);
+        rule.from = "net.iface".to_owned();
+        rule.to = "net.qdisc".to_owned();
+        let events = vec![
+            link(10, "net.iface", KeyValue::iface_as_given(1, "lo/drops"), 0),
+            link(
+                11,
+                "net.iface",
+                KeyValue::iface_as_given(0, "veth9/errors"),
+                0,
+            ),
+            link(20, "net.qdisc", KeyValue::iface_as_given(1, "lo"), 1),
+            // Renamed after the state opened: one interface, one key.
+            link(21, "net.qdisc", KeyValue::iface_as_given(1, "renamed"), 1),
+            // The same name on another index is another interface.
+            link(22, "net.qdisc", KeyValue::iface_as_given(2, "lo"), 1),
+            link(23, "net.qdisc", KeyValue::iface_as_given(0, "veth9"), 1),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        assert_eq!((correlation.matched, correlation.unmatched), (3, 1));
+        let keys: Vec<(&str, u64)> = correlation
+            .top
+            .iter()
+            .map(|row| (row.key.as_str(), row.matched))
+            .collect();
+        assert_eq!(keys, vec![("iface:lo", 2), ("iface:veth9", 1)]);
+        states_balance(&correlation);
+    }
+
+    /// Under `between`, the states are the interface's and the baseline is the
+    /// reading's own series: two series of one interface each start from their
+    /// own previous value, and both are credited to the state of the interface.
+    #[test]
+    fn a_reading_of_an_interface_keeps_its_own_baseline_and_shares_the_interfaces_states() {
+        let mut rule = between_rule();
+        rule.via = Some(KeyKind::Iface);
+        rule.from = "net.iface".to_owned();
+        rule.to = "net.bytes".to_owned();
+        rule.opens = None;
+        rule.closes = None;
+        rule.reading = Some(Reading::Level);
+        let events = vec![
+            link(0, "net.bytes", KeyValue::iface_as_given(1, "lo"), 100),
+            link(
+                0,
+                "net.bytes",
+                KeyValue::iface_as_given(1, "lo/other"),
+                5000,
+            ),
+            link(50, "net.iface", KeyValue::iface_as_given(1, "lo/drops"), 0),
+            link(100, "net.bytes", KeyValue::iface_as_given(1, "lo"), 130),
+            link(
+                100,
+                "net.bytes",
+                KeyValue::iface_as_given(1, "lo/other"),
+                5007,
+            ),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        let readings = correlation.readings.as_ref().unwrap();
+        assert_eq!(readings.baselines, 2, "one baseline per series");
+        // The first reading at 100 takes the state; the second finds none.
+        assert_eq!(readings.credited, 30.0);
+        assert_eq!(readings.uncredited, 7.0);
+        assert_eq!(correlation.top[0].key, "iface:lo");
         states_balance(&correlation);
     }
 
@@ -4121,6 +4523,7 @@ mod tests {
             woken: None,
             span: None,
             stamped: None,
+            enclosing: None,
             depth: None,
             value: None,
             reading: None,
@@ -4236,6 +4639,7 @@ mod tests {
             woken: None,
             span: None,
             stamped: None,
+            enclosing: None,
             depth: None,
             value: None,
             reading: None,
@@ -4573,6 +4977,72 @@ mod tests {
         }
     }
 
+    /// A drained row of several episodes, stamped when its first began, with
+    /// the sum of their durations and the window that encloses them all.
+    fn drained(ts_ns: u64, tid: i32, count: u64, total_ns: u64, enclosing_ns: u64) -> Event {
+        let mut event = blocked(ts_ns, tid, total_ns);
+        event.attrs.push(Attr::uint("count", count));
+        event.attrs.push(Attr::uint("enclosing_ns", enclosing_ns));
+        event
+    }
+
+    /// The rule says which attribute of a drained row is a window rather
+    /// than a sum: with `enclosing`, a row whose episodes all lie inside one
+    /// interval is credited whole to it, and one whose window crosses an
+    /// interval's end stays uncredited -- as every such row does without it.
+    #[test]
+    fn a_drained_row_is_credited_whole_to_the_one_interval_that_encloses_it() {
+        let mut rule = overlap_rule();
+        rule.stamped = Some(Stamped::Start);
+        let events = vec![
+            polled(100, 7),
+            polled(200, 7),
+            polled(300, 7),
+            // Three episodes summing 30 inside [110, 190]: in (100, 200].
+            drained(110, 7, 3, 30, 80),
+            // Two summing 20 inside [180, 240]: across the reading at 200.
+            drained(180, 7, 2, 20, 60),
+            // One episode: its own span, as ever. [210, 220] in (200, 300].
+            blocked(210, 7, 10),
+        ];
+        let summed = apply(&rule, &events).unwrap();
+        let readings = summed.readings.as_ref().unwrap();
+        assert_eq!((readings.credited, readings.uncredited), (10.0, 50.0));
+        assert_eq!((summed.matched, summed.unmatched), (1, 2));
+
+        rule.enclosing = Some("enclosing_ns".to_owned());
+        let enclosed = apply(&rule, &events).unwrap();
+        let readings = enclosed.readings.as_ref().unwrap();
+        assert_eq!((readings.credited, readings.uncredited), (40.0, 20.0));
+        assert_eq!((enclosed.matched, enclosed.unmatched), (2, 1));
+        let credit = |start: u64| {
+            enclosed
+                .top
+                .iter()
+                .find(|row| row.opened_ns == start)
+                .and_then(|row| row.change.as_ref())
+                .map(|change| change.delta)
+        };
+        assert_eq!(credit(100), Some(30.0));
+        assert_eq!(credit(200), Some(10.0));
+
+        // A row without the attribute the rule names is the session's
+        // mistake, as a missing `span` is.
+        let mut bare = blocked(150, 7, 5);
+        bare.attrs.push(Attr::uint("count", 2));
+        let error = apply(&rule, &[polled(100, 7), polled(200, 7), bare]).unwrap_err();
+        assert!(matches!(error, JoinError::MissingSpan { .. }), "{error}");
+
+        // And a match that places no window refuses the field.
+        let mut keyed = eq_rule();
+        keyed.enclosing = Some("enclosing_ns".to_owned());
+        let error = apply(&keyed, &[]).unwrap_err();
+        assert!(
+            matches!(error, JoinError::EnclosingOutsideOverlap { .. }),
+            "{error}"
+        );
+    }
+
     /// A block of 250 across readings 100 apart is split by the share of it
     /// each reading's interval holds, and what lies before the first reading
     /// is uncredited rather than given to it.
@@ -4623,6 +5093,7 @@ mod tests {
         let rule = Rule {
             span: None,
             stamped: None,
+            enclosing: None,
             ..overlap_rule()
         };
         let events = vec![
@@ -4888,6 +5359,7 @@ mod tests {
             woken: None,
             span: None,
             stamped: None,
+            enclosing: None,
             depth: None,
             value: Some("bytes".to_owned()),
             reading: Some(Reading::Level),

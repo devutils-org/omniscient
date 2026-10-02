@@ -1,0 +1,59 @@
+# A packet's wait in a queueing discipline, laid across the readings of its
+# interface's link counters: two producers of one key that name it two ways.
+#
+#   omn -f examples/join-iface-qdisc.yml
+#
+# `net.qdisc` reads the interface off the packet in the kernel and carries its
+# index (`iface:lo`, index 1, as the kernel numbers it). `net.iface` reads
+# `/proc/net/dev`, which names interfaces only, and keeps one series per kind
+# of counter (`iface:lo/drops`). A join compares an `iface` key by the kernel's
+# index -- resolved from the name at the read when a producer has only the
+# name, and a name's sub-series after `/` is not part of the interface -- so
+# the two meet on lo, and on nothing else (`docs/keys.md`).
+#
+# The rule: each `drops` reading of an interface closes an interval of it, and
+# each drained row of queued packets of that interface is credited whole to the
+# interval holding its window (`enclosing: window_ns`: from the row's first
+# packet, the drain's length holds every packet of the row), or counted
+# uncredited when its window crosses a reading. TEMPORAL.
+#
+# **Loopback is `noqueue` by default**: the transmit path calls the driver
+# directly and no qdisc tracepoint fires, so on a stock machine `net.qdisc`
+# sees nothing on lo and the join has nothing to credit, correctly. The test
+# (`join_engine::a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index`)
+# sends datagrams over lo and holds the credit to
+# `/sys/class/net/lo/statistics/tx_packets`; it skips, with that reason, on a
+# machine where lo has no discipline that queues (a fifo is bypassed while it
+# is empty). `tc qdisc replace dev lo root netem limit 100000`
+# gives it one (as root), and `tc qdisc del dev lo root` puts it back.
+name: queued packets per reading of the link
+duration: 3s
+format: text
+
+requests:
+  - label: links
+    source: net.iface
+    target: {iface: lo}
+    mode: poll@500ms
+    emit: [summary]
+    keys: [iface]
+
+  - label: queued
+    source: net.qdisc
+    target: {iface: lo}
+    mode: trace
+    emit: [summary, raw]
+    keys: [iface]
+
+joins:
+  - id: queued-per-link-reading
+    from: net.iface
+    to: net.qdisc
+    via: iface
+    match: overlap
+    opens: "counter == 'drops'"
+    value: count
+    span: total_ns
+    enclosing: window_ns
+    stamped: start
+    top: 100
