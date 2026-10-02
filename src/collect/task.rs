@@ -153,6 +153,149 @@ pub fn tgid_of(tid: i32) -> Option<i32> {
         .ok()
 }
 
+/// How finely a task's cpu time was read.
+///
+/// A budget weighs the tool's cpu against the target's, and the target's used
+/// to be `/proc/<pid>/stat`'s clock ticks: 10 ms each. A target that burns
+/// less than a tick between two checks read as having burnt nothing, the
+/// percentage stayed "not knowable yet", and a `--budget 5%` over a sleeping
+/// loop ended 16 % over its ceiling without ever being moved. The scheduler
+/// keeps the same account in nanoseconds (`sum_exec_runtime`), and that is
+/// what is read first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuGrain {
+    /// The scheduler's own nanoseconds: the process cpu clock for a process,
+    /// `/proc/<pid>/task/<tid>/schedstat` for a thread.
+    Nanoseconds,
+    /// `/proc/<pid>/stat`'s clock ticks, where the nanosecond account could
+    /// not be read: a kernel without `CONFIG_SCHED_INFO` publishes no
+    /// `schedstat`, and a process in another pid namespace has no clock this
+    /// process can name.
+    Ticks,
+}
+
+// Read by the budget's meter once `collect/mod.rs` calls it (filed in
+// `docs/open-findings.md`, the sixteenth wave, stream runner); until then only
+// the tests below do.
+#[allow(dead_code)]
+impl CpuGrain {
+    /// What a cost record says the target's cpu was read from.
+    pub fn says(self) -> &'static str {
+        match self {
+            CpuGrain::Nanoseconds => "the scheduler's own nanoseconds",
+            CpuGrain::Ticks => {
+                "clock ticks from /proc/<pid>/stat, because the scheduler's nanosecond account \
+                 could not be read here: a target that burns less than a tick between two \
+                 checks reads as having burnt nothing"
+            }
+        }
+    }
+}
+
+/// A task's cpu time, and how finely it was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuRead {
+    pub ns: u64,
+    pub grain: CpuGrain,
+}
+
+/// The kernel's tick, which is what `/proc/<pid>/stat` counts cpu time in.
+fn ticks_per_second() -> u64 {
+    // SAFETY: `sysconf` takes an integer and returns one.
+    match unsafe { libc::sysconf(libc::_SC_CLK_TCK) } {
+        ticks if ticks > 0 => ticks as u64,
+        _ => 100,
+    }
+}
+
+/// Fields `range` of `/proc/<path>/stat`, summed and turned into nanoseconds.
+///
+/// The command name is parenthesised and may contain spaces and parentheses
+/// of its own, so the fields are counted from the last `)`: after it, the
+/// first field is `state`, which is field 3, and `utime` is field 14.
+fn stat_ticks_ns(path: &str, range: std::ops::Range<usize>) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{path}/stat")).ok()?;
+    let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
+    let ticks: u64 = fields
+        .get(range)?
+        .iter()
+        .map(|field| field.parse::<u64>().unwrap_or(0))
+        .sum();
+    Some(ticks * 1_000_000_000 / ticks_per_second())
+}
+
+/// The process cpu clock of another process: every thread's
+/// `sum_exec_runtime`, the ones that have exited included, in nanoseconds.
+///
+/// Linux lets any process read another's process clock (not a thread's), with
+/// no check beyond the pid being visible in its namespace.
+fn process_clock_ns(pid: i32) -> Option<u64> {
+    let mut clock: libc::clockid_t = 0;
+    // SAFETY: both take integers and write to a local this function owns.
+    if unsafe { libc::clock_getcpuclockid(pid, &mut clock) } != 0 {
+        return None;
+    }
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
+        return None;
+    }
+    Some(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
+}
+
+// Read by the budget's meter once `collect/mod.rs` calls it (filed in
+// `docs/open-findings.md`, the sixteenth wave, stream runner); until then only
+// the tests below do.
+#[allow(dead_code)]
+/// The cpu time one process has consumed, its children reaped included.
+///
+/// Its own threads, the exited ones included, from the process cpu clock in
+/// nanoseconds; the children it has reaped from `cutime` and `cstime`, which
+/// are only kept in ticks -- a shell that forks is still the workload that
+/// was asked for. Where the clock cannot be read, all four of `stat`'s
+/// fields, in ticks, and the grain says so.
+pub fn process_cpu(pid: i32) -> Option<CpuRead> {
+    let children = stat_ticks_ns(&pid.to_string(), 13..15);
+    match (process_clock_ns(pid), children) {
+        (Some(own), Some(children)) => Some(CpuRead {
+            ns: own + children,
+            grain: CpuGrain::Nanoseconds,
+        }),
+        _ => stat_ticks_ns(&pid.to_string(), 11..15).map(|ns| CpuRead {
+            ns,
+            grain: CpuGrain::Ticks,
+        }),
+    }
+}
+
+// Read by the budget's meter once `collect/mod.rs` calls it (filed in
+// `docs/open-findings.md`, the sixteenth wave, stream runner); until then only
+// the tests below do.
+#[allow(dead_code)]
+/// The cpu time one thread has been charged, its own and no other's.
+///
+/// `/proc/<tid>/task/<tid>/schedstat`'s first field, the thread's
+/// `sum_exec_runtime` in nanoseconds; its `stat` in ticks where the kernel
+/// keeps no schedstat. Not `/proc/<tid>/stat`: a thread id looked up at the
+/// top of `/proc` names its whole thread group.
+pub fn thread_cpu(tid: i32) -> Option<CpuRead> {
+    let schedstat = std::fs::read_to_string(format!("/proc/{tid}/task/{tid}/schedstat"))
+        .ok()
+        .and_then(|text| text.split_whitespace().next()?.parse::<u64>().ok());
+    match schedstat {
+        Some(ns) => Some(CpuRead {
+            ns,
+            grain: CpuGrain::Nanoseconds,
+        }),
+        None => stat_ticks_ns(&format!("{tid}/task/{tid}"), 11..13).map(|ns| CpuRead {
+            ns,
+            grain: CpuGrain::Ticks,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +408,71 @@ mod tests {
         assert_eq!(comms.get(i32::MAX), None);
         assert_eq!(tgids.get(i32::MAX), None);
         assert!(!tgids.by_tid.contains_key(&i32::MAX));
+    }
+
+    /// A process that burns a few milliseconds -- well under the tens of
+    /// milliseconds `stat` counts in -- and then waits is read to the
+    /// nanosecond, against the figures it reports of itself: its process cpu
+    /// clock and its main thread's, through Python's `time` module. Its
+    /// `stat` ticks are a whole number of ticks, which is what the budget used
+    /// to read and why it could not see such a target.
+    #[test]
+    fn a_target_that_burns_under_a_tick_is_read_in_nanoseconds_against_its_own_clock() {
+        use std::io::{BufRead, Write};
+        const BURN: &str = "import sys, time\n\
+             t = time.process_time_ns()\n\
+             while time.process_time_ns() - t < 3_000_000: pass\n\
+             print(time.process_time_ns(), time.thread_time_ns(), flush=True)\n\
+             sys.stdin.readline()\n\
+             print(time.process_time_ns(), time.thread_time_ns(), flush=True)\n";
+        let Ok(mut child) = std::process::Command::new("python3")
+            .args(["-c", BURN])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+        else {
+            eprintln!("skipped: no python3 to be the target");
+            return;
+        };
+        let pid = child.id() as i32;
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let figures = |line: &str| -> (u64, u64) {
+            let mut parts = line.split_whitespace().map(|n| n.parse::<u64>().unwrap());
+            (parts.next().unwrap(), parts.next().unwrap())
+        };
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let (process_before, thread_before) = figures(&line);
+        let process = process_cpu(pid).expect("a live child's cpu");
+        let thread = thread_cpu(pid).expect("its main thread's cpu");
+        let ticks = stat_ticks_ns(&pid.to_string(), 11..13).expect("its stat");
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        line.clear();
+        stdout.read_line(&mut line).unwrap();
+        let (process_after, thread_after) = figures(&line);
+        let _ = child.wait();
+
+        let account = format!(
+            "read {} ns ({:?}) of the process and {} ns ({:?}) of its thread; the child said \
+             {process_before}..{process_after} and {thread_before}..{thread_after}; stat said \
+             {ticks} ns",
+            process.ns, process.grain, thread.ns, thread.grain
+        );
+        assert_eq!(process.grain, CpuGrain::Nanoseconds, "{account}");
+        assert!(
+            (process_before..=process_after).contains(&process.ns),
+            "{account}"
+        );
+        if thread.grain == CpuGrain::Nanoseconds {
+            assert!(
+                (thread_before..=thread_after).contains(&thread.ns),
+                "{account}"
+            );
+        } else {
+            eprintln!("skipped the thread half: this kernel keeps no schedstat ({account})");
+        }
+        let tick = 1_000_000_000 / ticks_per_second();
+        assert_eq!(ticks % tick, 0, "{account}");
+        assert!(process.ns >= 3_000_000, "{account}");
     }
 }

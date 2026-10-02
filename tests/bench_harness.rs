@@ -587,3 +587,52 @@ fn a_row_with_a_column_missing_is_refused_rather_than_judged() {
         Band::Missing(_)
     ));
 }
+
+/// The backends table is wrong, and its test fails, when it measured nothing,
+/// lost a planned row without listing it, holds a row another backend served,
+/// or a row missing a column; a row over its band alone is flagged and the
+/// table stands. Synthetic rows, each wrong in one way the table test has
+/// to catch on the real one.
+#[test]
+fn a_wrong_backends_table_fails_and_a_row_over_its_band_alone_does_not() {
+    fn row<'a>(forced: &'a str, served_by: &'a [String], band: &'a Band) -> TableRow<'a> {
+        TableRow {
+            label: format!("io.latency through `{forced}`"),
+            forced,
+            served_by,
+            band,
+        }
+    }
+    let within = &Band::Within("0.10 % against `low`'s 1 %".into());
+    let over = &Band::Over("7.00 % (dilation) against `low`'s 1 %".into());
+    let missing = &Band::Missing("no repetition completed, so no column is measured".into());
+    let raw_tp = &["bpf:raw_tp".to_owned()][..];
+    let tp = &["bpf:tp".to_owned()][..];
+
+    let good = [row("bpf:raw_tp", raw_tp, within), row("bpf:tp", tp, over)];
+    assert_eq!(table_failures(2, 0, &good), Vec::<String>::new());
+    // One pair excluded by the gate and listed: still a table.
+    assert_eq!(table_failures(3, 1, &good), Vec::<String>::new());
+
+    let empty = table_failures(2, 0, &[]);
+    assert!(empty.iter().any(|why| why.contains("no row")), "{empty:?}");
+    let lost = table_failures(3, 0, &good);
+    assert!(
+        lost.iter().any(|why| why.contains("went missing")),
+        "{lost:?}"
+    );
+    let other = table_failures(1, 0, &[row("bpf:raw_tp", tp, within)]);
+    assert!(
+        other
+            .iter()
+            .any(|why| why.contains("forced `bpf:raw_tp` and was served by")),
+        "{other:?}"
+    );
+    let unmeasured = table_failures(1, 0, &[row("bpf:raw_tp", raw_tp, missing)]);
+    assert!(
+        unmeasured
+            .iter()
+            .any(|why| why.contains("missing a column")),
+        "{unmeasured:?}"
+    );
+}

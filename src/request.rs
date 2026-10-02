@@ -1027,6 +1027,104 @@ impl fmt::Display for EmitKind {
     }
 }
 
+impl EmitKind {
+    /// Whether this emit weighs every event by what it stands for, so that one
+    /// series can be made of events that stand for different amounts.
+    ///
+    /// `hist`, `topk`, `rate` and `summary` read an event's `weight`
+    /// ([`crate::emit::WEIGHT_ATTR`]): a traced event weighs one, a row of an
+    /// in-kernel histogram weighs what its bucket counted, and a sampled event
+    /// weighs its period. Each of those emits is one answer over the whole
+    /// series, whichever mode produced which part of it. `raw` and `timeline`
+    /// list the events one by one, and `stack` counts them, so either would
+    /// present two kinds of event as one.
+    pub fn weighs_each_event(self) -> bool {
+        matches!(
+            self,
+            EmitKind::Hist | EmitKind::TopK | EmitKind::Rate | EmitKind::Summary
+        )
+    }
+}
+
+/// Why a series begun in one mode cannot be continued in another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeMove {
+    /// The destination mode cannot produce this emit at all, so it is not a
+    /// rung a budget can step onto: passed over, as a backend that cannot
+    /// serve the target is.
+    NotProduced(EmitKind),
+    /// The destination mode produces this emit, and only by putting the
+    /// events of two modes into one list as if they were one kind: the
+    /// invalid combination, refused before the run.
+    Mixed(EmitKind),
+}
+
+impl fmt::Display for ModeMove {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ModeMove::NotProduced(emit) => write!(f, "`{emit}` is not an emit that mode produces"),
+            ModeMove::Mixed(emit) => write!(
+                f,
+                "`{emit}` would hold the events of both modes as one kind, though a traced event \
+                 is one occurrence and a sampled one stands for a period"
+            ),
+        }
+    }
+}
+
+/// Whether a series begun in `from` can be continued in `to` for the emits a
+/// request asked for: what one series made of two modes means to an emit
+/// (`DECISIONS.md`, settled in the sixteenth wave).
+///
+/// A budget may move a collection only onto a mode whose events every one of
+/// the request's emits can take. Within one mode nothing changes. Across two,
+/// each emit has to be one the destination produces, or the rung is passed
+/// over ([`ModeMove::NotProduced`]), and one that weighs each event by what it
+/// stands for ([`EmitKind::weighs_each_event`]), or the request is refused
+/// before anything runs ([`ModeMove::Mixed`]).
+pub fn mode_move(from: ModeKind, to: ModeKind, emits: &[Emit]) -> Result<(), ModeMove> {
+    if from == to {
+        return Ok(());
+    }
+    if let Some(emit) = emits
+        .iter()
+        .map(|emit| emit.kind())
+        .find(|emit| !to.valid_emits().contains(emit))
+    {
+        return Err(ModeMove::NotProduced(emit));
+    }
+    match emits
+        .iter()
+        .map(|emit| emit.kind())
+        .find(|emit| !emit.weighs_each_event())
+    {
+        Some(emit) => Err(ModeMove::Mixed(emit)),
+        None => Ok(()),
+    }
+}
+
+impl Mode {
+    /// The modes a budget may continue a series of this mode in, cheapest
+    /// last: phase 6's `trace` -> `sample`.
+    ///
+    /// A traced series can go on sampled, every event then standing for its
+    /// period. Nothing else is a rung. `count` closes a window into one total,
+    /// which no emit of events merges with; a `poll` or a `snapshot` reads a
+    /// value, not an event; and a sampled series has nowhere below it. The
+    /// in-kernel histogram is not a rung either: a collector takes it at the
+    /// start whenever the request's emits allow it (`io.latency` with `hist`
+    /// alone), and stepping onto it mid-run would mean dropping every emit a
+    /// histogram cannot answer.
+    pub fn cheaper(self) -> Vec<Mode> {
+        match self {
+            Mode::Trace => vec![Mode::Sample {
+                freq: Mode::DEFAULT_SAMPLE_FREQ,
+            }],
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// A typed correlation key.
 ///
 /// Each key names the boundary it crosses. They are the only things a join rule
@@ -2272,5 +2370,66 @@ requests:
             "bpf:tp".parse::<BackendOverride>().unwrap().as_str(),
             "bpf:tp"
         );
+    }
+
+    /// What one series made of two modes means to an emit: the rule a
+    /// budget's ladder is held to. Within one mode nothing is in question; a
+    /// traced `hist` or `topk` goes on sampled, every event weighed by its
+    /// period; an emit the sampled mode cannot produce takes the rung out; and
+    /// one it produces only as a list of mixed events is refused.
+    #[test]
+    fn a_series_crosses_modes_only_in_the_emits_that_weigh_each_event() {
+        let emits = |names: &[&str]| -> Vec<Emit> {
+            names.iter().map(|name| name.parse().unwrap()).collect()
+        };
+        let (trace, sample) = (ModeKind::Trace, ModeKind::Sample);
+        assert_eq!(
+            mode_move(trace, trace, &emits(&["raw", "timeline"])),
+            Ok(())
+        );
+        assert_eq!(
+            mode_move(trace, sample, &emits(&["hist", "topk:5"])),
+            Ok(())
+        );
+        assert_eq!(
+            mode_move(trace, sample, &emits(&["hist", "summary"])),
+            Err(ModeMove::NotProduced(EmitKind::Summary))
+        );
+        assert_eq!(
+            mode_move(trace, sample, &emits(&["hist", "raw"])),
+            Err(ModeMove::Mixed(EmitKind::Raw))
+        );
+        assert_eq!(
+            mode_move(trace, sample, &emits(&["stack"])),
+            Err(ModeMove::Mixed(EmitKind::Stack))
+        );
+        // Every emit the rule lets cross is one the emit layer weighs, and
+        // every one it refuses as mixed is one a mode it crosses into
+        // produces: the two lists agree with the matrix.
+        for emit in EmitKind::ALL {
+            if sample.valid_emits().contains(&emit) && trace.valid_emits().contains(&emit) {
+                let crossed = mode_move(trace, sample, &[emit_of(emit)]);
+                assert_eq!(crossed.is_ok(), emit.weighs_each_event(), "{emit}");
+            }
+        }
+        assert_eq!(Mode::Trace.cheaper().len(), 1);
+        assert!(Mode::Count.cheaper().is_empty());
+        assert!(Mode::Sample {
+            freq: Mode::DEFAULT_SAMPLE_FREQ
+        }
+        .cheaper()
+        .is_empty());
+    }
+
+    fn emit_of(kind: EmitKind) -> Emit {
+        match kind {
+            EmitKind::Raw => Emit::Raw,
+            EmitKind::Hist => "hist".parse().unwrap(),
+            EmitKind::Rate => Emit::Rate,
+            EmitKind::TopK => "topk".parse().unwrap(),
+            EmitKind::Stack => Emit::Stack,
+            EmitKind::Timeline => Emit::Timeline,
+            EmitKind::Summary => Emit::Summary,
+        }
     }
 }

@@ -118,6 +118,14 @@ pub fn prune(
                         elsewhere: Some(elsewhere),
                         ..
                     } => elsewhere.whose(),
+                    resolve::ResolveError::FilterFieldNotCarried {
+                        elsewhere: Some(elsewhere),
+                        ..
+                    } => elsewhere.whose(),
+                    // No backend attaches the key or carries the field: the
+                    // request's to change, as `omn` answers it (exit 2).
+                    resolve::ResolveError::KeyNotCarried { .. }
+                    | resolve::ResolveError::FilterFieldNotCarried { .. } => Whose::Request,
                     resolve::ResolveError::StackRefused { whose, .. } => *whose,
                     // A source the catalog does not carry is a catalog this
                     // build was not given, not a request anyone wrote wrong.
@@ -183,6 +191,10 @@ pub fn run(
                 let whose = match &error {
                     resolve::ResolveError::NoViableBackend { .. } => Whose::Machine,
                     resolve::ResolveError::KeyNotCarried {
+                        elsewhere: Some(elsewhere),
+                        ..
+                    } => elsewhere.whose(),
+                    resolve::ResolveError::FilterFieldNotCarried {
                         elsewhere: Some(elsewhere),
                         ..
                     } => elsewhere.whose(),

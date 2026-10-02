@@ -556,6 +556,16 @@ impl Evictor {
 /// The kernel's thermal throttle counters, summed over every cpu, where the
 /// kernel publishes them. `None` is "not observable here", which the report
 /// says rather than reading as "never throttled".
+///
+/// These are the files `power.throttle`'s `fs:sys` backend reads, and they are
+/// read here directly rather than through the tool, on purpose (`DECISIONS.md`,
+/// the sixteenth wave). The guardrail wraps the bare runs as well as the
+/// traced ones, and the bare run is the baseline every dilation is measured
+/// against: running `omn` beside it would make it a traced run, and the
+/// dilation column a comparison of two traced runs. Read before and after a
+/// repetition, outside the timed region, it costs the workload nothing. And a
+/// guardrail measured by the tool under test would pass whatever defect the
+/// tool had in that source.
 pub fn throttle_count() -> Option<u64> {
     let mut total = None;
     let entries = std::fs::read_dir("/sys/devices/system/cpu").ok()?;
@@ -1495,6 +1505,55 @@ pub fn judge_band(
     } else {
         Band::Over(said)
     }
+}
+
+/// One row of the backends table, as the check of the whole table reads it.
+pub struct TableRow<'a> {
+    /// `source through backend`, for the failure that names it.
+    pub label: String,
+    /// The backend the row forced.
+    pub forced: &'a str,
+    /// The backends its runs were served by, from their own `cost.json`.
+    pub served_by: &'a [String],
+    pub band: &'a Band,
+}
+
+/// Every reason the backends table is wrong, which fails the test that wrote
+/// it; empty for a table that may be pasted.
+///
+/// A table is wrong when it measured nothing; when a planned pair is neither
+/// a row nor listed as excluded by the gate, so a row went missing without a
+/// word; when a row was served by another backend than the one it forced, so
+/// its numbers are another backend's; and when a row is missing a column
+/// ([`judge_band`]). A row over its band is not here: that is a catalog claim
+/// to correct, flagged in the table.
+pub fn table_failures(planned: usize, excluded: usize, rows: &[TableRow<'_>]) -> Vec<String> {
+    let mut failures = Vec::new();
+    if rows.is_empty() {
+        failures.push(format!(
+            "the table has no row: {planned} pair(s) were planned, {excluded} excluded by the \
+             gate, and nothing was measured"
+        ));
+    }
+    if rows.len() + excluded != planned {
+        failures.push(format!(
+            "{planned} pair(s) were planned and the table holds {} row(s) and {excluded} \
+             exclusion(s): a row went missing without being listed",
+            rows.len()
+        ));
+    }
+    for row in rows {
+        if !row.served_by.is_empty() && row.served_by != [row.forced.to_owned()] {
+            failures.push(format!(
+                "{}: forced `{}` and was served by {:?}",
+                row.label, row.forced, row.served_by
+            ));
+        }
+        if let Band::Missing(why) = row.band {
+            failures.push(format!("{}: the row is missing a column: {why}", row.label));
+        }
+    }
+    failures
 }
 
 /// Judges the resolver against the measurements of every backend of one
