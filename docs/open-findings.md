@@ -9339,6 +9339,9 @@ use crate::collect::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 
 ### To the owner of `tests/cli.rs`: the shipped catalog's `KeyNotCarried` is the build's gap, exit 3 -- red until it lands
 
+**Lands in the same merge as `feat/w16-io`**: without it the merged tree is red
+(the review of this wave reproduced it alone, `tests/cli.rs:1664`).
+
 `catalog/io.yaml` now declares `keys: [dev]` on `io.bytes`'s `fs:proc`, so
 `a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does`
 takes its early branch, which asserts exit 2. The shipped refusal is *"`bpf:raw_tp`
@@ -9415,8 +9418,10 @@ The skip's new wording (*"bpftool could not dump ... WARNING: bpftool not found
 for kernel 6.17.0-1022"*) is not a pattern: `linux-tools-6.17.0-1022-azure` is
 installed and Ubuntu's `/usr/sbin/bpftool` wrapper looks for the binary under
 the version without its flavour. `.github/workflows/ci.yml` now links the
-binary the package installed into `/usr/local/bin`. If the next run still
-skips, the step's `::warning::` says why.
+binary the package installed (or any under `/usr/lib`) into `/usr/local/bin`
+and dumps `/sys/kernel/btf/vmlinux` with it in the same step. If the next run
+still skips, the step's `::warning::` says why, and the coordinator may then
+add the wording as a pattern.
 
 ### Answered: the sixteenth wave's requests to `src/collect/mod.rs`
 

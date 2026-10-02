@@ -420,6 +420,51 @@ fn measure_while(args: &[&str], device: &Device, workload: impl FnOnce()) -> (Ou
     (output, after.since(&before))
 }
 
+/// What the kernel counted on `device` over a span the session's window must
+/// enclose, from just before `workload` to just after it, with the monotonic
+/// instants that span began and ended at.
+struct Enclosed {
+    counters: Counters,
+    from_ns: u64,
+    to_ns: u64,
+}
+
+/// [`measure_while`], and also the kernel's counters over the workload alone:
+/// the window that encloses the session's is an upper bound on what it can
+/// report, and this one -- inside the session's, which the result's own
+/// `window` says -- a lower bound.
+fn measure_around(
+    args: &[&str],
+    device: &Device,
+    wait: Duration,
+    workload: impl FnOnce(),
+) -> (Output, Counters, Enclosed) {
+    let before = counters_of(device);
+    let child = Command::new(BINARY)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(wait);
+    let from_ns = monotonic_ns();
+    let inner_before = counters_of(device);
+    workload();
+    let inner_after = counters_of(device);
+    let to_ns = monotonic_ns();
+    let output = child.wait_with_output().expect("omn should finish");
+    let after = counters_of(device);
+    (
+        output,
+        after.since(&before),
+        Enclosed {
+            counters: inner_after.since(&inner_before),
+            from_ns,
+            to_ns,
+        },
+    )
+}
+
 /// What the kernel's own `inflight` file said while a workload ran.
 #[derive(Default)]
 struct QueueSeen {
@@ -1296,20 +1341,49 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
     let device = backing_device(Path::new(env!("CARGO_TARGET_TMPDIR"))).expect("a block device");
     write_and_sync(&file);
 
-    let mut read_back = 0;
-    let (output, enclosing) = measure_while(
-        &["-f", &session("io-known-volume.yml"), "--format", "json"],
-        &device,
-        || read_back = cold_read(&file),
-    );
+    // The read has to fall inside the session's window for the kernel's
+    // count over the read to be a floor under the session's, and the session
+    // takes a while to open it -- longer than 300 ms when five test binaries
+    // share the machine (seen here once, in a parallel run). So the read
+    // starts later on each attempt until the window, by its own stamps,
+    // encloses it; the session lasts 2 s and the read takes well under one.
+    let mut attempts = Vec::new();
+    let (enclosing, inner, document) = loop {
+        let mut read_back = 0;
+        let wait = Duration::from_millis(300 * (1 + attempts.len() as u64));
+        let (output, enclosing, inner) = measure_around(
+            &["-f", &session("io-known-volume.yml"), "--format", "json"],
+            &device,
+            wait,
+            || read_back = cold_read(&file),
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            read_back, KNOWN_BYTES,
+            "the workload did not read the file it promised to"
+        );
+        let document = json(&output);
+        let window = &result(&document, "merges")["window"];
+        let (opened, closed) = (
+            window["opened_ns"].as_u64().expect("the window's opening"),
+            window["closed_ns"].as_u64().expect("the window's close"),
+        );
+        let enclosed = opened <= inner.from_ns && inner.to_ns <= closed;
+        attempts.push(format!(
+            "window [{opened}, {closed}], read [{}, {}] after {wait:?}",
+            inner.from_ns, inner.to_ns
+        ));
+        if enclosed || attempts.len() == 3 {
+            assert!(
+                enclosed,
+                "the session's window never enclosed the read, so the kernel's count over the \
+                 read is no floor under it: {attempts:?}"
+            );
+            break (enclosing, inner, document);
+        }
+    };
     let _ = std::fs::remove_file(&file);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(
-        read_back, KNOWN_BYTES,
-        "the workload did not read the file it promised to"
-    );
 
-    let document = json(&output);
     let measured = series(
         output_of(result(&document, "volume"), "summary"),
         &device.key,
@@ -1332,13 +1406,16 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
     );
 
     // What the block layer coalesced, held to the kernel's own merge count
-    // over a window that encloses the session's. Not to zero on a device whose
-    // scheduler is `none`, which an earlier version of this check assumed and
-    // the CI's `sda` disproved (11 merges in 86 reads, both cells): with no
-    // elevator the block layer still merges a bio into a request waiting in
-    // the submitter's plug list or the software queue, and counts it in the
-    // same column. The kernel's count is the number that is known; the
-    // session's can be no larger, and no larger than the requests themselves.
+    // from both sides: no more than over a window that encloses the
+    // session's, no fewer than over the read alone, which the session's
+    // window encloses (its own `window` says so, on the clock the test read).
+    // Not to zero on a device whose scheduler is `none`, which an earlier
+    // version of this check assumed and the CI's `sda` disproved (11 merges in
+    // 86 reads, both cells): with no elevator the block layer still merges a
+    // bio into a request waiting in the submitter's plug list or the software
+    // queue, and counts it in the same column. A collector that reported 0
+    // fails the floor wherever the read merged anything; where the kernel
+    // itself merged nothing, the floor is 0 and the read says so.
     let merges = series(
         output_of(result(&document, "merges"), "summary"),
         &device.key,
@@ -1359,9 +1436,30 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
         enclosing.merges
     );
     assert!(
+        merges >= inner.counters.merges as f64,
+        "the session found {merges} merges on {} and the kernel counted {} over the read \
+         alone, inside the session's window",
+        device.leaf,
+        inner.counters.merges
+    );
+    assert!(
+        ops >= inner.counters.reads as f64 && ops <= (enclosing.reads + enclosing.writes) as f64,
+        "the session found {ops} requests on {}; the kernel completed {} reads over the read \
+         alone and {} requests over a window enclosing the session's",
+        device.leaf,
+        inner.counters.reads,
+        enclosing.reads + enclosing.writes
+    );
+    assert!(
         merges <= ops,
         "more requests were merged away than the device completed: {merges} against {ops}"
     );
+    if inner.counters.merges == 0 {
+        eprintln!(
+            "the kernel merged nothing on {} over the read, so the merge count's floor is 0",
+            device.leaf
+        );
+    }
 }
 
 /// The queue depth a burst of writes reaches is seen, and only by a poll fast
@@ -5352,8 +5450,11 @@ fn buckets_of(series: &serde_json::Value) -> BTreeMap<u64, u64> {
 /// what put 4 of 318 across an edge in one run of five (the fifteenth wave's
 /// finding): the old tolerance was 2 % of the value, 115 ns at 5.7 us, and the
 /// skew is absolute. The comparison now allows a request to cross only where
-/// the stream's value is within twice this run's measured skew of an edge,
-/// only into the next bucket, and the totals must agree exactly.
+/// the stream's value is within twice this run's median skew of an edge, plus
+/// as many as the witness itself was seen to put in another bucket from
+/// beyond that reach, and the totals must agree exactly. The arithmetic is not
+/// the cause: `insn::the_unrolled_log2_is_the_same_arithmetic_as_the_layouts`
+/// holds the kernel's bucketing to the emit layer's at every edge.
 #[test]
 fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
     if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
@@ -5436,9 +5537,13 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         said(streamed)
     );
 
-    // What the stream carried: every request one of the two sizes, or the
-    // readahead a filesystem may turn a first direct read into, and never more
-    // requests of a size than reads of it.
+    // What the stream carried: every request one of the two sizes, a
+    // fragment of a 64 KiB read, or the readahead a filesystem may turn a
+    // first direct read into, and never more requests of a size than reads of
+    // it. A fragment is what a direct read spanning two extents of a
+    // fragmented file becomes -- one request per extent (btrfs at 99 % full
+    // here: 40 960 + 24 576, six times in 64 reads). Fragments are synchronous
+    // reads of less than a block, and together they make whole blocks.
     let events = raw_events(streamed);
     let of = |bytes: u64| {
         events
@@ -5446,6 +5551,12 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
             .filter(|attrs| attrs["bytes"].as_u64() == Some(bytes) && attrs["rwbs"] != "RA")
             .count()
     };
+    let fragments: Vec<u64> = events
+        .iter()
+        .filter(|attrs| !attrs["rwbs"].as_str().unwrap_or_default().contains('A'))
+        .filter_map(|attrs| attrs["bytes"].as_u64())
+        .filter(|&bytes| bytes != 4096 && bytes != 65536)
+        .collect();
     assert!(
         of(4096) <= PAGES && of(65536) <= BLOCKS,
         "more requests than reads: {}",
@@ -5455,8 +5566,28 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         let bytes = attrs["bytes"].as_u64().unwrap_or_default();
         let rwbs = attrs["rwbs"].as_str().unwrap_or_default();
         assert!(
-            bytes == 4096 || bytes == 65536 || rwbs.contains('A'),
+            bytes == 4096
+                || bytes == 65536
+                || rwbs.contains('A')
+                || (bytes < 65536 && bytes % 512 == 0),
             "a request of {bytes} bytes (`{rwbs}`) that the program did not make"
+        );
+    }
+    let fragment_bytes: u64 = fragments.iter().sum();
+    assert_eq!(
+        fragment_bytes % 65536,
+        0,
+        "requests of {fragments:?} bytes do not make whole 64 KiB reads"
+    );
+    let fragmented_reads = fragment_bytes / 65536;
+    // The requests the fragments add over the reads they make up.
+    let split = fragments.len() as u64 - fragmented_reads;
+    if !fragments.is_empty() {
+        eprintln!(
+            "{} of the program's 64 KiB reads reached the device as {} requests: the file is \
+             fragmented on this filesystem",
+            fragmented_reads,
+            fragments.len()
         );
     }
     let lost = |result: &serde_json::Value| losses(result)["dropped"].as_u64().unwrap_or(0);
@@ -5489,7 +5620,7 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
     // (the interpreter's own reads, another process's under the same launch)
     // shows here as a total above what the program issued.
     let issued = (PAGES + BLOCKS) as u64;
-    let readahead = events.len() as u64 - (of(4096) + of(65536)) as u64;
+    let readahead = events.len() as u64 - (of(4096) + of(65536) + fragments.len()) as u64;
     assert!(
         readahead <= 2,
         "{readahead} requests of neither size the program read at: at most the first read \
@@ -5499,9 +5630,10 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         // A lost request is one the path did not count; it was still made.
         let seen = counted + lost(result);
         assert!(
-            seen + 2 >= issued && counted <= issued,
+            seen + 2 >= issued && counted <= issued + split,
             "the `{}` path counted {counted} requests and dropped {}, and the program made \
-             {issued} ({PAGES} of 4 KiB and {BLOCKS} of 64 KiB)",
+             {issued} ({PAGES} of 4 KiB and {BLOCKS} of 64 KiB), {split} more where a read was \
+             split along the file's extents",
             result["label"].as_str().unwrap_or("?"),
             lost(result)
         );
@@ -5526,12 +5658,12 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         );
         return;
     }
+    let blocks = of(65536) as u64 + fragmented_reads;
     assert!(
-        of(4096) + 1 >= PAGES && of(65536) + 1 >= BLOCKS,
+        of(4096) + 1 >= PAGES && blocks + 1 >= BLOCKS as u64,
         "a run that lost nothing is short of the program's reads by more than the one a \
-         filesystem may turn into a readahead: {} of {PAGES} pages, {} of {BLOCKS} blocks",
-        of(4096),
-        of(65536)
+         filesystem may turn into a readahead: {} of {PAGES} pages, {blocks} of {BLOCKS} blocks",
+        of(4096)
     );
     assert_eq!(
         from_kernel.keys().collect::<Vec<_>>(),
@@ -5566,17 +5698,27 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         "the witness paired {paired} of the stream's {} requests by their kernel stamp",
         by_stream.len()
     );
-    // The usual skew, and the requests something ran between the reads of:
-    // an interrupt or a preemption between two sets' programs puts
-    // microseconds there (11.5 us once in six runs here), and it does so to a
-    // share of requests the witness measures. The kernel's set is not the
-    // witness -- its programs sit at another place in each tracepoint's list
-    // and do other work -- so twice the usual skew is the reach, and as many
-    // outliers as the witness saw are allowed on top: a margin, not a
-    // calibration.
-    let skew = skews[(paired * 99 / 100).min(paired - 1)];
+    // The usual skew, and the requests something ran between the reads of.
+    // The reach is twice the *median* skew, not a high percentile: a request
+    // the kernel's set and the stream's read 120 ns apart crosses an edge only
+    // if it lies within that of one. What the median leaves out -- an
+    // interrupt or a preemption between two sets' programs, microseconds once
+    // in a while (11.5 us once in six runs here) -- is allowed only as the
+    // witness saw it actually happen: a witnessed request skewed beyond the
+    // reach *and* put in another bucket than the stream's. The kernel's set is
+    // not the witness, so this is a margin measured on the run, not a
+    // calibration; it is not one counted twice either, since a crosser the
+    // witness saw beyond the reach is not one the reach accounts for.
+    let bucket = |value: u64| if value == 0 { 0 } else { 1u64 << value.ilog2() };
+    let skew = skews[paired / 2];
     let reach = 2 * skew;
-    let outliers = skews.iter().filter(|&&each| each > reach).count() as u64;
+    let outliers = by_stream
+        .iter()
+        .filter_map(|(request, value)| Some((*value, *by_witness.get(request)?)))
+        .filter(|(stream, witness)| {
+            stream.abs_diff(*witness) > reach && bucket(*stream) != bucket(*witness)
+        })
+        .count() as u64;
     let near_an_edge = events
         .iter()
         .filter_map(|attrs| attrs["latency_ns"].as_u64())
@@ -5607,14 +5749,14 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
     }
     eprintln!(
         "the two histograms are {crossings} edge crossings apart; {near_an_edge} requests were \
-         within {reach} ns of an edge (twice the p99 skew of {paired} witnessed requests) and \
-         {outliers} witnessed requests were skewed further"
+         within {reach} ns of an edge (twice the median skew of {paired} witnessed requests) \
+         and {outliers} witnessed requests were skewed further and into another bucket"
     );
     assert!(
         crossings <= near_an_edge + outliers,
         "the kernel's buckets and the stream's are {crossings} edge crossings apart, and only \
-         {near_an_edge} requests were within twice the measured skew ({skew} ns at the 99th \
-         percentile of {paired}) of an edge, with {outliers} skewed further:\n kernel \
+         {near_an_edge} requests were within twice the measured skew ({skew} ns, the median \
+         of {paired}) of an edge, with {outliers} witnessed crossers skewed further:\n kernel \
          {from_kernel:?}\n stream {from_stream:?}"
     );
 }

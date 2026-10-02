@@ -74,14 +74,27 @@ jobs:
           # under the kernel's version without its flavour, and on the azure
           # kernel it answers "WARNING: bpftool not found for kernel
           # 6.17.0-1022" with the package installed (run 37f17c8, both
-          # cells). The binary the package did install goes first on PATH.
-          real=$(find /usr/lib -name bpftool \( -type f -o -type l \) 2>/dev/null \
-            | grep -F "$(uname -r | cut -d- -f1-2)" | head -n 1)
+          # cells). The binary the package did install goes first on PATH:
+          # the one built for this kernel's version, or else any the image
+          # carries -- dumping a BTF blob does not depend on which kernel the
+          # tool was built with. The step then dumps the running kernel's own
+          # BTF, which is what `btf.rs` asks of it, so a link that does not
+          # work is said here rather than as a skip in the suite.
+          found=$(find /usr/lib -name bpftool \( -type f -o -type l \) 2>/dev/null | sort)
+          real=$(printf '%s\n' "$found" | grep -F "$(uname -r | cut -d- -f1-2)" | head -n 1)
+          [ -n "$real" ] || real=$(printf '%s\n' "$found" | head -n 1)
           if [ -n "$real" ]; then
+            echo "bpftool candidates: $(printf '%s ' $found)"
             sudo ln -sf "$real" /usr/local/bin/bpftool
+            hash -r
             bpftool version | head -n 1
+            if bpftool btf dump file /sys/kernel/btf/vmlinux format raw >/dev/null; then
+              echo "bpftool dumps /sys/kernel/btf/vmlinux"
+            else
+              echo "::warning::$real cannot dump /sys/kernel/btf/vmlinux"
+            fi
           else
-            echo "::warning::linux-tools-$(uname -r) installed no bpftool binary"
+            echo "::warning::linux-tools-$(uname -r) installed no bpftool binary under /usr/lib"
           fi
 
       # The cell is a stock kernel's defaults with no capabilities, which the

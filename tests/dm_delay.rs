@@ -38,19 +38,32 @@ const DELAY_NS: u64 = DELAY_MS * 1_000_000;
 /// it stamps each bio `jiffies + msecs_to_jiffies(delay)` and releases it on
 /// the first tick at or past that, so a bio queued late in a tick waits up to
 /// one tick less than the table says (19.91 ms of 20 here, at HZ 1000). Read
-/// from the kernel's own configuration, and the coarsest the kernel allows
-/// (HZ 100) when the configuration is not readable.
+/// from the kernel's own configuration -- `/proc/config.gz` where the kernel
+/// exports it, `/boot/config-<release>` where the distribution installs it
+/// (Ubuntu, Debian, Fedora) -- and the coarsest the kernel allows (HZ 100)
+/// when neither is readable, which the run says, since it lowers the floor
+/// below to half the delay.
 fn tick_ns() -> u64 {
-    let hz = Command::new("zcat")
+    let from = |text: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("CONFIG_HZ=")?.trim().parse::<u64>().ok())
+    };
+    let exported = Command::new("zcat")
         .arg("/proc/config.gz")
         .output()
         .ok()
-        .and_then(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .find_map(|line| line.strip_prefix("CONFIG_HZ=")?.trim().parse::<u64>().ok())
-        })
-        .unwrap_or(100);
+        .and_then(|output| from(&String::from_utf8_lossy(&output.stdout)));
+    let installed = || {
+        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+        from(&std::fs::read_to_string(format!("/boot/config-{}", release.trim())).ok()?)
+    };
+    let hz = exported.or_else(installed).unwrap_or_else(|| {
+        eprintln!(
+            "note: CONFIG_HZ is in neither /proc/config.gz nor /boot/config-<release>; the \
+             floor allows the coarsest tick the kernel has, 10 ms (HZ 100)"
+        );
+        100
+    });
     1_000_000_000 / hz.max(1)
 }
 
@@ -75,34 +88,57 @@ impl Drop for Delayed {
         if self.mapped {
             // A mapped device still open by a dying child refuses removal for
             // a moment; `--retry` is dmsetup's own answer to that.
-            let removed = sudo(&["dmsetup", "remove", "--retry", &self.name]);
-            if !removed.status.success() {
-                eprintln!(
+            match sudo(&["dmsetup", "remove", "--retry", &self.name]) {
+                Ok(removed) if removed.status.success() => {}
+                Ok(removed) => eprintln!(
                     "warning: `sudo -n dmsetup remove {}` failed: {}",
                     self.name,
                     String::from_utf8_lossy(&removed.stderr).trim()
-                );
+                ),
+                Err(error) => eprintln!("warning: dmsetup remove {}: {error}", self.name),
             }
         }
         if let Some(loop_device) = &self.loop_device {
-            let detached = sudo(&["losetup", "-d", loop_device]);
-            if !detached.status.success() {
-                eprintln!(
+            match sudo(&["losetup", "-d", loop_device]) {
+                Ok(detached) if detached.status.success() => {}
+                Ok(detached) => eprintln!(
                     "warning: `sudo -n losetup -d {loop_device}` failed: {}",
                     String::from_utf8_lossy(&detached.stderr).trim()
-                );
+                ),
+                Err(error) => eprintln!("warning: losetup -d {loop_device}: {error}"),
             }
         }
         let _ = std::fs::remove_file(&self.image);
     }
 }
 
-fn sudo(args: &[&str]) -> Output {
+/// `sudo -n <args>`, or why it could not even be started -- no `sudo` here
+/// is a missing piece like any other, not a failure of the test.
+fn sudo(args: &[&str]) -> Result<Output, String> {
     Command::new("sudo")
         .arg("-n")
         .args(args)
         .output()
-        .unwrap_or_else(|error| panic!("sudo could not be run: {error}"))
+        .map_err(|error| format!("`sudo` could not be run ({error}): the scenario needs it"))
+}
+
+/// Whether what `sudo -n` answered is its own refusal -- no password may be
+/// asked for, or the command is not in sudoers -- rather than the command's.
+fn sudo_refused(said: &str) -> bool {
+    said.contains("password")
+        || said.contains("not allowed")
+        || said.contains("may not run")
+        || said.contains("is not in the sudoers")
+}
+
+/// Whether the kernel has, or can load, the `delay` target: loaded already,
+/// or a module `modinfo` finds (which needs no root), or built in.
+fn dm_delay_loadable() -> bool {
+    Path::new("/sys/module/dm_delay").exists()
+        || Command::new("modinfo")
+            .arg("dm_delay")
+            .output()
+            .is_ok_and(|output| output.status.success())
 }
 
 /// The loop device and the delay target over it, or why this machine cannot
@@ -120,19 +156,36 @@ fn set_up() -> Result<Delayed, String> {
         mapped: false,
     };
 
+    const SUDOERS: &str =
+        "`<user> ALL=(root) NOPASSWD: /usr/bin/losetup, /usr/bin/dmsetup` in sudoers";
+    if !Path::new("/dev/loop-control").exists() {
+        return Err(
+            "no loop driver here (/dev/loop-control is absent): the scenario needs \
+                    the `loop` module"
+                .to_owned(),
+        );
+    }
     let attached = sudo(&[
         "losetup",
         "--show",
         "-f",
         delayed.image.to_str().expect("a UTF-8 path"),
-    ]);
+    ])?;
     if !attached.status.success() {
-        return Err(format!(
-            "`sudo -n losetup --show -f {}` failed ({}): {}; the scenario needs \
-             `<user> ALL=(root) NOPASSWD: /usr/bin/losetup, /usr/bin/dmsetup` in sudoers",
+        let said = String::from_utf8_lossy(&attached.stderr).trim().to_owned();
+        // sudo's own refusal is a missing grant; anything else losetup says
+        // is a failure on a machine that has every piece, and is one.
+        assert!(
+            sudo_refused(&said),
+            "`sudo -n losetup --show -f {}` failed ({}) with every piece present: {said}",
             delayed.image.display(),
-            attached.status,
-            String::from_utf8_lossy(&attached.stderr).trim()
+            attached.status
+        );
+        return Err(format!(
+            "`sudo -n losetup` is not granted: `sudo -n losetup --show -f {}` failed ({}): \
+             {said}; the scenario needs {SUDOERS}",
+            delayed.image.display(),
+            attached.status
         ));
     }
     let loop_device = String::from_utf8_lossy(&attached.stdout).trim().to_owned();
@@ -141,17 +194,27 @@ fn set_up() -> Result<Delayed, String> {
     // `delay <device> <offset> <read delay>`: with no write half the write
     // delay is the read one, so both are held for DELAY_MS.
     let table = format!("0 {} delay {loop_device} 0 {DELAY_MS}", IMAGE_BYTES / 512);
-    let created = Command::new("sudo")
-        .args(["-n", "dmsetup", "create", &delayed.name, "--table", &table])
-        .output()
-        .map_err(|error| format!("sudo could not be run: {error}"))?;
+    let created = sudo(&["dmsetup", "create", &delayed.name, "--table", &table])?;
     if !created.status.success() {
         let said = String::from_utf8_lossy(&created.stderr).trim().to_owned();
-        let missing = if said.contains("password") || said.contains("not allowed") {
-            "`sudo -n dmsetup` is not granted (`/usr/bin/dmsetup` in sudoers)"
+        let missing = if sudo_refused(&said) {
+            format!("`sudo -n dmsetup` is not granted: the scenario needs {SUDOERS}")
+        } else if !Path::new("/dev/mapper/control").exists() {
+            "no device-mapper here (/dev/mapper/control is absent): the scenario needs the \
+             `dm_mod` module"
+                .to_owned()
+        } else if !dm_delay_loadable() {
+            "dm-delay is not loadable here: neither /sys/module/dm_delay nor `modinfo dm_delay` \
+             finds it"
+                .to_owned()
         } else {
-            "the `delay` target could not be created: dm-delay is not loadable here \
-             (`modinfo dm_delay`)"
+            // Every piece is present and the table was still refused: that is
+            // a failure, not a machine without the scenario.
+            panic!(
+                "`sudo -n dmsetup create {} --table '{table}'` failed ({}) with sudo granted \
+                 and dm-delay available: {said}",
+                delayed.name, created.status
+            );
         };
         return Err(format!(
             "{missing}: `sudo -n dmsetup create {} --table '{table}'` failed ({}): {said}",
@@ -321,6 +384,22 @@ fn a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device() {
     assert_eq!(calls.len() as u64, READS + WRITES, "{account}");
     let own_total: u64 = calls.iter().filter_map(|call| call["ns"].as_u64()).sum();
     let held = DELAY_NS - tick_ns();
+    // And held once, not twice: a call that waited two delays is a table, a
+    // target or a stack that delays each bio on its way down and again on its
+    // way up, which the floor alone would never see. The median, because a
+    // shared machine may stall one call by anything; a separation, not a
+    // calibration.
+    let mut sorted: Vec<u64> = calls
+        .iter()
+        .filter_map(|call| call["ns"].as_u64())
+        .collect();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    assert!(
+        median < 2 * DELAY_NS,
+        "the median call through a {DELAY_MS} ms delay took {median} ns by the program's own \
+         clock: the delay was held more than once"
+    );
     for call in calls {
         assert!(
             call["ns"].as_u64().unwrap_or(0) >= held,
@@ -376,6 +455,14 @@ fn a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device() {
         "the syscall layer found {syscall_total} ns inside calls the program's own clock put \
          {own_total} ns around"
     );
+    // From below by the same clock: what separates the program's stamps from
+    // the kernel's entry and exit is the interpreter's call, microseconds,
+    // against 20 ms of delay in each.
+    assert!(
+        syscall_total * 10 >= own_total * 9,
+        "the syscall layer found {syscall_total} ns inside calls the program's own clock put \
+         {own_total} ns around: more than a tenth of the time the program waited is missing"
+    );
 
     // The device under the delay: the loop device is this test's alone, so
     // every request on it is the program's, one per I/O, and none of them
@@ -411,11 +498,20 @@ fn a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device() {
          {DELAY_MS} ms delay must spend there",
         READS + WRITES
     );
+    // From above: no more than twice the configured delay per I/O, the same
+    // separation the median call is held to, here on the tool's split.
+    assert!(
+        above <= (READS + WRITES) * 2 * DELAY_NS,
+        "{above} ns above the device for {} I/Os through a {DELAY_MS} ms delay: more than \
+         twice the delay each",
+        READS + WRITES
+    );
     eprintln!(
         "{} I/Os through {DELAY_MS} ms: {syscall_total} ns at the syscall layer, {device_total} \
-         ns on {key} in {} requests, {above} ns above the device (configured: {floor})",
+         ns on {key} in {} requests, {above} ns above the device (configured: {}, less a tick each: {floor})",
         READS + WRITES,
-        on_loop.len()
+        on_loop.len(),
+        (READS + WRITES) * DELAY_NS
     );
 }
 

@@ -231,14 +231,15 @@ fn check_joins(
                     ),
                 ));
             }
-            // A request answered by a histogram the kernel builds has rows of
-            // `(device, bucket)` and nothing else: the entry carries the key,
+            // A request answered by a histogram the kernel builds (only
+            // `io.latency`'s, `collect::io::builds_histogram_in_kernel`) has
+            // rows of `(device, bucket)` and nothing else: the entry carries the key,
             // the rows this session would produce do not, and the join would
             // come back empty as though nothing were related.
             if via != crate::request::KeyKind::Dev {
                 if let Some(request) = session.requests.iter().find(|request| {
                     request.source.as_str() == kind.as_str()
-                        && crate::collect::io::histogram_is_enough(request)
+                        && crate::collect::io::builds_histogram_in_kernel(request)
                 }) {
                     let label = request.label.as_deref().unwrap_or(kind.as_str());
                     rejections.push(Rejection::with_hint(
@@ -946,13 +947,15 @@ mod tests {
     /// request is answered by rows of `(device, bucket)` built in the kernel
     /// (`collect::io::histogram_is_enough`), which carry no `blk`. The same
     /// session with `summary` beside the histogram, `io-request-halves.yml`'s
-    /// shape, is accepted, and so is a join on the device the rows do carry.
+    /// shape, is accepted. So is a hist-only `io.queue` on the other side:
+    /// only `io.latency`'s collector builds its histogram in the kernel, and
+    /// `io.queue` streams every request whatever it emits.
     #[test]
     fn a_join_over_a_histogram_built_in_the_kernel_is_refused_with_the_emit_that_serves_it() {
-        let session = |emit: &str, via: &str| {
+        let session = |queue: &str, emit: &str, via: &str| {
             let text = format!(
                 "requests:\n\
-                 \x20 - {{source: io.queue, target: system, mode: trace, emit: [hist, summary]}}\n\
+                 \x20 - {{label: q, source: io.queue, target: system, mode: trace, emit: {queue}}}\n\
                  \x20 - {{label: device, source: io.latency, target: system, mode: trace, emit: {emit}}}\n\
                  joins:\n\
                  \x20 - {{id: halves, from: io.queue, to: io.latency, via: {via}, match: scoped_eq, window: 30s}}\n"
@@ -962,7 +965,7 @@ mod tests {
             session
         };
 
-        let refused = validate_session(&catalog(), &session("[hist]", "blk"))
+        let refused = validate_session(&catalog(), &session("[hist, summary]", "[hist]", "blk"))
             .expect_err("a join on `blk` over rows that carry no `blk`");
         let text = format!("{refused:?}");
         assert!(text.contains("join `halves` matches on `blk`"), "{text}");
@@ -975,8 +978,18 @@ mod tests {
             "{text}"
         );
 
-        if let Err(rejections) = validate_session(&catalog(), &session("[hist, summary]", "blk")) {
+        if let Err(rejections) = validate_session(
+            &catalog(),
+            &session("[hist, summary]", "[hist, summary]", "blk"),
+        ) {
             panic!("the requests one at a time carry `blk`: {rejections:?}");
+        }
+        if let Err(rejections) =
+            validate_session(&catalog(), &session("[hist]", "[hist, summary]", "blk"))
+        {
+            panic!(
+                "a hist-only `io.queue` streams every request, each with its `blk`: {rejections:?}"
+            );
         }
     }
 

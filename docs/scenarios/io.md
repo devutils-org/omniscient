@@ -1079,8 +1079,13 @@ cells: 11 merges in 86 reads, 12 in 83. With no elevator, `blk_mq_submit_bio`
 still merges a bio into a request waiting in the submitter's plug list or the
 software queue, and counts it in the same column of `/proc/diskstats`. The
 tool was right and the test was not. The check is now the kernel's own merge
-columns over the window enclosing the session's, read by the test (`merges <=
-enclosing.merges`), and `merges <= ops`.
+columns read by the test from both sides: no more than over a window enclosing
+the session's (`merges <= enclosing.merges`), and no fewer than over the read
+alone, a span the session's own `window` (`opened_ns`, `closed_ns`, on the
+clock the test reads) is asserted to enclose. The operation count is held the
+same way, and `merges <= ops`. A ceiling alone, the first form of this fix,
+passed a collector that always answered 0 (the review of this wave); the floor
+is what a zero would fail, wherever the read merged anything.
 
 ### 15. A queue depth required of a burst that drains between two polls — **fixed**
 
@@ -1118,9 +1123,25 @@ value, 115 ns at that latency; the skew is absolute.
 
 The test now carries that witness and counts the fewest edge crossings that
 turn one histogram into the other (the running difference over the buckets),
-allowing one per request within twice the run's p99 skew of an edge, plus as
-many as the witness saw skewed further. Twelve runs, zero crossings. Bit
-equality needs one program feeding both, filed to the owner of `src/bpf/io.rs`.
+allowing one per request within twice the run's *median* skew of an edge,
+plus as many as the witness itself put in another bucket from beyond that
+reach. The first form of this bound took the p99 skew and allowed every
+witnessed request beyond it on top: 1.2 us of reach, 143 of 320 requests
+inside it at 5.7 us, a test that failed only past 45 % disagreeing (the
+review of this wave). With the median: 240 to 300 ns of reach, 1 to 30 of 328
+requests inside it, 0 to 12 crossings in five runs. The bucket arithmetic is
+held separately, to known values at every edge, by
+`insn::the_unrolled_log2_is_the_same_arithmetic_as_the_layouts`. What would
+hold the two histograms to a known set of *device* latencies is a device that
+completes in a set time, `null_blk` with `irqmode=2 completion_nsec=<n>`:
+a module load, under "Needs privilege" in `docs/fixes/w16-io.md`. Bit equality
+needs one program feeding both, filed to the owner of `src/bpf/io.rs`.
+
+The same test met a fragmented file under `/home` at 99 % full (btrfs): a
+64 KiB direct read spanning two extents reaches the device as two requests
+(40 960 + 24 576, eight reads in 64). The program's account is now held in
+whole reads: fragments are synchronous, smaller than a block, sector-aligned,
+and add up to whole 64 KiB reads, each split adding one request to the ceiling.
 
 ### 17. The eBPF skips said "no viable backend on this machine:." and stopped
 
@@ -1148,7 +1169,15 @@ the device against 456 configured (20 ms less one 1 ms tick, times 24).
 `io.latency` cannot see it on the mapped device (there are no requests) or on
 the loop device (they arrive late and are served fast). The layer that sees it
 is the one above. The test skips naming the missing piece -- the tracers'
-capabilities first, then `sudo -n losetup`, `sudo -n dmsetup`, dm-delay, or the
-udev rule that gives `omn-*` mapped devices to the user -- and removes the
-mapped device and the loop device on a panic too.
+capabilities first, then `sudo` itself, the loop driver, a `sudo -n losetup`
+or `sudo -n dmsetup` sudo refuses, device-mapper, dm-delay (neither
+`/sys/module/dm_delay` nor `modinfo dm_delay`), or the udev rule that gives
+`omn-*` mapped devices to the user -- and fails, rather than skips, when every
+piece is there and the command still fails. It removes the mapped device and
+the loop device on a panic too. The tick is read from `/proc/config.gz`, else
+`/boot/config-<release>`, else HZ 100 with a note. The delay is held from
+above too, as a separation: the median call under twice the delay, and the
+syscall layer's time above the device under twice the delay times the count
+(a delay applied twice); and the syscall layer's total to at least nine tenths
+of the program's own clock around the calls.
 

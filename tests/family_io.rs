@@ -211,6 +211,60 @@ fn a_dumped_io_request_is_a_session_file_that_validates() {
     );
 }
 
+fn validate_stdin(session: &str) -> Output {
+    let mut child = Command::new(BINARY)
+        .args(["validate", "-f", "-", "--input-format", "yaml"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin is piped")
+        .write_all(session.as_bytes())
+        .expect("writing the session");
+    child.wait_with_output().expect("omn should finish")
+}
+
+/// A join on `blk` is refused (exit 2) only when its `io.latency` side asked
+/// for nothing but a log2 histogram, which the kernel builds and which carries
+/// no `blk`; a hist-only `io.queue` streams every request and joins. The
+/// second session ran on wave 15's binary and matched every request it saw.
+#[test]
+fn a_join_on_blk_is_refused_only_over_a_histogram_the_kernel_builds() {
+    let session = |queue: &str, latency: &str| {
+        format!(
+            "requests:\n\
+             \x20 - {{label: q, source: io.queue, target: system, mode: trace, emit: {queue}}}\n\
+             \x20 - {{label: device, source: io.latency, target: system, mode: trace, emit: {latency}}}\n\
+             joins:\n\
+             \x20 - {{id: halves, from: io.queue, to: io.latency, via: blk, match: scoped_eq, window: 30s}}\n"
+        )
+    };
+
+    let refused = validate_stdin(&session("[hist, summary]", "[hist]"));
+    assert_eq!(
+        refused.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("`device` asks `io.latency` only for a log2 histogram"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let accepted = validate_stdin(&session("[hist]", "[hist, summary]"));
+    assert!(
+        accepted.status.success(),
+        "a hist-only io.queue carries `blk`: {}",
+        stderr(&accepted)
+    );
+}
+
 /// The examples are part of the documentation, and documentation that does not
 /// parse is worse than none.
 #[test]

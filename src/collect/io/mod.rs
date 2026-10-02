@@ -20,7 +20,7 @@
 //! what the cheaper one gives up.
 
 mod block;
-pub(crate) use block::histogram_is_enough;
+use block::histogram_is_enough;
 mod diskstats;
 mod fsync;
 pub(super) mod histogram;
@@ -28,6 +28,18 @@ mod pagecache;
 mod pressure;
 pub(super) mod vfs;
 mod writeback;
+
+/// Whether this request's collector builds a log2 histogram in the kernel and
+/// publishes no record per request, so that its rows are `(device, bucket)`
+/// and carry no key but `dev`.
+///
+/// Only `io.latency` does: `io.queue` and `io.size` stream every request
+/// whatever they emit, and so does every other family's source. The validator
+/// reads this to refuse a join that would match nothing
+/// (`validate::check_joins`), and must not refuse one that works.
+pub(crate) fn builds_histogram_in_kernel(request: &crate::request::Request) -> bool {
+    request.source.as_str() == "io.latency" && histogram_is_enough(request)
+}
 
 use std::collections::BTreeMap;
 
