@@ -37,7 +37,7 @@ wave's, from `BRIEF.md`'s table. "nobody" means the file is not listed there.
 | 18 | `scenario_io::the_page_cache_sessions_say_what_their_headers_predict` | tests/scenario_io.rs:4423 | a | D | Carry `losses.dropped` (the kernel's skips) as slack on the exact 4096, and have the workload `mincore` the file before the warm read and print what was evicted |
 | 19 | `scenario_io::the_tracer_and_the_kernels_own_counter_see_the_same_requests` ("0 bytes traced") | tests/scenario_io.rs:2371 | d (the audit's (c) refuted, below) | D (test); nobody (`src/bpf/io.rs`) | Not the kblockd submitter: measured, every request credited to the reading thread under 32 direct writers. What makes a total miss is still unknown; log the run's `comm` counts and `losses` when it fails |
 | 20 | `scenario_mem::every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code` | tests/scenario_mem.rs:3175 | c | D (test); R (`src/emit.rs`) | `emit::stack` calls `value_of` where it should call `measured`, so an untimed IBS load is `NotNumeric` (exit 1). Count it as `unmeasured` |
-| 21 | `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter` | tests/scenario_mem.rs:1095 | a | D | Take the meminfo bracket as min/max over reads interleaved with each round, not before and after the session. Or make the huge pages the workload's own |
+| 21 | `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter` | tests/scenario_mem.rs:1265 | c, **closed** | D | Closed in the sixteenth wave (stream mem): it failed alone with the same gap every round, a tool defect -- `fs:sys` counted PTE-mapped huge folios as whole; it now reads the PMD-mapped count where the kernel keeps it (`docs/scenarios/mem.md` D15) |
 | 22 | `scenario_mem::compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where_it_did_not` | tests/scenario_mem.rs:2703 | a, fixed | D | Already fixed (a kcompactd wake is no longer taken as compaction). Off the tally |
 | 23 | `collect::mem::wss::tests::a_process_that_holds_much_and_touches_little_reports_the_little` | src/collect/mem/wss.rs:321 | a | D | The walker counts its walks in the handshake page. Wait for two walks after the clear instead of sleeping 300 ms |
 | 24 | `scenario_gpu::a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power` | tests/scenario_gpu.rs:938 | a | V | Re-check `device_to_ourselves()` after the busy run and skip with the numbers, or assert per-process NVML utilisation, not device-wide |
@@ -395,6 +395,43 @@ pattern 1 (a count over the machine) for #21 and the two cache tests, and the
 working-set and `defect_2` failures read as a descheduled reader (a window or a
 last poll that came late). They are kept here, with their messages, for the
 first time one fails alone.
+
+**Later the same day, under heavier load (load average 16 to 96), three of
+them failed again, and two were not flakes:**
+
+- **#21 failed alone**, five rounds in a row with the same gap (1571 against
+  1267, 3 partially mapped): a bias, not a level moving. The fifteenth wave's
+  subtraction (`nr_anon - nr_anon_partially_mapped`) is not the kernel's
+  arithmetic: folios whose PMD was split into page-table entries are in neither
+  count. Fixed in the tool, `docs/scenarios/mem.md` D15; **#21 is closed**.
+- **`a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` failed inside its
+  own file's run** (a review's first `cargo test --test scenario_mem`, and once
+  here: 72296 TLB misses against a bound of 65536, with the program's whole
+  buffer on huge pages by its own `AnonHugePages`). Not the page size: every
+  reschedule of the scan refills its translations, and that is the machine's
+  load. The bound was a calibration; it is now a separation -- the same scan
+  advised onto and off huge pages, each run saying how many it got, the
+  small-page one held to the 262144 translations it must cross and the
+  huge-page one to a quarter of that run's count (measured at load 96: 26749
+  to 30897 against 413344 to 448939). Off the tally.
+- **`defect_1_the_first_reading_of_a_launched_target_is_of_the_program`**
+  failed once in a `--no-fail-fast` run (*"left: Some(8), right: Some(7)"*, the
+  two sessions' poll counts a tick apart) and passed alone once. Stays, as a
+  descheduled reader.
+
+Two more of this stream's tests, not on the tally before:
+
+- `collect::mem::page_faults::tests::faults_are_reported_at_the_address_that_faulted`
+  (`docs/scenarios/cross-machine.md` #2, *"65 events landed in a block of 64
+  pages"*, and red once in a review's run of the module): the bound counted
+  events, and one page can fault twice; and the window opened before the
+  mapping, when the same addresses could be another thread's. Now: events from
+  after the `mmap` only, every address at the offset this test wrote (the first
+  byte of a page), and at most 64 distinct ones. Five runs green.
+- `a_binary_without_its_shim_fails_the_heap_tests_rather_than_skipping_them`
+  (new this wave, `scenario_mem` and `family_mem`): *"Text file busy"* once in
+  the file's parallel run -- another thread forked while the copy was open for
+  writing. `ETXTBSY` is retried.
 
 Two CI failures of the same stream's files that looked like this and were not:
 `collect::mem::pressure::tests::a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not`

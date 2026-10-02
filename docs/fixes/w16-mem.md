@@ -40,9 +40,14 @@ run to what the program's own stores take:
 - `the_faults_a_worker_thread_takes_are_traced_to_that_thread`: at least the
   16 384 pages the worker stored into (a mapping advised against huge pages),
   and at most its own `RUSAGE_THREAD` count plus its tail;
-- `the_tool_finds_the_faults_the_program_counted_itself`: at least 128 (256 MiB
-  in PMD-sized folios at most) and at most `ru_minflt`, then a loud *"skipped
-  the exact comparison: this machine samples page faults in user mode only"*.
+- `the_tool_finds_the_faults_the_program_counted_itself`: the same comparison
+  with `ru_minflt` on both paths, a shortfall under 10 %, widened to 15 % where
+  the run says it sampled in user mode only (the kernel's own faults for this
+  workload: 17 of 1610, measured with `perf stat -e
+  page-faults:u,page-faults:k`). The first version kept only a floor of 128 on
+  that path; the review showed the exact check still served (below). And the
+  test had skipped on every machine since the fifteenth wave, which the
+  review's run made visible: D16.
 
 ### `collect::mem::pressure::tests::a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not` (defaults): the test's
 
@@ -52,8 +57,18 @@ first to run this test at all: only `defaults` delegates a cgroup. **Fix**:
 `memory.high` instead. Both make the kernel reclaim from the cgroup as it
 grows, and the waiting is the stall measured; only `max` calls the OOM killer
 when reclaim falls behind, and over `high` a task that outruns reclaim is
-throttled, which is itself counted as memory stall. Passed three times in a
-row here, alone.
+throttled, which is itself counted as memory stall.
+
+The throttling is up to two seconds per charge batch, so on a disk too slow
+for reclaim the child can still be touching when the toucher's thirty-second
+handshake gives up -- a different red, not a green (the review's point 2). So
+the child is not required to finish: `Scratch::spawn_throttled_toucher` returns
+after the work or after thirty seconds, says which
+(`Toucher::finished_touching`), and the test reads the window either way,
+because thirty seconds of throttling is thirty seconds of stall. And it touches
+192 MiB rather than 512 (eight times the limit), which asks a third of the
+swap of the cloud disk. A child that *dies* still panics with its
+`memory.events`. Passed eight times here (load 16 to 96).
 
 ### `collect::mem::swap::tests::a_page_of_zeros_is_swapped_without_being_written` (defaults): hardened, not proven
 
@@ -131,7 +146,7 @@ output rather than reading it as a machine limit.
   this wave's reruns.
 - `docs/scenarios/mem.md`: D14.
 
-## 6. The flaky tally entries, alone, five times each
+## 6. The flaky tally entries, alone, five times each (and what failed later)
 
 35 of 35 passed, at load average 2 to 5: `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`
 (#21), `a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line`,
@@ -139,7 +154,39 @@ output rather than reading it as a machine limit.
 `family_mem::the_working_set_is_what_was_touched_and_not_what_was_held`,
 `scenario_proc::defect_1_...`, `defect_2_...`,
 `scenario_sched::a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them`.
-None failed again, so no ground truth changed; `docs/flaky.md` has the table.
+None failed again then. Later the same day, at load 16 to 96, #21 failed
+alone five rounds in a row with one gap -- a tool defect, fixed (D15, #21
+closed) -- and the cache test failed in its own file's run, a calibrated bound
+replaced by a separation; `defect_1` failed once in the whole-workspace run
+and passed alone once. `docs/flaky.md` has both tables.
+
+## The review's six points
+
+1. **The user-mode path dropped the exact comparison** -- real. Restored, 15 %
+   on that path (above). Locally it runs the 10 % bound at paranoid -1; it
+   could not be run at paranoid 2 here (changing the sysctl is outside this
+   stream's privilege). And the test could not have caught either version:
+   `unavailable` read `perf_event_paranoid` in the caveat every run prints and
+   skipped. Fixed, D16; all 42 `scenario_mem` tests still pass, now with that
+   comparison run.
+2. **Pressure under `memory.high` could time out instead** -- real, as reasoned.
+   Fixed: a throttled child is accepted, 192 MiB touched (above).
+3. **The zero-page fix is a guess** -- agreed, and the table below now says
+   *unknown* rather than *expected green*. Nothing in the logs gives the
+   runner's THP mode; the `MADV_NOHUGEPAGE` stays (harmless, and removes the
+   one mechanism known to take zero pages out of a cgroup without a swap
+   entry), and the failure message's vmstat deltas are the evidence the next
+   red brings.
+4. **The cache test fails in its own file** -- real; reproduced (72296 TLB
+   misses with all 131072 KiB of the buffer on huge pages, so not a THP
+   fallback). Fixed as a separation (`docs/flaky.md`): two scans, advised onto
+   and off huge pages, `tlb_scan_session`. Three file runs and three alone
+   green since.
+5. **`faults_are_reported_at_the_address_that_faulted` red in the module** --
+   real, and the bound was wrong rather than tight: it counted events, and the
+   window opened before the mapping. Fixed (`docs/flaky.md`); five runs green.
+6. **Green runs** -- no change. One addition the same runs found: the new
+   no-shim test hit `ETXTBSY` once in its file's parallel run; retried.
 
 ## Also landed: the interface index (stream docs' request, the fifteenth wave)
 
@@ -153,6 +200,23 @@ comparing the index, the counter kind out of `net.iface`'s name) are
 `src/join.rs`'s and a surface change, not this stream's.
 
 ## Checks
+
+After the review (the disk was full again, 4 KiB to 820 KiB free on `/home`;
+built and run with `CARGO_TARGET_DIR=/tmp/claude-1000/w16-mem-target`,
+`CARGO_INCREMENTAL=0`, so without capabilities): `cargo test --lib --
+collect::mem collect::net collect::sched collect::proc bpf::tests` 344 passed;
+`scenario_mem` 42 passed (five whole-file runs after the last fix),
+`family_mem` 16, `cross_memory` 9, `cli` 26. The commit's check is below the
+first run's notes: `cargo test --workspace --no-fail-fast` with the same
+target directory and `CARGO_PROFILE_{DEV,TEST}_DEBUG=line-tables-only` (full
+debuginfo hit the `/tmp` quota mid-link) -- **2122 passed, 11 failed, 10
+ignored**; every failure is a test that runs `<checkout>/target/debug/omn` by
+that path (`bench_capabilities` x3, `portability::the_listing_parser_reads_the_real_listing`,
+`omn-mcp` x7), which does not exist while the worktree's own `target/` is
+deleted to keep `/home` writable. None in this stream's files; clippy
+(`--all-targets -D warnings`) and `cargo fmt --check` clean.
+
+Before the review:
 
 - While iterating: `cargo test --lib` for `collect::mem::page_faults`,
   `collect::mem::swap`, `collect::mem::pressure`, `collect::net`, `bpf::tests`;
@@ -180,16 +244,21 @@ comparing the index, the counter kind out of `net.iface`'s name) are
 
 | Test | defaults (paranoid 2, no caps, delegated cgroup) | stock (paranoid 4) |
 |---|---|---|
-| `collect::mem::swap::tests::a_page_of_zeros_is_swapped_without_being_written` | **Expected green, not proven**: small pages remove the one mechanism found that takes zero pages out without a swap entry. If it is red again, the message now carries the vmstat deltas that say where the pages went | green, as at `37f17c8`: no cgroup can be made, so it skips with the reason |
-| `collect::mem::pressure::tests::a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not` | green: `memory.high` never calls the OOM killer, and the stall is measured either way | green, skips as before (no delegated cgroup) |
+| `collect::mem::swap::tests::a_page_of_zeros_is_swapped_without_being_written` | **Unknown.** The cause on the runner was not measured, and the runner's THP mode is not in its log; on `madvise` the small-page change does nothing. If it is red again, the message carries `memory.current` and the vmstat deltas that say where the pages went | green, as at `37f17c8`: no cgroup can be made, so it skips with the reason |
+| `collect::mem::pressure::tests::a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not` | green, reasoned: `memory.high` never calls the OOM killer, a throttled child is the stall measured rather than a timeout, and 192 MiB needs a third of the swap. A child killed some other way still panics, with its `memory.events` | green, skips as before (no delegated cgroup) |
 | `scenario_mem::every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_code` | green: the user-mode retry now runs for a launched program (the library test showed the user-mode open works on that cell), so the ten combinations exit 0. Residual risk: several tests in one binary sampling at once share the user's `perf_event_mlock_kb` budget, which paranoid -1 here never charges; a ring refused there is a `ring_budget_refusal`, exit 1, and would name the limit | green, as at `37f17c8`: the resolver withholds `pmu:sw` at paranoid 4, which the sweep does not ask about |
 | `scenario_net::the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need` | green: `/dev/ptp1` does not open there, so the exit-1 branch, whose text is the one the CI printed (`so_timestamping: phc: missing`) | green, the same |
-| `scenario_mem::the_tool_finds_the_faults_the_program_counted_itself`, `the_faults_a_worker_thread_takes_are_traced_to_that_thread` (skipped at `37f17c8`) | run for the first time, user mode only, against the floors above; one new skip line, filed for the gate | skip, as before |
+| `scenario_mem::the_tool_finds_the_faults_the_program_counted_itself`, `the_faults_a_worker_thread_takes_are_traced_to_that_thread` (skipped at `37f17c8`) | run for the first time, user mode only: the first against `ru_minflt` within 15 %, the second against its 16 384 stores; no new skip line | skip, as before |
+| `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter` (green at `37f17c8`, D15 changes it) | green: both backends now read the PMD-mapped count, the bound is the measured drift | green, the same files |
+| `scenario_mem::a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` | skips at the L1 request, as before (no hardware PMU) | skips, as before (paranoid 4) |
 
 ## Open
 
 - **The zero-page swap test on the CI**, above: the cause of 22 MiB on swap is
   not measured; the next run's message will say.
+- **The user-mode bound of `the_tool_finds_the_faults_the_program_counted_itself`**
+  is reasoned from one `perf stat` of the workload (1 % kernel-mode faults),
+  not run at paranoid 2 here.
 - **The disk.** `/home` was full while this stream ran (200 G, 0 to 600 M
   free, the main checkout's `target/` alone is 25 G): `make check` in the
   worktree failed twice at link time with *"No space left on device"*, and the
@@ -227,7 +296,15 @@ sudo umount /mnt/omn-nosuid
   retry that never ran pass on the cell it was written for.
 - **A cgroup test that wants reclaim uses `memory.high`**, not `memory.max`,
   unless what it measures is the limit itself: `max` adds an OOM kill that is
-  the disk's speed, not the subject.
+  the disk's speed, not the subject. And it does not require the throttled
+  child to finish: the throttling is the stall.
+- **Two backends of one source answer one kernel counter under one attribute
+  name, or carry different names.** Matching on the day is not evidence (D6
+  matched, D15 did not); where one file has no equivalent, the backend reads
+  the counter where the kernel keeps it and publishes its own under its own
+  name (`huge_folios`).
+- **A run that exited 0 was served.** A scenario's skip test looks for a
+  machine's limit in the refusal, never in the caveats of a run that worked.
 - **Unbuilt and unservable here** (the `net.hwts` case): the chain path says
   the machine first, the forced path says the build first. This stream's test
   accepts both by the machine and does not choose; filed to the resolver.

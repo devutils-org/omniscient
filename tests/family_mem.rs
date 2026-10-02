@@ -87,11 +87,25 @@ fn run_without_the_shim(args: &[&str]) -> Output {
             directory.join(place).display()
         );
     }
-    let output = Command::new(&copy)
-        .args(args)
-        .env_remove("OMN_PRELOAD_LIB")
-        .output()
-        .expect("the copy should run");
+    // `ETXTBSY` is retried: another test thread that forks while the copy
+    // is still open for writing holds that descriptor until its child execs,
+    // and the kernel refuses to run a file someone may still be writing. The
+    // descriptor is close-on-exec, so the refusal ends within a fork-exec of
+    // another test; failed once in this file's parallel run.
+    let mut busy = 0;
+    let output = loop {
+        match Command::new(&copy)
+            .args(args)
+            .env_remove("OMN_PRELOAD_LIB")
+            .output()
+        {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && busy < 100 => {
+                busy += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            other => break other.expect("the copy should run"),
+        }
+    };
     let _ = std::fs::remove_dir_all(directory.parent().expect("the scratch's parent"));
     output
 }

@@ -1125,6 +1125,49 @@ taken with an error in the shape `crate::perf` returns, and
 holds the match to a real refusal: an event on pid 1, which belongs to root
 and which the kernel refuses to an unprivileged user at every paranoid level.
 
+### D15 — D6's fix matched on the day and was not the kernel's arithmetic — **fixed in the sixteenth wave**
+
+D6 made `fs:sys` publish `nr_anon - nr_anon_partially_mapped` as
+`resident_huge_pages`, on the evidence that 412 - 30 = 382 matched vmstat's
+382. That held while every huge folio was either mapped by one PMD or partly
+unmapped. A third kind is neither: a folio whose PMD was split into page-table
+entries that still map every subpage (an `mprotect` or `mremap` of part of it,
+a fork), which is in `nr_anon` and in neither of the other two counts. In the
+sixteenth wave, with five other streams' suites running on this machine,
+`both_huge_page_backends_read_the_same_promotion_counter` failed alone, five
+rounds in a row, the same gap each time:
+
+```
+(fs:sys, fs:proc, partially mapped): (1571, 1267, 3), (1566, 1262, 3), (1576, 1272, 3), ...
+nr_anon 494, nr_anon_partially_mapped 3, nr_anon_transparent_hugepages 357 (= AnonHugePages / 2 MiB)
+```
+
+A bias, not drift: two backends answering different questions under one name,
+the defect D6 was about. The per-size statistics have no PMD-mapped count, so
+`fs:sys` now reads `nr_anon_transparent_hugepages` where the kernel keeps it
+(`/proc/vmstat`, added to the backend's `requires`), and the folios travel
+beside it as `huge_folios`, under their own name, with a caveat saying what
+each counts. The scenario drops its `partial / 2` slack: the bound is the
+machine's own movement between rounds, and the folio count is held to the
+kernel's identity (a PMD-mapped folio and a partially mapped one are disjoint).
+Tests: `collect::mem::thp::tests::the_per_size_statistics_report_whole_huge_pages_and_the_folios_apart`
+(this machine's three numbers) and
+`a_kernel_that_does_not_count_whole_huge_pages_reports_no_resident_count`.
+
+### D16 — a served run read as a machine limit, so a scenario never compared — **fixed in the sixteenth wave**
+
+`tests/scenario_mem.rs`'s `unavailable` turned a run into a skip when its
+stderr held `perf_event_paranoid` anywhere. Since the fifteenth wave the
+`mem.faults` caveat names `perf_event_paranoid` on every run, so
+`the_tool_finds_the_faults_the_program_counted_itself` skipped on every
+machine, exit 0 and all, and its comparison with `ru_minflt` never ran. A run
+that succeeded is now served whatever its caveats say, and the words are looked
+for only from the refusal on. The comparison runs again here (1611 faults by
+the kernel's count) and is the 10 % bound it was, widened to 15 % where the
+run says it sampled in user mode only: the faults the kernel takes on the
+program's behalf were 17 of 1610 for this workload (`perf stat -e
+page-faults:u,page-faults:k`).
+
 ---
 
 ## What this leaves for the coordinator

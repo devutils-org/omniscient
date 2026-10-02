@@ -639,6 +639,11 @@ mod tests {
         };
         assert_ne!(block, libc::MAP_FAILED, "the mapping must succeed");
         let base = block as u64;
+        // From here until the unmap the range is this test's alone. Before
+        // it, the same addresses may have been another thread's mapping, whose
+        // faults the process-wide collector saw too -- at addresses inside
+        // this block that this test never wrote.
+        let mapped_at = crate::clock::monotonic_ns();
         for index in 0..PAGES {
             // SAFETY: writing inside the mapping, one byte per page, which is
             // what makes each of them fault in.
@@ -650,15 +655,20 @@ mod tests {
         // SAFETY: unmapping what was mapped above, after the last read of it.
         unsafe { libc::munmap(block, PAGES * page) };
 
-        let inside = events
+        let addresses: Vec<u64> = events
             .iter()
-            .filter(|event| match event.key(crate::request::KeyKind::Mem) {
-                Some(KeyValue::Mem { base: addr, .. }) => {
-                    (base..base + (PAGES * page) as u64).contains(addr)
+            .filter(|event| event.ts_ns >= mapped_at)
+            .filter_map(|event| match event.key(crate::request::KeyKind::Mem) {
+                Some(KeyValue::Mem { base: addr, .. })
+                    if (base..base + (PAGES * page) as u64).contains(addr) =>
+                {
+                    Some(*addr)
                 }
-                _ => false,
+                _ => None,
             })
-            .count();
+            .collect();
+        let inside = addresses.len();
+        let pages: std::collections::BTreeSet<u64> = addresses.iter().copied().collect();
 
         // Neither bound is the page count, and both of the reasons matter.
         //
@@ -671,9 +681,14 @@ mod tests {
         // process.
         //
         // What can be asserted is that the addresses are real. The block sits
-        // where the allocator put it, so samples landing inside it are not
-        // coincidence, and samples exceeding the pages it holds would mean an
-        // address is being reported that was never touched.
+        // where the kernel put it, so samples landing inside it while it was
+        // ours are not coincidence; and this test wrote exactly one byte, the
+        // first, of each page, so a fault inside it at any other offset is an
+        // address that was never touched. The number of events is not bounded
+        // by the pages: one page can fault twice (a fault retried, a page
+        // migrated under compaction), and a run recorded in
+        // docs/scenarios/cross-machine.md saw 65 events in these 64 pages.
+        // The number of distinct pages is.
         assert!(!events.is_empty(), "no page-fault event arrived at all");
         assert!(
             inside >= PAGES / 16,
@@ -681,10 +696,20 @@ mod tests {
              below even one fault per sixteen-page folio",
             events.len()
         );
+        let untouched: Vec<u64> = addresses
+            .iter()
+            .filter(|addr| (**addr - base) % page as u64 != 0)
+            .map(|addr| addr - base)
+            .collect();
         assert!(
-            inside <= PAGES,
-            "{inside} events landed in a block of {PAGES} pages, so an address is being reported \
-             that was never touched"
+            untouched.is_empty(),
+            "faults reported at offsets {untouched:x?} of the block, where nothing was written: \
+             only the first byte of each page was"
+        );
+        assert!(
+            pages.len() <= PAGES,
+            "{} distinct addresses in a block of {PAGES} pages",
+            pages.len()
         );
         assert!(collector.losses().is_clean(), "{:?}", collector.losses());
     }

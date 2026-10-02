@@ -349,7 +349,7 @@ full avg10=0.98 avg60=1.87 avg300=2.76 total=903210
     #[test]
     fn a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not() {
         const LIMIT: u64 = 24 * 1024 * 1024;
-        const TOUCHED: u64 = 512 * 1024 * 1024;
+        const TOUCHED: u64 = 192 * 1024 * 1024;
 
         let Some(scratch) = Scratch::cgroup("pressure") else {
             eprintln!("skipped: this user cannot create a cgroup under its own slice");
@@ -390,12 +390,25 @@ full avg10=0.98 avg60=1.87 avg300=2.76 total=903210
         // the child halfway (`memory.events`: `max 1631 oom 1 oom_kill 1`),
         // and the test said nothing about pressure. Over `high`, a task that
         // outruns reclaim is throttled, and the throttling is itself counted
-        // as memory stall.
+        // as memory stall -- which is why the child is not required to have
+        // finished: on a swap device too slow for reclaim to keep up, the
+        // over-high penalty sleeps it for up to two seconds per charge batch,
+        // and thirty seconds of that is thirty seconds of the stall measured
+        // here. Eight times the limit, not twenty: enough reclaim to stall on
+        // any device, and a third of the swap the earlier half gibibyte asked
+        // of a cloud disk.
         assert!(scratch.write("memory.high", &LIMIT.to_string()));
         collector.sample(2).expect("a read before the work starts");
-        let mut child = scratch.spawn_toucher(TOUCHED);
+        let mut child = scratch.spawn_throttled_toucher(TOUCHED, Duration::from_secs(30));
+        let finished = child.finished_touching();
         let stalled = collector.sample(3).expect("a read after the work");
         child.stop();
+        if !finished {
+            eprintln!(
+                "the child was still touching its {TOUCHED} bytes after thirty seconds over a \
+                 {LIMIT}-byte memory.high: throttled, which is the stall this reads"
+            );
+        }
 
         let event = stalled.first().expect("a second read produces a point");
         let ratio = event.attr("stall_ratio").unwrap().as_f64().unwrap();
