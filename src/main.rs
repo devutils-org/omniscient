@@ -627,6 +627,15 @@ fn weighs_its_samples(source: &str, backend: &str) -> bool {
 /// The mode rungs a budget passes over because the collector's sampled events
 /// would not be weighed, as one sentence for the budget's note.
 fn unweighed_mode_rungs(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> {
+    unweighed_mode_rungs_given(catalog, resolved, weighs_its_samples)
+}
+
+/// [`unweighed_mode_rungs`], with which collectors weigh their samples given.
+fn unweighed_mode_rungs_given(
+    catalog: &Catalog,
+    resolved: &ResolvedRequest,
+    weighs: fn(&str, &str) -> bool,
+) -> Option<String> {
     let entry = catalog.get(&resolved.request.source)?;
     let mode = resolved.request.mode;
     let passed: Vec<String> = mode
@@ -643,7 +652,7 @@ fn unweighed_mode_rungs(catalog: &Catalog, resolved: &ResolvedRequest) -> Option
                 .filter(move |backend| entry.backend_modes(backend).contains(&cheaper.kind()))
                 .filter(|backend| {
                     collect::implements(resolved.request.source.as_str(), &backend.id)
-                        && !weighs_its_samples(resolved.request.source.as_str(), &backend.id)
+                        && !weighs(resolved.request.source.as_str(), &backend.id)
                 })
                 .map(move |backend| format!("`{}` in `{cheaper}`", backend.id))
         })
@@ -2327,10 +2336,10 @@ mod tests {
 
     /// The rung `trace` -> `sample` is offered only on a collector that
     /// weighs its samples, and `raw` is refused only when it could be taken:
-    /// with `mem.faults`'s collector weighing (as the filed change to
-    /// `page_faults.rs` would make it), a `raw` list is refused up front and a
-    /// `hist` is not; with it as it is, the rung is passed over, nothing can
-    /// mix, and the note names the rung and why.
+    /// with `mem.faults`'s collector weighing (as `page_faults.rs` does), a
+    /// `raw` list is refused up front and a `hist` is not; with it unweighed,
+    /// the rung is passed over, nothing can mix, and the note names the rung
+    /// and why.
     #[test]
     fn a_sampled_rung_whose_events_are_not_weighed_is_passed_over_not_taken() {
         let (catalog, raw) = match traced_faults("raw") {
@@ -2356,19 +2365,27 @@ mod tests {
         );
         assert_eq!(budget_refusal_given(&catalog, &hist, |_, _| true), None);
 
-        assert!(!weighs_its_samples("mem.faults", "pmu:sw"));
-        assert_eq!(budget_refusal(&catalog, &raw), None);
+        // The shipped collector weighs its samples: the same answers.
+        assert!(weighs_its_samples("mem.faults", "pmu:sw"));
+        assert_eq!(budget_refusal(&catalog, &raw), Some(refused));
+        assert_eq!(budget_refusal(&catalog, &hist), None);
         assert!(
             rungs(&catalog, &hist, 0.01)
                 .iter()
-                .all(|rung| rung.mode == hist.request.mode),
-            "no mode rung on an unweighed collector"
+                .any(|rung| rung.mode != hist.request.mode),
+            "a weighed collector offers the mode rung"
         );
-        let note = budget_note(&catalog, &hist).expect("a budget has a note");
+
+        assert_eq!(unweighed_mode_rungs(&catalog, &hist), None);
+
+        // An unweighed one: the rung is passed over, and the note says why.
+        assert_eq!(budget_refusal_given(&catalog, &raw, |_, _| false), None);
+        let passed = unweighed_mode_rungs_given(&catalog, &hist, |_, _| false)
+            .expect("an unweighed collector's mode rung is passed over");
         assert!(
-            note.contains("`pmu:sw` in `sample@99hz`, is passed over")
-                && note.contains("carry no `weight`"),
-            "{note}"
+            passed.contains("`pmu:sw` in `sample@99hz`, is passed over")
+                && passed.contains("carry no `weight`"),
+            "{passed}"
         );
     }
 

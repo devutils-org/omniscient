@@ -1,6 +1,6 @@
 # Guide — running the demonstrations, and what each one shows
 
-A hundred and sixty-three sessions, nine families and their crossings, four kinds of question. This is how to
+A hundred and sixty-six sessions, nine families and their crossings, four kinds of question. This is how to
 run them and what to look for.
 
 Everything here runs against **this** machine, now. Nothing is recorded, nothing
@@ -12,7 +12,7 @@ make                    # build, and grant the capabilities a relink drops
 make demo               # the guided tour: eight questions, about seven seconds
 scripts/demo.sh --list  # every session, by family, without running any
 scripts/demo.sh mem     # one family's sessions
-make demo-all           # the tour and then all one hundred and sixty-three
+make demo-all           # the tour and then all one hundred and sixty-six
 omn -f examples/mem-footprints.yml     # one session on its own
 ```
 
@@ -448,6 +448,8 @@ and a decomposition that adds up — or prints what does not, as a signed residu
 | `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
 | `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
 | `join-overlap-machine.yml` | A thread's waits laid across the machine's memory-pressure readings with no key: `overlap` over state the machine holds once. |
+| `join-iface-loopback.yml` | Two sources of loopback joined by the interface's index, the bytes it moved credited while both watched. |
+| `join-iface-qdisc.yml` | Queued packets laid across their interface's link readings: a kernel index meeting a name; lo queues nothing by default. |
 
 ## cross-family
 
@@ -469,6 +471,7 @@ and `docs/scenarios/cross-<name>.md` says what it found.
 | `cross-io-stale-pointer.yml` | Would a bare pointer have credited somebody else's request to this reader? |
 | `cross-machine-frequency.yml` | Did the machine's clock explain the instruction rate you just measured? |
 | `cross-machine-reclaim-io.yml` | Was the I/O you just measured the program's, or the memory limit's? |
+| `cross-machine-reclaim-enclosed.yml` | A memory limit's drained reclaim rows credited whole to the second of pressure that encloses them. |
 
 ## general
 

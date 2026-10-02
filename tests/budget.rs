@@ -2034,12 +2034,12 @@ fn a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto
 }
 
 /// A budget refuses up front only a move it could take: `mem.faults`'s
-/// sampled events carry no `weight` yet, so the `trace` -> `sample` rung is
-/// passed over and named with the reason, a `raw` list under a budget cannot
-/// mix two kinds of event and is let through, and `hist` is told it will stop
-/// rather than degrade. (`main.rs`'s unit test
+/// sampled events carry their period as `weight`, so the `trace` -> `sample`
+/// rung is offered, a `raw` list under a budget would mix two kinds of event
+/// and is refused with the reason, and `hist` is told it will degrade onto
+/// the weighed samples. (`main.rs`'s unit test
 /// `a_sampled_rung_whose_events_are_not_weighed_is_passed_over_not_taken`
-/// holds the refusal of `raw` once the collector weighs.)
+/// holds the other branch: an unweighed collector's rung is passed over.)
 ///
 /// Held to the matrix the validator itself answers with: `-m sample -e raw`
 /// is a valid request (exit 0 on the dump) and `-m sample -e summary` is not
@@ -2062,8 +2062,11 @@ fn a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed() {
         eprintln!("SKIP: `mem.faults` is not served here: {said}");
         return;
     }
-    assert_eq!(raw.status.code(), Some(0), "{said}");
-    assert!(said.contains("stop rather than degrade"), "{said}");
+    assert_eq!(raw.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("`raw` would hold the events of both modes as one kind"),
+        "{said}"
+    );
     // Each mode serves `raw` alone, without a budget.
     for mode in ["trace", "sample"] {
         let alone = dump(&["-m", mode, "-e", "raw"]);
@@ -2085,16 +2088,15 @@ fn a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed() {
         "{}",
         stderr(&summary)
     );
-    // `hist` weighs each event, and the sampled events would not carry what
-    // they stand for: the rung is named as passed over, with the reason, and
-    // not offered.
+    // `hist` weighs each event, and the sampled events carry what they stand
+    // for: the rung is offered, and nothing is passed over.
     let hist = dump(&["-m", "trace", "-e", "hist", "--budget", "0.01%"]);
     let said = stderr(&hist);
     assert_eq!(hist.status.code(), Some(0), "{said}");
     assert!(
-        said.contains("stop rather than degrade")
-            && said.contains("`pmu:sw` in `sample@99hz`, is passed over")
-            && said.contains("carry no `weight`"),
+        said.contains("degrade onto `pmu:sw` in `sample@99hz`")
+            && said.contains("every event then standing for its period")
+            && !said.contains("is passed over"),
         "{said}"
     );
 }

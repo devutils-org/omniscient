@@ -1,6 +1,6 @@
 # Examples
 
-A hundred and sixty-three sessions. Each is the same object a command line builds,
+A hundred and sixty-six sessions. Each is the same object a command line builds,
 written down, so a reader can run it and a test can run it identically.
 
 ```console
@@ -277,6 +277,8 @@ and a decomposition that adds up — or prints what does not, as a signed residu
 | `join-interrupt-or-task.yml` | Who released a thread, a timer or another thread: the interrupt named as the interrupt, at either end of a chain. |
 | `join-overlap-waits.yml` | Waits split across the 100 ms intervals of a poll by their overlap with each, at TEMPORAL. |
 | `join-overlap-machine.yml` | A thread's waits laid across the machine's memory-pressure readings with no key: `overlap` over state the machine holds once. |
+| `join-iface-loopback.yml` | Two sources of loopback joined by the interface's index, the bytes it moved credited while both watched. |
+| `join-iface-qdisc.yml` | Queued packets laid across their interface's link readings: a kernel index meeting a name; lo queues nothing by default. |
 
 ## cross-family
 
@@ -299,6 +301,7 @@ correlations, and only one of them is evidence.
 | `cross-io-stale-pointer.yml` | Would a bare pointer have credited somebody else's request to this reader? |
 | `cross-machine-frequency.yml` | Did the machine's clock explain the instruction rate you just measured? |
 | `cross-machine-reclaim-io.yml` | Was the I/O you just measured the program's, or the memory limit's? |
+| `cross-machine-reclaim-enclosed.yml` | A memory limit's drained reclaim rows credited whole to the second of pressure that encloses them. |
 
 ## general
 
