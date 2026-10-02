@@ -217,11 +217,15 @@ the next backend that serves, never quietly. In the catalog today:
 | `kernel>=5.8` | 33 eBPF backends | the BPF ring buffer they publish through, and `CAP_BPF` / `CAP_PERFMON` |
 | `kernel>=6.1` | 5: the `bpf:raw_tp` backends of `sched.runqlat`, `sched.offcpu` and `sched.switches`, and both tracepoint backends of `sched.lock` | the four-argument `sched_switch`; `lock:contention_*` |
 | `kernel>=6.8` | 1: `mem.thp`'s `fs:sys` | its `fs:proc` fallback serves older kernels |
-| `uprobe_multi` (6.6) | the `bpf:usdt` backends of `net.request` | every site is linked with one uprobe-multi link |
+| `uprobe_multi` (6.6) | both backends of `net.request`, `bpf:usdt` and `bpf:usdt:threads` | every site is linked with one uprobe-multi link; **no fallback**: below 6.6 `net.request` is refused |
 
 Every one of the five 6.1 backends has a fallback below it in its chain (a
 `bpf:tp` program, or `sched.lock`'s `bpf:kprobe`), so on an older kernel the
-source is served by that fallback, with what it degrades stated.
+source is served by that fallback, with what it degrades stated. `net.request`
+is the exception: both of its backends need `uprobe_multi`, and the source has
+no older route, so below 6.6 it is refused, naming the kernel's refusal
+(`catalog/net.yaml`'s caveat; `docs/portability.md`, P5, measured missing on
+5.15 and 6.1).
 
 **5.15 is served.** Under 5.15, 6.1, 6.6 and 7.2 with the capabilities,
 `omn list` calls 86, 88, 88 and 89 sources usable (measured in guests,
@@ -238,7 +242,7 @@ structures are refused, and a run attaches 53 sessions instead of 100 under
 | | Kernel | Every backend's `kernel>=` met | BTF |
 |---|---|---|---|
 | Ubuntu 24.04 | 6.8, later with HWE **(read from its documentation)**; the hosted runner is 6.17, measured | yes | yes, measured on the runner |
-| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | with HWE; on 5.15 the six `kernel>=6.1`/`6.8` backends and `uprobe_multi` are refused and their fallbacks serve, measured in a 5.15.221 guest | yes **(read from its documentation)** |
+| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | with HWE; on 5.15 the six `kernel>=6.1`/`6.8` backends are refused and their fallbacks serve, and `net.request` is refused outright (`uprobe_multi` is missing and it has no fallback), measured in a 5.15.221 guest | yes **(read from its documentation)** |
 | Fedora 40 and later | 6.8 and later **(read from its documentation)** | yes | yes **(read from its documentation)** |
 | Arch | the current stable kernel, 7.2.6 here, measured | yes | yes, measured |
 

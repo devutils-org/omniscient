@@ -39,7 +39,12 @@ against, plus `cargo test --test cli` (26 passed).
      `sched.offcpu` and `sched.switches`, and both tracepoint backends of
      `sched.lock`.
    - 1 needs `kernel>=6.8`: `mem.thp`'s `fs:sys`.
-   - `net.request`'s `bpf:usdt` needs `uprobe_multi`.
+   - Both `net.request` backends (`bpf:usdt`, `bpf:usdt:threads`) need
+     `uprobe_multi` (6.6), and the source has no fallback: below 6.6 it is
+     refused (`catalog/net.yaml:396-397`, caveat `:413-415`). A review found
+     that the first version of the Ubuntu 22.04 row said its fallbacks served
+     on 5.15. They do not, and the row, the table and the paragraph under the
+     table now say that `net.request` is refused below 6.6.
 
    Each of the five 6.1 backends has a fallback below it in its chain
    (`catalog/sched.yaml:66`, `:99`, `:179`, `:218`). The section states that
