@@ -309,6 +309,14 @@ fn profile_emitting(
     })
 }
 
+/// `perf_event_paranoid is N`, for a skip line to name the machine's reason.
+fn paranoid_said() -> String {
+    match std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid") {
+        Ok(text) => format!("perf_event_paranoid is {}", text.trim()),
+        Err(error) => format!("perf_event_paranoid is unreadable ({error})"),
+    }
+}
+
 /// Profiles, or says loudly why this machine cannot.
 fn profile_or_skip(build: Build, stack: Option<&str>) -> Option<Profile> {
     let binary = self::build(build)?;
@@ -1074,7 +1082,11 @@ fn sample_launched(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!("skipped: cannot sample with {callchain:?}: {error}");
+            eprintln!(
+                "skipped: this machine will not sample this process with {callchain:?} \
+                 ({}): {error}",
+                paranoid_said()
+            );
             return None;
         }
     };
@@ -1306,7 +1318,11 @@ fn sample_launched_args(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!("skipped: cannot sample with {callchain:?}: {error}");
+            eprintln!(
+                "skipped: this machine will not sample this process with {callchain:?} \
+                 ({}): {error}",
+                paranoid_said()
+            );
             return None;
         }
     };
@@ -1522,13 +1538,21 @@ int main(void) {
         .unwrap();
     let burner: i32 = line.trim().parse().expect("the burner says its tid");
     let pid = child.id() as i32;
-    let spec = omn::perf::SampleSpec::software(CPU_CLOCK, 50_000, Callchain::BOTH_HALVES);
+    // The kernel half only where the machine allows it: the drops per ring
+    // are the subject, and a user-only chain fills a ring the same way.
+    let callchain = Callchain::FramePointers {
+        kernel: omn::perf::kernel_callchain_allowed(),
+    };
+    let spec = omn::perf::SampleSpec::software(CPU_CLOCK, 50_000, callchain);
     let mut sampler = match TaskSampler::open(&spec, pid, true, 8, 8) {
         Ok(sampler) => sampler,
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!("skipped: {error}");
+            eprintln!(
+                "skipped: this machine will not sample this process ({}): {error}",
+                paranoid_said()
+            );
             return;
         }
     };
@@ -1643,7 +1667,10 @@ fn named_stacks(binary: &Path, debuginfod: Option<Arc<Debuginfod>>) -> Option<Na
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!("skipped: {error}");
+            eprintln!(
+                "skipped: this machine will not sample this process ({}): {error}",
+                paranoid_said()
+            );
             return None;
         }
     };

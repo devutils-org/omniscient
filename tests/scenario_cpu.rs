@@ -575,6 +575,38 @@ fn withheld_here(message: &str) -> bool {
             && message.contains("missing"))
 }
 
+/// A refusal quoted on a skip line, the machine's reason first.
+///
+/// `omn` writes its warnings and notes before the error, so a skip line that
+/// quotes the whole stderr starts with `warning: ...` or `note: container
+/// ...`, and the reason is several lines down, unindented, where a reader of
+/// skip lines -- and `.github/scripts/skip-gate.sh`, which reads a skip line
+/// and the indented lines under it -- does not look. The lines that say why
+/// the machine cannot serve come first, and the rest are indented under them
+/// (stream engine's `machine_s_reason`, the fifteenth wave).
+fn machine_s_reason(said: &str) -> String {
+    let lines: Vec<&str> = said
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let (reasons, rest): (Vec<&str>, Vec<&str>) = lines.iter().partition(|line| {
+        line.trim_start().starts_with("error")
+            || line.contains("missing")
+            || line.contains("perf_event_paranoid")
+            || line.contains("no viable backend")
+    });
+    let mut laid = String::new();
+    for line in reasons.iter().chain(rest.iter()) {
+        if laid.is_empty() {
+            laid.push_str(line.trim());
+        } else {
+            laid.push_str("\n    ");
+            laid.push_str(line.trim_end());
+        }
+    }
+    laid
+}
+
 /// Whether a refusal is this machine's limit rather than a refusal of the
 /// request. Only the first is a reason for a scenario to stop quietly.
 fn machine_cannot_serve(message: &str) -> bool {
@@ -721,7 +753,7 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
                 machine_cannot_serve(&message),
                 "the example was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return None;
         }
     };
@@ -834,7 +866,7 @@ fn counted(source: &str, spec: &str, axes: &[&str]) -> Option<f64> {
                 "the request was refused, which is a broken scenario rather than a limited \
                  machine: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             None
         }
     }
@@ -922,7 +954,7 @@ fn consumed_cpu(spec: &str, axes: &[&str]) -> Option<Consumed> {
                 machine_cannot_serve(&message),
                 "the request was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return None;
         }
     };
@@ -1382,7 +1414,7 @@ fn a_profile_renders_in_every_format_that_carries_stacks() {
         Outcome::Measured { document, .. } => document,
         Outcome::Refused { message, .. } => {
             assert!(machine_cannot_serve(&message), "{message}");
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
     };
@@ -1534,7 +1566,7 @@ fn session_run(session: &str) -> Option<serde_json::Value> {
                 machine_cannot_serve(&message),
                 "the session was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             None
         }
     }
@@ -1710,7 +1742,7 @@ fn a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency() {
                     machine_cannot_serve(&message),
                     "`cpu.cycles` on `{backend}` was refused, not unserved: {message}"
                 );
-                eprintln!("skipped `{backend}`: {message}");
+                eprintln!("skipped `{backend}`: {}", machine_s_reason(&message));
                 None
             }
         }
@@ -1794,7 +1826,7 @@ fn the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_co
                     machine_cannot_serve(&message),
                     "`cpu.cycles` on `{backend}` was refused, not unserved: {message}"
                 );
-                eprintln!("skipped `{backend}`: {message}");
+                eprintln!("skipped `{backend}`: {}", machine_s_reason(&message));
                 continue;
             }
         };
@@ -2698,7 +2730,7 @@ fn a_profile_samples_every_thread_for_the_cpu_it_used() {
         Outcome::Measured { document, .. } => document,
         Outcome::Refused { code, message } => {
             assert!(machine_cannot_serve(&message), "exit {code}: {message}");
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
     };
@@ -3075,7 +3107,7 @@ fn a_system_target_asks_whether_this_process_may_count_a_cpu() {
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(machine_cannot_serve(&message), "{message}");
-        eprintln!("skipped: {message}");
+        eprintln!("skipped: {}", machine_s_reason(&message));
         return;
     }
     let record: serde_json::Value =
@@ -3367,7 +3399,7 @@ fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
     .refusal();
     // The build's gap is reached only through a backend the machine offers.
     if withheld_here(&message) {
-        eprintln!("skipped: {message}");
+        eprintln!("skipped: {}", machine_s_reason(&message));
         return;
     }
     assert_eq!(
@@ -3499,7 +3531,7 @@ fn stalled_share() -> Option<f64> {
                 machine_cannot_serve(&message) || message.contains("pressure"),
                 "the request was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             None
         }
     }
@@ -3611,7 +3643,7 @@ fn a_duration_beside_a_session_file_replaces_the_sessions_own() {
         // The dump is of the resolved request, so a machine that withholds
         // `cpu.instructions` has no dump to give; the refusal is its own.
         Outcome::Refused { message, .. } if withheld_here(&message) => {
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
         Outcome::Refused { code, message } => {
@@ -3864,8 +3896,9 @@ fn a_cgroup_capped_at_a_tenth_of_a_cpu_is_stopped_for_nine_tenths_of_the_time() 
     })
     .map(str::to_owned) else {
         eprintln!(
-            "skipped: no ancestor of `{parent}` that this user owns hands the cpu controller \
-             down, so no cgroup made here can carry a quota and nothing can be throttled"
+            "skipped: no cgroup here delegates the cpu controller to this user (no ancestor of \
+             `{parent}` that this user owns hands it down), so no cgroup made here can carry a \
+             quota and nothing can be throttled"
         );
         return;
     };
@@ -4054,7 +4087,7 @@ fn over_a_target(
                     machine_cannot_serve(&message),
                     "`{source} --cgroup` was refused rather than unserved: {message}"
                 );
-                eprintln!("skipped: {message}");
+                eprintln!("skipped: {}", machine_s_reason(&message));
                 return None;
             }
         };
@@ -4377,7 +4410,7 @@ fn the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted() {
                     machine_cannot_serve(&message),
                     "a polled counter was refused rather than unserved: {message}"
                 );
-                eprintln!("skipped: {message}");
+                eprintln!("skipped: {}", machine_s_reason(&message));
                 return None;
             }
         };
@@ -4466,7 +4499,7 @@ fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
         ])
         .refusal();
         if withheld_here(&message) {
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
         // A mode this machine cannot serve is the machine's gap (exit 1); one

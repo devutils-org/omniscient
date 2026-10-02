@@ -1049,6 +1049,16 @@ pub fn kernel_callchain_allowed() -> bool {
     *ANSWER.get_or_init(|| probe_open(Callchain::BOTH_HALVES).is_ok())
 }
 
+/// `perf_event_paranoid is N`, as a test's skip line names the machine's
+/// reason: the CI's cells are told apart by it (`.github/expected-skips*.txt`).
+#[cfg(test)]
+pub(crate) fn paranoid_said() -> String {
+    match std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid") {
+        Ok(text) => format!("perf_event_paranoid is {}", text.trim()),
+        Err(error) => format!("perf_event_paranoid is unreadable ({error})"),
+    }
+}
+
 /// Whether the kernel will copy the user registers and a slice of the user
 /// stack with each sample, which `fp+leaf` and `dwarf` both need.
 ///

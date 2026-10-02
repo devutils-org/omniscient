@@ -945,7 +945,10 @@ mod tests {
             }
             spun = thread_ns() - from;
         }) else {
-            eprintln!("skipped: this machine refuses the software cpu clock to this process");
+            eprintln!(
+                "skipped: {}: this machine refuses the software cpu clock to this process",
+                crate::perf::paranoid_said()
+            );
             return;
         };
         let counted = readings[0].value as f64;
@@ -1546,7 +1549,7 @@ mod tests {
                 reason.contains("reads zero") || reason.contains("refused"),
                 "{reason}"
             );
-            eprintln!("skipped: {reason}");
+            eprintln!("skipped: {}: {reason}", crate::perf::paranoid_said());
             return;
         }
         let before = kernel_switches();
