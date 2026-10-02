@@ -683,6 +683,7 @@ mod tests {
             return;
         }
         assert!(scratch.write("memory.max", &LIMIT.to_string()));
+        let vmstat_before = zero_and_huge_page_counters();
         collector.sample(0).expect("the baseline read");
         let mut child = scratch.spawn_zero_toucher(TOUCHED);
         let events = collector.sample(1).expect("a second read");
@@ -690,6 +691,26 @@ mod tests {
             .ok()
             .and_then(|text| text.trim().parse::<f64>().ok())
             .expect("the stock the kernel publishes");
+        // What the kernel says happened to the pages, for a failure to be read
+        // against rather than guessed at: the CI's `defaults` cell once held
+        // 22 MiB on swap of the 160 MiB that had left the cgroup.
+        let resident =
+            std::fs::read_to_string(scratch.path().join("memory.current")).unwrap_or_default();
+        let moved: Vec<String> = zero_and_huge_page_counters()
+            .into_iter()
+            .map(|(name, after)| {
+                let before = vmstat_before
+                    .iter()
+                    .find(|(seen, _)| *seen == name)
+                    .map_or(0, |(_, value)| *value);
+                format!("{name} +{}", after.saturating_sub(before))
+            })
+            .collect();
+        let said = format!(
+            "memory.current {}, /proc/vmstat over the run: {}",
+            resident.trim(),
+            moved.join(", ")
+        );
         child.stop();
 
         let event = events.first().expect("a second read produces a point");
@@ -703,7 +724,7 @@ mod tests {
         assert!(
             stock >= 0.5 * expected,
             "a cgroup limited to {LIMIT} with {TOUCHED} touched inside it holds about \
-             {expected} bytes on a swap device; memory.swap.current said {stock}"
+             {expected} bytes on a swap device; memory.swap.current said {stock} ({said})"
         );
         assert!(
             zeroed >= 0.5 * expected,
@@ -715,6 +736,32 @@ mod tests {
             "nothing was written to a device, and yet {written} bytes of traffic were reported \
              beside {zeroed} bytes of zero pages"
         );
+    }
+
+    /// The machine's counters of what became of a page on its way out: zero
+    /// pages recorded instead of written, huge pages split or swapped whole.
+    /// The names this kernel publishes, with their values; absent ones are
+    /// left out.
+    fn zero_and_huge_page_counters() -> Vec<(String, u64)> {
+        const NAMES: [&str; 6] = [
+            "pswpout",
+            "swpout_zero",
+            "thp_split_page",
+            "thp_underused_split_page",
+            "thp_swpout",
+            "thp_swpout_fallback",
+        ];
+        std::fs::read_to_string(VMSTAT)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.split_once(' ')?;
+                if !NAMES.contains(&name) {
+                    return None;
+                }
+                Some((name.to_owned(), value.trim().parse().ok()?))
+            })
+            .collect()
     }
 
     /// The machine counted at least what the cgroup did.

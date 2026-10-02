@@ -1101,6 +1101,30 @@ where it did not, the test skips with the numbers and asserts the source
 reported nothing rather than something. On a fragmented machine it is a real
 check; here it is an honest skip.
 
+### D14 — the paranoid-2 retry of `mem.faults` never ran — **fixed in the sixteenth wave**
+
+At `perf_event_paranoid` 2 an event that counts kernel mode is refused, and
+`mem.faults` retries in user mode only and says so in a note (the fifteenth
+wave). The retry matched the refusal by its errno, and `crate::perf` returns it
+wrapped in a message (`perf_event_open: Permission denied (os error 13)`),
+which keeps the kind and drops the number. So the retry never fired, and the
+CI's `defaults` cell refused every sampled or traced `mem.faults` of a launched
+program with exit 1 -- ten combinations of the counter-source sweep:
+
+```
+error: cannot start collecting `mem.faults`: perf_event_open for page faults on
+pid 14345 was refused (perf_event_open: Permission denied (os error 13)); check
+/proc/sys/kernel/perf_event_paranoid
+```
+
+The library test of the user-mode path passed on that same cell, because it
+forced the path with a refusal it built itself, as a bare errno: a shape the
+real path never produces. The retry now matches the kind, the forced path is
+taken with an error in the shape `crate::perf` returns, and
+`collect::mem::page_faults::tests::a_refusal_is_recognised_in_the_shape_perf_returns_it`
+holds the match to a real refusal: an event on pid 1, which belongs to root
+and which the kernel refuses to an unprivileged user at every paranoid level.
+
 ---
 
 ## What this leaves for the coordinator

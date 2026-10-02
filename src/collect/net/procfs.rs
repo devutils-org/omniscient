@@ -23,6 +23,11 @@ pub const NETSTAT: &str = "/proc/net/netstat";
 /// fifo, then frame/colls, compressed/carrier, multicast/compressed.
 pub struct Interface {
     pub name: String,
+    /// The kernel's index for it, asked at the read (`if_nametoindex`), so
+    /// that a key from these counters is the same interface as one from a
+    /// source that reads the index itself. 0 for one removed between the read
+    /// and the question, which is what an unknown index has always been.
+    pub index: u32,
     pub columns: Vec<u64>,
 }
 
@@ -59,7 +64,12 @@ pub fn interfaces(only: Option<&str>, losses: &mut Losses) -> Result<Vec<Interfa
             ));
             continue;
         }
-        interfaces.push(Interface { name, columns });
+        let index = super::interfaces::index_of(&name).unwrap_or(0);
+        interfaces.push(Interface {
+            name,
+            index,
+            columns,
+        });
     }
 
     if interfaces.is_empty() {

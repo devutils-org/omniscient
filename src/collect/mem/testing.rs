@@ -252,7 +252,13 @@ impl Toucher {
                     -1,
                     0,
                 );
-                if block != libc::MAP_FAILED && working.is_some() {
+                // A block of zeros is small pages too: a huge page that is
+                // all zeros, split under reclaim, can have its zero subpages
+                // remapped to the shared zero page and freed
+                // (`thp_underused_split_page`, 6.12 on), which takes them out
+                // of the cgroup without a swap entry -- and the zero-page test
+                // is about what the swap path does with them.
+                if block != libc::MAP_FAILED && (working.is_some() || fill == 0) {
                     // A walker's pages are small pages, on purpose: the
                     // referenced bit is set when the cpu walks the page tables,
                     // and a working set of eight huge pages stays in the TLB,

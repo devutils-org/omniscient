@@ -145,6 +145,21 @@ pub struct PageFaultCollector {
     user_mode_only: bool,
 }
 
+/// A refusal in the shape `crate::perf` returns one: the errno's kind, and a
+/// message in place of the number. What the paranoid-2 path is taken with when
+/// a test forces it, so that the forced path and the machine's are one path.
+fn refused_as_perf_says_it() -> std::io::Error {
+    let os = std::io::Error::from_raw_os_error(libc::EACCES);
+    std::io::Error::new(os.kind(), format!("perf_event_open: {os}"))
+}
+
+/// Whether `crate::perf` refused an open for want of privilege, which is what
+/// the user-mode retry answers. By kind: EACCES and EPERM are both
+/// `PermissionDenied`, and the number itself is not kept.
+fn is_refusal(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
 impl PageFaultCollector {
     pub fn new(pid: i32, mode: Mode) -> Self {
         Self {
@@ -300,13 +315,20 @@ impl Collector for PageFaultCollector {
         // still sees every fault the program's own code takes; what it loses is
         // the faults the kernel takes on the program's behalf, copying into a
         // buffer it has not touched yet, and the notes say so.
+        //
+        // The refusal is matched by its kind, not its number: `crate::perf`
+        // wraps the errno in a message (`perf_event_open: Permission denied`),
+        // which keeps the kind and drops `raw_os_error`, and a match on the
+        // number never fired -- the CI's paranoid-2 cell was refused for every
+        // launched program after this retry was written. EACCES and EPERM are
+        // both `PermissionDenied`.
         let asked = if self.user_mode_only {
-            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+            Err(refused_as_perf_says_it())
         } else {
             open(&spec)
         };
         let opened = match asked {
-            Err(error) if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => {
+            Err(error) if is_refusal(&error) => {
                 let user_only = SampleSpec {
                     exclude_kernel: true,
                     ..spec
@@ -434,6 +456,8 @@ impl Collector for PageFaultCollector {
 mod tests {
     use super::*;
 
+    const MIN_TEST_RING: usize = 8;
+
     /// An anonymous mapping of `pages` pages, none of them resident yet.
     fn fresh_block(pages: usize) -> *mut libc::c_void {
         // SAFETY: an anonymous mapping of our own; the caller unmaps it.
@@ -550,6 +574,41 @@ mod tests {
             "with kernel mode, {kernels} samples landed in the {PAGES} pages the kernel's copy \
              touched"
         );
+    }
+
+    /// The retry for paranoid 2 has to recognise a refusal the way `crate::perf`
+    /// actually returns one. Until the sixteenth wave it matched the errno, which
+    /// `crate::perf` does not keep, so the retry never ran and the CI's
+    /// paranoid-2 cell refused `mem.faults` for every launched program.
+    ///
+    /// Ground truth from outside this code: pid 1 belongs to root, and the
+    /// kernel lets no unprivileged user open an event on another user's
+    /// process at any `perf_event_paranoid` (`ptrace_may_access`). A test run
+    /// as root, or with `CAP_PERFMON`, is let in, and skips saying so.
+    #[test]
+    fn a_refusal_is_recognised_in_the_shape_perf_returns_it() {
+        let owner =
+            std::fs::metadata("/proc/1").map(|meta| std::os::unix::fs::MetadataExt::uid(&meta));
+        // SAFETY: getuid has no failure mode.
+        let me = unsafe { libc::getuid() };
+        if owner.ok() == Some(me) {
+            eprintln!("skipped: pid 1 belongs to this user, so nothing refuses the open");
+            return;
+        }
+        let spec = SampleSpec::software(perf::PERF_COUNT_SW_PAGE_FAULTS as u64, 1, Callchain::Off);
+        match ThreadSampler::open_process(&spec, 1, MIN_TEST_RING) {
+            Ok(_) => eprintln!(
+                "skipped: this process may sample pid 1 (root, or CAP_PERFMON), so there is no \
+                 refusal to recognise"
+            ),
+            Err(error) => {
+                assert!(
+                    is_refusal(&error),
+                    "a refusal not recognised as one: {error:?}"
+                );
+                assert!(is_refusal(&refused_as_perf_says_it()));
+            }
+        }
     }
 
     #[test]

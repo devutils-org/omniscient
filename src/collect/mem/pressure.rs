@@ -336,8 +336,9 @@ full avg10=0.98 avg60=1.87 avg300=2.76 total=903210
 
     /// Ground truth: memory pressure is *caused* and then measured.
     ///
-    /// A cgroup is limited to a fraction of what a process inside it is about
-    /// to touch, so the kernel has to reclaim continuously to let it run. That
+    /// A cgroup is held (`memory.high`) to a fraction of what a process inside
+    /// it is about to touch, so the kernel has to reclaim continuously to let
+    /// it run. That
     /// is memory stall by construction -- the tasks are waiting for pages that
     /// have to be found before they can have them -- and the same collector
     /// reading the same file for an unconstrained cgroup a moment earlier
@@ -381,7 +382,16 @@ full avg10=0.98 avg60=1.87 avg300=2.76 total=903210
             eprintln!("skipped: {reason}");
             return;
         }
-        assert!(scratch.write("memory.max", &LIMIT.to_string()));
+        // `memory.high`, not `memory.max`: both make the kernel reclaim from
+        // the cgroup as it grows, and the time its tasks wait for that is the
+        // stall this measures, but only `max` calls the OOM killer when reclaim
+        // falls behind. On the CI's `defaults` cell -- a swap file on a cloud
+        // disk, four cpus shared with the rest of the suite -- `max` killed
+        // the child halfway (`memory.events`: `max 1631 oom 1 oom_kill 1`),
+        // and the test said nothing about pressure. Over `high`, a task that
+        // outruns reclaim is throttled, and the throttling is itself counted
+        // as memory stall.
+        assert!(scratch.write("memory.high", &LIMIT.to_string()));
         collector.sample(2).expect("a read before the work starts");
         let mut child = scratch.spawn_toucher(TOUCHED);
         let stalled = collector.sample(3).expect("a read after the work");

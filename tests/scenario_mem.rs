@@ -162,7 +162,7 @@ fn json(output: &Output) -> serde_json::Value {
 fn unavailable(output: &Output) -> Option<String> {
     let message = stderr(output);
     assert!(
-        !message.contains("heap shim was not found"),
+        !message.contains(SHIM_MISSING),
         "the heap sources need the preload shim: build with `make`, not `cargo build`\n{message}"
     );
     // The resolver's own word for a machine's limit is the widest of these:
@@ -180,6 +180,71 @@ fn unavailable(output: &Output) -> Option<String> {
         .find("error:")
         .map_or(message.as_str(), |at| &message[at..]);
     withheld.then(|| from_the_error.to_owned())
+}
+
+/// The words the tool uses when the shim is not where it looks
+/// (`collect::mem::heap::shim_in`: *"the preload shim was not found at ..."*).
+/// Until the sixteenth wave the check read "heap shim was not found", which the
+/// tool has not printed since the ninth, so a missing shim read as whatever
+/// failure came after it.
+const SHIM_MISSING: &str = "shim was not found";
+
+/// Runs a copy of the binary from a directory that holds no shim, beside it or
+/// in `../lib/omn/`, with `OMN_PRELOAD_LIB` unset: a build that was not run
+/// through `make`, made on purpose.
+fn run_without_the_shim(args: &[&str]) -> Output {
+    let directory = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("no-shim-{}", std::process::id()))
+        .join("bin");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let copy = directory.join("omn");
+    std::fs::copy(BINARY, &copy).expect("copying the binary");
+    // Ground truth, outside the tool: neither place it looks holds a shim.
+    for place in ["libomn_preload.so", "../lib/omn/libomn_preload.so"] {
+        assert!(
+            !directory.join(place).exists(),
+            "{} exists",
+            directory.join(place).display()
+        );
+    }
+    let output = Command::new(&copy)
+        .args(args)
+        .env_remove("OMN_PRELOAD_LIB")
+        .output()
+        .expect("the copy should run");
+    let _ = std::fs::remove_dir_all(directory.parent().expect("the scratch's parent"));
+    output
+}
+
+/// A missing shim fails the heap tests rather than skipping them, and the
+/// check that says so matches what the tool prints.
+#[test]
+fn a_binary_without_its_shim_fails_the_heap_tests_rather_than_skipping_them() {
+    let output = run_without_the_shim(&["mem.heap.alloc", "-e", "summary", "--", "true"]);
+    assert_ne!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(SHIM_MISSING),
+        "the tool's words for a missing shim changed: {}",
+        stderr(&output)
+    );
+    let caught = std::panic::catch_unwind(|| unavailable(&output));
+    assert!(
+        caught.is_err(),
+        "a missing shim was read as a machine that cannot serve the request"
+    );
+}
+
+/// Whether the run says it sampled page faults in user mode only: the
+/// `perf_event_paranoid` 2 path, where the faults the kernel takes on the
+/// program's behalf are not in the samples (the source's note, in the
+/// result's `notes`).
+fn sampled_in_user_mode_only(result: &serde_json::Value) -> bool {
+    result["notes"].as_array().is_some_and(|notes| {
+        notes
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|note| note.contains("page faults in user mode only"))
+    })
 }
 
 fn has_python() -> bool {
@@ -835,9 +900,29 @@ fn the_tool_finds_the_faults_the_program_counted_itself() {
         "touching 256 MiB has to fault more than {kernels_own} times, or the workload did nothing"
     );
 
-    let traced = result(&json(&output), "faults")["events_seen"]
-        .as_u64()
-        .expect("a count") as f64;
+    let document = json(&output);
+    let faults = result(&document, "faults");
+    let traced = faults["events_seen"].as_u64().expect("a count") as f64;
+    if sampled_in_user_mode_only(faults) {
+        // `ru_minflt` counts the faults the kernel took on the program's
+        // behalf too, and a user-mode event cannot see them, so the kernel's
+        // number is a ceiling here and not the answer. The floor is the
+        // program's own stores: one per 4096 bytes of a 256 MiB buffer, which
+        // no folio the kernel picks can serve in fewer than one fault per
+        // PMD-sized huge page.
+        const FLOOR: f64 = 256.0 / 2.0;
+        assert!(
+            (FLOOR..=kernels_own).contains(&traced),
+            "sampled in user mode only, the run traced {traced} faults: at least the {FLOOR} \
+             the program's own stores must take and at most the {kernels_own} the kernel \
+             counted in all"
+        );
+        eprintln!(
+            "skipped the exact comparison: this machine samples page faults in user mode only, \
+             so the kernel's share of the {kernels_own} faults is not in the {traced} traced"
+        );
+        return;
+    }
     let shortfall = (kernels_own - traced) / kernels_own;
     assert!(
         (0.0..0.10).contains(&shortfall),
@@ -3590,6 +3675,21 @@ fn the_faults_a_worker_thread_takes_are_traced_to_that_thread() {
         .filter(|event| event["keys"][0]["task"]["tid"].as_f64() == Some(worker))
         .count() as f64;
     let dropped = result["losses"]["dropped"].as_f64().unwrap_or(0.0);
+    if sampled_in_user_mode_only(result) {
+        // The worker's own number counts faults the kernel took for it as
+        // well, which a user-mode event cannot see. Its own stores it can: one
+        // per page of a mapping advised against huge pages, each a fault the
+        // worker's code took.
+        const PAGES_STORED: f64 = 64.0 * 1024.0 * 1024.0 / 4096.0;
+        assert!(
+            traced + dropped >= PAGES_STORED && traced <= its_own + 64.0,
+            "sampled in user mode only, the run traced {traced} faults to thread {worker} with \
+             {dropped} lost; the worker's own stores took {PAGES_STORED} and it counted \
+             {its_own} in all: {}",
+            result["degradations"]
+        );
+        return;
+    }
     // What the worker took is either traced to it or counted as lost. It
     // faults a few more times after its own read -- formatting and writing the
     // line that carries it -- so the trace may exceed its number by those and

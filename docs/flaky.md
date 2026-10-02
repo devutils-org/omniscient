@@ -19,7 +19,7 @@ wave's, from `BRIEF.md`'s table. "nobody" means the file is not listed there.
 |---|---|---|---|---|---|
 | 1 | `one_known_number_of_round_trips_is_found_by_four_sources` | tests/scenario_sched.rs:340 | a (+c) | D | Switches: a floor of N, plus `switches - blocks` checked against the kernel's `nivcsw` delta. Wakeups: the pair's two top wakee series, as #2 already does |
 | 2 | `a_workload_that_is_half_blocked_measures_as_half_blocked` | tests/scenario_sched.rs:443 | c (finding 48), with a leftover (a) | D | Defect: `src/bpf/wakeup.rs` should not credit a wakeup made in interrupt context to the task it interrupted. Share: use `total_ns - queued_ns` |
-| 3 | `an_overflowing_wakeup_ring_says_what_it_could_not_hold` | tests/scenario_sched.rs:1085 | a (+c) | D | In the no-loss branch, assert only the floor `seen >= expected*(1-tol)`, or count only the pair threads' wakee series |
+| 3 | `an_overflowing_wakeup_ring_says_what_it_could_not_hold` | tests/scenario_sched.rs:1367 | a (+c), **closed** | D | Closed in the fifteenth wave (stream kernel): the ring is filled by a futex burst (C fixture `wakers`, 16 384 waiters per `FUTEX_WAKE`, 3.5 rings), so there is no no-loss branch; one run that must overflow, checked once against the system call's own count |
 | 4 | `a_blocking_stack_names_the_call_that_blocked` | tests/scenario_sched.rs:620 | c, fixed | D | Already fixed: the target is compared before the stack walk (`docs/families/drains.md` §2). Take it off the tally if it stays green |
 | 5 | `a_task_moved_between_two_cpus_is_counted_once_per_move` | tests/family_sched.rs:832 | b | D | Replace the fixed 800 ms attach delay with a wait for the run's "attached" signal, or keep moving the task until the run ends and count the moves inside its window |
 | 6 | `tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them` | tests/family_sched.rs:597 | a | D | Check each task's `total_ns` against its own `/proc/<tid>/schedstat` `run_delay` delta, not against the share of the window |
@@ -87,6 +87,9 @@ cause: "a contended interpreter lock adds wakeups of its own". Finding 48's
 interrupt-credited wakeups add more. Both are real wakeups of the target, so the only
 thing the workload guarantees is the floor. `docs/fixes/stacks.md:308` records the
 failure without its message. It should be confirmed as the no-loss branch.
+**Closed** in the fifteenth wave: the workload is now a futex burst that overflows the
+ring on every machine, so the no-loss branch is gone, and the terminal check is made
+on the same run (`docs/scenarios/sched.md`, "Does the tool say what it did not see?").
 
 **4. `a_blocking_stack_names_the_call_that_blocked`.** (c), fixed. The program walked
 every blocking stack on the machine before narrowing to the target, and a loaded
@@ -369,3 +372,32 @@ by coincidence*.
 > 5. *Rehearse under load once.* A new scenario runs green alongside `stress-ng
 >    --cpu N --io 4 --vm 2` (or the full suite) before it merges. If it fails only
 >    there, it is either (1)-(4) or a finding, and it is not a tally entry.
+
+## The sixteenth wave: the `mem`, `sched` and `proc` entries rerun alone
+
+Stream mem of the sixteenth wave ran each test of its files that the fifteenth
+wave's handoffs recorded failing more than once, alone, five times in a row,
+with other streams working on the same 24 cpus (load average 2 to 5 at the end). **35 of 35
+passed.** None failed again, so no ground truth was changed for them:
+
+| Test | Recorded | Alone, x5 |
+|---|---|---|
+| `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter` (#21) | failed again alone once (w15 runner) | 5 passed. The per-round `/proc/meminfo` bracket (the audit's fix) is already in; it stays on the tally as (a), a machine-wide level other streams move |
+| `scenario_mem::a_gibibyte_of_reads_costs_one_l1_miss_per_cache_line` (THP `always`) | once in a `--no-fail-fast` run | 5 passed |
+| `scenario_mem::a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory` (THP `always`) | once in a `--no-fail-fast` run | 5 passed |
+| `family_mem::the_working_set_is_what_was_touched_and_not_what_was_held` | twice, in two streams' `make check` | 5 passed |
+| `scenario_proc::defect_1_the_first_reading_of_a_launched_target_is_of_the_program` | once (w15 resolver) | 5 passed |
+| `scenario_proc::defect_2_the_last_reading_of_a_launched_target_is_one_the_program_was_alive_for` | once (*"left: 0, right: 20"*) | 5 passed |
+| `scenario_sched::a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them` | twice (*"17 involuntary switches of its own and the program 25, with 0 lost"*) | 5 passed |
+
+Each fails only under the whole workspace at once, never alone: the tally's
+pattern 1 (a count over the machine) for #21 and the two cache tests, and the
+working-set and `defect_2` failures read as a descheduled reader (a window or a
+last poll that came late). They are kept here, with their messages, for the
+first time one fails alone.
+
+Two CI failures of the same stream's files that looked like this and were not:
+`collect::mem::pressure::tests::a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not`
+had its child OOM-killed under `memory.max` on the CI's `defaults` cell (now
+`memory.high`, which throttles rather than kills), and the counter-source sweep's
+ten `mem.faults` refusals were a tool defect (`docs/scenarios/mem.md`, D14).

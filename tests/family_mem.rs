@@ -55,11 +55,63 @@ fn stderr(output: &Output) -> String {
 fn unavailable(output: &Output) -> Option<String> {
     let message = stderr(output);
     assert!(
-        !message.contains("heap shim was not found"),
+        !message.contains(SHIM_MISSING),
         "the heap sources need the preload shim: run `cargo build -p omn-preload` first\n{message}"
     );
     let withheld = message.contains("not readable") || message.contains("perf_event_paranoid");
     withheld.then_some(message)
+}
+
+/// The words the tool uses when the shim is not where it looks
+/// (`collect::mem::heap::shim_in`: *"the preload shim was not found at ..."*).
+/// Until the sixteenth wave the check read "heap shim was not found", which the
+/// tool has not printed since the ninth, so a missing shim read as whatever
+/// failure came after it.
+const SHIM_MISSING: &str = "shim was not found";
+
+/// Runs a copy of the binary from a directory that holds no shim, beside it or
+/// in `../lib/omn/`, with `OMN_PRELOAD_LIB` unset: a build that was not run
+/// through `make`, made on purpose.
+fn run_without_the_shim(args: &[&str]) -> Output {
+    let directory = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("no-shim-{}", std::process::id()))
+        .join("bin");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let copy = directory.join("omn");
+    std::fs::copy(BINARY, &copy).expect("copying the binary");
+    // Ground truth, outside the tool: neither place it looks holds a shim.
+    for place in ["libomn_preload.so", "../lib/omn/libomn_preload.so"] {
+        assert!(
+            !directory.join(place).exists(),
+            "{} exists",
+            directory.join(place).display()
+        );
+    }
+    let output = Command::new(&copy)
+        .args(args)
+        .env_remove("OMN_PRELOAD_LIB")
+        .output()
+        .expect("the copy should run");
+    let _ = std::fs::remove_dir_all(directory.parent().expect("the scratch's parent"));
+    output
+}
+
+/// A missing shim fails the heap tests rather than skipping them, and the
+/// check that says so matches what the tool prints.
+#[test]
+fn a_binary_without_its_shim_fails_the_heap_tests_rather_than_skipping_them() {
+    let output = run_without_the_shim(&["mem.heap.alloc", "-e", "summary", "--", "true"]);
+    assert_ne!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(SHIM_MISSING),
+        "the tool's words for a missing shim changed: {}",
+        stderr(&output)
+    );
+    let caught = std::panic::catch_unwind(|| unavailable(&output));
+    assert!(
+        caught.is_err(),
+        "a missing shim was read as a machine that cannot serve the request"
+    );
 }
 
 fn has_python() -> bool {

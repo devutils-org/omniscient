@@ -154,25 +154,33 @@ only the loss line says so. A collector that lost that much and stayed quiet
 would have produced a wrong number that looked right, and by the time anyone
 noticed the run would be gone.
 
-The test does not assert that shortfall, and the reason is worth stating
-because it is the limit of this scenario. Run inside the suite, with fourteen
-other tests on the machine, the same workload sometimes reports *more* than
-80 000 events while still dropping thousands: a contended interpreter lock adds
-wakeups of its own, so two per round trip stops being the rate. The shortfall
-is real and reproducible standing alone, and its size is the machine's to
-decide, so the number is here and the invariant is in the test — the loss is
-counted, it is named, and the events plus the drops still account for the round
-trips.
+The session is the demonstration; the test is not this workload. A Python
+ping-pong outran the drain on an idle machine and not on a loaded one, so the
+test used to skip when the ring never filled, and its terminal check, made on a
+second run, asked a run that dropped nothing to explain a drop (flaky tally
+#3). `scenario_sched::an_overflowing_wakeup_ring_says_what_it_could_not_hold`
+fills the ring on every machine instead, with the C fixture `wakers`: three
+`FUTEX_WAKE`s, each making 16 384 waiting threads runnable inside one system
+call, 3.5 times what the ring holds between two drains, and the kernel writes one record
+per wakeup while it walks them. How many it woke is the system call's own
+return value, summed by the program and printed. One run, checked once: the
+ring overflowed, the loss line names the ring, and the events seen plus the
+drops reach the count the kernel returned -- nothing lost uncounted.
+
+The other half is
+`scenario_sched::a_moderate_wakeup_rate_loses_nothing_and_says_so`: 2 000 pipe
+round trips paced at 2 000 a second, about 6 000 wakeups a second against the
+468 100 the ring drains, with zero drops and the loss line still printed to say
+so.
 
 Both of this family's loss kinds show up here. `dropped` is the ring; `late
 ticks` is the drain taking longer than the 10 ms it is given, which is the same
 pressure seen from the reader's side. Each is reported with a sentence, not
 just a count.
 
-If a machine drains faster than two ping-pong pairs can fill — a real
-possibility on hardware quicker than this one — the test says so in those words
-and stops, because that is a machine that cannot serve the scenario rather than
-a scenario that passed.
+A machine that drains faster than the session's two ping-pong pairs can fill
+shows no loss in the session; the test does not depend on it, because the
+burst is larger than the ring by construction.
 
 Runtime: 0.4 s.
 
@@ -322,9 +330,15 @@ wants.
 **The threaded ping-pong** — `sched-wakeup-loss.yml`.
 Several pipe ping-pongs as thread pairs inside one `python3` process, so every
 wakeup is inside one thread group and a process target keeps all of them.
-Guarantees a wakeup rate above what a 256 KiB ring drained every 10 ms can
-hold. Two pairs at twenty thousand round trips is about 0.35 s and loses
-between 8 000 and 17 000 wakeups.
+On an idle machine, a wakeup rate above what a 256 KiB ring drained every 10
+ms can hold: two pairs at twenty thousand round trips is about 0.35 s and lost
+between 8 000 and 17 000 wakeups here. Not under load, which is why the test
+uses the burst below.
+
+**The futex burst** — the C fixture `wakers`, `burst <waiters> <rounds>`.
+16 384 threads parked on one futex, woken by one `FUTEX_WAKE`, three times.
+Guarantees more wakeups inside one system call than the ring holds between two
+drains, on any machine, and prints the kernel's own count of who it woke.
 
 **The affinity walk** — `sched-migrations.yml`.
 A shell that rewrites its own affinity *N* times with `taskset -p`, to a

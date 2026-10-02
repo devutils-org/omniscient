@@ -53,9 +53,14 @@ and each of those differs for a reason its own file gives.
 
 ### `sched.lock` — the locks the kernel takes
 
-`lock:contention_begin` and `lock:contention_end`, which is why the floor is
-6.1: `DECISIONS.md` chose that floor so this source would not need a kprobe on
-every lock primitive, covering a different set on every kernel.
+`lock:contention_begin` and `lock:contention_end`, which is why this backend
+requires `kernel>=6.1`, the release that added them. There is no kernel floor
+for the tool as a whole -- `DECISIONS.md` settled in the fifteenth wave that
+each backend carries its own `kernel>=`, and 5.15 is served -- so on an older
+kernel this source is the one that answers "missing", with that requirement,
+rather than the tool refusing to start. The tracepoints are what keep it from
+needing a kprobe on every lock primitive, covering a different set on every
+kernel.
 
 The pairing is by thread id and nothing else, because a thread waits for one
 lock at a time — a thread blocked on a lock is not running, so it cannot begin

@@ -387,7 +387,22 @@ pub fn permission_advice(action: &str) -> String {
     let disabled = std::fs::read_to_string("/proc/sys/kernel/unprivileged_bpf_disabled")
         .map(|text| text.trim().to_owned())
         .unwrap_or_default();
-    let sysctl = match disabled.as_str() {
+    advice_for(
+        action,
+        &disabled,
+        crate::capabilities::withheld_file_capabilities().as_deref(),
+    )
+}
+
+/// [`permission_advice`] over what it read: the sysctl's value, and why the
+/// binary's own grant did not reach this process, if it carries one.
+///
+/// A grant already made is not advised again. A binary that carries
+/// `CAP_BPF`/`CAP_PERFMON` on a `nosuid` mount, or run under `no_new_privs`,
+/// was told to `setcap` the file it had just `setcap`ed; the probe said why
+/// since the fifteenth wave, and the attach said the old line.
+fn advice_for(action: &str, disabled: &str, withheld: Option<&str>) -> String {
+    let sysctl = match disabled {
         "1" => {
             " (`kernel.unprivileged_bpf_disabled` is 1, so bpf() is refused outright without \
                 CAP_BPF)"
@@ -395,6 +410,9 @@ pub fn permission_advice(action: &str) -> String {
         "2" => " (`kernel.unprivileged_bpf_disabled` is 2, so bpf() needs CAP_BPF)",
         _ => "",
     };
+    if let Some(withheld) = withheld {
+        return format!("{action} needs CAP_BPF and CAP_PERFMON{sysctl}. {withheld}.");
+    }
     format!(
         "{action} needs CAP_BPF and CAP_PERFMON{sysctl}. Grant them to the binary with \
          `sudo setcap cap_bpf,cap_perfmon+ep $(which omn)`, or run it under sudo. This is the \
@@ -406,6 +424,38 @@ pub fn permission_advice(action: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grant already made is not advised again: where the binary carries the
+    /// capabilities and this process was not given them, the advice is why,
+    /// and never the `setcap` the reader already ran. Where nothing was
+    /// granted, the `setcap` is the answer.
+    #[test]
+    fn the_advice_says_why_a_grant_did_not_reach_the_process_rather_than_to_grant_it() {
+        let withheld = "The binary /mnt/omn carries CAP_BPF and CAP_PERFMON, but this process \
+                        was not given them: the filesystem at /mnt is mounted nosuid";
+        let advice = advice_for("loading the `x` program", "2", Some(withheld));
+        assert!(advice.contains("mounted nosuid"), "{advice}");
+        assert!(
+            advice.contains("unprivileged_bpf_disabled` is 2"),
+            "{advice}"
+        );
+        assert!(
+            !advice.contains("setcap"),
+            "a grant already made, advised again: {advice}"
+        );
+
+        let advice = advice_for("loading the `x` program", "0", None);
+        assert!(
+            advice.contains("sudo setcap cap_bpf,cap_perfmon+ep"),
+            "{advice}"
+        );
+        // And the process this test runs in: its binary is rebuilt under a
+        // fresh hash every run and carries nothing, so the real advice is the
+        // grant.
+        if crate::capabilities::withheld_file_capabilities().is_none() {
+            assert!(permission_advice("x").contains("setcap"));
+        }
+    }
 
     /// The statistics switch is granted or refused for want of
     /// `CAP_SYS_ADMIN`, and nothing else: an unknown command would be

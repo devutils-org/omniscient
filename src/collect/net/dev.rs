@@ -187,7 +187,12 @@ impl Collector for DevCollector {
                 ts_ns,
                 ts_err_ns: 0,
                 kind: self.counted.source().to_owned(),
-                keys: vec![KeyValue::iface(0, line.name.clone())],
+                // The index asked at the read, as `procfs::interfaces` does, so
+                // this key names the interface the index-reading sources name.
+                keys: vec![KeyValue::iface(
+                    super::interfaces::index_of(&line.name).unwrap_or(0),
+                    line.name.clone(),
+                )],
                 attrs: vec![
                     Attr::uint(self.counted.value_attr(), received + transmitted),
                     Attr::uint("rx", received),
@@ -282,6 +287,26 @@ mod tests {
         let events = collector.sample(0).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].attr("iface").unwrap().to_string(), "lo");
+    }
+
+    /// Every series carries the kernel's index for its interface, as the
+    /// sources that read the index themselves do. Ground truth from another
+    /// file than the counters': sysfs's `ifindex`.
+    #[test]
+    fn every_series_carries_the_index_sysfs_gives_its_interface() {
+        let mut collector = collector(Counted::Bytes);
+        collector.sample(0).unwrap();
+        let events = collector.sample(1).unwrap();
+        assert!(!events.is_empty(), "the machine has at least loopback");
+        for event in &events {
+            let KeyValue::Iface { index, name } = &event.keys[0] else {
+                panic!("not an interface key: {:?}", event.keys[0]);
+            };
+            let Ok(text) = std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex")) else {
+                continue; // removed since the read
+            };
+            assert_eq!(index.to_string(), text.trim(), "`{name}`");
+        }
     }
 
     #[test]

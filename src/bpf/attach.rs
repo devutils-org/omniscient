@@ -204,7 +204,7 @@ pub fn probe_type_support(kind: &str) -> Option<Support> {
     // Two requirements that are not attach kinds, answered here because this
     // is the one hook `capabilities.rs` gives the kernel stream's files: the
     // `net` collectors' own start, asked in advance.
-    if let Some(answer) = crate::collect::mem::net_probe(kind) {
+    if let Some(answer) = crate::collect::net::probe(kind) {
         return Some(match answer {
             Ok(()) => Support::Yes,
             Err(reason) => Support::No(reason),
