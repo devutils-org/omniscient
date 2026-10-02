@@ -406,9 +406,12 @@ impl Collector for ProfileCollector {
 
     fn start(&mut self) -> Result<(), String> {
         // Before the window, not inside a drain: see
-        // `stack::prime_kernel_symbols`. A profile walks into the kernel on
-        // almost any workload, and the runner's round is serial.
-        if self.callchain != Callchain::Off {
+        // `stack::prime_kernel_symbols`. A profile whose callchain has a
+        // kernel half walks into the kernel on almost any workload, and the
+        // runner's round is serial. A user-only one (`perf_event_paranoid` 2)
+        // never sees a kernel frame, and the table would be most of a second
+        // of this process's cpu before the window for nothing.
+        if self.callchain.kernel() {
             crate::stack::prime_kernel_symbols();
         }
         let period = match self.mode {
@@ -716,6 +719,134 @@ mod tests {
                     !user_only && mode != StackMode::None
                 );
             }
+        }
+    }
+
+    /// Set in the copy of this test binary that
+    /// [`a_profile_reads_the_kernels_symbols_only_when_its_stacks_have_a_kernel_half`]
+    /// runs, which is a process whose kernel symbol table nothing has read yet.
+    const PRIME_CHILD: &str = "OMN_PROFILE_PRIME_CHILD";
+
+    /// Bytes this thread has read through system calls so far, by the
+    /// kernel's own account (`/proc/thread-self/io`, `rchar`).
+    fn thread_rchar() -> u64 {
+        std::fs::read_to_string("/proc/thread-self/io")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("rchar:"))
+                    .and_then(|value| value.trim().parse().ok())
+            })
+            .expect("this thread's io accounting is readable")
+    }
+
+    /// A profile whose stacks are user-only (`perf_event_paranoid` 2) never
+    /// sees a kernel frame, so it must not pay for the kernel's symbol table
+    /// before its window -- the better part of a second of a debug build's
+    /// cpu, measured at 978 ms for a one-second profile. One whose stacks have
+    /// a kernel half must, before the window rather than inside a drain.
+    ///
+    /// Ground truth is the kernel's count of the bytes the starting thread
+    /// read, against the size of `/proc/kallsyms` read here. The table is read
+    /// once per process, so the two starts run, user-only first, in a fresh
+    /// copy of this test binary where nothing has read it.
+    #[test]
+    fn a_profile_reads_the_kernels_symbols_only_when_its_stacks_have_a_kernel_half() {
+        use crate::request::StackMode;
+        if std::env::var_os(PRIME_CHILD).is_some() {
+            let pid = std::process::id() as i32;
+            for (label, user_only) in [("user-only", true), ("both-halves", false)] {
+                let mut choice = StackChoice::of(StackMode::Fp);
+                choice.user_only = user_only;
+                let prepare = Prepare {
+                    mode: "sample@99hz".parse().unwrap(),
+                    choice,
+                    debuginfod: None,
+                };
+                let mut collector = prepare.collector(pid, false);
+                let before = thread_rchar();
+                let started = collector.start();
+                let read = thread_rchar() - before;
+                match started {
+                    Ok(()) => println!("prime: {label} {read}"),
+                    Err(error) => println!("prime: {label} refused {error}"),
+                }
+                let _ = collector.stop();
+            }
+            return;
+        }
+        let kallsyms = match std::fs::read("/proc/kallsyms") {
+            Ok(bytes) if bytes.len() > 1 << 20 => bytes.len() as u64,
+            Ok(bytes) => {
+                eprintln!(
+                    "skipped: /proc/kallsyms is {} bytes here, too small for its read to be \
+                     told from the rest of a start",
+                    bytes.len()
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("skipped: /proc/kallsyms is not readable here: {error}");
+                return;
+            }
+        };
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "collect::cpu::profile::tests::\
+                 a_profile_reads_the_kernels_symbols_only_when_its_stacks_have_a_kernel_half",
+                "--test-threads",
+                "1",
+                "--nocapture",
+            ])
+            .env(PRIME_CHILD, "1")
+            .output()
+            .expect("this test binary runs");
+        let said = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "the child failed: {said}");
+        let answer = |label: &str| -> Result<u64, String> {
+            let line = said
+                .lines()
+                .find_map(|line| {
+                    // libtest prints the test's name on the same line as the
+                    // first thing it writes.
+                    let marker = format!("prime: {label} ");
+                    line.find(&marker).map(|at| &line[at + marker.len()..])
+                })
+                .unwrap_or_else(|| panic!("the child said nothing of {label}: {said}"));
+            match line.strip_prefix("refused ") {
+                Some(error) => Err(error.to_owned()),
+                None => Ok(line.trim().parse().expect("a byte count")),
+            }
+        };
+        let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_else(|_| "unreadable".to_owned());
+        let user_only = match answer("user-only") {
+            Ok(read) => read,
+            Err(error) => {
+                eprintln!(
+                    "skipped: perf_event_paranoid is {paranoid}, and this machine refuses \
+                     unprivileged perf sampling of this process: {error}"
+                );
+                return;
+            }
+        };
+        assert!(
+            user_only < kallsyms / 4,
+            "a user-only profile read {user_only} bytes as it started, and /proc/kallsyms is \
+             {kallsyms}: it read the kernel's symbols for frames it will never see"
+        );
+        match answer("both-halves") {
+            Ok(read) => assert!(
+                read >= kallsyms * 9 / 10,
+                "a profile whose stacks have a kernel half read {read} bytes as it started, and \
+                 /proc/kallsyms is {kallsyms}: the table is left to the first drain"
+            ),
+            Err(error) => eprintln!(
+                "not asked: perf_event_paranoid is {paranoid}, which refuses this process the \
+                 kernel, so only the user-only half is held here: {error}"
+            ),
         }
     }
 
