@@ -9,11 +9,12 @@
 # difference by the window the counter was read over, not by the run's wall
 # clock. It is a mean over the window, not a peak.
 #
-# What the run reports, on the development machine (an RTX 2080 Ti at idle),
-# beside `nvidia-smi --query-gpu=power.draw` sampled over the same window:
+# What the run reports, on the development machine (an RTX 2080 Ti, its
+# display attached), beside `nvidia-smi --query-gpu=power.draw` sampled four
+# times over the same window (re-run on 2026-10-02):
 #
-#   rate   system 42.40 J over 2.01s the counter was enabled  =  21.09 J/s
-#   nvidia-smi: 20.47 W
+#   rate   system 104.49 J over 2.01s the counter was enabled  =  52.08 W
+#   nvidia-smi: 53.17 W, 53.21 W, 52.96 W, 53.16 W
 #
 # `tests/scenario_gpu.rs`, `a_counted_energy_window_divided_by_its_length_is_the_boards_draw`,
 # holds the two against each other.

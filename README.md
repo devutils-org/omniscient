@@ -9,7 +9,8 @@ something else.
 
 ## Install
 
-From a release archive (x86_64, glibc 2.34 or later, Linux 6.1 or later):
+From a release archive (x86_64, glibc 2.34 or later; Linux 5.15 is served, and
+each backend states the kernel it needs, `docs/install.md`):
 
 ```console
 $ sha256sum --check omn-0.1.0-x86_64-linux-gnu.tar.gz.sha256
@@ -32,7 +33,7 @@ has what each distribution needs and what `perf_event_paranoid` changes.
 
 ```console
 $ omn list | tail -n 3 | head -n 1
-101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+101 sources: 92 usable here, 0 unverified, 9 out of reach on this machine.
 
 $ omn mem.rss --emit timeline --mode poll@100ms -- ./build.sh
 mem.rss  via fs:proc:smaps_rollup  (mem.rss)
@@ -123,14 +124,14 @@ error: `sched.wakeup` has no viable backend on this machine:
 
 ```console
 $ omn list mem
-SOURCE             MODES                 COST   DET     HERE  COLLECTOR  SUMMARY
-mem.rss            poll, snapshot        free   medium  yes   all        Resident footprint
-mem.heap.retained  poll, snapshot        low    high    yes   all        Fragmentation: retained but no longer live
-mem.bandwidth      count, poll           free   low     ?     none       DRAM throughput
-mem.reclaim        trace, count          low    medium  yes   1 of 2     Direct reclaim
-
-23 sources: 22 usable here, 1 unverified, 0 out of reach on this machine.
-20 of them have a collector, covering 27 of their 45 backends.
+SOURCE             MODES                  COST   DET     HERE  COLLECTOR  SUMMARY
+mem.rss            poll, snapshot         free   medium  yes   all        Resident footprint (pages in RAM, shared ones counted in full)
+mem.heap.retained  poll, snapshot         extreme  high    yes   all        Fragmentation: memory retained by the allocator but no longer live
+mem.bandwidth      count, poll            free   low     no    none       DRAM throughput
+mem.reclaim        trace, count           low    medium  yes   1 of 2     Direct reclaim
+…
+23 sources: 22 usable here, 0 unverified, 1 out of reach on this machine.
+22 of them have a collector, covering 29 of their 45 backends. …
 ```
 
 Three different questions, kept apart. **HERE** is what this machine offers,

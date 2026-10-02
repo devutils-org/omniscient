@@ -9315,3 +9315,46 @@ first stderr line>)"*. On the runner that line should name the missing
 `linux-tools-6.17.0-*-azure` package; the pattern `skipped the cross-check:
 bpftool could not dump` is the one to expect. (It used to skip everywhere: the
 dump's `DATASEC` line was read as the variable's.)
+
+## Needs from another stream — the sixteenth wave, stream docs
+
+Stream docs' record is `docs/fixes/w16-docs.md`. Nothing here blocks it.
+
+### To whoever owns `src/render.rs`: `extreme` overflows the COST column of `omn list`
+
+`render.rs:316` and `:344` lay COST out as `{:<5}`, and `Cost::Extreme`
+prints seven characters, so every row priced `extreme` pushes DET, HERE and
+COLLECTOR two columns right. Measured at 37f17c8:
+
+```console
+$ omn list mem
+SOURCE             MODES                  COST   DET     HERE  COLLECTOR  SUMMARY
+mem.rss            poll, snapshot         free   medium  yes   all        Resident footprint ...
+mem.heap.retained  poll, snapshot         extreme  high    yes   all        Fragmentation: ...
+```
+
+Wanted: the width of the longest cost word (`extreme`, 7), or the width
+computed over the rows as `id_width` and `modes_width` already are. A test:
+every row of `omn list` has HERE starting at the same column as the header's.
+`README.md` quotes the misaligned output as it is until then.
+
+### To the coordinator (repository root, `scripts/release.sh`, `Makefile`): the GPL-2.0 text
+
+`src/bpf/` is `MIT OR GPL-2.0` (an SPDX line on every file) and the
+programs declare `Dual MIT/GPL` to the kernel, but the tree carries only
+`LICENSE-MIT` and `LICENSE-APACHE`, and the archive and `make install` ship
+only those two (`scripts/release.sh:60-61`, `Makefile:185-186`). The MIT
+option alone is enough to use the code, so nothing is unlicensed; a
+`LICENSES/GPL-2.0-only.txt` (or `LICENSE-GPL-2.0`) beside them would make the
+second option the files name readable from the tree. Decided either way, the
+README's "License" section says what the tree carries.
+
+### To whoever owns `docs/portability.md`: `sched.switches` on 5.15
+
+`docs/portability.md:184` lists `sched.switches` among the sources refused on
+5.15 by `kernel>=6.1`. In the catalog at 37f17c8 only its `bpf:raw_tp`
+backend says `kernel>=6.1`; `pmu:sw` and the `bpf:tp` count program below it
+say no kernel (`catalog/sched.yaml:166-180`), so on 5.15 the chain should
+fall to them (`pmu:sw` serves `trace` and `count`, not a cgroup). Not run on
+5.15 by this stream; the end-of-wave matrix sweep answers it, and the row
+changes with it.

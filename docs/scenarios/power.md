@@ -81,13 +81,15 @@ scenario arranges: the same counted second with and without a spin loop on
 every core.
 
 ```console
-$ omn -f examples/power-energy.yml                      #  49.1 J/s
+$ omn -f examples/power-energy.yml                      #  23.73 W
 $ for i in $(seq $(nproc)); do sh -c 'while :; do :; done' & done
-$ omn -f examples/power-energy.yml                      # 145.3 J/s
+$ omn -f examples/power-energy.yml                      # 145.46 W
 ```
 
-Sixty-four watts against a hundred and forty-five on an otherwise idle machine:
-a margin no measurement error reaches. It is also the family's **scale** test.
+Re-run on 2026-10-02 on the 3900X, with five other agents' builds and tests
+sharing it: the quiet reading moved between 23.7 W and 54.7 W across runs, the
+loaded one did not. Twenty-four to fifty-five watts against a hundred and
+forty-five: a margin no measurement error reaches. It is also the family's **scale** test.
 RAPL counts in units of 2⁻³² joules and publishes what one tick is worth beside
 the counter; a collector that assumed microjoules would be out by ten orders of
 magnitude, so a package that lands in the tens of watts rather than the
@@ -342,8 +344,12 @@ $ omn power.energy --system -m count -e summary -d 3s
     system n=4     min 0.000 uJ  mean 51.11 J  max 92.54 J  last 0.000 uJ
 
 $ omn power.energy --system -m count -e rate -d 3s
-    system 153.98 J over 3.00s  =  51.32 J/s
+    system 153.98 J over 3.00s  =  51.32 W
 ```
+
+(The output as it was when the defect was found, before the fix; only the rate's
+unit is edited, to the `W` the tool prints since the fifteenth wave, and the
+output was not regenerated. Today `summary` reports `n=1`, the window's total.)
 
 Three seconds of a package drawing about 51 W is 154 J, which `rate` reports
 correctly. `summary` on the same window says the smallest interval was zero, the

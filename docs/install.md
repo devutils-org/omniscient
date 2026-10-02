@@ -12,7 +12,7 @@ In short:
 $ tar -xzf omn-0.1.0-x86_64-linux-gnu.tar.gz -C ~/.local --strip-components=1
 $ sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/omn
 $ omn list | tail -n 3 | head -n 1
-101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+101 sources: 92 usable here, 0 unverified, 9 out of reach on this machine.
 ```
 
 ---
@@ -109,7 +109,7 @@ and not one `make install` can take for you.
 ## The two capabilities, and why
 
 `omn` reads part of what it serves from files anyone can read (`/proc`, `/sys`,
-cgroups) and from `perf_event_open` on the program you launched: 57 of the 93
+cgroups) and from `perf_event_open` on the program you launched: 51 of the 92
 sources the development machine serves need nothing more. The rest come from
 eBPF programs it loads into the kernel, and loading one needs two
 capabilities. The tool asks for exactly those:
@@ -205,21 +205,44 @@ binary.
 
 ## The kernel
 
-**Linux 6.1 is the floor** (`DECISIONS.md`, "Kernel floor"). Below it, the
-sources that need a 6.1 tracepoint are refused by name with the version
-(`kernel>=6.1: missing: kernel 5.15 is older than 6.1`), and the rest serve:
-under 5.15, 6.1, 6.6 and 7.2 with the capabilities, `omn list` calls 86, 88,
-88 and 89 sources usable (measured in guests, `docs/portability.md`).
+**There is no single kernel floor: each backend states the kernel it needs**
+(`DECISIONS.md`, "Kernel floor", amended in the fifteenth wave), and the
+resolver probes it like any other requirement. Below a backend's version that
+backend is refused by name with the version
+(`kernel>=6.1: missing: kernel 5.15 is older than 6.1`), and the chain moves to
+the next backend that serves, never quietly. In the catalog today:
+
+| Requirement | Backends | Why that version |
+|---|---|---|
+| `kernel>=5.8` | 33 eBPF backends | the BPF ring buffer they publish through, and `CAP_BPF` / `CAP_PERFMON` |
+| `kernel>=6.1` | 5: the `bpf:raw_tp` backends of `sched.runqlat`, `sched.offcpu` and `sched.switches`, and both tracepoint backends of `sched.lock` | the four-argument `sched_switch`; `lock:contention_*` |
+| `kernel>=6.8` | 1: `mem.thp`'s `fs:sys` | its `fs:proc` fallback serves older kernels |
+| `uprobe_multi` (6.6) | both backends of `net.request`, `bpf:usdt` and `bpf:usdt:threads` | every site is linked with one uprobe-multi link; **no fallback**: below 6.6 `net.request` is refused |
+
+Every one of the five 6.1 backends has a fallback below it in its chain (a
+`bpf:tp` program, or `sched.lock`'s `bpf:kprobe`), so on an older kernel the
+source is served by that fallback, with what it degrades stated. `net.request`
+is the exception: both of its backends need `uprobe_multi`, and the source has
+no older route, so below 6.6 it is refused, naming the kernel's refusal
+(`catalog/net.yaml`'s caveat; `docs/portability.md`, P5, measured missing on
+5.15 and 6.1).
+
+**5.15 is served.** Under 5.15, 6.1, 6.6 and 7.2 with the capabilities,
+`omn list` calls 86, 88, 88 and 89 sources usable (measured in guests,
+`docs/portability.md`). No kernel between 5.15 and 6.1 has been measured, so
+whether the 6.1 backends would serve a 5.18 is not known; they keep 6.1 until
+a cell says otherwise. Below 5.8 nothing has been measured; the 33 backends
+that say `kernel>=5.8` are refused there by name.
 
 It also wants the kernel's own type information, `/sys/kernel/btf/vmlinux`
 (`CONFIG_DEBUG_INFO_BTF`). Without it the eBPF sources that read kernel
 structures are refused, and a run attaches 53 sessions instead of 100 under
 7.2 (measured in guests, `docs/portability.md`).
 
-| | Kernel | Floor met | BTF |
+| | Kernel | Every backend's `kernel>=` met | BTF |
 |---|---|---|---|
 | Ubuntu 24.04 | 6.8, later with HWE **(read from its documentation)**; the hosted runner is 6.17, measured | yes | yes, measured on the runner |
-| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | only with HWE | yes **(read from its documentation)** |
+| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | with HWE; on 5.15 the six `kernel>=6.1`/`6.8` backends are refused and their fallbacks serve, and `net.request` is refused outright (`uprobe_multi` is missing and it has no fallback), measured in a 5.15.221 guest | yes **(read from its documentation)** |
 | Fedora 40 and later | 6.8 and later **(read from its documentation)** | yes | yes **(read from its documentation)** |
 | Arch | the current stable kernel, 7.2.6 here, measured | yes | yes, measured |
 
@@ -231,7 +254,7 @@ The one-line checks, in the order worth running them:
 
 ```console
 $ omn list | tail -n 3 | head -n 1             # the whole answer, in one line
-101 sources: 93 usable here, 4 unverified, 4 out of reach on this machine.
+101 sources: 92 usable here, 0 unverified, 9 out of reach on this machine.
 
 $ getcap "$(command -v omn)"                    # the capabilities, if any
 /home/you/.local/bin/omn cap_perfmon,cap_bpf=ep
@@ -246,8 +269,8 @@ What the first line said, measured:
 
 | Machine | Usable of 101 |
 |---|---|
-| development machine, capabilities granted, installed or in `target/` | 93 |
-| development machine, none, or on a `nosuid` mount | 57 |
+| development machine, capabilities granted, in `target/` (37f17c8, 2026-10-02) | 92 |
+| development machine, none (a copy of the same binary, 37f17c8) | 51 |
 | Ubuntu 24.04 hosted runner, none, paranoid 2 | 38 |
 | Ubuntu 24.04 hosted runner, none, paranoid 4 as shipped | 32 |
 
@@ -408,22 +431,26 @@ None: this stream added no session.
 Under "Needs from another stream", "Stream D, the fourteenth wave", in
 `docs/open-findings.md`:
 
+Each re-read against the code at 37f17c8 (`docs/open-requests.md`):
+
 - **P** (`src/capabilities.rs`): a binary on a `nosuid` mount carries its file
-  capabilities and does not get them, and the probe then tells the user to run
-  the `setcap` they already ran.
+  capabilities and does not get them. *Partly landed*: the probe knows
+  (`capabilities::withheld_file_capabilities` names the `nosuid` mount or
+  `no_new_privs`, and the resolved record carries it); the attach's advice in
+  `src/bpf/mod.rs` still tells the user to run the `setcap` they already ran.
 - **R** (`shim/**`, `src/collect/mem/heap/mod.rs`): `aligned_alloc` and
-  `memalign` are not hooked, so `dd bs=64M` (coreutils allocates its buffer
-  with `aligned_alloc`) shows a largest allocation of 4 KiB and reports no
-  loss; the shim-missing refusal tells an installed user to "build it with
-  `make`"; and `find_shim` could also look in `<exe>/../lib/omn/`.
+  `memalign` were not hooked, so `dd bs=64M` showed a largest allocation of
+  4 KiB and no loss. *Landed* in the fifteenth wave: the shim hooks
+  `aligned_alloc`, `memalign`, `valloc` and `pvalloc`, and `find_shim` also
+  looks in `<exe>/../lib/omn/`.
 - **R** (`src/collect/mod.rs`, the refusal): with the shim missing,
-  `mem.heap.alloc` is refused with "no collector is written for ...
-  `bpf:usdt`" as its first line, and the reason that matters, the shim's
-  path, comes second.
-- **Coordinator**: ~~the repository has no `LICENSE` file~~ -- landed after the
+  `mem.heap.alloc` was refused with "no collector is written for ...
+  `bpf:usdt`" as its first line. *Landed*: the refusal leads with the first
+  collected backend passed over and its reason (`src/main.rs`, `PassedOver`).
+- **Coordinator**: the repository had no `LICENSE` file. *Landed* after the
   fifteenth wave: `LICENSE-MIT` and `LICENSE-APACHE`, `MIT OR Apache-2.0`, with
-  `src/bpf/` under `MIT OR GPL-2.0`. A release archive should carry both files;
-  `contents` in `release.sh` is where they go.
+  `src/bpf/` under `MIT OR GPL-2.0`; `release.sh` and `make install` put both
+  files under `share/doc/omn/`.
 
 ### Matrix cells
 
@@ -433,7 +460,7 @@ by the coordinator, and the expected answer is the build tree's:
 
 ```console
 $ make release && sudo make install PREFIX=/usr/local && sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/omn
-$ /usr/local/bin/omn list | tail -n 3 | head -n 1     # 93 here, as target/debug/omn
+$ /usr/local/bin/omn list | tail -n 3 | head -n 1     # 92 here, as target/debug/omn
 ```
 
 The first stock-kernel cell for a release is `release.yml`'s run on
