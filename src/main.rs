@@ -610,12 +610,11 @@ fn rungs(catalog: &Catalog, resolved: &ResolvedRequest, ceiling: f64) -> Vec<Run
 /// counts once where it stood for a hundred makes every total after the move
 /// short by that factor. Such a rung is passed over -- named, with the
 /// reason, in the budget's note -- rather than taken and flagged after the
-/// fact. No collector of this build weighs its samples yet: `mem.faults` on
-/// `pmu:sw`, the only source whose chain declares both `trace` and `sample`,
-/// is filed for it (`docs/open-findings.md`, the sixteenth wave, stream
-/// runner). A collector that does is added here, with the test that holds its
-/// weighed series to a workload's own count.
-const WEIGHS_ITS_SAMPLES: &[(&str, &str)] = &[];
+/// fact. `mem.faults` on `pmu:sw`, the only source whose chain declares both
+/// `trace` and `sample`, weighs each sampled fault by its period
+/// (`src/collect/mem/page_faults.rs`). A collector that does is added here,
+/// with the test that holds its weighed series to a workload's own count.
+const WEIGHS_ITS_SAMPLES: &[(&str, &str)] = &[("mem.faults", "pmu:sw")];
 
 /// Whether the collector of `source` on `backend` weighs each sampled event
 /// by its period ([`WEIGHS_ITS_SAMPLES`]).
@@ -1577,6 +1576,9 @@ fn assemble(
     // collected over one window against one target, which is what makes them
     // comparable in the first place.
     let mut merged = Vec::new();
+    // Where each collection ends in `merged`: the joins walk them apart, in the
+    // engine's order, with no index of the whole run (`join::apply_merging`).
+    let mut bounds = vec![0];
     let mut run = encode::RunOutput {
         results: Vec::new(),
         joins: Vec::new(),
@@ -1614,9 +1616,10 @@ fn assemble(
             }
         }
         merged.extend(collection.events.iter().cloned());
+        bounds.push(merged.len());
         let unit = catalog
             .get(&serving.request.source)
-            .map(|entry| entry.unit)
+            .map(|entry| entry.backend_unit(&serving.backend.id))
             .unwrap_or(omn::catalog::Unit::Count);
         let value_attr = collection.value_attr.clone();
         let mut cost = measured_cost(catalog, &serving, &collection);
@@ -1656,8 +1659,11 @@ fn assemble(
             watched.closed_ns = u64::MAX;
         }
     }
+    let streams: Vec<&[omn::event::Event]> =
+        bounds.windows(2).map(|at| &merged[at[0]..at[1]]).collect();
     for rule in &session.joins {
-        run.joins.push(join::apply_within(rule, &merged, &windows)?);
+        run.joins
+            .push(join::apply_merging(rule, &streams, &windows)?);
     }
     // The served requests rather than the session's: a budget can lower a
     // sampling rate, and a sample stands for the period it was taken at.

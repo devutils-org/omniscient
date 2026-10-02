@@ -310,10 +310,18 @@ fn table(
         .max()
         .unwrap_or(5)
         .max(5);
+    // `extreme` is seven characters: the column is as wide as its widest word,
+    // so a row priced `extreme` does not push the columns after it right.
+    let cost_width = entries
+        .iter()
+        .map(|e| e.best_cost().as_str().len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
 
     let _ = writeln!(
         out,
-        "{:<id_width$}  {:<modes_width$}  {:<5}  {:<6}  {:<4}  {:<9}  SUMMARY",
+        "{:<id_width$}  {:<modes_width$}  {:<cost_width$}  {:<6}  {:<4}  {:<9}  SUMMARY",
         "SOURCE", "MODES", "COST", "DET", "HERE", "COLLECTOR"
     );
     let coverage = collect::coverage();
@@ -341,7 +349,7 @@ fn table(
         };
         let _ = writeln!(
             out,
-            "{name}  {:<modes_width$}  {:<5}  {:<6}  {:<4}  {:<9}  {}",
+            "{name}  {:<modes_width$}  {:<cost_width$}  {:<6}  {:<4}  {:<9}  {}",
             join(entry.modes.iter()),
             entry.best_cost().as_str(),
             entry.determinism.as_str(),

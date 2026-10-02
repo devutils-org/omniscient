@@ -1810,9 +1810,6 @@ fn a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency() {
 /// cpu (`CLOCK_THREAD_CPUTIME_ID`), so the fallback's value is at least that
 /// many nanoseconds, and the text a person reads prints it as a time.
 #[test]
-#[ignore = "needs `Entry::backend_unit` where a result's unit is chosen (src/main.rs, \
-            src/triage/engine.rs, src/join.rs): docs/open-findings.md, the sixteenth wave, \
-            stream cpu"]
 fn the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count() {
     let _load = may_load_the_machine();
     const BURNED_NS: f64 = 300e6;

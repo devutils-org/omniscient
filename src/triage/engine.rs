@@ -225,7 +225,7 @@ pub fn run(
         events.extend(collection.events.iter().cloned());
         let unit = catalog
             .get(&serving.request.source)
-            .map(|entry| entry.unit)
+            .map(|entry| entry.backend_unit(&serving.backend.id))
             .unwrap_or(Unit::Count);
         let value_attr = collection.value_attr.clone();
         let results = emit::aggregate(serving, collection, unit, &value_attr)

@@ -1661,7 +1661,16 @@ fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backe
     // half below.
     let undeclared = run(&args);
     if stderr(&undeclared).contains("does not attach") {
-        assert_eq!(undeclared.status.code(), Some(EXIT_REJECTED));
+        let message = stderr(&undeclared);
+        assert!(
+            message.contains("`bpf:raw_tp` does, and this build has no collector for it"),
+            "{message}"
+        );
+        assert_eq!(
+            undeclared.status.code(),
+            Some(EXIT_NOT_IMPLEMENTED),
+            "{message}"
+        );
         return;
     }
     assert!(undeclared.status.success(), "{}", stderr(&undeclared));

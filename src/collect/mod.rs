@@ -32,14 +32,8 @@ mod runtime;
 mod sched;
 mod task;
 
-/// The one pressure-stall reader, `src/collect/psi.rs`, which `cpu`, `io` and
-/// `mem` all read through, at the path that says it is shared:
-/// `crate::collect::psi`. Its `mod` line is still in `src/collect/mem/mod.rs`
-/// (stream K's), and declaring the file twice is what clippy's
-/// `duplicate_mod` refuses, so the declaration moves here in the one commit
-/// that removes it there -- filed in `docs/open-findings.md` -- and every
-/// reader can take this path meanwhile.
-pub use mem::psi;
+/// The one pressure-stall reader, which `cpu`, `io` and `mem` all read through.
+pub mod psi;
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -600,6 +594,10 @@ impl Losses {
 /// left and the one it moved onto were both observing the target.
 struct Moved {
     onto: String,
+    /// The mode it was moved into, when the move kept the backend and changed
+    /// the mode (`trace` -> `sample`): then the backend alone does not say
+    /// what changed.
+    into_mode: Option<String>,
     overlap_from_ns: u64,
     overlap_to_ns: u64,
 }
@@ -1166,40 +1164,20 @@ fn ticks_per_second() -> u64 {
     }
 }
 
-/// Cpu time one task has consumed, from its own `/proc` entry.
+/// Cpu time one task has consumed, its reaped children included.
 ///
-/// `cutime` and `cstime` are included: a shell that forks is still the workload
-/// that was asked for, and leaving its children out would make every collector
-/// look expensive against it.
+/// `task::process_cpu`: the process cpu clock in nanoseconds plus `cutime` and
+/// `cstime` -- a shell that forks is still the workload that was asked for,
+/// and leaving its children out would make every collector look expensive
+/// against it. `/proc/<pid>/stat`'s ticks only where the clock cannot be read.
 fn task_cpu_ns(pid: i32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name is parenthesised and may contain spaces and parentheses
-    // of its own, so the fields are counted from the last `)` rather than split
-    // from the start. After it, the first field is `state`, which is field 3.
-    let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
-    let ticks: u64 = fields
-        .get(11..15)?
-        .iter()
-        .map(|field| field.parse::<u64>().unwrap_or(0))
-        .sum();
-    Some(ticks * 1_000_000_000 / ticks_per_second())
+    task::process_cpu(pid).map(|read| read.ns)
 }
 
-/// The cpu time one thread has been charged, its own and no other's.
-///
-/// Not `/proc/<tid>/stat`: a thread id looked up at the top of `/proc` names
-/// its whole thread group, and that file sums every thread of the process and
-/// the children it reaped. The thread's own account is under its group's
-/// `task/` directory, and a thread has no children of its own to add.
+/// The cpu time one thread has been charged, its own and no other's, from
+/// its `schedstat` in nanoseconds (`task::thread_cpu`).
 fn thread_cpu_of(tid: i32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{tid}/task/{tid}/stat")).ok()?;
-    let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
-    let ticks: u64 = fields
-        .get(11..13)?
-        .iter()
-        .map(|field| field.parse::<u64>().unwrap_or(0))
-        .sum();
-    Some(ticks * 1_000_000_000 / ticks_per_second())
+    task::thread_cpu(tid).map(|read| read.ns)
 }
 
 /// Cpu time the machine, or a set of cpus, spent on anything but idling.
@@ -1340,18 +1318,25 @@ impl Meter {
     fn describes(&self) -> String {
         match self {
             Meter::Launched(pid) => format!(
-                "the launched program's own cpu time (/proc/{pid}/stat while it ran, \
-                 getrusage(RUSAGE_CHILDREN) once it was reaped)"
+                "the launched program's own cpu time ({} of {pid} while it ran, \
+                 getrusage(RUSAGE_CHILDREN) once it was reaped)",
+                task::process_cpu(*pid)
+                    .map_or(task::CpuGrain::Ticks, |read| read.grain)
+                    .says(),
             ),
             Meter::Tasks(pids) => format!(
-                "the cpu time of {} (/proc/<pid>/stat, children included)",
+                "the cpu time of {} ({}, children reaped included)",
                 pids.iter()
                     .map(|pid| pid.to_string())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                pids.first()
+                    .and_then(|pid| task::process_cpu(*pid))
+                    .map_or(task::CpuGrain::Ticks, |read| read.grain)
+                    .says(),
             ),
             Meter::Threads(tids) => format!(
-                "the cpu time of thread {} (/proc/<tid>/task/<tid>/stat, its own)",
+                "the cpu time of thread {} (/proc/<tid>/task/<tid>/schedstat, its own)",
                 tids.iter()
                     .map(|tid| tid.to_string())
                     .collect::<Vec<_>>()
@@ -3150,11 +3135,15 @@ impl<'a> Spending<'a> {
                     Ok(moved) => self.notes[index].push(format!(
                         "over budget at {:.2} ms into the run: `{source}` through `{was}` spent \
                          {percent:.2} % of the target's cpu time{inside} against a ceiling of \
-                         {ceiling} %, so it was moved onto `{}` for the rest of it; both counted \
-                         from {:.3} ms to {:.3} ms into the run, and what the target did in \
-                         that span can be in both",
+                         {ceiling} %, so it was moved onto `{}`{} for the rest of it; both \
+                         counted from {:.3} ms to {:.3} ms into the run, and what the target did \
+                         in that span can be in both",
                         entered_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
                         moved.onto,
+                        moved
+                            .into_mode
+                            .as_ref()
+                            .map_or(String::new(), |mode| format!(" in `{mode}`")),
                         moved.overlap_from_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
                         moved.overlap_to_ns.saturating_sub(self.opened_ns) as f64 / 1e6,
                     )),
@@ -3229,11 +3218,21 @@ impl<'a> Spending<'a> {
         let programs = programs_since(before.as_ref());
         let meter = InsideMeter::of(&onto, account, programs, &self.program_stats);
         self.inside[index].moved_onto(meter);
-        losses[index].note(format!(
-            "the budget moved this collection from `{}` to `{onto}` mid-run; the series is two \
-             backends end to end",
-            self.serving[index].backend.id
-        ));
+        let was = &self.serving[index];
+        let into_mode = (was.backend.id == onto).then(|| next.request.mode.to_string());
+        losses[index].note(if was.backend.id == onto {
+            format!(
+                "the budget moved this collection from `{}` to `{}` on `{onto}` mid-run; the \
+                 series is two modes end to end",
+                was.request.mode, next.request.mode
+            )
+        } else {
+            format!(
+                "the budget moved this collection from `{}` to `{onto}` mid-run; the series is \
+                 two backends end to end",
+                was.backend.id
+            )
+        });
         *current = replacement;
         self.serving[index] = next;
         self.served_by[index].push(onto.clone());
@@ -3244,6 +3243,7 @@ impl<'a> Spending<'a> {
         };
         Ok(Moved {
             onto,
+            into_mode,
             overlap_from_ns,
             overlap_to_ns,
         })

@@ -127,6 +127,13 @@ the selected backend never emits would empty the series rather than narrow it.
 The loader refuses a backend that claims a target or a field the entry does not
 offer, and an entry that offers one no backend in its chain serves.
 
+A backend may also declare `unit:` when its values are in another unit than the
+entry's: `cpu.cycles` through `pmu:sw` reads the cpu clock, so it says
+`unit: ns` where the entry says `count`, and a result served by it is in
+nanoseconds (`Entry::backend_unit`). The loader refuses it on the head of the
+chain, on a backend declared `equivalent`, where it repeats the entry's, and
+where it does not add up while the entry's does (`check_backend_units`).
+
 `requires` lists what the backend needs, each string answered by
 `Capabilities::probe` in `src/capabilities.rs` as available, missing or unknown.
 The classes it answers include a path (`/proc/diskstats`, with `[pid]`

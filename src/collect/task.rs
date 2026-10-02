@@ -174,10 +174,6 @@ pub enum CpuGrain {
     Ticks,
 }
 
-// Read by the budget's meter once `collect/mod.rs` calls it (filed in
-// `docs/open-findings.md`, the sixteenth wave, stream runner); until then only
-// the tests below do.
-#[allow(dead_code)]
 impl CpuGrain {
     /// What a cost record says the target's cpu was read from.
     pub fn says(self) -> &'static str {
@@ -245,10 +241,6 @@ fn process_clock_ns(pid: i32) -> Option<u64> {
     Some(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
 }
 
-// Read by the budget's meter once `collect/mod.rs` calls it (filed in
-// `docs/open-findings.md`, the sixteenth wave, stream runner); until then only
-// the tests below do.
-#[allow(dead_code)]
 /// The cpu time one process has consumed, its children reaped included.
 ///
 /// Its own threads, the exited ones included, from the process cpu clock in
@@ -270,10 +262,6 @@ pub fn process_cpu(pid: i32) -> Option<CpuRead> {
     }
 }
 
-// Read by the budget's meter once `collect/mod.rs` calls it (filed in
-// `docs/open-findings.md`, the sixteenth wave, stream runner); until then only
-// the tests below do.
-#[allow(dead_code)]
 /// The cpu time one thread has been charged, its own and no other's.
 ///
 /// `/proc/<tid>/task/<tid>/schedstat`'s first field, the thread's

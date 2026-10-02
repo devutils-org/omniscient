@@ -623,7 +623,7 @@ impl Collector for IbsCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        if self.callchain != Callchain::Off {
+        if self.callchain.kernel() {
             crate::stack::prime_kernel_symbols();
         }
         self.open()?;

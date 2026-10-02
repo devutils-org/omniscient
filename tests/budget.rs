@@ -2130,8 +2130,6 @@ print(json.dumps(points), flush=True)
 /// 16 % over its ceiling without ever being moved. The task's own log
 /// brackets what it spent inside the window, to the microsecond.
 #[test]
-#[ignore = "needs collect/mod.rs's Meter to read collect::task::process_cpu (docs/open-findings.md, \
-            the sixteenth wave, stream runner); un-ignore with that swap"]
 fn a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it() {
     use std::io::{BufRead, Read};
 

@@ -180,6 +180,12 @@ impl PageFaultCollector {
     }
 
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
+        // A sampled fault stands for the period it was taken at: one event of
+        // `sample@100` is a hundred faults to every emit that counts them.
+        let period = match self.mode {
+            Mode::Sample { freq } => freq.as_hz(),
+            _ => 1,
+        };
         let Some(event) = self.event.as_mut() else {
             return;
         };
@@ -223,6 +229,9 @@ impl PageFaultCollector {
                         ];
                         if let Some(comm) = comms.get(sample.tid as i32) {
                             attrs.push(Attr::text("comm", comm));
+                        }
+                        if period > 1 {
+                            attrs.push(Attr::uint(crate::emit::WEIGHT_ATTR, period));
                         }
                         attrs
                     },

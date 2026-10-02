@@ -34,8 +34,8 @@
 use std::path::PathBuf;
 
 use super::cgroup::Cgroup;
-use super::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 use crate::clock::monotonic_ns;
+use crate::collect::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};

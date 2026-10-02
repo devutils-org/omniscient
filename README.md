@@ -124,11 +124,11 @@ error: `sched.wakeup` has no viable backend on this machine:
 
 ```console
 $ omn list mem
-SOURCE             MODES                  COST   DET     HERE  COLLECTOR  SUMMARY
-mem.rss            poll, snapshot         free   medium  yes   all        Resident footprint (pages in RAM, shared ones counted in full)
+SOURCE             MODES                  COST     DET     HERE  COLLECTOR  SUMMARY
+mem.rss            poll, snapshot         free     medium  yes   all        Resident footprint (pages in RAM, shared ones counted in full)
 mem.heap.retained  poll, snapshot         extreme  high    yes   all        Fragmentation: memory retained by the allocator but no longer live
-mem.bandwidth      count, poll            free   low     no    none       DRAM throughput
-mem.reclaim        trace, count           low    medium  yes   1 of 2     Direct reclaim
+mem.bandwidth      count, poll            free     low     no    none       DRAM throughput
+mem.reclaim        trace, count           low      medium  yes   1 of 2     Direct reclaim
 …
 23 sources: 22 usable here, 0 unverified, 1 out of reach on this machine.
 22 of them have a collector, covering 29 of their 45 backends. …
