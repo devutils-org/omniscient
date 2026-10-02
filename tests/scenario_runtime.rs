@@ -237,7 +237,8 @@ fn the_declared_filter_fields_select_rather_than_emptying_the_series() {
     assert_eq!(filtered["kept"], 1);
     assert_eq!(
         filtered["dropped"], 7,
-        "a reader has to be able to tell a filter that removed seven from a workload          that produced one: {filtered}"
+        "a reader has to be able to tell a filter that removed seven from a workload \
+         that produced one: {filtered}"
     );
 }
 

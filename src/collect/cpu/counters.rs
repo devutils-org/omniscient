@@ -1407,7 +1407,8 @@ mod tests {
             let error = (count - expected).abs() / expected;
             assert!(
                 error < 0.01,
-                "counted {count} user-mode instructions where the loop retires {expected}:                  {:.2} % off",
+                "counted {count} user-mode instructions where the loop retires {expected}: \
+                 {:.2} % off",
                 error * 100.0
             );
         }
@@ -1454,7 +1455,8 @@ mod tests {
         let error = (count - expected).abs() / expected;
         assert!(
             error < 0.05,
-            "the work ran in a thread and retired {expected} instructions, but {count}              were counted: the event is not following the threads it should"
+            "the work ran in a thread and retired {expected} instructions, but {count} \
+             were counted: the event is not following the threads it should"
         );
     }
 

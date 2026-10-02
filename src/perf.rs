@@ -3454,7 +3454,7 @@ mod tests {
         let full = everything.read_final().expect("read");
         assert!(
             full[0].value > readings[0].value,
-            "counting kernel mode as well cannot yield fewer instructions              ({} against {})",
+            "counting kernel mode as well cannot yield fewer instructions ({} against {})",
             full[0].value,
             readings[0].value
         );
