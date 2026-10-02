@@ -554,7 +554,9 @@ impl Rung {
 /// cheaper mode ([`omn::request::Mode::cheaper`], phase 6's `trace` ->
 /// `sample`) on the serving backend and on those below it that fit, when the
 /// request's emits can take a series made of the two modes
-/// ([`omn::request::mode_move`]). The serving backend is offered in the
+/// ([`omn::request::mode_move`]), and only on a backend whose collector
+/// weighs each sampled event by its period ([`weighs_its_samples`]). The
+/// serving backend is offered in the
 /// cheaper mode whatever its band: the band is the backend's, and a sampled
 /// mode of it costs less than the traced one it was measured over.
 ///
@@ -593,10 +595,69 @@ fn rungs(catalog: &Catalog, resolved: &ResolvedRequest, ceiling: f64) -> Vec<Run
                 .into_iter()
                 .chain(below.iter().copied())
                 .filter(|backend| entry.backend_modes(backend).contains(&cheaper.kind()))
+                .filter(|backend| weighs_its_samples(resolved.request.source.as_str(), &backend.id))
                 .map(|backend| rung(backend, cheaper)),
         );
     }
     rungs
+}
+
+/// The collectors whose sampled events each carry the period they stand for
+/// as [`omn::emit::WEIGHT_ATTR`], by source and backend.
+///
+/// A series the budget moves from `trace` to `sample` is one answer only if
+/// every sampled event after the move is weighed by its period; one that
+/// counts once where it stood for a hundred makes every total after the move
+/// short by that factor. Such a rung is passed over -- named, with the
+/// reason, in the budget's note -- rather than taken and flagged after the
+/// fact. No collector of this build weighs its samples yet: `mem.faults` on
+/// `pmu:sw`, the only source whose chain declares both `trace` and `sample`,
+/// is filed for it (`docs/open-findings.md`, the sixteenth wave, stream
+/// runner). A collector that does is added here, with the test that holds its
+/// weighed series to a workload's own count.
+const WEIGHS_ITS_SAMPLES: &[(&str, &str)] = &[];
+
+/// Whether the collector of `source` on `backend` weighs each sampled event
+/// by its period ([`WEIGHS_ITS_SAMPLES`]).
+fn weighs_its_samples(source: &str, backend: &str) -> bool {
+    WEIGHS_ITS_SAMPLES
+        .iter()
+        .any(|(weighed, by)| *weighed == source && *by == backend)
+}
+
+/// The mode rungs a budget passes over because the collector's sampled events
+/// would not be weighed, as one sentence for the budget's note.
+fn unweighed_mode_rungs(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> {
+    let entry = catalog.get(&resolved.request.source)?;
+    let mode = resolved.request.mode;
+    let passed: Vec<String> = mode
+        .cheaper()
+        .into_iter()
+        .filter(|cheaper| {
+            omn::request::mode_move(mode.kind(), cheaper.kind(), &resolved.request.emit).is_ok()
+        })
+        .flat_map(|cheaper| {
+            entry
+                .backends
+                .iter()
+                .skip_while(|backend| backend.id != resolved.backend.id)
+                .filter(move |backend| entry.backend_modes(backend).contains(&cheaper.kind()))
+                .filter(|backend| {
+                    collect::implements(resolved.request.source.as_str(), &backend.id)
+                        && !weighs_its_samples(resolved.request.source.as_str(), &backend.id)
+                })
+                .map(move |backend| format!("`{}` in `{cheaper}`", backend.id))
+        })
+        .collect();
+    (!passed.is_empty()).then(|| {
+        format!(
+            "{}, is passed over: its sampled events carry no `{}`, so each would count once \
+             where it stood for its period and every total after the move would be short by \
+             that factor",
+            passed.join(" and "),
+            omn::emit::WEIGHT_ATTR
+        )
+    })
 }
 
 /// Refuses a budget that could move a request onto a mode its emits cannot
@@ -611,6 +672,18 @@ fn rungs(catalog: &Catalog, resolved: &ResolvedRequest, ceiling: f64) -> Vec<Run
 /// cannot produce at all only takes that rung out of the ladder, which
 /// [`budget_note`] says.
 fn budget_refusal(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> {
+    budget_refusal_given(catalog, resolved, weighs_its_samples)
+}
+
+/// [`budget_refusal`], with which collectors weigh their samples given: a
+/// sampled rung whose events are not weighed is passed over
+/// ([`weighs_its_samples`]), so it cannot mix two kinds of event and there is
+/// nothing to refuse.
+fn budget_refusal_given(
+    catalog: &Catalog,
+    resolved: &ResolvedRequest,
+    weighs: fn(&str, &str) -> bool,
+) -> Option<String> {
     let budget = resolved.request.budget?;
     let entry = catalog.get(&resolved.request.source)?;
     let mode = resolved.request.mode;
@@ -628,7 +701,9 @@ fn budget_refusal(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<Strin
             .iter()
             .skip_while(|backend| backend.id != resolved.backend.id)
             .find(|backend| {
-                entry.backend_modes(backend).contains(&cheaper.kind()) && collected(backend)
+                entry.backend_modes(backend).contains(&cheaper.kind())
+                    && collected(backend)
+                    && weighs(resolved.request.source.as_str(), &backend.id)
             })
         else {
             continue;
@@ -675,6 +750,9 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
 
     let rungs = rungs(catalog, resolved, ceiling);
     let others = rungs.iter().any(|rung| rung.backend != selected.id);
+    let passed = unweighed_mode_rungs(catalog, resolved)
+        .map(|why| format!(". The ladder's cheaper mode, {why}"))
+        .unwrap_or_default();
     let cheaper: Vec<String> = rungs
         .iter()
         .map(|rung| rung.describe(resolved.request.mode))
@@ -683,14 +761,15 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
     Some(match cheaper.as_slice() {
         [] => format!(
             "[{source}] --budget {budget}: `{}` declares `{}` ({}), and nothing below it in the \
-             chain declares less, so a run that exceeds the ceiling will stop rather than degrade",
+             chain declares less, so a run that exceeds the ceiling will stop rather than \
+             degrade{passed}",
             selected.id,
             selected.cost,
             band(selected.cost),
         ),
         candidates => format!(
             "[{source}] --budget {budget}: `{}` declares `{}` ({}), so a run that exceeds the \
-             ceiling will degrade onto {}{}",
+             ceiling will degrade onto {}{}{}",
             selected.id,
             selected.cost,
             band(selected.cost),
@@ -702,6 +781,7 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
             } else {
                 ""
             },
+            passed,
         ),
     })
 }
@@ -1524,6 +1604,15 @@ fn assemble(
         if let Some(note) = unweighed_after_a_mode_move(&resolved[index], &serving, &collection) {
             serving.degradations.push(note);
         }
+        // A run the budget stopped with a mode rung it would not take says
+        // why that rung was not one, beside the reason it stopped.
+        if collection.stopped_because.contains("nothing cheaper than") {
+            if let Some(why) = unweighed_mode_rungs(catalog, &serving) {
+                serving.degradations.push(format!(
+                    "the budget stopped the run, and the ladder's cheaper mode, {why}"
+                ));
+            }
+        }
         merged.extend(collection.events.iter().cloned());
         let unit = catalog
             .get(&serving.request.source)
@@ -2203,6 +2292,78 @@ mod tests {
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// `mem.faults` traced under a budget, resolved on this machine, or why it
+    /// cannot be.
+    fn traced_faults(emit: &str) -> Result<(Catalog, ResolvedRequest), String> {
+        let catalog = Catalog::embedded().expect("the embedded catalog loads");
+        let request = omn::request::Request {
+            source: "mem.faults".parse().unwrap(),
+            target: omn::request::Target::Pid(vec![std::process::id() as i32]),
+            mode: omn::request::Mode::Trace,
+            emit: vec![emit.parse().unwrap()],
+            keys: Vec::new(),
+            filter: None,
+            duration: None,
+            budget: Some("0.01%".parse().unwrap()),
+            stack: None,
+            symbols: None,
+            backend: None,
+            label: None,
+            window: None,
+        };
+        let capabilities = Capabilities::detect();
+        resolve::resolve(&catalog, &capabilities, &request)
+            .map(|resolved| (catalog, resolved))
+            .map_err(|error| error.to_string())
+    }
+
+    /// The rung `trace` -> `sample` is offered only on a collector that
+    /// weighs its samples, and `raw` is refused only when it could be taken:
+    /// with `mem.faults`'s collector weighing (as the filed change to
+    /// `page_faults.rs` would make it), a `raw` list is refused up front and a
+    /// `hist` is not; with it as it is, the rung is passed over, nothing can
+    /// mix, and the note names the rung and why.
+    #[test]
+    fn a_sampled_rung_whose_events_are_not_weighed_is_passed_over_not_taken() {
+        let (catalog, raw) = match traced_faults("raw") {
+            Ok(resolved) => resolved,
+            Err(why) => {
+                eprintln!("SKIP: `mem.faults` traced is not served here: {why}");
+                return;
+            }
+        };
+        let (_, hist) = traced_faults("hist").expect("hist resolves where raw does");
+        if raw.backend.id != "pmu:sw" {
+            eprintln!(
+                "SKIP: `mem.faults` traced is served by `{}`, not `pmu:sw`",
+                raw.backend.id
+            );
+            return;
+        }
+        let refused = budget_refusal_given(&catalog, &raw, |_, _| true)
+            .expect("a weighing collector makes the move reachable, and raw cannot cross it");
+        assert!(
+            refused.contains("`raw` would hold the events of both modes as one kind"),
+            "{refused}"
+        );
+        assert_eq!(budget_refusal_given(&catalog, &hist, |_, _| true), None);
+
+        assert!(!weighs_its_samples("mem.faults", "pmu:sw"));
+        assert_eq!(budget_refusal(&catalog, &raw), None);
+        assert!(
+            rungs(&catalog, &hist, 0.01)
+                .iter()
+                .all(|rung| rung.mode == hist.request.mode),
+            "no mode rung on an unweighed collector"
+        );
+        let note = budget_note(&catalog, &hist).expect("a budget has a note");
+        assert!(
+            note.contains("`pmu:sw` in `sample@99hz`, is passed over")
+                && note.contains("carry no `weight`"),
+            "{note}"
+        );
     }
 
     #[test]

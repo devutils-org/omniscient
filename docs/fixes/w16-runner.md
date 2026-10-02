@@ -42,37 +42,58 @@ never degraded silently" and "every mechanism as a chain":
   the event's `weight`"*. `Ladder::record` finds the serving request by the
   number of moves the collection made, not by backend id, because a mode move
   keeps the backend. `cost.json`'s `mode` reads `trace then sample@99hz`.
-- `assemble` reads the events. When a series moved modes and no event carries
-  a weight, it says the totals are short after the move
+- **A mode rung is taken only on a collector that weighs its sampled events**
+  (`WEIGHS_ITS_SAMPLES`, `weighs_its_samples`, `src/main.rs`; added after the
+  review). A sampled event that carries no `weight` counts once where it stood
+  for its period, so a series moved onto it is short by that factor after the
+  move: a known-wrong combination, which is passed over rather than taken and
+  flagged after the fact. No collector of this build weighs its samples yet
+  (`mem.faults` on `pmu:sw` is filed), so **in this build the ladder never
+  changes mode**: the rung is named as passed over, with the reason, in the
+  budget's note (*"The ladder's cheaper mode, `pmu:sw` in `sample@99hz`, is
+  passed over: its sampled events carry no `weight`, ..."*) and beside the
+  stop when the budget ends the run with nowhere to go. `budget_refusal`
+  refuses `raw` only when the rung could be taken (`budget_refusal_given`),
+  since a move that cannot happen cannot mix two kinds of event.
+- `assemble` still reads the events as a backstop. When a series moved modes
+  and no event carries a weight, it says the totals are short after the move
   (`unweighed_after_a_mode_move`), instead of claiming the weighing.
 
-**Ground truth**, `budget::a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`.
+**Ground truth**, `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`
+(renamed from `a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`).
 `mem.faults` is the one entry whose backend (`pmu:sw`) both traces and
 samples. A python task faults 1024 fresh pages a round (`MADV_NOHUGEPAGE`,
 then `MADV_DONTNEED`) and logs `(CLOCK_MONOTONIC, ru_minflt + ru_majflt)`. At
-`--budget 5%` the run is over at its first check (about 88 % traced). It moves
-to `sample@99hz` and holds there. The test checks:
+`--budget 5%` the run is over at its first check (about 90 % traced).
 
-- both announcements are present, and no "was pinned" note is (item 2);
-- the trace half drops nothing: the events counted are at least the task's
-  faults before the announced overlap (*45057 before the overlap, 63431
-  counted*);
-- the weighed half: the series' weighed count is the task's own count, short
-  by at most a period per cpu and over by at most what the overlap held.
+- **As the build is** (the rung passed over): the run stops at the check,
+  the series is traced end to end, and every fault the window held is an
+  event: *"the series counts 44706 faults and lost 0 records; the task took
+  43008 to 45056 inside the window; mode trace, stopped because `mem.faults`
+  spent 91.56 % ... nothing cheaper than `pmu:sw` is available"*. The test
+  holds `counted + lost >= least` and `counted <= most`, that nothing is
+  flagged after the fact, and that the passed-over rung is named beside the
+  stop.
+- **Once `page_faults.rs` weighs and `WEIGHS_ITS_SAMPLES` names it**: the
+  run moves to `sample@99hz`, and the same test holds both announcements, no
+  "was pinned" note (item 2), and the weighed series against the task's own
+  count, short by at most a period per cpu and over by at most what the
+  overlap held. Before the review, with the two-line `page_faults.rs` diff
+  applied locally and then reverted, three moved runs counted 1474515 against
+  the task's 1474603..1476651, 1583251 against 1583151..1585199, and 1657423
+  against 1656881..1658929. Without it the moved series counted 61892 against
+  1537069..1539117 (the reviewer's run): the 25x short total that made the
+  rung a known-wrong combination.
 
-That last check needs the sampled faults to carry `weight = period`, which is
-`page_faults.rs` and the mem stream's file. It skips loudly and names the
-request until that lands. With the two-line diff applied locally and then
-reverted, three runs counted 1474515 against the task's 1474603..1476651,
-1583251 against 1583151..1585199, and 1657423 against 1656881..1658929. Without
-it the count is about 63 000 against 1 650 000, and the run says so.
-
-`budget::a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front`
-holds the refusal against the validator's own matrix. `-m trace -e raw` and
-`-m sample -e raw` are each valid alone (exit 0), and `-m sample -e summary` is
-not (exit 2). So the exit 2 for `trace` + `raw` + `--budget` is about the move.
-`summary` passes and is told the run would stop; `hist` is told the rung
-(`` `pmu:sw` in `sample@99hz` ``).
+`budget::a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed`
+(renamed from `a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front`)
+holds the dumps against the validator's own matrix. `-m trace -e raw` and `-m
+sample -e raw` are each valid alone (exit 0), and `-m sample -e summary` is
+not (exit 2). Under a budget, `raw` and `summary` are let through and told the
+run would stop; `hist` is told the rung is passed over and why.
+`main.rs`'s `tests::a_sampled_rung_whose_events_are_not_weighed_is_passed_over_not_taken`
+resolves `mem.faults` on this machine and holds the refusal of `raw` (exit 2's
+sentence) for a collector that weighs, and the pass-over for the one there is.
 `request::tests::a_series_crosses_modes_only_in_the_emits_that_weigh_each_event`
 holds the rule against the mode x emit matrix.
 
@@ -97,6 +118,10 @@ reads a whole number of ticks.
 
 The meter that weighs the budget is `Meter` in `src/collect/mod.rs`, which is
 not this stream's file. The swap is filed with the exact lines.
+**So item 1b is not in effect**: the readers are landed and unit-tested,
+`process_cpu` / `thread_cpu` are dead code in the binary (three
+`#[allow(dead_code)]`), the budget still weighs `stat` ticks, and the 16 %
+case is not held anywhere on `main` until the swap lands.
 `budget::a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it`
 is written and `#[ignore]`d until that swap lands. The task is a python loop
 that sleeps 1 ms at a time and logs its own process clock. The tool runs
@@ -169,7 +194,7 @@ three ways.
 | "no viable backend" leads with the backend passed over (`main.rs`) | already on `main` (`refused_at_collect`, `PassedOver`) |
 | the `cost:` line and the cpu before the window | landed (item 2) |
 | the ladder's pin is not the user's | landed (item 2, `resolve_onto`) |
-| phase 6's trace -> hist -> sample ladder | landed as trace -> sample; the hist rung is taken at the start (item 1a) |
+| phase 6's trace -> hist -> sample ladder | not landed as asked: the rule and a trace -> sample rung are built, the rung is passed over until a collector weighs its samples, and no hist rung exists (item 1a; see "Review") |
 | the swap to `join::decompose_within`, `check_paired_parts` gone (`main.rs`, `triage/engine.rs`, `request.rs`) | already on `main` |
 | `NoBackendDeclares`, `KeyNotCarried`, `StackRefused` arms in `triage/engine.rs` | already on `main`; `FilterFieldNotCarried` added to both matches |
 | `proc` has no producer (`request.rs` and `event.rs`) | not landed: removing `KeyKind::Proc` needs `KeyValue::Proc` in `src/event.rs` and `docs/keys.md` in the same commit, and a producer belongs to the procfs collectors; neither file is this stream's |
@@ -199,21 +224,53 @@ three ways.
   was then `cargo clean`ed to let git write the commit (the disk was at 0):
   run `make` before using `target/debug/omn` here again.
 
+### After the review
+
+- `make check` could not run: `/home` reached 92 KB free and the `/tmp`
+  tmpfs its user quota (EDQUOT) mid-link, both filled by the six worktrees'
+  `target`s (this one's was moved to the scratch tmpfs and its unneeded test
+  binaries removed to build at all). Run instead, after `make` (capabilities
+  granted, `getcap` checked): `cargo test --bin omn` (4 passed),
+  `--test budget` (21 passed, 1 ignored), `--test runner`, `--test cli` (all
+  green); `cargo clippy --workspace --all-targets -D warnings` and `cargo fmt
+  --check` clean. The changes are in `src/main.rs`, `src/cli.rs`'s help text,
+  `tests/budget.rs` and documents, no shared layer.
+- In the first combined `budget` run two tests failed under load:
+  `the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes`
+  (in `docs/flaky.md`; passed alone once) and the renamed ladder test, on
+  *"too few faults to judge"*: the run stops at its first check, and a loaded
+  machine fitted fewer than 20 000 faults into that tenth of a second. Its
+  traced branch now asks for two whole rounds of 1024 inside the window, which
+  is still an exact bracket; it passed five times alone and once in the file.
+- **The coordinator's merge should run the full suite**, which this pass
+  could not.
+
 ## Landed, each with its test
 
-1. The mode rule and the ladder across modes, with the refusal up front:
-   `budget::a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`,
-   `budget::a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front`,
+1. The mode rule (`mode_move`), and a ladder across modes that takes a mode
+   rung only on a collector that weighs its samples -- in this build, none,
+   so the rung is passed over and named:
+   `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`,
+   `budget::a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed`,
+   `omn` (bin) `tests::a_sampled_rung_whose_events_are_not_weighed_is_passed_over_not_taken`,
    `request::tests::a_series_crosses_modes_only_in_the_emits_that_weigh_each_event`.
-2. The nanosecond readers:
-   `collect::task::tests::a_target_that_burns_under_a_tick_is_read_in_nanoseconds_against_its_own_clock`;
-   the budget's use of them is written,
+   **Not landed**: phase 6's trace -> hist -> sample ladder end to end (no
+   catalog source has the three, and the hist rung is not built), and a
+   trace -> sample move held to a workload across the move (waits on
+   `page_faults.rs`).
+2. The nanosecond readers only:
+   `collect::task::tests::a_target_that_burns_under_a_tick_is_read_in_nanoseconds_against_its_own_clock`.
+   **The denominator itself is not landed**: the budget's `Meter` still reads
+   ticks, and
    `budget::a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it`
-   (`#[ignore]` until the `Meter` swap).
+   is `#[ignore]` until the filed `Meter` swap.
 3. The `cost:` line before the window:
    `budget::what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted`.
-4. The ladder's move is not a pin (`resolve_onto`): asserted in the mode
-   ladder test.
+4. The ladder's move is not a pin (`resolve_onto`): asserted on the
+   backend move `pmu:sw` -> `bpf:raw_tp`
+   (`budget::a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted`,
+   assertion added after the review), and in the mode ladder test's moved
+   branch once a mode move can be taken.
 5. `FilterFieldNotCarried`'s elsewhere:
    `resolve::tests::a_filter_field_another_backend_carries_is_named_for_what_keeps_the_request_from_it`.
 6. The bench table check and the guardrail's reason:
@@ -233,8 +290,9 @@ tests:
 | `resolve::...a_filter_field_another_backend_carries...` | pass: a fixture, path probes and the registry, no perf | pass, the same |
 | `request::...a_series_crosses_modes...` | pass: pure | pass |
 | `collect::task::...burns_under_a_tick...` | pass: a process clock of one's own child needs no privilege; `schedstat` is 0444 (a kernel without it takes the thread half's own skip) | pass, the same |
-| `budget::a_traced_series...` | `SKIP: mem.faults is not served here` (the cell refused `mem.faults` at start in 37f17c8's log, EACCES); if served, user-mode faults are the task's own, and it passes, skipping the weighed half | `SKIP: mem.faults is not served here` (no viable backend at paranoid 4) |
-| `budget::a_budget_that_could_move_a_raw_list...` | pass: `--dump-request` on the test's own pid resolves `pmu:sw` there (the same log resolved it) | `SKIP` (no viable backend) |
+| `budget::a_traced_series_over_its_ceiling...` | `SKIP: mem.faults is not served here` (the cell refused `mem.faults` at start in 37f17c8's log, EACCES); if served, user-mode faults are the task's own and the traced branch passes | `SKIP: mem.faults is not served here` (no viable backend at paranoid 4) |
+| `budget::a_budget_takes_no_mode_rung...` | pass: `--dump-request` on the test's own pid resolves `pmu:sw` there (the same log resolved it); the notes are the catalog's and the rung table's | `SKIP` (no viable backend) |
+| `omn` (bin) `tests::a_sampled_rung...` | pass if `pmu:sw` resolves traced, as on the dump; otherwise its `SKIP:` line | `SKIP:` (`mem.faults` traced not served) |
 | `budget::what_a_profile_with_stacks...` | as before (passed); the new line check runs where `cpu.profile` is served | as before (`SKIP`: no `cpu.profile`) |
 | `budget::a_target_that_burns_under_a_tick_per_check...` | ignored | ignored |
 | `bench_harness::a_wrong_backends_table...` | pass: synthetic | pass |
@@ -244,9 +302,15 @@ only `skipped:` and `SKIPPED`, so none of them can fail a cell.
 
 ## Open, with the measured reason
 
-- **The weighed half of the mode ladder** waits on `page_faults.rs` carrying
-  `weight = period` on sampled faults (filed). That is a defect of its own as
-  well: `mem.faults -m sample@N` counts each sampled fault once.
+- **The mode ladder never changes mode in this build.** The trace -> sample
+  rung waits on `page_faults.rs` carrying `weight = period` on sampled faults
+  (filed), then one line in `WEIGHS_ITS_SAMPLES`. That is a defect of its own
+  as well: `mem.faults -m sample@N` counts each sampled fault once. The hist
+  rung of phase 6 is not built, and no catalog source declares trace,
+  in-kernel hist and sample, so an end-to-end ladder test cannot be written
+  against today's catalog.
+- **The ladder is exercised only where `mem.faults` is served**: both CI
+  cells skip it (EACCES at paranoid 2, no viable backend at paranoid 4).
 - **The denominator in the budget** waits on the `Meter` swap in
   `src/collect/mod.rs` (filed, two lines and the descriptions). The readers
   and the test are landed.
@@ -265,6 +329,12 @@ None. Everything above ran as uid 1000 with what `make` grants
 
 Move the three "Open" lines to the settled ones:
 
+- **A mode rung is taken only on a collector that weighs its sampled
+  events.** One that does not would make every total after the move short by
+  the period, a known-wrong combination: it is passed over and named, not
+  taken and flagged afterwards. Which collectors weigh is the build's fact
+  (`WEIGHS_ITS_SAMPLES` in `src/main.rs`, to move into the collector registry
+  when its owner adds a field for it).
 - **What one series made of two modes means to an emit.** A budget may
   continue a series in another mode only for the emits that weigh each event
   by what it stands for: `hist`, `topk`, `rate`, `summary`, which read
@@ -306,7 +376,25 @@ end of `docs/open-findings.md`:
 - the owner of `src/collect/mem/page_faults.rs`: `weight = period` on sampled
   faults;
 - the coordinator: the `DECISIONS.md`, `ROADMAP.md` (phases 6 and 9) and
-  `STATE.md` lines.
+  `STATE.md` lines (corrected after the review: the mode ladder is built and
+  passes over its only rung; the denominator is not in effect).
+
+## Review
+
+1. **The mode rung undercounting about 25x** -- real. Fixed: the rung is
+   passed over on a collector that does not weigh its samples, named in the
+   budget's note and beside the stop, and `raw` is refused only when the rung
+   could be taken. Tests above.
+2. **Item 1b not in effect** -- real. Nothing to change in owned files (the
+   `Meter` is `src/collect/mod.rs`); the record now says readers landed and
+   the denominator not.
+3. **No trace -> hist -> sample ladder end to end** -- real as a deviation
+   from the brief. After fix 1 the ladder takes no mode rung at all in this
+   build; recorded as not landed, with why (no source has the three; the hist
+   rung is taken at start, not stepped onto).
+4. **Test run note** -- no defect. The two `bench_harness` failures under
+   EDQUOT are the machine's disk (`/home` had 3.1 GB left at the start of
+   this pass).
 
 ## Session index rows
 

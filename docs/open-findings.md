@@ -9387,7 +9387,7 @@ losses[index].note(if was.backend.id == onto {
 and the same distinction in the `over budget at ...` note (`moved onto `{}``
 -> `moved onto `pmu:sw` in `sample@99hz``), for instance by carrying the
 mode in `Moved`. The ladder's own note in the results already names both
-modes; `budget::a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`
+modes; `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`
 does not depend on either sentence.
 
 ### To whoever owns `src/collect/mem/page_faults.rs`: a sampled fault stands for its period
@@ -9411,11 +9411,14 @@ if period > 1 {
 With it applied here, the moved series counted *1474515* faults against the
 task's own *1474603 to 1476651*, *1583251* against *1583151 to 1585199*, and
 *1657423* against *1656881 to 1658929* (three runs), where it counts about
-*63 000* against *1 650 000* without it. The weighed half of
-`budget::a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`
-skips, naming this request, until it lands; the run itself already says it
-(*"none of its N events carries a `weight`: from the move on each counts once
-where it stood for its period"*, `src/main.rs`, `unweighed_after_a_mode_move`).
+*63 000* against *1 650 000* without it. Until it lands the budget's ladder passes over the `trace` -> `sample` rung
+on `pmu:sw` and says why (`src/main.rs`, `WEIGHS_ITS_SAMPLES`): a moved series
+counted 61892 faults against the task's 1537069..1539117. With it landed, add
+`("mem.faults", "pmu:sw")` to `WEIGHS_ITS_SAMPLES` (or, better, a
+`weighs_samples` field on the collector registry's factory, which
+`src/main.rs` would read instead of its list), and the moved branch of
+`budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`
+holds the weighed series to the task's own count across the move.
 
 ### To the coordinator (`DECISIONS.md`, `ROADMAP.md`, `STATE.md`)
 
@@ -9424,9 +9427,13 @@ where it stood for its period"*, `src/main.rs`, `unweighed_after_a_mode_move`).
   DECISIONS.md".
 - `ROADMAP.md` phase 6, task 3 and the second criterion: *"the ladder steps
   backends of one mode, then `trace` -> `sample` on the same backends, held to
-  a task's own fault count across the move; the in-kernel histogram is taken
-  at the start, not stepped onto"*. Phase 9: *"`power.throttle`'s counters,
+  a task's own fault count across the move, once the sampled collector weighs
+  its events; the in-kernel histogram is taken at the start, not stepped
+  onto"*. Exit criterion still open: no run changes mode yet. Phase 9: *"`power.throttle`'s counters,
   read directly by the harness, on purpose"* (`docs/bench.md`).
-- `STATE.md` "What remains" item 2: the mode ladder, the denominator (pending
-  the `Meter` swap above), and `FilterFieldNotCarried`'s `elsewhere` are
-  landed; the bench's second table still wants its quiet-machine run.
+- `STATE.md` "What remains" item 2: the mode rule and the ladder are built,
+  and the ladder passes over its only mode rung until `page_faults.rs` weighs
+  its samples, so no run changes mode yet; phase 6's hist rung is not built.
+  The denominator is **not** in effect: the nanosecond readers are landed and
+  unused until the `Meter` swap above. `FilterFieldNotCarried`'s `elsewhere`
+  is landed; the bench's second table still wants its quiet-machine run.

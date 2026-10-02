@@ -280,8 +280,11 @@ backend in the chain, then from
 .B trace
 to
 .B sample
-(the same backends, each event then standing for its period), or, where there
-is nothing cheaper, stops. Either way the reason is in
+(the same backends, each event then standing for its period, and only on a
+collector whose sampled events carry that period as their
+.BR weight ;
+none does yet, so that step is named as passed over), or, where there is
+nothing cheaper, stops. Either way the reason is in
 .I stopped_because
 and on standard error. Every run reports what it cost, budget or no budget.
 .IP
@@ -298,8 +301,9 @@ budget takes. A budget that could move a request whose
 .B timeline
 or
 .B stack
-the cheaper mode would produce is refused before the run (exit 2), because
-that emit would hold two kinds of event as one.
+the cheaper mode would produce, on a collector the budget could move it onto,
+is refused before the run (exit 2), because that emit would hold two kinds of
+event as one.
 .IP
 What is weighed is this tool's CPU and what the collector spent inside the
 target, where the tool's own account cannot see it: an eBPF program's run time

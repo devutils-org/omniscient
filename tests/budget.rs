@@ -1716,6 +1716,12 @@ fn a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted() 
         "{}",
         stderr(&moved.output)
     );
+    // The ladder chose `bpf:raw_tp`; the user pinned nothing.
+    let notes = moved.results["results"][0]["degradations"].to_string();
+    assert!(
+        !notes.contains("was pinned"),
+        "the ladder's step is not the user's pin: {notes}"
+    );
     let (opened, closed, counted, lost) = window(&moved);
     let (least, most) = moved.bracket(opened, closed);
     let degradations = moved.results["results"][0]["degradations"]
@@ -1791,29 +1797,27 @@ points.append((mono(), faulted()))
 print(json.dumps(points), flush=True)
 "#;
 
-/// Ground truth for phase 6's ladder across modes: a traced series that the
-/// budget moves onto a sampled one is one series, every event weighed by what
-/// it stands for, and its count is the task's own count of its faults.
+/// Ground truth for phase 6's ladder across modes, as it stands: a traced
+/// series over its ceiling is not moved onto sampling while the sampled
+/// events would not say what they stand for, and every fault the window held
+/// is an event of its own, the task's own count.
 ///
 /// `mem.faults` traces every fault through `pmu:sw` and samples one in a
-/// period through the same backend, which is the one entry of the catalog
-/// whose backend serves both. Traced, the tool spends about as much cpu as a
-/// task that does nothing but fault, so a 5 % ceiling is over at the first
-/// check and the ladder's only rung is the same backend sampled at its
-/// default period: the run moves once, and says so twice -- when and which
-/// way (the runner's note), and that the series changed mode (the ladder's).
-/// `hist` is asked because it is an emit both modes produce and one that
-/// weighs each event by its `weight`. The task's `getrusage` log brackets
-/// what the window held.
+/// period through the same backend, the one entry of the catalog whose
+/// backend serves both. Traced, the tool spends about as much cpu as a task
+/// that does nothing but fault, so a 5 % ceiling is over at the first check.
+/// The ladder's only rung below would be the same backend sampled, and its
+/// sampled events carry no `weight` (filed for `page_faults.rs`): the rung is
+/// passed over rather than taken and flagged after the fact, so the run stops
+/// rather than degrades, and says the rung was passed over and why. `hist` is
+/// asked because it is an emit both modes produce. The task's `getrusage` log
+/// brackets what the window held.
 ///
-/// Two halves. The trace half holds whatever the sampled events carry: every
-/// fault before the announced overlap is an event of its own, so the series
-/// counts at least those. The whole holds only when the sampled events say
-/// what they stand for: the total, weighed, is the task's count, short by at
-/// most a period per counter at the end and over by at most what the overlap
-/// held.
+/// Once `page_faults.rs` weighs its samples and `main.rs`'s
+/// `WEIGHS_ITS_SAMPLES` names it, the run moves, and the weighed half below
+/// holds the whole series to the task's count across the move.
 #[test]
-fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
+fn a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples() {
     use std::io::{BufRead, Read};
 
     if Command::new("python3").arg("-V").output().is_err() {
@@ -1907,14 +1911,67 @@ fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
         .filter_map(|note| note.as_str().map(str::to_owned))
         .collect();
     let mode = cost["mode"].as_str().unwrap_or_default().to_owned();
+    let stopped = cost["stopped_because"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let counted: u64 = result["outputs"][0]["series"]
+        .as_array()
+        .expect("a histogram")
+        .iter()
+        .map(|series| series["count"].as_u64().unwrap_or(0))
+        .sum();
+    let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+    let (least, most) = bracket(opened, closed);
+
     if !mode.contains(" then ") {
-        eprintln!(
-            "SKIP: the run never moved ({mode}, {}): a 5 % ceiling held over a task that only \
-             faults, which this test cannot judge",
-            cost["stopped_because"]
+        // Not moved: the series is traced end to end, every fault an event.
+        let account = format!(
+            "the series counts {counted} faults and lost {lost} records; the task took \
+             {least} to {most} inside the window; mode {mode}, stopped because {stopped:?}; \
+             {said}"
         );
+        eprintln!("{account}");
+        // The run stops at its first check, a tenth of a second in, and a
+        // loaded machine fits only a few rounds of 1024 faults into it: two
+        // whole rounds inside the window are enough for an exact count.
+        assert!(least >= 2048, "too few faults to judge: {account}");
+        assert!(
+            counted + lost >= least,
+            "faults the traced series saw were dropped: {account}"
+        );
+        assert!(
+            counted <= most,
+            "the traced series counts more faults than the task took: {account}"
+        );
+        assert!(
+            !degradations
+                .iter()
+                .any(|note| note.contains("carries a `weight`")),
+            "no move, so nothing to flag after the fact: {degradations:?}"
+        );
+        if stopped.contains("nothing cheaper") {
+            // Over its ceiling: the budget's note said why the sampled rung
+            // was not one.
+            assert!(
+                degradations.iter().any(|note| {
+                    note.contains("the budget stopped the run")
+                        && note.contains("`pmu:sw` in `sample@99hz`, is passed over")
+                        && note.contains("carry no `weight`")
+                }),
+                "the passed-over rung is named beside the stop: {degradations:?}"
+            );
+        } else {
+            eprintln!(
+                "note: the run held its 5 % ceiling ({stopped}), so the ladder was not put to \
+                 the test"
+            );
+        }
         return;
     }
+    // Moved: only onto a collector that weighs its samples.
     assert_eq!(mode, "trace then sample@99hz", "{said}");
     assert!(
         degradations
@@ -1925,6 +1982,12 @@ fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
     assert!(
         !degradations.iter().any(|note| note.contains("was pinned")),
         "the ladder's step is not the user's pin: {degradations:?}"
+    );
+    assert!(
+        !degradations
+            .iter()
+            .any(|note| note.contains("carries a `weight`")),
+        "a rung is taken only when its sampled events are weighed: {degradations:?}"
     );
     let seam = degradations
         .iter()
@@ -1945,19 +2008,9 @@ fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
     let run_opened = result["window"]["run_opened_ns"]
         .as_u64()
         .expect("the run's opening");
-    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
-    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
     let overlap_from = run_opened + (from_ms * 1e6) as u64 - 1_000;
     let overlap_to = run_opened + (to_ms * 1e6) as u64 + 1_000;
-    let counted: u64 = result["outputs"][0]["series"]
-        .as_array()
-        .expect("a histogram")
-        .iter()
-        .map(|series| series["count"].as_u64().unwrap_or(0))
-        .sum();
-    let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
     let (traced_least, _) = bracket(opened, overlap_from);
-    let (least, most) = bracket(opened, closed);
     let (_, overlap_most) = bracket(overlap_from, overlap_to);
     let account = format!(
         "the series counts {counted} faults and lost {lost} records; the task took at least \
@@ -1966,27 +2019,8 @@ fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
     );
     eprintln!("{account}");
     assert!(least > 20_000, "too few faults to judge: {account}");
-    // The trace half: every fault before the move is an event of its own.
-    assert!(
-        counted + lost >= traced_least,
-        "faults the trace half saw were dropped: {account}"
-    );
-
-    if degradations
-        .iter()
-        .any(|note| note.contains("carries a `weight`"))
-    {
-        eprintln!(
-            "SKIP (the weighed half): `mem.faults`'s sampled events carry no `weight`, so the \
-             series after the move counts each once where it stood for 99 faults, and the run \
-             says so; filed for the owner of src/collect/mem/page_faults.rs \
-             (docs/open-findings.md, the sixteenth wave, stream runner)"
-        );
-        return;
-    }
     // A counter per cpu the task ran on, each short by less than a period at
-    // the end; the run says how many cpus it sampled on through the losses
-    // it reports per ring, which a single-threaded task bounds by the cpus.
+    // the end.
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
     let slack = 99 * cpus;
     assert!(
@@ -1999,15 +2033,20 @@ fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
     );
 }
 
-/// A budget that could move a traced request onto sampling refuses an emit
-/// that would hold the two modes' events as one kind, before anything runs,
-/// and lets through one that weighs each event, naming the rung.
+/// A budget refuses up front only a move it could take: `mem.faults`'s
+/// sampled events carry no `weight` yet, so the `trace` -> `sample` rung is
+/// passed over and named with the reason, a `raw` list under a budget cannot
+/// mix two kinds of event and is let through, and `hist` is told it will stop
+/// rather than degrade. (`main.rs`'s unit test
+/// `a_sampled_rung_whose_events_are_not_weighed_is_passed_over_not_taken`
+/// holds the refusal of `raw` once the collector weighs.)
 ///
 /// Held to the matrix the validator itself answers with: `-m sample -e raw`
 /// is a valid request (exit 0 on the dump) and `-m sample -e summary` is not
-/// (exit 2), so the refusal is about the move and not about either mode.
+/// (exit 2), so what the budget says is about the move and not about either
+/// mode.
 #[test]
-fn a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front() {
+fn a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed() {
     // This process, which any machine that serves `mem.faults` at all lets
     // its own user observe.
     let own = std::process::id().to_string();
@@ -2017,25 +2056,21 @@ fn a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front() {
         all.push("--dump-request");
         run(&all)
     };
-    let raw = dump(&["-m", "trace", "-e", "raw", "--budget", "5%"]);
+    let raw = dump(&["-m", "trace", "-e", "raw", "--budget", "0.01%"]);
     let said = stderr(&raw);
     if said.contains("has no viable backend on this machine") {
         eprintln!("SKIP: `mem.faults` is not served here: {said}");
         return;
     }
-    assert_eq!(raw.status.code(), Some(2), "{said}");
-    assert!(
-        said.contains("may move this collection from `trace` to `sample@99hz` on `pmu:sw`")
-            && said.contains("`raw` would hold the events of both modes as one kind"),
-        "{said}"
-    );
+    assert_eq!(raw.status.code(), Some(0), "{said}");
+    assert!(said.contains("stop rather than degrade"), "{said}");
     // Each mode serves `raw` alone, without a budget.
     for mode in ["trace", "sample"] {
         let alone = dump(&["-m", mode, "-e", "raw"]);
         assert_eq!(alone.status.code(), Some(0), "{}", stderr(&alone));
     }
-    // `summary` is not a sampled emit: the rung is passed over, not refused,
-    // and the note says the run would stop rather than degrade.
+    // `summary` is not a sampled emit: the rung is passed over, and the note
+    // says the run would stop rather than degrade.
     let sampled_summary = dump(&["-m", "sample", "-e", "summary"]);
     assert_eq!(
         sampled_summary.status.code(),
@@ -2050,13 +2085,17 @@ fn a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front() {
         "{}",
         stderr(&summary)
     );
-    // `hist` weighs each event, so the sampled rung is named.
+    // `hist` weighs each event, and the sampled events would not carry what
+    // they stand for: the rung is named as passed over, with the reason, and
+    // not offered.
     let hist = dump(&["-m", "trace", "-e", "hist", "--budget", "0.01%"]);
-    assert_eq!(hist.status.code(), Some(0), "{}", stderr(&hist));
+    let said = stderr(&hist);
+    assert_eq!(hist.status.code(), Some(0), "{said}");
     assert!(
-        stderr(&hist).contains("`pmu:sw` in `sample@99hz`"),
-        "{}",
-        stderr(&hist)
+        said.contains("stop rather than degrade")
+            && said.contains("`pmu:sw` in `sample@99hz`, is passed over")
+            && said.contains("carry no `weight`"),
+        "{said}"
     );
 }
 
