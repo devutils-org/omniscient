@@ -1217,6 +1217,35 @@ fn answered_by_the_build(source: &Source) -> bool {
             .any(|r| r.state != State::Available && r.detail.contains("no probe is written"))
 }
 
+/// Whether the difference between two cells' answers for one source is the
+/// build's: a listing rule on either side, or a requirement no probe was
+/// written for that the two answered differently. An unwritten probe that
+/// answered alike on both sides cannot be what differs -- `net.hwts`'s
+/// `so_timestamping` is unverified in every cell, and the gap is its `phc`.
+fn differs_by_the_build(left: &Source, right: &Source) -> bool {
+    let listing_rule = |source: &Source| {
+        source.here != Here::Yes && source.requirements().all(|r| r.state == State::Available)
+    };
+    let unwritten_and_differs = |mine: &Source, theirs: &Source| {
+        mine.backends.iter().any(|backend| {
+            backend.requires.iter().any(|requirement| {
+                requirement.state != State::Available
+                    && requirement.detail.contains("no probe is written")
+                    && theirs
+                        .backend(&backend.id)
+                        .and_then(|other| {
+                            other.requires.iter().find(|r| r.needs == requirement.needs)
+                        })
+                        .is_none_or(|other| other.state != requirement.state)
+            })
+        })
+    };
+    listing_rule(left)
+        || listing_rule(right)
+        || unwritten_and_differs(left, right)
+        || unwritten_and_differs(right, left)
+}
+
 /// Whether two cells were swept by the same binary, as far as they record.
 fn same_build(a: &Sweep, b: &Sweep) -> Option<bool> {
     Some(a.cell.build.as_ref()? == b.cell.build.as_ref()?)
@@ -1365,6 +1394,19 @@ enum Cause {
     /// Any of these fields decides it: `perf_event_open` at paranoia 2 is
     /// refused by the sysctl and granted by CAP_PERFMON, so either explains.
     Fields(&'static [&'static str]),
+    /// Two refusals in one reason, either of which a machine can lift: a
+    /// uprobe-multi link that Linux 6.6 introduced, and the uprobe PMU it
+    /// falls back to below that, which only CAP_SYS_ADMIN opens. A newer
+    /// kernel or a privilege explains the gap.
+    KernelBelowOr((u32, u32), &'static [&'static str]),
+}
+
+/// The version in "..., which Linux 6.6 introduced", the words a probe uses
+/// for a kernel feature it found missing.
+fn introduced_in(detail: &str) -> Option<(u32, u32)> {
+    let (_, rest) = detail.split_once("which Linux ")?;
+    let (version, _) = rest.split_once(" introduced")?;
+    kernel_version(version)
 }
 
 /// The cause a probe names for a requirement it did not answer available, or
@@ -1378,6 +1420,9 @@ fn cause(needs: &str, detail: &str) -> Option<Cause> {
         return kernel_version(version).map(Cause::KernelBelow);
     }
     let says = |words: &[&str]| words.iter().any(|w| detail.contains(w));
+    if let Some(version) = introduced_in(detail).filter(|_| says(&["CAP_"])) {
+        return Some(Cause::KernelBelowOr(version, &["privileges"]));
+    }
     Some(Cause::Fields(if says(&["/sys/kernel/btf/vmlinux"]) {
         &["kernel_btf"]
     } else if says(&["tracefs is not mounted"]) {
@@ -1453,57 +1498,86 @@ fn judge_cause(
     other_available: bool,
     requirement: &Requirement,
 ) -> Verdict {
-    let release = |sweep: &Sweep| {
-        environment_field(sweep, "kernel_release")
-            .and_then(|value| value.as_str().and_then(kernel_version))
-    };
     match cause(&requirement.needs, &requirement.detail) {
         None => Verdict::Unexplained(format!(
             "`{}` refused with a reason that names nothing a resolved record carries: {}",
             requirement.needs, requirement.detail
         )),
-        Some(Cause::KernelBelow(needed)) => match (release(refusing), release(other)) {
-            (Some(here), Some(there)) if here < needed && (!other_available || there >= needed) => {
-                Verdict::Explained("kernel_release")
+        Some(Cause::KernelBelow(needed)) => {
+            judge_kernel(refusing, other, other_available, requirement, needed)
+        }
+        Some(Cause::Fields(fields)) => judge_fields(refusing, other, requirement, fields),
+        Some(Cause::KernelBelowOr(needed, fields)) => {
+            match judge_kernel(refusing, other, other_available, requirement, needed) {
+                explained @ Verdict::Explained(_) => explained,
+                _ => judge_fields(refusing, other, requirement, fields),
             }
-            (here, there) => Verdict::Unexplained(format!(
-                "`{}` refused on kernel {here:?} and {} on {there:?}",
-                requirement.needs,
-                if other_available {
-                    "available"
-                } else {
-                    "refused too"
-                }
-            )),
-        },
-        Some(Cause::Fields(fields)) => {
-            for field in fields {
-                let (Some(x), Some(y)) = (
-                    environment_field(refusing, field),
-                    environment_field(other, field),
-                ) else {
-                    continue;
-                };
-                let refuses_here = !matches!(*field, "kernel_btf" | "tracefs")
-                    || x != serde_json::json!("readable");
-                if x != y && refuses_here {
-                    return Verdict::Explained(field);
-                }
-            }
-            if let Some(field) = fields.iter().find(|field| {
-                RECORDED_SINCE_THE_FIFTEENTH_WAVE.contains(field)
-                    && (environment_field(refusing, field).is_none()
-                        || environment_field(other, field).is_none())
-            }) {
-                return Verdict::Unrecorded(field);
-            }
-            Verdict::Unexplained(format!(
-                "`{}` refused ({}), and none of {fields:?} differs between the two records the \
-                 way that refuses",
-                requirement.needs, requirement.detail
-            ))
         }
     }
+}
+
+/// A kernel version explains a refusal when it is newer than the refusing
+/// side's and, where the other side served it, not newer than the other's.
+fn judge_kernel(
+    refusing: &Sweep,
+    other: &Sweep,
+    other_available: bool,
+    requirement: &Requirement,
+    needed: (u32, u32),
+) -> Verdict {
+    let release = |sweep: &Sweep| {
+        environment_field(sweep, "kernel_release")
+            .and_then(|value| value.as_str().and_then(kernel_version))
+    };
+    match (release(refusing), release(other)) {
+        (Some(here), Some(there)) if here < needed && (!other_available || there >= needed) => {
+            Verdict::Explained("kernel_release")
+        }
+        (here, there) => Verdict::Unexplained(format!(
+            "`{}` refused on kernel {here:?} and {} on {there:?}",
+            requirement.needs,
+            if other_available {
+                "available"
+            } else {
+                "refused too"
+            }
+        )),
+    }
+}
+
+/// A field explains a refusal when it differs between the two records the way
+/// that refuses on the refusing side.
+fn judge_fields(
+    refusing: &Sweep,
+    other: &Sweep,
+    requirement: &Requirement,
+    fields: &'static [&'static str],
+) -> Verdict {
+    for field in fields {
+        let (Some(x), Some(y)) = (
+            environment_field(refusing, field),
+            environment_field(other, field),
+        ) else {
+            continue;
+        };
+        let refuses_here =
+            !matches!(*field, "kernel_btf" | "tracefs") || x != serde_json::json!("readable");
+        if x != y && refuses_here {
+            return Verdict::Explained(field);
+        }
+    }
+    if let Some(field) = fields.iter().find(|field| {
+        RECORDED_SINCE_THE_FIFTEENTH_WAVE.contains(field)
+            && (environment_field(refusing, field).is_none()
+                || environment_field(other, field).is_none())
+    }) {
+        return Verdict::Unrecorded(field);
+    }
+    Verdict::Unexplained(format!(
+        "`{}` refused ({}), and none of {fields:?} differs between the two records the way \
+         that refuses",
+        requirement.needs, requirement.detail
+    ))
 }
 
 /// For each source whose availability differs between two cells, the
@@ -1519,7 +1593,7 @@ fn gaps_between(a: &Sweep, b: &Sweep, gaps: &mut Gaps) {
             continue;
         }
         let where_ = format!("{} / {}: `{}`", a.cell.name, b.cell.name, left.id);
-        if answered_by_the_build(left) || answered_by_the_build(right) {
+        if differs_by_the_build(left, right) {
             if same_build(a, b) == Some(true) {
                 gaps.unexplained.push(format!(
                     "{where_} differs by what the build answers, under one build"
@@ -2395,3 +2469,62 @@ const KNOWN_DEFECTS: &[Known] = &[Known {
     targets: &["launch"],
     says: "is the hierarchy root",
 }];
+
+#[test]
+fn a_refusal_with_two_causes_is_explained_by_either() {
+    let uprobe = "this kernel refused a uprobe-multi link (Invalid argument (os error 22)), \
+                  which Linux 6.6 introduced; and the uprobe PMU it would fall back to refuses \
+                  this process (Permission denied (os error 13)): the kernel opens a `uprobe` \
+                  PMU event only for CAP_SYS_ADMIN, which CAP_BPF and CAP_PERFMON do not include";
+    assert_eq!(
+        cause("uprobe", uprobe),
+        Some(Cause::KernelBelowOr((6, 6), &["privileges"]))
+    );
+    // A privilege alone stays a privilege.
+    assert_eq!(
+        cause("bpf", "needs CAP_BPF, which this kernel requires"),
+        Some(Cause::Fields(&["privileges"]))
+    );
+}
+
+#[test]
+fn an_unwritten_probe_answered_alike_on_both_sides_is_not_the_build_s_difference() {
+    let requirement = |needs: &str, state: State, detail: &str| Requirement {
+        needs: needs.into(),
+        state,
+        detail: detail.into(),
+    };
+    let hwts = |phc: State, here: Here| Source {
+        id: "net.hwts".into(),
+        here,
+        here_backend: None,
+        degraded: BTreeMap::new(),
+        listing: String::new(),
+        runs: Vec::new(),
+        backends: vec![Backend {
+            id: "so_timestamping".into(),
+            collector: false,
+            degraded: None,
+            requires: vec![
+                requirement(
+                    "so_timestamping",
+                    State::Unverified,
+                    "no probe is written for `so_timestamping` yet",
+                ),
+                requirement(
+                    "phc",
+                    phc,
+                    "no interface on this machine keeps a readable PTP clock",
+                ),
+            ],
+        }],
+    };
+    let (guest, host) = (
+        hwts(State::Missing, Here::No),
+        hwts(State::Available, Here::Yes),
+    );
+    assert!(!differs_by_the_build(&guest, &host));
+    let mut written = host.clone();
+    written.backends[0].requires[0].state = State::Available;
+    assert!(differs_by_the_build(&guest, &written));
+}
