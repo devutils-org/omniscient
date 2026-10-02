@@ -228,8 +228,9 @@ no older route, so below 6.6 it is refused, naming the kernel's refusal
 5.15 and 6.1).
 
 **5.15 is served.** Under 5.15, 6.1, 6.6 and 7.2 with the capabilities,
-`omn list` calls 86, 88, 88 and 89 sources usable (measured in guests,
-`docs/portability.md`). No kernel between 5.15 and 6.1 has been measured, so
+`omn list` calls 71, 74, 78 and 80 sources usable (7.2.7; measured in
+guests on 2026-10-02 with the build `cd394a8a8550c199`, `docs/portability.md`,
+"The sixteenth wave's sweep"); an earlier binary counted 86, 88, 88 and 89. No kernel between 5.15 and 6.1 has been measured, so
 whether the 6.1 backends would serve a 5.18 is not known; they keep 6.1 until
 a cell says otherwise. Below 5.8 nothing has been measured; the 33 backends
 that say `kernel>=5.8` are refused there by name.

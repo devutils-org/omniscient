@@ -1340,3 +1340,53 @@ keep the read and correct the phase 9 sentence.
 | every cell | `environment.privileges`, `environment.virtualization` and `cell.build` recorded; `every_gap_...` explains the 2754 it counts as unrecorded today, or fails naming the ones it cannot |
 | every guest | nothing for `cpu.cycles`: the guests expose the host's PMU and stay on `pmu`; `pmu:sw` now reads `collector written` in the listing |
 | `ci-6.17-*` | `cpu.cycles` served on the runner's vcpu, `pmu:sw`, with the degradation |
+
+## The sixteenth wave's sweep
+
+All 22 cells swept again on 2026-10-02, alone, with one binary
+(`cell.build` `cd394a8a8550c199`, `main` after the sixteenth wave's merge):
+`here-caps`, `here-nocaps`, and 5.15.221, 6.1.188, 6.6.157 and 7.2.7 under
+`caps`, `root`, `notracefs`, `nobtf` and `nocaps`. Every guest cell completed
+with 0 broken; `6.1.188-caps` has a sweep again (it had only a qemu `vhost`
+error before). `here-nocaps` was swept from a relinked binary, which carries no
+capabilities, and `make` put them back. Usable sources, as `omn list` counts
+them since the fourteenth wave (through a backend this build collects):
+
+| Kernel | caps | root | notracefs | nobtf | nocaps |
+|---|---|---|---|---|---|
+| 5.15.221 | 71 | 75 | 75 | 45 | 41 |
+| 6.1.188 | 74 | 78 | 78 | 45 | 41 |
+| 6.6.157 | 78 | 79 | 79 | 45 | 41 |
+| 7.2.7 | 80 | 81 | 81 | 45 | 41 |
+| here (7.2.7, no guest) | 92 | | | | 56 |
+
+The table under "The cells" above is an earlier binary's, and the two counts
+are not comparable.
+
+What the cells hold now:
+
+- every cell records `environment.privileges`, `environment.virtualization`
+  and `cell.build`;
+- `every_gap_between_two_cells_is_explained_by_their_resolved_records`:
+  among the 22 fresh cells every gap is explained by a recorded field that
+  differs the way that refuses, none is the build's, none waits on a missing
+  field (phase 7's criterion, ticked). The first pass left 58 unexplained, all
+  the judge's (`3e78c7c`): `runtime.*` through `uprobe` on 5.15 and 6.1 is
+  refused for two causes at once, uprobe-multi (6.6) and the uprobe PMU's
+  `CAP_SYS_ADMIN`, and the judge read only the privilege
+  (`Cause::KernelBelowOr` now); and `net.hwts`'s `so_timestamping` has no
+  probe, which the judge counted as the build's difference "under one build"
+  where the real difference is `phc` (an unwritten probe is the build's only
+  where the two cells answered it differently);
+- `here-caps`: `net.hwts --system` runs in `poll` through `netlink:ethtool`
+  and exits 0; `here-nocaps`: the five stale "usable through a backend with no
+  collector" violations are gone; the invariants judge passes;
+- `sched.switches` is usable on 5.15 through `pmu:sw`: only its `bpf:raw_tp`
+  backend needs 6.1, so the row "What differs by kernel" gives it is a
+  backend's refusal, not the source's (the docs stream's question,
+  `docs/open-findings.md`).
+
+The five `7.2.6-*` cells on disk predate the host's move to 7.2.7 and record
+none of the new fields; they alone account for the judge's 1316 "not
+explained yet". `rm -r target/matrix/cells/7.2.6-*` clears them. Logs:
+`target/matrix-here.log`, `target/matrix-all.log`.

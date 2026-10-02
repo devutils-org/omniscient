@@ -8768,6 +8768,8 @@ found in a file this stream does not own.
 
 ### To whoever owns `src/event.rs` and `src/join.rs`: `iface` is compared by its name alone
 
+**Closed in the sixteenth wave** (streams mem and engine): `net.bytes` and `net.iface` fill the index at the read, and `join::identity` compares `iface#<index>`. The third bullet, the counter kind out of the name, is no longer in a join's way and stays with `docs/open-requests.md`; the network namespace beside the index is open (`DECISIONS.md`).
+
 `join::identity` compares a key's `Display`, and `KeyValue::Iface` displays
 `iface:<name>`. So the index takes no part in a match, and the doc comment on
 `KeyValue::Iface` (*"an interface that gets renamed is still the same
@@ -8790,6 +8792,8 @@ other's events on `lo`, whose index is 1 on every Linux machine.
 
 ### To whoever owns `src/request.rs` and `src/event.rs`: `proc` has no producer
 
+**Answered in the sixteenth wave** (stream engine): `proc` stays as vocabulary and a join on it is refused by name (`DECISIONS.md`); the producers are filed again under the sixteenth wave, stream engine.
+
 `KeyKind::Proc` and `KeyValue::Proc { pidns, pid }` exist, and no collector
 writes one. No catalog entry lists `proc` among its keys either. Processes are
 keyed `task:<pid>` (`src/collect/proc/status.rs:241`,
@@ -8799,6 +8803,8 @@ key. Either a producer (the procfs sources know their pid namespace from
 commit.
 
 ### To the coordinator (`STATE.md`), and whoever owns `docs/install.md` and `docs/families/sched.md`: the floor is per backend
+
+**Closed in the sixteenth wave**: `docs/install.md` (stream docs) and `docs/families/sched.md:57` (stream mem); `STATE.md`'s phase 0 row at the fifteenth wave's merge.
 
 `DECISIONS.md` now says there is no single kernel floor: each backend carries
 its own `kernel>=`, and 5.15 is served ("Settled in the fifteenth wave").
@@ -8815,6 +8821,8 @@ Three places still say 6.1 is the floor:
 
 ### To the probes stream: the power guardrail is yours to decide, and `DECISIONS.md` is mine
 
+**Closed in the sixteenth wave**: the harness's own `thermal_throttle` read, on purpose (stream runner; `DECISIONS.md`, `ROADMAP.md` phase 9).
+
 `ROADMAP.md` phase 9 now says `power` is not collected as a guardrail: the
 bench reads `thermal_throttle` around each repetition
 (`examples/bench/harness.rs`, `throttle_count`) and says on AMD that it cannot
@@ -8825,6 +8833,8 @@ phase 9 sentence changes to point at it.
 ## Needs from another stream — the fifteenth wave, stream engine
 
 ### To the resolver stream (`src/main.rs`, `src/triage/engine.rs`): the swap to `join::decompose_within`
+
+**Closed at the fifteenth wave's merge** (`303fcfe`).
 
 Landed in `src/join.rs` (stream R's fourteenth-wave request, above):
 
@@ -8882,6 +8892,8 @@ then runs instead of being refused.
 
 ### To the coordinator (`ROADMAP.md`): the exit criteria this stream's tests now hold
 
+**Closed at the fifteenth wave's merge**, except the hour, ticked in the sixteenth wave after its full 3600 s run.
+
 - Phase 1, "a serialized/deserialized `Event` is identical": `[x]`, by
   `event::tests::an_event_survives_a_round_trip_through_json_and_yaml` (every
   `KeyValue` and `AttrValue` variant, `ts_err_ns` 1250, zero, negative and
@@ -8919,6 +8931,8 @@ without it. One line was added after `stack:` in each, and nothing else:
 
 ### To whoever owns `src/collect/mod.rs`: `net`, `psi` and `BPF_ENABLE_STATS` (K's, the fourteenth wave)
 
+**Closed in the sixteenth wave**: `pub mod net` and `ProgramStats::for_run` at the fifteenth wave's merge; `pub mod psi` declared once at the sixteenth's (`8d80fd1`).
+
 Not this stream's file this wave, so filed with the exact lines:
 
 ```rust
@@ -8937,6 +8951,8 @@ match crate::bpf::enable_run_time_stats() {
 ```
 
 ### To stream J (`src/join.rs`): `decompose_within`, and then the coordinator's swap
+
+**Closed at the fifteenth wave's merge** (`303fcfe`).
 
 `src/main.rs` calls a local `decompose_within(decomposition, &served,
 &run.results, &merged, &session.joins, &windows)` now, whose body calls
@@ -8964,6 +8980,8 @@ windows)` (or the call site calls it directly and the local function goes);
 
 ### To whoever owns `src/triage/engine.rs`: the new resolver refusal is the request's
 
+**Closed at the fifteenth wave's merge** (`c481b1c`).
+
 `ResolveError::NoBackendDeclares` (a target and a mode the entry declares and
 no one backend declares together; K's request of the fourteenth wave) is
 answered as the request's by `omn` (exit 2). `engine.rs:112` maps every
@@ -8974,6 +8992,8 @@ was not given"); wanted there, one arm:
 
 ### To the coordinator (`CATALOG.md`, `DECISIONS.md`): the unwind table moved
 
+**Closed at the fifteenth wave's merge** (`65577bf`).
+
 `src/unwind.yaml` is `catalog/unwind.yaml` now (`git mv`), and
 `Catalog::load_dir` passes over it. `CATALOG.md:198` and `DECISIONS.md:443`
 still name `src/unwind.yaml`; the `DECISIONS.md` row "Where the table lives"
@@ -8982,6 +9002,8 @@ directory when it has one** -- because `load_dir` skips `catalog::UNWIND_TABLE`
 and `stack::unwind::use_table_in` reads it.
 
 ### To whoever owns `src/collect/cpu/mod.rs` (optional)
+
+**Closed in the sixteenth wave** (stream cpu): the `pmu:sw` factory takes `ResolvedRequest.stack` when present.
 
 `ResolvedRequest.stack` now carries the `StackChoice` for `cpu.profile`, made
 by the resolver. The `pmu:sw` factory still calls `stack::choose` again, which
@@ -8992,6 +9014,8 @@ the refusal. `debuginfod: None` there stays: `profile::Prepare` builds the
 client from the choice.
 
 ### To whoever owns `catalog/io.yaml`: the keys `io.bytes`'s backends attach
+
+**Closed in the sixteenth wave** (stream io): `keys:` on `io.bytes`'s `fs:proc` and `fs:cgroup` and `io.iops`'s `fs:proc`; the shipped refusal is exit 3, `tests/cli.rs` taking it at the merge.
 
 `Backend.keys` exists now, the loader holds it to the entry's `keys` in both
 directions (`check_backend_keys`), and the resolver refuses a request keyed on
@@ -9013,6 +9037,8 @@ shipped catalog it takes the refusal half directly. `io.iops`'s `fs:proc` is
 the same case (`keys: [dev]`).
 
 ### After review: three more, from the resolver's fixes
+
+**Closed in the sixteenth wave** for the first (stream cpu: `Whose::Machine`, exit 1, and the test reads the expected code from the machine); the other two closed at the fifteenth wave's merge (`c481b1c`, `65577bf`).
 
 **`tests/scenario_cpu.rs` (P's): a forced `--stack` mode this machine cannot
 serve is the machine's gap.** `unwind::Refusal` now says whose a refusal of
@@ -9058,6 +9084,8 @@ each item is the other half of a change landed in the runner's files.
 
 ### To whoever owns `src/main.rs`: the "no viable backend" refusal, the reason that matters first
 
+**Closed at the fifteenth wave's merge** (`refused_at_collect`, `PassedOver`).
+
 Stream D's request of the fourteenth wave, above, lands in `src/main.rs:840-865`
 (the `UnimplementedBackend` arm that prints "`X` was passed over"), not in
 `src/collect/mod.rs`, which only carries the error. Still wanted: when the
@@ -9069,6 +9097,8 @@ found at ... or ...; it ships beside the binary, so reinstall, or build it with
 reader can act on.
 
 ### To whoever owns `src/main.rs`: the `cost:` line and what came before the window
+
+**Closed in the sixteenth wave** (stream runner, `MeasuredCost::line`).
 
 `collect::Overhead` carries `before_window_cpu_ns` and `after_window_cpu_ns`
 now, and `Overhead::tool_cpu_ns()` is their sum with `collector_cpu_ns`: what
@@ -9093,6 +9123,8 @@ it (`tests/budget.rs`,
 
 ### To whoever owns `src/main.rs`: the ladder's pin is not the user's
 
+**Closed in the sixteenth wave** (stream runner, `resolve::resolve_onto`).
+
 After a budget moves a collection, its results carry "backend `bpf:raw_tp` was
 pinned, so the chain was not walked: this measures that backend, not what the
 resolver would choose" -- `resolve::resolve` saying so of the `force:` that
@@ -9110,6 +9142,8 @@ does not mark the result pinned (P's `resolve.rs`). Seen in every run of
 
 ### To whoever owns `src/main.rs` and `catalog/*.yaml`: phase 6's trace -> hist -> sample ladder
 
+**Closed in the sixteenth wave**: decided (`DECISIONS.md`) and built by stream runner; the `trace` -> `sample` rung is taken on weighed samples since the merge (`8d80fd1`), and the in-kernel histogram is taken at the start, not stepped onto.
+
 `ROADMAP.md` phase 6 task 3 names the degradation `trace` -> in-kernel `hist`
 -> `sample`. What is built is a ladder over **backends** of one request's
 mode: `Ladder::candidates` walks the chain below the serving backend by cost
@@ -9124,6 +9158,8 @@ stream's handoff) on what one series made of two modes means to an emit; then
 
 ### To stream U (`src/collect/cpu/profile.rs:406`): a user-only profile reads the kernel's symbols
 
+**Closed in the sixteenth wave** (stream cpu; `late_stacks` by stream io, `ibs.rs` at the merge).
+
 `ProfileCollector::start` primes the kernel's symbol table whenever
 `self.callchain != Callchain::Off`, so a profile whose callchain is user-only
 (`{ kernel: false }`, paranoid 2) spends the better part of a second in a debug
@@ -9133,6 +9169,8 @@ Wanted: prime only when the callchain includes the kernel.
 
 ### To stream K (`src/collect/mem/mod.rs`, `src/bpf/attach.rs`): `pub mod net` landed
 
+**Closed in the sixteenth wave** (stream mem): `net_probe` is gone.
+
 `src/collect/mod.rs` declares `pub mod net;`. `collect::mem::net_probe` can go,
 and `src/bpf/attach.rs:206` calls `crate::collect::net::probe(kind)`.
 `ProgramStats::for_run` calls `crate::bpf::enable_run_time_stats()` and keeps
@@ -9140,12 +9178,16 @@ no copy of the command.
 
 ### To whoever owns `tests/family_mem.rs:58`, `tests/scenario_mem.rs:165`, `tests/cross_memory.rs:130`: the shim check matches nothing
 
+**Closed in the sixteenth wave** (stream mem), each with a test that runs a binary with no shim beside it.
+
 Each asserts `!message.contains("heap shim was not found")`; the message has
 said "the preload shim was not found at ..." since the ninth wave, so the
 check never fires and a missing shim reads as whatever failure follows.
 Wanted: `"shim was not found"`, as `tests/aggregation.rs` now has.
 
 ### To whoever owns `examples/gpu-draw-in-watts.yml`, `examples/power-energy.yml`, `docs/scenarios/power.md`: `W`, not `J/s`
+
+**Closed in the sixteenth wave** (stream docs), re-run.
 
 A rate over joules prints in watts now (`encode::per_second_quantity`):
 `examples/gpu-draw-in-watts.yml:15`, `examples/power-energy.yml:15` and
@@ -9177,6 +9219,8 @@ its subject. R: keep it, or replace it and drop the commit.
 
 ### To the owner of `src/bpf/mod.rs` (the coordinator's shared layer): the attach-time advice
 
+**Closed in the sixteenth wave** (stream mem, `advice_for`).
+
 `capabilities::probe` now rewrites a privilege refusal when the binary's file
 carries `CAP_BPF`/`CAP_PERFMON` and the process was not given them (a `nosuid`
 mount, `no_new_privs`, a grant without `e`): the listing and the resolver say
@@ -9193,6 +9237,8 @@ if let Some(withheld) = crate::capabilities::withheld_file_capabilities() {
 `withheld_file_capabilities() -> Option<String>` is `pub` and cached.
 
 ### To the runner stream (`examples/bench/harness.rs`): the guardrail through the source it claims
+
+**Answered in the sixteenth wave** (stream runner): the direct read stays, on purpose; `ROADMAP.md` phase 9 says so.
 
 `ROADMAP.md` phase 9 says `power` has been "collected unconditionally since
 phase 8 as a guardrail". The harness reads `thermal_throttle/*_throttle_count`
@@ -9218,11 +9264,15 @@ fifteenth wave", item 4, has both halves.
 
 ### To stream R (`src/catalog.rs`): what `extreme` means (stream J's, the fourteenth wave, again)
 
+**Closed at the fifteenth wave's merge**.
+
 `Cost::Extreme`'s doc comment still says "Over 10x: kernel replay"; `omn-mcp`
 and `main.rs` say "over 20 %, with no bound above". Filed to P in the
 fourteenth wave, but `src/catalog.rs` is R's.
 
 ### To the coordinator: four lines in documents nobody owns
+
+**Closed at the fifteenth wave's merge** for `CATALOG.md:510`, `CLAUDE.md`'s counts and `DECISIONS.md`'s line; the `docs/scenarios/cpu.md` row closed in the sixteenth wave (stream cpu).
 
 - `CATALOG.md:510`: *"same as cgroup, and every entry that says `container:
   no`"* -- no entry that serves a cgroup says it now, and the loader refuses
@@ -9247,6 +9297,8 @@ Nothing new from this stream's paths in its runs; see the handoff's check.
 
 ### To the owner of `net.hwts` (`catalog/net.yaml`, `src/collect/net/**`): listed usable for `trace`, refused at the start
 
+**Closed at the fifteenth wave's merge** (stream kernel's per-backend `modes:`); the sixteenth wave's sweep finds `here-caps` clean.
+
 Found by `portability::every_cell_on_disk_holds_the_invariants` on the
 `here-caps` cell of the 2026-09-30 sweep (the one violation there):
 `omn trace net.hwts -m trace -e summary -d 300ms --system` exits 3 with
@@ -9262,6 +9314,8 @@ it usable through `netlink:ethtool`. Wanted: `netlink:ethtool` declares
 Stream kernel's handoff is `docs/fixes/w15-kernel.md`. Nothing here blocks it.
 
 ### To stream P (`src/validate.rs`) and R (`src/collect/mod.rs`): a join over a histogram the kernel built
+
+**Closed in the sixteenth wave** (stream io): `pub(crate) mod io`, and the validator asks `collect::io::builds_histogram_in_kernel`.
 
 `io.latency` with `emit: [hist]` alone (log2, `trace`, no filter, keys ⊆
 `dev`) is now answered by a kernel-side histogram: one event per `(device,
@@ -9281,6 +9335,8 @@ crate::collect::io::histogram_is_enough(&request) // -> bool
 
 ### To the owners of five strings: a continuation that lost its `\`
 
+**Closed in the sixteenth wave**: four by stream cpu, `src/collect/mod.rs` by stream io.
+
 A string continued across lines without its trailing `\` keeps the next
 line's indentation (`"... the waker is the                  interrupt ..."`).
 This stream fixed ten in its own files; five remain, found with
@@ -9289,6 +9345,8 @@ This stream fixed ten in its own files; five remain, found with
 `src/collect/mod.rs:2637` (a user-facing refusal), `tests/scenario_runtime.rs:240`.
 
 ### To the coordinator (`docs/scenarios/net.md`, `docs/scenarios/sched.md`, `ROADMAP.md`, the flaky tally)
+
+**Closed in the sixteenth wave**: `net.md` and `sched.md` and flaky #3 by stream mem; `ROADMAP.md` at the fifteenth wave's merge.
 
 - `net.md`, defect 7: `net.hwts -m trace` of an interface is now refused at
   resolution (`netlink:ethtool` declares `poll, snapshot`), exit 1 until P's
@@ -9308,6 +9366,8 @@ This stream fixed ten in its own files; five remain, found with
 
 ### To stream P (`.github/expected-skips.txt`): the bpftool skip, with its reason
 
+**Answered in the sixteenth wave** (stream io): the workflow links the binary instead of the gate excusing it; a pattern only if the next push still skips.
+
 `bpf::btf::tests::a_variable_is_found_by_the_id_the_kernel_numbers_it_with`
 skips only when `bpftool` exits non-zero, now as *"skipped the cross-check:
 bpftool could not dump /sys/kernel/btf/vmlinux (exit status: N: <bpftool's
@@ -9321,6 +9381,8 @@ dump's `DATASEC` line was read as the variable's.)
 Stream docs' record is `docs/fixes/w16-docs.md`. Nothing here blocks it.
 
 ### To whoever owns `src/render.rs`: `extreme` overflows the COST column of `omn list`
+
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
 
 `render.rs:316` and `:344` lay COST out as `{:<5}`, and `Cost::Extreme`
 prints seven characters, so every row priced `extreme` pushes DET, HERE and
@@ -9350,6 +9412,8 @@ second option the files name readable from the tree. Decided either way, the
 README's "License" section says what the tree carries.
 
 ### To whoever owns `docs/portability.md`: `sched.switches` on 5.15
+
+**Answered by the sixteenth wave's sweep**: `sched.switches` is usable on 5.15 through `pmu:sw` (`docs/portability.md`, "The sixteenth wave's sweep"); the older table's row stays as that binary's.
 
 `docs/portability.md:184` lists `sched.switches` among the sources refused on
 5.15 by `kernel>=6.1`. In the catalog at 37f17c8 only its `bpf:raw_tp`
@@ -9414,6 +9478,8 @@ every event, `keys: vec![KeyValue::task(self.pid)]` becoming
 
 ### To whoever owns `src/main.rs` (`assemble`): the joins' input walked apart
 
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
+
 `join::apply_within` over `merged` takes an index of the whole run for every
 rule, because `merged` is the collections laid end to end and is not in order:
 15.3 MiB beyond a million events, against 0.6 MiB for the same events walked
@@ -9470,6 +9536,8 @@ diff below was applied locally, its test run against it, and reverted.
 
 ### To whoever owns `src/collect/mod.rs`: the budget's denominator in nanoseconds
 
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
+
 `src/collect/task.rs` has `process_cpu(pid)` and `thread_cpu(tid) -> Option<CpuRead>`
 (`CpuRead { ns, grain: CpuGrain }`): the process cpu clock
 (`clock_getcpuclockid`, every thread's `sum_exec_runtime`, the exited ones
@@ -9511,6 +9579,8 @@ the defect, a 5 % ceiling never acted on.
 
 ### To whoever owns `src/collect/mod.rs`: a move between modes is not "two backends"
 
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
+
 The budget's ladder now steps from `trace` to `sample` on one backend
 (`Ladder` in `src/main.rs`). `Spending::degrade` notes *"the budget moved this
 collection from `pmu:sw` to `pmu:sw` mid-run; the series is two backends end
@@ -9537,6 +9607,8 @@ modes; `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_mo
 does not depend on either sentence.
 
 ### To whoever owns `src/collect/mem/page_faults.rs`: a sampled fault stands for its period
+
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
 
 `mem.faults -m sample@N` samples one fault in N, and each event carries
 `count = 1` and nothing else, so every emit counts it once: `-m sample@100 -e
@@ -9568,6 +9640,8 @@ holds the weighed series to the task's own count across the move.
 
 ### To the coordinator (`DECISIONS.md`, `ROADMAP.md`, `STATE.md`)
 
+**Landed with the sixteenth wave's closing documents**, corrected for the merge: the mode rung is taken, and the denominator is in effect.
+
 - `DECISIONS.md` "Open": the two runner proposals and the bench's guardrail
   are settled; the lines are in `docs/fixes/w16-runner.md`, "For
   DECISIONS.md".
@@ -9590,6 +9664,8 @@ Stream cpu's handoff is `docs/fixes/w16-cpu.md`. Nothing here blocks it; each
 item is the other half of a change landed in this stream's files.
 
 ### To whoever owns `src/main.rs` and `src/triage/engine.rs`: a result's unit is its backend's
+
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
 
 `catalog::Backend` has `unit: Option<Unit>` now, and `Entry::backend_unit(&self,
 backend: &str) -> Unit` answers the backend's own unit or the entry's.
@@ -9615,6 +9691,8 @@ call if a decomposition over `cpu.cycles` through `pmu:sw` is ever written.
 
 ### To the coordinator (`CATALOG.md`): the backend key `unit`
 
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
+
 A backend may declare `unit:` when its values are in another unit than the
 entry's. The loader refuses it on the head of the chain, on a backend declared
 `equivalent`, when it repeats the entry's, and when it does not add up where
@@ -9622,6 +9700,8 @@ the entry's does (`check_backend_units`). Wanted, a line where `CATALOG.md`
 lists the per-backend keys (`targets`, `modes`, `keys`, `filter_fields`).
 
 ### To whoever owns `src/collect/mod.rs`: a late attach primes the kernel's symbols for a user-only profile too
+
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
 
 `profile.rs` primes `/proc/kallsyms` only when the callchain has a kernel half
 now (`ProfileCollector::start`, held by
@@ -9643,6 +9723,8 @@ Stream io's handoff is `docs/fixes/w16-io.md`. Nothing here blocks it.
 
 ### To the owner of `src/collect/mem/mod.rs` and `src/collect/mem/pressure.rs`, with the coordinator: `psi` where it lives, in one commit
 
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
+
 `src/collect/io/pressure.rs` reads `crate::collect::psi` now (through the
 `pub use` in `src/collect/mod.rs`). The declaration cannot move to
 `src/collect/mod.rs` on this branch alone: `src/collect/mem/mod.rs` still
@@ -9659,6 +9741,8 @@ use crate::collect::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
 ```
 
 ### To the owner of `tests/cli.rs`: the shipped catalog's `KeyNotCarried` is the build's gap, exit 3 -- red until it lands
+
+**Landed at the sixteenth wave's merge** (`8d80fd1`).
 
 **Lands in the same merge as `feat/w16-io`**: without it the merged tree is red
 (the review of this wave reproduced it alone, `tests/cli.rs:1664`).
@@ -9758,6 +9842,8 @@ add the wording as a pattern.
 Stream mem's handoff is `docs/fixes/w16-mem.md`. Nothing here blocks it.
 
 ### To the owner of `.github/expected-skips.txt`: the user-mode-only page faults
+
+**Landed** before the merge: the pattern is on `main`.
 
 Two skips on the `defaults` cell (paranoid 2, no capabilities) are the machine's
 and are in no pattern: the library test's *"skipped the kernel-mode half: this

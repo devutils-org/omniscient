@@ -507,7 +507,7 @@ the code.
 | Decision | Choice | Reason |
 |---|---|---|
 | How an eBPF program is built | **Assembled in Rust as an instruction array and relocated from the running kernel's BTF at load.** No libbpf, no clang, no object file, no `vmlinux.h`. | The same relocation compile-time CO-RE performs, done a few milliseconds later against the kernel that will run the program, so an offset cannot be stale. `omn` stays one binary: building it needs Rust and nothing else, and running it needs no libbpf (`docs/install.md`). It talks to `bpf()` itself, which is boundary 4's rule one layer down. |
-| The kernel a source needs | **A `kernel>=` requirement on each backend that needs one**, probed like the rest, and no floor for the tool. | A backend is refused below its own version, by name, and the others still serve. 5.15 is served: 86 sources usable in a 5.15.221 guest with the capabilities, against 89 on 7.2 (`docs/portability.md`). |
+| The kernel a source needs | **A `kernel>=` requirement on each backend that needs one**, probed like the rest, and no floor for the tool. | A backend is refused below its own version, by name, and the others still serve. 5.15 is served: 86 sources usable in a 5.15.221 guest with the capabilities, against 89 on 7.2 (`docs/portability.md`), an earlier sweep's count; the sixteenth wave's sweep, with its own binary, counts 71 against 80 on 7.2.7. |
 | A perf event at `perf_event_paranoid` 2 without `CAP_PERFMON` | **Opened user-mode only when the program's own registers raise it, and noted; refused when only kernel code raises it.** | A user-mode page fault, instruction or profile sample is the program's own. A context switch or a migration never happens in user mode, so a user-mode count of it is zero. |
 | The roadmap's `Span` struct | **Not written.** Evidence lives on `join::Correlation` (per rule) and `join::Attribution` (per upstream state). A decomposition's rows are the tree a span would have built. | What the engine emits is aggregated and bounded. A span per matched event would be a record per event. |
 | Reordering | **No bounded window and no watermark. Each collection is sorted by timestamp after the fact**, and a join sorts what it merges. | Every output is a document over a closed window, so waiting for the close costs nothing the document was not already waiting for. A sort is exact at any lateness. |
@@ -695,31 +695,82 @@ test that holds it there.
 
 ---
 
+## Settled in the sixteenth wave
+
+What the six streams settled, from their handoffs
+(`docs/fixes/w16-{cpu,io,mem,runner,engine,docs}.md`), each with the test that
+holds it. The four lines that were open after the fifteenth wave are among
+them: the enclosing window of a drained row (engine), what one series made of
+two modes means to an emit and the budget's denominator (runner), and the
+bench's guardrail (runner).
+
+**The budget** (`docs/fixes/w16-runner.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What one series made of two modes means to an emit (was open) | **A budget may continue a series in another mode only for the emits that weigh each event by what it stands for** -- `hist`, `topk`, `rate`, `summary`, which read `weight`: a traced event weighs one, an in-kernel histogram row its bucket's count, a sampled event its period. A mode that cannot produce an emit the request asked for is not a rung. An emit the cheaper mode produces only by listing two kinds of event as one (`raw`, `timeline`, `stack`) makes the request invalid under a budget: refused before the run, exit 2. The one mode rung is `trace` -> `sample`, taken after the same-mode backends below. The in-kernel histogram is taken at the start when the emits allow it, never stepped onto. | An invalid combination is refused with the reason, never degraded silently; stepping onto a histogram mid-run would drop every emit it cannot answer. `request::tests::a_series_crosses_modes_only_in_the_emits_that_weigh_each_event`, `budget::a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed`. |
+| Which collector a mode rung may move onto | **Only one that weighs its sampled events** (`WEIGHS_ITS_SAMPLES` in `src/main.rs`; `mem.faults` on `pmu:sw` since the merge, whose samples carry `weight = period`). One that does not is passed over and named, not taken and flagged afterwards. | A sampled event with no weight counts once where it stood for its period: a moved series was 25 times short (61 892 faults against the task's 1 537 069). Weighed, a moved run counted 1 707 073 against the task's own 1 706 035 to 1 708 083 inside the window. `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`. Which collectors weigh is the build's fact, to move into the collector registry when its owner adds the field. |
+| The budget's denominator (was open) | **The scheduler's nanoseconds.** A process: its process cpu clock (every thread's `sum_exec_runtime`, exited ones included) plus its reaped children's ticks. A thread: its `schedstat`. `stat`'s ticks only where neither can be read, and the record says so. | A target that burns under a tick per check was weighed at 0 ns and a 5 % ceiling was never acted on (16 % over). `collect::task::tests::a_target_that_burns_under_a_tick_is_read_in_nanoseconds_against_its_own_clock`, `budget::a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it` (un-ignored at the merge). |
+| A budget's move and a pin | **Not the same.** The ladder resolves onto its rung (`resolve::resolve_onto`) without marking it pinned; only the user's `--backend force:` says the chain was not walked. A move between modes on one backend is named as one ("two modes end to end"). | A note that says the user pinned what nobody pinned is a false record. `budget::a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted`. |
+| The bench's thermal guardrail (was open) | **The harness's own read of `thermal_throttle`**, not `power.throttle` through the tool. | It wraps the bare baseline runs, which an `omn` beside them would turn into traced runs, and a guardrail measured by the tool under test would pass the tool's own defect in that source. `docs/bench.md`; `ROADMAP.md` phase 9 says so. |
+| A filter field's elsewhere | **Chosen as a key's is**: forceable, then missing, then unwritten, then unfit; a `--backend force:` hint only for a backend this build collects and this machine runs. | `resolve::tests::a_filter_field_another_backend_carries_is_named_for_what_keeps_the_request_from_it`. |
+
+**The engine** (`docs/fixes/w16-engine.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A drained row's enclosing window (was open) | **The rule's to name**: an `overlap` rule says `enclosing: <attr>`, the attribute holding a window from the row's stamp that encloses every occurrence. Such a row is credited whole to the one interval holding the window, and stays uncredited when it crosses one. Without it, `span` is a sum and the row is uncredited. A source without the attribute is refused (`MissingSpan`); `enclosing` on another match is refused (`EnclosingOutsideOverlap`). | A drained row carries both numbers, and a rule needs both. `mem.reclaim`'s `window_ns` is such a window today: `cross_machine::a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure` credited all of `memory.stat`'s pgsteal in four runs (41 246 to 42 263 pages), against under 1.1 % read as a sum. |
+| What an interface is | **Its index, within one network namespace.** A join compares `iface` by the kernel's index (`iface#<index>`), filled from the name at the read when a producer has only the name; the name is what a row prints, and a sub-series after `/` is not part of the interface. | A rename made a second key, and `net.iface`'s `lo/drops` could not join anything. `join::tests::an_interface_is_one_key_by_its_index_across_a_rename_and_a_sub_series`, `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved` (4 112 000 bytes credited for 4 112 000 counted). The namespace is still open, below. |
+| `proc` | **Stays as vocabulary, with no producer**, the way a source with no collector does; a join `via: proc` is refused by name until a source declares it. | `CATALOG.md`'s container trap: removing the kind and adding it back later costs more than a refusal that names it. The producers are filed. |
+| The engine's memory | **Bounded by its map and its `top`**, plus an index of any input stream that is not in order. A run's collections are handed to it apart (`join::apply_merging`), never laid end to end. | 0.6 MiB beyond a million events walked apart, 15.3 MiB laid end to end; the hour ran at 0.7 MiB a round. `join_engine::a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map`, `join::tests::streams_walked_apart_meet_in_the_engines_order`. |
+
+**The resolver's answers** (`docs/fixes/w16-cpu.md`, `w16-io.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A forced `--stack` mode whose requirement the machine lacks | **The machine's refusal, exit 1**; one the machine would serve with no collector is the build's, exit 3. | The two answers `Whose` already defines, rather than one code for both. `scenario_cpu::an_unwinder_this_build_lacks_is_refused_before_the_program_starts`. |
+| A backend's own unit | **Declared on a fallback that says what it degrades, never on the head or an `equivalent` backend**; the result carries the unit of the backend that served it (`Entry::backend_unit`). | A value in another unit is another measurement. Chosen over renaming `cpu.cycles`'s unit or splitting the source, because a chain is the shape for several mechanisms of one job. `catalog::tests::a_backend_reports_in_its_own_unit_only_where_it_is_a_fallback_that_says_so`, `scenario_cpu::the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count`. |
+| A `KeyNotCarried` whose attaching backend is unwritten | **The build's gap, exit 3**, as `KeyElsewhere::whose` says; `catalog/io.yaml`'s first shipped `keys:` make it reachable. | `scenario_io::a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_backend_that_does`, `tests/cli.rs::a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does`. |
+| A join over a request answered by an in-kernel histogram | **Refused by the validator, exit 2**, only where the collector really builds it (`collect::io::builds_histogram_in_kernel`, `io.latency` today). | The collector cannot see joins; the request is fine alone and wrong only with the join. Refusing a combination that works would be the opposite failure. `validate::tests::a_join_over_a_histogram_built_in_the_kernel_is_refused_with_the_emit_that_serves_it`, `family_io::a_join_on_blk_is_refused_only_over_a_histogram_the_kernel_builds`. |
+
+**What a test holds the tool to** (`docs/fixes/w16-{cpu,io,mem,docs}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A forced error path | **Forced with an error in the shape the layer below returns**, never a hand-built one. | A bare errno is what let paranoid 2's user-mode retry, which never ran, pass on the cell it was written for (`docs/scenarios/mem.md`, D14). `collect::mem::page_faults::tests::a_refusal_is_recognised_in_the_shape_perf_returns_it`. |
+| A cgroup test that wants reclaim | **`memory.high`, not `memory.max`**, unless the limit itself is measured; a throttled child is not required to finish, since the throttling is the stall. | `max` adds an OOM kill that is the disk's speed, not the subject. `collect::mem::pressure::tests::a_cgroup_forced_to_reclaim_stalls_and_an_idle_one_does_not`. |
+| Two backends of one source | **Answer one kernel counter under one attribute name, or carry different names.** | Matching on the day is not evidence (D6 matched, D15 did not). `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`. |
+| A run that exited 0 | **Was served**: a skip looks for a machine's limit in the refusal, never in the caveats of a run that worked. | `scenario_mem` skipped a comparison on every machine for a wave by reading a caveat (D16). |
+| A gauge | **Held to the kernel's own reading of the same gauge**, required only when the kernel's file, read at 1 ms, says a 20 ms poll could not have missed it. | A depth the sampling could not have seen is not evidence either way. `scenario_io::a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it`. |
+| A count from a shared file | **Held from both sides by the kernel's own count**: over a window enclosing the session's (ceiling) and over the workload alone inside it (floor). | A ceiling alone passes a collector that answers 0. `scenario_io::a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move`. |
+| Two program sets on one tracepoint | **Disagree by an absolute skew, measured per run by a witness**, not a relative tolerance assumed. | 120 ns at the median, 11.5 us once; the 2 % tolerance was 115 ns at 5.7 us. `scenario_io::a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`. |
+| The user stack a sample copied | **Held to the target's pagemap**, not the mapping's extent. | The kernel copies resident memory only (`copy_from_user_nmi`). `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`. |
+| A tool the CI needs | **Installed by the workflow, not excused by the skip gate.** | The gate's own rule for workloads. The bpftool link in `.github/workflows/ci.yml`. |
+| A quoted output that cannot be regenerated | **Keeps its numbers and says so**; only what the tool now prints differently is edited, and today's output is given beside it. | A "current" version of a fixed defect's output would be a fabricated record. `docs/scenarios/power.md`. |
+| A document's machine numbers | **Carry their commit and date.** | The usable count moves with every probe fix (93 to 92, 57 to 51 between two waves). `docs/install.md`. |
+
+---
+
 ## Open
 
-- **An `overlap` rule's `span` that encloses a drained row's occurrences.**
-  A row of several episodes whose enclosing window fits in one interval could
-  be credited whole and exactly, but the engine cannot tell an enclosing
-  window from a sum of durations by the attribute's name, so the rule would
-  have to say which. Leaving it open costs the credit of drained sources:
-  41 184 of 41 639 reclaimed pages uncredited on the reclaim crossing, counted
-  and said.
-- **What one series made of two modes means to an emit** (the runner stream's
-  proposal, `docs/fixes/w15-runner.md`). The budget's trace -> hist -> sample
-  ladder needs it before it is built: proposed, a budget may move only onto a
-  mode whose events the request's emits can take (a `hist` of traced events
-  and an in-kernel `hist` merge; a `raw` does not survive the move and is
-  refused up front). Leaving it open costs phase 6's ladder: a budget moves
-  between backends of one mode only.
-- **The budget's denominator in nanoseconds** (the same handoff). Proposed: a
-  launched or pid target's cpu from `schedstat` (nanoseconds on cpu), not
-  `stat` (10 ms ticks). Leaving it open costs every target that burns under a
-  tick per check: `sched.offcpu --budget 5%` over a sleeping python loop ended
-  16 % over its ceiling and was never moved.
-- **Whether the `power` sources are the bench's guardrail** (phase 9), or the
-  harness's own `thermal_throttle` read stays. The probes stream stated why the
-  bench reads the counters directly (`docs/portability.md`, item 4) and filed
-  the call for the runner stream; neither side landed it.
+- **The network namespace beside an interface's index** (engine, filed to
+  the kernel-side `net` producers). An index is per namespace, and
+  `net.qdisc`, `net.capture` and `net.hwts` read every namespace. Leaving it
+  open costs a join on `iface` the right to cross namespaces: 2000 of 2000
+  packets queued on another namespace's lo were credited to this one's
+  (`docs/keys.md` says when such a join is sound).
+- **Which answer first when a backend is both unbuilt and unservable here**
+  (mem, filed to the resolver). The chain path asks the machine first (exit 1),
+  the forced path the build first (exit 3), so one request exits 1 or 3 by the
+  path that reached it; `scenario_net`'s `net.hwts` test accepts both, by the
+  machine. The filing suggests the chain's order.
+- **The GPL-2.0 text** (docs, filed to the coordinator; the user's call).
+  `src/bpf` is `MIT OR GPL-2.0` and declares `Dual MIT/GPL` to the kernel, and
+  the tree and the archive ship only `LICENSE-MIT` and `LICENSE-APACHE`.
+  Leaving it open costs nothing legally (the MIT option is enough to use the
+  code), and costs the second option its text: either ship
+  `LICENSES/GPL-2.0-only.txt` from `scripts/release.sh` and `make install`, or
+  say in the README that the tree carries only the MIT text.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

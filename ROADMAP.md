@@ -141,6 +141,13 @@ any code.
       document exists, every producer named from a grep of `src/collect/**`
       and every comparison read from `join::identity`. The two findings are
       filed (`docs/open-findings.md`, stream docs).*
+      *Sixteenth wave: both findings answered. `iface` is compared by the
+      kernel's index (`join::tests::an_interface_is_one_key_by_its_index_across_a_rename_and_a_sub_series`,
+      held to the kernel's own byte count by
+      `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved`);
+      `proc` stays as vocabulary with no producer, refused by name in a join
+      (`DECISIONS.md`, "Settled in the sixteenth wave"). `docs/keys.md`
+      rewritten for both; the network namespace beside the index is open.*
 
 ---
 
@@ -348,6 +355,16 @@ req:a3f1   total 412 ms
       the tenth wave, a client's 30 ms mid-request pause in `net_rx` and a slow
       reader's window in `net_tx`, injected from the client, which is what `tc
       netem` was for and needs no root. `dm-delay` is the one injection left.*
+      *Sixteenth wave: `dm-delay` is injected and held, but not on the server.
+      `dm_delay::a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device`
+      sets 20 ms on every I/O of a loop device and holds `io.syscall` and
+      `io.latency` to it: 482.0 ms above the device for 24 I/Os, 480 ms
+      configured (floor 456, one tick less per I/O), 0.54 ms on the loop
+      device. That is two
+      sources compared by the test, on a program issuing direct I/O; no
+      `decompose:` of the vertical server puts the delay in its row yet. Left
+      `[~]`: it closes when `examples/vertical-one-request.yml`'s block-io
+      table reads a file on the delayed device and its row carries the delay.*
 
 ---
 
@@ -379,7 +396,10 @@ Now, and not before: we have three real join types to generalize from.
       *Fifteenth wave: held for the agent tier by
       `join_engine::a_new_boundary_is_a_rule_in_a_session_and_no_line_of_engine`.
       Left `[~]`: a rule still cannot choose the kernel or query tier.*
-- [~] A load test proves there is no open-state leak over 1 h.
+      *Sixteenth wave: unchanged. A kernel-tier rule would be a program of
+      `src/bpf/` per match kind, and the query tier needs a command over
+      stored runs, which `omn` does not have (`docs/fixes/w16-engine.md`).*
+- [x] A load test proves there is no open-state leak over 1 h.
       *Audit, fourteenth wave: Not proven: no join-engine load test of any
       length exists. The open-state balance (`states_balance` in `src/join.rs`)
       is checked on hand-built events of a few states only, and rules are
@@ -394,6 +414,14 @@ Now, and not before: we have three real join types to generalize from.
       events, every round's peak equal, nothing live), not for 3600 s. Ticks
       when `cargo test --release --test join_engine -- --ignored an_hour_of_joins`
       has run to the end on a quiet machine.*
+      *Sixteenth wave, proven: `join_engine::an_hour_of_joins_leaks_no_state`
+      ran its full 3600 s in release on a quiet machine (`target/join-hour.log`,
+      2026-10-02): 1500 rounds of 2 001 347 events (790 600 states each),
+      every state the generator opened ended, nothing live at the end, and
+      every round's peak 0.7 MiB beyond its stream, the same in all 1500
+      rounds. The engine is also handed a run's collections apart now
+      (`join::apply_merging`, called by `assemble`), so a real run's join
+      holds no index of an ordered collection.*
 - [x] Evictions appear in the user-visible output.
       *Audit, fourteenth wave: Partly: the engine counts expired and overflowed
       states on hand-built inputs (`src/join.rs` tests), and
@@ -437,7 +465,9 @@ Now, and not before: we have three real join types to generalize from.
       (`#[ignore]`), and not run: it needs `null_blk`, a module load
       (`STATE.md`, "Needs privilege"). The disk here reaches about 12 000
       reads a second.*
-- [~] Exceeding the budget produces an **announced** degradation, not a loss.
+      *Sixteenth wave: unchanged, still waiting on `null_blk`, which this
+      wave did not load (`STATE.md`, "Needs privilege", item 1).*
+- [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
       serves (`Ladder` in `src/main.rs`), after draining the outgoing
@@ -458,6 +488,21 @@ Now, and not before: we have three real join types to generalize from.
       trace to hist to sample, is not built: it waits on the open decision
       "what one series made of two modes means to an emit" (`DECISIONS.md`).
       Left `[~]`.*
+      *Sixteenth wave, proven: the decision is settled (`DECISIONS.md`,
+      "Settled in the sixteenth wave") and the ladder steps backends of one
+      mode, then `trace` -> `sample` on a collector that weighs its sampled
+      events, which `mem.faults` on `pmu:sw` does since the merge.
+      `budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`
+      holds the moved series to the task's own `getrusage` count of its
+      faults: 1 707 073 counted, 0 lost, against 1 706 035 to 1 708 083 inside
+      the window, the move announced with its overlap. A request whose emits
+      cannot survive the move is refused before the run (exit 2), and a rung
+      it cannot take is named as passed over
+      (`budget::a_budget_takes_no_mode_rung_whose_sampled_events_would_not_be_weighed`).
+      The budget weighs the target in nanoseconds
+      (`budget::a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it`).
+      Task 3's in-kernel `hist` is taken at the start when the emits allow
+      it, never stepped onto, by that decision.*
 - [x] A collector can be added and removed mid-session. *A request's `window`,
       tenth wave: one phase of a program counted within +0.17 %, and nothing of
       the other. The join engine's view of a detached source is filed.*
@@ -498,7 +543,7 @@ Now, and not before: we have three real join types to generalize from.
       from the command line and from the session file that command line
       dumps; both match the program's own numbers, and the replay's series,
       filtered counts and events seen equal the command line's exactly.*
-- [~] The resolved file is enough to explain a gap between two machines.
+- [x] The resolved file is enough to explain a gap between two machines.
       *Audit, fourteenth wave: Not proven: tests check only that fields such as
       governor, SMT, clocksource and kernel release are present, and only the
       GPU record is checked against sysfs. Microarchitecture, NUMA,
@@ -516,6 +561,18 @@ Now, and not before: we have three real join types to generalize from.
       (`Environment.privileges`, `.virtualization`), but the cells were swept
       before it did. Ticks when a sweep with this binary leaves no gap
       unrecorded (`STATE.md`, "What remains", item 1).*
+      *Sixteenth wave, proven: the 22 cells were swept again with one binary
+      (`cd394a8a8550c199`, 2026-10-02), each recording its privileges, its
+      virtualization and `cell.build`, and
+      `portability::every_gap_between_two_cells_is_explained_by_their_resolved_records`
+      passes: among the fresh cells every gap is explained by a recorded
+      field that differs the way that refuses, none is the build's and none
+      waits on a missing field. Two judge defects were fixed first (a refusal
+      with two causes, `Cause::KernelBelowOr`, and an unwritten probe counted
+      as the build's only where the cells answered it differently). The five
+      `7.2.6-*` cells on disk predate the host's 7.2.7 and the fields; they
+      alone account for the judge's 1316 "not explained yet", and deleting
+      them leaves none.*
 
 ---
 
@@ -579,6 +636,13 @@ finally earns its place.
       `a_row_with_a_column_missing_is_refused_rather_than_judged`). The
       table's own run (`tests/bench_backends.rs`, `#[ignore]`) was not rerun.
       Left `[~]`.*
+      *Sixteenth wave: `harness::table_failures` now fails the whole table
+      when it has no row, when a planned pair is neither a row nor excluded
+      by the gate, or when a row was served by another backend than the one
+      it forced (`bench_harness::a_wrong_backends_table_fails_and_a_row_over_its_band_alone_does_not`,
+      in the suite). The table was still not rerun: `scripts/bench.sh`
+      measures `target/release/omn`, whose capabilities need root (`STATE.md`,
+      "Needs privilege"). Left `[~]`.*
 - [~] The resolver's choices are confirmed by measurement, or corrected.
       *Confirmed for the seven chains with two served backends. The table's
       correction is to the cost bands: an in-kernel collector's cost is in the
@@ -589,6 +653,7 @@ finally earns its place.
       the catalog's bands to a measured dilation.*
       *Fifteenth wave: the band column above is that test, once the bench's
       table is rerun on a quiet machine. Left `[~]`.*
+      *Sixteenth wave: unchanged; the same rerun.*
 - [~] The agent's own cost (CPU, RSS) is measured separately from the dilation of
       the observed process. *Tenth wave: collector cpu from `cost.json`, peak RSS
       from `/proc`, dilation from the workload's own clock.*
@@ -601,6 +666,10 @@ finally earns its place.
       of `omn` by `budget::what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted`,
       while the percentage stays over the window. The separation from the
       dilation is still asserted only in the bench's ignored run. Left `[~]`.*
+      *Sixteenth wave: the `cost:` line now names the cpu spent before the
+      window when it outweighs the window's, held to `cost.json` and to
+      `wait4` by the same budget test. The separation from the dilation is
+      unchanged. Left `[~]`.*
 
 ---
 
@@ -619,13 +688,11 @@ the kernel's `thermal_throttle` counters around every repetition and drops a
 run they moved in (`examples/bench/harness.rs`, `throttle_count`). On an AMD
 part, which publishes none of those counters, it says a throttled run cannot
 be told from one that was not (`docs/bench.md`, "Environment control").
-Whether the guardrail becomes the `power` sources themselves, or stays the
-harness's own counter read, was the fifteenth wave's probes stream's to
-decide. It stated why the bench reads the counters directly
-(`docs/portability.md`, "The fifteenth wave", item 4) and filed the call for
-the owner of `examples/bench/harness.rs`; nothing landed on either side, so
-the decision is open (`DECISIONS.md`, "Open") and this sentence stays true
-as written.
+The sixteenth wave settled it (`DECISIONS.md`, "Settled in the sixteenth
+wave"): **`power.throttle`'s counters, read directly by the harness, on
+purpose.** The guardrail wraps the bare baseline runs too, which an `omn`
+beside them would turn into traced runs, and a guardrail measured by the tool
+under test would pass the tool's own defect in that source (`docs/bench.md`).
 
 **Criterion per added source**: catalog entry + backend + fallback chain + ground
 truth test + automatic appearance in `omn list`.
