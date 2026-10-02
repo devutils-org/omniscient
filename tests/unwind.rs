@@ -1598,20 +1598,23 @@ int main(void) {
 /// shares; what is under test is the client, not a server.
 /// Answers with the server's url, the requests for the served build id, and
 /// every request.
-fn serve(debuginfo: PathBuf) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+fn serve(debuginfo: PathBuf) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let asked = Arc::new(AtomicUsize::new(0));
-    let all = Arc::new(AtomicUsize::new(0));
+    let all = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (counter, every) = (Arc::clone(&asked), Arc::clone(&all));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            every.fetch_add(1, Ordering::SeqCst);
             let mut request = [0u8; 2048];
             let read = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..read]);
             let path = request.split_whitespace().nth(1).unwrap_or("").to_owned();
+            every
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(path.clone());
             let wanted = build_id_of(&debuginfo);
             if path == format!("/buildid/{wanted}/debuginfo") {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -1721,9 +1724,9 @@ fn a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripp
         return;
     };
     assert_eq!(build_id_of(stripped), build_id_of(unstripped));
-    // `asked` counts the requests for the call tree's build id; `all` every
-    // request, which includes the one for a stripped libc this server does
-    // not have.
+    // `asked` counts the requests for the call tree's build id; `all` is the
+    // path of every request, which includes the one for a stripped libc this
+    // server does not have.
     let (url, asked, all) = serve(unstripped.to_path_buf());
     let cache = scratch().join("debuginfod-cache");
     let _ = std::fs::remove_dir_all(&cache);
@@ -1733,7 +1736,7 @@ fn a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripp
         return;
     };
     assert_eq!(
-        all.load(Ordering::SeqCst),
+        all.lock().unwrap().len(),
         0,
         "a server was asked without --symbols debuginfod"
     );
@@ -1830,13 +1833,22 @@ fn a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripp
     }
 
     // Asked again: the cache answers, and the server is not -- not for the
-    // file it had, and not for the one it did not (the stripped libc).
-    let before = all.load(Ordering::SeqCst);
+    // file it had, and not for the one it did not (the stripped libc). A
+    // module that only this run sampled (a library a sample of the first run
+    // happened not to land in, which a loaded machine makes likelier) is a
+    // first request, so what is held is that no path is asked twice, by the
+    // server's own log.
+    let before = all.lock().unwrap().clone();
     let (_, origins) = named_stacks(stripped, Some(client)).unwrap();
-    assert_eq!(
-        all.load(Ordering::SeqCst),
-        before,
-        "a build id no server had was asked again"
+    let again: Vec<String> = all.lock().unwrap()[before.len()..]
+        .iter()
+        .filter(|path| before.contains(path))
+        .cloned()
+        .collect();
+    assert!(
+        again.is_empty(),
+        "asked again of the server, after the first run asked it: {again:?} (the first \
+         run asked {before:?})"
     );
     assert_eq!(
         asked.load(Ordering::SeqCst),
@@ -1981,7 +1993,7 @@ fn symbols_from_debuginfod_are_asked_for_from_the_command_line_and_the_session_f
     // Not asked, with a server named: nothing is fetched.
     let (local, resolved) = profile_named(None, stripped, None, &env).expect("a local profile");
     assert_eq!(
-        all.load(Ordering::SeqCst),
+        all.lock().unwrap().len(),
         0,
         "a server was asked without --symbols"
     );

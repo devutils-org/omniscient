@@ -683,17 +683,20 @@ fn check_backend_units(entry: &Entry) -> Result<(), ParseError> {
             ))
         } else if rank == 0 {
             Some(format!(
-                "is the head of the chain and declares the unit `{unit}`, where the entry says                  `{}`: the entry's unit is its head's, so one of the two is wrong",
+                "is the head of the chain and declares the unit `{unit}`, where the entry says \
+                 `{}`: the entry's unit is its head's, so one of the two is wrong",
                 entry.unit
             ))
         } else if backend.equivalent {
             Some(format!(
-                "is declared equivalent and reports in `{unit}`, where the entry says `{}`: a                  value in another unit is not the same measurement",
+                "is declared equivalent and reports in `{unit}`, where the entry says `{}`: a \
+                 value in another unit is not the same measurement",
                 entry.unit
             ))
         } else if sums(entry.unit) && !sums(unit) {
             Some(format!(
-                "reports in `{unit}`, which does not add up where the entry's `{}` does: its                  `rate` and `stack` would be sums of a level",
+                "reports in `{unit}`, which does not add up where the entry's `{}` does: its \
+                 `rate` and `stack` would be sums of a level",
                 entry.unit
             ))
         } else {
@@ -1064,7 +1067,11 @@ mod tests {
         let refused = |edit: &dyn Fn(&mut Entry)| -> String {
             let mut entry = base.clone();
             edit(&mut entry);
-            Catalog::from_entries(vec![entry]).unwrap_err().to_string()
+            let error = Catalog::from_entries(vec![entry]).unwrap_err().to_string();
+            // A continuation that lost its `\` prints its indentation inside
+            // the message; a sentence never holds two spaces in a row.
+            assert!(!error.contains("  "), "a run of spaces in: {error:?}");
+            error
         };
         let error = refused(&|entry| entry.backends[1].unit = Some(Unit::Count));
         assert!(error.contains("which is the entry's"), "{error}");

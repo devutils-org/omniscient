@@ -13,6 +13,12 @@ stream cpu". Branch `feat/w16-cpu`, from `37f17c8`.
    Resolver's filing of the fifteenth wave, in one commit with its test:
    `scenario_cpu::an_unwinder_this_build_lacks_is_refused_before_the_program_starts`
    (here: `lbr` and `sframe` both exit 1, the program's marker file absent).
+   The expected code is the machine's, not the message's (review): `lbr`
+   expects 3 exactly where the test itself opens a user-only branch call
+   stack (`branch_call_stack_samples_here`, a direct `perf_event_open`),
+   1 elsewhere; `sframe` expects 1 on every kernel, since none read through
+   7.2 unwinds from `.sframe` and a newer one is an unknown, which never
+   counts as available.
 2. **The CI's reds in this stream's files** (one commit, `9ea6286`), each
    now holding the tool to what the kernel or the workload says:
    - `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`.
@@ -66,13 +72,16 @@ stream cpu". Branch `feat/w16-cpu`, from `37f17c8`.
      (defaults: not throttled). `cpu.profile` is served by `pmu:sw` only
      (the `pmu` collector is not written), the cpu clock, an hrtimer the
      kernel never arms for less than 10 us -- which at the default ceiling
-     of 100 000 samples a second is the ceiling itself. It passes the
-     ceiling only by the timer's jitter around the tick, which this machine
-     has and the CI's VM did not. When not throttled, served by `pmu:sw`
-     and the ceiling is at least 100 000, it skips with the reason: "this
-     cpu offers no hardware PMU to sample on" when a hardware cycles
-     sampler cannot be opened (asked of the kernel directly), and "this
-     build samples through the cpu clock only" otherwise.
+     of 100 000 samples a second is the ceiling itself, so the kernel has
+     to throttle it only under a ceiling it has lowered (79 000 here, the
+     kernel's own lowering after long interrupts). Whether it had to is
+     judged from the kernel's `perf_event_max_sample_rate`, read before the
+     run, never from the tool's losses (review): under 100 000 the test
+     asserts the throttle is counted and named; at or above it, through
+     `pmu:sw`, it skips with the ceiling and "this cpu offers no hardware
+     PMU to sample on" (a hardware cycles sampler cannot be opened, asked
+     of the kernel directly) or "this build samples through the cpu clock
+     only".
    - `collect::cpu::oncpu::tests::a_program_that_burns_cpu_is_reported_as_having_burnt_it_and_one_that_sleeps_is_not`
      (defaults: a life of 2140 ms reported as 780 ms). The busy program's
      cpu is the scheduler's `schedstat` for it, held to 0.6 to 1.5 of what
@@ -90,11 +99,17 @@ stream cpu". Branch `feat/w16-cpu`, from `37f17c8`.
    with the kernel, against a 19 011 713-byte table; with the old condition
    the user-only start read 19 011 811 and the test failed. Held in bytes
    read rather than in `cost.json`'s time before the window, because the
-   read is the cause and a time is a load-dependent proxy of it.
+   read is the cause and a time is a load-dependent proxy of it on a
+   machine five other streams share (the time before the window is what
+   `scenario_cpu`'s existing fixed-cost scenario, "the profile is paying a
+   fixed cost before it samples anything", already bounds). Since the
+   review the child reports the bytes read even when the kernel refuses
+   the event (paranoid 4), since the prime comes before the open, so both
+   halves are held on every cell instead of skipping on stock.
    **The factory takes the resolver's choice** (`ResolvedRequest.stack`,
    optional item): `cpu.profile`'s `pmu:sw` factory uses it when present and
    calls `stack::choose` only for a request resolved without one.
-4. **`Backend.unit`**: a backend's own unit when it is not the entry's,
+4. **`Backend.unit`, the catalog half only** -- the item is not done: a backend's own unit when it is not the entry's,
    read through `Entry::backend_unit`. The loader refuses one that repeats
    the entry's, one on the head of the chain, one on an `equivalent`
    backend, and one that does not add up where the entry's does
@@ -109,11 +124,22 @@ stream cpu". Branch `feat/w16-cpu`, from `37f17c8`.
    applied and `--ignored`, it passed here (`303.19ms` in the text, `ns`
    and `count`). `docs/scenarios/cpu.md`'s "Do two roads to the same number
    agree?" is rewritten for the chain with two collectors, with the row
-   probes asked for.
+   probes asked for; its paragraph on the unit now says, in the present,
+   that the output still says `count` on both (it claimed `ns` before the
+   review). `src/main.rs`, `src/triage/engine.rs` and `src/join.rs` are not
+   this stream's files; the change is filed, and the ignored test is the
+   one to un-ignore with it.
 5. **Four continuations that lost their `\`**: `src/perf.rs:3457`,
    `src/collect/cpu/counters.rs` (two; the filing's 1354 and 1401 had moved
-   to 1410 and 1457), `tests/scenario_runtime.rs:240`. `grep -rnE
-   '"[^"]*\S {10,}\S[^"]*"'` finds none in this stream's files.
+   to 1410 and 1457), `tests/scenario_runtime.rs:240`. **And three more
+   this stream itself introduced** (review): `check_backend_units`'s three
+   messages in `src/catalog.rs` had lost theirs, printing 18 spaces inside
+   the sentence; the earlier claim that none were left was false. Fixed,
+   and `catalog::tests::a_backend_reports_in_its_own_unit_...` now refuses
+   two spaces in a row in every message it provokes (checked: red with one
+   of the three reintroduced). A line-by-line scan of every file this
+   stream owns for a string literal that continues onto the next line
+   without a `\` finds none.
 6. **Skip lines that name the machine's reason** (not asked; read off the
    skip gate of both cells, which failed partly on this stream's lines):
    `tests/unwind.rs`'s four perf refusals say "this machine will not sample
@@ -162,26 +188,76 @@ stream cpu". Branch `feat/w16-cpu`, from `37f17c8`.
   edits reapplied. This stream removed its own `target/debug/incremental`
   (1.5 GB) and its tests' stale scratch directories, nothing else.
 
+## The review, and what came of it
+
+1. The three `check_backend_units` messages without their `\`: real, fixed,
+   and the test now catches it (landed 5).
+2. `Backend.unit` not used: real; the use is in files outside this stream,
+   so it stays filed and the item is recorded as half done (Open).
+3. `docs/scenarios/cpu.md` claiming `ns` in the present: real, rewritten.
+4. The item-2 test's expected code read from the message: real; now from
+   a direct open of a branch call stack, and from the kernel's `.sframe`
+   support as read (landed 1).
+5. The throttle skip gated on the tool's own losses: real; now gated on the
+   kernel's ceiling read before the run (landed 2).
+6. The defaults claim for `each_mode_copies_...`: real, the claim is
+   corrected to "plausible, not shown" in the table. The code is unchanged:
+   the pooled comparison is the one that held at load here, and nothing at
+   paranoid 2 can be run on this machine to choose otherwise.
+7. The kallsyms test skipping on stock: real, both halves are held there now
+   (landed 3). Bytes rather than time: kept, with the reason (landed 3).
+8. The reviewer's own run, all green: nothing to fix.
+9. Scope: nothing to fix; this pass also touches only `src/catalog.rs`
+   (`check_backend_units`'s strings and its test), `tests/scenario_cpu.rs`,
+   `src/collect/cpu/profile.rs`, `tests/unwind.rs`, `docs/scenarios/cpu.md` and this handoff.
+10. Found by this pass's workspace run, not by the review:
+   `unwind::a_stripped_build_...` red at its last step, *"a build id no
+   server had was asked again"*, 3 requests where 2 were expected. The
+   count assumed the second run samples no module the first did not; a
+   library first sampled in the second run is a first request, not a
+   repeat. The server now logs every path it is asked, and the test holds
+   that no path the first run asked is asked again (a repeat of the
+   stripped libc's 404 is still red). Its file passed alone at once.
+
+## Checks of the review pass
+
+- `make check` once: red only at
+  `scenario_io::a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`
+  (*"a request of 57344 bytes (`RS`) that the program did not make"*,
+  stream io's file). Then `cargo test --workspace --no-fail-fast` once:
+  **2126 passed, 3 failed, 11 ignored**: that same test, which fails alone
+  too (twice here, with `/home` at 99 to 100 % and five streams' block io
+  on the machine; not this stream's, for stream io), `budget::the_extra_cpu_a_faster_poll_costs_...`
+  (flaky tally #14, passed alone at once), and `unwind::a_stripped_build_...`
+  (fixed, review item 10). Clippy and fmt clean after the fix; the stream's
+  test files `scenario_cpu` (the two changed tests), `unwind` (17 passed) and
+  `collect::cpu::profile` (8 passed) green here.
+
 ## CI expectation, per test this stream owns that the last push failed
 
 | Test | defaults (paranoid 2, no PMU) | stock (paranoid 4) |
 |---|---|---|
 | `unwind::a_mode_this_machine_cannot_serve_...` | passed there; unchanged path (refused naming the requirement) | skip: the probes' reasons first (`perf_event_paranoid is 4`, `has no viable backend`) |
 | `unwind::the_choice_says_user_only_...` | passed there; unchanged | skip: "perf_event_paranoid is 4, which refuses ..." |
-| `unwind::each_mode_copies_...` | green: the copy is held to the pagemap, which is what made it red; the cost half passed there alternated and now runs side by side on 4 vcpus | skip: "will not sample this process (perf_event_paranoid is 4)" |
+| `unwind::each_mode_copies_...` | plausible, not shown: the copy assertion, which is the only one that ran there (it panicked on the first mode), is now held to the pagemap; dwarf's copy, the cost separation (now side by side: two targets and two `omn` on 4 vcpus, pooled means rather than min > max), the events-within-10 % and `collector_cpu_ns` checks have never run at paranoid 2 | skip: "will not sample this process (perf_event_paranoid is 4)" |
 | `unwind::a_stripped_build_...` | green: the `["spin"]` it failed on is the leaf end of every whole path | skip, as above |
 | `stack::tests::a_forced_mode_...` | passed there; unchanged | skip after holding every refusal: "perf_event_paranoid is 4, which refuses every perf event ..." |
 | `stack::tests::auto_chooses_...` | passed there; unchanged | skip, same reason |
-| `scenario_cpu::a_profile_driven_past_the_kernels_ceiling_...` | skip: "this cpu offers no hardware PMU to sample on, ..." (no hardware event is published on the VM, so the direct open fails) | passed there (skipped by "will not sample at all", the run refused) |
+| `scenario_cpu::a_profile_driven_past_the_kernels_ceiling_...` | skip if the runner's ceiling is at least 100 000 (the kernel's default; the log does not print it): "perf_event_max_sample_rate is N, at or above ..., and this cpu offers no hardware PMU". If the runner's kernel had lowered it, the test asserts, and would be red only if a lowered ceiling did not throttle the VM's late timer -- the residual risk, with the ceiling in the message | passed there (skipped by "will not sample at all", the run refused) |
 | `scenario_cpu::a_profile_samples_every_thread_...` | green: the threads burn in user mode, so the user-only samples cover them (expected 199 a thread, within 30 %) | passed there (refused, skipped) |
 | `collect::cpu::oncpu::tests::a_program_that_burns_cpu_...` | green: held to `schedstat`, which the load does not inflate | passed there |
-| `scenario_cpu::an_unwinder_this_build_lacks_...` | green: exit 1 for "cannot be served here", or the source withheld and skipped | skip (withheld) |
+| `scenario_cpu::an_unwinder_this_build_lacks_...` | green: no PMU, so the direct branch-call-stack open fails and both modes expect exit 1; or the source withheld and skipped | skip (withheld) |
 
 What is not reproduced here and so is reasoning only: the CI's paranoia (this
 machine is at -1 with the capabilities), its missing PMU, and its timer. The
 skip texts are written against `.github/expected-skips*.txt` as they stand.
 
 ## Open, with the measured reason
+
+- **Item 4 is half done**: `cpu.cycles` through `pmu:sw` still reports
+  `count`, because the result's unit is chosen outside this stream's files
+  (filed). `scenario_cpu::the_cpu_clock_fallback_...` runs nowhere until the
+  `#[ignore]` comes off with that change.
 
 - `unwind::a_stripped_build_...`, the second shape: the unstripped
   reference missing the whole `compare` branch once, in a workspace run at
@@ -192,9 +268,6 @@ skip texts are written against `.github/expected-skips*.txt` as they stand.
   `collector_cpu_ns` is 38 ms (fp) and 71 ms (dwarf) where the kernel
   counts 1.7 s of `omn` beyond the target (fourteenth wave's finding,
   unchanged: the symbolizing after the target exits).
-- `Backend.unit` reaches the output only with the filed lines in
-  `src/main.rs` and `src/triage/engine.rs`; until then
-  `cpu.cycles --backend force:pmu:sw` still says `count`.
 
 ## Needs privilege
 

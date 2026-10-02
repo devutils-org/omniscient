@@ -2062,6 +2062,21 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         "150ms",
     ];
 
+    // Whether the kernel has to throttle this run is the kernel's to say, read
+    // before the run: it delivers at most `perf_event_max_sample_rate / HZ`
+    // samples per tick per event, and the cpu clock is an hrtimer it never arms
+    // for less than 10 us (`perf_swevent_set_period`), so a clock asked for a
+    // hundred thousand a second runs at most at that rate. Under a ceiling
+    // below it -- the kernel lowers the ceiling itself when its interrupts run
+    // long, as it has on the development machine -- every tick of a spinning
+    // task overruns it, and the run is throttled. At or above it the clock
+    // cannot pass the ceiling except by the timer's jitter, and nothing the
+    // request says can make it.
+    const ASKED: u64 = 100_000;
+    let ceiling = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+
     let mut as_json: Vec<&str> = axes.to_vec();
     as_json.extend(["--format", "json"]);
     let Outcome::Measured { document, .. } = run(&as_json) else {
@@ -2078,39 +2093,39 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         .filter(|(reason, _)| reason.contains("throttled"))
         .filter_map(|(_, count)| count.as_u64())
         .sum();
-    let ceiling = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok());
     let backend = document["results"][0]["backend"]
         .as_str()
         .unwrap_or_default();
-    if throttled + named == 0 && backend == "pmu:sw" && ceiling.is_some_and(|c| c >= 100_000) {
-        // The cpu clock is an hrtimer, which the kernel never arms for less
-        // than 10 us (`perf_swevent_set_period`): at a ceiling of 100 000
-        // samples a second, the kernel's default, one task's clock reaches
-        // the ceiling and passes it only by the timer's jitter around the
-        // tick. A virtual machine's timer fires late rather than early, and
-        // only a hardware counter's overflow is driven past the ceiling by
-        // the request itself.
-        let why = if hardware_cycles_sample_here() {
-            "this build samples through the cpu clock (`pmu:sw`) only, the `pmu` collector \
-             not being written"
-        } else {
-            "this cpu offers no hardware PMU to sample on, so the profile is the cpu clock's \
-             (`pmu:sw`)"
-        };
-        eprintln!(
-            "skipped: {why}, which cannot be driven past perf_event_max_sample_rate {}: its \
-             hrtimer fires at most every 10 us, which is the ceiling itself, and this run was \
-             not throttled: {losses}",
-            ceiling.unwrap_or_default()
-        );
-        return;
+    match ceiling {
+        None => {
+            eprintln!(
+                "skipped: /proc/sys/kernel/perf_event_max_sample_rate is not readable, so \
+                 whether the kernel had to throttle this run cannot be told: {losses}"
+            );
+            return;
+        }
+        Some(ceiling) if ceiling >= ASKED && backend == "pmu:sw" => {
+            let why = if hardware_cycles_sample_here() {
+                "this build samples through the cpu clock (`pmu:sw`) only, the `pmu` collector \
+                 not being written"
+            } else {
+                "this cpu offers no hardware PMU to sample on, so the profile is the cpu clock's \
+                 (`pmu:sw`)"
+            };
+            eprintln!(
+                "skipped: perf_event_max_sample_rate is {ceiling}, at or above the {ASKED} \
+                 asked, and {why}, whose hrtimer fires at most every 10 us: the kernel did not \
+                 have to throttle this run ({losses})"
+            );
+            return;
+        }
+        Some(_) => {}
     }
     assert!(
         throttled + named > 0,
-        "a hundred thousand samples a second was not throttled on this machine, so this \
-         scenario measured nothing: {losses}"
+        "the kernel's ceiling is {} samples a second and `{backend}` was driven at {ASKED}, \
+         past it, so the kernel throttled this run, and the run says it lost nothing: {losses}",
+        ceiling.unwrap_or_default()
     );
     // The field, not just the sentence. `losses.throttled` is what a consumer
     // filters on, and a throttled run that leaves it at zero reads as clean to
@@ -2165,6 +2180,32 @@ fn hardware_cycles_sample_here() -> bool {
     attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
     attr.config = sys::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
     attr.__bindgen_anon_1.sample_period = 1_000_000;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+    // SAFETY: a valid attribute, this process, any cpu, no group.
+    let fd = unsafe { sys::perf_event_open(&mut attr, 0, -1, -1, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: the descriptor was just opened here and is not used again.
+    unsafe { libc::close(fd) };
+    true
+}
+
+/// Whether the kernel opens a user-only LBR call stack for this process: the
+/// one thing `--stack lbr` needs of the machine. Asked of the kernel directly,
+/// not of the tool.
+fn branch_call_stack_samples_here() -> bool {
+    let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = sys::bindings::PERF_TYPE_HARDWARE;
+    attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attr.config = sys::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+    attr.__bindgen_anon_1.sample_period = 1_000_000;
+    attr.sample_type =
+        (sys::bindings::PERF_SAMPLE_IP | sys::bindings::PERF_SAMPLE_BRANCH_STACK) as u64;
+    attr.branch_sample_type = (sys::bindings::PERF_SAMPLE_BRANCH_USER
+        | sys::bindings::PERF_SAMPLE_BRANCH_CALL_STACK) as u64;
     attr.set_disabled(1);
     attr.set_exclude_kernel(1);
     attr.set_exclude_hv(1);
@@ -4504,12 +4545,22 @@ fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
         }
         // A mode this machine cannot serve is the machine's gap (exit 1); one
         // it would serve and no collector here reads is the build's (exit 3).
-        let expected = if message.contains("cannot be served here") {
-            1
-        } else {
-            3
+        // Which of the two is asked of the machine, not of the tool's message:
+        // the kernel opens a branch call stack for this user or it does not,
+        // and no kernel read so far unwinds a user stack from `.sframe` (its
+        // user unwinder knows frame pointers only, through 7.2: docs/unwind.md),
+        // while a newer one is an unknown, which never counts as available.
+        let served_here = match stack {
+            "lbr" => branch_call_stack_samples_here(),
+            _ => false,
         };
-        assert_eq!(code, expected, "`--stack {stack}`: {message}");
+        let expected = if served_here { 3 } else { 1 };
+        assert_eq!(
+            code,
+            expected,
+            "`--stack {stack}`, which this machine {} serve: {message}",
+            if served_here { "can" } else { "cannot" }
+        );
         assert!(
             message.contains(&format!("--stack {stack}"))
                 && (message.contains("not implemented")

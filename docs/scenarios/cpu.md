@@ -244,15 +244,18 @@ declares (*"CPU time, not cycles: blind to DVFS"*). They are compared by
 |---|---|---|
 | `cpu.cycles` | `pmu` over `pmu:sw` | the core's cycles per nanosecond of cpu -- 4.2 GHz on the development machine -- between half cpufreq's minimum and a fifth over its maximum; `pmu:sw`'s own difference between a 100 ms and a 500 ms burn is the 400 ms the workload's own clock burned, to 15 % |
 
-Each reports in its own unit since the sixteenth wave: the catalog gives
-`pmu:sw` `unit: ns` (`Backend.unit`, which the loader holds to a fallback that
-says what it degrades), so its result says `ns` and prints a time, where
-`pmu`'s says `count`. Before, both said `count`, and a reader could add the
-cpu clock's nanoseconds to the hardware's cycles.
+The two do not report in the same unit, and the output does not say so yet.
+Since the sixteenth wave the catalog gives `pmu:sw` `unit: ns`
+(`Backend.unit`, which the loader holds to a fallback that says what it
+degrades, and `Entry::backend_unit` answers), but the three places a result's
+unit is chosen (`src/main.rs`, `src/triage/engine.rs`, `src/join.rs`'s
+`unit_of`) still read the entry's: both results say `count`, and a reader can
+add the cpu clock's nanoseconds to the hardware's cycles. The `degraded` note
+on `pmu:sw` is what says it until then.
 `the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count`
-holds it to the workload's own clock; it is ignored until the three places a
-result's unit is chosen read `Entry::backend_unit` (`docs/open-findings.md`,
-the sixteenth wave, stream cpu).
+holds the output to the workload's own clock; it is ignored until those places
+read `Entry::backend_unit` (`docs/open-findings.md`, the sixteenth wave, stream
+cpu), and passes here with `--ignored` once `src/main.rs`'s does.
 
 Seven backends are declared and not built: `cpu.profile pmu`,
 `cpu.oncpu_time bpf:tp`, `cpu.oncpu_time fs:cgroup`, `cpu.util fs:cgroup`,

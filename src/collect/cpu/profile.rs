@@ -767,9 +767,12 @@ mod tests {
                 let before = thread_rchar();
                 let started = collector.start();
                 let read = thread_rchar() - before;
+                // The table is primed before the event is opened, so what
+                // was read is known whether or not the kernel then refused
+                // the event (`perf_event_paranoid` 4).
                 match started {
                     Ok(()) => println!("prime: {label} {read}"),
-                    Err(error) => println!("prime: {label} refused {error}"),
+                    Err(error) => println!("prime: {label} {read} refused {error}"),
                 }
                 let _ = collector.stop();
             }
@@ -804,7 +807,7 @@ mod tests {
             .expect("this test binary runs");
         let said = String::from_utf8_lossy(&output.stdout).into_owned();
         assert!(output.status.success(), "the child failed: {said}");
-        let answer = |label: &str| -> Result<u64, String> {
+        let answer = |label: &str| -> (u64, Option<String>) {
             let line = said
                 .lines()
                 .find_map(|line| {
@@ -814,40 +817,33 @@ mod tests {
                     line.find(&marker).map(|at| &line[at + marker.len()..])
                 })
                 .unwrap_or_else(|| panic!("the child said nothing of {label}: {said}"));
-            match line.strip_prefix("refused ") {
-                Some(error) => Err(error.to_owned()),
-                None => Ok(line.trim().parse().expect("a byte count")),
-            }
+            let (read, refused) = match line.split_once(" refused ") {
+                Some((read, error)) => (read, Some(error.to_owned())),
+                None => (line, None),
+            };
+            (read.trim().parse().expect("a byte count"), refused)
         };
         let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
             .map(|text| text.trim().to_owned())
             .unwrap_or_else(|_| "unreadable".to_owned());
-        let user_only = match answer("user-only") {
-            Ok(read) => read,
-            Err(error) => {
-                eprintln!(
-                    "skipped: perf_event_paranoid is {paranoid}, and this machine refuses \
-                     unprivileged perf sampling of this process: {error}"
-                );
-                return;
-            }
-        };
+        let (user_only, refused) = answer("user-only");
+        if let Some(error) = &refused {
+            eprintln!(
+                "perf_event_paranoid is {paranoid}, which refuses this process perf sampling \
+                 ({error}); the reads are held all the same, since they come before the open"
+            );
+        }
         assert!(
             user_only < kallsyms / 4,
             "a user-only profile read {user_only} bytes as it started, and /proc/kallsyms is \
              {kallsyms}: it read the kernel's symbols for frames it will never see"
         );
-        match answer("both-halves") {
-            Ok(read) => assert!(
-                read >= kallsyms * 9 / 10,
-                "a profile whose stacks have a kernel half read {read} bytes as it started, and \
-                 /proc/kallsyms is {kallsyms}: the table is left to the first drain"
-            ),
-            Err(error) => eprintln!(
-                "not asked: perf_event_paranoid is {paranoid}, which refuses this process the \
-                 kernel, so only the user-only half is held here: {error}"
-            ),
-        }
+        let (read, _) = answer("both-halves");
+        assert!(
+            read >= kallsyms * 9 / 10,
+            "a profile whose stacks have a kernel half read {read} bytes as it started, and \
+             /proc/kallsyms is {kallsyms}: the table is left to the first drain"
+        );
     }
 
     /// The frequency the caller asked for is the frequency the kernel is told,
