@@ -1,0 +1,69 @@
+# How much of a memory limit's reclaim lay inside one second of the machine's
+# pressure -- with the drained rows credited, not left over.
+#
+#   omn -f examples/cross-machine-reclaim-enclosed.yml &
+#   (the program of examples/cross-machine-reclaim-io.yml, in a cgroup capped
+#    at 32 MiB)
+#
+# `mem.reclaim` builds its rows in the kernel and drains them every 100 ms: a
+# row stands for every episode of one (task, cgroup, bucket) in the window,
+# stamped when the first of them began. Its `total_ns` is a sum of waits that
+# may lie anywhere in the window, so an `overlap` that reads it as a span
+# cannot place the row, and counts its pages uncredited: on the crossing of
+# examples/cross-machine-reclaim-io.yml that is 40 000 of 41 000 pages.
+#
+# The row also carries `window_ns`, the drain's length. From its stamp (the
+# first episode's start) that is a window holding every episode of the row: it
+# began no earlier than the window opened and ended before the drain read it.
+# `enclosing: window_ns` says so, and a row whose window lies inside one
+# reading of the machine's pressure is credited to it whole -- exactly, since
+# every episode is inside. A row whose window crosses a reading stays
+# uncredited, never split.
+#
+# The pressure is polled every second rather than every 100 ms on purpose: a
+# window of up to 200 ms falls inside one second most of the time and crosses
+# a 100 ms reading almost always. The two rules below read the same rows; only
+# the second names the enclosure.
+#
+# `tests/cross_machine.rs` runs the program capped and holds the credit to the
+# cgroup's own `memory.stat`. TEMPORAL: a reclaim and a stall in the same
+# second share a clock and nothing else.
+name: a memory limit's reclaim, enclosed
+format: text
+duration: 4s
+
+requests:
+  - label: pressure
+    source: mem.pressure
+    target: system
+    mode: poll@1s
+    emit: [timeline, raw]
+
+  - label: reclaim
+    source: mem.reclaim
+    target: system
+    mode: trace
+    emit: [summary, raw]
+    keys: [task, cgroup]
+
+joins:
+  # A drained row read as a sum: placed only when it stands for one episode.
+  - id: reclaim-per-second-summed
+    from: mem.pressure
+    to: mem.reclaim
+    match: overlap
+    value: pages_reclaimed
+    span: total_ns
+    stamped: start
+    top: 100
+
+  # The same rows, a drained one placed by the window that encloses it.
+  - id: reclaim-per-second-enclosed
+    from: mem.pressure
+    to: mem.reclaim
+    match: overlap
+    value: pages_reclaimed
+    span: total_ns
+    enclosing: window_ns
+    stamped: start
+    top: 100

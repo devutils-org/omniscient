@@ -47,7 +47,6 @@
 //! join -- nothing is matched -- but it is what the joins were for, and it
 //! carries the same evidence levels beside each row.
 
-use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -1059,46 +1058,131 @@ pub fn apply_within(
     events: &[Event],
     windows: &BTreeMap<String, Watched>,
 ) -> Result<Correlation, JoinError> {
+    apply_merging(rule, &[events], windows)
+}
+
+/// `apply_within` over several streams -- one per collection -- merged by the
+/// engine as it walks them, rather than over one stream made by concatenating
+/// them.
+///
+/// Two streams merge here, and at an equal timestamp the order decides the
+/// answer: an allocation has to be open before a fault inside it can be
+/// attributed, and a wakeup before the work it released. Sorting the opening
+/// side first at each instant is the only ordering that cannot invent an
+/// unmatched event; at an equal instant and side, the earlier stream and then
+/// the earlier event come first, which is the order a stable sort of the
+/// streams laid end to end gives.
+///
+/// A stream already in that order is walked where it lies; one that is not is
+/// walked through an index of references to it, eight bytes an event, which is
+/// the one cost of the engine that grows with the run once its attributions
+/// are bounded (`Ranked`). The streams of a run are usually each in order and
+/// their concatenation is not, so handing them here apart is what keeps a
+/// run's joins from taking that index over the whole run. `woke` takes the
+/// index regardless, because the pairs it hands a decomposition borrow the
+/// events they pair.
+pub fn apply_merging(
+    rule: &Rule,
+    streams: &[&[Event]],
+    windows: &BTreeMap<String, Watched>,
+) -> Result<Correlation, JoinError> {
     check(rule)?;
     let mut watch = Watch::of(rule, windows);
-
-    // Two streams merge here, and at an equal timestamp the order decides the
-    // answer: an allocation has to be open before a fault inside it can be
-    // attributed, and a wakeup before the work it released. Sorting the opening
-    // side first at each instant is the only ordering that cannot invent an
-    // unmatched event.
-    //
-    // A stream already in that order is walked where it lies: the index of
-    // references a sort needs is eight bytes an event, the one cost of the
-    // engine that grows with the run once its attributions are bounded
-    // (`Ranked`). `woke` keeps the references, because the pairs it hands a
-    // decomposition borrow the events they pair.
     let order = |event: &Event| (event.ts_ns, u8::from(event.kind != rule.from));
-    let in_order = events
-        .windows(2)
-        .all(|pair| order(&pair[0]) <= order(&pair[1]));
-    let index = || {
-        let mut ordered: Vec<&Event> = events.iter().collect();
-        ordered.sort_by_key(|event| order(event));
-        ordered
+
+    // The streams out of order, indexed; the others walked where they lie.
+    let indexed: Vec<Option<Vec<&Event>>> = streams
+        .iter()
+        .map(|events| {
+            let in_order = events
+                .windows(2)
+                .all(|pair| order(&pair[0]) <= order(&pair[1]));
+            (!in_order).then(|| {
+                let mut ordered: Vec<&Event> = events.iter().collect();
+                ordered.sort_by_key(|event| order(event));
+                ordered
+            })
+        })
+        .collect();
+    let cursors: Vec<Cursor<'_>> = streams
+        .iter()
+        .zip(&indexed)
+        .map(|(events, index)| match index {
+            Some(index) => Cursor::Refs(index),
+            None => Cursor::Events(events),
+        })
+        .collect();
+    let merged = Merged {
+        cursors,
+        from: &rule.from,
     };
 
-    let mut correlation = match (rule.match_kind, in_order) {
-        (MatchKind::Woke, _) => {
-            woke(rule, &index(), &mut watch).map(|(correlation, _)| correlation)
+    let mut correlation = match rule.match_kind {
+        MatchKind::Woke => {
+            let ordered: Vec<&Event> = merged.collect();
+            woke(rule, &ordered, &mut watch).map(|(correlation, _)| correlation)
         }
-        (match_kind, true) => walk(match_kind, rule, events, &mut watch),
-        (match_kind, false) => walk(match_kind, rule, &index(), &mut watch),
+        match_kind => walk(match_kind, rule, merged, &mut watch),
     }?;
     correlation.outside_window = watch.outside;
     Ok(correlation)
 }
 
+/// What is left of one stream to walk, in the engine's order.
+#[derive(Clone, Copy)]
+enum Cursor<'a> {
+    Events(&'a [Event]),
+    Refs(&'a [&'a Event]),
+}
+
+impl<'a> Cursor<'a> {
+    fn head(&self) -> Option<&'a Event> {
+        match self {
+            Cursor::Events(events) => events.first(),
+            Cursor::Refs(refs) => refs.first().copied(),
+        }
+    }
+
+    fn advance(&mut self) {
+        match self {
+            Cursor::Events(events) => *events = &events[1..],
+            Cursor::Refs(refs) => *refs = &refs[1..],
+        }
+    }
+}
+
+/// Several streams, each in the engine's order, walked as one: at each step
+/// the stream whose next event comes first, the earlier stream on a tie. Its
+/// state is a cursor per stream, so a match that walks the input twice clones
+/// it rather than the events.
+#[derive(Clone)]
+struct Merged<'a, 'r> {
+    cursors: Vec<Cursor<'a>>,
+    from: &'r str,
+}
+
+impl<'a> Iterator for Merged<'a, '_> {
+    type Item = &'a Event;
+
+    fn next(&mut self) -> Option<&'a Event> {
+        let from = self.from;
+        let order = |event: &Event| (event.ts_ns, u8::from(event.kind != from));
+        let (at, event) = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(at, cursor)| cursor.head().map(|event| (at, event)))
+            .min_by_key(|(at, event)| (order(event), *at))?;
+        self.cursors[at].advance();
+        Some(event)
+    }
+}
+
 /// One match over a stream already in the engine's order.
-fn walk<E: Borrow<Event>>(
+fn walk<'a>(
     match_kind: MatchKind,
     rule: &Rule,
-    events: &[E],
+    events: impl Iterator<Item = &'a Event> + Clone,
     watch: &mut Watch,
 ) -> Result<Correlation, JoinError> {
     match match_kind {
@@ -1174,9 +1258,9 @@ impl Watch {
 
 /// An address inside a range: the match that attributes a page fault to the
 /// allocation that owns the page.
-fn interval<E: Borrow<Event>>(
+fn interval<'a>(
     rule: &Rule,
-    events: &[E],
+    events: impl Iterator<Item = &'a Event> + Clone,
     watch: &mut Watch,
 ) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
@@ -1184,7 +1268,6 @@ fn interval<E: Borrow<Event>>(
     let (mut matched, mut unmatched) = (0u64, 0u64);
 
     for event in events {
-        let event: &Event = event.borrow();
         watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
@@ -1257,9 +1340,9 @@ fn interval<E: Borrow<Event>>(
 /// arrives after its request was freed and the pointer reissued carries the
 /// scope of the request it belongs to, so under `scoped_eq` it does not match
 /// and is counted; under `eq` it lands on a stranger.
-fn keyed<E: Borrow<Event>>(
+fn keyed<'a>(
     rule: &Rule,
-    events: &[E],
+    events: impl Iterator<Item = &'a Event> + Clone,
     watch: &mut Watch,
 ) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
@@ -1268,7 +1351,6 @@ fn keyed<E: Borrow<Event>>(
     let (mut matched, mut unmatched) = (0u64, 0u64);
 
     for event in events {
-        let event: &Event = event.borrow();
         watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
@@ -1351,9 +1433,9 @@ fn keyed<E: Borrow<Event>>(
 /// whatever task they interrupted, so a waker can be a task that had nothing to
 /// do with it, and a waker of zero is the idle task rather than a task at all.
 /// The evidence level says so, and the chain names what it found.
-fn wakeup<E: Borrow<Event>>(
+fn wakeup<'a>(
     rule: &Rule,
-    events: &[E],
+    events: impl Iterator<Item = &'a Event> + Clone,
     watch: &mut Watch,
 ) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
@@ -1373,7 +1455,6 @@ fn wakeup<E: Borrow<Event>>(
     let mut interrupted: BTreeMap<i32, String> = BTreeMap::new();
 
     for event in events {
-        let event: &Event = event.borrow();
         watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
@@ -1469,9 +1550,9 @@ fn wakeup<E: Borrow<Event>>(
 /// interval is the finest thing the clock can tell apart -- splitting a change
 /// between four states that opened in it would be inventing a precision the
 /// evidence does not have.
-fn between<E: Borrow<Event>>(
+fn between<'a>(
     rule: &Rule,
-    events: &[E],
+    events: impl Iterator<Item = &'a Event> + Clone,
     watch: &mut Watch,
 ) -> Result<Correlation, JoinError> {
     let mut keyless = 0u64;
@@ -1498,7 +1579,6 @@ fn between<E: Borrow<Event>>(
     };
 
     for event in events {
-        let event: &Event = event.borrow();
         watch.advance(event.ts_ns, &mut states);
         states.expire(event.ts_ns);
 
@@ -1798,9 +1878,9 @@ struct Covered {
 /// Read after the fact rather than as the stream arrives, because an interval
 /// ends at the reading that closes it, and a window that began inside it has
 /// usually ended before that reading comes.
-fn overlap<E: Borrow<Event>>(
+fn overlap<'a>(
     rule: &Rule,
-    events: &[E],
+    events: impl Iterator<Item = &'a Event> + Clone,
     watch: &mut Watch,
 ) -> Result<Correlation, JoinError> {
     let Some(attr) = rule.value.as_deref() else {
@@ -1823,8 +1903,7 @@ fn overlap<E: Borrow<Event>>(
     // refused by name before anything is credited.
     if rule.via.is_none() {
         let series: BTreeSet<String> = events
-            .iter()
-            .map(Borrow::borrow)
+            .clone()
             .filter(|event| event.kind == rule.from && opens(rule, event))
             .map(all_keys)
             .collect();
@@ -1843,11 +1922,7 @@ fn overlap<E: Borrow<Event>>(
     let mut last: BTreeMap<String, u64> = BTreeMap::new();
     let mut intervals: BTreeMap<String, Vec<Covered>> = BTreeMap::new();
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
-    for event in events
-        .iter()
-        .map(Borrow::<Event>::borrow)
-        .filter(|event| event.kind == rule.from)
-    {
+    for event in events.clone().filter(|event| event.kind == rule.from) {
         let Some(key) = series_of(rule, event) else {
             return Err(missing_key(rule, event));
         };
@@ -1891,11 +1966,7 @@ fn overlap<E: Borrow<Event>>(
         .collect();
 
     let (mut matched, mut unmatched, mut keyless) = (0u64, 0u64, 0u64);
-    for event in events
-        .iter()
-        .map(Borrow::<Event>::borrow)
-        .filter(|event| event.kind == rule.to)
-    {
+    for event in events.filter(|event| event.kind == rule.to) {
         if watch.outside(event.ts_ns) {
             continue;
         }
@@ -4278,6 +4349,35 @@ mod tests {
         assert_eq!(correlation.top[1].key, "task:9");
         assert_eq!(correlation.top[1].matched, 1);
         states_balance(&correlation);
+    }
+
+    /// The streams of a run walked apart, as `assemble` collects them: each
+    /// in order, their concatenation not. The answer is the one worked out by
+    /// hand -- a descriptor at the instant its thread's state opens is inside
+    /// it, one before it is not -- whichever stream comes first, whether a
+    /// stream is out of order itself, and the same as over one sorted stream.
+    #[test]
+    fn streams_walked_apart_meet_in_the_engines_order() {
+        let opened = vec![threads(10, 7), threads(20, 9), threads(30, 7)];
+        let looked_up = vec![
+            descriptors(10, 7),
+            descriptors(15, 9),
+            descriptors(20, 9),
+            descriptors(31, 7),
+        ];
+        let windows = BTreeMap::new();
+        let merged = apply_merging(&eq_rule(), &[&opened, &looked_up], &windows).unwrap();
+        assert_eq!((merged.matched, merged.unmatched), (3, 1));
+        states_balance(&merged);
+
+        let reversed = apply_merging(&eq_rule(), &[&looked_up, &opened], &windows).unwrap();
+        assert_eq!(reversed, merged);
+        let mut shuffled = looked_up.clone();
+        shuffled.reverse();
+        let indexed = apply_merging(&eq_rule(), &[&opened, &shuffled], &windows).unwrap();
+        assert_eq!(indexed, merged);
+        let concatenated: Vec<Event> = looked_up.iter().chain(&opened).cloned().collect();
+        assert_eq!(apply(&eq_rule(), &concatenated).unwrap(), merged);
     }
 
     fn link(ts_ns: u64, kind: &str, key: KeyValue, value: u64) -> Event {

@@ -2059,16 +2059,9 @@ fn balances(states: &join::StateStats) -> bool {
             + states.still_open
 }
 
-/// One load: the stream built, applied with the `from` source's window
-/// closing before the end and without, and every count held to the
-/// generator's. Returns the heap the two applications needed at their peak,
-/// beyond the stream itself.
-fn one_load(events: u64) -> usize {
-    let rule = load_rule();
-    let started = std::time::Instant::now();
-    let (stream, closed_ns) = Stream::load(events);
-    let built = started.elapsed();
-    let expected = &stream.expected;
+/// The load's windows: the requests' source detached before the end, the
+/// segments' watched to it.
+fn load_windows(closed_ns: u64) -> BTreeMap<String, omn::collect::Watched> {
     let mut windows = BTreeMap::new();
     windows.insert(
         "blk.rq".to_owned(),
@@ -2090,6 +2083,75 @@ fn one_load(events: u64) -> usize {
             attach_ns: None,
         },
     );
+    windows
+}
+
+/// The load as a run hands it over: one collection per source, each in
+/// order, and the joins' input either those collections walked apart
+/// (`join::apply_merging`) or laid end to end into one stream that is not in
+/// order (`join::apply_within` over it, which is what `assemble` in
+/// `src/main.rs` does today). Returns the heap each needed at its peak beyond
+/// its input, after holding both answers to the generator's counts.
+fn split_load(events: u64) -> (usize, usize) {
+    let rule = load_rule();
+    let (stream, closed_ns) = Stream::load(events);
+    let expected = stream.expected;
+    let windows = load_windows(closed_ns);
+    let (requests, segments): (Vec<Event>, Vec<Event>) = stream
+        .events
+        .into_iter()
+        .partition(|event| event.kind == "blk.rq");
+
+    let before = heap::live();
+    heap::reset_peak();
+    let apart =
+        join::apply_merging(&rule, &[&requests, &segments], &windows).expect("the rule applies");
+    let merged_peak = heap::peak() - before;
+
+    let laid: Vec<Event> = requests.into_iter().chain(segments).collect();
+    let before = heap::live();
+    heap::reset_peak();
+    let end_to_end = join::apply_within(&rule, &laid, &windows).expect("the rule applies");
+    let laid_peak = heap::peak() - before;
+
+    for (name, correlation) in [("apart", &apart), ("end to end", &end_to_end)] {
+        assert!(
+            balances(&correlation.states),
+            "{name}: {:?}",
+            correlation.states
+        );
+        assert_eq!(correlation.states.opened, expected.opened, "{name}: opened");
+        assert_eq!(correlation.matched, expected.matched, "{name}: matched");
+        assert_eq!(
+            correlation.unmatched, expected.unmatched,
+            "{name}: unmatched"
+        );
+        assert_eq!(
+            correlation.outside_window, expected.left_open,
+            "{name}: outside the window"
+        );
+    }
+    eprintln!(
+        "load as a run hands it over: {} events in two collections; walked apart, peak {:.1} \
+         MiB beyond them; laid end to end, {:.1} MiB",
+        expected.events,
+        merged_peak as f64 / (1 << 20) as f64,
+        laid_peak as f64 / (1 << 20) as f64
+    );
+    (merged_peak, laid_peak)
+}
+
+/// One load: the stream built, applied with the `from` source's window
+/// closing before the end and without, and every count held to the
+/// generator's. Returns the heap the two applications needed at their peak,
+/// beyond the stream itself.
+fn one_load(events: u64) -> usize {
+    let rule = load_rule();
+    let started = std::time::Instant::now();
+    let (stream, closed_ns) = Stream::load(events);
+    let built = started.elapsed();
+    let expected = &stream.expected;
+    let windows = load_windows(closed_ns);
 
     let before = heap::live();
     heap::reset_peak();
@@ -2202,7 +2264,10 @@ fn is_child() -> bool {
 /// index of the input and a record of every state that ended), 0.7 MiB after.
 /// A twice longer stream may take no more than the shorter's peak and a
 /// margin, every peak stays under [`LOAD_BOUND`], and nothing is left live
-/// afterwards.
+/// afterwards. And the input as a run hands it over -- one collection per
+/// source, each in order -- walked apart by `apply_merging` stays under the
+/// bound too, while the same collections laid end to end, which is what
+/// `assemble` gives the engine today, cost an index of the whole run.
 #[test]
 fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map() {
     in_a_child(
@@ -2225,6 +2290,21 @@ fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map()
         long < short + LOAD_BOUND / 4,
         "twice the stream took {long} bytes against {short}: the engine's memory grows with \
          the run"
+    );
+
+    // The collections of a run, each in order and their concatenation not:
+    // walked apart they cost what one ordered stream does; laid end to end
+    // the engine indexes the whole run, eight bytes an event at least.
+    let (apart, laid) = split_load(1_000_000);
+    assert!(
+        apart < LOAD_BOUND,
+        "two collections walked apart took {apart} bytes beyond them, more than the \
+         {LOAD_BOUND} one ordered stream may"
+    );
+    assert!(
+        laid >= 8 * 1_000_000,
+        "one stream out of order took only {laid} bytes beyond it: the index of a million \
+         references the engine sorts it by is eight megabytes"
     );
 }
 
@@ -2693,4 +2773,146 @@ fn two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved() {
         "the join read {} bytes on lo; the kernel counted {moved} across the whole run",
         credited + uncredited
     );
+}
+
+/// What the kernel says lo transmitted, in packets.
+fn loopback_tx_packets() -> f64 {
+    std::fs::read_to_string("/sys/class/net/lo/statistics/tx_packets")
+        .expect("every Linux machine has lo")
+        .trim()
+        .parse::<f64>()
+        .expect("a counter")
+}
+
+/// Two producers of one interface that name it two ways: `net.qdisc` carries
+/// lo's index as the kernel read it off each packet, `net.iface` only the
+/// name `/proc/net/dev` prints, in one series per counter kind (`lo/drops`).
+/// They are one key by the index, so every packet the discipline saw on lo is
+/// laid across lo's readings -- credited to the reading whose interval holds
+/// its drained row, or counted uncredited, never dropped for a key that did
+/// not match -- and at least half of what the kernel counted transmitted on lo
+/// across this test's own burst is credited.
+///
+/// Loopback is `noqueue` unless someone gave it a discipline, and then no
+/// packet of it passes one: the test skips with that reason, which is the
+/// machine's (`tc qdisc replace dev lo root netem limit 100000`, as root,
+/// makes it run; a fifo is bypassed while empty and queues nothing).
+#[test]
+fn a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index() {
+    const DATAGRAMS: usize = 2000;
+    let run = Command::new(BINARY)
+        .args(["-f", "examples/join-iface-qdisc.yml", "--format", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // After the first two readings of lo, and well before the last.
+    thread::sleep(StdDuration::from_millis(1200));
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let to = receiver.local_addr().expect("an address");
+    receiver
+        .set_read_timeout(Some(StdDuration::from_millis(50)))
+        .expect("a timeout");
+    let before_burst = loopback_tx_packets();
+    let mut buffer = [0u8; 2048];
+    for _ in 0..DATAGRAMS {
+        sender.send_to(&[7u8; 100], to).expect("a datagram");
+        let _ = receiver.recv_from(&mut buffer);
+    }
+    let burst = loopback_tx_packets() - before_burst;
+
+    let output = run.wait_with_output().expect("omn should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            machine_cannot_serve(&stderr),
+            "the session failed for a reason that is not the machine's:\n{stderr}"
+        );
+        eprintln!(
+            "SKIPPED: {}. It would have checked that a kernel-indexed and a named producer of \
+             lo join by its index",
+            machine_s_reason(&stderr)
+        );
+        return;
+    }
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("a JSON document");
+    let queued: Vec<&serde_json::Value> = document["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|result| result["label"] == "queued")
+        .flat_map(|result| result["outputs"].as_array().into_iter().flatten())
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| output["events"].as_array().into_iter().flatten())
+        .collect();
+    let packets: f64 = queued
+        .iter()
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .and_then(|attrs| attrs.iter().find(|attr| attr["name"] == "count"))
+                .and_then(|attr| attr["value"].as_f64())
+                .unwrap_or(0.0)
+        })
+        .sum();
+    if packets == 0.0 {
+        eprintln!(
+            "SKIPPED: no packet of lo was queued on this machine: lo is `noqueue` by default, \
+             and a fifo is bypassed while it is empty, so none of the {burst} packets the kernel \
+             counted on lo entered a discipline and `net.qdisc` has nothing to key. \
+             `tc qdisc replace dev lo root netem limit 100000` (as root; `tc qdisc del dev lo \
+             root` undoes it) gives it one that queues. It would have checked that a \
+             kernel-indexed and a named producer of lo join by its index"
+        );
+        return;
+    }
+    let join = document["joins"]
+        .as_array()
+        .and_then(|joins| {
+            joins
+                .iter()
+                .find(|join| join["rule"] == "queued-per-link-reading")
+        })
+        .expect("the session's join");
+    let credited = number(&join["readings"]["credited"]);
+    let uncredited = number(&join["readings"]["uncredited"]);
+    eprintln!(
+        "lo transmitted {burst} packets in the burst; net.qdisc saw {packets} on lo; credited \
+         {credited}, uncredited {uncredited}"
+    );
+    assert_eq!(join["evidence"], "TEMPORAL");
+    assert!(
+        burst >= DATAGRAMS as f64,
+        "the kernel counted {burst} packets transmitted on lo for {DATAGRAMS} datagrams"
+    );
+    assert_eq!(
+        join["keyless"].as_u64().unwrap_or(0),
+        0,
+        "every row of lo carries lo: {join}"
+    );
+    assert!(
+        (credited + uncredited - packets).abs() < 0.5,
+        "net.qdisc saw {packets} packets on lo and the join laid {credited} across lo's readings \
+         and left {uncredited}: a row whose key matched nothing would be in neither"
+    );
+    assert!(
+        packets >= burst,
+        "the kernel transmitted {burst} packets on lo across the burst, and its discipline saw \
+         {packets}"
+    );
+    assert!(
+        credited >= burst / 2.0,
+        "the kernel counted {burst} packets on lo across the burst, inside the run; the join \
+         credited {credited} to lo's readings ({uncredited} uncredited): the two producers' \
+         keys of lo did not meet\n{join}"
+    );
+    for row in join["top"].as_array().into_iter().flatten() {
+        assert!(
+            row["key"] == "iface:lo",
+            "a row of lo's readings is lo's: {row}"
+        );
+    }
 }

@@ -162,9 +162,22 @@ Held by `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo
 `net.iface` and `net.bytes` of `lo` joined by `between`, credited at least
 what `/sys/class/net/lo/statistics` counted across the test's own burst and at
 most what it counted across the run; before, the two names matched nothing.
-The index is per network namespace, and the tool reads its own, so an index
-read in another namespace (`net.qdisc` names one, `src/collect/net/qdisc.rs`)
-can collide with one of this namespace's. A deleted and re-created interface
+A producer that carries the kernel's index (`net.qdisc`, `net.capture`,
+`net.hwts`) meets a named one by it: held by
+`join_engine::a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index`,
+`net.qdisc` against `net.iface`, which skips wherever lo queues nothing --
+lo is `noqueue` by default -- and so runs only on a machine whose lo was given
+a discipline that queues (`netem`).
+
+**The index is per network namespace**, and the identity does not say which.
+The tool resolves a name in its own namespace, but `net.qdisc` reads the
+packets of every namespace, and lo is 1 in each: measured, 2000 packets queued
+on the lo of an unprivileged namespace were all credited to this namespace's
+`iface:lo`. Until the kernel-side producers carry the namespace beside the
+index (filed, `docs/open-findings.md`, the sixteenth wave, stream engine), a
+join of a machine-wide interface source with a named one is sound only on a
+machine with one network namespace, or with the kernel-side source targeted at
+an interface that exists only in this one. A deleted and re-created interface
 has a new index, so it is a new key.
 
 **`dev`, a block device.** The major and minor as `/proc/diskstats` writes

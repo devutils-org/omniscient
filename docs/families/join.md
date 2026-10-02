@@ -22,11 +22,12 @@ unchanged.
 
 | | |
 |---|---|
-| Delivered | an `iface` key compared by the kernel's index; `KeyValue::proc_of`; `overlap`'s `enclosing`; the engine's attributions bounded to the rule's `top` as states end, and a stream already in order walked where it lies; the memory decomposition's test held to a ready interpreter |
+| Delivered | an `iface` key compared by the kernel's index; `overlap`'s `enclosing`, held to the reclaim crossing; the engine's attributions bounded to the rule's `top` as states end; `join::apply_merging`, the streams of a run walked apart with no index of them; the memory decomposition's test held to a ready interpreter |
+| Not delivered | a producer of `proc` (no collector of this stream's files emits one; filed); the joins of a real run walked apart (`src/main.rs`, filed); the kernel and query tiers |
 | Refused, new | `enclosing` on any match but `overlap` (`JoinError::EnclosingOutsideOverlap`); a drained row without the attribute `enclosing` names (`MissingSpan`, as for `span`) |
-| Tests | `src/event.rs` 2 new; `src/join.rs` 3 new; `tests/join_engine.rs` 1 new, 2 widened; `tests/cross_machine.rs` 1 widened |
-| Sessions | `examples/join-iface-loopback.yml` |
-| Files | `src/join.rs`, `src/event.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/{join-decompose-memory,join-iface-loopback}.yml`, `docs/keys.md`, this document |
+| Tests | `src/event.rs` 2 new; `src/join.rs` 4 new; `tests/join_engine.rs` 2 new, 2 widened; `tests/cross_machine.rs` 1 new |
+| Sessions | `examples/join-iface-loopback.yml`, `examples/join-iface-qdisc.yml`, `examples/cross-machine-reclaim-enclosed.yml` |
+| Files | `src/join.rs`, `src/event.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/{join-decompose-memory,join-iface-loopback,join-iface-qdisc,cross-machine-reclaim-enclosed}.yml`, `docs/keys.md`, this document |
 | Machine | 24 cpus, kernel 7.2.7, five other streams, `/home` full for most of the wave (`docs/fixes/w16-engine.md`) |
 
 ## 1. An interface is its index
@@ -37,73 +38,124 @@ rename made a second key. `KeyValue::iface` now fills an index of 0 from the
 name at the read (`if_nametoindex` on the part before a `/`, which no Linux
 interface name holds), and the identity is `iface#<index>`, the name only when
 the index stayed 0. `between` keeps each reading's baseline on the full key, so
-two series of one interface never difference each other. Held by
-`join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved`:
-`net.iface` and `net.bytes` of `lo` joined by `between`, the bytes credited at
-least what `/sys/class/net/lo/statistics` counted across the test's own 2000
-datagrams and at most what it counted across the run. Before: 0 of 20 readings
-matched, nothing credited. After: 20 of 20, 4 112 000 bytes for a burst the
-kernel counted at 4 112 000.
+two series of one interface never difference each other.
 
-## 2. `proc` has a maker
+Two tests, because there are two ways a producer names an interface:
 
-Kept, not removed: `CATALOG.md`'s container trap names it as the answer to a
-pid being ambiguous across namespaces. `KeyValue::proc_of(pid)` reads the pid
-namespace's inode from `/proc/<pid>/ns/pid` and the pid inside it from the last
-`NSpid`, and is tested against the namespace link's own text. No collector
-calls it yet; the per-process sources are filed (`docs/open-findings.md`, the
-sixteenth wave, stream engine).
+- **Two named producers.**
+  `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved`:
+  `net.iface` and `net.bytes` of `lo`, both read off `/proc/net/dev`, joined
+  by `between`; the bytes credited are at least what
+  `/sys/class/net/lo/statistics` counted across the test's own 2000 datagrams
+  and at most what it counted across the run. Before: 0 of 20 readings
+  matched. After: 20 of 20, 4 112 000 bytes for a burst the kernel counted at
+  4 112 000. This one is the sub-series: both keys get their index the same
+  way, so it holds the `/drops` suffix and nothing else.
+- **A kernel index against a name.**
+  `join_engine::a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index`
+  (`examples/join-iface-qdisc.yml`): `net.qdisc`, which carries the index the
+  kernel read off each packet, laid across `net.iface`'s readings of lo by
+  `overlap` with `enclosing: window_ns`; every packet the discipline saw on lo
+  credited or uncredited, at least half of the kernel's `tx_packets` across
+  the test's burst credited. **It skips on a stock machine, this one and both
+  CI cells included**: lo is `noqueue`, and a fifo is bypassed while empty
+  (measured: `pfifo` and `fq_codel` on a namespace's lo, 2000 datagrams, zero
+  rows), so no packet of lo is queued. `netem limit 100000` queues every one.
+  Giving the host's lo a discipline is root's (`docs/fixes/w16-engine.md`,
+  "Needs privilege").
+
+  Exercised by hand instead, with the qdisc on the lo of an unprivileged
+  network namespace (`unshare -rn`, `tc qdisc replace dev lo root netem limit
+  100000`, 2000 datagrams): the 2000 packets `tc -s` counted were all credited
+  to `iface:lo`, by index 1. **Which is also a defect**: that lo is not this
+  namespace's lo. An index is per network namespace, `net.qdisc` reads packets
+  of every namespace, and lo is 1 in each, so a key compared by the index alone
+  can join two interfaces. Open (`docs/open-findings.md`, the sixteenth wave,
+  stream engine): the identity wants the namespace beside the index, which the
+  kernel-side producers have to carry.
+
+## 2. `proc` is still vocabulary
+
+The brief said give `proc` a producer or remove it. It has neither: no
+collector emits a `proc` key, and no catalog entry declares one, so a join
+`via: proc` is refused before the run by name ("join `by-proc` matches on
+`proc`, which `proc.threads` does not carry", with what it does carry). Kept by alignment with `CATALOG.md`'s
+container trap, which names it as the answer to a pid that two containers
+share, and with the catalog's practice for a source with no collector: it
+resolves, it validates, and it says plainly that nothing carries it yet.
+`KeyValue::proc_of(pid)` makes the key -- the pid namespace's inode from
+`/proc/<pid>/ns/pid` and the pid inside it from the last `NSpid` -- and is
+tested against the namespace link's own text; the per-process collectors that
+should call it are another stream's files, and filed.
 
 ## 3. `overlap`'s `enclosing`
 
-`DECISIONS.md` left open how a drained row of several episodes is credited. The
-rule now says it: `enclosing: <attr>` names the attribute holding the length of
-a window, from the row's stamp, that encloses every occurrence. A row whose
-window lies in one interval is credited whole (exactly: every occurrence is
-inside); one that crosses an interval's end stays uncredited. Absent, `span` is
-a sum and the row is uncredited, as before.
+`DECISIONS.md` left open how a drained row of several episodes is credited.
+The rule now says it: `enclosing: <attr>` names the attribute holding the
+length of a window, from the row's stamp, that encloses every occurrence. A
+row whose window lies in one interval is credited whole (exactly: every
+occurrence is inside); one that crosses an interval's end stays uncredited.
+Absent, `span` is a sum and the row is uncredited, as before.
 
-On the reclaim crossing, against the cgroup's own `memory.stat` (pgsteal):
+`mem.reclaim`'s rows already carry such a window: stamped at the first
+episode's start, every episode of the row ended before the drain read it, and
+`window_ns` -- the drain's length -- is at least that far. So
+`enclosing: window_ns` is sound today, with no change to the collector. It is
+held by `cross_machine::a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure`
+(`examples/cross-machine-reclaim-enclosed.yml`), against the cgroup's own
+`memory.stat`, on one run with two rules over the same rows:
 
-| enclosure carried by `mem.reclaim` | credited in the program's intervals |
-|---|---|
-| none (today) | 745 of 41 413 pages |
-| the drain's close less the first episode's start | 165 of 36 937, 143 of 42 810 |
-| the last episode's end less the first's start | 35 225 of 37 657, 40 497 of 40 739, 41 909 of 42 093 |
+| run | memory.stat pgsteal | read as a sum | `enclosing: window_ns` |
+|---|---|---|---|
+| 1 | 41 797 | 437 credited, 41 360 uncredited | 41 797 credited, 0 uncredited |
+| 2 | 41 943 | 197 / 41 746 | 41 943 / 0 |
+| 3 | 42 263 | 294 / 41 969 | 42 263 / 0 |
+| 4 | 41 246 | 377 / 40 869 | 41 246 / 0 |
 
-The drain and the pressure poll are both 100 ms and out of phase, so a window
-closed by the drain almost always crosses a reading. The last episode's end
-needs eight bytes in the row and one store in `src/bpf/mem_stall.rs`; it was
-measured with that patch applied locally and reverted (it is the mem and
-coordinator layer's). Filed with the patch; the session line
-`enclosing: enclosing_ns` lands with it, and
-`cross_machine::a_memory_limit_turns_...` then holds half the cgroup's pgsteal
-credited at least.
+The pressure is read every second there, not every 100 ms as in
+`cross-machine-reclaim-io.yml`: a window of up to 200 ms (the drain's length,
+from a first episode that may be late in it) lies in a one-second reading
+almost always and crosses a 100 ms reading almost always. On the 100 ms
+session a window from the first episode to the drain's close credited 165 of
+36 937 and 143 of 42 810; the row's
+last episode end would tighten it to 35 225 of 37 657 (measured with a patch
+to `src/bpf/mem_stall.rs`, reverted; filed). The test asserts at least half
+of pgsteal credited, fewer pages uncredited than the sum leaves, and every
+page the tool saw credited or uncredited under both rules.
 
-## 4. Memory that does not grow with the run
+## 4. Memory that does not grow with the run -- inside the engine
 
 The engine kept a record of every state that ended until it ranked them, and
 sorted an index of references to the whole input. Both were linear in the run.
 `Ranked` now folds (`wakeup`, `woke`) or ranks and cuts back to `top` (every
 other match) as states end, which is exact: the cut is the final stable sort.
-And `apply_within` walks a stream already in the engine's order where it lies.
-Measured by `join_engine::a_join_under_load_...` on the 1.5 M events
-(500 k then 1 M), beyond the stream:
+And `join::apply_merging(rule, &[stream, ..], windows)` walks several streams
+-- one per collection -- as one, by a cursor per stream: a stream in the
+engine's order is walked where it lies, one out of order through an index of
+it alone. `apply_within` is `apply_merging` over one stream.
+
+Measured by `join_engine::a_join_under_load_...`, beyond the input:
 
 | | 500 k | 1 M |
 |---|---|---|
 | before | 48.7 MiB | 97.2 MiB |
 | attributions bounded | — | 15.4 MiB |
 | and an in-order stream walked in place | 0.7 MiB | 0.7 MiB |
+| two collections, each in order, walked apart | — | 0.6 MiB |
+| the same two laid end to end (what `assemble` does) | — | 15.3 MiB |
 
-The test now holds every peak under 4 MiB and the long stream to the short's
-peak plus 1 MiB. What is still linear is not the engine's: `main.rs` clones
-every collection's events into one unsorted `merged` vector, so the engine
-falls back to its index (12 bytes an event) there. Filed. A rule still cannot
-choose the kernel or the query tier: the kernel tier is a rule compiled into a
-program of `src/bpf/` per match kind, and the query tier a join over stored
-runs, which `omn` has no command for. Cost: phase 5's "adding a boundary means
-adding a rule" stays `[~]`, for the agent tier only.
+**A real run does not have that yet.** `assemble` (`src/main.rs`) clones every
+collection's events into one `merged` vector, one collection after another,
+which is not in order, so every rule takes the index over the whole run (the
+last row), on top of the clone. The fix is three lines in `assemble` --
+keep each collection's bounds in `merged` and hand the slices to
+`apply_merging` -- and is filed, with the lines. The clone stays linear: the
+collections are consumed by `emit::aggregate`, so walking them as they stream
+needs the runner to keep no events, which a `raw` emit cannot do. A rule still
+cannot choose the kernel or the query tier: the kernel tier is a rule compiled
+into a program of `src/bpf/` per match kind, and the query tier a join over
+stored runs, which `omn` has no command for. Cost: phase 5's "adding a
+boundary means adding a rule" stays `[~]`, for the agent tier only.
 
 ## 5. The hour
 
