@@ -166,14 +166,6 @@ impl Device {
             .map(|kb| kb * 1024)
             .unwrap_or(128 * 1024)
     }
-
-    /// Whether the I/O scheduler can coalesce adjacent requests at all. A
-    /// multi-queue device with `none` hands the driver what it was given.
-    fn merges_are_possible(&self) -> bool {
-        std::fs::read_to_string(format!("/sys/block/{}/queue/scheduler", self.leaf))
-            .map(|text| !text.contains("[none]"))
-            .unwrap_or(true)
-    }
 }
 
 fn read_number(path: &str) -> Option<u64> {
@@ -286,6 +278,8 @@ struct Counters {
     read_sectors: u64,
     writes: u64,
     write_sectors: u64,
+    /// Requests the block layer merged into another, reads and writes.
+    merges: u64,
 }
 
 impl Counters {
@@ -299,6 +293,7 @@ impl Counters {
             read_sectors: self.read_sectors.saturating_sub(before.read_sectors),
             writes: self.writes.saturating_sub(before.writes),
             write_sectors: self.write_sectors.saturating_sub(before.write_sectors),
+            merges: self.merges.saturating_sub(before.merges),
         }
     }
 }
@@ -316,6 +311,7 @@ fn counters_of(device: &Device) -> Counters {
             read_sectors: at(5),
             writes: at(7),
             write_sectors: at(9),
+            merges: at(4) + at(8),
         };
     }
     Counters::default()
@@ -422,6 +418,110 @@ fn measure_while(args: &[&str], device: &Device, workload: impl FnOnce()) -> (Ou
     let output = child.wait_with_output().expect("omn should finish");
     let after = counters_of(device);
     (output, after.since(&before))
+}
+
+/// What the kernel counted on `device` over a span the session's window must
+/// enclose, from just before `workload` to just after it, with the monotonic
+/// instants that span began and ended at.
+struct Enclosed {
+    counters: Counters,
+    from_ns: u64,
+    to_ns: u64,
+}
+
+/// [`measure_while`], and also the kernel's counters over the workload alone:
+/// the window that encloses the session's is an upper bound on what it can
+/// report, and this one -- inside the session's, which the result's own
+/// `window` says -- a lower bound.
+fn measure_around(
+    args: &[&str],
+    device: &Device,
+    wait: Duration,
+    workload: impl FnOnce(),
+) -> (Output, Counters, Enclosed) {
+    let before = counters_of(device);
+    let child = Command::new(BINARY)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(wait);
+    let from_ns = monotonic_ns();
+    let inner_before = counters_of(device);
+    workload();
+    let inner_after = counters_of(device);
+    let to_ns = monotonic_ns();
+    let output = child.wait_with_output().expect("omn should finish");
+    let after = counters_of(device);
+    (
+        output,
+        after.since(&before),
+        Enclosed {
+            counters: inner_after.since(&inner_before),
+            from_ns,
+            to_ns,
+        },
+    )
+}
+
+/// What the kernel's own `inflight` file said while a workload ran.
+#[derive(Default)]
+struct QueueSeen {
+    /// How many times it was read.
+    reads: u64,
+    /// The deepest queue one read found.
+    deepest: u64,
+    /// The time between reads that found the queue non-empty, summed: the
+    /// span the queue held something, to the resolution of the reads.
+    busy: Duration,
+    /// The longest run of consecutive reads that all found it non-empty,
+    /// from the first of them to the last: a span in which no read, a
+    /// millisecond apart, saw the queue empty.
+    longest: Duration,
+    /// From the first read to the last.
+    span: Duration,
+}
+
+/// Runs `workload` while reading `/sys/block/<dev>/inflight` as fast as one
+/// thread can, sleeping a millisecond between reads.
+fn while_watching_the_queue(device: &Device, workload: impl FnOnce()) -> QueueSeen {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let path = format!("/sys/block/{}/inflight", device.leaf);
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut seen = QueueSeen::default();
+            let began = Instant::now();
+            let mut last = began;
+            let mut run_began: Option<Instant> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let depth: u64 = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .filter_map(|field| field.parse::<u64>().ok())
+                    .sum();
+                let now = Instant::now();
+                seen.reads += 1;
+                seen.deepest = seen.deepest.max(depth);
+                if depth > 0 {
+                    seen.busy += now - last;
+                    let began = *run_began.get_or_insert(now);
+                    seen.longest = seen.longest.max(now - began);
+                } else {
+                    run_began = None;
+                }
+                last = now;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            seen.span = last - began;
+            seen
+        })
+    };
+    workload();
+    stop.store(true, Ordering::Relaxed);
+    watcher.join().expect("the queue watcher")
 }
 
 // ---------------------------------------------------------------------------
@@ -644,10 +744,31 @@ fn no_bpf_here() -> Option<String> {
         return None;
     }
     Some(format!(
-        "this build cannot load a block tracer: {}. `make` grants CAP_BPF and CAP_PERFMON to \
+        "{}: this build cannot load a block tracer. `make` grants CAP_BPF and CAP_PERFMON to \
          target/debug/omn, and every `cargo build` drops them again",
-        stderr(&output).lines().next().unwrap_or("").trim()
+        machine_reason(&output)
     ))
+}
+
+/// What a refusal says the machine lacks, the backends' own missing pieces
+/// first: the headline of a "no viable backend" refusal ends in a colon and
+/// its reasons are the indented lines under it, which a skip that quoted only
+/// the first line left out (`... has no viable backend on this machine:.`, on
+/// every eBPF skip of the CI's run at 37f17c8).
+fn machine_reason(output: &Output) -> String {
+    let said = stderr(output);
+    let headline = said.lines().next().unwrap_or("").trim();
+    let reasons: Vec<&str> = said
+        .lines()
+        .skip(1)
+        .filter(|line| line.starts_with("  ") && !line.trim_start().starts_with("hint:"))
+        .map(str::trim)
+        .collect();
+    if reasons.is_empty() {
+        headline.to_owned()
+    } else {
+        format!("{} ({headline})", reasons.join("; "))
+    }
 }
 
 /// A mode and an emit are compatible in the abstract or not at all, and the
@@ -832,6 +953,116 @@ fn a_filter_the_backend_cannot_carry_names_the_backend_that_can() {
         text.contains("kept 0 of"),
         "a filter that kept nothing has to say how much it dropped:\n{text}"
     );
+}
+
+/// A request keyed on what `/proc/diskstats` and `io.stat` cannot say is
+/// refused where it resolves, naming the backend that does attach the key.
+///
+/// The two files are the kernel's, and what they carry is known without the
+/// tool: a line of `/proc/diskstats` is a `major minor name` and its counters,
+/// a line of `io.stat` a `major:minor` and its counters. Neither names a task
+/// or a request, so `io.bytes` and `io.iops` keyed on `task` or `blk` and
+/// resolved onto them would be events no join over that key could ever match.
+/// The catalog says so in each backend's `keys`, and the resolver refuses with
+/// the eBPF backend that carries them -- which this build has not written, so
+/// the refusal is the build's (exit 3) on every machine, with or without
+/// capabilities. Keyed on the device, the one thing both files do name, the
+/// same request runs, and its series are the devices the kernel's file lists.
+#[test]
+fn a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_backend_that_does() {
+    // The keys each entry offers and the counter file does not name: `io.iops`
+    // offers no `task` at all, which is the validator's refusal and another
+    // test's.
+    let mut cases: Vec<(&str, &str, &str, &str, &[&str])> = vec![
+        ("io.bytes", "--system", "", "fs:proc", &["task", "blk"]),
+        ("io.iops", "--system", "", "fs:proc", &["blk"]),
+    ];
+    if Path::new("/sys/fs/cgroup/io.stat").exists() {
+        cases.push(("io.bytes", "--cgroup", "/", "fs:cgroup", &["task", "blk"]));
+    } else {
+        eprintln!(
+            "skipped the `fs:cgroup` half: /sys/fs/cgroup/io.stat does not exist here, so \
+             `io.bytes --cgroup` resolves onto no counter file"
+        );
+    }
+    for (source, target, value, backend, keys) in cases {
+        for &key in keys {
+            let mut args = vec![source, target];
+            if !value.is_empty() {
+                args.push(value);
+            }
+            args.extend(["-k", key, "-m", "count", "-e", "summary", "-d", "200ms"]);
+            let refused = run(&args);
+            let message = stderr(&refused);
+            if backend == "fs:cgroup" && message.contains("has no viable backend") {
+                eprintln!("skipped the `fs:cgroup` half: {}", machine_reason(&refused));
+                break;
+            }
+            // `fs:cgroup` has no collector in this build, so with the
+            // capabilities the resolver stops at the unwritten `bpf:raw_tp`
+            // ahead of it, and the refusal is that one -- the build's as well.
+            if backend == "fs:cgroup" && !message.contains("does not attach") {
+                assert_eq!(
+                    refused.status.code(),
+                    Some(EXIT_NOT_IMPLEMENTED),
+                    "{args:?}: {message}"
+                );
+                assert!(
+                    message.contains("no collector is written"),
+                    "{args:?}: {message}"
+                );
+                continue;
+            }
+            assert!(
+                message.contains(&format!(
+                    "`{source}` is keyed on `{key}`, which the selected backend `{backend}` \
+                     does not attach"
+                )),
+                "{args:?}: {message}"
+            );
+            assert!(
+                message.contains("`bpf:raw_tp` does") || message.contains("`bpf:tp` does"),
+                "the refusal has to name the backend that attaches `{key}`: {message}"
+            );
+            assert_eq!(
+                refused.status.code(),
+                Some(EXIT_NOT_IMPLEMENTED),
+                "the backend that attaches `{key}` is one this build has not written: {message}"
+            );
+            assert!(stdout(&refused).is_empty(), "{}", stdout(&refused));
+        }
+    }
+
+    // Keyed on the device, it runs, and every series is a device the kernel's
+    // own file lists.
+    let listed: Vec<String> = std::fs::read_to_string("/proc/diskstats")
+        .expect("/proc/diskstats is readable")
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            Some(format!("dev:{}+{}", fields.first()?, fields.get(1)?))
+        })
+        .collect();
+    let served = run(&[
+        "io.bytes", "--system", "-k", "dev", "-m", "count", "-e", "summary", "-d", "200ms",
+        "--format", "json",
+    ]);
+    assert!(served.status.success(), "{}", stderr(&served));
+    let document = json(&served);
+    let summary = output_of(&document["results"][0], "summary");
+    let keys: Vec<String> = summary["series"]
+        .as_array()
+        .expect("the summary has series")
+        .iter()
+        .filter_map(|series| series["key"].as_str().map(str::to_owned))
+        .collect();
+    assert!(!keys.is_empty(), "no device was reported: {summary}");
+    for key in &keys {
+        assert!(
+            listed.contains(key),
+            "`{key}` is not a device /proc/diskstats lists: {listed:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,20 +1341,49 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
     let device = backing_device(Path::new(env!("CARGO_TARGET_TMPDIR"))).expect("a block device");
     write_and_sync(&file);
 
-    let mut read_back = 0;
-    let (output, enclosing) = measure_while(
-        &["-f", &session("io-known-volume.yml"), "--format", "json"],
-        &device,
-        || read_back = cold_read(&file),
-    );
+    // The read has to fall inside the session's window for the kernel's
+    // count over the read to be a floor under the session's, and the session
+    // takes a while to open it -- longer than 300 ms when five test binaries
+    // share the machine (seen here once, in a parallel run). So the read
+    // starts later on each attempt until the window, by its own stamps,
+    // encloses it; the session lasts 2 s and the read takes well under one.
+    let mut attempts = Vec::new();
+    let (enclosing, inner, document) = loop {
+        let mut read_back = 0;
+        let wait = Duration::from_millis(300 * (1 + attempts.len() as u64));
+        let (output, enclosing, inner) = measure_around(
+            &["-f", &session("io-known-volume.yml"), "--format", "json"],
+            &device,
+            wait,
+            || read_back = cold_read(&file),
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            read_back, KNOWN_BYTES,
+            "the workload did not read the file it promised to"
+        );
+        let document = json(&output);
+        let window = &result(&document, "merges")["window"];
+        let (opened, closed) = (
+            window["opened_ns"].as_u64().expect("the window's opening"),
+            window["closed_ns"].as_u64().expect("the window's close"),
+        );
+        let enclosed = opened <= inner.from_ns && inner.to_ns <= closed;
+        attempts.push(format!(
+            "window [{opened}, {closed}], read [{}, {}] after {wait:?}",
+            inner.from_ns, inner.to_ns
+        ));
+        if enclosed || attempts.len() == 3 {
+            assert!(
+                enclosed,
+                "the session's window never enclosed the read, so the kernel's count over the \
+                 read is no floor under it: {attempts:?}"
+            );
+            break (enclosing, inner, document);
+        }
+    };
     let _ = std::fs::remove_file(&file);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(
-        read_back, KNOWN_BYTES,
-        "the workload did not read the file it promised to"
-    );
 
-    let document = json(&output);
     let measured = series(
         output_of(result(&document, "volume"), "summary"),
         &device.key,
@@ -1145,11 +1405,17 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
         enclosing.bytes()
     );
 
-    // What the block layer coalesced. On a device whose scheduler is `none`
-    // there is nothing to coalesce: the filesystem submits requests already at
-    // the device's maximum size, and the right answer is exactly zero. A
-    // collector that reported a plausible number instead would pass every
-    // check that only asks for a number.
+    // What the block layer coalesced, held to the kernel's own merge count
+    // from both sides: no more than over a window that encloses the
+    // session's, no fewer than over the read alone, which the session's
+    // window encloses (its own `window` says so, on the clock the test read).
+    // Not to zero on a device whose scheduler is `none`, which an earlier
+    // version of this check assumed and the CI's `sda` disproved (11 merges in
+    // 86 reads, both cells): with no elevator the block layer still merges a
+    // bio into a request waiting in the submitter's plug list or the software
+    // queue, and counts it in the same column. A collector that reported 0
+    // fails the floor wherever the read merged anything; where the kernel
+    // itself merged nothing, the floor is 0 and the read says so.
     let merges = series(
         output_of(result(&document, "merges"), "summary"),
         &device.key,
@@ -1162,16 +1428,35 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
     )
     .map(|series| number(&series["last"]))
     .expect("the operation count is reported per device");
-    if device.merges_are_possible() {
-        assert!(
-            merges <= ops,
-            "more requests were merged away than the device completed: {merges} against {ops}"
-        );
-    } else {
-        assert!(
-            merges <= ops / 8.0,
-            "the scheduler on {} is `none`, which coalesces nothing, and {merges} merges are \
-             reported against {ops} operations",
+    assert!(
+        merges <= enclosing.merges as f64,
+        "the session found {merges} merges on {} and the kernel counted {} over a window \
+         enclosing it",
+        device.leaf,
+        enclosing.merges
+    );
+    assert!(
+        merges >= inner.counters.merges as f64,
+        "the session found {merges} merges on {} and the kernel counted {} over the read \
+         alone, inside the session's window",
+        device.leaf,
+        inner.counters.merges
+    );
+    assert!(
+        ops >= inner.counters.reads as f64 && ops <= (enclosing.reads + enclosing.writes) as f64,
+        "the session found {ops} requests on {}; the kernel completed {} reads over the read \
+         alone and {} requests over a window enclosing the session's",
+        device.leaf,
+        inner.counters.reads,
+        enclosing.reads + enclosing.writes
+    );
+    assert!(
+        merges <= ops,
+        "more requests were merged away than the device completed: {merges} against {ops}"
+    );
+    if inner.counters.merges == 0 {
+        eprintln!(
+            "the kernel merged nothing on {} over the read, so the merge count's floor is 0",
             device.leaf
         );
     }
@@ -1183,11 +1468,29 @@ fn a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move() {
 /// A gauge is the one thing in this family that cannot be recovered after the
 /// fact: a queue that fills and drains between two reads leaves no trace at
 /// all. So the session polls at 20 ms, and what it must find is a depth
-/// greater than zero on the device the file was written to -- the workload
-/// holds tens of requests in flight for a couple of hundred milliseconds --
-/// while the devices it did not touch stay where they were.
+/// greater than zero on the device the file was written to.
+///
+/// The workload holds the queue rather than filling it once: eight threads
+/// write straight to the device from before the session starts until it has
+/// ended, so a request is in flight at most instants of the window. A buffered 64 MiB and one `fsync`, which
+/// this used to be, drains in about 20 ms on this machine's NVMe (the kernel's
+/// own reads saw the queue non-empty for 16 ms at a stretch at best) and was
+/// seen at all only because one 20 ms poll happened to land inside it; on the
+/// CI's cloud disk no poll did, 101 times over, on both cells.
+///
+/// How long the queue held anything is still the device's business, so the
+/// test asks the kernel rather than assuming it: while the file is written it
+/// reads `/sys/block/<dev>/inflight` itself, about once a millisecond. That is
+/// the ground truth the session's maximum is held to, and a device whose
+/// queue the kernel itself never saw held is one no gauge can be held to. So the depth is
+/// required only when the kernel's own reads say a 20 ms poll could not have
+/// missed it -- non-empty for two intervals without a break, or for a share
+/// of the write that every poll missing is one chance in a thousand -- and
+/// otherwise the test says what the kernel saw -- and still holds the
+/// series' spacing and volume below.
 #[test]
 fn a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it() {
+    use std::os::unix::fs::OpenOptionsExt;
     let file = scratch("io-queue-depth.bin");
     if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
         eprintln!("skipped: {reason}");
@@ -1195,13 +1498,44 @@ fn a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it() {
     }
     let device = backing_device(Path::new(env!("CARGO_TARGET_TMPDIR"))).expect("a block device");
 
-    let (output, _) = measure_while(
-        &["-f", &session("io-device-load.yml"), "--format", "json"],
-        &device,
-        || write_and_sync(&file),
-    );
+    if let Err(error) = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(&file)
+    {
+        eprintln!(
+            "skipped: {} refuses O_DIRECT ({error}), so no write of it is held to a queue",
+            device.leaf
+        );
+        return;
+    }
+
+    // The writers run from before the session starts until it has ended, so
+    // its window is inside the workload whatever the tool's start-up costs on
+    // a loaded machine (more than the 300 ms lead-in at a load of 20, once).
+    let child = Command::new(BINARY)
+        .args(["-f", &session("io-device-load.yml"), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    let mut written = Ok(Vec::new());
+    let mut output = None;
+    let kernel = while_watching_the_queue(&device, || {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let writers = scope.spawn(|| direct_writes_until(&file, WRITERS, &stop));
+            output = Some(child.wait_with_output().expect("omn should finish"));
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            written = writers.join().expect("the writers");
+        });
+    });
+    let output = output.expect("the session's output");
     let _ = std::fs::remove_file(&file);
     assert!(output.status.success(), "{}", stderr(&output));
+    let written = written.expect("the direct writes");
 
     let document = json(&output);
     let depth = series(
@@ -1209,11 +1543,48 @@ fn a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it() {
         &device.key,
     )
     .expect("the queue depth is reported per device");
-    assert!(
-        number(&depth["max"]) >= 1.0,
-        "{KNOWN_BYTES} bytes of writeback keep tens of requests in flight, and a 20 ms poll \
-         over two seconds saw a queue that never held one: {depth}"
-    );
+    // When a 20 ms poll cannot miss the queue. Not if the queue stayed
+    // non-empty for two of its intervals without a break: one read lands
+    // inside that whatever the phase, and the second interval is the slack a
+    // loaded machine puts in a tick. Nor, to one chance in a thousand, if the
+    // kernel found it non-empty for a share `f` of the writes and they
+    // spanned `n` polls: `(1 - f)^n`, the polls missing it every time. On
+    // this machine alone `f` is 0.8 and more; with five other streams' tests
+    // writing to the same disk it has been 0.1, which leaves one chance in
+    // twenty-five of a right gauge that saw nothing, and the depth is then
+    // reported, not required.
+    const POLL: Duration = Duration::from_millis(20);
+    let share = kernel.busy.as_secs_f64() / kernel.span.as_secs_f64().max(1e-9);
+    let polls = kernel.span.as_secs_f64() / POLL.as_secs_f64();
+    let all_missed = (1.0 - share.min(1.0)).powf(polls);
+    if kernel.longest >= POLL * 2 || all_missed <= 1e-3 {
+        assert!(
+            number(&depth["max"]) >= 1.0,
+            "the kernel's own reads of /sys/block/{}/inflight found the queue non-empty for \
+             {:?} of {:?} ({:?} at a stretch, deepest {}, {} reads), and a 20 ms poll saw a \
+             queue that never held one: {depth}",
+            device.leaf,
+            kernel.busy,
+            kernel.span,
+            kernel.longest,
+            kernel.deepest,
+            kernel.reads
+        );
+    } else {
+        eprintln!(
+            "skipped the depth: the kernel's own reads of /sys/block/{}/inflight, {} of them a \
+             millisecond apart across the write, found its queue non-empty for {:?} of {:?} \
+             ({:?} at a stretch at most, deepest {}), which {polls:.0} polls at 20 ms all miss \
+             with probability {all_missed:.3}; the session's maximum was {}",
+            device.leaf,
+            kernel.reads,
+            kernel.busy,
+            kernel.span,
+            kernel.longest,
+            kernel.deepest,
+            depth["max"]
+        );
+    }
 
     // The series has to have the spacing the request asked for. Two seconds at
     // 20 ms is a hundred reads, and a session whose points are counted in tens
@@ -1232,20 +1603,144 @@ fn a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it() {
     // The volume over the same window, from the polled series rather than a
     // counted total: the two emits are two roads to one number and they have
     // to agree about the floor the workload set.
-    let volume: f64 = output_of(result(&document, "volume"), "timeline")["series"]
+    //
+    // The floor is the writes that began after the series' first read and
+    // returned before its last, by the workload's own clock against the
+    // window's stamps -- both `CLOCK_MONOTONIC`. Not every write: a tool slow
+    // to start under load opens its window after the workload has begun, and
+    // the bytes before it are no series' to report.
+    let volume_result = result(&document, "volume");
+    let points: Vec<serde_json::Value> = output_of(volume_result, "timeline")["series"]
         .as_array()
         .expect("the volume has series")
         .iter()
         .filter(|series| series["key"] == device.key.as_str())
         .flat_map(|series| series["points"].as_array().cloned().unwrap_or_default())
-        .map(|point| number(&point["value"]))
-        .sum();
+        .collect();
+    let volume: f64 = points.iter().map(|point| number(&point["value"])).sum();
+    let opened = volume_result["window"]["opened_ns"]
+        .as_u64()
+        .expect("the window's opening");
+    let offset = |point: Option<&serde_json::Value>| {
+        point
+            .and_then(|point| point["offset_ns"].as_u64())
+            .unwrap_or(0)
+    };
+    let (first, last) = (
+        opened + offset(points.first()),
+        opened + offset(points.last()),
+    );
+    let inside = written
+        .iter()
+        .filter(|(began, returned)| *began >= first && *returned <= last)
+        .count() as u64
+        * DIRECT_CHUNK as u64;
     assert!(
-        volume >= KNOWN_BYTES as f64,
-        "the polled series adds up to {volume} bytes on {}, less than the {KNOWN_BYTES} the \
-         workload synced inside the window",
+        inside > 0,
+        "none of the {} writes fell between the series' first and last reads",
+        written.len()
+    );
+    assert!(
+        volume >= inside as f64,
+        "the polled series adds up to {volume} bytes on {}, less than the {inside} the \
+         workload wrote straight to it between the series' first and last reads",
         device.leaf
     );
+}
+
+/// How many threads write at once in the queue scenario: each holds one
+/// request in flight while it waits, so the queue is empty only in the instant
+/// between one thread's write returning and the next one's arriving, and every
+/// other thread is in the middle of its own.
+const WRITERS: usize = 8;
+
+/// The size of each direct write: 128 KiB, a request most devices take whole.
+/// Not larger: a megabyte at a time, eight at once, is gigabytes in 600 ms on
+/// this machine's NVMe, and the scenarios beside it in this binary bracket the
+/// same device's counters -- two of them failed on the extra volume.
+const DIRECT_CHUNK: usize = 128 << 10;
+
+/// `threads` threads writing `DIRECT_CHUNK`s straight to the device, each over
+/// its own 2 MiB of the file, until `span` has passed. Returns when each
+/// write began and returned, in `CLOCK_MONOTONIC`; every one of its
+/// `DIRECT_CHUNK` bytes reached the device in between: `O_DIRECT` bypasses the page cache, so there is no
+/// writeback to wait for and no burst that drains in a few milliseconds.
+fn direct_writes_for(
+    path: &Path,
+    threads: usize,
+    span: Duration,
+) -> std::io::Result<Vec<(u64, u64)>> {
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let writers = scope.spawn(|| direct_writes_until(path, threads, &stop));
+        std::thread::sleep(span);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writers.join().expect("the writers")
+    })
+}
+
+/// `direct_writes_for`, until `stop` is set.
+fn direct_writes_until(
+    path: &Path,
+    threads: usize,
+    stop: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<Vec<(u64, u64)>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    const REGION: usize = 2 << 20;
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|index| {
+                let path = path.to_owned();
+                scope.spawn(move || -> std::io::Result<Vec<(u64, u64)>> {
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .custom_flags(libc::O_DIRECT)
+                        .open(&path)?;
+                    let fd = file.as_raw_fd();
+                    let mut storage = incompressible(DIRECT_CHUNK + PAGE);
+                    let offset = (PAGE - (storage.as_ptr() as usize % PAGE)) % PAGE;
+                    // Safety: `offset` is under `PAGE` and the allocation is
+                    // `DIRECT_CHUNK + PAGE`, so `DIRECT_CHUNK` bytes from here are
+                    // inside it, aligned as `O_DIRECT` requires.
+                    let buffer = unsafe { storage.as_mut_ptr().add(offset) } as *const libc::c_void;
+                    let mut written = Vec::new();
+                    let mut at = 0usize;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let position = (index * REGION + at) as libc::off_t;
+                        let began = monotonic_ns();
+                        // Safety: the descriptor is open for writing and the
+                        // buffer is this thread's own, alive for the call.
+                        let done = unsafe { libc::pwrite(fd, buffer, DIRECT_CHUNK, position) };
+                        if done != DIRECT_CHUNK as isize {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        written.push((began, monotonic_ns()));
+                        at = (at + DIRECT_CHUNK) % REGION;
+                    }
+                    Ok(written)
+                })
+            })
+            .collect();
+        let mut all = Vec::new();
+        for worker in workers {
+            all.extend(worker.join().expect("a writer thread")?);
+        }
+        Ok(all)
+    })
+}
+
+/// `CLOCK_MONOTONIC`, the clock the tool stamps its windows in.
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Safety: `now` is this frame's own, and the clock id is a constant.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
 }
 
 /// Pressure is reported as a share of the window it was measured over, and
@@ -1294,7 +1789,16 @@ fn pressure_is_a_share_of_its_own_window_and_full_never_exceeds_some() {
             "json",
         ],
         &device,
-        || write_and_sync(&file),
+        || {
+            // Writes straight to the device for 600 ms, eight at a time, so
+            // a task is blocked on I/O for most of the window rather than for
+            // the 20 ms a buffered 64 MiB and one fsync take to drain here --
+            // a stall too short to stand out against a shared machine's idle
+            // one. A filesystem that refuses O_DIRECT gets the buffered write.
+            if direct_writes_for(&file, WRITERS, Duration::from_millis(600)).is_err() {
+                write_and_sync(&file);
+            }
+        },
     );
     let _ = std::fs::remove_file(&file);
     assert!(output.status.success(), "{}", stderr(&output));
@@ -1350,8 +1854,8 @@ fn pressure_is_a_share_of_its_own_window_and_full_never_exceeds_some() {
     }
     assert!(
         under_load > quiet,
-        "a task blocked in fsync for the length of a 64 MiB writeback is stall time, and the \
-         window that held it reports {under_load:.3} against {quiet:.3} for an idle one"
+        "eight tasks blocked in direct writes for 600 ms are stall time, and the window that \
+         held them reports {under_load:.3} against {quiet:.3} for an idle one"
     );
 }
 
@@ -3116,9 +3620,9 @@ fn no_fentry_here() -> Option<String> {
         return None;
     }
     Some(format!(
-        "this build cannot attach an fentry program: {}. `make` grants CAP_BPF and CAP_PERFMON \
+        "{}: this build cannot attach an fentry program. `make` grants CAP_BPF and CAP_PERFMON \
          to target/debug/omn, and every `cargo build` drops them again",
-        stderr(&output).lines().next().unwrap_or("").trim()
+        machine_reason(&output)
     ))
 }
 
@@ -4939,10 +5443,18 @@ fn buckets_of(series: &serde_json::Value) -> BTreeMap<u64, u64> {
 ///
 /// Not bit for bit per bucket, and why: the two program sets are two programs
 /// on each tracepoint, each reading the clock when it runs, so the same request
-/// has two intervals a few tens of nanoseconds apart, and one within that of a
-/// power of two can land on either side of it. The comparison allows a request
-/// to cross only where the stream's own value is within 2 % of a bucket edge,
-/// and the totals must agree exactly.
+/// has two intervals apart by whatever ran between the two reads -- the first
+/// set's own work, and an interrupt when one lands there. Measured with a third
+/// set, the witness, paired with the stream request by request: -350 to
+/// +570 ns, median +120, on 999 direct 4 KiB reads of about 5.7 us. That is
+/// what put 4 of 318 across an edge in one run of five (the fifteenth wave's
+/// finding): the old tolerance was 2 % of the value, 115 ns at 5.7 us, and the
+/// skew is absolute. The comparison now allows a request to cross only where
+/// the stream's value is within twice this run's median skew of an edge, plus
+/// as many as the witness itself was seen to put in another bucket from
+/// beyond that reach, and the totals must agree exactly. The arithmetic is not
+/// the cause: `insn::the_unrolled_log2_is_the_same_arithmetic_as_the_layouts`
+/// holds the kernel's bucketing to the emit layer's at every edge.
 #[test]
 fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
     if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
@@ -4977,7 +5489,12 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
          \x20   source: io.latency\n\
          \x20   target: {{launch: {launch}}}\n\
          \x20   mode: trace\n\
-         \x20   emit: [raw, hist]\n"
+         \x20   emit: [raw, hist]\n\
+         \x20 - label: witness\n\
+         \x20   source: io.latency\n\
+         \x20   target: {{launch: {launch}}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [raw]\n"
     );
     let session_path = scratch("io-two-histograms.yml");
     std::fs::write(&session_path, session).expect("the session");
@@ -5020,9 +5537,13 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         said(streamed)
     );
 
-    // What the stream carried: every request one of the two sizes, or the
-    // readahead a filesystem may turn a first direct read into, and never more
-    // requests of a size than reads of it.
+    // What the stream carried: every request one of the two sizes, a
+    // fragment of a 64 KiB read, or the readahead a filesystem may turn a
+    // first direct read into, and never more requests of a size than reads of
+    // it. A fragment is what a direct read spanning two extents of a
+    // fragmented file becomes -- one request per extent (btrfs at 99 % full
+    // here: 40 960 + 24 576, six times in 64 reads). Fragments are synchronous
+    // reads of less than a block, and together they make whole blocks.
     let events = raw_events(streamed);
     let of = |bytes: u64| {
         events
@@ -5030,6 +5551,12 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
             .filter(|attrs| attrs["bytes"].as_u64() == Some(bytes) && attrs["rwbs"] != "RA")
             .count()
     };
+    let fragments: Vec<u64> = events
+        .iter()
+        .filter(|attrs| !attrs["rwbs"].as_str().unwrap_or_default().contains('A'))
+        .filter_map(|attrs| attrs["bytes"].as_u64())
+        .filter(|&bytes| bytes != 4096 && bytes != 65536)
+        .collect();
     assert!(
         of(4096) <= PAGES && of(65536) <= BLOCKS,
         "more requests than reads: {}",
@@ -5039,8 +5566,28 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         let bytes = attrs["bytes"].as_u64().unwrap_or_default();
         let rwbs = attrs["rwbs"].as_str().unwrap_or_default();
         assert!(
-            bytes == 4096 || bytes == 65536 || rwbs.contains('A'),
+            bytes == 4096
+                || bytes == 65536
+                || rwbs.contains('A')
+                || (bytes < 65536 && bytes % 512 == 0),
             "a request of {bytes} bytes (`{rwbs}`) that the program did not make"
+        );
+    }
+    let fragment_bytes: u64 = fragments.iter().sum();
+    assert_eq!(
+        fragment_bytes % 65536,
+        0,
+        "requests of {fragments:?} bytes do not make whole 64 KiB reads"
+    );
+    let fragmented_reads = fragment_bytes / 65536;
+    // The requests the fragments add over the reads they make up.
+    let split = fragments.len() as u64 - fragmented_reads;
+    if !fragments.is_empty() {
+        eprintln!(
+            "{} of the program's 64 KiB reads reached the device as {} requests: the file is \
+             fragmented on this filesystem",
+            fragmented_reads,
+            fragments.len()
         );
     }
     let lost = |result: &serde_json::Value| losses(result)["dropped"].as_u64().unwrap_or(0);
@@ -5073,7 +5620,7 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
     // (the interpreter's own reads, another process's under the same launch)
     // shows here as a total above what the program issued.
     let issued = (PAGES + BLOCKS) as u64;
-    let readahead = events.len() as u64 - (of(4096) + of(65536)) as u64;
+    let readahead = events.len() as u64 - (of(4096) + of(65536) + fragments.len()) as u64;
     assert!(
         readahead <= 2,
         "{readahead} requests of neither size the program read at: at most the first read \
@@ -5083,9 +5630,10 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         // A lost request is one the path did not count; it was still made.
         let seen = counted + lost(result);
         assert!(
-            seen + 2 >= issued && counted <= issued,
+            seen + 2 >= issued && counted <= issued + split,
             "the `{}` path counted {counted} requests and dropped {}, and the program made \
-             {issued} ({PAGES} of 4 KiB and {BLOCKS} of 64 KiB)",
+             {issued} ({PAGES} of 4 KiB and {BLOCKS} of 64 KiB), {split} more where a read was \
+             split along the file's extents",
             result["label"].as_str().unwrap_or("?"),
             lost(result)
         );
@@ -5110,12 +5658,12 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         );
         return;
     }
+    let blocks = of(65536) as u64 + fragmented_reads;
     assert!(
-        of(4096) + 1 >= PAGES && of(65536) + 1 >= BLOCKS,
+        of(4096) + 1 >= PAGES && blocks + 1 >= BLOCKS as u64,
         "a run that lost nothing is short of the program's reads by more than the one a \
-         filesystem may turn into a readahead: {} of {PAGES} pages, {} of {BLOCKS} blocks",
-        of(4096),
-        of(65536)
+         filesystem may turn into a readahead: {} of {PAGES} pages, {blocks} of {BLOCKS} blocks",
+        of(4096)
     );
     assert_eq!(
         from_kernel.keys().collect::<Vec<_>>(),
@@ -5130,36 +5678,110 @@ fn a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make() {
         total(&from_stream)
     );
 
-    // Requests within 2 % of a power of two, which either side may put in the
-    // bucket on the other side of it.
+    // How far apart two program sets read the clock for one request, measured
+    // rather than assumed: the witness is a third set on the same tracepoints,
+    // and the kernel's own stamp on each request (`blk:rq@open_ts`) pairs its
+    // records with the stream's one for one. Their disagreement is the
+    // skew of this run, on this machine, under this load -- a few hundred
+    // nanoseconds here, absolute and not relative to the latency, which is why
+    // a tolerance of 2 % of the value was too narrow for a request of 5 us.
+    let witness = result(&document, "witness");
+    let (by_stream, by_witness) = (latency_by_request(streamed), latency_by_request(witness));
+    let mut skews: Vec<u64> = by_stream
+        .iter()
+        .filter_map(|(request, value)| Some(value.abs_diff(*by_witness.get(request)?)))
+        .collect();
+    skews.sort_unstable();
+    let paired = skews.len();
+    assert!(
+        paired * 10 >= by_stream.len() * 9,
+        "the witness paired {paired} of the stream's {} requests by their kernel stamp",
+        by_stream.len()
+    );
+    // The usual skew, and the requests something ran between the reads of.
+    // The reach is twice the *median* skew, not a high percentile: a request
+    // the kernel's set and the stream's read 120 ns apart crosses an edge only
+    // if it lies within that of one. What the median leaves out -- an
+    // interrupt or a preemption between two sets' programs, microseconds once
+    // in a while (11.5 us once in six runs here) -- is allowed only as the
+    // witness saw it actually happen: a witnessed request skewed beyond the
+    // reach *and* put in another bucket than the stream's. The kernel's set is
+    // not the witness, so this is a margin measured on the run, not a
+    // calibration; it is not one counted twice either, since a crosser the
+    // witness saw beyond the reach is not one the reach accounts for.
+    let bucket = |value: u64| if value == 0 { 0 } else { 1u64 << value.ilog2() };
+    let skew = skews[paired / 2];
+    let reach = 2 * skew;
+    let outliers = by_stream
+        .iter()
+        .filter_map(|(request, value)| Some((*value, *by_witness.get(request)?)))
+        .filter(|(stream, witness)| {
+            stream.abs_diff(*witness) > reach && bucket(*stream) != bucket(*witness)
+        })
+        .count() as u64;
     let near_an_edge = events
         .iter()
         .filter_map(|attrs| attrs["latency_ns"].as_u64())
         .filter(|&value| {
             let edge = value.next_power_of_two();
             let below = edge / 2;
-            let near = |edge: u64| (value as f64 - edge as f64).abs() <= edge as f64 * 0.02;
+            let near = |edge: u64| value.abs_diff(edge) <= reach;
             near(edge) || (below > 0 && near(below))
         })
         .count() as u64;
-    let mut moved = 0;
+    // The fewest edge crossings that turn one histogram into the other: walking
+    // up the buckets, whatever one side holds more of below an edge must have
+    // crossed that edge, so the running difference after each bucket is the
+    // traffic across the edge above it. Every one of those crossings is a
+    // request within reach of that edge.
+    let mut crossings = 0;
     for (key, kernel_buckets) in &from_kernel {
         let stream_buckets = &from_stream[key];
         let lows: std::collections::BTreeSet<&u64> =
             kernel_buckets.keys().chain(stream_buckets.keys()).collect();
+        let mut carried: i64 = 0;
         for low in lows {
             let a = kernel_buckets.get(low).copied().unwrap_or(0);
             let b = stream_buckets.get(low).copied().unwrap_or(0);
-            moved += a.abs_diff(b);
+            carried += a as i64 - b as i64;
+            crossings += carried.unsigned_abs();
         }
     }
-    // A request that crossed an edge is one bucket short and one over: two.
-    assert!(
-        moved <= 2 * near_an_edge,
-        "the kernel's buckets differ from the stream's by {moved} counts, and only \
-         {near_an_edge} requests were close enough to an edge to cross it:\n kernel {from_kernel:?}\n \
-         stream {from_stream:?}"
+    eprintln!(
+        "the two histograms are {crossings} edge crossings apart; {near_an_edge} requests were \
+         within {reach} ns of an edge (twice the median skew of {paired} witnessed requests) \
+         and {outliers} witnessed requests were skewed further and into another bucket"
     );
+    assert!(
+        crossings <= near_an_edge + outliers,
+        "the kernel's buckets and the stream's are {crossings} edge crossings apart, and only \
+         {near_an_edge} requests were within twice the measured skew ({skew} ns, the median \
+         of {paired}) of an edge, with {outliers} witnessed crossers skewed further:\n kernel \
+         {from_kernel:?}\n stream {from_stream:?}"
+    );
+}
+
+/// Each request's latency as one streamed result reports it, by the kernel's
+/// own stamp on the request -- the `blk` key's pointer and `open_ts` -- which
+/// two program sets read identically.
+fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
+    output_of(result, "raw")["events"]
+        .as_array()
+        .expect("a raw emit carries its events")
+        .iter()
+        .filter_map(|event| {
+            let blk = event["keys"]
+                .as_array()?
+                .iter()
+                .find_map(|key| key.get("blk"))?;
+            let latency = event["attrs"]
+                .as_array()?
+                .iter()
+                .find(|attr| attr["name"] == "latency_ns")?["value"]
+                .as_u64()?;
+            Some(((blk["ptr"].as_u64()?, blk["open_ts"].as_u64()?), latency))
+        })
+        .collect()
 }
 
 /// Phase 6's exit criterion: `io.latency --emit hist` at two million requests

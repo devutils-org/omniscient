@@ -231,6 +231,31 @@ fn check_joins(
                     ),
                 ));
             }
+            // A request answered by a histogram the kernel builds (only
+            // `io.latency`'s, `collect::io::builds_histogram_in_kernel`) has
+            // rows of `(device, bucket)` and nothing else: the entry carries the key,
+            // the rows this session would produce do not, and the join would
+            // come back empty as though nothing were related.
+            if via != crate::request::KeyKind::Dev {
+                if let Some(request) = session.requests.iter().find(|request| {
+                    request.source.as_str() == kind.as_str()
+                        && crate::collect::io::builds_histogram_in_kernel(request)
+                }) {
+                    let label = request.label.as_deref().unwrap_or(kind.as_str());
+                    rejections.push(Rejection::with_hint(
+                        format!(
+                            "join `{}` matches on `{via}`, and `{label}` asks `{kind}` only for a \
+                             log2 histogram, which is built in the kernel and carries no `{via}`: \
+                             its rows are one per device and bucket, so the join would match nothing",
+                            rule.id
+                        ),
+                        format!(
+                            "add another emit (`summary`) to `{label}` to have the requests one at \
+                             a time, each with its `{via}`"
+                        ),
+                    ));
+                }
+            }
         }
 
         if rule.window.is_none() {
@@ -915,6 +940,57 @@ mod tests {
         // And a plain ranking, by the keys, asks for no attribute at all.
         ranked.emit = vec!["topk:5".parse().unwrap()];
         assert!(validate_request(&catalog(), &ranked, OutputFormat::Text).is_ok());
+    }
+
+    /// A join over an `io.latency` that asked only for a log2 histogram is
+    /// refused naming the request and the emit that would serve it: that
+    /// request is answered by rows of `(device, bucket)` built in the kernel
+    /// (`collect::io::histogram_is_enough`), which carry no `blk`. The same
+    /// session with `summary` beside the histogram, `io-request-halves.yml`'s
+    /// shape, is accepted. So is a hist-only `io.queue` on the other side:
+    /// only `io.latency`'s collector builds its histogram in the kernel, and
+    /// `io.queue` streams every request whatever it emits.
+    #[test]
+    fn a_join_over_a_histogram_built_in_the_kernel_is_refused_with_the_emit_that_serves_it() {
+        let session = |queue: &str, emit: &str, via: &str| {
+            let text = format!(
+                "requests:\n\
+                 \x20 - {{label: q, source: io.queue, target: system, mode: trace, emit: {queue}}}\n\
+                 \x20 - {{label: device, source: io.latency, target: system, mode: trace, emit: {emit}}}\n\
+                 joins:\n\
+                 \x20 - {{id: halves, from: io.queue, to: io.latency, via: {via}, match: scoped_eq, window: 30s}}\n"
+            );
+            let mut session: Session = serde_norway::from_str(&text).expect("the session parses");
+            session.apply_defaults();
+            session
+        };
+
+        let refused = validate_session(&catalog(), &session("[hist, summary]", "[hist]", "blk"))
+            .expect_err("a join on `blk` over rows that carry no `blk`");
+        let text = format!("{refused:?}");
+        assert!(text.contains("join `halves` matches on `blk`"), "{text}");
+        assert!(
+            text.contains("`device` asks `io.latency` only for a log2 histogram"),
+            "{text}"
+        );
+        assert!(
+            text.contains("add another emit (`summary`) to `device`"),
+            "{text}"
+        );
+
+        if let Err(rejections) = validate_session(
+            &catalog(),
+            &session("[hist, summary]", "[hist, summary]", "blk"),
+        ) {
+            panic!("the requests one at a time carry `blk`: {rejections:?}");
+        }
+        if let Err(rejections) =
+            validate_session(&catalog(), &session("[hist]", "[hist, summary]", "blk"))
+        {
+            panic!(
+                "a hist-only `io.queue` streams every request, each with its `blk`: {rejections:?}"
+            );
+        }
     }
 
     /// A decomposition part read from a join (`value: paired`) is checked

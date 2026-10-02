@@ -66,9 +66,11 @@ merges  via fs:proc  (io.merges)
 64.0 MiB is the file. 513 is `67108864 / 131072` plus one, the device's own
 `max_sectors_kb` being what decides how many requests a transfer takes — that
 divisor is read out of sysfs by the test, not assumed. The zero is the third
-check and the easiest one to fake: this device's scheduler is `none`, so there
-is nothing to coalesce and the right answer is exactly zero. A collector
-returning a plausible number would pass every test that only asks for a number.
+check: it is held to the kernel's own merge columns over a window enclosing the
+session's, read by the test, so a collector returning a plausible number fails
+it. Zero is this run's answer and not a law: the `none` scheduler still merges
+a bio into a request waiting in the submitter's plug list, and the CI's `sda`
+reported 11 and 12 merges for 86 and 83 reads (defect 14).
 
 ---
 
@@ -87,7 +89,8 @@ over one window.
   over a window enclosing the session's — read by the test itself, before and
   after, so the number is bracketed from both sides and neither side is the
   tool's. The operation count is at least `bytes / max_sectors_kb`. The merge
-  count is zero where the scheduler cannot merge.
+  count is at most the kernel's own over the enclosing window, and at most the
+  operations.
 - **Why it is one session and not three**: volume alone cannot tell a few large
   transfers from many small ones, the operation count alone cannot tell a busy
   device from a fast one, and the quotient of the two is the mean request size,
@@ -105,13 +108,19 @@ is the one whose counters are its own.
 `examples/io-device-load.yml` — the same three quantities polled at 20 ms, plus
 the one that is not a counter.
 
-- **Workload**: 64 MiB written and synced, which keeps tens of requests in
-  flight for a couple of hundred milliseconds.
+- **Workload**: eight threads writing 128 KiB straight to the device
+  (`O_DIRECT`) from before the session starts until it ends, each write timed by the workload's own
+  `CLOCK_MONOTONIC`, while the test reads `/sys/block/<dev>/inflight` itself
+  about once a millisecond (defect 15).
 - **Check**: `a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it`
-  asserts the maximum depth on that device is at least one, that the polled
-  volume series adds up to at least the 64 MiB the workload synced — the second
-  road to the number scenario 1 counts — and that a two-second window polled
-  every 20 ms produced about a hundred points rather than a handful.
+  asserts the maximum depth on that device is at least one whenever the
+  kernel's own reads say a 20 ms poll could not have missed the queue (two
+  intervals without a break, or a busy share every poll missing is one chance
+  in a thousand), and says what the kernel saw otherwise; that the polled
+  volume series adds up to at least the writes that began after its first
+  read and returned before its last, by the window's own stamps; and that a
+  two-second window polled every 20 ms produced about a hundred points rather
+  than a handful.
 - **Why the interval is short**: queue depth is a gauge. A queue that fills and
   drains between two reads leaves no trace at all, so at 1 s this scenario is a
   coin toss and at 20 ms it is not. The series then describes the device rather
@@ -305,14 +314,11 @@ The fix is not a better test. It is `fs:cgroup`, which reads the same numbers
 per cgroup and is declared, `equivalent: true`, with no collector — the one
 place in this family where a backend comparison would be worth running.
 
-**Merges above zero.** `io.merges` cannot be driven anywhere but zero on this
-machine, and not for want of trying: the device is multi-queue with the `none`
-scheduler, and the filesystem submits requests already at `max_sectors_kb`, so
-there is nothing adjacent to coalesce. Zero is the right answer and the
-scenario checks it *is* zero, which is a real check — but a machine with
-`mq-deadline` or `bfq` and a workload of many small adjacent reads would
-exercise the other half, and nothing here does. The test branches on the
-scheduler and says which of the two checks it ran.
+**Merges above zero.** `io.merges` comes back zero on this machine for the
+cold read, and the CI's cloud disk, also `none`, reports a dozen (defect 14).
+The check is the kernel's own count over an enclosing window, either way; what
+nothing here does is drive a known number of merges, which a workload of
+adjacent small reads under `mq-deadline` would.
 
 **A backend comparison.** Class B has nothing to compare in this family: each
 of the five sources has exactly one implemented backend, so
@@ -593,7 +599,7 @@ to the mode × emit matrix for exactly this reason, on the grounds that a
 counted window *is* one event; the decision is documented there as needing to
 be promoted or reverted, and this family is a second family that wants it.
 
-### 8. A key the backend cannot produce is accepted silently
+### 8. A key the backend cannot produce is accepted silently — **fixed** (the sixteenth wave)
 
 ```console
 $ omn io.bytes --system -m poll@100ms -d 300ms -e timeline -k task --format json
@@ -617,6 +623,14 @@ carries `targets` and `filter_fields` in exactly that shape and no `keys`, so
 accessors, the loader check and the resolver's refusal are written out under
 "Needs from another stream" in `docs/open-findings.md`; the entry meanwhile
 carries a caveat naming which backend attaches which key.
+
+Fixed: `fs:proc` declares `keys: [dev]` on `io.bytes` and `io.iops`, and
+`fs:cgroup` `keys: [dev, cgroup]`, the first shipped entries to reach the
+resolver's `KeyNotCarried`. `io.bytes -k task` (or `blk`) and `io.iops -k blk`
+are refused where they resolve, naming `bpf:raw_tp` as the backend that
+attaches the key and this build's lack of a collector for it (exit 3):
+`a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_backend_that_does`,
+which also holds `-k dev` to the devices `/proc/diskstats` lists.
 
 This is `docs/open-findings.md` §1 ("the catalog declares per entry what
 actually varies per backend") in its sharpest form: for modes it costs an exit
@@ -1053,3 +1067,117 @@ Fixed by choosing the source from the build: the first catalog entry none of
 whose backends `omn::collect::implements`, which also has a `system` target and
 a `raw` emit so the validator does not refuse it first. Streams B through E land
 collectors in this wave too and will not hit it.
+
+## The sixteenth wave
+
+### 14. A merge count held to zero because the scheduler was `none` — **fixed**
+
+`a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move`
+required `merges <= ops / 8` on a device whose scheduler is `none`, reading
+"`none` coalesces nothing" as a law. The CI's `sda` disproved it on both
+cells: 11 merges in 86 reads, 12 in 83. With no elevator, `blk_mq_submit_bio`
+still merges a bio into a request waiting in the submitter's plug list or the
+software queue, and counts it in the same column of `/proc/diskstats`. The
+tool was right and the test was not. The check is now the kernel's own merge
+columns read by the test from both sides: no more than over a window enclosing
+the session's (`merges <= enclosing.merges`), and no fewer than over the read
+alone, a span the session's own `window` (`opened_ns`, `closed_ns`, on the
+clock the test reads) is asserted to enclose. The operation count is held the
+same way, and `merges <= ops`. A ceiling alone, the first form of this fix,
+passed a collector that always answered 0 (the review of this wave); the floor
+is what a zero would fail, wherever the read merged anything.
+
+### 15. A queue depth required of a burst that drains between two polls — **fixed**
+
+The queue scenario wrote 64 MiB and synced it, and required a 20 ms poll to
+see a depth of one. The kernel's own reads of `/sys/block/nvme0n1/inflight`,
+a millisecond apart, found that queue non-empty for 16 ms at a stretch at
+best: the scenario passed here because a poll happened to land inside the
+burst, and failed on the CI, 101 polls at zero on both cells. Two changes: a
+workload that holds the queue (eight direct writers for the whole session), and the
+depth required only when the kernel's own reads say a 20 ms poll could not
+have missed it, the numbers printed otherwise (`skipped the depth: ...`, in
+`.github/expected-skips.txt`). Its volume floor is now the writes inside the
+series' first and last reads, by `CLOCK_MONOTONIC` on both sides: under a
+load of 20 the tool opened its window after a 600 ms workload had ended, which
+is why the writers now run until the session does.
+
+The pressure scenario took the same writers, for 600 ms: a 20 ms fsync burst did not
+stand out against a shared machine's idle stall (failed once at load 20 with
+three test binaries running).
+
+### 16. Edge-crossers between the kernel's histogram and the stream's — **bounded**
+
+The fifteenth wave saw 4 counts of 318 in different buckets in one run of five
+of `a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`,
+and this wave, under load, 3 failures in 12 runs, two of them with no request
+within the old tolerance of an edge. The cause is not the bucket arithmetic:
+`insn::push_log2_bucket` and the emit layer's `BucketLayout::Log2` both put
+`[2^(k-1), 2^k)` in bucket `k`. It is the clock: each program set reads
+`bpf_ktime_get_ns` when it runs, so one request has two intervals apart by
+whatever ran between the two reads. Measured with a third set paired with the
+stream by the kernel's own stamp on each request (`blk:rq@open_ts`): -350 to
++570 ns, median +120, over 999 direct 4 KiB reads of about 5.7 us -- and once,
+11.5 us, an interrupt between two programs. The old tolerance was 2 % of the
+value, 115 ns at that latency; the skew is absolute.
+
+The test now carries that witness and counts the fewest edge crossings that
+turn one histogram into the other (the running difference over the buckets),
+allowing one per request within twice the run's *median* skew of an edge,
+plus as many as the witness itself put in another bucket from beyond that
+reach. The first form of this bound took the p99 skew and allowed every
+witnessed request beyond it on top: 1.2 us of reach, 143 of 320 requests
+inside it at 5.7 us, a test that failed only past 45 % disagreeing (the
+review of this wave). With the median: 240 to 300 ns of reach, 1 to 30 of 328
+requests inside it, 0 to 12 crossings in five runs. The bucket arithmetic is
+held separately, to known values at every edge, by
+`insn::the_unrolled_log2_is_the_same_arithmetic_as_the_layouts`. What would
+hold the two histograms to a known set of *device* latencies is a device that
+completes in a set time, `null_blk` with `irqmode=2 completion_nsec=<n>`:
+a module load, under "Needs privilege" in `docs/fixes/w16-io.md`. Bit equality
+needs one program feeding both, filed to the owner of `src/bpf/io.rs`.
+
+The same test met a fragmented file under `/home` at 99 % full (btrfs): a
+64 KiB direct read spanning two extents reaches the device as two requests
+(40 960 + 24 576, eight reads in 64). The program's account is now held in
+whole reads: fragments are synchronous, smaller than a block, sector-aligned,
+and add up to whole 64 KiB reads, each split adding one request to the ceiling.
+
+### 17. The eBPF skips said "no viable backend on this machine:." and stopped
+
+Every `no_bpf_here`/`no_fentry_here` skip quoted the refusal's first line,
+which ends in a colon; the reasons are the indented lines under it. The skip
+now puts the backends' own missing pieces first.
+
+### 18. `dm-delay`: a latency set from outside
+
+`tests/dm_delay.rs::a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device`.
+A loop device over a 16 MiB file in `target/tmp`, `sudo -n dmsetup create
+omn-delay-<pid>` with `delay <loop> 0 20` (20 ms on reads and writes), and a
+program issuing 12 `pread64` and 12 `pwrite64` of 4 KiB with `O_DIRECT`, each
+timed by its own clock. Held: every call at least 20 ms less one kernel tick
+by the program's clock (`dm-delay` releases a bio on the first jiffy at or past
+its deadline: 19.91 ms of 20 seen at HZ 1000); `io.syscall` exactly 12 and 12
+on that descriptor, with at least 24 x 20 ms inside and no more than the
+program's own clock put around them; the loop device below with at least 24
+requests and almost none of the delay; and the vertical attribution, syscall
+time less device time, at least the configured delay times the count. Here:
+481 ms at the syscall layer, 0.35 ms on `dev:7+0` in 27 requests, 481 ms above
+the device against 456 configured (20 ms less one 1 ms tick, times 24).
+
+`dm-delay` is bio-based, so the delay never appears on a request at all:
+`io.latency` cannot see it on the mapped device (there are no requests) or on
+the loop device (they arrive late and are served fast). The layer that sees it
+is the one above. The test skips naming the missing piece -- the tracers'
+capabilities first, then `sudo` itself, the loop driver, a `sudo -n losetup`
+or `sudo -n dmsetup` sudo refuses, device-mapper, dm-delay (neither
+`/sys/module/dm_delay` nor `modinfo dm_delay`), or the udev rule that gives
+`omn-*` mapped devices to the user -- and fails, rather than skips, when every
+piece is there and the command still fails. It removes the mapped device and
+the loop device on a panic too. The tick is read from `/proc/config.gz`, else
+`/boot/config-<release>`, else HZ 100 with a note. The delay is held from
+above too, as a separation: the median call under twice the delay, and the
+syscall layer's time above the device under twice the delay times the count
+(a delay applied twice); and the syscall layer's total to at least nine tenths
+of the program's own clock around the calls.
+

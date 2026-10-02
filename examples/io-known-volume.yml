@@ -64,10 +64,12 @@ requests:
     emit: [summary, rate]
     keys: [dev]
 
-  # What the block layer coalesced. On a multi-queue device with the `none`
-  # scheduler this is zero and zero is the right answer, which is worth
-  # checking: a collector that invented a plausible number would pass every
-  # test that only asks for a number.
+  # What the block layer coalesced. Often zero for a large sequential read,
+  # and not zero by law even with the `none` scheduler: a bio is still merged
+  # into a request waiting in the submitter's plug list (the CI's cloud disk
+  # reports a dozen in 86 reads). The kernel's own merge columns over the same
+  # window are what to hold it to; a collector that invented a plausible
+  # number would pass every test that only asks for a number.
   - label: merges
     source: io.merges
     target: system

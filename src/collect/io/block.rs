@@ -139,9 +139,9 @@ pub struct Prepare {
 /// join reads) is something a row keyed by device does not carry.
 ///
 /// The one thing this cannot see is a session's join: a join names sources, not
-/// requests, and reaches no collector. A `hist`-only `io.latency` in a session
-/// that joins it `via: blk` is answered with rows that carry no `blk`, and the
-/// run's note says so (filed to the validator in `docs/open-findings.md`).
+/// requests, and reaches no collector. The validator can, and refuses a join on
+/// any key but `dev` over a request this answers (exit 2, naming the emit that
+/// would carry the key): `validate::check_joins`.
 pub fn histogram_is_enough(request: &crate::request::Request) -> bool {
     use crate::request::{Emit, HistScale, KeyKind};
     request.mode == Mode::Trace
