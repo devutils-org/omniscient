@@ -129,7 +129,13 @@ pub enum KeyValue {
     },
     /// A network interface, by kernel index and by name. Both are carried: the
     /// index is what the kernel uses, the name is what a person reads, and an
-    /// interface that gets renamed is still the same interface.
+    /// interface that gets renamed is still the same interface -- a join
+    /// compares the index ([`KeyValue::iface_identity`]), and only the name
+    /// when no index was known at the read.
+    ///
+    /// The name may carry a sub-series after a `/` (`lo/drops`, `net.iface`'s
+    /// counter kinds): no Linux interface name holds a `/`, so everything
+    /// before it is the interface ([`KeyValue::iface_name`]).
     Iface {
         index: u32,
         name: String,
@@ -153,10 +159,47 @@ pub enum KeyValue {
 }
 
 impl KeyValue {
+    /// An interface key. An index of 0 -- a producer that reads a name, such
+    /// as `/proc/net/dev` -- is resolved from the name at the read, while the
+    /// interface exists, so every producer's key of one interface carries its
+    /// index; it stays 0 when the kernel knows no interface by that name (it
+    /// is gone, or in another network namespace).
     pub fn iface(index: u32, name: impl Into<String>) -> Self {
+        let name = name.into();
+        let index = if index == 0 {
+            index_of(iface_base(&name))
+        } else {
+            index
+        };
+        KeyValue::Iface { index, name }
+    }
+
+    /// An interface key exactly as given, with no lookup: what a test, or an
+    /// event read back from a file, writes.
+    pub fn iface_as_given(index: u32, name: impl Into<String>) -> Self {
         KeyValue::Iface {
             index,
             name: name.into(),
+        }
+    }
+
+    /// The interface an `iface` key names, without the sub-series a producer
+    /// may have written after a `/`. `None` for every other key.
+    pub fn iface_name(&self) -> Option<&str> {
+        match self {
+            KeyValue::Iface { name, .. } => Some(iface_base(name)),
+            _ => None,
+        }
+    }
+
+    /// What two `iface` keys are compared by: the kernel's index when the
+    /// read knew it, so a rename is still one interface and `lo/drops` is
+    /// `lo`; the interface's name otherwise. `None` for every other key.
+    pub fn iface_identity(&self) -> Option<String> {
+        match self {
+            KeyValue::Iface { index, .. } if *index != 0 => Some(format!("iface#{index}")),
+            KeyValue::Iface { name, .. } => Some(format!("iface:{}", iface_base(name))),
+            _ => None,
         }
     }
 
@@ -178,6 +221,26 @@ impl KeyValue {
 
     pub fn proc(pidns: u64, pid: i32) -> Self {
         KeyValue::Proc { pidns, pid }
+    }
+
+    /// The `proc` key of a process this tool sees as `pid`: the pid namespace
+    /// it lives in (the inode `/proc/<pid>/ns/pid` names) and its pid inside
+    /// that namespace (the last `NSpid` of `/proc/<pid>/status`), so two
+    /// containers' pid 1 are two keys and a process is never its main thread.
+    /// `None` when either is unreadable: the process is gone, or the namespace
+    /// link is closed to this user (it needs the access `ptrace` read does).
+    pub fn proc_of(pid: i32) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let pidns = std::fs::metadata(format!("/proc/{pid}/ns/pid")).ok()?.ino();
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let inner = status
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))?
+            .split_whitespace()
+            .last()?
+            .parse()
+            .ok()?;
+        Some(KeyValue::Proc { pidns, pid: inner })
     }
 
     pub fn kind(&self) -> KeyKind {
@@ -217,6 +280,22 @@ impl fmt::Display for KeyValue {
             KeyValue::Node { node } => write!(f, "node:{node}"),
         }
     }
+}
+
+/// The interface part of an `iface` key's name: everything before a `/`,
+/// which the kernel refuses in an interface name.
+fn iface_base(name: &str) -> &str {
+    name.split_once('/').map_or(name, |(base, _)| base)
+}
+
+/// The kernel's index for an interface name in this network namespace, 0 when
+/// it has none.
+fn index_of(name: &str) -> u32 {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return 0;
+    };
+    // SAFETY: a NUL-terminated string we own, read and not kept.
+    unsafe { libc::if_nametoindex(name.as_ptr()) }
 }
 
 /// A named measurement carried by an event.
@@ -334,6 +413,64 @@ impl fmt::Display for AttrValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process's `proc` key is its pid namespace and its pid inside it, as
+    /// the kernel names both: the namespace's inode in the link's own text
+    /// (`pid:[<inode>]`), and, in the namespace this test runs in, the pid
+    /// the kernel gave it.
+    #[test]
+    fn a_process_is_keyed_by_its_pid_namespace_and_its_pid_inside_it() {
+        let me = std::process::id() as i32;
+        let link = std::fs::read_link("/proc/self/ns/pid").expect("a pid namespace");
+        let named: u64 = link
+            .to_string_lossy()
+            .trim_start_matches("pid:[")
+            .trim_end_matches(']')
+            .parse()
+            .expect("an inode");
+        let Some(KeyValue::Proc { pidns, pid }) = KeyValue::proc_of(me) else {
+            panic!("this process can read its own namespace");
+        };
+        assert_eq!(pidns, named);
+        let status = std::fs::read_to_string("/proc/self/status").expect("readable");
+        let depth = status
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))
+            .map_or(1, |pids| pids.split_whitespace().count());
+        if depth == 1 {
+            assert_eq!(pid, me, "in one pid namespace the pid inside it is the pid");
+        }
+        assert!(KeyValue::proc_of(i32::MAX).is_none(), "no such process");
+    }
+
+    /// A producer that reads only a name gets the kernel's index at the read:
+    /// `lo` is 1 in every network namespace Linux makes, and the sub-series
+    /// after a `/` is not part of the name looked up.
+    #[test]
+    fn an_interface_named_without_its_index_is_given_the_kernels() {
+        let expected: u32 = std::fs::read_to_string("/sys/class/net/lo/ifindex")
+            .expect("every Linux machine has lo")
+            .trim()
+            .parse()
+            .expect("an index");
+        assert_eq!(expected, 1);
+        for name in ["lo", "lo/drops"] {
+            let key = KeyValue::iface(0, name);
+            assert!(
+                matches!(key, KeyValue::Iface { index, .. } if index == expected),
+                "{key:?}"
+            );
+            assert_eq!(key.iface_name(), Some("lo"));
+            assert_eq!(key.iface_identity().as_deref(), Some("iface#1"));
+        }
+        let gone = KeyValue::iface(0, "omn-no-such-if/drops");
+        assert!(matches!(gone, KeyValue::Iface { index: 0, .. }), "{gone:?}");
+        assert_eq!(
+            gone.iface_identity().as_deref(),
+            Some("iface:omn-no-such-if")
+        );
+        assert_eq!(KeyValue::task(1).iface_identity(), None);
+    }
 
     fn sample() -> Event {
         Event {

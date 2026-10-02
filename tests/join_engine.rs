@@ -804,16 +804,39 @@ fn the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_prog
     let freed_at = run.reported("FREED ")[0][0]
         .parse::<u64>()
         .expect("a timestamp");
+    // The interpreter's own startup is the third: a first reading taken
+    // before it was ready (a slow VM, CI's `defaults` cell) saw part of it,
+    // and the rise in `live` then includes what it allocated after that
+    // reading -- at most what glibc says it holds once ready.
+    let ready = &run.reported("READY ")[0];
+    let ready_at = ready[0].parse::<u64>().expect("a timestamp");
+    let in_use_when_ready = ready[1].parse::<f64>().expect("bytes");
+    let free_when_ready = ready[2].parse::<f64>().expect("bytes");
+    let resident_when_ready = ready[3].parse::<f64>().expect("bytes");
     let result = run.result("retained");
     let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
-    let last_reading = result["outputs"]
+    let readings: Vec<(u64, f64)> = result["outputs"]
         .as_array()
         .expect("outputs")
         .iter()
         .filter(|output| output["emit"] == "raw")
         .flat_map(|output| output["events"].as_array().into_iter().flatten())
-        .filter_map(|event| event["ts_ns"].as_u64())
-        .max()
+        .filter_map(|event| {
+            let live = event["attrs"]
+                .as_array()?
+                .iter()
+                .find(|attr| attr["name"] == "live")?["value"]
+                .as_f64()?;
+            Some((event["ts_ns"].as_u64()?, live))
+        })
+        .collect();
+    let last_reading = readings.iter().map(|(ts, _)| *ts).max().unwrap_or(0);
+    // The rows' own filter, `live > 0`: the first reading they start from.
+    let first_reading = readings
+        .iter()
+        .filter(|(_, live)| *live > 0.0)
+        .map(|(ts, _)| *ts)
+        .min()
         .unwrap_or(0);
     eprintln!(
         "last reading {:+.1} ms from the last free; the shim dropped {dropped}",
@@ -851,24 +874,57 @@ fn the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_prog
         );
         return;
     }
+    // What the startup after the first reading can add to each row, by the
+    // program's own figures once ready; nothing when the first reading came
+    // after it.
+    let early = first_reading < ready_at;
+    let (startup_live, startup_retained, startup_resident) = if early {
+        (in_use_when_ready, free_when_ready, resident_when_ready)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    if !early {
+        assert!(
+            (live - held).abs() <= INTERPRETER,
+            "the program ends holding {held} bytes it asked for; the live row says {live}"
+        );
+    } else {
+        if in_use_when_ready < 0.0 {
+            eprintln!(
+                "not asserted: the first reading came {:.1} ms before the interpreter was \
+                 ready, and this glibc has no mallinfo2 to say how much of the startup the \
+                 rows include",
+                (ready_at - first_reading) as f64 / 1e6
+            );
+            return;
+        }
+        eprintln!(
+            "the first reading came {:.1} ms before the interpreter was ready: the live row \
+             may include up to the {in_use_when_ready} bytes glibc says it held then",
+            (ready_at - first_reading) as f64 / 1e6
+        );
+        assert!(
+            live >= held - INTERPRETER && live <= held + in_use_when_ready + INTERPRETER,
+            "the program ends holding {held} bytes it asked for, and held {in_use_when_ready} \
+             when it was ready, after the first reading; the live row says {live}"
+        );
+    }
     assert!(
-        (live - held).abs() <= INTERPRETER,
-        "the program ends holding {held} bytes it asked for; the live row says {live}"
-    );
-    assert!(
-        (retained - whole_pages).abs() <= INTERPRETER,
-        "the freed blocks cover {whole_pages} bytes of whole pages; the retained row says \
+        (retained - whole_pages).abs() <= startup_retained + INTERPRETER,
+        "the freed blocks cover {whole_pages} bytes of whole pages (and glibc kept \
+         {startup_retained} free from a startup the rows began inside); the retained row says \
          {retained}"
     );
     let predicted = freed - whole_pages;
     assert!(
-        residue >= -INTERPRETER,
+        residue >= -INTERPRETER - startup_live - startup_retained,
         "a residue of {residue} means more was accounted for than is resident"
     );
     assert!(
-        residue <= predicted + HUGE_PAGE,
+        residue <= predicted + HUGE_PAGE + startup_resident,
         "a residue of {residue} is more than the {predicted} the program predicts plus a huge \
-         page: something resident is in neither row"
+         page (and the {startup_resident} resident bytes of a startup the rows began inside): \
+         something resident is in neither row"
     );
     assert!(
         table.get("residue_resolution").is_none(),
@@ -2517,4 +2573,105 @@ fn a_join_that_evicts_says_how_many_in_results_json_and_in_the_text() {
             "the text's counts balance: {counts} / {evicted}"
         );
     }
+}
+
+/// What loopback has received and transmitted, in bytes, as the kernel counts
+/// it in `/sys/class/net/lo/statistics`.
+fn loopback_bytes() -> f64 {
+    ["rx_bytes", "tx_bytes"]
+        .iter()
+        .map(|file| {
+            std::fs::read_to_string(format!("/sys/class/net/lo/statistics/{file}"))
+                .expect("every Linux machine has lo")
+                .trim()
+                .parse::<f64>()
+                .expect("a counter")
+        })
+        .sum()
+}
+
+/// Two sources of one interface, joined by it: `net.iface`'s `lo/drops` and
+/// `net.bytes`'s `lo` are one key, by the kernel's index, and the bytes lo
+/// moved while both watched are credited -- at least what the kernel counted
+/// across this test's own burst of datagrams, and at most what it counted
+/// across the whole run. Before the key compared the index, the two names
+/// matched nothing and every reading was uncredited.
+#[test]
+fn two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved() {
+    const DATAGRAMS: usize = 2000;
+    let before_run = loopback_bytes();
+    let run = Command::new(BINARY)
+        .args(["-f", "examples/join-iface-loopback.yml", "--format", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+
+    // Well inside the run's two seconds: after the first readings of both
+    // sources, and long before the last.
+    thread::sleep(StdDuration::from_millis(700));
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let to = receiver.local_addr().expect("an address");
+    receiver
+        .set_read_timeout(Some(StdDuration::from_millis(50)))
+        .expect("a timeout");
+    let before_burst = loopback_bytes();
+    let mut buffer = [0u8; 2048];
+    for _ in 0..DATAGRAMS {
+        sender.send_to(&[7u8; 1000], to).expect("a datagram");
+        let _ = receiver.recv_from(&mut buffer);
+    }
+    let burst = loopback_bytes() - before_burst;
+
+    let output = run.wait_with_output().expect("omn should finish");
+    let moved = loopback_bytes() - before_run;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            machine_cannot_serve(&stderr),
+            "the session failed for a reason that is not the machine's:\n{stderr}"
+        );
+        eprintln!(
+            "SKIPPED: {}. It would have checked that two sources of lo join by its index",
+            machine_s_reason(&stderr)
+        );
+        return;
+    }
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("a JSON document");
+    let join = document["joins"]
+        .as_array()
+        .and_then(|joins| {
+            joins
+                .iter()
+                .find(|join| join["rule"] == "lo-moved-while-watched")
+        })
+        .expect("the session's join");
+    let credited = number(&join["readings"]["credited"]);
+    let uncredited = number(&join["readings"]["uncredited"]);
+    eprintln!(
+        "lo moved {burst} bytes in the burst and {moved} over the run; credited {credited}, \
+         uncredited {uncredited}"
+    );
+    assert_eq!(join["evidence"], "TEMPORAL");
+    assert!(
+        burst >= (DATAGRAMS * 2 * 1000) as f64,
+        "the kernel counted {burst} bytes for {DATAGRAMS} datagrams of 1000 bytes, sent and received"
+    );
+    assert!(
+        join["matched"].as_u64().unwrap_or(0) > 0,
+        "no `net.bytes` reading of lo met a `net.iface` state of lo: the key is still \
+         compared by name\n{join}"
+    );
+    assert!(
+        credited >= burst,
+        "the kernel counted {burst} bytes on lo across the burst, inside the run; the join \
+         credited {credited}"
+    );
+    assert!(
+        credited + uncredited <= moved,
+        "the join read {} bytes on lo; the kernel counted {moved} across the whole run",
+        credited + uncredited
+    );
 }

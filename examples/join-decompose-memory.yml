@@ -33,7 +33,13 @@
 # launched program can land before it exec'd, and reads this tool's own forked
 # image. The rows start at the first reading of the running program.
 #
-# The workload is `cross-memory-did-it-stay.yml`'s, unchanged: four 8 MiB
+# The program also prints when it is ready, what glibc says it holds and keeps
+# free then, and its own resident size (`READY <ns> <in use> <free> <rss>`):
+# on a slow machine the first reading can land while the interpreter is still
+# starting, and each row's rise then includes some of the startup -- at most
+# what the program holds, keeps free or has resident once it is ready.
+#
+# The workload is otherwise `cross-memory-did-it-stay.yml`'s: four 8 MiB
 # blocks kept, four freed, and 512 arena blocks of 64 KiB of which every
 # other one is freed into holes between live ones.
 name: where the rise in resident size went
@@ -76,6 +82,23 @@ requests:
           def whole_pages(blocks, size):
               return sum(((b + size) // PAGE - (b + PAGE - 1) // PAGE) * PAGE for b in blocks)
 
+          class MallInfo2(ctypes.Structure):
+              _fields_ = [(name, ctypes.c_size_t) for name in (
+                  'arena', 'ordblks', 'smblks', 'hblks', 'hblkhd',
+                  'usmblks', 'fsmblks', 'uordblks', 'fordblks', 'keepcost')]
+
+          # What the interpreter holds once it is ready, by glibc's own count,
+          # and when that was, on CLOCK_MONOTONIC: a first reading taken before
+          # this saw part of the startup, which the rise then includes.
+          try:
+              libc.mallinfo2.restype = MallInfo2
+              info = libc.mallinfo2()
+              in_use, free = info.uordblks + info.hblkhd, info.fordblks
+          except AttributeError:
+              in_use, free = -1, -1
+          with open('/proc/self/statm') as statm:
+              resident = int(statm.read().split()[1]) * PAGE
+          sys.stderr.write('READY %d %d %d %d\n' % (time.monotonic_ns(), in_use, free, resident))
           time.sleep(0.3)
           kept = make('kept', 4, 8 * MiB)
           time.sleep(0.3)

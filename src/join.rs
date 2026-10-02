@@ -1218,7 +1218,11 @@ fn keyed(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlatio
                 continue;
             }
             if opens(rule, event) {
-                let label = if scoped { key.to_string() } else { id.clone() };
+                let label = if scoped {
+                    key.to_string()
+                } else {
+                    label_of(key)
+                };
                 let collapsed = scoped
                     && states.open.get(&id).is_some_and(
                         |open| matches!(open.extent, Extent::Scope(held) if held == scope(key)),
@@ -1432,9 +1436,9 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
             if closing || opens(rule, event) {
                 arrived += 1;
                 states.insert(
-                    (key.to_string(), arrived),
+                    (identity(key), arrived),
                     OpenState {
-                        label: key.to_string(),
+                        label: label_of(key),
                         extent: Extent::Change { opening: !closing },
                         opened_ns: event.ts_ns,
                         matched: 0,
@@ -1455,6 +1459,11 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
                 keyless += 1;
                 continue;
             };
+            // The states are filed under the identity, which is what the two
+            // sides share; the reading's own baseline is its series, every
+            // field of the key, so two series of one interface -- a rename,
+            // or two counter kinds -- never take each other's previous value.
+            let id = identity(key);
             let key = key.to_string();
             let value = event
                 .attr(attr)
@@ -1465,7 +1474,7 @@ fn between(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
                     kind: event.kind.clone(),
                 })?;
 
-            let pending = states.take_key(&key);
+            let pending = states.take_key(&id);
             let (opened, closed) =
                 pending
                     .iter()
@@ -1750,9 +1759,11 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         }
     }
 
-    // The intervals each key's readings cover, in the order they ended.
+    // The intervals each key's readings cover, in the order they ended, and
+    // what a row calls each key.
     let mut last: BTreeMap<String, u64> = BTreeMap::new();
     let mut intervals: BTreeMap<String, Vec<Covered>> = BTreeMap::new();
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
     for event in events.iter().filter(|event| event.kind == rule.from) {
         let Some(key) = series_of(rule, event) else {
             return Err(missing_key(rule, event));
@@ -1760,6 +1771,11 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
         if !opens(rule, event) {
             continue;
         }
+        labels.entry(key.clone()).or_insert_with(|| {
+            rule.via
+                .and_then(|via| event.key(via))
+                .map_or_else(|| key.clone(), label_of)
+        });
         let stated = event
             .attr("interval_ns")
             .and_then(AttrValue::as_f64)
@@ -1877,11 +1893,12 @@ fn overlap(rule: &Rule, events: &[&Event], watch: &mut Watch) -> Result<Correlat
     let mut attributed = Vec::new();
     for (key, list) in intervals {
         states.stats.peak_open += 1;
+        let label = labels.get(&key).cloned().unwrap_or(key);
         for covered in list {
             states.stats.opened += 1;
             states.stats.closed += 1;
             attributed.push(Attribution {
-                key: key.clone(),
+                key: label.clone(),
                 base: 0,
                 len: 0,
                 opened_ns: covered.start_ns,
@@ -2212,6 +2229,22 @@ fn stands_for_many(event: &Event) -> bool {
 fn identity(key: &KeyValue) -> String {
     match key {
         KeyValue::Blk { ptr, .. } => format!("blk:{ptr:#x}"),
+        KeyValue::Iface { .. } => key.iface_identity().expect("an iface key has an identity"),
+        other => other.to_string(),
+    }
+}
+
+/// What a row names a state by: the key as a person reads it, less what the
+/// identity leaves out. A block request without its open timestamp, and an
+/// interface by its name -- not the index the identity compares, and not the
+/// sub-series a producer wrote after it.
+fn label_of(key: &KeyValue) -> String {
+    match key {
+        KeyValue::Blk { .. } => identity(key),
+        KeyValue::Iface { .. } => format!(
+            "iface:{}",
+            key.iface_name().expect("an iface key has a name")
+        ),
         other => other.to_string(),
     }
 }
@@ -2277,7 +2310,7 @@ pub const MACHINE: &str = "machine";
 /// one series when the rule names none. `None` is an event without the key.
 fn series_of(rule: &Rule, event: &Event) -> Option<String> {
     match rule.via {
-        Some(via) => event.key(via).map(ToString::to_string),
+        Some(via) => event.key(via).map(identity),
         None => Some(MACHINE.to_owned()),
     }
 }
@@ -4062,6 +4095,93 @@ mod tests {
         assert_eq!(correlation.top[0].matched, 2);
         assert_eq!(correlation.top[1].key, "task:9");
         assert_eq!(correlation.top[1].matched, 1);
+        states_balance(&correlation);
+    }
+
+    fn link(ts_ns: u64, kind: &str, key: KeyValue, value: u64) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: kind.to_owned(),
+            keys: vec![key],
+            attrs: vec![Attr::uint("bytes", value), Attr::uint("frames", value)],
+            collector_id: CollectorId::new(kind),
+            seq: 0,
+        }
+    }
+
+    /// An interface is one key by the kernel's index, whatever its name says:
+    /// `net.iface`'s `lo/drops` is `lo`, a rename mid-run is still the same
+    /// interface, and the same name on another index is another one. With no
+    /// index known at the read, the name before its sub-series is compared.
+    #[test]
+    fn an_interface_is_one_key_by_its_index_across_a_rename_and_a_sub_series() {
+        let mut rule = eq_rule();
+        rule.via = Some(KeyKind::Iface);
+        rule.from = "net.iface".to_owned();
+        rule.to = "net.qdisc".to_owned();
+        let events = vec![
+            link(10, "net.iface", KeyValue::iface_as_given(1, "lo/drops"), 0),
+            link(
+                11,
+                "net.iface",
+                KeyValue::iface_as_given(0, "veth9/errors"),
+                0,
+            ),
+            link(20, "net.qdisc", KeyValue::iface_as_given(1, "lo"), 1),
+            // Renamed after the state opened: one interface, one key.
+            link(21, "net.qdisc", KeyValue::iface_as_given(1, "renamed"), 1),
+            // The same name on another index is another interface.
+            link(22, "net.qdisc", KeyValue::iface_as_given(2, "lo"), 1),
+            link(23, "net.qdisc", KeyValue::iface_as_given(0, "veth9"), 1),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        assert_eq!((correlation.matched, correlation.unmatched), (3, 1));
+        let keys: Vec<(&str, u64)> = correlation
+            .top
+            .iter()
+            .map(|row| (row.key.as_str(), row.matched))
+            .collect();
+        assert_eq!(keys, vec![("iface:lo", 2), ("iface:veth9", 1)]);
+        states_balance(&correlation);
+    }
+
+    /// Under `between`, the states are the interface's and the baseline is the
+    /// reading's own series: two series of one interface each start from their
+    /// own previous value, and both are credited to the state of the interface.
+    #[test]
+    fn a_reading_of_an_interface_keeps_its_own_baseline_and_shares_the_interfaces_states() {
+        let mut rule = between_rule();
+        rule.via = Some(KeyKind::Iface);
+        rule.from = "net.iface".to_owned();
+        rule.to = "net.bytes".to_owned();
+        rule.opens = None;
+        rule.closes = None;
+        rule.reading = Some(Reading::Level);
+        let events = vec![
+            link(0, "net.bytes", KeyValue::iface_as_given(1, "lo"), 100),
+            link(
+                0,
+                "net.bytes",
+                KeyValue::iface_as_given(1, "lo/other"),
+                5000,
+            ),
+            link(50, "net.iface", KeyValue::iface_as_given(1, "lo/drops"), 0),
+            link(100, "net.bytes", KeyValue::iface_as_given(1, "lo"), 130),
+            link(
+                100,
+                "net.bytes",
+                KeyValue::iface_as_given(1, "lo/other"),
+                5007,
+            ),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        let readings = correlation.readings.as_ref().unwrap();
+        assert_eq!(readings.baselines, 2, "one baseline per series");
+        // The first reading at 100 takes the state; the second finds none.
+        assert_eq!(readings.credited, 30.0);
+        assert_eq!(readings.uncredited, 7.0);
+        assert_eq!(correlation.top[0].key, "iface:lo");
         states_balance(&correlation);
     }
 

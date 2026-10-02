@@ -1,0 +1,54 @@
+# Two sources of one interface, joined by the interface.
+#
+#   omn -f examples/join-iface-loopback.yml
+#
+# `net.iface` and `net.bytes` both read `/proc/net/dev`, and neither key
+# carried the interface's index: `net.bytes` wrote `iface:lo`, `net.iface`
+# wrote one series per counter kind, `iface:lo/drops`, and a join compared the
+# two names and found nothing in common. An `iface` key is now compared by the
+# kernel's index (lo is 1 in every network namespace), resolved from the name
+# at the read when the producer has only the name, and a name's sub-series
+# after a `/` -- which no Linux interface name holds -- is not part of the
+# interface (`docs/keys.md`).
+#
+# The rule: each `drops` reading of lo opens a state, and each `net.bytes`
+# reading of lo is credited with the bytes lo moved since the reading before
+# it, when a state of lo opened in that interval. Both sources poll at the
+# same period, so every interval after the first holds one, and what lo moved
+# while both were reading is credited; what came before the first `drops`
+# reading is not. `between` is `TEMPORAL`: it says the two moved together on
+# one interface, which is all a pair of counters can say.
+#
+# The test (`join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved`)
+# sends datagrams over lo while this runs and holds the credited bytes to
+# `/sys/class/net/lo/statistics`, read around its own burst and around the
+# whole run.
+name: two sources of loopback, joined by the interface
+duration: 2s
+format: text
+
+requests:
+  - label: drops
+    source: net.iface
+    target: {iface: lo}
+    mode: poll@100ms
+    emit: [summary]
+    keys: [iface]
+
+  - label: bytes
+    source: net.bytes
+    target: {iface: lo}
+    mode: poll@100ms
+    emit: [summary]
+    keys: [iface]
+
+joins:
+  - id: lo-moved-while-watched
+    from: net.iface
+    to: net.bytes
+    via: iface
+    match: between
+    value: bytes
+    reading: delta
+    opens: "counter == 'drops'"
+    window: 60s
