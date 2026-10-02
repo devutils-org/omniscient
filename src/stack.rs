@@ -2308,6 +2308,36 @@ mod tests {
             .clone()
     }
 
+    /// Why this process may open no sampler with a callchain at all, read
+    /// from `/proc` rather than from the probes the chooser asks:
+    /// `perf_event_paranoid` 3 or above (a Debian patch; Ubuntu ships 4)
+    /// refuses every perf event to a process that holds neither
+    /// `CAP_PERFMON` nor `CAP_SYS_ADMIN`, and a test binary holds neither.
+    fn sampling_refused_here() -> Option<String> {
+        let paranoid: i32 = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        if paranoid < 3 {
+            return None;
+        }
+        const CAP_SYS_ADMIN: u32 = 21;
+        const CAP_PERFMON: u32 = 38;
+        let effective = std::fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:"))
+            .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())?;
+        if effective & (1 << CAP_PERFMON | 1 << CAP_SYS_ADMIN) != 0 {
+            return None;
+        }
+        Some(format!(
+            "perf_event_paranoid is {paranoid}, which refuses every perf event to a process \
+             holding neither CAP_PERFMON nor CAP_SYS_ADMIN, as this one does"
+        ))
+    }
+
     /// One spelling per mode, the same on the command line and in a file, and
     /// a misspelling refused with every spelling there is.
     #[test]
@@ -2340,6 +2370,10 @@ mod tests {
     /// one mode that asks nothing of the target.
     #[test]
     fn auto_chooses_a_concrete_mode_and_says_why_it_passed_over_the_others() {
+        if let Some(reason) = sampling_refused_here() {
+            eprintln!("skipped: {reason}, so no mode has a callchain to choose");
+            return;
+        }
         for stack in [None, Some(StackMode::Auto)] {
             let choice = choose(&profile_request(stack), &environment()).unwrap();
             assert_eq!(choice.mode, StackMode::Fp);
@@ -2393,6 +2427,22 @@ mod tests {
     #[test]
     fn a_forced_mode_is_served_as_asked_or_refused_with_the_reason() {
         let environment = environment();
+        if let Some(reason) = sampling_refused_here() {
+            // Every mode is refused, and with the machine's reason: that much
+            // is held here too.
+            for mode in StackMode::CONCRETE {
+                if mode == StackMode::None {
+                    continue;
+                }
+                let error = choose(&profile_request(Some(mode)), &environment).unwrap_err();
+                assert!(
+                    error.contains(&format!("--stack {mode}")) && error.contains("missing"),
+                    "{error}"
+                );
+            }
+            eprintln!("skipped: {reason}, so no forced mode can be served to be held to it");
+            return;
+        }
         for (mode, callchain) in [
             (StackMode::Fp, Callchain::FramePointers { kernel: true }),
             (

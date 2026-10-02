@@ -945,7 +945,10 @@ mod tests {
             }
             spun = thread_ns() - from;
         }) else {
-            eprintln!("skipped: this machine refuses the software cpu clock to this process");
+            eprintln!(
+                "skipped: {}: this machine refuses the software cpu clock to this process",
+                crate::perf::paranoid_said()
+            );
             return;
         };
         let counted = readings[0].value as f64;
@@ -1407,7 +1410,8 @@ mod tests {
             let error = (count - expected).abs() / expected;
             assert!(
                 error < 0.01,
-                "counted {count} user-mode instructions where the loop retires {expected}:                  {:.2} % off",
+                "counted {count} user-mode instructions where the loop retires {expected}: \
+                 {:.2} % off",
                 error * 100.0
             );
         }
@@ -1454,7 +1458,8 @@ mod tests {
         let error = (count - expected).abs() / expected;
         assert!(
             error < 0.05,
-            "the work ran in a thread and retired {expected} instructions, but {count}              were counted: the event is not following the threads it should"
+            "the work ran in a thread and retired {expected} instructions, but {count} \
+             were counted: the event is not following the threads it should"
         );
     }
 
@@ -1544,7 +1549,7 @@ mod tests {
                 reason.contains("reads zero") || reason.contains("refused"),
                 "{reason}"
             );
-            eprintln!("skipped: {reason}");
+            eprintln!("skipped: {}: {reason}", crate::perf::paranoid_said());
             return;
         }
         let before = kernel_switches();

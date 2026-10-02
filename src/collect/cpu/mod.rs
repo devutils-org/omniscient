@@ -71,9 +71,16 @@ pub fn factories() -> Vec<Factory> {
             // and what it reports is where the samples landed. The unwind mode
             // is decided here rather than in the collector, because `--stack
             // dwarf` is a refusal with a reason and a refusal belongs before
-            // the target is launched.
+            // the target is launched. The resolver has made that choice
+            // already, and refused the request where it refuses; it is taken
+            // as made, so the run cannot unwind otherwise than the resolved
+            // file says. A request resolved without one (a file written before
+            // the field) is chosen here.
             Factory::new("cpu.profile", "pmu:sw", |resolved| {
-                let choice = crate::stack::choose(&resolved.request, &resolved.environment)?;
+                let choice = match &resolved.stack {
+                    Some(choice) => choice.clone(),
+                    None => crate::stack::choose(&resolved.request, &resolved.environment)?,
+                };
                 Ok(Box::new(profile::Prepare {
                     mode: resolved.request.mode,
                     choice,

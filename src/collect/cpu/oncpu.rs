@@ -396,26 +396,27 @@ mod tests {
     ///
     /// The pair is what makes this a measurement rather than a plausible
     /// number. A collector reporting the wall clock passes the first half and
-    /// fails the second; one reporting a constant fails both. And each half is
-    /// checked a second time against `/proc/<pid>/schedstat`, which is the
-    /// scheduler's own nanosecond accounting of the same task in a different
-    /// file, in a different unit, that this code never reads to produce its
-    /// answer.
+    /// fails the second; one reporting a constant fails both. What the busy
+    /// one spent is `/proc/<pid>/schedstat`, the scheduler's own nanosecond
+    /// accounting of the same task in a different file, in a different unit,
+    /// that this code never reads to produce its answer -- and not its wall
+    /// clock, which on a loaded machine is several times its cpu (a life of
+    /// 2140 ms reported as 780 ms of cpu on the CI's four vcpus, beside the
+    /// rest of the suite).
     #[test]
     fn a_program_that_burns_cpu_is_reported_as_having_burnt_it_and_one_that_sleeps_is_not() {
         let Some(busy) = spin(400_000) else {
             eprintln!("skipped: /bin/sh is not available");
             return;
         };
-        let (reported, kernel, wall) = follow(busy, 50);
-        assert!(
-            reported > wall * 0.5,
-            "a shell loop was on a cpu for its whole life of {:.0} ms and is reported as \
-             having consumed {:.0} ms",
-            wall / 1e6,
-            reported / 1e6
-        );
+        let (reported, kernel, _) = follow(busy, 50);
         let kernel = kernel.expect("the scheduler counts this task while it lives");
+        assert!(
+            kernel > 100_000_000,
+            "a shell loop of 400 000 turns was on a cpu for {:.1} ms by the scheduler's \
+             account, too little to be the busy program this test needs",
+            kernel as f64 / 1e6
+        );
         let ratio = reported / kernel.max(1) as f64;
         assert!(
             (0.6..1.5).contains(&ratio),

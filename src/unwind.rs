@@ -515,15 +515,10 @@ fn forced(
     })?;
     let (missing, unknown) = verdicts(entry, environment, target);
     if !missing.is_empty() {
-        // The machine's gap by `Whose`'s own definition, and held at the
-        // build's code for now: `tests/scenario_cpu.rs::
-        // an_unwinder_this_build_lacks_is_refused_before_the_program_starts`
-        // asserts exit 3 for it, which is what the collector gave when it was
-        // the only one to refuse. Moving it to the machine's is filed with the
-        // exact diff (docs/open-findings.md, the fifteenth wave, stream
-        // resolver).
+        // The machine's gap, by `Whose`'s own definition: the request is fine
+        // and this machine cannot serve it (exit 1).
         return Err(Refusal {
-            whose: crate::collect::Whose::Build,
+            whose: crate::collect::Whose::Machine,
             reason: format!(
                 "`--stack {mode}` cannot be served here: {}",
                 missing.join("; ")

@@ -29,6 +29,8 @@ use std::collections::BTreeMap;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use perf_event_open_sys as sys;
+
 const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 
 // ---------------------------------------------------------------------------
@@ -325,6 +327,14 @@ fn spin_for(duration: Duration) {
 /// against, and it is deliberately not a wall-clock duration: a contended
 /// machine gives a spinning task less cpu than wall time, and a scenario whose
 /// ground truth moved with the load would be measuring the machine.
+///
+/// The cpu is burnt in user mode. `CLOCK_THREAD_CPUTIME_ID` is a system call
+/// on x86-64 (the vDSO serves no per-thread clock), and a loop that read it on
+/// every turn spent most of its time in the kernel: on a cloud VM at
+/// `perf_event_paranoid` 2, where a profile is user-only and a sample taken in
+/// the kernel is not delivered, 80 % of the burn was in no sample. So the
+/// clock is read between blocks of arithmetic of some tens of microseconds,
+/// and the kernel's share is the one call per block.
 fn burn(cpu: Duration) {
     let consumed = || {
         let mut now = libc::timespec {
@@ -336,8 +346,15 @@ fn burn(cpu: Duration) {
         Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
     };
     let until = consumed() + cpu;
+    let mut state = 1u64;
     while consumed() < until {
-        std::hint::spin_loop();
+        for _ in 0..20_000 {
+            state = std::hint::black_box(
+                state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407),
+            );
+        }
     }
 }
 
@@ -558,6 +575,38 @@ fn withheld_here(message: &str) -> bool {
             && message.contains("missing"))
 }
 
+/// A refusal quoted on a skip line, the machine's reason first.
+///
+/// `omn` writes its warnings and notes before the error, so a skip line that
+/// quotes the whole stderr starts with `warning: ...` or `note: container
+/// ...`, and the reason is several lines down, unindented, where a reader of
+/// skip lines -- and `.github/scripts/skip-gate.sh`, which reads a skip line
+/// and the indented lines under it -- does not look. The lines that say why
+/// the machine cannot serve come first, and the rest are indented under them
+/// (stream engine's `machine_s_reason`, the fifteenth wave).
+fn machine_s_reason(said: &str) -> String {
+    let lines: Vec<&str> = said
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let (reasons, rest): (Vec<&str>, Vec<&str>) = lines.iter().partition(|line| {
+        line.trim_start().starts_with("error")
+            || line.contains("missing")
+            || line.contains("perf_event_paranoid")
+            || line.contains("no viable backend")
+    });
+    let mut laid = String::new();
+    for line in reasons.iter().chain(rest.iter()) {
+        if laid.is_empty() {
+            laid.push_str(line.trim());
+        } else {
+            laid.push_str("\n    ");
+            laid.push_str(line.trim_end());
+        }
+    }
+    laid
+}
+
 /// Whether a refusal is this machine's limit rather than a refusal of the
 /// request. Only the first is a reason for a scenario to stop quietly.
 fn machine_cannot_serve(message: &str) -> bool {
@@ -704,7 +753,7 @@ fn example_counted(spec: &str) -> Option<KnownWork> {
                 machine_cannot_serve(&message),
                 "the example was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return None;
         }
     };
@@ -817,7 +866,7 @@ fn counted(source: &str, spec: &str, axes: &[&str]) -> Option<f64> {
                 "the request was refused, which is a broken scenario rather than a limited \
                  machine: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             None
         }
     }
@@ -905,7 +954,7 @@ fn consumed_cpu(spec: &str, axes: &[&str]) -> Option<Consumed> {
                 machine_cannot_serve(&message),
                 "the request was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return None;
         }
     };
@@ -1365,7 +1414,7 @@ fn a_profile_renders_in_every_format_that_carries_stacks() {
         Outcome::Measured { document, .. } => document,
         Outcome::Refused { message, .. } => {
             assert!(machine_cannot_serve(&message), "{message}");
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
     };
@@ -1517,7 +1566,7 @@ fn session_run(session: &str) -> Option<serde_json::Value> {
                 machine_cannot_serve(&message),
                 "the session was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             None
         }
     }
@@ -1693,7 +1742,7 @@ fn a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency() {
                     machine_cannot_serve(&message),
                     "`cpu.cycles` on `{backend}` was refused, not unserved: {message}"
                 );
-                eprintln!("skipped `{backend}`: {message}");
+                eprintln!("skipped `{backend}`: {}", machine_s_reason(&message));
                 None
             }
         }
@@ -1749,6 +1798,71 @@ fn a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency() {
             "the cycles over the cpu clock say {ghz:.2} GHz; this machine publishes no cpufreq \
              range to hold it to"
         ),
+    }
+}
+
+/// `cpu.cycles` through its `pmu:sw` fallback is the cpu clock, so its values
+/// are nanoseconds of cpu, and the result says so: `ns`, where the hardware
+/// counter's says `count`. A result labelled `count` over nanoseconds is a
+/// number a reader adds to the hardware's cycles.
+///
+/// Ground truth is the workload's own clock: it burns 300 ms of its thread's
+/// cpu (`CLOCK_THREAD_CPUTIME_ID`), so the fallback's value is at least that
+/// many nanoseconds, and the text a person reads prints it as a time.
+#[test]
+#[ignore = "needs `Entry::backend_unit` where a result's unit is chosen (src/main.rs, \
+            src/triage/engine.rs, src/join.rs): docs/open-findings.md, the sixteenth wave, \
+            stream cpu"]
+fn the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count() {
+    let _load = may_load_the_machine();
+    const BURNED_NS: f64 = 300e6;
+    for (backend, unit) in [("pmu:sw", "ns"), ("pmu", "count")] {
+        let pin = format!("force:{backend}");
+        let axes = ["--backend", pin.as_str(), "-m", "count", "-e", "raw"];
+        let document = match measure("cpu.cycles", "burn:300", &axes) {
+            Outcome::Measured { document, .. } => document,
+            Outcome::Refused { message, .. } => {
+                assert!(
+                    machine_cannot_serve(&message),
+                    "`cpu.cycles` on `{backend}` was refused, not unserved: {message}"
+                );
+                eprintln!("skipped `{backend}`: {}", machine_s_reason(&message));
+                continue;
+            }
+        };
+        let result = &document["results"][0];
+        assert_eq!(
+            result["unit"], unit,
+            "`cpu.cycles` through `{backend}`: {result}"
+        );
+        if backend == "pmu:sw" {
+            let events = raw_events(&document);
+            let value = attr_of(&events[0], "count").expect("a value");
+            assert!(
+                value >= BURNED_NS * 0.95,
+                "the workload burned {BURNED_NS:.0} ns of its own cpu, and the cpu clock says \
+                 {value:.0} {unit}"
+            );
+            let args: Vec<String> = ["cpu.cycles", "--backend", "force:pmu:sw", "-m", "count"]
+                .iter()
+                .map(|arg| (*arg).to_owned())
+                .chain(["-e".to_owned(), "summary".to_owned(), "--".to_owned()])
+                .chain(workload_program())
+                .collect();
+            let Outcome::Measured { rendered, .. } = run_workload(Some("burn:300"), &args) else {
+                panic!("the same run, rendered as text, was refused");
+            };
+            let a_time = |word: &str| {
+                ["ms", "s"].iter().any(|suffix| {
+                    word.strip_suffix(suffix)
+                        .is_some_and(|number| number.parse::<f64>().is_ok())
+                })
+            };
+            assert!(
+                rendered.split_whitespace().any(a_time),
+                "a value in nanoseconds is printed as a time:\n{rendered}"
+            );
+        }
     }
 }
 
@@ -1948,6 +2062,21 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         "150ms",
     ];
 
+    // Whether the kernel has to throttle this run is the kernel's to say, read
+    // before the run: it delivers at most `perf_event_max_sample_rate / HZ`
+    // samples per tick per event, and the cpu clock is an hrtimer it never arms
+    // for less than 10 us (`perf_swevent_set_period`), so a clock asked for a
+    // hundred thousand a second runs at most at that rate. Under a ceiling
+    // below it -- the kernel lowers the ceiling itself when its interrupts run
+    // long, as it has on the development machine -- every tick of a spinning
+    // task overruns it, and the run is throttled. At or above it the clock
+    // cannot pass the ceiling except by the timer's jitter, and nothing the
+    // request says can make it.
+    const ASKED: u64 = 100_000;
+    let ceiling = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+
     let mut as_json: Vec<&str> = axes.to_vec();
     as_json.extend(["--format", "json"]);
     let Outcome::Measured { document, .. } = run(&as_json) else {
@@ -1964,10 +2093,39 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         .filter(|(reason, _)| reason.contains("throttled"))
         .filter_map(|(_, count)| count.as_u64())
         .sum();
+    let backend = document["results"][0]["backend"]
+        .as_str()
+        .unwrap_or_default();
+    match ceiling {
+        None => {
+            eprintln!(
+                "skipped: /proc/sys/kernel/perf_event_max_sample_rate is not readable, so \
+                 whether the kernel had to throttle this run cannot be told: {losses}"
+            );
+            return;
+        }
+        Some(ceiling) if ceiling >= ASKED && backend == "pmu:sw" => {
+            let why = if hardware_cycles_sample_here() {
+                "this build samples through the cpu clock (`pmu:sw`) only, the `pmu` collector \
+                 not being written"
+            } else {
+                "this cpu offers no hardware PMU to sample on, so the profile is the cpu clock's \
+                 (`pmu:sw`)"
+            };
+            eprintln!(
+                "skipped: perf_event_max_sample_rate is {ceiling}, at or above the {ASKED} \
+                 asked, and {why}, whose hrtimer fires at most every 10 us: the kernel did not \
+                 have to throttle this run ({losses})"
+            );
+            return;
+        }
+        Some(_) => {}
+    }
     assert!(
         throttled + named > 0,
-        "a hundred thousand samples a second was not throttled on this machine, so this \
-         scenario measured nothing: {losses}"
+        "the kernel's ceiling is {} samples a second and `{backend}` was driven at {ASKED}, \
+         past it, so the kernel throttled this run, and the run says it lost nothing: {losses}",
+        ceiling.unwrap_or_default()
     );
     // The field, not just the sentence. `losses.throttled` is what a consumer
     // filters on, and a throttled run that leaves it at zero reads as clean to
@@ -2011,6 +2169,54 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         "the kernel throttled this profile over {throttled} periods, counted apart from \
                the {dropped} samples the ring reported losing"
     );
+}
+
+/// Whether this process may sample its own cpu cycles: a hardware counter's
+/// overflow, which is what a profile has to be driven by to pass the kernel's
+/// sample-rate ceiling. Asked of the kernel directly, not of the tool.
+fn hardware_cycles_sample_here() -> bool {
+    let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = sys::bindings::PERF_TYPE_HARDWARE;
+    attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attr.config = sys::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+    attr.__bindgen_anon_1.sample_period = 1_000_000;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+    // SAFETY: a valid attribute, this process, any cpu, no group.
+    let fd = unsafe { sys::perf_event_open(&mut attr, 0, -1, -1, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: the descriptor was just opened here and is not used again.
+    unsafe { libc::close(fd) };
+    true
+}
+
+/// Whether the kernel opens a user-only LBR call stack for this process: the
+/// one thing `--stack lbr` needs of the machine. Asked of the kernel directly,
+/// not of the tool.
+fn branch_call_stack_samples_here() -> bool {
+    let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = sys::bindings::PERF_TYPE_HARDWARE;
+    attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attr.config = sys::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+    attr.__bindgen_anon_1.sample_period = 1_000_000;
+    attr.sample_type =
+        (sys::bindings::PERF_SAMPLE_IP | sys::bindings::PERF_SAMPLE_BRANCH_STACK) as u64;
+    attr.branch_sample_type = (sys::bindings::PERF_SAMPLE_BRANCH_USER
+        | sys::bindings::PERF_SAMPLE_BRANCH_CALL_STACK) as u64;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+    // SAFETY: a valid attribute, this process, any cpu, no group.
+    let fd = unsafe { sys::perf_event_open(&mut attr, 0, -1, -1, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: the descriptor was just opened here and is not used again.
+    unsafe { libc::close(fd) };
+    true
 }
 
 /// A poll faster than the kernel's own accounting gets the kernel's
@@ -2565,7 +2771,7 @@ fn a_profile_samples_every_thread_for_the_cpu_it_used() {
         Outcome::Measured { document, .. } => document,
         Outcome::Refused { code, message } => {
             assert!(machine_cannot_serve(&message), "exit {code}: {message}");
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
     };
@@ -2942,7 +3148,7 @@ fn a_system_target_asks_whether_this_process_may_count_a_cpu() {
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(machine_cannot_serve(&message), "{message}");
-        eprintln!("skipped: {message}");
+        eprintln!("skipped: {}", machine_s_reason(&message));
         return;
     }
     let record: serde_json::Value =
@@ -3234,7 +3440,7 @@ fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
     .refusal();
     // The build's gap is reached only through a backend the machine offers.
     if withheld_here(&message) {
-        eprintln!("skipped: {message}");
+        eprintln!("skipped: {}", machine_s_reason(&message));
         return;
     }
     assert_eq!(
@@ -3366,7 +3572,7 @@ fn stalled_share() -> Option<f64> {
                 machine_cannot_serve(&message) || message.contains("pressure"),
                 "the request was refused rather than unserved: {message}"
             );
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             None
         }
     }
@@ -3478,7 +3684,7 @@ fn a_duration_beside_a_session_file_replaces_the_sessions_own() {
         // The dump is of the resolved request, so a machine that withholds
         // `cpu.instructions` has no dump to give; the refusal is its own.
         Outcome::Refused { message, .. } if withheld_here(&message) => {
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
         Outcome::Refused { code, message } => {
@@ -3731,8 +3937,9 @@ fn a_cgroup_capped_at_a_tenth_of_a_cpu_is_stopped_for_nine_tenths_of_the_time() 
     })
     .map(str::to_owned) else {
         eprintln!(
-            "skipped: no ancestor of `{parent}` that this user owns hands the cpu controller \
-             down, so no cgroup made here can carry a quota and nothing can be throttled"
+            "skipped: no cgroup here delegates the cpu controller to this user (no ancestor of \
+             `{parent}` that this user owns hands it down), so no cgroup made here can carry a \
+             quota and nothing can be throttled"
         );
         return;
     };
@@ -3921,7 +4128,7 @@ fn over_a_target(
                     machine_cannot_serve(&message),
                     "`{source} --cgroup` was refused rather than unserved: {message}"
                 );
-                eprintln!("skipped: {message}");
+                eprintln!("skipped: {}", machine_s_reason(&message));
                 return None;
             }
         };
@@ -4244,7 +4451,7 @@ fn the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted() {
                     machine_cannot_serve(&message),
                     "a polled counter was refused rather than unserved: {message}"
                 );
-                eprintln!("skipped: {message}");
+                eprintln!("skipped: {}", machine_s_reason(&message));
                 return None;
             }
         };
@@ -4304,9 +4511,10 @@ fn the_ticks_of_a_polled_counter_add_up_to_the_loop_it_counted() {
 }
 
 /// `--stack lbr` and `--stack sframe` are refused with the gap's code before
-/// the program they would profile is started: as not implemented where the
-/// machine offers the mechanism, and as not servable here where it does not
-/// (`pmu:branch_call_stack`, `kernel:sframe`). `dwarf` is served since the
+/// the program they would profile is started: as not implemented (the build's,
+/// exit 3) where the machine offers the mechanism, and as not servable here
+/// (the machine's, exit 1) where it does not (`pmu:branch_call_stack`,
+/// `kernel:sframe`). `dwarf` is served since the
 /// fourteenth wave, so it is no longer asked here.
 ///
 /// The factory refuses them, which runs before the launch. The ground truth that
@@ -4332,10 +4540,27 @@ fn an_unwinder_this_build_lacks_is_refused_before_the_program_starts() {
         ])
         .refusal();
         if withheld_here(&message) {
-            eprintln!("skipped: {message}");
+            eprintln!("skipped: {}", machine_s_reason(&message));
             return;
         }
-        assert_eq!(code, 3, "`--stack {stack}` is this build's gap: {message}");
+        // A mode this machine cannot serve is the machine's gap (exit 1); one
+        // it would serve and no collector here reads is the build's (exit 3).
+        // Which of the two is asked of the machine, not of the tool's message:
+        // the kernel opens a branch call stack for this user or it does not,
+        // and no kernel read so far unwinds a user stack from `.sframe` (its
+        // user unwinder knows frame pointers only, through 7.2: docs/unwind.md),
+        // while a newer one is an unknown, which never counts as available.
+        let served_here = match stack {
+            "lbr" => branch_call_stack_samples_here(),
+            _ => false,
+        };
+        let expected = if served_here { 3 } else { 1 };
+        assert_eq!(
+            code,
+            expected,
+            "`--stack {stack}`, which this machine {} serve: {message}",
+            if served_here { "can" } else { "cannot" }
+        );
         assert!(
             message.contains(&format!("--stack {stack}"))
                 && (message.contains("not implemented")

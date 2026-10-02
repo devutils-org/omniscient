@@ -9583,3 +9583,56 @@ holds the weighed series to the task's own count across the move.
   The denominator is **not** in effect: the nanosecond readers are landed and
   unused until the `Meter` swap above. `FilterFieldNotCarried`'s `elsewhere`
   is landed; the bench's second table still wants its quiet-machine run.
+
+## Needs from another stream — the sixteenth wave, stream cpu
+
+Stream cpu's handoff is `docs/fixes/w16-cpu.md`. Nothing here blocks it; each
+item is the other half of a change landed in this stream's files.
+
+### To whoever owns `src/main.rs` and `src/triage/engine.rs`: a result's unit is its backend's
+
+`catalog::Backend` has `unit: Option<Unit>` now, and `Entry::backend_unit(&self,
+backend: &str) -> Unit` answers the backend's own unit or the entry's.
+`cpu.cycles`'s `pmu:sw` (the cpu clock) declares `unit: ns`. A result's unit is
+still chosen from the entry alone, so `cpu.cycles` through `pmu:sw` says
+`count` over nanoseconds. Wanted, one line at each place:
+
+```rust
+// src/main.rs:~1337 (the loop that calls emit::aggregate), and
+// src/triage/engine.rs:~214, the same shape:
+let unit = catalog
+    .get(&serving.request.source)
+    .map(|entry| entry.backend_unit(&serving.backend.id))
+    .unwrap_or(Unit::Count);
+```
+
+Then `#[ignore]` comes off
+`tests/scenario_cpu.rs::the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count`
+(the `main.rs` line alone makes it pass here: run with `--ignored`, it did).
+`src/join.rs` follows by itself where it reads `result.unit`; its `unit_of`
+(`~2950`, a decomposition's row) reads the entry's and would want the same
+call if a decomposition over `cpu.cycles` through `pmu:sw` is ever written.
+
+### To the coordinator (`CATALOG.md`): the backend key `unit`
+
+A backend may declare `unit:` when its values are in another unit than the
+entry's. The loader refuses it on the head of the chain, on a backend declared
+`equivalent`, when it repeats the entry's, and when it does not add up where
+the entry's does (`check_backend_units`). Wanted, a line where `CATALOG.md`
+lists the per-backend keys (`targets`, `modes`, `keys`, `filter_fields`).
+
+### To whoever owns `src/collect/mod.rs`: a late attach primes the kernel's symbols for a user-only profile too
+
+`profile.rs` primes `/proc/kallsyms` only when the callchain has a kernel half
+now (`ProfileCollector::start`, held by
+`collect::cpu::profile::tests::a_profile_reads_the_kernels_symbols_only_when_its_stacks_have_a_kernel_half`).
+The run's own prime for a request attached late (`src/collect/mod.rs:~2159`,
+`late_stacks`) still fires for one whose stacks are user-only. Wanted:
+
+```rust
+&& (request.stack.is_some() || request.emit.contains(&crate::request::Emit::Stack))
+&& resolved.stack.as_ref().is_none_or(|choice| !choice.user_only)
+```
+
+`src/collect/mem/ibs.rs:626` (stream K's) has the `!= Callchain::Off` test the
+profile had; `self.callchain.kernel()` is the same fix there.
