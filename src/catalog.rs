@@ -117,6 +117,17 @@ impl Entry {
         backend.keys.as_deref().unwrap_or(&self.keys)
     }
 
+    /// The unit one backend of this chain reports in: its own when it
+    /// declares one, the entry's otherwise. An id that is not in the chain
+    /// gets the entry's.
+    pub fn backend_unit(&self, backend: &str) -> Unit {
+        self.backends
+            .iter()
+            .find(|candidate| candidate.id == backend)
+            .and_then(|candidate| candidate.unit)
+            .unwrap_or(self.unit)
+    }
+
     /// The backends of this chain that attach a key, in chain order. What a
     /// rejection names when the selected one does not.
     pub fn backends_carrying_key(&self, key: KeyKind) -> Vec<&str> {
@@ -260,6 +271,20 @@ pub struct Backend {
     /// that asked for the I/O: `io.bytes` through `fs:proc` attaches `dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<Vec<KeyKind>>,
+    /// The unit *this* backend's values are in, when it is not the entry's.
+    ///
+    /// Absent means the entry's, which is the common case. Present, it is
+    /// what a fallback that measures something else in its own unit reports
+    /// in: `cpu.cycles` through `pmu:sw` is the cpu clock, nanoseconds of cpu
+    /// and not a count of cycles, and a result that labelled them `count`
+    /// would let a reader add them to the hardware counter's. The loader
+    /// refuses one that repeats the entry's, one on the head of the chain
+    /// (whose unit is the entry's), one on a backend declared `equivalent`
+    /// (a different unit is not the same measurement), and one that does not
+    /// add up where the entry's does (its `rate` and `stack` would mean
+    /// nothing). [`Entry::backend_unit`] reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<Unit>,
 }
 
 /// How two events are tied together into one measurement.
@@ -636,6 +661,54 @@ fn check_backend_keys(entry: &Entry) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// A backend's own `unit`: a different unit from the entry's, on a fallback
+/// that says what it degrades, and one a sum means something of wherever the
+/// entry's does.
+fn check_backend_units(entry: &Entry) -> Result<(), ParseError> {
+    // The same split as `validate`'s, kept exhaustive so that a unit added
+    // tomorrow has to answer it.
+    fn sums(unit: Unit) -> bool {
+        match unit {
+            Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
+            Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius => false,
+        }
+    }
+    for (rank, backend) in entry.backends.iter().enumerate() {
+        let Some(unit) = backend.unit else {
+            continue;
+        };
+        let complaint = if unit == entry.unit {
+            Some(format!(
+                "declares the unit `{unit}`, which is the entry's; leave the key out to mean it"
+            ))
+        } else if rank == 0 {
+            Some(format!(
+                "is the head of the chain and declares the unit `{unit}`, where the entry says                  `{}`: the entry's unit is its head's, so one of the two is wrong",
+                entry.unit
+            ))
+        } else if backend.equivalent {
+            Some(format!(
+                "is declared equivalent and reports in `{unit}`, where the entry says `{}`: a                  value in another unit is not the same measurement",
+                entry.unit
+            ))
+        } else if sums(entry.unit) && !sums(unit) {
+            Some(format!(
+                "reports in `{unit}`, which does not add up where the entry's `{}` does: its                  `rate` and `stack` would be sums of a level",
+                entry.unit
+            ))
+        } else {
+            None
+        };
+        if let Some(complaint) = complaint {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}`: backend `{}` {complaint}",
+                entry.id, backend.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The per-backend `modes` lists, in the same two directions as the targets:
 /// a backend cannot serve a mode the entry refuses, and a mode the entry
 /// declares has to be served by some backend, or a request the validator
@@ -822,6 +895,7 @@ impl Catalog {
             check_backend_filter_fields(entry)?;
             check_backend_modes(entry)?;
             check_backend_keys(entry)?;
+            check_backend_units(entry)?;
             check_requirement_globs(entry)?;
         }
         let catalog = Self { entries };
@@ -972,6 +1046,41 @@ mod tests {
             error.message().contains("neither states what it degrades"),
             "{error}"
         );
+    }
+
+    /// A backend's own unit is what its values are in, and the loader holds
+    /// it to a fallback that says what it degrades: `cpu.cycles` through
+    /// `pmu:sw` is the cpu clock, in nanoseconds, beside a head that counts.
+    #[test]
+    fn a_backend_reports_in_its_own_unit_only_where_it_is_a_fallback_that_says_so() {
+        let embedded = catalog();
+        let cycles = embedded.get(&"cpu.cycles".parse().unwrap()).unwrap();
+        assert_eq!(cycles.unit, Unit::Count);
+        assert_eq!(cycles.backend_unit("pmu"), Unit::Count);
+        assert_eq!(cycles.backend_unit("pmu:sw"), Unit::Ns);
+        assert_eq!(cycles.backend_unit("fs:proc"), Unit::Count);
+        let base = cycles.clone();
+
+        let refused = |edit: &dyn Fn(&mut Entry)| -> String {
+            let mut entry = base.clone();
+            edit(&mut entry);
+            Catalog::from_entries(vec![entry]).unwrap_err().to_string()
+        };
+        let error = refused(&|entry| entry.backends[1].unit = Some(Unit::Count));
+        assert!(error.contains("which is the entry's"), "{error}");
+        let error = refused(&|entry| entry.backends[0].unit = Some(Unit::Ns));
+        assert!(error.contains("head of the chain"), "{error}");
+        let error = refused(&|entry| {
+            entry.backends[1].degraded = None;
+            entry.backends[1].equivalent = true;
+        });
+        assert!(error.contains("not the same measurement"), "{error}");
+        let error = refused(&|entry| entry.backends[1].unit = Some(Unit::Hz));
+        assert!(error.contains("does not add up"), "{error}");
+
+        // And it reads back from the catalog's own spelling.
+        let yaml = serde_norway::to_string(&base.backends[1]).unwrap();
+        assert!(yaml.contains("unit: ns"), "{yaml}");
     }
 
     #[test]

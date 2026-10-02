@@ -228,24 +228,43 @@ and not stacks.
 
 `every_backend_either_measures_or_says_it_is_not_built`
 
-**They cannot, in this family: every chain here has exactly one backend with a
-collector.** That is established rather than asserted — the scenario forces each
-of the twenty-one declared backends of the fourteen sources with
-`--backend force:` and classifies what comes back — and it is the test that
-tells whoever writes the second collector that the comparison is now owed: the
-day a chain has two, it fails and names the source.
+**One chain has two, and they are not two roads to the same number.** That is
+established rather than asserted — the scenario forces each of the twenty-one
+declared backends of the fourteen sources with `--backend force:` and
+classifies what comes back — and it is the test that tells whoever writes a
+second collector that the comparison is now owed: the day another chain has
+two, it fails and names the source.
 
-Eight backends are declared and not built: `cpu.cycles pmu:sw`, `cpu.profile
-pmu`, `cpu.oncpu_time bpf:tp`, `cpu.oncpu_time fs:cgroup`, `cpu.util
-fs:cgroup`, `cpu.pressure fs:cgroup`, `cpu.flow pmu:aux:intel_pt`, `cpu.flow
+The chain with two is `cpu.cycles`, since the fifteenth wave: `pmu` counts the
+core's cycles and `pmu:sw` is the cpu clock, the degraded fallback the catalog
+declares (*"CPU time, not cycles: blind to DVFS"*). They are compared by
+`a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency`:
+
+| Source | Collectors | What one says of the other |
+|---|---|---|
+| `cpu.cycles` | `pmu` over `pmu:sw` | the core's cycles per nanosecond of cpu -- 4.2 GHz on the development machine -- between half cpufreq's minimum and a fifth over its maximum; `pmu:sw`'s own difference between a 100 ms and a 500 ms burn is the 400 ms the workload's own clock burned, to 15 % |
+
+Each reports in its own unit since the sixteenth wave: the catalog gives
+`pmu:sw` `unit: ns` (`Backend.unit`, which the loader holds to a fallback that
+says what it degrades), so its result says `ns` and prints a time, where
+`pmu`'s says `count`. Before, both said `count`, and a reader could add the
+cpu clock's nanoseconds to the hardware's cycles.
+`the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count`
+holds it to the workload's own clock; it is ignored until the three places a
+result's unit is chosen read `Entry::backend_unit` (`docs/open-findings.md`,
+the sixteenth wave, stream cpu).
+
+Seven backends are declared and not built: `cpu.profile pmu`,
+`cpu.oncpu_time bpf:tp`, `cpu.oncpu_time fs:cgroup`, `cpu.util fs:cgroup`,
+`cpu.pressure fs:cgroup`, `cpu.flow pmu:aux:intel_pt`, `cpu.flow
 pmu:aux:cs_etm`. Each has to exit 3 and name both halves of what is missing,
 which is the comparison this family can make:
 
 ```console
-$ omn cpu.cycles --backend force:pmu:sw -m count -e summary -- /bin/true
-warning: backend `pmu:sw` is pinned, so the resolver's choice is bypassed; this
-         is for the comparison bench, not for measuring
-error: no collector is written for `cpu.cycles` on backend `pmu:sw` yet
+$ omn cpu.profile --backend force:pmu -m sample@99hz -e stack -- /bin/true
+warning: [cpu.profile #1] backend `pmu` is pinned, so the resolver's choice is
+         bypassed; this is for the comparison bench, not for measuring
+error: no collector is written for `cpu.profile` on backend `pmu` yet
 $ echo $?
 3
 ```

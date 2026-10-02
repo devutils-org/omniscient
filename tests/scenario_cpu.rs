@@ -1769,6 +1769,71 @@ fn a_cycle_count_and_its_cpu_clock_fallback_differ_by_the_core_s_frequency() {
     }
 }
 
+/// `cpu.cycles` through its `pmu:sw` fallback is the cpu clock, so its values
+/// are nanoseconds of cpu, and the result says so: `ns`, where the hardware
+/// counter's says `count`. A result labelled `count` over nanoseconds is a
+/// number a reader adds to the hardware's cycles.
+///
+/// Ground truth is the workload's own clock: it burns 300 ms of its thread's
+/// cpu (`CLOCK_THREAD_CPUTIME_ID`), so the fallback's value is at least that
+/// many nanoseconds, and the text a person reads prints it as a time.
+#[test]
+#[ignore = "needs `Entry::backend_unit` where a result's unit is chosen (src/main.rs, \
+            src/triage/engine.rs, src/join.rs): docs/open-findings.md, the sixteenth wave, \
+            stream cpu"]
+fn the_cpu_clock_fallback_of_cpu_cycles_reports_nanoseconds_and_the_counter_a_count() {
+    let _load = may_load_the_machine();
+    const BURNED_NS: f64 = 300e6;
+    for (backend, unit) in [("pmu:sw", "ns"), ("pmu", "count")] {
+        let pin = format!("force:{backend}");
+        let axes = ["--backend", pin.as_str(), "-m", "count", "-e", "raw"];
+        let document = match measure("cpu.cycles", "burn:300", &axes) {
+            Outcome::Measured { document, .. } => document,
+            Outcome::Refused { message, .. } => {
+                assert!(
+                    machine_cannot_serve(&message),
+                    "`cpu.cycles` on `{backend}` was refused, not unserved: {message}"
+                );
+                eprintln!("skipped `{backend}`: {message}");
+                continue;
+            }
+        };
+        let result = &document["results"][0];
+        assert_eq!(
+            result["unit"], unit,
+            "`cpu.cycles` through `{backend}`: {result}"
+        );
+        if backend == "pmu:sw" {
+            let events = raw_events(&document);
+            let value = attr_of(&events[0], "count").expect("a value");
+            assert!(
+                value >= BURNED_NS * 0.95,
+                "the workload burned {BURNED_NS:.0} ns of its own cpu, and the cpu clock says \
+                 {value:.0} {unit}"
+            );
+            let args: Vec<String> = ["cpu.cycles", "--backend", "force:pmu:sw", "-m", "count"]
+                .iter()
+                .map(|arg| (*arg).to_owned())
+                .chain(["-e".to_owned(), "summary".to_owned(), "--".to_owned()])
+                .chain(workload_program())
+                .collect();
+            let Outcome::Measured { rendered, .. } = run_workload(Some("burn:300"), &args) else {
+                panic!("the same run, rendered as text, was refused");
+            };
+            let a_time = |word: &str| {
+                ["ms", "s"].iter().any(|suffix| {
+                    word.strip_suffix(suffix)
+                        .is_some_and(|number| number.parse::<f64>().is_ok())
+                })
+            };
+            assert!(
+                rendered.split_whitespace().any(a_time),
+                "a value in nanoseconds is printed as a time:\n{rendered}"
+            );
+        }
+    }
+}
+
 /// The one comparison this family does own: two mechanisms, one busy core.
 ///
 /// `cpu.util --cpu N` reads `/proc/stat`, which counts every task that ran on
