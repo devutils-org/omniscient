@@ -29,6 +29,8 @@ use std::collections::BTreeMap;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use perf_event_open_sys as sys;
+
 const BINARY: &str = env!("CARGO_BIN_EXE_omn");
 
 // ---------------------------------------------------------------------------
@@ -325,6 +327,14 @@ fn spin_for(duration: Duration) {
 /// against, and it is deliberately not a wall-clock duration: a contended
 /// machine gives a spinning task less cpu than wall time, and a scenario whose
 /// ground truth moved with the load would be measuring the machine.
+///
+/// The cpu is burnt in user mode. `CLOCK_THREAD_CPUTIME_ID` is a system call
+/// on x86-64 (the vDSO serves no per-thread clock), and a loop that read it on
+/// every turn spent most of its time in the kernel: on a cloud VM at
+/// `perf_event_paranoid` 2, where a profile is user-only and a sample taken in
+/// the kernel is not delivered, 80 % of the burn was in no sample. So the
+/// clock is read between blocks of arithmetic of some tens of microseconds,
+/// and the kernel's share is the one call per block.
 fn burn(cpu: Duration) {
     let consumed = || {
         let mut now = libc::timespec {
@@ -336,8 +346,15 @@ fn burn(cpu: Duration) {
         Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
     };
     let until = consumed() + cpu;
+    let mut state = 1u64;
     while consumed() < until {
-        std::hint::spin_loop();
+        for _ in 0..20_000 {
+            state = std::hint::black_box(
+                state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407),
+            );
+        }
     }
 }
 
@@ -1964,6 +1981,35 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         .filter(|(reason, _)| reason.contains("throttled"))
         .filter_map(|(_, count)| count.as_u64())
         .sum();
+    let ceiling = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let backend = document["results"][0]["backend"]
+        .as_str()
+        .unwrap_or_default();
+    if throttled + named == 0 && backend == "pmu:sw" && ceiling.is_some_and(|c| c >= 100_000) {
+        // The cpu clock is an hrtimer, which the kernel never arms for less
+        // than 10 us (`perf_swevent_set_period`): at a ceiling of 100 000
+        // samples a second, the kernel's default, one task's clock reaches
+        // the ceiling and passes it only by the timer's jitter around the
+        // tick. A virtual machine's timer fires late rather than early, and
+        // only a hardware counter's overflow is driven past the ceiling by
+        // the request itself.
+        let why = if hardware_cycles_sample_here() {
+            "this build samples through the cpu clock (`pmu:sw`) only, the `pmu` collector \
+             not being written"
+        } else {
+            "this cpu offers no hardware PMU to sample on, so the profile is the cpu clock's \
+             (`pmu:sw`)"
+        };
+        eprintln!(
+            "skipped: {why}, which cannot be driven past perf_event_max_sample_rate {}: its \
+             hrtimer fires at most every 10 us, which is the ceiling itself, and this run was \
+             not throttled: {losses}",
+            ceiling.unwrap_or_default()
+        );
+        return;
+    }
     assert!(
         throttled + named > 0,
         "a hundred thousand samples a second was not throttled on this machine, so this \
@@ -2011,6 +2057,28 @@ fn a_profile_driven_past_the_kernels_ceiling_says_what_it_did_not_take() {
         "the kernel throttled this profile over {throttled} periods, counted apart from \
                the {dropped} samples the ring reported losing"
     );
+}
+
+/// Whether this process may sample its own cpu cycles: a hardware counter's
+/// overflow, which is what a profile has to be driven by to pass the kernel's
+/// sample-rate ceiling. Asked of the kernel directly, not of the tool.
+fn hardware_cycles_sample_here() -> bool {
+    let mut attr: sys::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = sys::bindings::PERF_TYPE_HARDWARE;
+    attr.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attr.config = sys::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+    attr.__bindgen_anon_1.sample_period = 1_000_000;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+    // SAFETY: a valid attribute, this process, any cpu, no group.
+    let fd = unsafe { sys::perf_event_open(&mut attr, 0, -1, -1, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: the descriptor was just opened here and is not used again.
+    unsafe { libc::close(fd) };
+    true
 }
 
 /// A poll faster than the kernel's own accounting gets the kernel's

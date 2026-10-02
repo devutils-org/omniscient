@@ -346,11 +346,11 @@ of the samples taken plus two points for the callers' own loops.
 | `auto_chooses_by_how_the_target_was_built_...` | all four | auto | fp+leaf, fp+leaf, dwarf, dwarf, each with why |
 | `a_mode_this_machine_cannot_serve_...` | leaf | lbr, sframe | refused, naming `pmu:branch_call_stack` / `kernel:sframe` |
 | `dwarf_counts_and_says_the_stacks_deeper_than_its_copy` | deep (24 levels of 1 KiB), shallow (2) | dwarf | the loss path: deep, ≥ 90 % of samples in `spin`, ≤ 10 % reach `main`, no walk holds all 24 levels, ≥ 90 % keep part of them, and the degradation counts the cut walks (≥ 90 % of the `spin` samples); shallow, ≥ 90 % reach `main` through `descend` ×3 and nothing is said to be cut |
-| `each_mode_copies_what_it_declares_...` | nofp | fp+leaf, dwarf | the copy is min(declared, stack top − sp) in ≥ 90 % of samples, the stack top read from the target's own `[stack]` mapping; dwarf costs more per sample than fp in two alternated runs each, measured from outside (below); the samples are the target's own clock divided by the period, within 10 %; the tool's reported cost does not exceed the kernel's count for the run beyond the target |
+| `each_mode_copies_what_it_declares_...` | nofp | fp+leaf, dwarf | the copy is min(declared, end − sp) in ≥ 90 % of samples, the end being the top of the target's own `[stack]` mapping or the first page above sp its pagemap says is not resident, whichever is lower (below); dwarf costs more per sample than fp, pooled over three runs of the two side by side, measured from outside (below); the samples are the target's own clock divided by the period, within 10 %; the tool's reported cost does not exceed the kernel's count for the run beyond the target |
 | `user_only_stacks_...` | writes | fp, user half | no kernel frame; the samples cover the program's own user time and leave its system time out (`getrusage`); fewer than half the samples of both halves |
 | `the_choice_says_user_only_exactly_when_...` | leaf | auto, none | the note iff the kernel's rule, read from `/proc` and the binary's capabilities, refuses the kernel; neither refused |
 | `a_ring_that_overflows_...` | two threads | fp | per-ring drops are the burner's |
-| `a_stripped_build_is_named_from_debuginfod_...` | strip, nofp | dwarf | as in 4 |
+| `a_stripped_build_is_named_from_debuginfod_...` | strip, nofp | dwarf | as in 4; the whole paths from `main` are the same set, and a walk that stopped short of `main` is the leaf end of a whole one, in under 5 % of samples |
 
 **The cost, measured** (debug build, this machine, beside five other streams):
 the kernel copies 256 bytes per sample under `fp+leaf` and min(8192, the
@@ -366,6 +366,27 @@ nanoseconds divided by the period are the samples taken. Measured: **14.4 and
 and 80.2 / 66.2 ms of `omn` over about 1485 ms of the target). The target's
 own thread time for the same work is 919 ms and 899 ms in whole runs, so the
 copy in the target's context is below this measurement's resolution.
+
+**A copy stops at the first page that is not resident.** The kernel copies the
+user stack where no page fault may be taken (`copy_from_user_nmi`), so a copy
+from sp upwards ends early at a page of the `[stack]` mapping nothing has
+touched. One was among the top four pages in three of five runs measured here: `exec` lowers the stack
+pointer by up to 8 KiB at random below the strings it writes at the top
+(`arch_align_stack`) before it writes the argument vectors, and a page wholly
+inside that gap is never written. On the CI's runner, whose environment is
+long, every dwarf sample of one run carried about 2600 bytes against a stack
+more than 8192 deep, and the test, which held the copy to the mapping's top,
+failed on all 432 (the sixteenth wave). It now reads the target's pagemap while
+it runs; the frames between sp and `main` are always resident, so what is cut
+is the argument vectors, never a frame.
+
+What a sample costs in cpu time moves with the machine's load by as much as
+the separation between the modes: two `fp` runs a minute apart at load 12 to
+18 on 24 cpus measured 14.9 and 30.4 µs a sample, and the test, which compared
+the dearest `fp` run with the cheapest `dwarf` one, failed twice in a row. The
+two modes now run side by side, three times, compared pooled: under 14 busy
+loops beside the other streams, `fp` 18.6 to 25.1 µs and `dwarf` 30.5 to
+61.1 µs, separating in each of three runs.
 
 **The tool's own cost figure is not the tool's cost.** Over whole runs,
 `cost.json`'s `collector_cpu_ns` says 26 ms (`fp`) and 46 ms (`dwarf`) where
