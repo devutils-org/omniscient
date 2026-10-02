@@ -1,6 +1,8 @@
 # The join engine and the decomposition
 
-Five waves of the engine's stream are recorded here, the newest first. The
+Six waves of the engine's stream are recorded here, the newest first. The
+sixteenth wave bounded the engine's memory, compared an interface by its index
+and let an `overlap` rule say which attribute of a drained row is a window. The
 fifteenth wave held the engine to its phase 1, 4 and 5 exit criteria: a
 signed integer that survives a round trip, a row that cannot go without its
 evidence level, a load test, an eviction seen end to end, and a boundary
@@ -13,6 +15,102 @@ tenth wave found in the engine. Each was a place where the engine said more,
 or less, than it had measured. The eighth wave built the engine's third rung
 (`TEMPORAL`), the decomposition and the chains. Their records follow
 unchanged.
+
+---
+
+# The sixteenth wave — the engine's memory, and the keys it compares
+
+| | |
+|---|---|
+| Delivered | an `iface` key compared by the kernel's index; `KeyValue::proc_of`; `overlap`'s `enclosing`; the engine's attributions bounded to the rule's `top` as states end, and a stream already in order walked where it lies; the memory decomposition's test held to a ready interpreter |
+| Refused, new | `enclosing` on any match but `overlap` (`JoinError::EnclosingOutsideOverlap`); a drained row without the attribute `enclosing` names (`MissingSpan`, as for `span`) |
+| Tests | `src/event.rs` 2 new; `src/join.rs` 3 new; `tests/join_engine.rs` 1 new, 2 widened; `tests/cross_machine.rs` 1 widened |
+| Sessions | `examples/join-iface-loopback.yml` |
+| Files | `src/join.rs`, `src/event.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/{join-decompose-memory,join-iface-loopback}.yml`, `docs/keys.md`, this document |
+| Machine | 24 cpus, kernel 7.2.7, five other streams, `/home` full for most of the wave (`docs/fixes/w16-engine.md`) |
+
+## 1. An interface is its index
+
+`join::identity` compared `iface` by its name. `net.iface` writes one series
+per counter kind (`lo/drops`), so it never met `net.bytes`'s `lo`, and a
+rename made a second key. `KeyValue::iface` now fills an index of 0 from the
+name at the read (`if_nametoindex` on the part before a `/`, which no Linux
+interface name holds), and the identity is `iface#<index>`, the name only when
+the index stayed 0. `between` keeps each reading's baseline on the full key, so
+two series of one interface never difference each other. Held by
+`join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved`:
+`net.iface` and `net.bytes` of `lo` joined by `between`, the bytes credited at
+least what `/sys/class/net/lo/statistics` counted across the test's own 2000
+datagrams and at most what it counted across the run. Before: 0 of 20 readings
+matched, nothing credited. After: 20 of 20, 4 112 000 bytes for a burst the
+kernel counted at 4 112 000.
+
+## 2. `proc` has a maker
+
+Kept, not removed: `CATALOG.md`'s container trap names it as the answer to a
+pid being ambiguous across namespaces. `KeyValue::proc_of(pid)` reads the pid
+namespace's inode from `/proc/<pid>/ns/pid` and the pid inside it from the last
+`NSpid`, and is tested against the namespace link's own text. No collector
+calls it yet; the per-process sources are filed (`docs/open-findings.md`, the
+sixteenth wave, stream engine).
+
+## 3. `overlap`'s `enclosing`
+
+`DECISIONS.md` left open how a drained row of several episodes is credited. The
+rule now says it: `enclosing: <attr>` names the attribute holding the length of
+a window, from the row's stamp, that encloses every occurrence. A row whose
+window lies in one interval is credited whole (exactly: every occurrence is
+inside); one that crosses an interval's end stays uncredited. Absent, `span` is
+a sum and the row is uncredited, as before.
+
+On the reclaim crossing, against the cgroup's own `memory.stat` (pgsteal):
+
+| enclosure carried by `mem.reclaim` | credited in the program's intervals |
+|---|---|
+| none (today) | 745 of 41 413 pages |
+| the drain's close less the first episode's start | 165 of 36 937, 143 of 42 810 |
+| the last episode's end less the first's start | 35 225 of 37 657, 40 497 of 40 739, 41 909 of 42 093 |
+
+The drain and the pressure poll are both 100 ms and out of phase, so a window
+closed by the drain almost always crosses a reading. The last episode's end
+needs eight bytes in the row and one store in `src/bpf/mem_stall.rs`; it was
+measured with that patch applied locally and reverted (it is the mem and
+coordinator layer's). Filed with the patch; the session line
+`enclosing: enclosing_ns` lands with it, and
+`cross_machine::a_memory_limit_turns_...` then holds half the cgroup's pgsteal
+credited at least.
+
+## 4. Memory that does not grow with the run
+
+The engine kept a record of every state that ended until it ranked them, and
+sorted an index of references to the whole input. Both were linear in the run.
+`Ranked` now folds (`wakeup`, `woke`) or ranks and cuts back to `top` (every
+other match) as states end, which is exact: the cut is the final stable sort.
+And `apply_within` walks a stream already in the engine's order where it lies.
+Measured by `join_engine::a_join_under_load_...` on the 1.5 M events
+(500 k then 1 M), beyond the stream:
+
+| | 500 k | 1 M |
+|---|---|---|
+| before | 48.7 MiB | 97.2 MiB |
+| attributions bounded | — | 15.4 MiB |
+| and an in-order stream walked in place | 0.7 MiB | 0.7 MiB |
+
+The test now holds every peak under 4 MiB and the long stream to the short's
+peak plus 1 MiB. What is still linear is not the engine's: `main.rs` clones
+every collection's events into one unsorted `merged` vector, so the engine
+falls back to its index (12 bytes an event) there. Filed. A rule still cannot
+choose the kernel or the query tier: the kernel tier is a rule compiled into a
+program of `src/bpf/` per match kind, and the query tier a join over stored
+runs, which `omn` has no command for. Cost: phase 5's "adding a boundary means
+adding a rule" stays `[~]`, for the agent tier only.
+
+## 5. The hour
+
+`cargo test --release --test join_engine -- --ignored an_hour_of_joins` runs as
+written; `OMN_JOIN_LOAD_SECS` shortens it. Every round asserts the state
+balance, every count against the generator, the peak against the first round
+and the 4 MiB bound, and nothing live after.
 
 ---
 

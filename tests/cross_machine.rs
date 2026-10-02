@@ -1531,6 +1531,25 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         under.overlap_in_brackets,
         under.overlap_uncredited
     );
+    // With `enclosing`, the rule reads a drained bucket's window rather than
+    // its sum, and a bucket whose episodes all lie in one pressure interval
+    // is credited whole: most of what the cgroup reclaimed, since a burst of
+    // reclaim is short against a 100 ms interval. Measured with the row's
+    // last episode end carried (`docs/fixes/w16-engine.md`): 93.5 to 99.6 % of
+    // memory.stat's count credited in three runs, against 0.4 to 2 % without.
+    let session = std::fs::read_to_string(example("cross-machine-reclaim-io.yml"))
+        .expect("the reclaim session ships");
+    if session.contains("enclosing:") {
+        assert!(
+            under.overlap_in_brackets >= (capped.pgsteal / 2) as f64,
+            "the rule names each bucket's enclosing window, and of the {} pages the cgroup's \
+             memory.stat counted only {:.0} were credited to the intervals the program \
+             overlapped ({:.0} uncredited)",
+            capped.pgsteal,
+            under.overlap_in_brackets,
+            under.overlap_uncredited
+        );
+    }
     let accounted = under.overlap_credited + under.overlap_uncredited;
     assert!(
         (accounted - under.reclaimed_machine_wide as f64).abs() <= 1.0,

@@ -136,6 +136,7 @@ fn eq_rule() -> Rule {
         woken: None,
         span: None,
         stamped: None,
+        enclosing: None,
         depth: None,
         value: None,
         reading: None,
@@ -264,6 +265,7 @@ fn wakeup_rule() -> Rule {
         woken: None,
         span: None,
         stamped: None,
+        enclosing: None,
         depth: None,
         value: None,
         reading: None,
@@ -2193,11 +2195,14 @@ fn is_child() -> bool {
 /// evicted from a full map, segments of no request, and requests in flight
 /// when the `from` source's window closes. Every count is held to what the
 /// generator wrote, the open-state balance included, and the map to its
-/// capacity. The memory: the engine holds at most `capacity` open states, and
-/// what it needs besides is its sort of the input and the states it finished,
-/// both linear in the input and released when it returns. A twice longer
-/// stream may take no more than about twice the peak -- a leak per state or a
-/// cost quadratic in the map would -- and nothing is left live afterwards.
+/// capacity. The memory: the engine holds at most `capacity` open states and
+/// the rule's `top` attributions, and walks a stream already in order where it
+/// lies, so what it needs does not grow with the stream: measured, 97.2 MiB
+/// beyond the stream for the million events before the sixteenth wave (an
+/// index of the input and a record of every state that ended), 0.7 MiB after.
+/// A twice longer stream may take no more than the shorter's peak and a
+/// margin, every peak stays under [`LOAD_BOUND`], and nothing is left live
+/// afterwards.
 #[test]
 fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map() {
     in_a_child(
@@ -2209,18 +2214,32 @@ fn a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map()
     }
     let short = one_load(500_000);
     let long = one_load(1_000_000);
+    for (events, peak) in [(500_000, short), (1_000_000, long)] {
+        assert!(
+            peak < LOAD_BOUND,
+            "{events} events took {peak} bytes beyond the stream, more than the {LOAD_BOUND} a \
+             map of {LOAD_CAPACITY} states and its top need"
+        );
+    }
     assert!(
-        long < short * 3,
-        "twice the stream took {:.1}x the peak: {long} bytes against {short}",
-        long as f64 / short as f64
+        long < short + LOAD_BOUND / 4,
+        "twice the stream took {long} bytes against {short}: the engine's memory grows with \
+         the run"
     );
 }
 
-/// The same for an hour, by hand:
+/// What one application of the load rule may hold beyond its input: the map
+/// of [`LOAD_CAPACITY`] states with their age index and labels, and the
+/// buffer of attributions it cuts back to the rule's `top`, with room for the
+/// allocator's rounding. Not a calibrated figure: two orders of magnitude
+/// under what the engine held before it was bounded.
+const LOAD_BOUND: usize = 4 << 20;
+
+/// The same for an hour, by hand (`OMN_JOIN_LOAD_SECS` shortens it):
 ///
 /// ```console
 /// cargo test --release --test join_engine -- --ignored an_hour_of_joins
-/// OMN_JOIN_LOAD_SECS=600 cargo test --release --test join_engine -- --ignored an_hour_of_joins
+/// OMN_JOIN_LOAD_SECS=300 cargo test --release --test join_engine -- --ignored an_hour_of_joins
 /// ```
 ///
 /// Rounds of two million events for as long as asked, each held to its own
@@ -2245,8 +2264,8 @@ fn an_hour_of_joins_leaks_no_state() {
         let peak = one_load(2_000_000);
         let first = *first_peak.get_or_insert(peak);
         assert!(
-            peak < first * 2,
-            "round {rounds}: the peak grew from {first} to {peak} bytes"
+            peak < first * 2 && peak < LOAD_BOUND,
+            "round {rounds}: the peak grew from {first} to {peak} bytes (bound {LOAD_BOUND})"
         );
         assert!(
             heap::live() <= baseline + 64 * 1024,

@@ -9315,3 +9315,71 @@ first stderr line>)"*. On the runner that line should name the missing
 `linux-tools-6.17.0-*-azure` package; the pattern `skipped the cross-check:
 bpftool could not dump` is the one to expect. (It used to skip everywhere: the
 dump's `DATASEC` line was read as the variable's.)
+
+## Needs from another stream — the sixteenth wave, stream engine
+
+Stream engine's record is `docs/fixes/w16-engine.md`.
+
+### To whoever owns `src/bpf/mem_stall.rs` and `src/collect/mem/stall.rs`: the enclosing window of a drained stall row
+
+`overlap` rules now take `enclosing: <attr>` (`src/join.rs`, `Rule::enclosing`):
+the attribute of a row of several occurrences holding the length, from its
+stamp, of a window that encloses them all. `mem.reclaim`'s rows carry their
+first episode's start and nothing that closes the window. Wanted, in one
+commit:
+
+- `src/bpf/mem_stall.rs`: `const VALUE_LAST_NS: i16 = 48;`,
+  `ROW_VALUE_BYTES` 56, every stack slot below `ROW_VALUE` moved down 8
+  (`ROW_VALUE -56`, `ROW_KEY -88`, `PID_TGID -96`, `START_KEY -104`,
+  `START_VALUE -112`, `DROP_KEY -116`, `ROWS_SLOT -128`); in
+  `end_instructions`, `Insn::stx(BPF_DW, 0, VALUE_LAST_NS, 8)` after the
+  atomic adds on an existing row, and
+  `Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_LAST_NS, 8)` beside
+  `VALUE_FIRST_NS` on a new one (r8 is the episode's end); `pub last_ns: u64`
+  on `StallRow`, decoded from `VALUE_LAST_NS`, and the byte-accounting test's
+  table.
+- `src/collect/mem/stall.rs`, in `drain_into`:
+  `Attr::uint("enclosing_ns", if row.last_ns > ts_ns { row.last_ns - ts_ns } else { closed_ns.saturating_sub(ts_ns) })`
+  on every row: the last episode's end, or the drain's close when the row has
+  none.
+- Then `enclosing: enclosing_ns` under `reclaim-per-pressure-interval` in
+  `examples/cross-machine-reclaim-io.yml` (the engine's file: the coordinator
+  or this stream adds it with the commit above, never before, since a rule
+  naming an attribute a row lacks is refused).
+
+Measured with exactly this applied locally and reverted: 35 225, 40 497 and
+41 909 of 37 657, 40 739 and 42 093 pages the cgroup's `memory.stat` counted
+credited in the program's intervals, against 745 of 41 413 today and 165 of
+36 937 with the drain's close as the enclosure.
+`cross_machine::a_memory_limit_turns_...` asserts at least half once the
+session names `enclosing`.
+
+### To whoever owns `src/collect/proc/status.rs`, `src/collect/mem/footprint.rs` and their catalog entries: carry `proc`
+
+`KeyValue::proc_of(pid) -> Option<KeyValue>` (`src/event.rs`) makes the key:
+the pid namespace's inode and the pid inside it. Wanted: computed once at
+attach (a process does not change pid namespace) and pushed after `task` on
+every event, `keys: vec![KeyValue::task(self.pid)]` becoming
+`std::iter::once(KeyValue::task(self.pid)).chain(self.proc_key.clone()).collect()`
+(`src/collect/proc/status.rs:241`, `src/collect/mem/footprint.rs:260`), and
+`proc` added to those entries' `keys:` in `catalog/proc.yaml` and
+`catalog/mem.yaml`. `docs/keys.md` already describes it as filed.
+
+### To whoever owns `src/main.rs` (`assemble`): the joins' input in order
+
+`join::apply_within` walks a stream already in `(ts_ns, opening side first)`
+order where it lies, and otherwise sorts an index of references (12 bytes an
+event). `assemble` builds `merged` by cloning every collection's events one
+collection after another, so it always takes the index, on top of the clone.
+Wanted: `merged.sort_by_key(|event| event.ts_ns)` once before the joins (one
+in-place sort for every rule, instead of one index per rule); better, a merge
+of the collections by reference without the clone, which needs
+`apply_within` over `&[&Event]` -- it already takes any `E: Borrow<Event>`
+internally, and its signature can widen to that on request.
+
+### To whoever owns `src/collect/net/iface.rs`: the counter kind in the key's name
+
+No longer in the way of a join: an `iface` key is compared by its index, and the
+name's part after a `/` is not the interface (`docs/keys.md`). It still makes
+five series of one interface, which a sub-series would replace
+(`docs/open-requests.md`, line 3054). Nothing to do this wave.
