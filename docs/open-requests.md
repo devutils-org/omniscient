@@ -1,69 +1,75 @@
-# The open requests, as of the fifteenth wave
+# The open requests, as of the sixteenth wave
 
-State of `main` at d1f0182 (2026-09-30), after the fourteenth wave's merge.
-The twelfth wave's snapshot (f7b6a92) judged every request in
-`docs/open-findings.md` up to the eleventh wave's sections. It left 122 rows
-OPEN or PARTLY, and each of them is judged again here against the code. The
-requests filed since, under the twelfth, thirteenth and fourteenth waves'
-headings, are judged below them. A line number is the line of
-`docs/open-findings.md` the request starts at. That file is append-only, so
-the number stays valid.
+State of `main` at 37f17c8 (2026-10-01), after the fifteenth wave's merge.
+The fifteenth wave's snapshot was made at d1f0182 (2026-09-30); the sixteenth
+wave re-read every row it left OPEN or PARTLY against the code at 37f17c8,
+including the five it had marked open without reading (8388, 8552, 8612, 8658,
+8747). A row re-read and unchanged says "re-read at 37f17c8" with the line it
+was checked at; a row that moved says where it landed. The twelfth wave's
+snapshot (f7b6a92) judged every request in `docs/open-findings.md` up to the
+eleventh wave's sections, and the requests filed under the twelfth,
+thirteenth and fourteenth waves' headings are judged below them. A line
+number is the line of `docs/open-findings.md` the request starts at. That
+file is append-only, so the number stays valid.
 
 `docs/open-findings.md` never marks a request closed, which is why this file
 exists. It is a dated snapshot, made by reading each request against the code.
 The next brief is written from it, and it is redone rather than kept up to
-date. Owners are left out: the fifteenth wave's streams did not exist when
-these were filed, and whoever owns a row's file owns the row.
+date. Owners are left out: whoever owns a row's file owns the row. What the
+fifteenth wave itself filed (`docs/open-findings.md`, "Needs from another
+stream — the fifteenth wave, stream X") is not in these tables: `STATE.md`,
+"What remains", item 3, lists it by file, checked at fbe6f19.
 
 Counts, in rows of the tables below (a row may carry several line numbers
-that ask for one thing): of what the snapshot left open, **67 landed and 4
-superseded, 17 partly done and 17 still open**; of what was filed since, 12
-landed, 1 superseded, 1 partly done and 20 open. Every line number the
-snapshot left open appears in one of the first two tables.
+that ask for one thing): of what the twelfth wave's snapshot left open,
+**69 landed and 4 superseded, 16 partly done and 16 still open**; of what was
+filed since, 31 landed, 1 superseded, 1 partly done and 1 open. Every line
+number the twelfth wave's snapshot left open appears in one of the first two
+tables. At d1f0182 the counts were 67, 4, 17 and 17, and 12, 1, 1 and 20.
 
 ## Still open
 
 | line | status | request | file | what is left, and where |
 |---|---|---|---|---|
-| 546 (§11) | OPEN | `family_proc::a_count_without_its_limit...` fails on an index | `tests/family_proc.rs` | `run["results"][0]["outputs"][0]["events"][0]` (`:143`) is read before anything asserts an event exists; the failure is `expect("attributes")`, not "no event" |
-| 973 | OPEN | a `gpu` line in the text environment dump | `src/render.rs` | `push_environment` (`:185`) prints kernel, clocks, BTF, cgroup2, tracefs and paranoia, and not the cards the resolved file carries |
-| 1040 | PARTLY | `emitted_fields(source_id, backend)`, the catalog's filter fields crossed against the build | `src/collect/mod.rs` | per-collector `every_filter_field_the_catalog_declares_is_on_an_event` tests only; no `emitted_fields`, no sweep over the whole catalog |
-| 1503 | PARTLY | 23. one PSI reader | `src/collect/mod.rs` | one reader now (`src/collect/psi.rs`), declared as `collect::mem::psi` (`src/collect/mem/mod.rs:17`) and imported by `io/pressure.rs` through `mem`; declaring it in `collect/mod.rs` is filed again at 8067 and 8206 |
-| 1649 | PARTLY | 26. readers of `cpu/online` | `src/collect/power/sysfs.rs` | `capabilities::online_cpus` (`src/capabilities.rs:1396`) is used by `perf.rs` and `bpf/attach.rs:637`; `power/sysfs.rs:85` still reads its own, under a root it is given for tests |
-| 1809, 2301 | PARTLY | 29. the cost bands in `catalog.rs` | `src/main.rs`, `src/catalog.rs` | `Cost::worst_case_percent` moved (`src/catalog.rs:361`); the bands' words are still `band` in `src/main.rs:786` |
-| 1889 | PARTLY | `docs/families/cpu.md`'s stale passages | `docs/families/cpu.md` | "Needs from the shared layer" items 2 to 4 (`:238-248`) still ask for exit 3 for an unbuilt mode, a rate over `enabled_ns` and stack capture; all three exist |
-| 2056 | PARTLY | a missing value is not a non-numeric one | `src/emit.rs` | `stack` counts absent values as unmeasured now (`:1446`); `timeline_by` (`:1109`) and `rate_by` (`:1128`) still call `value_of` and fail the run with `NotNumeric` |
-| 2102 | OPEN | a series whose interest is its variation | `src/render.rs` | no first-value-then-deltas rendering |
-| 2265 | OPEN | `chrome` carries raw events | `src/render.rs` | `:505` says "`chrome` carries timelines"; `OutputFormat::accepts` (`src/format.rs:195`) takes `timeline` and `raw` |
-| 2280 | OPEN | the `Budget` doc comment | `src/request.rs` | `:1249` still says the resolver degrades `trace` to in-kernel `hist` to `sample`; the budget degrades at the runner and says which (`tests/budget.rs`) |
-| 2341 | PARTLY | ROADMAP ticks, CATALOG flag table | `ROADMAP.md` | the `CATALOG.md` half is gone; phase 6's "Exceeding the budget produces an announced degradation" is still `[~]` (`ROADMAP.md`, phase 6), the coordinator's to tick |
-| 2493 | PARTLY | `check_catalog` in the loader, and `Backend.keys` | `src/catalog.rs` | the loader runs `check_catalog` (`:766`); a backend declares no `keys` |
-| 2539, 7803 | PARTLY | refuse a key the selected backend cannot attach | `src/resolve.rs`, `src/catalog.rs` | `ResolveError::KeyNotCarried` exists (`src/resolve.rs:249`) and `main.rs` classifies it; nothing raises it until `Backend.keys` exists |
-| 2693 | OPEN | `UnsupportedTarget` carries its reason apart | `src/collect/mod.rs` | still `{ source_id, target }` with the reason inside `target` (`:121`) |
-| 2716 | OPEN | `Filtered.near_misses` | `src/collect/mod.rs`, `src/encode.rs` | nothing named `near_miss` in `src/` |
-| 2883 | OPEN | the profile scenario takes the machine | `tests/scenario_cpu.rs` | every test takes `may_load_the_machine()`, the read side of `MACHINE` (`:1810`); nothing takes the write side |
-| 3092 | PARTLY | a timeline point carries its error bar | `src/emit.rs`, `catalog/gpu.yaml` | stated as a degradation; `Point` is still `{ offset_ns, value }` (`src/emit.rs:363`), and `gpu.engine_busy` still emits `[timeline, summary]`, no `raw` |
-| 3119 | OPEN | a caveat true of two modes of three | `catalog/net.yaml` | *"These are counters, so a run reports the increment..."* unchanged at `:208` and `:368`, with no snapshot wording |
-| 3760 | PARTLY | BTF members behind anonymous unions, for the `net` callers | `src/bpf/net_drops.rs` | `net.tcp.lifetime` and `.retransmit` carry the remote endpoint (`src/bpf/net_lifetime.rs:105-140`); `net.drops` still reads no `skb->protocol`, `skb_iif` or `dev`, and says why (`:22-28`) |
-| 3972 | PARTLY | `direction` as a filter field | `catalog/mem.yaml`, `src/collect/mem/**` | `mem.page_alloc` has it (`:133`); `mem.kmalloc` is `[bytes, comm]` (`:152`) |
-| 4083 | OPEN | `GET_CURRENT_COMM` from `insn.rs` | `src/bpf/proc_syscall.rs` | still a local `extra_helper::GET_CURRENT_COMM` (`:45-54`), called at `:415` |
-| 4292 | OPEN | a bounded read at a `__data_loc` offset | `src/bpf/insn.rs`, `src/bpf/sched_drm.rs` | `attach::tracepoint_layout` flags the field (`src/bpf/attach.rs:535`); no variable-offset read, and `gpu.job`'s ring is the scheduler thread's name (`sched_drm.rs:138`) |
-| 4662 | OPEN | per-range residency of live allocations | `src/collect/mem/heap/live.rs` | its events carry `task` only (`:60`) |
-| 5132 | OPEN | 2.6 MiB of flusher progress beside 90 MiB of kworker writes | `src/collect/io/writeback.rs` | not investigated; a cgroup scope is refused as not built (`:57`) |
-| 5256 | PARTLY | "one run observes one target" is no longer true | tests and examples | gone from `src/main.rs` and `src/encode.rs`; still in `tests/scenario_mem.rs:2098`, `tests/scenario_sched.rs:2307` and seven examples (`mem-allocator-ledger`, `mem-kernel-sweep`, `mem-reclaim-squeeze`, `proc-bpf-sweep`, `net-not-built`, `sched-sweep`, `net-handshake-to-close`), each to be read against `DECISIONS.md`'s "One workload per run" |
-| 5272 | OPEN | the known-instruction scenario overshoots by +0.69 % | `tests/scenario_cpu.rs` | the double-count suspicion is recorded (`docs/flaky.md:138`) and not tested |
-| 5520 | OPEN | `Btf::function`, a function's id and prototype | `src/bpf/btf.rs` | the second parser, `fentry::FunctionIndex`, is still there (`src/bpf/fentry.rs:168`) |
-| 5536 | OPEN | the commands `fentry.rs` issues itself | `src/bpf/syscall.rs` | `fentry.rs` still defines `BPF_PROG_LOAD` and `BPF_RAW_TRACEPOINT_OPEN` (`:68-69`) and calls `bpf()` (`:533`); `syscall::raw_tracepoint_open` still takes a name (`:337`) |
-| 5553 | OPEN | five module lines in `bpf/mod.rs` | `src/bpf/mod.rs`, `src/bpf/attach.rs` | `fentry`, `io_fsync`, `io_vfs`, `net_connect`, `net_socket` still declared by `#[path]` in `attach.rs` (`:61-69`) |
-| 5566 | PARTLY | `GET_CURRENT_TASK` from `insn.rs` | `src/bpf/io_fsync.rs` | still a local constant (`:54`), called at `:349` |
-| 5652 | PARTLY | `count` over a kernel-built histogram | `src/request.rs` | `count` ranks now (`topk`, `:715-720`); it still has no `hist` |
-| 6642 | PARTLY | §47, the shim ring | `docs/bench.md` | the ring's caveat is on `mem.rss`; the bench's heap rows still predate the ring (`STATE.md`, "the bench's second table") |
-| 6871 | PARTLY | one grace period per round, not per source | `src/bpf/map.rs`, `src/collect/mod.rs` | `map::grace_period` is public (`:359`) and each drain waits its own (`:328`, `fentry.rs:1377`); no round-level retire |
+| 546 (§11) | OPEN | `family_proc::a_count_without_its_limit...` fails on an index | `tests/family_proc.rs` | re-read at 37f17c8: unchanged, `run["results"][0]["outputs"][0]["events"][0]` (`:143`) read before anything asserts an event exists, `expect("attributes")` at `:144` |
+| 973 | OPEN | a `gpu` line in the text environment dump | `src/render.rs` | re-read at 37f17c8: `push_environment` (`:185`) still names no card |
+| 1040 | PARTLY | `emitted_fields(source_id, backend)`, the catalog's filter fields crossed against the build | `src/collect/mod.rs` | re-read at 37f17c8: still no `emitted_fields` anywhere in `src/` or `tests/` |
+| 1503 | PARTLY | 23. one PSI reader | `src/collect/mod.rs` | re-read at 37f17c8: one reader (`src/collect/psi.rs`), still declared `pub mod psi` in `src/collect/mem/mod.rs:17`; filed again at 8067 and 8206, and by the fifteenth wave's kernel stream |
+| 1649 | PARTLY | 26. readers of `cpu/online` | `src/collect/power/sysfs.rs` | re-read at 37f17c8: `power/sysfs.rs:85` still has its own `online_cpus` beside `capabilities::online_cpus` |
+| 1809, 2301 | PARTLY | 29. the cost bands in `catalog.rs` | `src/main.rs`, `src/catalog.rs` | re-read at 37f17c8: `Cost::worst_case_percent` is in `src/catalog.rs`; the bands' words are still `fn band` in `src/main.rs:834` |
+| 1889 | PARTLY | `docs/families/cpu.md`'s stale passages | `docs/families/cpu.md` | re-read at 37f17c8: "Needs from the shared layer" items 2 to 4 (`:240-247`) unchanged, still asking for what exists |
+| 2056 | PARTLY | a missing value is not a non-numeric one | `src/emit.rs` | re-read at 37f17c8: `timeline_by` (`:1109`) and `rate_by` (`:1128`) still call `value_of` |
+| 2102 | OPEN | a series whose interest is its variation | `src/render.rs` | re-read at 37f17c8: no first-value-then-deltas rendering |
+| 2265 | OPEN | `chrome` carries raw events | `src/render.rs` | re-read at 37f17c8: `:541` still says "`chrome` carries timelines"; `OutputFormat::accepts` (`src/format.rs:195`) takes `timeline` and `raw` |
+| 2280 | OPEN | the `Budget` doc comment | `src/request.rs` | re-read at 37f17c8: `:1249` unchanged |
+| 2341 | PARTLY | ROADMAP ticks, CATALOG flag table | `ROADMAP.md` | re-read at 37f17c8: phase 6's "Exceeding the budget produces an announced degradation" still `[~]` (`ROADMAP.md:440`), the coordinator's to tick |
+| 2539, 7803 | PARTLY | refuse a key the selected backend cannot attach | `catalog/io.yaml` | at 37f17c8 the resolver raises `KeyNotCarried` (`src/resolve.rs:885`), held by `resolve`'s tests over a test catalog; no shipped backend declares `keys:` yet, so no shipped entry reaches it (`io.bytes`'s `fs:proc`/`fs:cgroup` and `io.iops`'s `fs:proc`, filed by the fifteenth wave's resolver stream) |
+| 2693 | OPEN | `UnsupportedTarget` carries its reason apart | `src/collect/mod.rs` | re-read at 37f17c8: still `{ source_id, target }` (`:123`) |
+| 2716 | OPEN | `Filtered.near_misses` | `src/collect/mod.rs`, `src/encode.rs` | re-read at 37f17c8: nothing named `near_miss` in `src/` |
+| 3092 | PARTLY | a timeline point carries its error bar | `src/emit.rs`, `catalog/gpu.yaml` | re-read at 37f17c8: `Point` is still `{ offset_ns, value }` (`src/emit.rs:363`); `gpu.engine_busy` still `[timeline, summary]` |
+| 3119 | OPEN | a caveat true of two modes of three | `catalog/net.yaml` | re-read at 37f17c8: unchanged at `:208` and `:372` |
+| 3760 | PARTLY | BTF members behind anonymous unions, for the `net` callers | `src/bpf/net_drops.rs` | re-read at 37f17c8: `net.drops` still says why it reads no `skb->protocol`, `skb_iif` or `dev` (`:23-29`) |
+| 3972 | PARTLY | `direction` as a filter field | `catalog/mem.yaml`, `src/collect/mem/**` | re-read at 37f17c8: `mem.kmalloc` still `[bytes, comm]` (`:152`) |
+| 4083 | OPEN | `GET_CURRENT_COMM` from `insn.rs` | `src/bpf/proc_syscall.rs` | re-read at 37f17c8: still `extra_helper::GET_CURRENT_COMM` (`:55`), called at `:416` |
+| 4292 | OPEN | a bounded read at a `__data_loc` offset | `src/bpf/insn.rs`, `src/bpf/sched_drm.rs` | re-read at 37f17c8: no variable-offset read in `insn.rs` |
+| 4662 | OPEN | per-range residency of live allocations | `src/collect/mem/heap/live.rs` | re-read at 37f17c8: events carry `task` only (`:60`) |
+| 5132 | OPEN | 2.6 MiB of flusher progress beside 90 MiB of kworker writes | `src/collect/io/writeback.rs` | re-read at 37f17c8: not investigated; a cgroup scope still refused as not built (`:57`) |
+| 5256 | PARTLY | "one run observes one target" is no longer true | tests and examples | re-read at 37f17c8: still in `tests/scenario_mem.rs:2104`, `tests/scenario_sched.rs:2570` and six examples (`mem-allocator-ledger`, `mem-reclaim-squeeze`, `net-handshake-to-close`, `net-not-built`, `sched-sweep`, `sched-sweep-machine`); `mem-kernel-sweep` and `proc-bpf-sweep` no longer say it. Each to be read against `DECISIONS.md`'s "One workload per run" |
+| 5272 | OPEN | the known-instruction scenario overshoots by +0.69 % | `tests/scenario_cpu.rs` | re-read at 37f17c8: recorded (`docs/flaky.md:138`), not tested |
+| 5520 | OPEN | `Btf::function`, a function's id and prototype | `src/bpf/btf.rs` | re-read at 37f17c8: `fentry::FunctionIndex` still there (`src/bpf/fentry.rs:169`) |
+| 5536 | OPEN | the commands `fentry.rs` issues itself | `src/bpf/syscall.rs` | re-read at 37f17c8: `fentry.rs` still defines `BPF_PROG_LOAD` and `BPF_RAW_TRACEPOINT_OPEN` (`:69-70`) |
+| 5553 | OPEN | five module lines in `bpf/mod.rs` | `src/bpf/mod.rs`, `src/bpf/attach.rs` | re-read at 37f17c8: the five still declared by `#[path]` in `attach.rs` (`:62-70`) |
+| 5566 | PARTLY | `GET_CURRENT_TASK` from `insn.rs` | `src/bpf/io_fsync.rs` | re-read at 37f17c8: still a local constant (`:55`), called at `:350` |
+| 5652 | PARTLY | `count` over a kernel-built histogram | `src/request.rs` | re-read at 37f17c8: `count` takes `rate`, `summary`, `raw`, `topk` (`:715-720`), no `hist` |
+| 6642 | PARTLY | §47, the shim ring | `docs/bench.md` | re-read at 37f17c8: the heap rows still say they want one more rerun (`docs/bench.md:379`) |
+| 6871 | PARTLY | one grace period per round, not per source | `src/bpf/map.rs`, `src/collect/mod.rs` | re-read at 37f17c8: `map::grace_period` (`:360`), each drain still waits its own (`fentry.rs:1378`); no round-level retire |
 
 ## Landed or superseded since the twelfth wave's snapshot
 
 | line | status | request | where |
 |---|---|---|---|
+| 2493 | LANDED | `check_catalog` in the loader, and `Backend.keys` | at 37f17c8: `Backend.keys: Option<Vec<KeyKind>>` (`src/catalog.rs:262`), read by the resolver (fifteenth wave, resolver, `b121922`) |
+| 2883 | LANDED | the profile scenario takes the machine | at 37f17c8: `machine_to_itself()`, the write side of `MACHINE` (`tests/scenario_cpu.rs:1900`), taken by six scenarios (`:1430`, `:1769`, `:2042`, `:2247`, `:2418`, `:3297`; `b98a164`) |
 | 168 (§5) | LANDED | `count` -> `raw` in the mode x emit matrix | `CATALOG.md:526` |
 | 168 (§5) | LANDED | a rate over the counter's own window | `emit::rate_by` reads `enabled_ns` (`src/emit.rs:1138`) |
 | 250 (§7) | LANDED | `--pid a,b` measures only `a` | refused where a collector follows one process (`Target::narrowed_to_one`, `src/collect/mod.rs:2026`; `DECISIONS.md`, the thirteenth wave) |
@@ -145,39 +151,39 @@ left.
 
 | line | status | request | file | what is left, and where |
 |---|---|---|---|---|
-| 7221 | LANDED | `omn list --format json` carries the sweep | | `here` on each entry (`src/main.rs:1537`); `omn-mcp` still has `parse_sweep` over the text (`mcp/src/binary.rs:299`), which can go |
+| 7221 | LANDED | `omn list --format json` carries the sweep | | `here` on each entry; `omn-mcp` still has `parse_sweep` over the text (`mcp/src/binary.rs:299`, called at `:173`), which can go |
 | 7331, 7344 | LANDED | `Btf::var_id`; `THIS_CPU_PTR`, `load_btf_id` | | `src/bpf/btf.rs:168`; `src/bpf/insn.rs:126`, `:299`. `wakeup.rs` keeps a test-only `var_id` over the raw blob (`:673`) |
 | 7377 | LANDED | a waker of 0 is not always the idle task | | `interrupt (hardirq)` chains (`src/encode.rs:441`) |
 | 7451 | LANDED | what `proc.syscall`'s comparison skipped | | `SKIPPED_BY_PREDICATE` (`src/bpf/proc_syscall.rs:84`) |
 | 7469 | LANDED | who applied a predicate | | `AppliedBy` in the text (`src/render.rs:166-168`) |
 | 7581, 7843 | LANDED | `CATALOG.md` §1's requirement notations | | `btf_member:`, `writable:` and the prototypes (`CATALOG.md:135-160`) |
 | 7605 | SUPERSEDED | the `cgroup`/`container` targets nothing serves | | the fourteenth wave's `container: no`, and its removal from the eleven entries that serve a cgroup, filed at 8247 and 8331 (below) |
-| 7930 | PARTLY | `ProgramStats::for_run` onto `bpf::enable_run_time_stats` | `src/collect/mod.rs` | the re-export exists (`src/bpf/mod.rs:109`); `for_run` still issues `BPF_ENABLE_STATS` itself (`src/collect/mod.rs:761`, `:825`) |
+| 7930 | LANDED | `ProgramStats::for_run` onto `bpf::enable_run_time_stats` | `src/collect/mod.rs` | at 37f17c8 the call goes through `crate::bpf::enable_run_time_stats()` (`src/collect/mod.rs:858`; fifteenth wave, runner) |
 | 7944 | LANDED | two bench tests share a report file | | the name carries a per-call counter (`examples/bench/harness.rs:777`) |
 | 8030 | LANDED | `SCHED_SWITCHES` is used | | `src/collect/cpu/counters.rs:246` |
-| 8067, 8206 | OPEN | declare `psi` where it lives | `src/collect/mod.rs`, `src/collect/mem/mod.rs` | `pub mod psi` is still in `mem/mod.rs:17`; moved in one commit with K's three lines |
+| 8067, 8206 | OPEN | declare `psi` where it lives | `src/collect/mod.rs`, `src/collect/mem/mod.rs` | re-read at 37f17c8: `pub mod psi` still in `mem/mod.rs:17`; filed again by the fifteenth wave, to move in one commit with the kernel stream's three lines |
 | 8131 | LANDED | `topk` back into `net.bytes` | | `emits: [rate, timeline, summary, topk]` (`catalog/net.yaml:130`) |
 | 8221 | LANDED | the kernel's count is a fact (`net.softirq`) | | `facts()` holds both of the kernel's counts (`src/collect/net/softirq.rs:495`) |
-| 8234, 8247, 8331 | OPEN | `container: no` dropped where a cgroup is served | `catalog/cpu.yaml`, `catalog/mem.yaml`, `src/validate.rs`, `tests/scenario_cpu.rs` | ten `container: no` in `catalog/cpu.yaml`; the entries and the refusal test change in one commit |
-| 8261, 8623 | OPEN | `.github/expected-skips.txt`: the cgroup-ancestry wording in, `/sys/class/block/root` out | `.github/expected-skips.txt` | the `/sys/class/block/root` line is still there (`:75`) |
-| 8295 | OPEN | `join::decompose_within(.., windows)`, so a `paired` part pairs over the joins' windows | `src/join.rs` | no `decompose_within`; `Session::check_paired_parts` still refuses before the run (`src/request.rs:1684`) |
-| 8366 | OPEN | `--symbols local\|debuginfod` | `src/request.rs`, `src/cli.rs` | the mechanism is landed; no flag in `src/cli.rs` |
-| 8388 | OPEN | the unwind choice in the resolved file | `src/main.rs`, `src/resolve.rs` | `STATE.md`, "What remains", item 2 |
-| 8399 | OPEN | the mode table beside the catalog | `src/catalog.rs` | still `src/unwind.yaml`, because `load_dir` parses every file of `catalog/` as entries |
-| 8437 | OPEN | `cost.json` for a profile with stacks leaves most of it out | `src/collect/mod.rs` | 26 ms reported where the kernel counts 986 ms (`STATE.md`) |
-| 8489 | OPEN | a rate over joules printed as watts | `src/encode.rs` | the rate line still appends `/s` to the unit (`:1267`) |
-| 8497 | OPEN | "here" names a build's gap (optional) | `src/render.rs` | |
-| 8546 | OPEN | *"bpftool could not dump the BTF"* gives no reason | `src/bpf/btf.rs` | `:670` unchanged |
-| 8552 | OPEN | skip lines the gate cannot read | `tests/cross_memory.rs:147`, `tests/cross_machine.rs:807`, `:1032` | `STATE.md`, "What remains", item 2 |
+| 8234, 8247, 8331 | LANDED | `container: no` dropped where a cgroup is served | `catalog/cpu.yaml`, `catalog/mem.yaml`, `src/validate.rs` | at 37f17c8: no `container: no` in `catalog/cpu.yaml` or `catalog/mem.yaml`, and the loader refuses one where a cgroup is served (fifteenth wave, probes, `f6bdbc9`) |
+| 8261, 8623 | LANDED | `.github/expected-skips.txt`: the cgroup-ancestry wording in, `/sys/class/block/root` out | `.github/expected-skips.txt` | at 37f17c8: the ancestry line is at `:59` and no `/sys/class/block/root` line is left |
+| 8295 | LANDED | `join::decompose_within(.., windows)`, so a `paired` part pairs over the joins' windows | `src/join.rs` | `join::decompose_within` (`src/join.rs:3005`); `check_paired_parts` removed (`303fcfe`) |
+| 8366 | LANDED | `--symbols local\|debuginfod` | `src/request.rs`, `src/cli.rs` | `symbols` on the command line (`src/cli.rs:190`, `:549`), the choice in `resolved.json` (`b121922`) |
+| 8388 | LANDED | the unwind choice in the resolved file | `src/main.rs`, `src/resolve.rs` | re-read at 37f17c8: `ResolvedRequest.stack: Option<StackChoice>` (`src/resolve.rs:50`), set by the resolver through `stack::recorded_choice` (`:700`), so `main.rs` and the triage engine get it with the backend (`b121922`) |
+| 8399 | LANDED | the mode table beside the catalog | `src/catalog.rs` | `catalog/unwind.yaml`, skipped by the loader as `UNWIND_TABLE` (`src/catalog.rs:41`); `src/unwind.yaml` is gone |
+| 8437 | LANDED | `cost.json` for a profile with stacks leaves most of it out | `src/collect/mod.rs` | the account: `cost.json` carries the cpu before, in and after the window, held to `wait4` (`docs/fixes/w15-runner.md`, section 2). The cost itself is filed again: a user-only callchain still primes the kernel's symbols, most of 968 ms before the window (`src/collect/cpu/profile.rs`) |
+| 8489 | LANDED | a rate over joules printed as watts | `src/encode.rs` | `per_second_quantity` (`src/encode.rs:1872`); the documents quoting `J/s` changed in the sixteenth wave (`docs/fixes/w16-docs.md`) |
+| 8497 | LANDED | "here" names a build's gap (optional) | `src/render.rs` | *"no backend is usable in this build: this machine serves ..."* (`src/render.rs:407`), test `render::tests::here_tells_a_gap_in_this_build_from_one_in_this_machine` |
+| 8546 | LANDED | *"bpftool could not dump the BTF"* gives no reason | `src/bpf/btf.rs` | the skip says what bpftool answered (`src/bpf/btf.rs:657-670`; fifteenth wave, kernel); its new wording for `.github/expected-skips.txt` is filed |
+| 8552 | LANDED | skip lines the gate cannot read | `tests/cross_memory.rs`, `tests/cross_machine.rs` | re-read at 37f17c8: `cross_memory.rs:169` puts the refusal on the `SKIPPED` line (both CI cells print it so at 37f17c8); `cross_machine.rs:807` asks the count alone and skips only on the machine's refusal of it (`a_guardrail_this_machine_cannot_serve_refuses_the_whole_crossing` ok on both cells); `cross_machine.rs:1087` says what the program printed and how it exited |
 | 8588 | LANDED | a context switch is kernel mode | | the probe opens without `exclude_kernel` for the kernel-only events (`counted_only_in_kernel`, `src/capabilities.rs:1040`), and the counter refuses rather than notes (`src/collect/cpu/counters.rs:681`) |
-| 8612 | OPEN | a (target, mode) pair no backend declares is the request's, exit 2 | `src/resolve.rs` or `src/validate.rs` | `sched.switches --cgroup -m trace` reads as the machine's |
-| 8631 | OPEN | two lines for `collect/mod.rs`: `pub mod net`, `ProgramStats::for_run` | `src/collect/mod.rs` | `mod net` is private (`:26`) |
-| 8642 | OPEN | a preempted program skips every run behind it | `docs/bpf-layer.md` | the coordinator's; `STATE.md` lists it unscheduled |
-| 8658 | OPEN | three `mcp` protocol tests fail rather than skip without capabilities | `mcp/tests/protocol.rs` | |
-| 8711 | OPEN | capabilities on the file, not in the process; a `nosuid` mount | `src/capabilities.rs` | nothing says `nosuid` in `src/` |
-| 8728 | OPEN | the shim hooks `aligned_alloc`, `memalign`, `valloc`, `pvalloc`; its refusal; `find_shim` under `lib/omn/` | `shim/**`, `src/collect/mem/heap/mod.rs` | the shim replaces `posix_memalign` (`shim/src/lib.rs:852`) and none of the four; `dd bs=64M` reads a largest allocation of 4 KiB and no loss, **a silent loss** |
-| 8747 | OPEN | the "no viable backend" refusal leads with the backend passed over | `src/collect/mod.rs` | |
-| 8756 | OPEN | a `LICENSE` file | the repository root | none; `Cargo.toml` says Apache-2.0 |
+| 8612 | LANDED | a (target, mode) pair no backend declares is the request's, exit 2 | `src/resolve.rs` | re-read at 37f17c8: `ResolveError::NoBackendDeclares` (`src/resolve.rs:239`, raised at `:643`); `omn sched.switches --cgroup /sys/fs/cgroup -m trace` exits 2 with *"no backend of its chain declares both, so no machine could serve it"*, run here |
+| 8631 | LANDED | two lines for `collect/mod.rs`: `pub mod net`, `ProgramStats::for_run` | `src/collect/mod.rs` | `pub mod net` (`:28`); `for_run` through `bpf::enable_run_time_stats` (`:858`). `mod io` is still private, filed again (`pub(crate) mod io`, for the validator) |
+| 8642 | LANDED | a preempted program skips every run behind it | `docs/bpf-layer.md` | documented at `docs/bpf-layer.md:185`; the remedy (a per-target attach) is not scheduled |
+| 8658 | LANDED | three `mcp` protocol tests fail rather than skip without capabilities | `mcp/tests/protocol.rs` | re-read at 37f17c8: all three go through `common::run_example_or_skip` (`mcp/tests/common/mod.rs:73`), which skips on the machine's refusal with its reason on the line (`protocol.rs:29`, `:111`, `:236`); `ok` on both CI cells at 37f17c8 |
+| 8711 | PARTLY | capabilities on the file, not in the process; a `nosuid` mount | `src/capabilities.rs`, `src/bpf/mod.rs` | the probe knows: `capabilities::withheld_file_capabilities` (`src/capabilities.rs:387`) names a `nosuid` mount or `no_new_privs`, and the resolved record carries it; `bpf::permission_advice` (`src/bpf/mod.rs:386`) does not call it yet, so an attach still advises the grant (filed by the fifteenth wave's probes stream). `docs/install.md` names `findmnt` |
+| 8728 | LANDED | the shim hooks `aligned_alloc`, `memalign`, `valloc`, `pvalloc`; its refusal; `find_shim` under `lib/omn/` | `shim/**`, `src/collect/mem/heap/mod.rs` | `shim/src/lib.rs:936-957`; `SHIM_PLACES` includes `../lib/omn/` (`src/collect/mem/heap/mod.rs:141`) (fifteenth wave, runner) |
+| 8747 | LANDED | the "no viable backend" refusal leads with the backend passed over | `src/main.rs` | re-read at 37f17c8: `PassedOver` and `passed_over_first` (`src/main.rs:973`, `:999`) lead with the first collected backend passed over and its reason (fifteenth wave, resolver) |
+| 8756 | LANDED | a `LICENSE` file | the repository root | `LICENSE-MIT` and `LICENSE-APACHE` (`37f17c8`); `Cargo.toml` says `MIT OR Apache-2.0`, `src/bpf` is `MIT OR GPL-2.0` |
 | (STATE) | LANDED | `CLAUDE.md`'s *"86 usable sources and 51"* | `CLAUDE.md` | 92 and 51, this wave |
 
 ## Landed by the twelfth wave's snapshot
@@ -345,8 +351,8 @@ written; a line number in them is the one it had then.
 ## Requests filed more than once
 
 - 1809 and 2301: the cost bands. The number moved to `src/catalog.rs`, the words did not.
-- 2539 and 7803: `KeyNotCarried`, waiting on `Backend.keys` (2493).
+- 2539 and 7803: `KeyNotCarried`, raised since `Backend.keys` (2493) landed, and reached by no shipped entry yet.
 - 1503, 8067 and 8206: the one PSI reader, declared where it lives.
-- 7930 and 8631: `ProgramStats::for_run` onto `bpf::enable_run_time_stats`.
+- 7930 and 8631: `ProgramStats::for_run` onto `bpf::enable_run_time_stats` (both landed).
 - 4083 and 5566: two helpers still local to their programs (`GET_CURRENT_COMM`, `GET_CURRENT_TASK`), one line each in `src/bpf/insn.rs`.
 - 5520 and 5536: `fentry.rs` keeps its own BTF parser and its own `bpf()` calls; both go through the shared layer, or neither does.

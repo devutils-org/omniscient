@@ -20,8 +20,8 @@ built around the opposite rule:
   target, and says *unknown* rather than zero when it cannot.
 
 Every output below is real: it was run on the development machine (AMD Zen 2,
-24 cpus, Linux 7.2) on 2026-10-01, after the fifteenth wave's merge, and only
-trimmed where marked `…`.
+24 cpus, Linux 7.2) on 2026-10-02, at the fifteenth wave's merge (`37f17c8`),
+with other builds sharing the machine, and only trimmed where marked `…`.
 
 To run them yourself: install a release or `make install PREFIX=~/.local`,
 grant the two capabilities with
@@ -40,25 +40,25 @@ it reports its own ground truth as it exits:
 
 ```console
 $ omn latency --objective latency -- target/omn-triage-fixture/workload lock 150 2000
-omn-truth mode=lock … wall_ns=158021253 oncpu_ns=2721880 runq_ns=34620 lock_wait_ns=146479986 locks=150
+omn-truth mode=lock … wall_ns=158418461 oncpu_ns=3179570 runq_ns=28060 lock_wait_ns=146441769 locks=150
 
-  for latency, task:2353194 of the run spent most of its time asleep in a pthread mutex
+  for latency, task:40760 of the run spent most of its time asleep in a pthread mutex
   another thread held: lock-contended: …
 
     STATE              SOURCE          KIND     EVIDENCE      AMOUNT  RESOLUTION   SHARE
-    on-cpu             cpu.profile     sampled  KEY           2.01ms    +-1.00ms   1.2 %
+    on-cpu             cpu.profile     sampled  KEY           3.01ms    +-1.00ms   1.8 %
       …
-    runnable           sched.runqlat   traced   KEY         474.86us       exact   0.3 %
-    blocked: sleeping  sched.offcpu    traced   KEY         159.33ms       exact  97.8 %
-      -> 146.43ms waiting in pthread_mutex_lock over 151 acquisition(s), most of it on the mutex at 0x55c99ca97140 …
-      -> 148.32ms waiting in futex(2) over 76 wait(s) [sched.futex KEY]
+    runnable           sched.runqlat   traced   KEY         551.50us       exact   0.3 %
+    blocked: sleeping  sched.offcpu    traced   KEY         158.90ms       exact  97.3 %
+      -> 146.34ms waiting in pthread_mutex_lock over 151 acquisition(s), most of it on the mutex at 0x5589aed09140 …
+      -> 148.09ms waiting in futex(2) over 76 wait(s) [sched.futex KEY]
       -> 92 % of it from one stack, leaf first: … pthread_mutex_lock … <- main <- …
-    whole              the program's life lifetime -  162.88ms    +-6.23ms 100.0 %
-    RESIDUE            whole - parts                    1.07ms    +-7.24ms
+    whole              the program's life lifetime -  163.24ms    +-9.91ms 100.0 %
+    RESIDUE            whole - parts                  781.34us   +-10.91ms
 ```
 
-The program measured **146.48 ms** of lock waiting on its own clock, and `omn`
-found **146.43 ms**, and named the mutex and the stack.
+The program measured **146.44 ms** of lock waiting on its own clock, and `omn`
+found **146.34 ms**, and named the mutex and the stack.
 
 ## 2. Where did a thread's wall clock go? Down to the microsecond
 
@@ -70,18 +70,18 @@ not explain, is printed rather than rounded away:
 $ omn -f examples/join-decompose-compute.yml
 decompose where-the-time-went  per task, in ns
 
-  task:2353441
+  task:41249
     STATE     SOURCE          VALUE     KIND     EVIDENCE      AMOUNT  RESOLUTION   SHARE
-    on-cpu    cpu.profile     samples   sampled  KEY         198.60ms    +-1.00ms  54.1 %
-    runnable  sched.runqlat   total_ns  traced   KEY           1.69ms       exact   0.5 %
-    blocked   sched.offcpu    total_ns  traced   KEY         166.24ms       exact  45.3 %
-    parts                                                    366.52ms
-    whole     the program's life gate to reap lifetime -     366.76ms    +-9.03ms
-    RESIDUE   whole - parts                                 +237.12us   +-10.04ms
+    on-cpu    cpu.profile     samples   sampled  KEY         208.63ms    +-1.00ms  53.1 %
+    runnable  sched.runqlat   total_ns  traced   KEY           2.76ms       exact   0.7 %
+    blocked   sched.offcpu    total_ns  traced   KEY         181.68ms       exact  46.3 %
+    parts                                                    393.06ms
+    whole     the program's life gate to reap lifetime -     392.80ms    +-1.14ms
+    RESIDUE   whole - parts                                 -267.63us    +-2.14ms
 ```
 
 On-cpu, waiting for a cpu and blocked add up to the program's life to within
-**237 µs**, inside a stated resolution of ±10.0 ms. The whole carries no
+**268 µs**, inside a stated resolution of ±2.1 ms. The whole carries no
 evidence level (`-`): it is the program's life, a bracket joined to nothing.
 
 ## 3. Ask for too much, and it tells you what you lost
@@ -93,11 +93,11 @@ $ omn cpu.profile -m sample@100000hz -e stack -d 2s -- python3 -c 'import time
 t=time.time()
 while time.time()-t<3: sum(i*i for i in range(1000))'
 cpu.profile  via pmu:sw  (cpu.profile)
-  23183 events over 2.00s, stopped because the requested duration elapsed
-  LOSS: 175754 dropped, 0 failed reads, 2 late ticks, 0 undecoded, 959 throttled
-    184x the kernel throttled profile sampling: an unknown number of samples in each
+  23309 events over 2.00s, stopped because the requested duration elapsed
+  LOSS: 175781 dropped, 0 failed reads, 2 late ticks, 0 undecoded, 963 throttled
+    185x the kernel throttled profile sampling: an unknown number of samples in each
          throttled period were not taken (see kernel.perf_event_max_sample_rate)
-    184x the profile ring overflowed: samples were taken and never read, so the stacks
+    185x the profile ring overflowed: samples were taken and never read, so the stacks
          here are a biased subset -- the busy phases are the ones that overflow
   degraded: stacks unwound by `dwarf`: 8 KiB of user stack is copied with every sample,
             so the rings fill about a hundred times faster than under frame pointers …
@@ -106,8 +106,8 @@ cpu.profile  via pmu:sw  (cpu.profile)
         frame pointers …)
 
   stack
-    >= short by at least 175754 of 198937 events (88.3 % unaccounted for), and by an
-       unknown number more: the kernel throttled this event 959 times …
+    >= short by at least 175781 of 199090 events (88.3 % unaccounted for), and by an
+       unknown number more: the kernel throttled this event 963 times …
 ```
 
 A flame graph drawn from this run would look clean. `omn` says that the
@@ -135,13 +135,14 @@ target, in the target's own context:
 ```console
 $ omn cpu.ipc -m count -e summary -- /bin/sh -c 'i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done'
   summary
-    task:2354601 n=1     min 2.068  mean 2.068  max 2.068  last 2.068
-cost: cpu.ipc (count) via `pmu` spent 950.0us of cpu … against the target's 527.2ms (0.18 %, declared `free`)
+    task:42963 n=1     min 2.138  mean 2.138  max 2.138  last 2.138
+cost: cpu.ipc (count) via `pmu` spent 834.0us of cpu and an unknown amount inside the target
+  against the target's 512.5ms (0.16 %, declared `free`) …
 caveat: A ratio, not an amount: a spin loop retires instructions at a high IPC while doing nothing. …
 
 $ omn proc.syscall -m count -e summary -- /bin/sh -c 'for i in $(seq 2000); do : > /dev/null; done'
-cost: proc.syscall (count) via `bpf:raw_tp` spent 859.0us of cpu and an unknown amount inside
-  the target against the target's 23.3ms (3.68 %, declared `extreme`) … the kernel is not timing
+cost: proc.syscall (count) via `bpf:raw_tp` spent 968.0us of cpu and an unknown amount inside
+  the target against the target's 21.8ms (4.43 %, declared `extreme`) … the kernel is not timing
   eBPF programs on this run: `kernel.bpf_stats_enabled` is 0 … `sysctl kernel.bpf_stats_enabled=1`
   before the run makes what the programs spend inside the target measurable
 ```
