@@ -103,6 +103,19 @@ The reviewer's five findings, each checked:
    the four new ones among them, before any change of this round; 84 with the
    merge test after it.
 
+## The review round's checks
+
+Run after the round's changes, with `CAP_BPF` and `CAP_PERFMON` (`make`): the
+lib tests `join::` and `event::` (84 passed); `join_engine` 23 passed, 1
+ignored (the hour); `cross_machine` 6, `cross_compute` 8, `cross_io` 7,
+`vertical` 16, all green. **`make check` could not run**: the build directory
+(tmpfs, `/tmp/claude-1000/w16e-debug`) hit the per-user quota (`EDQUOT`)
+compiling the lib tests, and then linking any test binary; `/home` had 2.4 GiB
+free. The one edit after the last green run of `cross_machine` is a skip
+message's wording, which compiled (only the link failed). The coordinator's
+merge run is the first full run of this round; freeing space is under "Needs
+privilege".
+
 ## Landed
 
 1. **CI red: the resident-size decomposition** (`defaults` cell, panic at
@@ -224,7 +237,10 @@ The reviewer's five findings, each checked:
   the merged ones; and the main checkout's 25 GiB `target/`. Then this
   stream's tmpfs build can go back:
   `rm /home/moha/repos/omniscient-w16-engine/target/debug && make` in the
-  worktree. `/tmp` is a per-user quota too (`EDQUOT` once this round).
+  worktree. `/tmp` is a per-user quota too, and it is full: this stream's
+  `/tmp/claude-1000/w16e-debug/incremental` (1.8 GiB, a cargo cache, safe to
+  delete) is what a human can remove so the build links again; the safety
+  check refused that removal to this agent.
 
 ## For DECISIONS.md
 
