@@ -108,6 +108,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
         planned.len(),
         unplanned.len()
     ));
+    let planned_pairs = planned.len();
     let mut by_source: BTreeMap<String, Vec<Planned>> = BTreeMap::new();
     for row in planned {
         by_source
@@ -122,6 +123,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
     let mut bare_elapsed: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
     let mut excluded: Vec<(String, String)> = Vec::new();
+    let mut excluded_pairs = 0usize;
     for (source, group) in &by_source {
         let workload = group[0].workload.clone();
         // A workload the gate excluded cannot resolve the overhead this table
@@ -139,6 +141,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
                         .cloned()
                         .unwrap_or_else(|| "its workload has no baseline".into());
                     excluded.push((source.clone(), format!("`{}` {why}", workload.name)));
+                    excluded_pairs += group.len();
                     continue;
                 }
             }
@@ -220,17 +223,12 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
          |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     let mut json_rows = Vec::new();
+    let mut bands: Vec<Band> = Vec::new();
     let mut flagged: Vec<String> = Vec::new();
     let mut verdicts: BTreeMap<String, Vec<Measured>> = BTreeMap::new();
     for (row, one) in &rows {
         let source = &row.method.source;
         let backend = row.method.backend.clone().unwrap_or_default();
-        if !one.served_by.is_empty() && one.served_by != [backend.clone()] {
-            failures.push(format!(
-                "{source}: forced `{backend}` and was served by {:?}",
-                one.served_by
-            ));
-        }
         let bare = bare_elapsed.get(source).and_then(|b| median(b));
         let dilation = match (bare, Stats::of(&one.elapsed)) {
             (Some(bare), Some(traced)) if bare > 0.0 && !row.method.system => Some(Stats {
@@ -249,12 +247,8 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             Stats::of(&one.percent),
             dilation,
         );
-        match &band {
-            Band::Missing(why) => failures.push(format!(
-                "{source} through `{backend}`: the row is missing a column: {why}"
-            )),
-            Band::Over(why) => flagged.push(format!("{source} through `{backend}`: {why}")),
-            Band::Within(_) => {}
+        if let Band::Over(why) = &band {
+            flagged.push(format!("{source} through `{backend}`: {why}"));
         }
         if let Some(cost) = collector {
             verdicts.entry(source.clone()).or_default().push(Measured {
@@ -313,6 +307,7 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             "declared": row.declared.as_str(),
             "band": band.cell(),
         }));
+        bands.push(band);
     }
     if !flagged.is_empty() {
         table.push_str(&format!(
@@ -386,6 +381,21 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
     for line in &flagged {
         say(format!("over its declared band, and flagged: {line}"));
     }
+    let checked: Vec<TableRow<'_>> = rows
+        .iter()
+        .zip(&bands)
+        .map(|((row, one), band)| TableRow {
+            label: format!(
+                "{} through `{}`",
+                row.method.source,
+                row.method.backend.as_deref().unwrap_or_default()
+            ),
+            forced: row.method.backend.as_deref().unwrap_or_default(),
+            served_by: &one.served_by,
+            band,
+        })
+        .collect();
+    failures.extend(table_failures(planned_pairs, excluded_pairs, &checked));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

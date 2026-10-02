@@ -757,6 +757,30 @@ counted over something. Still `#[ignore]`: a quiet machine, through
 `a_row_with_a_column_missing_is_refused_rather_than_judged`); the second table,
 on a quiet machine, is what exercises it.
 
+### The table that fails, and the guardrail, sixteenth wave
+
+The table test now holds the whole table, not only each row
+(`harness::table_failures`): it fails when it measured nothing, when a planned
+(source, backend) pair is neither a row nor listed as excluded by the gate,
+when a row was served by another backend than the one it forced, and when a
+row is missing a column. A row over its band is still flagged and not failed.
+Held on synthetic tables in `make check`
+(`bench_harness::a_wrong_backends_table_fails_and_a_row_over_its_band_alone_does_not`).
+The second table is `scripts/bench.sh backends` (or the whole sequence), on a
+quiet machine, and is not run by a stream.
+
+**The thermal guardrail stays a direct read** (`harness::throttle_count`), and
+is not a run of `power.throttle` through the tool. The guardrail wraps the bare
+runs as well as the traced ones, and the bare run is the baseline every
+dilation is measured against: an `omn` beside it would make it a traced run,
+and the dilation column a comparison of two traced runs. Read before and after
+a repetition, outside the timed region, it costs the workload nothing; and a
+guardrail measured by the tool under test would pass whatever defect the tool
+had in that source. What it reads is what `power.throttle`'s `fs:sys` backend
+reads, `thermal_throttle/{core,package}_throttle_count`; on a cpu that
+publishes none (AMD, this machine) the report says a throttled run cannot be
+told from one that was not.
+
 ## Exit criteria of phase 8
 
 - [x] *A cost/resolution/loss table measured for every (source, backend).* 94

@@ -176,7 +176,8 @@ pub struct TraceArgs {
 
     /// Overhead ceiling, as a percentage of the observed workload's own CPU time.
     /// Enforced against a measurement taken during the run: over it, the collection
-    /// moves to a cheaper backend or the run stops, and says which.
+    /// moves to a cheaper backend, then from trace to sample, or the run stops, and
+    /// says which.
     #[arg(short = 'b', long, value_name = "PERCENT")]
     pub budget: Option<Budget>,
 

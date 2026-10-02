@@ -244,20 +244,26 @@ pub enum ResolveError {
     },
     #[error("`{source_id}` has no backend `{backend}`")]
     UnknownBackend { source_id: String, backend: String },
+    /// Whose gap it is follows from [`KeyElsewhere`], as for a key: the
+    /// first backend that carries the field is named only for what stands
+    /// between the request and it, and a `--backend force:` hint is given
+    /// only for one this build collects and this machine can run.
     #[error(
         "`{source_id}` is filtered on `{field}`, which the selected backend `{backend}` does not \
-         carry:\n{}",
+         carry:\n  {}",
         .elsewhere.as_ref().map_or_else(
-            || format!("  no backend of `{source_id}` carries it"),
-            |ids| format!("  `{ids}` does, and `--backend force:{ids}` is how to ask for it"),
+            || format!("no backend of `{source_id}` carries it"),
+            |elsewhere| elsewhere.to_string(),
         )
     )]
     FilterFieldNotCarried {
         source_id: String,
         backend: String,
         field: String,
-        /// The backend of the chain that does carry it, when one does.
-        elsewhere: Option<String>,
+        /// The backend of the chain that does carry it, and whether it can be
+        /// asked for here; `None` when no backend carries it. Boxed: it is
+        /// the largest of the errors, and every `Result` here carries one.
+        elsewhere: Option<Box<KeyElsewhere>>,
     },
     /// The twin of `FilterFieldNotCarried`, for a key: `--keys task` on a
     /// backend that attaches no task would produce events that join to
@@ -299,8 +305,8 @@ pub enum ResolveError {
     },
 }
 
-/// A backend of the chain that attaches a key the selected one does not, and
-/// what stands between the request and it.
+/// A backend of the chain that attaches a key, or carries a filter field, the
+/// selected one does not, and what stands between the request and it.
 ///
 /// The first backend that attaches the key is not necessarily one the request
 /// can be moved to: it may serve neither the target nor the mode, this machine
@@ -494,7 +500,7 @@ pub fn resolve(
         if let Some(reason) = cannot_serve_mode(entry, backend, request.mode.kind()) {
             return Err(refuse(vec![reason]));
         }
-        check_filter_fields(entry, backend, request)?;
+        check_filter_fields(entry, backend, request, capabilities)?;
         check_keys_carried(entry, backend, request, capabilities)?;
         let requirements = probe_all(capabilities, backend, Some(&request.target));
         let missing: Vec<String> = requirements
@@ -560,7 +566,7 @@ pub fn resolve(
         let implemented = crate::collect::implements(request.source.as_str(), &backend.id);
 
         if all_checked && implemented {
-            check_filter_fields(entry, backend, request)?;
+            check_filter_fields(entry, backend, request, capabilities)?;
             check_keys_carried(entry, backend, request, capabilities)?;
             let mut resolved = build(
                 entry,
@@ -607,7 +613,7 @@ pub fn resolve(
         let Some((index, backend, requirements)) = candidate else {
             continue;
         };
-        check_filter_fields(entry, backend, request)?;
+        check_filter_fields(entry, backend, request, capabilities)?;
         check_keys_carried(entry, backend, request, capabilities)?;
         let mut resolved = build(
             entry,
@@ -669,6 +675,52 @@ pub fn resolve(
     })
 }
 
+/// What a pin says beside the numbers: the user chose the backend, and the
+/// resolver's choice was never asked.
+fn pinned_note(backend: &str) -> String {
+    format!(
+        "backend `{backend}` was pinned, so the chain was not walked: this measures that \
+         backend, not what the resolver would choose"
+    )
+}
+
+/// Resolves a request onto one backend of its chain that the caller chose,
+/// with every check a pin is given, for a caller that is not the user: a
+/// budget's ladder stepping onto the next rung.
+///
+/// The result is not marked pinned and carries no pin's note. The user pinned
+/// nothing, and "this measures that backend, not what the resolver would
+/// choose" beside a budget's move would report the ladder's choice as theirs.
+/// The request keeps whatever `--backend` the user did write.
+pub fn resolve_onto(
+    catalog: &Catalog,
+    capabilities: &Capabilities,
+    request: &Request,
+    backend: &str,
+) -> Result<ResolvedRequest, ResolveError> {
+    let mut onto = request.clone();
+    onto.backend =
+        Some(
+            format!("force:{backend}")
+                .parse()
+                .map_err(|_| ResolveError::UnknownBackend {
+                    source_id: request.source.to_string(),
+                    backend: backend.to_owned(),
+                })?,
+        );
+    let mut resolved = resolve(catalog, capabilities, &onto)?;
+    resolved.request.backend = request.backend.clone();
+    resolved.backend.pinned = request
+        .backend
+        .as_ref()
+        .is_some_and(|pinned| pinned.as_str() == backend);
+    if !resolved.backend.pinned {
+        let note = pinned_note(backend);
+        resolved.degradations.retain(|said| *said != note);
+    }
+    Ok(resolved)
+}
+
 fn finish_chain(
     mut chain: Vec<ConsideredBackend>,
     selected: &str,
@@ -715,10 +767,7 @@ fn build(
         degradations.push(format!("{}: {degraded}", backend.id));
     }
     if pinned {
-        degradations.push(format!(
-            "backend `{}` was pinned, so the chain was not walked: this measures that backend, not what the resolver would choose",
-            backend.id
-        ));
+        degradations.push(pinned_note(&backend.id));
     }
 
     Ok(ResolvedRequest {
@@ -835,6 +884,7 @@ fn check_filter_fields(
     entry: &Entry,
     backend: &Backend,
     request: &Request,
+    capabilities: &Capabilities,
 ) -> Result<(), ResolveError> {
     let Some(filter) = &request.filter else {
         return Ok(());
@@ -846,12 +896,21 @@ fn check_filter_fields(
         {
             continue;
         }
-        let elsewhere = entry.backends_carrying(field);
+        // Picked as a key's is: the first backend of the best kind, so that a
+        // pin hint is never given for a backend nothing collects or this
+        // machine cannot run -- the next run would refuse it.
+        let elsewhere = entry
+            .backends_carrying(field)
+            .into_iter()
+            .filter(|id| *id != backend.id)
+            .filter_map(|id| entry.backends.iter().find(|other| other.id == id))
+            .map(|other| key_elsewhere(entry, other, request, capabilities))
+            .min_by_key(KeyElsewhere::rank);
         return Err(ResolveError::FilterFieldNotCarried {
             source_id: request.source.to_string(),
             backend: backend.id.clone(),
             field: field.to_owned(),
-            elsewhere: elsewhere.first().map(|id| (*id).to_string()),
+            elsewhere: elsewhere.map(Box::new),
         });
     }
     Ok(())
@@ -1239,6 +1298,134 @@ mod tests {
             }
             _ => eprintln!("skipped the unwritten half: every io.bytes backend is collected"),
         }
+    }
+
+    /// A filter field the selected backend does not carry names the backend
+    /// that does for what keeps the request from it, as a key does: a pin hint
+    /// only for a carrier this build collects and this machine can run.
+    ///
+    /// A catalog fixture, `io.latency` with its carriers' requirements and ids
+    /// rewritten, held to what is independently true: `/proc/diskstats` exists
+    /// here and a path under a directory that does not exist does not
+    /// (`std::fs`), and the collector registry is what `omn` itself refuses as
+    /// unwritten.
+    #[test]
+    fn a_filter_field_another_backend_carries_is_named_for_what_keeps_the_request_from_it() {
+        use crate::collect::Whose;
+        let embedded = Catalog::embedded().unwrap();
+        let capabilities = Capabilities::detect();
+        let original = embedded
+            .get(&"io.latency".parse().unwrap())
+            .unwrap()
+            .clone();
+        let proc = original
+            .backends
+            .iter()
+            .position(|backend| backend.id == "fs:proc")
+            .unwrap();
+        let carriers: Vec<usize> = (0..original.backends.len())
+            .filter(|index| {
+                *index != proc
+                    && original
+                        .backend_filter_fields(&original.backends[*index])
+                        .iter()
+                        .any(|field| field == "rwbs")
+            })
+            .collect();
+        assert!(!carriers.is_empty(), "io.latency carries `rwbs` somewhere");
+        let collected: Vec<usize> = carriers
+            .iter()
+            .copied()
+            .filter(|index| crate::collect::implements("io.latency", &original.backends[*index].id))
+            .collect();
+        let mut request = fixture("io.latency", Target::System);
+        request.mode = Mode::Trace;
+        request.emit = vec!["hist".parse().unwrap()];
+        request.filter = Some("rwbs == 'R'".parse().unwrap());
+        let refused = |entry: &Entry| {
+            let error = check_filter_fields(entry, &entry.backends[proc], &request, &capabilities)
+                .unwrap_err();
+            let ResolveError::FilterFieldNotCarried {
+                backend,
+                field,
+                elsewhere,
+                ..
+            } = &error
+            else {
+                panic!("not a FilterFieldNotCarried: {error}");
+            };
+            assert_eq!((backend.as_str(), field.as_str()), ("fs:proc", "rwbs"));
+            (error.to_string(), elsewhere.clone().map(|boxed| *boxed))
+        };
+
+        // Every carrier needs a file this machine does not have.
+        let absent = "/omn-no-such-directory/blk";
+        assert!(std::fs::metadata(absent).is_err());
+        let mut entry = original.clone();
+        for index in &carriers {
+            entry.backends[*index].requires = vec![absent.to_owned()];
+        }
+        let (message, elsewhere) = refused(&entry);
+        let elsewhere = elsewhere.expect("a backend carries `rwbs`");
+        match collected.first() {
+            Some(first) => {
+                assert!(
+                    matches!(&elsewhere, KeyElsewhere::Missing { backend, reason }
+                        if *backend == entry.backends[*first].id && reason.contains(absent)),
+                    "{elsewhere:?}"
+                );
+                assert_eq!(elsewhere.whose(), Whose::Machine);
+            }
+            None => assert!(
+                matches!(elsewhere, KeyElsewhere::Unwritten(_)),
+                "{elsewhere:?}"
+            ),
+        }
+        assert!(
+            !message.contains("--backend force:"),
+            "a pin hint for a backend this machine cannot run: {message}"
+        );
+
+        // Every carrier renamed to a tag nothing collects for this source.
+        let mut entry = original.clone();
+        for (n, index) in carriers.iter().enumerate() {
+            let id = format!("fs:unwritten{n}");
+            assert!(!crate::collect::implements("io.latency", &id));
+            entry.backends[*index].id = id;
+            entry.backends[*index].requires = vec!["/proc/diskstats".to_owned()];
+        }
+        let (message, elsewhere) = refused(&entry);
+        assert_eq!(
+            elsewhere,
+            Some(KeyElsewhere::Unwritten("fs:unwritten0".into())),
+            "{message}"
+        );
+        assert_eq!(elsewhere.unwrap().whose(), Whose::Build);
+        assert!(!message.contains("--backend force:"), "{message}");
+
+        // A collected carrier whose one requirement is a file this machine
+        // has: the pin is the fix, and is named.
+        let Some(first) = collected.first() else {
+            eprintln!("skipped the forceable half: this build collects no io.latency carrier");
+            return;
+        };
+        if std::fs::metadata("/proc/diskstats").is_err() {
+            eprintln!("skipped the forceable half: no /proc/diskstats here");
+            return;
+        }
+        let mut entry = original.clone();
+        entry.backends[*first].requires = vec!["/proc/diskstats".to_owned()];
+        let (message, elsewhere) = refused(&entry);
+        let id = entry.backends[*first].id.clone();
+        assert_eq!(
+            elsewhere,
+            Some(KeyElsewhere::Forceable(id.clone())),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("--backend force:{id}")),
+            "{message}"
+        );
     }
 
     #[test]

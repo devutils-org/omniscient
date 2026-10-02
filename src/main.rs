@@ -303,6 +303,17 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         }
     }
 
+    // A budget that could move a request onto a mode its emits cannot be
+    // continued in is the invalid combination, refused before anything runs
+    // and on the dumps alike: the request is what is wrong.
+    if let Some(refusal) = resolutions
+        .iter()
+        .find_map(|resolved| budget_refusal(&catalog, resolved))
+    {
+        eprintln!("error: {refusal}");
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+
     // A budget that silently does nothing is worse than one that is refused,
     // so it is reported before anything is measured -- including on the dumps,
     // where the reader is deciding whether the request says what they meant.
@@ -476,6 +487,11 @@ fn resolution_is(error: &resolve::ResolveError) -> omn::collect::Whose {
             elsewhere: Some(elsewhere),
             ..
         } => elsewhere.whose(),
+        // A filter field, the same way: the backend that carries it says.
+        resolve::ResolveError::FilterFieldNotCarried {
+            elsewhere: Some(elsewhere),
+            ..
+        } => elsewhere.whose(),
         resolve::ResolveError::StackRefused { whose, .. } => *whose,
         _ => Whose::Request,
     }
@@ -508,6 +524,126 @@ fn resolution_hint(error: &resolve::ResolveError) -> Option<String> {
     }
 }
 
+/// One step a budget can take below the backend and mode serving a request:
+/// a backend of its chain, and the mode it would go on in.
+#[derive(Debug, Clone, PartialEq)]
+struct Rung {
+    backend: String,
+    cost: omn::catalog::Cost,
+    mode: omn::request::Mode,
+}
+
+impl Rung {
+    /// How the rung reads in a note, beside the mode the series began in.
+    fn describe(&self, from: omn::request::Mode) -> String {
+        if self.mode == from {
+            format!("`{}` ({})", self.backend, self.cost)
+        } else {
+            format!(
+                "`{}` in `{}` ({}, every event then standing for its period)",
+                self.backend, self.mode, self.cost
+            )
+        }
+    }
+}
+
+/// The rungs below what serves `resolved`, in the order a budget takes them.
+///
+/// First the backends below the serving one in the chain, in the same mode,
+/// whose declared band fits the ceiling: each keeps every event. Then each
+/// cheaper mode ([`omn::request::Mode::cheaper`], phase 6's `trace` ->
+/// `sample`) on the serving backend and on those below it that fit, when the
+/// request's emits can take a series made of the two modes
+/// ([`omn::request::mode_move`]). The serving backend is offered in the
+/// cheaper mode whatever its band: the band is the backend's, and a sampled
+/// mode of it costs less than the traced one it was measured over.
+///
+/// The ones above were rejected by this machine and a budget cannot make them
+/// reachable; the ones below were never probed, because a better backend was
+/// selected first -- so each is resolved for real before it is offered.
+fn rungs(catalog: &Catalog, resolved: &ResolvedRequest, ceiling: f64) -> Vec<Rung> {
+    let Some(entry) = catalog.get(&resolved.request.source) else {
+        return Vec::new();
+    };
+    let mode = resolved.request.mode;
+    let serving = entry.backend(&resolved.backend.id);
+    let below: Vec<&omn::catalog::Backend> = entry
+        .backends
+        .iter()
+        .skip_while(|backend| backend.id != resolved.backend.id)
+        .skip(1)
+        .filter(|backend| worst_case_percent(backend.cost) <= ceiling)
+        .collect();
+    let rung = |backend: &omn::catalog::Backend, mode| Rung {
+        backend: backend.id.clone(),
+        cost: backend.cost,
+        mode,
+    };
+    let mut rungs: Vec<Rung> = below
+        .iter()
+        .filter(|backend| entry.backend_modes(backend).contains(&mode.kind()))
+        .map(|backend| rung(backend, mode))
+        .collect();
+    for cheaper in mode.cheaper() {
+        if omn::request::mode_move(mode.kind(), cheaper.kind(), &resolved.request.emit).is_err() {
+            continue;
+        }
+        rungs.extend(
+            serving
+                .into_iter()
+                .chain(below.iter().copied())
+                .filter(|backend| entry.backend_modes(backend).contains(&cheaper.kind()))
+                .map(|backend| rung(backend, cheaper)),
+        );
+    }
+    rungs
+}
+
+/// Refuses a budget that could move a request onto a mode its emits cannot
+/// be continued in, before anything runs.
+///
+/// A `raw` list -- or a `timeline`, or a `stack` count -- of a series that is
+/// traced until the budget moves it and sampled after would present two kinds
+/// of event as one: a traced event is an occurrence, a sampled one stands for
+/// a period. The destination mode produces the emit, so the rung would be
+/// taken; the combination is what is invalid, and it is refused with the
+/// reason rather than degraded silently at the move. An emit the cheaper mode
+/// cannot produce at all only takes that rung out of the ladder, which
+/// [`budget_note`] says.
+fn budget_refusal(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> {
+    let budget = resolved.request.budget?;
+    let entry = catalog.get(&resolved.request.source)?;
+    let mode = resolved.request.mode;
+    let collected = |backend: &omn::catalog::Backend| {
+        collect::implements(resolved.request.source.as_str(), &backend.id)
+    };
+    for cheaper in mode.cheaper() {
+        let Err(why @ omn::request::ModeMove::Mixed(emit)) =
+            omn::request::mode_move(mode.kind(), cheaper.kind(), &resolved.request.emit)
+        else {
+            continue;
+        };
+        let Some(onto) = entry
+            .backends
+            .iter()
+            .skip_while(|backend| backend.id != resolved.backend.id)
+            .find(|backend| {
+                entry.backend_modes(backend).contains(&cheaper.kind()) && collected(backend)
+            })
+        else {
+            continue;
+        };
+        return Some(format!(
+            "[{}] --budget {budget} may move this collection from `{mode}` to `{cheaper}` on \
+             `{}`: {why}. Drop `{emit}` or the budget, or ask for `-m {}` from the start",
+            resolved.request.source,
+            onto.id,
+            cheaper.kind(),
+        ));
+    }
+    None
+}
+
 /// What `--budget` implies before anything has been measured.
 ///
 /// The flag is now enforced against a measurement, and the measurement does not
@@ -537,16 +673,11 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
         ));
     }
 
-    // Only the backends below the selected one are candidates: the ones above
-    // were rejected by this machine, and a budget cannot make them reachable.
-    let cheaper: Vec<String> = catalog
-        .get(source)
-        .into_iter()
-        .flat_map(|entry| entry.backends.iter())
-        .skip_while(|backend| backend.id != selected.id)
-        .skip(1)
-        .filter(|backend| worst_case_percent(backend.cost) <= ceiling)
-        .map(|backend| format!("`{}` ({})", backend.id, backend.cost))
+    let rungs = rungs(catalog, resolved, ceiling);
+    let others = rungs.iter().any(|rung| rung.backend != selected.id);
+    let cheaper: Vec<String> = rungs
+        .iter()
+        .map(|rung| rung.describe(resolved.request.mode))
         .collect();
 
     Some(match cheaper.as_slice() {
@@ -559,28 +690,31 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
         ),
         candidates => format!(
             "[{source}] --budget {budget}: `{}` declares `{}` ({}), so a run that exceeds the \
-             ceiling will degrade onto {} -- which was never probed, because a better backend \
-             was selected first",
+             ceiling will degrade onto {}{}",
             selected.id,
             selected.cost,
             band(selected.cost),
             candidates.join(" or "),
+            // A rung on the serving backend was probed with it; one below it
+            // was not, because a better backend was selected first.
+            if others {
+                " -- which was never probed, because a better backend was selected first"
+            } else {
+                ""
+            },
         ),
     })
 }
 
-/// The backends a budget may fall back onto, resolved against this machine.
+/// The rungs a budget may step onto, resolved against this machine.
 ///
 /// The runner knows it is over budget and nothing else. What is cheaper than
-/// the backend in use is a question about the catalog, and whether this machine
-/// can serve it is a question for the resolver; both live here, which is what
-/// keeps `src/collect/` from reaching back into either.
+/// the backend and mode in use is a question about the catalog, and whether
+/// this machine can serve it is a question for the resolver; both live here,
+/// which is what keeps `src/collect/` from reaching back into either.
 ///
-/// The candidates are the backends *below* the selected one in the chain. The
-/// ones above were rejected by this machine and a budget cannot make them
-/// reachable; the ones below were never probed, because a better backend was
-/// selected first -- so each is resolved for real before it is offered, and one
-/// this build has no collector for is not offered at all.
+/// See [`rungs`] for the order. Each rung is resolved for real before it is
+/// offered, and one this build has no collector for is not offered at all.
 struct Ladder<'a> {
     catalog: &'a Catalog,
     capabilities: &'a Capabilities,
@@ -588,6 +722,12 @@ struct Ladder<'a> {
     /// budget moves it. This, not the file written before the run, is what
     /// names the backend that produced the numbers.
     serving: Vec<ResolvedRequest>,
+    /// Every request offered per collection, in order. A move that is taken
+    /// adds a backend to the collection's `served_by`, and a move that cannot
+    /// be started ends the run, so the `n`th offer is what served after the
+    /// `n`th move -- which a backend id alone cannot tell when the move kept
+    /// the backend and changed the mode.
+    offered: Vec<Vec<ResolvedRequest>>,
 }
 
 impl<'a> Ladder<'a> {
@@ -600,23 +740,34 @@ impl<'a> Ladder<'a> {
             catalog,
             capabilities,
             serving: resolved.to_vec(),
+            offered: vec![Vec::new(); resolved.len()],
         }
     }
 
     /// The resolved request that was serving collection `index` when the run
     /// ended, which is the one to keep beside its numbers.
     ///
-    /// A degradation that could not be started leaves the run on the backend it
-    /// had, and `self.serving` has already moved on; the collection is the only
-    /// thing that knows which backend actually produced the events, so it is
-    /// the one asked.
-    fn record(&self, index: usize, backend: &str, original: &ResolvedRequest) -> ResolvedRequest {
-        if original.backend.id == backend {
+    /// `served_by` is the collection's own record of the backends it ran
+    /// through: the only thing that knows how many moves were taken, since a
+    /// move that could not be started leaves the run where it was.
+    fn record(
+        &self,
+        index: usize,
+        served_by: &[String],
+        original: &ResolvedRequest,
+    ) -> ResolvedRequest {
+        let moves = served_by.len().saturating_sub(1);
+        let backend = served_by.last().map(String::as_str).unwrap_or_default();
+        if moves == 0 && (backend.is_empty() || original.backend.id == backend) {
             return original.clone();
         }
-        if let Some(serving) = self.serving.get(index) {
-            if serving.backend.id == backend {
-                return serving.clone();
+        if let Some(offered) = self
+            .offered
+            .get(index)
+            .and_then(|offered| offered.get(moves.checked_sub(1)?))
+        {
+            if offered.backend.id == backend {
+                return offered.clone();
             }
         }
         let mut amended = original.clone();
@@ -624,18 +775,21 @@ impl<'a> Ladder<'a> {
         amended
     }
 
-    /// Every backend below `from` in the chain whose declared band fits the
-    /// ceiling, in chain order.
-    fn candidates(&self, source: &omn::request::SourceId, from: &str, ceiling: f64) -> Vec<String> {
-        self.catalog
-            .get(source)
-            .into_iter()
-            .flat_map(|entry| entry.backends.iter())
-            .skip_while(|backend| backend.id != from)
-            .skip(1)
-            .filter(|backend| worst_case_percent(backend.cost) <= ceiling)
-            .map(|backend| backend.id.clone())
-            .collect()
+    /// The modes a collection ran in, in order, as the cost line names them:
+    /// one mode, or `trace then sample@99hz` across a move between modes.
+    fn modes(&self, index: usize, served_by: &[String], original: &ResolvedRequest) -> String {
+        let moves = served_by.len().saturating_sub(1);
+        let mut modes = vec![original.request.mode];
+        for offered in self.offered.get(index).into_iter().flatten().take(moves) {
+            if modes.last() != Some(&offered.request.mode) {
+                modes.push(offered.request.mode);
+            }
+        }
+        modes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" then ")
     }
 }
 
@@ -648,22 +802,34 @@ impl collect::Cheaper for Ladder<'_> {
     ) -> Option<ResolvedRequest> {
         let serving = self.serving.get(index)?.clone();
         let source = serving.request.source.clone();
-        for id in self.candidates(&source, &serving.backend.id, ceiling) {
-            if !collect::implements(source.as_str(), &id) {
+        for rung in rungs(self.catalog, &serving, ceiling) {
+            if !collect::implements(source.as_str(), &rung.backend) {
                 continue;
             }
-            let Ok(pinned) = format!("force:{id}").parse() else {
-                continue;
-            };
             let mut request = serving.request.clone();
-            request.backend = Some(pinned);
+            request.mode = rung.mode;
             // Resolved for real: a backend further down the chain was never
             // probed, and offering one this machine cannot serve would turn a
-            // budget into a failed run.
-            let Ok(resolved) = resolve::resolve(self.catalog, self.capabilities, &request) else {
+            // budget into a failed run. Onto the rung, not pinned to it: the
+            // ladder chose it, and the user pinned nothing.
+            let Ok(mut resolved) =
+                resolve::resolve_onto(self.catalog, self.capabilities, &request, &rung.backend)
+            else {
                 continue;
             };
+            if rung.mode != serving.request.mode {
+                resolved.degradations.push(format!(
+                    "the budget moved this collection from `{}` to `{}` on `{}`: up to the move \
+                     every event is one occurrence, and after it each stands for its period, \
+                     which the emits weigh by the event's `{}`",
+                    serving.request.mode,
+                    rung.mode,
+                    rung.backend,
+                    omn::emit::WEIGHT_ATTR
+                ));
+            }
             self.serving[index] = resolved.clone();
+            self.offered[index].push(resolved.clone());
             return Some(resolved);
         }
         None
@@ -755,8 +921,25 @@ impl MeasuredCost {
                 overhead.in_target_from
             )
         };
+        // What this process spent before the window opened -- its startup,
+        // the probes, the tables a run reads first, such as the kernel's
+        // symbols -- dilated nothing and is in no percentage, and once it was
+        // a second against a window's 80 ms with nothing on this line to say
+        // so. Named when it outweighs the window. It is the process's cpu at
+        // this collection's opening, so a collection attached mid-run also
+        // holds the other collections' windows: it is said per collection,
+        // and never added up across them.
+        let before = if overhead.before_window_cpu_ns > overhead.attributed_cpu_ns {
+            format!(
+                "; and {} before this collection's window opened (startup, probes, the tables \
+                 the run reads first), which is in no percentage here",
+                span(overhead.before_window_cpu_ns)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} ({}) via `{}` spent {} of cpu{inside} {against}, over {} of wall time; \
+            "{} ({}) via `{}` spent {} of cpu{inside} {against}, over {} of wall time{before}; \
              measuring that cost {} across {} read(s){unknown}",
             self.source,
             self.mode,
@@ -1223,8 +1406,11 @@ fn record(
         .map(|(index, collection)| {
             let serving = ladder
                 .borrow()
-                .record(index, served_last(collection), &resolved[index]);
+                .record(index, &collection.served_by, &resolved[index]);
             let mut cost = measured_cost(catalog, &serving, collection);
+            cost.mode = ladder
+                .borrow()
+                .modes(index, &collection.served_by, &resolved[index]);
             // Weighed over a rolling span, so the whole window's figure is
             // not what held or broke the budget: the run's own stop is.
             cost.weighed_over_ns = Some(recorded.budget_interval_ns);
@@ -1252,7 +1438,7 @@ fn record(
             .map(|(index, collection)| {
                 ladder
                     .borrow()
-                    .record(index, served_last(collection), &resolved[index])
+                    .record(index, &collection.served_by, &resolved[index])
             })
             .collect();
         std::fs::write(
@@ -1332,14 +1518,21 @@ fn assemble(
         // serving when they arrived, which a budget may have moved. Handing
         // `aggregate` the file written before the run would name a backend that
         // stopped producing half way through it.
-        let serving = ladder.record(index, served_last(&collection), &resolved[index]);
+        let serving = ladder.record(index, &collection.served_by, &resolved[index]);
+        let modes = ladder.modes(index, &collection.served_by, &resolved[index]);
+        let mut serving = serving;
+        if let Some(note) = unweighed_after_a_mode_move(&resolved[index], &serving, &collection) {
+            serving.degradations.push(note);
+        }
         merged.extend(collection.events.iter().cloned());
         let unit = catalog
             .get(&serving.request.source)
             .map(|entry| entry.unit)
             .unwrap_or(omn::catalog::Unit::Count);
         let value_attr = collection.value_attr.clone();
-        costs.push(measured_cost(catalog, &serving, &collection));
+        let mut cost = measured_cost(catalog, &serving, &collection);
+        cost.mode = modes;
+        costs.push(cost);
         run.results
             .push(emit::aggregate(&serving, collection, unit, &value_attr)?);
         served_by.push(serving);
@@ -1396,6 +1589,42 @@ fn assemble(
         ));
     }
     Ok((run, costs, served_by))
+}
+
+/// Says so when a series moved from one mode to another and none of its events
+/// says what it stands for.
+///
+/// The emits that survive a move between modes weigh each event by its
+/// `weight` ([`omn::request::EmitKind::weighs_each_event`]). A collector whose
+/// sampled events carry none has each of them count once where it stood for a
+/// period, and the totals from the move on are short by that factor -- the one
+/// thing about the move the events themselves can show, so it is read off
+/// them rather than assumed.
+fn unweighed_after_a_mode_move(
+    original: &ResolvedRequest,
+    serving: &ResolvedRequest,
+    collection: &collect::Collection,
+) -> Option<String> {
+    if original.request.mode.kind() == serving.request.mode.kind() {
+        return None;
+    }
+    let weighed = collection.events.iter().any(|event| {
+        event
+            .attr(omn::emit::WEIGHT_ATTR)
+            .and_then(|weight| weight.as_f64())
+            .is_some_and(|weight| weight > 1.0)
+    });
+    (!weighed).then(|| {
+        format!(
+            "the budget moved this collection from `{}` to `{}`, and none of its {} events \
+             carries a `{}`: from the move on each counts once where it stood for its period, \
+             so every total here is short by that factor after the move",
+            original.request.mode,
+            serving.request.mode,
+            collection.events.len(),
+            omn::emit::WEIGHT_ATTR
+        )
+    })
 }
 
 /// The backend a collection ended on, which is the one its numbers came from.

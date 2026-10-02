@@ -276,10 +276,30 @@ An overhead ceiling, as
 .BR 2% ,
 read as a percentage of the observed workload's own CPU time. The run weighs
 itself ten times a second against that; over the ceiling it moves to a cheaper
-backend in the chain, or, where there is none, stops. Either way the reason is
-in
+backend in the chain, then from
+.B trace
+to
+.B sample
+(the same backends, each event then standing for its period), or, where there
+is nothing cheaper, stops. Either way the reason is in
 .I stopped_because
 and on standard error. Every run reports what it cost, budget or no budget.
+.IP
+A series moved from one mode to another is one series only to an emit that
+weighs each event by what it stands for:
+.BR hist ,
+.BR topk ,
+.B rate
+and
+.BR summary .
+A mode that cannot produce an emit the request asked for is not a step the
+budget takes. A budget that could move a request whose
+.BR raw ,
+.B timeline
+or
+.B stack
+the cheaper mode would produce is refused before the run (exit 2), because
+that emit would hold two kinds of event as one.
 .IP
 What is weighed is this tool's CPU and what the collector spent inside the
 target, where the tool's own account cannot see it: an eBPF program's run time

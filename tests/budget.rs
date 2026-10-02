@@ -1474,6 +1474,44 @@ fn what_a_profile_with_stacks_says_it_cost_adds_up_to_what_the_kernel_counted() 
         reported * 5 >= kernel_ns * 4,
         "the record leaves out more than a fifth of what the run cost: {account}"
     );
+
+    // And the one line every run prints says it, where it outweighs the
+    // window: it used to show the window's 80 ms and nothing of the second
+    // before it. The figure it names is the one held to the kernel above.
+    let line = said
+        .lines()
+        .find(|line| line.starts_with("cost: cpu.profile"))
+        .unwrap_or_else(|| panic!("a cost line: {said}"));
+    if before > during {
+        let named = line
+            .split_once("; and ")
+            .and_then(|(_, rest)| rest.split_once(" before this collection's window opened"))
+            .map(|(figure, _)| figure)
+            .unwrap_or_else(|| panic!("the line names the cpu before the window: {line}"));
+        let ns = |text: &str| -> Option<f64> {
+            [("ms", 1e6), ("us", 1e3), ("ns", 1.0), ("s", 1e9)]
+                .iter()
+                .find_map(|(unit, scale)| {
+                    text.strip_suffix(unit)
+                        .and_then(|number| number.parse::<f64>().ok())
+                        .map(|number| number * scale)
+                })
+        };
+        let named_ns = ns(named).unwrap_or_else(|| panic!("a duration: {named:?} in {line}"));
+        assert!(
+            (named_ns - before as f64).abs() <= before as f64 * 0.01 + 1e5,
+            "the line says {named} before the window and cost.json {before} ns: {line}"
+        );
+        assert!(
+            named_ns <= kernel_ns as f64 + 5e6,
+            "the line names more than the kernel counted: {line}; {account}"
+        );
+    } else {
+        assert!(
+            !line.contains("before this collection's window opened"),
+            "named although the window outweighs it: {line}"
+        );
+    }
 }
 
 /// A task that blocks every fifth of a millisecond until it is told to stop,
@@ -1723,5 +1761,432 @@ fn a_budget_s_move_between_backends_drops_nothing_and_says_where_both_counted() 
     assert!(
         counted <= most + twice_at_most,
         "switches counted twice outside the announced overlap: {account}"
+    );
+}
+
+/// A task that takes page faults at a steady rate until it is told to stop,
+/// and logs, on `CLOCK_MONOTONIC`, the kernel's own count of the faults it
+/// took (`ru_minflt + ru_majflt`) before every round of 1024 fresh pages.
+/// Huge pages are refused on the mapping, so a page is a fault.
+const FAULTING_WORKLOAD: &str = r#"
+import json, mmap, os, resource, signal, time
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+def faulted():
+    u = resource.getrusage(resource.RUSAGE_SELF)
+    return u.ru_minflt + u.ru_majflt
+done = []
+signal.signal(signal.SIGUSR1, lambda *_: done.append(1))
+size = 1 << 22
+m = mmap.mmap(-1, size)
+m.madvise(mmap.MADV_NOHUGEPAGE)
+points = []
+print("ready", os.getpid(), flush=True)
+end = mono() + 60 * 10**9
+while not done and mono() < end:
+    points.append((mono(), faulted()))
+    for i in range(0, size, 4096):
+        m[i] = 1
+    m.madvise(mmap.MADV_DONTNEED)
+points.append((mono(), faulted()))
+print(json.dumps(points), flush=True)
+"#;
+
+/// Ground truth for phase 6's ladder across modes: a traced series that the
+/// budget moves onto a sampled one is one series, every event weighed by what
+/// it stands for, and its count is the task's own count of its faults.
+///
+/// `mem.faults` traces every fault through `pmu:sw` and samples one in a
+/// period through the same backend, which is the one entry of the catalog
+/// whose backend serves both. Traced, the tool spends about as much cpu as a
+/// task that does nothing but fault, so a 5 % ceiling is over at the first
+/// check and the ladder's only rung is the same backend sampled at its
+/// default period: the run moves once, and says so twice -- when and which
+/// way (the runner's note), and that the series changed mode (the ladder's).
+/// `hist` is asked because it is an emit both modes produce and one that
+/// weighs each event by its `weight`. The task's `getrusage` log brackets
+/// what the window held.
+///
+/// Two halves. The trace half holds whatever the sampled events carry: every
+/// fault before the announced overlap is an event of its own, so the series
+/// counts at least those. The whole holds only when the sampled events say
+/// what they stand for: the total, weighed, is the task's count, short by at
+/// most a period per counter at the end and over by at most what the overlap
+/// held.
+#[test]
+fn a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did() {
+    use std::io::{BufRead, Read};
+
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("SKIP: the workload is python3, which this machine does not have");
+        return;
+    }
+    let mut task = Command::new("python3")
+        .args(["-c", FAULTING_WORKLOAD])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("python3 starts");
+    let mut stdout = std::io::BufReader::new(task.stdout.take().expect("a pipe"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the workload says it is ready");
+    let pid: i32 = line
+        .trim()
+        .strip_prefix("ready ")
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not start: {line:?}"));
+
+    let directory = scratch("mode-ladder");
+    let out = directory.to_string_lossy().into_owned();
+    let pid_text = pid.to_string();
+    let output = run(&[
+        "mem.faults",
+        "-m",
+        "trace",
+        "-e",
+        "hist",
+        "--format",
+        "json",
+        "--budget",
+        "5%",
+        "-d",
+        "2s",
+        "-o",
+        out.as_str(),
+        "--pid",
+        pid_text.as_str(),
+    ]);
+    // SAFETY: a signal to the child this test started and has not reaped.
+    unsafe { libc::kill(pid, libc::SIGUSR1) };
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).expect("the log");
+    let _ = task.wait();
+
+    let said = stderr(&output);
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&directory);
+        if said.contains("has no viable backend on this machine")
+            || said.contains("cannot start collecting `mem.faults`")
+        {
+            eprintln!("SKIP: `mem.faults` is not served here: {said}");
+            return;
+        }
+        panic!("the run failed: {said}");
+    }
+    let cost = cost_record(&directory);
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.join("results.json")).expect("results.json"),
+    )
+    .expect("results.json is json");
+    let _ = std::fs::remove_dir_all(&directory);
+    let points: Vec<(u64, u64)> = serde_json::from_str(rest.trim())
+        .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"));
+    let bracket = |from: u64, to: u64| -> (u64, u64) {
+        let at_or_before = |ts: u64| points.iter().rev().find(|(at, _)| *at <= ts).map(|p| p.1);
+        let at_or_after = |ts: u64| points.iter().find(|(at, _)| *at >= ts).map(|p| p.1);
+        match (
+            at_or_after(from),
+            at_or_before(to),
+            at_or_before(from),
+            at_or_after(to),
+        ) {
+            (Some(first_in), Some(last_in), Some(before), Some(after)) => (
+                last_in.saturating_sub(first_in),
+                after.saturating_sub(before),
+            ),
+            _ => panic!("the workload's log does not straddle {from}..{to}"),
+        }
+    };
+
+    let result = &results["results"][0];
+    let degradations: Vec<String> = result["degradations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|note| note.as_str().map(str::to_owned))
+        .collect();
+    let mode = cost["mode"].as_str().unwrap_or_default().to_owned();
+    if !mode.contains(" then ") {
+        eprintln!(
+            "SKIP: the run never moved ({mode}, {}): a 5 % ceiling held over a task that only \
+             faults, which this test cannot judge",
+            cost["stopped_because"]
+        );
+        return;
+    }
+    assert_eq!(mode, "trace then sample@99hz", "{said}");
+    assert!(
+        degradations
+            .iter()
+            .any(|note| note.contains("from `trace` to `sample@99hz` on `pmu:sw`")),
+        "the change of mode is announced: {degradations:?}"
+    );
+    assert!(
+        !degradations.iter().any(|note| note.contains("was pinned")),
+        "the ladder's step is not the user's pin: {degradations:?}"
+    );
+    let seam = degradations
+        .iter()
+        .find(|note| note.contains("both counted"))
+        .unwrap_or_else(|| panic!("the overlap is announced: {degradations:?}"));
+    let instants: Vec<f64> = seam
+        .split_once("both counted from ")
+        .map_or("", |(_, rest)| rest)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .filter(|pair| pair[1].trim_end_matches(',') == "ms")
+        .filter_map(|pair| pair[0].parse().ok())
+        .collect();
+    let [from_ms, to_ms] = instants[..] else {
+        panic!("the overlap names two instants: {seam}");
+    };
+    let run_opened = result["window"]["run_opened_ns"]
+        .as_u64()
+        .expect("the run's opening");
+    let opened = result["window"]["opened_ns"].as_u64().expect("a window");
+    let closed = result["window"]["closed_ns"].as_u64().expect("a window");
+    let overlap_from = run_opened + (from_ms * 1e6) as u64 - 1_000;
+    let overlap_to = run_opened + (to_ms * 1e6) as u64 + 1_000;
+    let counted: u64 = result["outputs"][0]["series"]
+        .as_array()
+        .expect("a histogram")
+        .iter()
+        .map(|series| series["count"].as_u64().unwrap_or(0))
+        .sum();
+    let lost = result["losses"]["dropped"].as_u64().unwrap_or(0);
+    let (traced_least, _) = bracket(opened, overlap_from);
+    let (least, most) = bracket(opened, closed);
+    let (_, overlap_most) = bracket(overlap_from, overlap_to);
+    let account = format!(
+        "the series counts {counted} faults and lost {lost} records; the task took at least \
+         {traced_least} before the overlap, {least} to {most} inside the window and at most \
+         {overlap_most} in the overlap: {seam}"
+    );
+    eprintln!("{account}");
+    assert!(least > 20_000, "too few faults to judge: {account}");
+    // The trace half: every fault before the move is an event of its own.
+    assert!(
+        counted + lost >= traced_least,
+        "faults the trace half saw were dropped: {account}"
+    );
+
+    if degradations
+        .iter()
+        .any(|note| note.contains("carries a `weight`"))
+    {
+        eprintln!(
+            "SKIP (the weighed half): `mem.faults`'s sampled events carry no `weight`, so the \
+             series after the move counts each once where it stood for 99 faults, and the run \
+             says so; filed for the owner of src/collect/mem/page_faults.rs \
+             (docs/open-findings.md, the sixteenth wave, stream runner)"
+        );
+        return;
+    }
+    // A counter per cpu the task ran on, each short by less than a period at
+    // the end; the run says how many cpus it sampled on through the losses
+    // it reports per ring, which a single-threaded task bounds by the cpus.
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
+    let slack = 99 * cpus;
+    assert!(
+        counted + lost * 99 + slack >= least,
+        "the weighed series counts fewer faults than the task took: {account}"
+    );
+    assert!(
+        counted <= most + overlap_most,
+        "the weighed series counts faults twice outside the announced overlap: {account}"
+    );
+}
+
+/// A budget that could move a traced request onto sampling refuses an emit
+/// that would hold the two modes' events as one kind, before anything runs,
+/// and lets through one that weighs each event, naming the rung.
+///
+/// Held to the matrix the validator itself answers with: `-m sample -e raw`
+/// is a valid request (exit 0 on the dump) and `-m sample -e summary` is not
+/// (exit 2), so the refusal is about the move and not about either mode.
+#[test]
+fn a_budget_that_could_move_a_raw_list_between_modes_is_refused_up_front() {
+    // This process, which any machine that serves `mem.faults` at all lets
+    // its own user observe.
+    let own = std::process::id().to_string();
+    let dump = |args: &[&str]| {
+        let mut all = vec!["mem.faults", "--pid", own.as_str()];
+        all.extend_from_slice(args);
+        all.push("--dump-request");
+        run(&all)
+    };
+    let raw = dump(&["-m", "trace", "-e", "raw", "--budget", "5%"]);
+    let said = stderr(&raw);
+    if said.contains("has no viable backend on this machine") {
+        eprintln!("SKIP: `mem.faults` is not served here: {said}");
+        return;
+    }
+    assert_eq!(raw.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("may move this collection from `trace` to `sample@99hz` on `pmu:sw`")
+            && said.contains("`raw` would hold the events of both modes as one kind"),
+        "{said}"
+    );
+    // Each mode serves `raw` alone, without a budget.
+    for mode in ["trace", "sample"] {
+        let alone = dump(&["-m", mode, "-e", "raw"]);
+        assert_eq!(alone.status.code(), Some(0), "{}", stderr(&alone));
+    }
+    // `summary` is not a sampled emit: the rung is passed over, not refused,
+    // and the note says the run would stop rather than degrade.
+    let sampled_summary = dump(&["-m", "sample", "-e", "summary"]);
+    assert_eq!(
+        sampled_summary.status.code(),
+        Some(2),
+        "{}",
+        stderr(&sampled_summary)
+    );
+    let summary = dump(&["-m", "trace", "-e", "summary", "--budget", "0.01%"]);
+    assert_eq!(summary.status.code(), Some(0), "{}", stderr(&summary));
+    assert!(
+        stderr(&summary).contains("stop rather than degrade"),
+        "{}",
+        stderr(&summary)
+    );
+    // `hist` weighs each event, so the sampled rung is named.
+    let hist = dump(&["-m", "trace", "-e", "hist", "--budget", "0.01%"]);
+    assert_eq!(hist.status.code(), Some(0), "{}", stderr(&hist));
+    assert!(
+        stderr(&hist).contains("`pmu:sw` in `sample@99hz`"),
+        "{}",
+        stderr(&hist)
+    );
+}
+
+/// A task that sleeps a millisecond at a time until it is told to stop, and
+/// logs, on `CLOCK_MONOTONIC`, its own process cpu clock before every sleep:
+/// a few microseconds a round, far under the 10 ms `/proc/<pid>/stat` counts
+/// in.
+const SLEEPING_WORKLOAD: &str = r#"
+import json, os, signal, time
+mono = lambda: time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+done = []
+signal.signal(signal.SIGUSR1, lambda *_: done.append(1))
+points = []
+print("ready", os.getpid(), flush=True)
+end = mono() + 60 * 10**9
+while not done and mono() < end:
+    points.append((mono(), time.process_time_ns())); time.sleep(0.001)
+points.append((mono(), time.process_time_ns()))
+print(json.dumps(points), flush=True)
+"#;
+
+/// Ground truth for the budget's denominator: a target that burns under a
+/// clock tick between two checks is weighed in the scheduler's nanoseconds,
+/// so the check sees it and acts, and the figure it weighed against is the
+/// task's own clock over the window.
+///
+/// `mem.rss` polled every millisecond costs the tool far more than a task
+/// that only sleeps spends, so a 5 % ceiling is over at the first check that
+/// can see the task at all. Read in ticks it never could: the task's cpu
+/// moved by 0 ticks between checks, the percentage stayed "not knowable yet",
+/// and a run like it (`sched.offcpu --budget 5%` over a sleeping loop) ended
+/// 16 % over its ceiling without ever being moved. The task's own log
+/// brackets what it spent inside the window, to the microsecond.
+#[test]
+#[ignore = "needs collect/mod.rs's Meter to read collect::task::process_cpu (docs/open-findings.md, \
+            the sixteenth wave, stream runner); un-ignore with that swap"]
+fn a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it() {
+    use std::io::{BufRead, Read};
+
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("SKIP: the workload is python3, which this machine does not have");
+        return;
+    }
+    let mut task = Command::new("python3")
+        .args(["-c", SLEEPING_WORKLOAD])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("python3 starts");
+    let mut stdout = std::io::BufReader::new(task.stdout.take().expect("a pipe"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the workload says it is ready");
+    let pid: i32 = line
+        .trim()
+        .strip_prefix("ready ")
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the workload did not start: {line:?}"));
+
+    let directory = scratch("sleeping");
+    let out = directory.to_string_lossy().into_owned();
+    let pid_text = pid.to_string();
+    let output = run(&[
+        "mem.rss",
+        "-m",
+        "poll@1ms",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--budget",
+        "5%",
+        "-d",
+        "3s",
+        "-o",
+        out.as_str(),
+        "--pid",
+        pid_text.as_str(),
+    ]);
+    // SAFETY: a signal to the child this test started and has not reaped.
+    unsafe { libc::kill(pid, libc::SIGUSR1) };
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).expect("the log");
+    let _ = task.wait();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let cost = cost_record(&directory);
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.join("results.json")).expect("results.json"),
+    )
+    .expect("results.json is json");
+    let _ = std::fs::remove_dir_all(&directory);
+    let points: Vec<(u64, u64)> = serde_json::from_str(rest.trim())
+        .unwrap_or_else(|error| panic!("the workload's log is not json ({error}): {rest}"));
+
+    let window = &results["results"][0]["window"];
+    let opened = window["opened_ns"].as_u64().expect("a window");
+    let closed = window["closed_ns"].as_u64().expect("a window");
+    let at_or_before = |ts: u64| points.iter().rev().find(|(at, _)| *at <= ts).map(|p| p.1);
+    let at_or_after = |ts: u64| points.iter().find(|(at, _)| *at >= ts).map(|p| p.1);
+    let (Some(first_in), Some(last_in), Some(before), Some(after)) = (
+        at_or_after(opened),
+        at_or_before(closed),
+        at_or_before(opened),
+        at_or_after(closed),
+    ) else {
+        panic!("the workload's log does not straddle the window");
+    };
+    let (least, most) = (
+        last_in.saturating_sub(first_in),
+        after.saturating_sub(before),
+    );
+    let observed = cost["overhead"]["observed_cpu_ns"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the target's cpu is weighed: {cost}"));
+    let served = cost["served_by"].as_array().map_or(0, Vec::len);
+    let stopped = cost["stopped_because"].as_str().unwrap_or_default();
+    let account = format!(
+        "the run weighed the task at {observed} ns and the task's clock puts {least} to {most} ns \
+         inside the window, which lasted {} ms; served by {served} backend(s), stopped because \
+         {stopped}; read from {}",
+        (closed - opened) / 1_000_000,
+        cost["overhead"]["observed_from"]
+    );
+    eprintln!("{account}");
+    assert!(
+        observed + 100_000 >= least && observed <= most + 100_000,
+        "the denominator is not the task's own cpu: {account}"
+    );
+    assert!(
+        served > 1 || stopped.contains("ceiling"),
+        "the check saw a run over its ceiling and did nothing: {account}"
     );
 }

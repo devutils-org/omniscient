@@ -9315,3 +9315,118 @@ first stderr line>)"*. On the runner that line should name the missing
 `linux-tools-6.17.0-*-azure` package; the pattern `skipped the cross-check:
 bpftool could not dump` is the one to expect. (It used to skip everywhere: the
 dump's `DATASEC` line was read as the variable's.)
+
+## Needs from another stream — the sixteenth wave, stream runner
+
+Stream runner's record is `docs/fixes/w16-runner.md`. Nothing here blocks it;
+each item is the other half of a change landed in the runner's files, and each
+diff below was applied locally, its test run against it, and reverted.
+
+### To whoever owns `src/collect/mod.rs`: the budget's denominator in nanoseconds
+
+`src/collect/task.rs` has `process_cpu(pid)` and `thread_cpu(tid) -> Option<CpuRead>`
+(`CpuRead { ns, grain: CpuGrain }`): the process cpu clock
+(`clock_getcpuclockid`, every thread's `sum_exec_runtime`, the exited ones
+included) plus the reaped children's `cutime`/`cstime`, and a thread's
+`schedstat`; `/proc/<pid>/stat`'s ticks only where neither can be read, said
+by `CpuGrain::says()`. Held by
+`collect::task::tests::a_target_that_burns_under_a_tick_is_read_in_nanoseconds_against_its_own_clock`.
+Wanted, in `Meter`:
+
+```rust
+// src/collect/mod.rs
+fn task_cpu_ns(pid: i32) -> Option<u64> {
+    task::process_cpu(pid).map(|read| read.ns)
+}
+fn thread_cpu_of(tid: i32) -> Option<u64> {
+    task::thread_cpu(tid).map(|read| read.ns)
+}
+// Meter::describes, the Launched / Tasks / Threads arms: name the grain, e.g.
+Meter::Tasks(pids) => format!(
+    "the cpu time of {} ({}, children reaped included)",
+    pids.iter().map(|pid| pid.to_string()).collect::<Vec<_>>().join(", "),
+    pids.first()
+        .and_then(|pid| task::process_cpu(*pid))
+        .map_or(task::CpuGrain::Ticks, |read| read.grain)
+        .says(),
+),
+```
+
+then drop the three `#[allow(dead_code)]` in `src/collect/task.rs` and the
+`#[ignore]` on
+`budget::a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_it`.
+With the first two lines applied here, that test passed twice: *"the run
+weighed the task at 1190171 ns and the task's clock puts 1181471 to 1234731
+ns inside the window ... served by 2 backend(s), stopped because `mem.rss`
+spent 378.09 % ..."*. Without them: *"weighed the task at 0 ns and the task's
+clock puts 14388704 to 14403814 ns inside the window, which lasted 3000 ms;
+served by 1 backend(s), stopped because the requested duration elapsed"* --
+the defect, a 5 % ceiling never acted on.
+
+### To whoever owns `src/collect/mod.rs`: a move between modes is not "two backends"
+
+The budget's ladder now steps from `trace` to `sample` on one backend
+(`Ladder` in `src/main.rs`). `Spending::degrade` notes *"the budget moved this
+collection from `pmu:sw` to `pmu:sw` mid-run; the series is two backends end
+to end"*, and the check's note says *"moved onto `pmu:sw`"*. Wanted, in
+`degrade`, where the loss note is written:
+
+```rust
+let was = &self.serving[index];
+losses[index].note(if was.backend.id == onto {
+    format!(
+        "the budget moved this collection from `{}` to `{}` on `{onto}` mid-run; the series \
+         is two modes end to end",
+        was.request.mode, next.request.mode
+    )
+} else {
+    format!(/* the sentence as it is */)
+});
+```
+
+and the same distinction in the `over budget at ...` note (`moved onto `{}``
+-> `moved onto `pmu:sw` in `sample@99hz``), for instance by carrying the
+mode in `Moved`. The ladder's own note in the results already names both
+modes; `budget::a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`
+does not depend on either sentence.
+
+### To whoever owns `src/collect/mem/page_faults.rs`: a sampled fault stands for its period
+
+`mem.faults -m sample@N` samples one fault in N, and each event carries
+`count = 1` and nothing else, so every emit counts it once: `-m sample@100 -e
+hist` reports a hundredth of the faults, with no word. It is also what makes
+the budget's `trace` -> `sample` move undercount. Wanted, in `drain_into`:
+
+```rust
+let period = match self.mode {
+    Mode::Sample { freq } => freq.as_hz(),
+    _ => 1,
+};
+// ... in the attrs of each Record::Sample:
+if period > 1 {
+    attrs.push(Attr::uint(crate::emit::WEIGHT_ATTR, period));
+}
+```
+
+With it applied here, the moved series counted *1474515* faults against the
+task's own *1474603 to 1476651*, *1583251* against *1583151 to 1585199*, and
+*1657423* against *1656881 to 1658929* (three runs), where it counts about
+*63 000* against *1 650 000* without it. The weighed half of
+`budget::a_traced_series_the_budget_moves_onto_sampling_counts_what_the_task_did`
+skips, naming this request, until it lands; the run itself already says it
+(*"none of its N events carries a `weight`: from the move on each counts once
+where it stood for its period"*, `src/main.rs`, `unweighed_after_a_mode_move`).
+
+### To the coordinator (`DECISIONS.md`, `ROADMAP.md`, `STATE.md`)
+
+- `DECISIONS.md` "Open": the two runner proposals and the bench's guardrail
+  are settled; the lines are in `docs/fixes/w16-runner.md`, "For
+  DECISIONS.md".
+- `ROADMAP.md` phase 6, task 3 and the second criterion: *"the ladder steps
+  backends of one mode, then `trace` -> `sample` on the same backends, held to
+  a task's own fault count across the move; the in-kernel histogram is taken
+  at the start, not stepped onto"*. Phase 9: *"`power.throttle`'s counters,
+  read directly by the harness, on purpose"* (`docs/bench.md`).
+- `STATE.md` "What remains" item 2: the mode ladder, the denominator (pending
+  the `Meter` swap above), and `FilterFieldNotCarried`'s `elsewhere` are
+  landed; the bench's second table still wants its quiet-machine run.
