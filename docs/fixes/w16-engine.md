@@ -24,6 +24,27 @@ assertion message, while the machine had 23 of 31 GiB in use and 12 GiB of
 tmpfs; the rerun of the same binary passed (below). Read as the machine's
 memory, not the engine's: every round's peak was 0.7 MiB beyond its stream.
 
+## What the commit-time runs said
+
+One `cargo test --workspace --no-fail-fast` per commit (each `make check`
+stopped at the expected index failure), then clippy and fmt, green. Red in the
+second run, none in this stream's files:
+
+- `cli::the_session_indexes_hold_exactly_the_sessions_on_disk`: the new
+  session's index row, expected (below).
+- Five `scenario_io` tests: `No space left on device` writing their files
+  under `target/tmp` on the full `/home`.
+- `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter`
+  (tally #21) and `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`
+  (the fifteenth wave's tally): each failed again alone, once, at a load
+  average of 27 to 46. Not investigated here: neither touches `join` or
+  `event`.
+- With capabilities afterwards, this stream's test binaries run directly
+  (`vertical` 16, `join_engine` 22, `cross_compute` 8, `cross_io` 7,
+  `cross_machine` 5, `cross_memory` 9): all green, except
+  `cross_compute::a_wakeup_join_onto_drained_totals_is_refused_because_each_event_holds_many_blocks`
+  once inside its binary's run, which passed alone twice: for the flaky tally.
+
 ## Landed
 
 1. **CI red: the resident-size decomposition** (`defaults` cell, panic at
