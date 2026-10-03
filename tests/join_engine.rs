@@ -2921,23 +2921,87 @@ fn a_queued_packet_on_lo_joins_lo_s_link_counters_by_its_index() {
 
 /// The script a sender runs inside `unshare -rn`: a discipline that queues on
 /// its own lo, the namespace's inode on the first line, then 2000 datagrams
-/// over that lo once the session has taken its first readings.
+/// over that lo once the session has taken its first readings, between two
+/// `CLOCK_MONOTONIC` readings on the second line. Each step that can fail
+/// exits with its own code, so the reason a machine gives is the one named.
 const OTHER_NAMESPACE_SENDER: &str = r#"
-ip link set lo up || exit 9
-tc qdisc replace dev lo root netem limit 100000 || exit 9
+ip link set lo up || exit 7
+tc qdisc replace dev lo root netem limit 100000 || exit 8
 readlink /proc/self/ns/net
 sleep 1
-python3 -c 'import socket
+python3 -c 'import socket, time
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); r=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); r.bind(("127.0.0.1",0))
-for _ in range(2000): s.sendto(b"x"*64, r.getsockname())' || exit 9
+began=time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+for _ in range(2000): s.sendto(b"x"*64, r.getsockname())
+print(began, time.clock_gettime_ns(time.CLOCK_MONOTONIC))' || exit 9
 tc -s qdisc show dev lo
 "#;
 
+/// What `run_beside_another_namespaces_lo` saw: the session's JSON, the inode
+/// of the sender's namespace, and when its burst began and ended.
+struct BesideAnotherLo {
+    document: serde_json::Value,
+    inode: u64,
+    burst: (u64, u64),
+}
+
+impl BesideAnotherLo {
+    /// The session's join, by its id in the shipped session.
+    fn join(&self) -> &serde_json::Value {
+        self.document["joins"]
+            .as_array()
+            .and_then(|joins| {
+                joins
+                    .iter()
+                    .find(|join| join["rule"] == "queued-per-link-reading")
+            })
+            .expect("the session's join")
+    }
+
+    /// That `net.qdisc` was attached for the whole burst: what makes a
+    /// count of nothing a statement about the burst rather than about when
+    /// the session happened to watch.
+    fn watched_the_burst(&self) {
+        let window = self.document["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|result| result["label"] == "queued")
+            .map(|result| &result["window"])
+            .expect("the queued result");
+        assert_eq!(window["attached"], true, "{window}");
+        let (began, ended) = self.burst;
+        assert!(
+            number(&window["opened_ns"]) <= began as f64
+                && ended as f64 <= number(&window["closed_ns"]),
+            "the session watched from before the burst ({began}) to after it ({ended}): {window}"
+        );
+    }
+}
+
 /// Runs `session` while a sender in another network namespace queues 2000
 /// packets on that namespace's lo. `None` when the machine cannot make such a
-/// namespace, with the reason printed; otherwise the session's JSON and the
-/// inode of the sender's namespace.
-fn run_beside_another_namespaces_lo(session: &str) -> Option<(serde_json::Value, u64)> {
+/// namespace or give it a discipline, with the reason printed.
+fn run_beside_another_namespaces_lo(session: &str) -> Option<BesideAnotherLo> {
+    const WOULD: &str = "It would have checked that another namespace's lo is not this one's";
+    match Command::new("unshare").args(["-rn", "true"]).output() {
+        Ok(probe) if probe.status.success() => {}
+        Ok(probe) => {
+            eprintln!(
+                "SKIPPED: this needs an unprivileged user namespace and this machine allows \
+                 none (`unshare -rn`): {}. {WOULD}",
+                String::from_utf8_lossy(&probe.stderr).trim()
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!(
+                "SKIPPED: this needs an unprivileged user namespace, and `unshare` could not \
+                 run: {error}. {WOULD}"
+            );
+            return None;
+        }
+    }
     let run = Command::new(BINARY)
         .args(["-f", session, "--format", "json"])
         .stdout(std::process::Stdio::piped())
@@ -2946,57 +3010,58 @@ fn run_beside_another_namespaces_lo(session: &str) -> Option<(serde_json::Value,
         .expect("omn should run");
     let sender = Command::new("unshare")
         .args(["-rn", "sh", "-c", OTHER_NAMESPACE_SENDER])
-        .output();
+        .output()
+        .expect("`unshare` ran a moment ago");
     let output = run.wait_with_output().expect("omn should finish");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let sender = match sender {
-        Ok(sender) if sender.status.success() => sender,
-        Ok(sender) => {
+    let complaint = String::from_utf8_lossy(&sender.stderr);
+    let complaint = complaint.trim();
+    match sender.status.code() {
+        Some(0) => {}
+        Some(8) => {
             eprintln!(
-                "SKIPPED: this machine cannot queue packets on lo in an unprivileged network \
-                 namespace (`unshare -rn` with `tc qdisc ... netem`; the user namespace may be \
-                 restricted, or `sch_netem` not loaded): {}. It would have checked that \
-                 another namespace's lo is not this one's",
-                String::from_utf8_lossy(&sender.stderr).trim()
+                "SKIPPED: this machine cannot serve a `netem` discipline on lo inside a \
+                 network namespace of its own (`sch_netem` is not built, or cannot be \
+                 loaded from there): {complaint}. {WOULD}"
             );
             return None;
         }
-        Err(error) => {
-            eprintln!(
-                "SKIPPED: `unshare` could not run: {error}. It would have checked that another \
-                 namespace's lo is not this one's"
-            );
-            return None;
-        }
-    };
+        _ => panic!(
+            "the sender failed inside a namespace this machine let it make: {:?}\n{complaint}",
+            sender.status
+        ),
+    }
     if !output.status.success() {
         assert!(
             machine_cannot_serve(&stderr),
             "the session failed for a reason that is not the machine's:\n{stderr}"
         );
-        eprintln!(
-            "SKIPPED: {}. It would have checked that another namespace's lo is not this one's",
-            machine_s_reason(&stderr)
-        );
+        eprintln!("SKIPPED: {}. {WOULD}", machine_s_reason(&stderr));
         return None;
     }
     let said = String::from_utf8_lossy(&sender.stdout);
-    let inode: u64 = said
-        .lines()
+    let mut lines = said.lines();
+    let inode: u64 = lines
         .next()
         .and_then(|line| line.strip_prefix("net:["))
         .and_then(|rest| rest.strip_suffix(']'))
         .and_then(|inode| inode.parse().ok())
         .unwrap_or_else(|| panic!("the sender names its namespace first: {said}"));
+    let burst = lines
+        .next()
+        .and_then(|line| line.split_once(' '))
+        .and_then(|(began, ended)| Some((began.parse().ok()?, ended.parse().ok()?)))
+        .unwrap_or_else(|| panic!("the sender says when its burst ran second: {said}"));
     assert!(
         said.contains("Sent ") && said.contains(" 2000 pkt"),
         "the discipline in the sender's namespace counted its 2000 packets: {said}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Some((
-        serde_json::from_str(&stdout).expect("a JSON document"),
+    Some(BesideAnotherLo {
+        document: serde_json::from_str(&stdout).expect("a JSON document"),
         inode,
-    ))
+        burst,
+    })
 }
 
 /// An interface index is per network namespace, and every namespace has a lo
@@ -3022,22 +3087,16 @@ fn another_namespaces_lo_is_not_credited_to_this_ones() {
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("join-iface-qdisc-system.yml");
     std::fs::write(&session, whole).expect("a session file");
 
-    let Some((document, inode)) = run_beside_another_namespaces_lo(session.to_str().unwrap())
-    else {
+    let Some(beside) = run_beside_another_namespaces_lo(session.to_str().unwrap()) else {
         return;
     };
-    let join = document["joins"]
-        .as_array()
-        .and_then(|joins| {
-            joins
-                .iter()
-                .find(|join| join["rule"] == "queued-per-link-reading")
-        })
-        .expect("the session's join");
+    beside.watched_the_burst();
+    let join = beside.join();
+    let inode = beside.inode;
     let credited = number(&join["readings"]["credited"]);
     let uncredited = number(&join["readings"]["uncredited"]);
     let theirs = format!("iface:lo@netns:{inode}");
-    let queued: Vec<String> = document["results"]
+    let queued: Vec<String> = beside.document["results"]
         .as_array()
         .into_iter()
         .flatten()
@@ -3075,25 +3134,30 @@ fn another_namespaces_lo_is_not_credited_to_this_ones() {
         "no row of their lo is labelled as this one's: {join}"
     );
     assert!(
-        join.to_string().contains(&theirs)
-            || queued.iter().any(|netns| *netns == inode.to_string()),
-        "their rows carry their namespace, {theirs}: {join}"
+        queued.iter().any(|netns| *netns == inode.to_string()),
+        "their rows carry their namespace: {:?}",
+        queued
+    );
+    let series = beside.document["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|result| result["label"] == "queued")
+        .map(|result| result["outputs"].to_string())
+        .unwrap_or_default();
+    assert!(
+        series.contains(&format!("\"key\":\"{theirs}\"")),
+        "their series is keyed by their namespace, {theirs}: {series}"
     );
 
     // As shipped, the target is this namespace's lo, and the kernel compares
-    // the namespace: none of theirs is a row.
-    let Some((document, _)) = run_beside_another_namespaces_lo("examples/join-iface-qdisc.yml")
-    else {
+    // the namespace: none of theirs is a row, while the session watched the
+    // whole burst.
+    let Some(beside) = run_beside_another_namespaces_lo("examples/join-iface-qdisc.yml") else {
         return;
     };
-    let join = document["joins"]
-        .as_array()
-        .and_then(|joins| {
-            joins
-                .iter()
-                .find(|join| join["rule"] == "queued-per-link-reading")
-        })
-        .expect("the session's join");
+    beside.watched_the_burst();
+    let join = beside.join();
     assert_eq!(
         number(&join["readings"]["credited"]) + number(&join["readings"]["uncredited"]),
         0.0,

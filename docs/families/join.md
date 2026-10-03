@@ -25,7 +25,7 @@ unchanged.
 |---|---|
 | Delivered | `tier:` on a rule: `agent` (the default), `query` (`join::apply_stored`, over a stored run's `raw` outputs), `kernel` refused with the reason; `join::sources_read`, the sources a run's joins and decompositions read; `Btf::member_offset` through a typedef; the preload shim's clock read only on a call that reports; the reclaim session's `enclosing:` line and its assertion; another namespace's lo as a test |
 | Not delivered | the kernel tier (no match kind has a program); the run skipping a query-tier rule and cloning only what `sources_read` names (`src/main.rs`, filed with the diff, applied, tested and reverted); an `omn` command that applies a rule to a stored run (`src/cli.rs`, filed) |
-| Refused, new | a rule at the kernel tier (`JoinError::KernelTier`); a query-tier rule over a side the session does not collect, collects without `raw`, or collects with a `window` (`JoinError::NotStored`), at validation; a stored run without one side's `raw` events, at the query |
+| Refused, new | a rule at the kernel tier (`JoinError::KernelTier`); a query-tier rule over a side the session does not collect, or collects without `raw` (`JoinError::NotStored`), at validation; a stored run without one side's `raw` events, at the query |
 | Tests | `src/join.rs` 5 new; `src/bpf/btf.rs` 5 new; `shim/src/lib.rs` 1 new; `tests/join_engine.rs` 3 new; `tests/cross_machine.rs` 1 assertion |
 | Files | `src/join.rs`, `src/bpf/btf.rs`, `shim/src/lib.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/cross-machine-reclaim-io.yml`, `CATALOG.md`, this document |
 | Machine | 24 cpus, kernel 7.2.7, nine other streams building and testing, `CAP_BPF` and `CAP_PERFMON` on the binary after `make` |
@@ -47,11 +47,14 @@ joins:
   -- the same `apply_merging` over each side's `raw` output, with the run's own
   merge of two results of one source. The run has to store what the rule will
   read, so `check_in` refuses, at validation, a query-tier rule whose side is
-  not collected, is collected without `raw`, or is collected with a `window`:
-  a stored result says when its source watched and not whether it stopped at
-  a detach or with the run, and that decides where a state still open at its
-  close ended. Refused rather than guessed, so the query tier answers what the
-  agent tier would have.
+  not collected or is collected without `raw`. Where a state still open at a
+  source's close ended is decided as the run decides it: a stored result says
+  when its source watched (`window`) and, in its `stopped_because`, whether it
+  was detached before the run ended (`collect::stopped_at_a_detach`, one
+  spelling for a window's close, a budget's and the escalation's). A detached
+  side ends its states at the detach, any other watched to the end, so the
+  query tier answers what the agent tier did over a run with a window or a
+  detach too (`join::tests::a_stored_side_detached_mid_run_is_closed_where_it_was_detached`).
 - **`kernel`**: refused with the reason (`JoinError::KernelTier`). A kernel
   tier is a program of `src/bpf/` per match kind; none exists, and the
   collectors that pair events in the kernel (`io.latency`'s issue and

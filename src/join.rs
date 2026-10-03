@@ -1133,11 +1133,9 @@ pub fn apply_within(
 /// both sides, for the whole run.
 ///
 /// A side the session does not collect, or collects without `raw`, leaves
-/// nothing in the stored run to join. And a request with a `window` is
-/// refused: a stored result says when its source watched but not whether it
-/// stopped at a detach or with the run, which is what decides whether a state
-/// still open at its close ended there ([`apply_within`]). Refused rather than
-/// guessed, so the query tier answers what the agent tier would have.
+/// nothing in the stored run to join. A request with a `window` is not
+/// refused: its stored result says when it watched and, in its
+/// `stopped_because`, whether it stopped at a detach ([`apply_stored`]).
 fn stored_in_full(rule: &Rule, requests: &[Request]) -> Result<(), JoinError> {
     let refuse = |source: &str, reason: &str| JoinError::NotStored {
         id: rule.id.clone(),
@@ -1165,15 +1163,6 @@ fn stored_in_full(rule: &Rule, requests: &[Request]) -> Result<(), JoinError> {
                     source,
                     "is collected without `raw`, so the stored run will hold what its events \
                      summed to and none of the events: add `raw` to its `emit`",
-                ));
-            }
-            if request.window.is_some() {
-                return Err(refuse(
-                    source,
-                    "is collected with a `window`, and a stored result does not say whether \
-                     its source stopped at a detach or with the run, which decides where a state \
-                     still open at its close ended: drop the window, or apply the rule at the \
-                     agent tier",
                 ));
             }
         }
@@ -1216,11 +1205,10 @@ pub fn sources_read(joins: &[Rule], decompositions: &[Decomposition]) -> BTreeSe
 /// the collection had -- what a run's joins walk -- and they are walked in
 /// the order the results are stored, which is the order of the run's
 /// collections. Each source's window is the union of its results' (as the
-/// run merges two requests of one source), watching to the end of the run:
-/// [`check_in`] refuses a query-tier rule over a request with a `window`,
-/// the one case a stored result cannot tell apart. Over a run whose session
-/// did not declare the rule `tier: query`, that holds only when neither side
-/// carried a window.
+/// run merges two requests of one source), closed where its collection was
+/// detached when its `stopped_because` says it was (a window that closed, a
+/// budget, the escalation), and watching to the end of the run otherwise:
+/// the agent tier's own reading, from what the stored run says.
 pub fn apply_stored(rule: &Rule, results: &[Results]) -> Result<Correlation, JoinError> {
     check(rule)?;
     let mut streams: Vec<&[Event]> = Vec::new();
@@ -1267,7 +1255,13 @@ pub fn apply_stored(rule: &Rule, results: &[Results]) -> Result<Correlation, Joi
                 }
             }
         }
-        if watched.attached {
+        // As the run does, a source that stopped with the run watched to its
+        // end, and one detached before it ended its states at the detach. The
+        // stored result says which in its `stopped_because`.
+        let detached = stored
+            .iter()
+            .any(|result| crate::collect::stopped_at_a_detach(&result.stopped_because));
+        if watched.attached && !detached {
             watched.closed_ns = u64::MAX;
         }
         windows.insert(source.clone(), watched);
@@ -6803,7 +6797,7 @@ mod tests {
     }
 
     /// The query tier asks of the session what the stored run must hold: both
-    /// sides collected, with `raw`, and with no `window`.
+    /// sides collected, with `raw`. A `window` is stored with its close.
     #[test]
     fn a_rule_at_the_query_tier_needs_both_sides_stored_in_full() {
         let rule = Rule {
@@ -6837,8 +6831,8 @@ mod tests {
              emit: [raw], window: '1s..'}",
         )
         .expect("a request");
-        let error = check_in(&rule, &windowed, &catalog()).unwrap_err();
-        assert!(error.to_string().contains("`window`"), "{error}");
+        check_in(&rule, &windowed, &catalog())
+            .expect("a stored result says where its window closed, and whether at a detach");
 
         // The agent tier asks none of it.
         check_in(&eq_rule(), &summed, &catalog()).expect("the agent reads the run's events");
@@ -6887,6 +6881,40 @@ mod tests {
         summed[2].outputs.clear();
         let error = apply_stored(&rule, &summed).unwrap_err();
         assert!(error.to_string().contains("without `raw`"), "{error}");
+    }
+
+    /// A side whose stored result says it was detached is read as the run
+    /// read it: its window ends at the detach, not at the end of the run.
+    #[test]
+    fn a_stored_side_detached_mid_run_is_closed_where_it_was_detached() {
+        let opened = vec![threads(10, 7), threads(40, 7)];
+        let looked_up = vec![descriptors(20, 7), descriptors(41, 7)];
+        let mut detached_at_30 = to_the_end();
+        detached_at_30.closed_ns = 30;
+        let mut ended = to_the_end();
+        ended.closed_ns = u64::MAX;
+        let mut as_run = BTreeMap::new();
+        as_run.insert("proc.threads".to_owned(), detached_at_30);
+        as_run.insert("proc.fd".to_owned(), ended);
+        let ran = apply_merging(&eq_rule(), &[&opened, &looked_up], &as_run).unwrap();
+        let mut guessed = as_run.clone();
+        guessed.insert("proc.threads".to_owned(), ended);
+        let to_the_end_of_the_run =
+            apply_merging(&eq_rule(), &[&opened, &looked_up], &guessed).unwrap();
+        assert_ne!(
+            ran, to_the_end_of_the_run,
+            "the detach changes the answer, so reading it is what is tested"
+        );
+
+        let mut threads_side = raw_result("proc.threads", opened, detached_at_30);
+        threads_side.stopped_because =
+            "its window closed: detached 0.000 s into the run, as asked".to_owned();
+        let stored = [threads_side, raw_result("proc.fd", looked_up, to_the_end())];
+        let rule = Rule {
+            tier: Tier::Query,
+            ..eq_rule()
+        };
+        assert_eq!(apply_stored(&rule, &stored).unwrap(), ran);
     }
 
     /// The events a run keeps for its joins and decompositions are those of

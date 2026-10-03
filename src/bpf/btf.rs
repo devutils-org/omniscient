@@ -948,7 +948,8 @@ mod tests {
 
     /// Following typedefs must not change an answer any caller already gets:
     /// on the running kernel, no type name a caller passes is also a typedef
-    /// naming a different struct or union. The list is every literal first
+    /// naming a different struct or union, or a typedef with no struct of its
+    /// own. A name the kernel's BTF does not hold is named, not checked. The list is every literal first
     /// argument of `member_offset` under `src/bpf/` that names a kernel type.
     #[test]
     fn no_caller_s_type_is_shadowed_by_a_typedef_on_the_running_kernel() {
@@ -990,8 +991,10 @@ mod tests {
             "tcp_sock",
             "wb_writeback_work",
         ];
+        let mut absent = Vec::new();
         for name in CALLERS {
             let Some(candidates) = btf.by_name.get(*name) else {
+                absent.push(*name);
                 continue;
             };
             let structs: Vec<usize> = candidates
@@ -1004,12 +1007,26 @@ mod tests {
                     continue;
                 }
                 if let Some(target) = btf.composite(*index as u32) {
+                    // A typedef alone, with no struct of the name, would turn
+                    // what was a refusal (read as "missing" by the probes)
+                    // into an offset: an answer that moved too.
                     assert!(
-                        structs.is_empty() || structs.contains(&target),
+                        !structs.is_empty(),
+                        "`{name}` is only a typedef here, so following it changes a refusal \
+                         into an offset"
+                    );
+                    assert!(
+                        structs.contains(&target),
                         "`{name}` is both a struct and a typedef of another type"
                     );
                 }
             }
+        }
+        if !absent.is_empty() {
+            eprintln!(
+                "not in this kernel's BTF, so not checked here: {}",
+                absent.join(", ")
+            );
         }
     }
 

@@ -373,6 +373,25 @@ pub struct Watched {
     pub attach_ns: Option<u64>,
 }
 
+/// How a collection's `stopped_because` says it was detached `at_s` seconds
+/// into the run, whatever detached it: its window, the budget or the
+/// escalation. One spelling, so [`stopped_at_a_detach`] can read it back.
+fn detached_at(at_s: f64) -> String {
+    format!("detached {at_s:.3} s into the run")
+}
+
+/// Whether a stored `stopped_because` says its collection was detached before
+/// the run ended, rather than stopped with it: what a join over a stored run
+/// needs to end the states still open at its close where the agent tier did.
+pub fn stopped_at_a_detach(stopped_because: &str) -> bool {
+    let Some((_, after)) = stopped_because.split_once("detached ") else {
+        return false;
+    };
+    after
+        .split_once(" s into the run")
+        .is_some_and(|(seconds, _)| seconds.parse::<f64>().is_ok())
+}
+
 impl Watched {
     /// Whether an event stamped at `ts_ns` fell inside this collection's view.
     pub fn contains(&self, ts_ns: u64) -> bool {
@@ -3667,7 +3686,7 @@ fn drive(
                 continue;
             }
             ledger.detach(index, slots, spending, |at| {
-                format!("its window closed: detached {at:.3} s into the run, as asked")
+                format!("its window closed: {}, as asked", detached_at(at))
             });
         }
 
@@ -3782,7 +3801,7 @@ fn drive(
                 .and_then(|escalation| escalation.shed(index, &reason));
             match shed {
                 Some(why) => ledger.detach(index, slots, spending, |at| {
-                    format!("detached {at:.3} s into the run to hold the budget: {why}")
+                    format!("{} to hold the budget: {why}", detached_at(at))
                 }),
                 None => {
                     over = Some(reason);
@@ -4105,7 +4124,7 @@ impl Ledger {
         for Switch { index, why, .. } in detaches {
             if matches!(slots.get(index), Some(Slot::Attached(_))) {
                 self.detach(index, slots, spending, |at| {
-                    format!("detached {at:.3} s into the run by the escalation: {why}")
+                    format!("{} by the escalation: {why}", detached_at(at))
                 });
             }
         }
@@ -4761,6 +4780,28 @@ fn prepare(resolved: &ResolvedRequest) -> Result<Box<dyn Prepared>, CollectError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every way a collection is detached reads back as a detach from its
+    /// stored `stopped_because`, and no way a run ends does.
+    #[test]
+    fn a_stored_reason_says_whether_its_collection_was_detached() {
+        for detached in [
+            format!("its window closed: {}, as asked", detached_at(1.0)),
+            format!("{} to hold the budget: over 2 %", detached_at(0.25)),
+            format!("{} by the escalation: quiet", detached_at(12.5)),
+        ] {
+            assert!(stopped_at_a_detach(&detached), "{detached}");
+        }
+        for ended in [
+            "the duration elapsed",
+            "the target exited",
+            "never attached: the run ended 3.000 s in, before this request's window `2s..` opened",
+            "never attached: the escalation did not name its layer in the 3.000 s the run lasted",
+            "",
+        ] {
+            assert!(!stopped_at_a_detach(ended), "{ended}");
+        }
+    }
 
     /// `drive` over collectors that are all attached before the run and stay
     /// attached to its end: every run there was before windows, and what the

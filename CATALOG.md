@@ -234,7 +234,8 @@ and, for an address in an anonymous executable mapping no file names -- a
 JIT's code, an interpreter's trampolines -- the `/tmp/perf-<pid>.map` the
 target itself wrote, re-read as it grows. That map is a file on this machine,
 so it needs no rung of its own; a frame it named prints `py::<function>:<file>`
-for CPython's map, and the facts line carries `perf-<pid>.map: perf-map`.
+for CPython's map, and the facts line's `names came from --` carries
+`perf-<pid>.map: perf-map, the <n> lines the program wrote for code no file holds`.
 `--symbols debuginfod` reads all of that first, then names a stripped file's
 frames from `DEBUGINFOD_URLS` by its build id, through elfutils' own cache, and
 never unless asked. Each frame says which of them named it (`elf`,
