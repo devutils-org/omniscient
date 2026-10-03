@@ -471,25 +471,30 @@ pub fn choose_classified(
         choice.symbol_servers = client.servers().to_vec();
     }
     if choice.user_only {
-        let what = if choice.mode == StackMode::None {
-            "samples are user-only"
-        } else {
-            "stacks are user-only"
-        };
-        // What it costs, said where the choice is: the samples shrink with
-        // the program's user time and the tool's work per tick does not, so a
-        // program that lives in system calls pays the most for the least
-        // (`docs/unwind.md`, "What a user-only profile costs").
-        choice.degradations.push(format!(
-            "perf_event_paranoid is {}, which refuses this user the kernel: {what}, and a \
-             sample taken while the task ran in the kernel is not delivered, so time spent \
-             in system calls is missing from this profile; a program that spends most of \
-             its time there yields few samples, and what the profile costs it is then \
-             mostly the tool's work on each tick, which does not shrink with them",
-            paranoid(environment)
-        ));
+        let said = user_only_degradation(choice.mode, environment);
+        choice.degradations.push(said);
     }
     Ok(choice)
+}
+
+/// What a user-only choice degrades, and what it costs, said where the choice
+/// is: the samples shrink with the program's user time and the tool's work per
+/// tick does not, so a program that lives in system calls pays the most for
+/// the least (`docs/unwind.md`, "What a user-only profile costs").
+fn user_only_degradation(mode: StackMode, environment: &Environment) -> String {
+    let what = if mode == StackMode::None {
+        "samples are user-only"
+    } else {
+        "stacks are user-only"
+    };
+    format!(
+        "perf_event_paranoid is {}, which refuses this user the kernel: {what}, and a \
+         sample taken while the task ran in the kernel is not delivered, so time spent \
+         in system calls is missing from this profile; a program that spends most of \
+         its time there yields few samples, and what the profile costs it is then \
+         mostly the tool's work on each tick, which does not shrink with them",
+        paranoid(environment)
+    )
 }
 
 /// Every requirement of a mode, probed.
@@ -1187,6 +1192,33 @@ mod tests {
         let client = Debuginfod::new(vec!["http://127.0.0.1:9".into()], std::env::temp_dir());
         for bad in ["", "../../etc/passwd", "abc/def", "12 34"] {
             assert!(client.debuginfo(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// The user-only degradation says what it loses and what it costs: the
+    /// time in system calls, and a tool's work per tick that does not shrink
+    /// with the samples. Built from a paranoid-2 environment, so it is read on
+    /// any machine, whatever the kernel allows this one.
+    #[test]
+    fn a_user_only_choice_says_what_it_loses_and_what_it_costs() {
+        let mut environment = crate::capabilities::Capabilities::detect()
+            .environment()
+            .clone();
+        environment.perf_event_paranoid = Some(2);
+        for (mode, what) in [
+            (StackMode::Fp, "stacks are user-only"),
+            (StackMode::None, "samples are user-only"),
+        ] {
+            let said = user_only_degradation(mode, &environment);
+            for part in [
+                "perf_event_paranoid is 2",
+                what,
+                "time spent in system calls is missing from this profile",
+                "what the profile costs it is then mostly the tool's work on each tick, \
+                 which does not shrink with them",
+            ] {
+                assert!(said.contains(part), "{mode:?}: `{part}` not in {said:?}");
+            }
         }
     }
 

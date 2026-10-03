@@ -31,7 +31,8 @@ user-only.
    **Fixed** (`3975c3c`, corrected by `dada897`): a process the last drain
    held samples of, or that no drain has held samples of yet, is re-read
    before the drain as before; one idle and sampled again, after the drain
-   and before its stacks are interned; an idle one, never. The first version
+   and before its stacks are interned, and not again before the next drain
+   (review round); an idle one, never, once a drain has held samples of it. The first version
    read every sampled process after the drain, which across a launched
    program's `execve` left 82 to 266 frames in no mapping at 100 kHz where
    the old rule left 7 to 54 (the suite found it: `tests/triage.rs`'s lossy
@@ -90,6 +91,54 @@ beside it held all four. The program's own work, not its names: a whole
 branch absent from a profile of an unchanged binary is a branch that did not
 run while it was sampled, or ran outside the window. Not this wave's to fix
 without a run that shows which: for the flaky tally, with that message.
+
+## Review
+
+The adversarial review's seven points, and what became of each (commit
+`fix(profile): the review's round`):
+
+- **Gap: machine-wide (`--cpus`) profiles read more than before. Fixed.** A
+  process read after drain N (idle in N-1, sampled in N) was in `recent` and
+  read again before drain N+1, even when N+1 held nothing of it: two reads
+  where the old machine-wide rule read one. The rule is now a type of its own,
+  `MapReads`. A process read after a drain, or whose unwinder was built during
+  it (`Unwinder::new` reads the maps), is not read again before the next one.
+  A process sampled now and then is read once per drain that holds it, and a
+  process held by consecutive drains is read once a drain. Held by
+  `over_a_machine_a_process_is_read_once_for_each_drain_that_holds_it`, which
+  drives `MapReads` the way `drain_into` does over ten drains of four
+  processes, one of them first seen mid-run. With the reviewer's rule
+  restored, that test fails (process 10: 6 reads for 4 drains). The launched
+  test still reads 25 and 26 times over 81 drains, with 56 and 57 of them
+  empty.
+- **The struct's doc comments. Fixed.** `refreshes` and `idle_drains` have
+  their own docs. The rule's doc sits on `MapReads`. `unwinders` no longer says
+  "re-read every tick".
+- **82 to 172 against 82 to 266. Fixed.** It now reads 266, as here and in
+  `docs/unwind.md`.
+- **A target that is never sampled is still read every tick. Kept, and
+  said.** That is what the `execve` correction needs (`dada897`). A launched
+  program's maps change under its first samples. `MapReads`' doc,
+  `docs/unwind.md` and section 1 below now say that "idle" means "once a
+  drain has held samples of it". A program that only sleeps, or that lives in
+  system calls under a user-only profile until its first user-mode sample,
+  costs what it did under the old rule.
+- **The records are gathered before they are processed. Kept, and said.**
+  Which processes a drain holds decides what is read before any stack is
+  interned, so the whole drain has to be seen first. `drain_into`'s doc now
+  gives the price: one tick holds the rings' whole contents at once. With
+  `dwarf` on per-cpu rings at a high frequency, that is every stack copy the
+  rings held. Not measured.
+- **The degradation's text untested. Fixed.** The text is now built by
+  `unwind::user_only_degradation`, and
+  `a_user_only_choice_says_what_it_loses_and_what_it_costs` checks it from a
+  paranoid-2 environment on any machine, for a stack mode and for `none`.
+- **The new test's skip gate. Fixed for this test.** It now skips only where
+  `SampledEvent::callchain_supported` fails, meaning the kernel refuses a
+  sampled event with a stack of either shape. A `start` that fails where one
+  opens now fails the test. The older test with the same pattern
+  (`a_profile_of_the_machine_...`) predates this stream and is left as it
+  was.
 
 ## Shown versus reasoned
 

@@ -642,7 +642,17 @@ Two costs, neither of them the mode's:
    being sampled. A process the last drain held samples of, or that no drain
    has held samples of yet, is re-read before the drain, as every process
    was; one that was idle and is sampled again, after the drain and before
-   its stacks are interned; an idle one, not at all. The first version read
+   its stacks are interned; an idle one, not at all, once a drain has held
+   samples of it (a launched program that has not been sampled yet -- one
+   that only sleeps, or lives in system calls under a user-only profile -- is
+   still read before every drain, as under the old rule). A process read
+   after a drain, or whose unwinder was built in it, is not read again before
+   the next: without that, over a machine (`--cpus`), where most processes
+   are sampled now and then, a process was read after the drain that held it
+   and again before the next one, which held nothing of it -- twice what the
+   old machine-wide rule read (the review found it; held by
+   `over_a_machine_a_process_is_read_once_for_each_drain_that_holds_it`). The
+   rule is `MapReads` in `src/collect/cpu/profile.rs`. The first version read
    every sampled process after the drain, and across a launched program's
    `execve` that names the child's samples of this tool's own code against
    the new image: at 100 kHz, 82 to 266 frames fell in no mapping where the
