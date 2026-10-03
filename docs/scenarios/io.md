@@ -1303,7 +1303,7 @@ the run reports as an upper bound on loss.
 
 ## The eighteenth wave
 
-### 20. The polled queue depth read 0 on the CI's nvme while the kernel's other file read 199 — **fixed in the source; shown here, not on the CI**
+### 20. The polled queue depth read 0 on the CI's nvme while the kernel's other file read 199 — **worked around in the source; the cause still open**
 
 `a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it`, both CI
 cells at `b37a925` (6.17.0-1022-azure): the test's own reads of
@@ -1328,13 +1328,30 @@ The fix is in the source (`src/collect/io/diskstats.rs`): the gauge reads both
 accounts for each device the run reports and takes the larger. Each counts
 requests really outstanding, so the larger is still never more than the device
 held, and each event carries both (`diskstats_inflight`, `sysfs_inflight`), so
-a kernel on which they part shows it in the output. The test is unchanged: its
-ground truth is still the kernel's own file read a millisecond apart, and the
-source now reads that file too -- which is why it is held to a separation
-(non-empty for 2.37 s of 2.38 s against a maximum of 0), not to a count.
-Held by `diskstats::tests::a_queue_one_account_misses_is_read_from_the_other`
-(the CI's shape, 0 against 199, and the other way round). Shown green here;
-**whether the CI's cells go green is the next CI run's to show**.
+a kernel on which they part shows it in the output. A device whose sysfs file
+cannot be read is reported from the diskstats column alone -- the very account
+that read 0 -- and the run's notes name it. The catalog entry's caveats say
+the same.
+
+This is a workaround, not the cause. **Why 6.17's disk line read 0 is still
+open**: the partition explanation is reasoned without a 6.17 source or
+machine, and it did not reproduce on 7.2. The headline `inflight` no longer
+shows the divergence; `diskstats_inflight` and `sysfs_inflight` still do, and
+a CI log that carries them is what would settle it.
+
+Since the gauge now reads `/sys/block/<dev>/inflight` too, the test's own
+reads of that file are no longer independent of the tool: a green run against
+them shows only that the tool reads what the test reads. So the scenario got a
+second floor that owes nothing to the file: at each poll's instant, the
+workload's own clock counts the direct writes that had begun and not
+returned, and when at least half of the eight writers were inside their
+syscalls at ten polls or more, the gauge must have read a queue at least
+once. Here: 101 of 101 polls with four or more writes outstanding, maximum 25.
+Held also by `diskstats::tests::a_queue_one_account_misses_is_read_from_the_other`
+(the CI's shape, 0 against 199, and the other way round) and
+`queue_depth_is_reported_as_it_stands` (the note when the file is missing).
+Shown green here; **whether the CI's cells go green is the next CI run's to
+show**.
 
 ### 21. The program statistics read 0 runs while the histogram counted 26.8 M — **fixed for `io.latency`; the rest filed**
 

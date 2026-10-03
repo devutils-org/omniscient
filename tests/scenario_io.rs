@@ -1586,6 +1586,68 @@ fn a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it() {
         );
     }
 
+    // A floor that owes nothing to /sys/block/<dev>/inflight. The gauge now
+    // reads that file too (`docs/scenarios/io.md`, defect 20), so the kernel's
+    // reads above only show that the tool reads what the test reads. The
+    // workload's own records do not: at each poll's instant, by the writers'
+    // clock against the window's stamps (both `CLOCK_MONOTONIC`), how many of
+    // the direct writes had begun and not returned. A direct write is a
+    // request at the device for nearly all of its syscall, so at an instant
+    // when half the writers are inside theirs, the device holding none of
+    // them is the gap between a syscall's entry and its bio for every one of
+    // four threads at once. Over ten such polls or more, a maximum of 0 is a
+    // gauge that does not see the queue.
+    let depth_result = result(&document, "queue depth");
+    let depth_opened = depth_result["window"]["opened_ns"]
+        .as_u64()
+        .expect("the window's opening");
+    let instants: Vec<u64> = output_of(depth_result, "timeline")["series"]
+        .as_array()
+        .expect("the queue depth has series")
+        .iter()
+        .filter(|series| series["key"] == device.key.as_str())
+        .flat_map(|series| series["points"].as_array().cloned().unwrap_or_default())
+        .filter_map(|point| point["offset_ns"].as_u64())
+        .map(|offset| depth_opened + offset)
+        .collect();
+    let outstanding = |at: u64| {
+        written
+            .iter()
+            .filter(|(began, returned)| *began <= at && at < *returned)
+            .count()
+    };
+    let held = instants
+        .iter()
+        .filter(|at| outstanding(**at) >= WRITERS / 2)
+        .count();
+    if held >= 10 {
+        eprintln!(
+            "the workload's floor: {held} of the {} polls on {} found at least {} of its direct \
+             writes outstanding by its own clock; the session's maximum was {}",
+            instants.len(),
+            device.leaf,
+            WRITERS / 2,
+            depth["max"]
+        );
+        assert!(
+            number(&depth["max"]) >= 1.0,
+            "at {held} of the {} polls on {}, the workload's own clock had at least {} of its \
+             {WRITERS} direct writes in their syscalls, and the gauge never read a queue: \
+             {depth}",
+            instants.len(),
+            device.leaf,
+            WRITERS / 2
+        );
+    } else {
+        eprintln!(
+            "the workload's floor not held: only {held} of the {} polls on {} found at least {} \
+             of its direct writes outstanding by its own clock",
+            instants.len(),
+            device.leaf,
+            WRITERS / 2
+        );
+    }
+
     // The series has to have the spacing the request asked for. Two seconds at
     // 20 ms is a hundred reads, and a session whose points are counted in tens
     // is one whose interval was decided by something other than the request.
@@ -6062,6 +6124,20 @@ fn a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histog
     let (kernel, streamed) = (
         result(&document, "in-kernel"),
         result(&document, "streamed"),
+    );
+    // The `hist`-only request must have counted in the kernel: had it quietly
+    // run on the streaming path, the two histograms would agree trivially and
+    // the in-kernel one would not be held to the known latency at all.
+    let said = |result: &serde_json::Value| result["notes"].to_string();
+    assert!(
+        said(kernel).contains("the histogram was built in the kernel"),
+        "the `hist`-only request did not say it was built in the kernel: {}",
+        said(kernel)
+    );
+    assert!(
+        !said(streamed).contains("built in the kernel"),
+        "the streamed request says it was built in the kernel: {}",
+        said(streamed)
     );
     for result in [kernel, streamed] {
         assert_eq!(

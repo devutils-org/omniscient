@@ -191,6 +191,10 @@ pub struct Diskstats {
     /// Where each device's own `inflight` file is, for the gauge: see
     /// [`Diskstats::gauge_events`].
     sys_block: PathBuf,
+    /// The devices whose `inflight` file could not be read, and why: their
+    /// gauge is the diskstats column alone, which is the very case where a
+    /// kernel like the CI's reads 0, so the run says so in its notes.
+    unread_sysfs: BTreeMap<String, String>,
     /// What each device name turned out to be, cached: the classification
     /// reads `/sys`, and the answer only changes when hardware appears.
     roles: BTreeMap<String, Role>,
@@ -210,6 +214,7 @@ impl Diskstats {
             mode,
             path,
             sys_block: PathBuf::from("/sys/block"),
+            unread_sysfs: BTreeMap::new(),
             roles: BTreeMap::new(),
             previous: None,
             baseline: None,
@@ -357,13 +362,22 @@ impl Diskstats {
     /// the device held; the gauge is that, and the event carries both, so a
     /// kernel where they part is visible in the output rather than averaged
     /// away.
-    fn gauge_events(&self, reading: &Reading, seq: u64) -> Vec<Event> {
+    fn gauge_events(&mut self, reading: &Reading, seq: u64) -> Vec<Event> {
         reading
             .devices
             .iter()
             .enumerate()
             .map(|(offset, (device, counters))| {
-                let driver = read_inflight(&self.sys_block.join(&device.name).join("inflight"));
+                let path = self.sys_block.join(&device.name).join("inflight");
+                let driver = match read_inflight(&path) {
+                    Ok(driver) => Some(driver),
+                    Err(reason) => {
+                        self.unread_sysfs
+                            .entry(device.name.clone())
+                            .or_insert_with(|| format!("{}: {reason}", path.display()));
+                        None
+                    }
+                };
                 let mut attrs = vec![
                     Attr::uint("inflight", counters.in_flight.max(driver.unwrap_or(0))),
                     Attr::text("dev", device.name.clone()),
@@ -466,6 +480,20 @@ impl Collector for Diskstats {
     fn losses(&self) -> Losses {
         self.losses.clone()
     }
+
+    /// The devices whose queue depth is the diskstats column alone, because
+    /// their `/sys/block/<dev>/inflight` could not be read at some poll.
+    fn notes(&self) -> Vec<String> {
+        self.unread_sysfs
+            .iter()
+            .map(|(device, reason)| {
+                format!(
+                    "{device}'s queue depth is /proc/diskstats' account alone at one poll or \
+                     more, which can read 0 under a real queue: {reason}"
+                )
+            })
+            .collect()
+    }
 }
 
 /// What one reading of the file holds, per device.
@@ -542,14 +570,18 @@ fn classify_under(root: &Path, name: &str) -> Role {
 }
 
 /// The reads and writes `/sys/block/<dev>/inflight` holds (`"       0      199"`),
-/// added; `None` when the file is not there or not two numbers.
-fn read_inflight(path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut numbers = text
+/// added; the reason when the file is not there or not two numbers.
+fn read_inflight(path: &Path) -> Result<u64, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let numbers: Vec<u64> = text
         .split_whitespace()
-        .map(|field| field.parse::<u64>().ok());
-    let (reads, writes) = (numbers.next()??, numbers.next()??);
-    numbers.next().is_none().then_some(reads + writes)
+        .map(|field| field.parse::<u64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("`{}` is not two counts", text.trim()))?;
+    match numbers[..] {
+        [reads, writes] => Ok(reads + writes),
+        _ => Err(format!("`{}` is not two counts", text.trim())),
+    }
 }
 
 /// Splits `  259  0 nvme0n1 88820 1663 ...` into the name and its counters.
@@ -934,6 +966,13 @@ mod tests {
             events[0].attr("sysfs_inflight").is_none(),
             "a sysfs file that is not there is absent, not zero"
         );
+        let notes = collector.notes();
+        assert!(
+            notes.len() == 1
+                && notes[0].contains(&device)
+                && notes[0].contains("/proc/diskstats' account alone"),
+            "a gauge read from one account alone says so, and of which device: {notes:?}"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -943,6 +982,9 @@ mod tests {
     #[test]
     fn a_queue_one_account_misses_is_read_from_the_other() {
         let Some(device) = a_leaf_device() else {
+            eprintln!(
+                "skipped: no device in /proc/diskstats is a leaf, so none is classified as one"
+            );
             return;
         };
         let sys_block = scratch("sys-block");

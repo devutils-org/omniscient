@@ -25,7 +25,11 @@ defects 20 to 22 and "19, continued".
   diskstats line for each device it reports, takes the larger (each is a count
   of requests really outstanding, so the larger is never more than the device
   held), and carries both as `diskstats_inflight` and `sysfs_inflight` (absent
-  when the file is not readable, not zero). The source changed, not the test.
+  when the file is not readable, not zero, and the device named in the run's
+  notes). A workaround, not the cause: why 6.17's disk line read 0 stays open
+  (below). `catalog/io.yaml`'s `io.inflight` says so in a caveat and a
+  comment on its backend; `/sys/block` is not in `requires`, because the gauge
+  works, and says what it lost, without it.
 - **`tests/scenario_io.rs`**: the cost test's doc comment and its panic say
   `udevadm settle` before the `chmod` of `/dev/nullb0`, and why; and a new
   ignored test, `a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histograms`,
@@ -34,6 +38,14 @@ defects 20 to 22 and "19, continued".
   log2 bucket, and both histograms (in-kernel and streamed) exactly one bucket
   holding all 64. The latency is read from the module's own parameters, and a
   value within a quarter bucket of an edge is refused.
+- **`tests/scenario_io.rs`, the queue scenario**: a floor independent of
+  `/sys/block/<dev>/inflight`, which the tool now reads too. At each poll's
+  instant, the workload's own clock counts the direct writes begun and not
+  returned; at ten polls or more with half the writers inside their syscalls,
+  the gauge must read a queue. Here 101 of 101 polls, maximum 25. And the
+  known-latency test asserts the in-kernel request said "the histogram was
+  built in the kernel" and the streamed one did not, as the test it copies
+  does.
 - **`docs/scenarios/io.md`**: defects 20 (the queue), 21 (the statistics) and
   22 (the known latencies), "19, continued" (the 348 ns, reasoned), and what
   was not done.
@@ -55,7 +67,8 @@ Shown on this machine (7.2.7, capabilities granted by `make`):
 
 Reasoned, not shown:
 
-- **Why the CI's disk read 0**: that 6.17's I/O accounting stayed on the
+- **Why the CI's disk read 0** (open; the root cause the brief asked for was
+  not found): that 6.17's I/O accounting stayed on the
   partition the writes went through and never reached the disk's line. No 6.17
   source or machine here. Whether the fix turns both cells green is the next
   CI run's to show.
@@ -176,6 +189,33 @@ in place of `self.program = None`, as `BlockProgram::detach` does.
   latencies" moved to "written, run pending".
 - Item 11's "driving a known number of merges" and "one program for both
   `io.latency` histograms" stay open.
+
+## Review
+
+The fix round after the adversarial review:
+
+- **`read_histogram`'s doc comment** had been split from its function by
+  `detach`'s; moved back above `read_histogram`. Fixed.
+- **The known-latency test** now asserts the in-kernel note on the `hist`-only
+  request and its absence on the streamed one. Fixed.
+- **The queue scenario's ground truth** was no longer independent of the tool;
+  the workload's own count of outstanding writes is now a second floor (above).
+  Fixed. The kernel-reads floor stays: it still separates "the queue was never
+  empty" from "the poll missed it".
+- **The root cause on 6.17** was not found. Not fixable here (no 6.17 source
+  or machine); `docs/scenarios/io.md` defect 20 is now titled *worked around
+  in the source; the cause still open*, and the coordinator should keep it
+  open in `STATE.md` and `docs/open-findings.md`.
+- **The catalog entry**: caveat and backend comment added. Fixed.
+- **An unreadable sysfs file** now names the device in the run's notes
+  (`Collector::notes`), held by `queue_depth_is_reported_as_it_stands`. Fixed.
+- **The silent skip** in `a_queue_one_account_misses_is_read_from_the_other`
+  now prints a `skipped:` line. Fixed. (The module's older tests keep their
+  silent return; not touched.)
+- **`io.fsync`, `io.pagecache`, `io.writeback`**: left as filed to launcher
+  (one read of the meters before the stops covers every collector), with the
+  per-program `detach()` as the fallback. Their program types are in
+  `src/bpf/io_*.rs`, which no stream owns this wave.
 
 ## Checks
 

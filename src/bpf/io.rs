@@ -1246,17 +1246,6 @@ impl BlockProgram {
         self.histogram.is_some()
     }
 
-    /// The kernel-side histogram, read once, at the end.
-    ///
-    /// The closing program is detached first and a grace period waited for,
-    /// so nothing is adding to a row while it is read: a completion either
-    /// landed before the detach, and is in a row, or happened after the run's
-    /// window, and is in none. Empty when the programs publish records.
-    ///
-    /// A kernel that withdraws the grace-period wait (`nohz_full`) is read
-    /// anyway, after the detach, and the second value says so: a run of the
-    /// closing program that began before the detach and was preempted could
-    /// still add to a row after it was read.
     /// Detaches both programs and keeps them loaded.
     ///
     /// What the kernel has counted of a program's runs (`run_time_ns` and
@@ -1272,6 +1261,17 @@ impl BlockProgram {
         self.close_link = None;
     }
 
+    /// The kernel-side histogram, read once, at the end.
+    ///
+    /// The closing program is detached first and a grace period waited for,
+    /// so nothing is adding to a row while it is read: a completion either
+    /// landed before the detach, and is in a row, or happened after the run's
+    /// window, and is in none. Empty when the programs publish records.
+    ///
+    /// A kernel that withdraws the grace-period wait (`nohz_full`) is read
+    /// anyway, after the detach, and the second value says so: a run of the
+    /// closing program that began before the detach and was preempted could
+    /// still add to a row after it was read.
     pub fn read_histogram(&mut self) -> Result<(Vec<HistRow>, Option<String>), String> {
         let Some(map) = &self.histogram else {
             return Ok((Vec::new(), None));
