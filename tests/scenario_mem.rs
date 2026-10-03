@@ -176,9 +176,12 @@ fn unavailable(output: &Output) -> Option<String> {
     // The skip line starts at the refusal: a launch's warnings come first on
     // stderr (`json` is one document...), and the CI's skip gate reads the
     // first line as the reason.
+    // A line that starts `error:`, not the word anywhere: a warning or a
+    // caveat that quotes it would otherwise start the skip line mid-sentence.
     let from_the_error = message
-        .find("error:")
-        .map_or(message.as_str(), |at| &message[at..]);
+        .match_indices("error:")
+        .find(|(at, _)| *at == 0 || message[..*at].ends_with('\n'))
+        .map_or(message.as_str(), |(at, _)| &message[at..]);
     // The resolver's own word for a machine's limit is the widest of these:
     // the CI's second runner has no hardware PMU, and `mem.cache_l1` was
     // refused there with "`L1-dcache-load-misses` is not available on this
@@ -266,6 +269,22 @@ fn sampled_in_user_mode_only(result: &serde_json::Value) -> bool {
             .iter()
             .filter_map(serde_json::Value::as_str)
             .any(|note| note.contains("page faults in user mode only"))
+    })
+}
+
+/// Whether a counted run says it counted page faults in user mode only: the
+/// same `perf_event_paranoid` 2 path as [`sampled_in_user_mode_only`], taken by
+/// the counting group (`CounterCollector::start`), which words its note after
+/// the source rather than after page faults.
+fn counted_in_user_mode_only(result: &serde_json::Value) -> bool {
+    result["notes"].as_array().is_some_and(|notes| {
+        notes
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|note| {
+                note.contains("would only open `mem.faults` for user mode")
+                    || note.contains("page faults in user mode only")
+            })
     })
 }
 
@@ -3683,6 +3702,23 @@ fn a_counted_run_of_page_faults_is_the_kernels_own_count() {
     let counted = document["results"][0]["outputs"][0]["series"][0]["last"]
         .as_f64()
         .unwrap_or_else(|| panic!("a counted value: {document}"));
+    if counted_in_user_mode_only(&document["results"][0]) {
+        // At perf_event_paranoid 2 the counter opens for user mode only, and
+        // the program's `getrusage` still counts the faults the kernel took on
+        // its behalf -- the exec's, a read() into a fresh buffer -- which a
+        // user-mode event cannot see. Its own stores it can: one per page of a
+        // mapping advised against huge pages, each a fault its code took. And
+        // the counter is still never above the kernel's count by more than
+        // the handful after the program's own read.
+        const PAGES_STORED: f64 = 64.0 * 1024.0 * 1024.0 / 4096.0;
+        assert!(
+            counted >= PAGES_STORED && counted <= kernels_own * 1.01,
+            "counted in user mode only, the run counted {counted} faults; the program's own \
+             stores took {PAGES_STORED} and the kernel counted {kernels_own} in all: {}",
+            document["results"][0]["notes"]
+        );
+        return;
+    }
     let difference = (kernels_own - counted) / kernels_own;
     assert!(
         (-0.01..0.05).contains(&difference),
