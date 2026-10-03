@@ -155,13 +155,34 @@ impl Gated {
         }
     }
 
-    /// Ends the child and reaps it, so the tool leaves nothing behind.
+    /// Ends the child and everything it started, and reaps it, so the tool
+    /// leaves nothing behind.
+    ///
+    /// The whole tree, not the launched process alone: a compiler driver
+    /// killed on its own leaves `cc1` running, reparented, still writing the
+    /// object a retry is about to write too (`docs/fixes/w17-build.md`).
+    /// The tree is frozen first ([`freeze`]) so that nothing in it can fork
+    /// past the kill, then killed, and a process group the program made
+    /// for itself goes with it. The program is not put in a group of its own
+    /// at launch: a process group that is not the terminal's foreground one
+    /// is stopped the moment it reads the terminal, and a target that reads
+    /// stdin would hang under the tool.
     pub fn terminate(&mut self) {
         if self.status.is_some() {
             return;
         }
-        // SAFETY: signalling and reaping a child of this process.
+        let tree = freeze(self.pid);
+        // SAFETY: signalling the processes this program started, then
+        // signalling and reaping the child of this process.
         unsafe {
+            // A group the program leads is one it made for itself (`setsid`,
+            // a shell's job control); its members may have left the tree.
+            if libc::getpgid(self.pid) == self.pid {
+                libc::kill(-self.pid, libc::SIGKILL);
+            }
+            for descendant in &tree {
+                libc::kill(*descendant, libc::SIGKILL);
+            }
             libc::kill(self.pid, libc::SIGKILL);
             let mut status = 0;
             let mut usage: libc::rusage = std::mem::zeroed();
@@ -205,6 +226,35 @@ impl Drop for Gated {
             self.pidfd = -1;
         }
     }
+}
+
+/// Stops `pid` and every descendant it has, until a pass finds none that was
+/// not already stopped, and returns the descendants.
+///
+/// A stopped process cannot fork, and a fork with a signal pending is
+/// restarted rather than completed, so once a pass finds nothing new the
+/// tree is fixed and a kill reaches all of it. Bounded, so that a tree
+/// growing faster than it can be walked still ends; whatever is left then is
+/// what the kill misses.
+fn freeze(pid: i32) -> Vec<i32> {
+    // SAFETY: stopping a child of this process.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    let mut stopped: Vec<i32> = Vec::new();
+    for _ in 0..64 {
+        let new: Vec<i32> = super::task::descendants(pid)
+            .into_iter()
+            .filter(|descendant| !stopped.contains(descendant))
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        for descendant in new {
+            // SAFETY: stopping a process the launched program started.
+            unsafe { libc::kill(descendant, libc::SIGSTOP) };
+            stopped.push(descendant);
+        }
+    }
+    stopped
 }
 
 fn describe(status: i32) -> String {
@@ -419,6 +469,62 @@ mod tests {
         // SAFETY: waiting on a pid this process created and already reaped.
         let result = unsafe { libc::waitpid(child.pid(), &mut ignored, libc::WNOHANG) };
         assert_eq!(result, -1, "the child was not reaped and is now a zombie");
+    }
+
+    /// Whether `pid` is gone or only waiting to be reaped by whoever inherited
+    /// it: either way it runs no more.
+    fn ended(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rfind(')')
+                .and_then(|end| stat[end + 1..].split_whitespace().next())
+                .is_some_and(|state| state == "Z" || state == "X"),
+        }
+    }
+
+    /// The stop ends what the program started, not its main process alone:
+    /// a shell waiting on one child with another in the background, each with
+    /// a child of its own, is ended whole, and nothing it started is left
+    /// running, reparented, once `terminate` returns.
+    #[test]
+    fn terminating_a_program_ends_every_process_it_started() {
+        let mut child = gated(
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "sh -c 'sleep 30; :' & sh -c 'sleep 30; :'; :".to_owned(),
+            ],
+            &[],
+        )
+        .expect("fork");
+        child.release();
+        let mut tree = Vec::new();
+        for _ in 0..500 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            tree = crate::collect::task::descendants(child.pid());
+            if tree.len() >= 4 {
+                break;
+            }
+        }
+        assert!(
+            tree.len() >= 4,
+            "two shells and their two sleeps had to start: {tree:?}"
+        );
+
+        child.terminate();
+        let mut left: Vec<i32> = tree.clone();
+        for _ in 0..200 {
+            left.retain(|pid| !ended(*pid));
+            if left.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            left.is_empty(),
+            "still running after the stop: {left:?} of {tree:?}"
+        );
     }
 
     /// A launched program must be readable in procfs by the user who launched

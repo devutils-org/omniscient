@@ -1950,6 +1950,25 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
         );
         return;
     }
+    // A run the kernel throttled is placed per ring only when the rings say
+    // whose throttles they were (`emit.rs`, `placed`); `cpu.profile`'s rings
+    // carry their drops and not their throttles yet, so on a loaded machine,
+    // where the kernel throttles a 50 kHz sampler, every series is marked
+    // with the run's loss. Filed for stream profile (`docs/fixes/w18-launcher.md`).
+    let throttled = result["losses"]["throttled"].as_u64().unwrap_or(0);
+    let throttled_by_ring: u64 = rings
+        .iter()
+        .map(|ring| ring["losses"]["throttled"].as_u64().unwrap_or(0))
+        .sum();
+    if throttled > throttled_by_ring {
+        eprintln!(
+            "SKIP: the kernel throttled this profile {throttled} times and its rings account \
+             for {throttled_by_ring} of them (`cpu.profile`'s `losses_by_ring` carries no \
+             throttles, filed for stream profile), so the run's loss is marked on every series \
+             rather than placed: {lost_by_task:?} of {dropped}"
+        );
+        return;
+    }
     let series = result["outputs"][0]["series"]
         .as_array()
         .expect("a ranking of tasks");

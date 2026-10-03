@@ -399,7 +399,7 @@ fn a_run_over_its_ceiling_moves_onto_a_cheaper_backend_and_says_when() {
 #[test]
 fn a_run_over_its_ceiling_with_nowhere_to_go_stops_and_says_so() {
     let stopped = |budget: &str| {
-        let (_, cost) = measured(
+        let (output, cost) = measured(
             "stop",
             &[
                 "-m",
@@ -410,22 +410,124 @@ fn a_run_over_its_ceiling_with_nowhere_to_go_stops_and_says_so() {
                 budget,
             ],
         );
-        cost["stopped_because"]
-            .as_str()
-            .expect("a reason")
-            .to_owned()
+        let line = stderr(&output)
+            .lines()
+            .find(|line| line.contains("and the run was stopped there"))
+            .map(str::to_owned);
+        (
+            cost["stopped_because"]
+                .as_str()
+                .expect("a reason")
+                .to_owned(),
+            cost["stopped_by_budget"].as_bool().unwrap_or(false),
+            line,
+            stderr(&output),
+        )
     };
 
-    let over = stopped("0.05%");
+    let (over, flagged, line, said) = stopped("0.05%");
     assert!(
         over.contains("ceiling of 0.05") && over.contains("nothing cheaper"),
         "a run the budget ended says which ceiling and that there was nowhere to go: {over}"
     );
+    // And says it was stopped on a line of its own, naming the source and
+    // the percentage, whatever the whole window's verdict came to.
+    let line = line.unwrap_or_else(|| panic!("no line says the run was stopped: {said}"));
+    assert!(
+        line.starts_with("budget: [mem.rss] --budget 0.05% was exceeded")
+            && line.contains("% of the target's cpu time"),
+        "{line}"
+    );
+    assert!(flagged, "and the cost record says so too");
 
-    let under = stopped("10000%");
+    let (under, flagged, line, said) = stopped("10000%");
     assert!(
         under.contains("duration") || under.contains("exited"),
         "a run inside its ceiling ends for the ordinary reason: {under}"
+    );
+    assert!(
+        line.is_none() && !flagged,
+        "a run the budget did not stop is not said to have been: {said}"
+    );
+}
+
+/// A program that waits while a process it started does the work is weighed
+/// with that process, and a stop ends the process too.
+///
+/// A compiler driver spent 4 ms in `wait4` while `cc1` spent seconds, and the
+/// budget weighed the tool against the driver alone: *"8581.01 % of the
+/// target's cpu time"* (`docs/fixes/w17-build.md`). And the stop killed the
+/// driver, leaving `cc1` running, reparented. Here a shell waits on a child
+/// shell that burns: the target's cpu has to hold the child's, which is two
+/// orders of magnitude over what the waiting shell spends of its own, and the
+/// child -- which says its pid before it burns -- is not running once the run
+/// has returned.
+#[test]
+fn a_waiting_program_is_weighed_with_the_process_it_started_and_its_stop_ends_both() {
+    let directory = scratch("tree");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let pid_file = directory.join("child.pid");
+    let inner = format!("echo $$ > {}; {BURN}", pid_file.display());
+    let program = format!("/bin/sh -c '{inner}'; :");
+    let out = directory.join("out").to_string_lossy().into_owned();
+    let output = run(&[
+        "mem.rss",
+        "-e",
+        "summary",
+        "-m",
+        "poll@50ms",
+        "-d",
+        "1s",
+        "-o",
+        out.as_str(),
+        "--",
+        "/bin/sh",
+        "-c",
+        &program,
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let cost = cost_record(Path::new(&out));
+    let child: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the child says its pid before it burns")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Gone, or a zombie waiting for whoever inherited it: either way it runs
+    // no more. Given a moment, since the reap is not this process's to make.
+    let running = || {
+        std::fs::read_to_string(format!("/proc/{child}/stat")).is_ok_and(|stat| {
+            stat.rfind(')')
+                .and_then(|end| stat[end + 1..].split_whitespace().next())
+                .is_some_and(|state| state != "Z" && state != "X")
+        })
+    };
+    let mut still = running();
+    for _ in 0..100 {
+        if !still {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        still = running();
+    }
+    if still {
+        // SAFETY: ending the child this test's program started, which the run
+        // should have ended.
+        unsafe { libc::kill(child, libc::SIGKILL) };
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let observed = cost["overhead"]["observed_cpu_ns"]
+        .as_u64()
+        .expect("a launched program has a cpu account");
+    assert!(
+        observed >= 50_000_000,
+        "a second of a burning child came to {observed} ns of the target's cpu, which is the \
+         waiting shell's alone: {}",
+        cost["overhead"]["observed_from"]
+    );
+    assert!(
+        !still,
+        "the child {child} the program started is still running after the run returned"
     );
 }
 
@@ -1813,9 +1915,9 @@ print(json.dumps(points), flush=True)
 /// asked because it is an emit both modes produce. The task's `getrusage` log
 /// brackets what the window held.
 ///
-/// Once `page_faults.rs` weighs its samples and `main.rs`'s
-/// `WEIGHS_ITS_SAMPLES` names it, the run moves, and the weighed half below
-/// holds the whole series to the task's count across the move.
+/// Once `page_faults.rs` weighs its samples and its factory declares it
+/// (`collect::Factory::weighing_its_samples`), the run moves, and the weighed
+/// half below holds the whole series to the task's count across the move.
 #[test]
 fn a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples() {
     use std::io::{BufRead, Read};
