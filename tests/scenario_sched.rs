@@ -1733,8 +1733,56 @@ const FUTEX_HOLD_MS: u64 = 500;
 /// anyone has to calibrate.
 const LONG_WAIT_NS: u64 = FUTEX_HOLD_MS * 1_000_000 / 2;
 
-/// The name the lock workload's processes carry, which the session filters on.
+/// The name the example session filters on. A run here substitutes a name of
+/// its own for it ([`lock_probe_name`]).
 const LOCK_PROBE: &str = "omnlockprobe";
+
+/// The name this run's lock workload carries, and the one its copy of the
+/// session filters on: unique to the checkout and to the test process.
+///
+/// A fixed name was one every checkout on the machine shared, and the
+/// in-process lock below serialises one test binary only: two worktrees
+/// running `scenario_sched` at once each measured the other's writers, and
+/// the attribution assertion said so -- *"the run attributed a wait to pid N,
+/// which is not one of the 12 it started"*, with `ps` showing probes from two
+/// other worktrees (`docs/open-findings.md`, the seventeenth wave, stream
+/// core). Fifteen characters at most, which is what the kernel keeps of a
+/// name; a `comm` truncated by the kernel is one the filter cannot match.
+fn lock_probe_name() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    env!("CARGO_MANIFEST_DIR").hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    let name = format!("omnlk{:08x}", hasher.finish() as u32);
+    assert!(name.len() <= 15, "`{name}` is longer than a comm");
+    name
+}
+
+/// Runs the example session over the workload named `name`: a copy of it,
+/// filtering on that name instead of the shared one, written beside the
+/// workload.
+fn lock_session(name: &str) -> Output {
+    let example = std::fs::read_to_string("examples/sched-lock-shared-file.yml")
+        .expect("examples/sched-lock-shared-file.yml is part of this scenario");
+    let shared = format!("comm == '{LOCK_PROBE}'");
+    assert_eq!(
+        example.matches(&shared).count(),
+        1,
+        "the example filters on `{shared}` exactly once, which is what a run substitutes"
+    );
+    let path = scratch(&format!("{name}.yml"));
+    std::fs::write(
+        &path,
+        example.replace(&shared, &format!("comm == '{name}'")),
+    )
+    .expect("the session copy is written");
+    omn(&[
+        "-f",
+        path.to_str().expect("a utf-8 path"),
+        "--format",
+        "json",
+    ])
+}
 
 /// One machine, two scenarios that start processes under the same name.
 ///
@@ -1765,8 +1813,8 @@ fn scratch(name: &str) -> PathBuf {
 /// exec'd. A workload that ran as `sh` could not be told apart from every other
 /// shell on the machine, and a `--system` measurement of the machine's own
 /// contention is exactly what this scenario must not accidentally assert.
-fn lock_probe() -> Option<PathBuf> {
-    let path = scratch(LOCK_PROBE);
+fn lock_probe(name: &str) -> Option<PathBuf> {
+    let path = scratch(name);
     if path.exists() {
         return Some(path);
     }
@@ -1877,7 +1925,8 @@ fn raw_events(result: &Value) -> Vec<std::collections::BTreeMap<String, Value>> 
 #[test]
 fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
     let _serialised = one_lock_workload_at_a_time();
-    let Some(probe) = lock_probe() else {
+    let name = lock_probe_name();
+    let Some(probe) = lock_probe(&name) else {
         eprintln!("skipped: /bin/sh could not be copied, and this workload needs a program with a name of its own to filter on");
         return;
     };
@@ -1896,7 +1945,7 @@ fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
         // Long enough for every writer to be past `exec` and into its loop.
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+        let output = lock_session(&name);
         let text = spoken(&output);
         stop(writers);
         if unprivileged(&text) {
@@ -1917,7 +1966,7 @@ fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
         for event in raw_events(result) {
             assert_eq!(
                 event["comm"].as_str(),
-                Some(LOCK_PROBE),
+                Some(name.as_str()),
                 "the session filters on comm and an event carries another: {event:?}"
             );
             let pid = event["pid"].as_u64().expect("a pid on every event") as u32;
@@ -1995,7 +2044,8 @@ fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
 #[test]
 fn more_lock_waits_is_not_more_contention() {
     let _serialised = one_lock_workload_at_a_time();
-    let Some(probe) = lock_probe() else {
+    let name = lock_probe_name();
+    let Some(probe) = lock_probe(&name) else {
         eprintln!("skipped: /bin/sh could not be copied");
         return;
     };
@@ -2005,7 +2055,7 @@ fn more_lock_waits_is_not_more_contention() {
         let _ = std::fs::remove_dir_all(&directory);
         let writers = lock_writers(&probe, shared, &directory);
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+        let output = lock_session(&name);
         let text = spoken(&output);
         stop(writers);
         if unprivileged(&text) {
@@ -2057,7 +2107,8 @@ fn more_lock_waits_is_not_more_contention() {
 #[test]
 fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
     let _serialised = one_lock_workload_at_a_time();
-    let Some(probe) = lock_probe() else {
+    let name = lock_probe_name();
+    let Some(probe) = lock_probe(&name) else {
         eprintln!("skipped: /bin/sh could not be copied");
         return;
     };
@@ -2065,7 +2116,7 @@ fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
     let _ = std::fs::remove_dir_all(&directory);
     let writers = lock_writers(&probe, true, &directory);
     std::thread::sleep(std::time::Duration::from_millis(300));
-    let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+    let output = lock_session(&name);
     let text = spoken(&output);
     stop(writers);
     let _ = std::fs::remove_dir_all(&directory);
