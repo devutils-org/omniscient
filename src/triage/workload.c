@@ -4,9 +4,10 @@
  * Built by `tests/triage.rs` into `target/omn-triage-fixture/workload`, which
  * is the path `examples/triage-*.yml` launch. Every mode spends its time in a
  * way the caller picked -- on a cpu, blocked on a disk, waiting for a mutex,
- * queued behind its own threads -- and prints the kernel's accounting of its
- * main thread on stderr, prefixed `omn-truth`, before it exits. The tool reads
- * none of that line.
+ * queued behind its own threads, in a child it started or in another thread --
+ * and prints the kernel's accounting of its main thread on stderr, prefixed
+ * `omn-truth`, before it exits; the modes whose work is elsewhere print that
+ * task's line too, each with its own `mode`. The tool reads none of them.
  *
  *   workload cpu MS                    spin MS of the thread's own cpu time
  *   workload io N DIR                  N x (write 4 KiB, fdatasync) in DIR
@@ -17,6 +18,10 @@
  *   workload diff FACTOR               four functions of equal cost, `beta` FACTOR times
  *   workload phases MS N HOLD_US LOG   spin MS, then the lock mode's N acquisitions,
  *                                      each written to LOG as `start_ns wait_ns`
+ *   workload child MS DEPTH            start a child and wait for it in waitpid; the
+ *                                      DEPTH-th descendant spins MS, the others wait
+ *   workload thread MS                 a second thread spins MS while the main
+ *                                      thread waits for it in read(2) on a pipe
  *
  * The spin is a chain of dependent multiplies: its speed is the multiplier's
  * latency, which an SMT sibling does not share, so a unit of work costs about
@@ -31,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -73,8 +79,9 @@ static void truth(const char *mode, uint64_t start, const char *extra)
 			on = rq = slices = 0;
 		fclose(f);
 	}
-	fprintf(stderr, "omn-truth mode=%s tid=%d wall_ns=%llu oncpu_ns=%llu runq_ns=%llu%s%s\n",
-		mode, getpid(), (unsigned long long)wall, on, rq, extra ? " " : "",
+	fprintf(stderr,
+		"omn-truth mode=%s tid=%d pid=%d wall_ns=%llu oncpu_ns=%llu runq_ns=%llu%s%s\n",
+		mode, gettid(), getpid(), (unsigned long long)wall, on, rq, extra ? " " : "",
 		extra ? extra : "");
 }
 
@@ -277,6 +284,69 @@ static int mode_queue(int threads, uint64_t ms)
 	return 0;
 }
 
+/* ---------------------------------------------------------------- child */
+
+/* The work is in a descendant: what a compiler driver and make do. Each
+ * process but the last starts the next and waits for it in waitpid; the last
+ * spins. Every one prints its own line, the deepest first, so the test can
+ * hold the verdict to the task that did the work and its time on a cpu. */
+static int mode_child(uint64_t ms, int depth)
+{
+	uint64_t start = now_ns(CLOCK_MONOTONIC);
+	if (depth <= 0) {
+		spin_cpu_ms(ms);
+		truth("child-worker", start, NULL);
+		return 0;
+	}
+	fflush(stderr);
+	pid_t child = fork();
+	if (child < 0)
+		return 1;
+	if (child == 0)
+		_exit(mode_child(ms, depth - 1));
+	int status = 0;
+	if (waitpid(child, &status, 0) != child)
+		return 1;
+	char extra[64];
+	snprintf(extra, sizeof extra, "depth=%d child=%d", depth, child);
+	truth(depth > 1 ? "child-driver" : "child", start, extra);
+	return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+/* ---------------------------------------------------------------- thread */
+
+/* The work is in another thread, and the main thread waits for it on a pipe,
+ * as a server's accept loop waits while a connection's thread serves it: the
+ * main thread is asleep on something that is not a lock the whole time. */
+static int thread_pipe[2];
+
+static void *worker(void *arg)
+{
+	uint64_t ms = *(uint64_t *)arg;
+	uint64_t start = now_ns(CLOCK_MONOTONIC);
+	spin_cpu_ms(ms);
+	truth("thread-worker", start, NULL);
+	char done = 1;
+	if (write(thread_pipe[1], &done, 1) != 1)
+		return NULL;
+	return NULL;
+}
+
+static int mode_thread(uint64_t ms)
+{
+	if (pipe(thread_pipe) != 0)
+		return 1;
+	uint64_t start = now_ns(CLOCK_MONOTONIC);
+	pthread_t thread;
+	pthread_create(&thread, NULL, worker, &ms);
+	char done = 0;
+	if (read(thread_pipe[0], &done, 1) != 1)
+		return 1;
+	truth("thread", start, NULL);
+	pthread_join(thread, NULL);
+	return 0;
+}
+
 /* ---------------------------------------------------------------- diff */
 
 /* Four functions of equal cost, told apart only by their names. */
@@ -319,11 +389,15 @@ int main(int argc, char **argv)
 		return mode_queue(atoi(argv[2]), strtoull(argv[3], NULL, 10));
 	if (argc >= 3 && strcmp(argv[1], "diff") == 0)
 		return mode_diff(atoi(argv[2]));
+	if (argc >= 4 && strcmp(argv[1], "child") == 0)
+		return mode_child(strtoull(argv[2], NULL, 10), atoi(argv[3]));
+	if (argc >= 3 && strcmp(argv[1], "thread") == 0)
+		return mode_thread(strtoull(argv[2], NULL, 10));
 	if (argc >= 6 && strcmp(argv[1], "phases") == 0)
 		return mode_phases(strtoull(argv[2], NULL, 10), atoi(argv[3]),
 				   strtoull(argv[4], NULL, 10), argv[5]);
 	fprintf(stderr, "usage: workload cpu MS | io N DIR | lock N HOLD_US | "
 			"tail COUNTER EVERY MS BLOCK_MS | queue THREADS MS | diff FACTOR | "
-			"phases MS N HOLD_US LOG\n");
+			"phases MS N HOLD_US LOG | child MS DEPTH | thread MS\n");
 	return 2;
 }

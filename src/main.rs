@@ -2205,6 +2205,9 @@ fn latency(args: LatencyArgs) -> anyhow::Result<ExitCode> {
         runs: args.runs,
         duration: args.duration,
         hz: args.hz,
+        // `--symbols` is stream names' flag (`src/cli.rs`); once it is on
+        // `LatencyArgs`, this reads `args.symbols`.
+        symbols: None,
     };
     if let Err(refusal) = ask.check() {
         return Ok(refuse_triage(&refusal));

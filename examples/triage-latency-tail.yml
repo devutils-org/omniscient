@@ -76,21 +76,6 @@ requests:
   keys:
   - task
   label: futex
-- source: sched.mutex
-  target:
-    launch:
-    - target/omn-triage-fixture/workload
-    - tail
-    - target/omn-triage-fixture/counter
-    - '5'
-    - '100'
-    - '200'
-  mode: trace
-  emit:
-  - summary
-  keys:
-  - task
-  label: mutex
 decompose:
 - id: where-the-time-went
   whole: lifetime

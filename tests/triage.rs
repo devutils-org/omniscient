@@ -137,9 +137,17 @@ impl Answered {
         self.truth_of(0, name)
     }
 
+    /// The figures of the answer's run `run`. When the answer is a second
+    /// pass, the program ran once per run in each pass and printed a line
+    /// each time: the answer's lines are the second half.
     fn truth_of(&self, run: usize, name: &str) -> f64 {
+        let first = if self.answer["second_pass"].is_string() {
+            self.truths.len() / 2
+        } else {
+            0
+        };
         self.truths
-            .get(run)
+            .get(first + run)
             .and_then(|truth| truth.get(name))
             .and_then(|value| value.parse().ok())
             .unwrap_or_else(|| {
@@ -148,6 +156,50 @@ impl Answered {
                     self.text
                 )
             })
+    }
+
+    /// A figure of the line a task printed, by the line's `mode`: the modes
+    /// whose work is in a child or another thread print one line per task.
+    fn truth_where(&self, mode: &str, name: &str) -> f64 {
+        self.truths
+            .iter()
+            .find(|truth| truth.get("mode").map(String::as_str) == Some(mode))
+            .and_then(|truth| truth.get(name))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the workload printed no `{name}` on a `{mode}` line:\n{}",
+                    self.text
+                )
+            })
+    }
+
+    /// The cpu the profile says it missed because it found a task the target
+    /// started only on a later tick, by its own note: in nanoseconds.
+    fn missed_by_late_discovery(&self) -> f64 {
+        let notes = self.median_run()["notes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        notes
+            .iter()
+            .filter_map(|note| note.as_str())
+            .filter_map(|note| {
+                let (_, after) = note.split_once("had used ")?;
+                let (ms, _) = after.split_once(" ms of cpu")?;
+                ms.trim().parse::<f64>().ok()
+            })
+            .sum::<f64>()
+            * 1e6
+    }
+
+    /// The reading the verdict decomposes: the last one followed.
+    fn decomposed(&self) -> &Value {
+        let mut at = self.median_run();
+        while !at["followed"].is_null() {
+            at = &at["followed"]["reading"];
+        }
+        at
     }
 
     fn verdict(&self) -> &Value {
@@ -386,6 +438,16 @@ fn the_session_a_question_is_asked_through_is_an_ordinary_session() {
     ] {
         let output = omn(args);
         assert!(output.status.success(), "{}", spoken(&output));
+        if name == "latency" {
+            // The mutex source runs inside the target and is asked only in a
+            // second pass, when a futex sleep needs it: never in the session
+            // a person or an agent is given to run.
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("sched.mutex"),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
         let file = dir.join(format!("{name}.yml"));
         std::fs::write(&file, &output.stdout).unwrap();
         let checked = omn(&["validate", "-f", file.to_str().unwrap()]);
@@ -455,6 +517,10 @@ fn a_cpu_bound_program_is_named_cpu_bound_for_latency() {
         return;
     };
     assert_eq!(run.limit(), Some("cpu"), "{}", run.text);
+    // A program that never sleeps on a futex is asked once, without the
+    // mutex source, and followed nowhere.
+    assert!(run.answer["second_pass"].is_null(), "{}", run.text);
+    assert!(run.median_run()["followed"].is_null(), "{}", run.text);
     // The on-cpu row against the kernel's own accounting of the same thread:
     // a sample count is exact about the samples and a period about the time,
     // and the kernel's figure was read a moment before the exit.
@@ -550,12 +616,184 @@ fn a_program_waiting_for_a_mutex_is_named_lock_contended_for_latency() {
         return;
     };
     assert_eq!(run.limit(), Some("lock"), "{}", run.text);
+    // The mutex source ran in a second pass, asked because the first named a
+    // futex sleep, and the second pass is the answer.
+    let second = run.answer["second_pass"].as_str().unwrap_or("");
+    assert!(second.contains("futex sleep"), "{}", run.text);
     // The shim's wait against the program's own clock around the same calls.
     let waited = lock["amount"].as_f64().unwrap();
     let truth = run.truth("lock_wait_ns");
     assert!(
         (waited - truth).abs() <= truth * 0.05 + 1e6,
         "the shim saw {waited} of mutex wait, the program timed {truth}:\n{}",
+        run.text
+    );
+}
+
+/// Which limit the kernel's own figures for a task make the right one: on a
+/// cpu, or waiting for one, or either when the two are within a tenth of each
+/// other (and 5 ms) -- the machine's load decides between them, not the tool.
+fn cpu_or_queue(oncpu: f64, queued: f64) -> (&'static str, bool) {
+    let expected = if queued > oncpu { "cpu-queue" } else { "cpu" };
+    let close = (queued - oncpu).abs() <= 0.1 * queued.max(oncpu) + 5e6;
+    (expected, close)
+}
+
+/// A followed task's on-cpu row against the kernel's own figure for it.
+///
+/// The profile finds a task the target started on a tick after it began, and
+/// says how much cpu it had used by then; the row is short by that. The bound
+/// below is the kernel's alone, with a fixed allowance for it -- a quarter of
+/// the task's cpu -- so a note claiming more missed cpu does not widen it.
+/// And the note's figure is itself held against the kernel: what the row
+/// read plus what the note says it missed is no more than the kernel's
+/// figure (and 10 ms for the other tasks found late, which spin nothing).
+fn assert_on_cpu_agrees(run: &Answered, task: &str, on_cpu: f64, truth: f64) {
+    let tolerance = 3.0 * PERIOD_NS + truth * 0.02;
+    let missed = run.missed_by_late_discovery();
+    assert!(
+        on_cpu <= truth + tolerance && on_cpu >= truth * 0.75 - tolerance,
+        "{task}'s on-cpu {on_cpu} against the kernel's {truth}:\n{}",
+        run.text
+    );
+    assert!(
+        on_cpu + missed <= truth + tolerance + 10e6,
+        "{task}'s on-cpu {on_cpu} and the {missed} the profile says it found late are more \
+         than the kernel's {truth}:\n{}",
+        run.text
+    );
+}
+
+/// A compiler driver's shape: the program starts a child, which starts the
+/// one that works, and each waits for the next in `waitpid`. The main
+/// thread's life is a wait; the answer is the grandchild's, by name of task,
+/// and its on-cpu row is the grandchild's own time on a cpu by the kernel.
+#[test]
+fn a_program_whose_work_is_in_its_child_is_answered_by_that_child() {
+    let workload = needs_fixture!();
+    let _alone = one_at_a_time();
+    let Some(run) = answer(
+        &[
+            "latency",
+            "--objective",
+            "latency",
+            "--",
+            workload.to_str().unwrap(),
+            "child",
+            "300",
+            "2",
+        ],
+        "that a driver waiting for its child's child is answered by the one that spun",
+    ) else {
+        return;
+    };
+    let worker = run.truth_where("child-worker", "tid") as u64;
+    let task = format!("task:{worker}");
+    // The separation: the main thread slept the whole run and the worker
+    // spun it. Whatever else the verdict says, it is not the main thread's
+    // sleep, and the task it decomposes is the one that spun.
+    assert_ne!(run.limit(), Some("sleep"), "{}", run.text);
+    assert_eq!(run.decomposed()["task"], task.as_str(), "{}", run.text);
+    let top = &run.median_run()["followed"];
+    assert_eq!(top["relation"], "child", "{}", run.text);
+    assert!(
+        top["wait"]
+            .as_str()
+            .is_some_and(|wait| wait.contains("wait")),
+        "the main thread's stack names its wait for a child: {}",
+        run.text
+    );
+    let on_cpu = run.decomposed()["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|state| state["state"] == "on-cpu")
+        .map(amount)
+        .unwrap_or_else(|| panic!("no on-cpu row for {task}:\n{}", run.text));
+    let truth = run.truth_where("child-worker", "oncpu_ns");
+    assert_on_cpu_agrees(&run, &task, on_cpu, truth);
+    // When the verdict decides, it decides what the kernel says.
+    if let Some(limit) = run.limit() {
+        assert_eq!(run.verdict()["task"], task.as_str(), "{}", run.text);
+        let (expected, close) = cpu_or_queue(truth, run.truth_where("child-worker", "runq_ns"));
+        assert!(
+            limit == expected || (close && matches!(limit, "cpu" | "cpu-queue")),
+            "{task} is `{limit}`, where the kernel says `{expected}`:\n{}",
+            run.text
+        );
+    } else {
+        // Undecided is right only while the sched sources do not follow the
+        // children: then the unread rows are what it is undecided about.
+        assert!(
+            run.text.contains("does not follow the program's children"),
+            "{}",
+            run.text
+        );
+    }
+}
+
+/// A server's shape: the main thread waits on a pipe while a second thread
+/// does the work. The main thread's block is named, and beside it the thread
+/// that ran, with its own decomposition, against the kernel's figures for it.
+#[test]
+fn a_program_whose_work_is_in_another_thread_names_that_thread_beside_its_wait() {
+    let workload = needs_fixture!();
+    let _alone = one_at_a_time();
+    let Some(run) = answer(
+        &[
+            "latency",
+            "--objective",
+            "latency",
+            "--",
+            workload.to_str().unwrap(),
+            "thread",
+            "300",
+        ],
+        "that a main thread asleep on a pipe names the thread that spun beside it",
+    ) else {
+        return;
+    };
+    let worker = run.truth_where("thread-worker", "tid") as u64;
+    let task = format!("task:{worker}");
+    let followed = &run.median_run()["followed"];
+    // A thread a sched source saw is placed in the program's process; one
+    // that never left its cpu gives them nothing to place it by, and the
+    // profile carries no pid, so it is unplaced -- said so, and never taken
+    // for a child process.
+    let unplaced = followed["relation"] == "unplaced";
+    assert!(
+        followed["relation"] == "thread"
+            || (unplaced && run.text.contains("no source placed it in a process")),
+        "{}",
+        run.text
+    );
+    assert_eq!(followed["during"], "blocked: sleeping", "{}", run.text);
+    assert_eq!(followed["reading"]["task"], task.as_str(), "{}", run.text);
+    assert_eq!(run.verdict()["task"], task.as_str(), "{}", run.text);
+    let oncpu = run.truth_where("thread-worker", "oncpu_ns");
+    let (expected, close) = cpu_or_queue(oncpu, run.truth_where("thread-worker", "runq_ns"));
+    let limit = run.limit().unwrap_or("undecided");
+    assert!(
+        limit == expected
+            || (close && matches!(limit, "cpu" | "cpu-queue"))
+            // Unplaced, its silent rows are unread, which may undecide it.
+            || (unplaced && limit == "undecided"),
+        "{task} is `{limit}`, where the kernel says `{expected}`:\n{}",
+        run.text
+    );
+    let on_cpu = followed["reading"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|state| state["state"] == "on-cpu")
+        .map(amount)
+        .unwrap();
+    assert_on_cpu_agrees(&run, &task, on_cpu, oncpu);
+    // The main thread's own sleep is in the answer, not in place of it.
+    let sleeping = amount(run.state("blocked: sleeping"));
+    assert!(
+        sleeping >= 0.5 * run.truth_where("thread", "wall_ns"),
+        "the main thread slept {sleeping}:\n{}",
         run.text
     );
 }
