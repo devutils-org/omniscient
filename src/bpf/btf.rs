@@ -190,17 +190,27 @@ impl Btf {
     /// an anonymous member may not shadow one of the enclosing type -- so the
     /// rule matters only for a malformed blob, where finding the named member
     /// is the better answer.
+    ///
+    /// A name that is a typedef of a struct or union -- `possible_net_t`,
+    /// a typedef of an anonymous struct -- is followed to the type it names,
+    /// through any qualifiers. Structs and unions of that name are searched
+    /// first, so a name that is both (`typedef struct foo foo`) answers as it
+    /// did before typedefs were followed.
     pub fn member_offset(&self, struct_name: &str, member: &str) -> Result<i32, String> {
         let candidates = self
             .by_name
             .get(struct_name)
             .ok_or_else(|| format!("this kernel's BTF has no type named `{struct_name}`"))?;
-        for index in candidates {
-            let entry = &self.types[*index];
-            if entry.kind != KIND_STRUCT && entry.kind != KIND_UNION {
-                continue;
-            }
-            if let Some(offset) = self.offset_within(*index, member, struct_name, 0)? {
+        let direct = candidates.iter().copied().filter(|index| {
+            let kind = self.types[*index].kind;
+            kind == KIND_STRUCT || kind == KIND_UNION
+        });
+        let through_typedef = candidates
+            .iter()
+            .filter(|index| self.types[**index].kind == KIND_TYPEDEF)
+            .filter_map(|index| self.composite(*index as u32));
+        for index in direct.chain(through_typedef) {
+            if let Some(offset) = self.offset_within(index, member, struct_name, 0)? {
                 return Ok(offset);
             }
         }
@@ -890,6 +900,137 @@ mod tests {
 
         assert_eq!(btf.member_offset("outer", "head"), Ok(0));
         assert_eq!(btf.member_offset("outer", "wanted"), Ok(12));
+    }
+
+    #[test]
+    fn a_typedef_of_an_anonymous_struct_is_followed_to_its_members() {
+        // typedef struct { u32 pad; struct net *net; } possible_like_t;
+        // reached through a `const`, as a qualifier may stand in the way.
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let pointer = builder.pointer(scalar);
+        let inner = builder.composite(
+            KIND_STRUCT,
+            "",
+            &[("pad", scalar, 0), ("net", pointer, 8 * 8)],
+            16,
+        );
+        let constant = builder.header(0, (KIND_CONST as u32) << 24, inner);
+        builder.named(KIND_TYPEDEF, "possible_like_t", constant);
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+
+        assert_eq!(btf.member_offset("possible_like_t", "net"), Ok(8));
+        let error = btf.member_offset("possible_like_t", "absent").unwrap_err();
+        assert!(error.contains("absent"), "{error}");
+    }
+
+    #[test]
+    fn a_typedef_of_something_not_composite_is_still_refused() {
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        builder.named(KIND_TYPEDEF, "u32_like_t", scalar);
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+        assert!(btf.member_offset("u32_like_t", "anything").is_err());
+    }
+
+    #[test]
+    fn a_struct_and_a_typedef_of_one_name_answer_from_the_struct() {
+        // `typedef struct other shared;` beside `struct shared`: the struct is
+        // what callers have always been answered from.
+        let mut builder = BtfBuilder::new();
+        let scalar = builder.scalar("u32");
+        let other = builder.composite(KIND_STRUCT, "other", &[("field", scalar, 4 * 8)], 8);
+        builder.named(KIND_TYPEDEF, "shared", other);
+        builder.composite(KIND_STRUCT, "shared", &[("field", scalar, 0)], 4);
+        let btf = Btf::parse(builder.build()).expect("the blob parses");
+        assert_eq!(btf.member_offset("shared", "field"), Ok(0));
+    }
+
+    /// Following typedefs must not change an answer any caller already gets:
+    /// on the running kernel, no type name a caller passes is also a typedef
+    /// naming a different struct or union. The list is every literal first
+    /// argument of `member_offset` under `src/bpf/` that names a kernel type.
+    #[test]
+    fn no_caller_s_type_is_shadowed_by_a_typedef_on_the_running_kernel() {
+        let Some(btf) = kernel_btf() else { return };
+        const CALLERS: &[&str] = &[
+            "address_space",
+            "backing_dev_info",
+            "bdi_writeback",
+            "block_device",
+            "bpf_prog_info",
+            "cgroup",
+            "css_set",
+            "fdtable",
+            "file",
+            "files_struct",
+            "folio",
+            "inet_connection_sock",
+            "inet_sock",
+            "inode",
+            "irqaction",
+            "kernfs_node",
+            "linux_binprm",
+            "net",
+            "net_device",
+            "netdev_queue",
+            "ns_common",
+            "pcpu_hot",
+            "pt_regs",
+            "Qdisc",
+            "request",
+            "signal_struct",
+            "sk_buff",
+            "sock",
+            "sock_common",
+            "socket",
+            "socket_alloc",
+            "super_block",
+            "task_struct",
+            "tcp_sock",
+            "wb_writeback_work",
+        ];
+        for name in CALLERS {
+            let Some(candidates) = btf.by_name.get(*name) else {
+                continue;
+            };
+            let structs: Vec<usize> = candidates
+                .iter()
+                .copied()
+                .filter(|index| matches!(btf.types[*index].kind, KIND_STRUCT | KIND_UNION))
+                .collect();
+            for index in candidates {
+                if btf.types[*index].kind != KIND_TYPEDEF {
+                    continue;
+                }
+                if let Some(target) = btf.composite(*index as u32) {
+                    assert!(
+                        structs.is_empty() || structs.contains(&target),
+                        "`{name}` is both a struct and a typedef of another type"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The case that asked for this: `net_device.nd_net` is a
+    /// `possible_net_t`, a typedef of an anonymous struct whose only member,
+    /// under `CONFIG_NET_NS`, is the `net` pointer.
+    #[test]
+    fn the_running_kernel_s_possible_net_t_is_read_through_its_typedef() {
+        let Some(btf) = kernel_btf() else { return };
+        if !btf.has_type("possible_net_t") {
+            eprintln!("skipped: this kernel's BTF has no possible_net_t");
+            return;
+        }
+        match btf.member_offset("possible_net_t", "net") {
+            Ok(offset) => assert_eq!(offset, 0, "the pointer is the struct's only member"),
+            Err(reason) => {
+                // Without CONFIG_NET_NS the struct is empty: the refusal must
+                // name the member, not the typedef.
+                assert!(reason.contains("`net`"), "{reason}");
+            }
+        }
     }
 
     #[test]
