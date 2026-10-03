@@ -588,12 +588,15 @@ pub const FLAT: f64 = 0.5;
 /// or by a frame's module, and what makes each write a perf map. A list of the
 /// runtimes, not a heuristic over the frames: a profile is called an
 /// interpreter's only when its program or its library is one of these.
+///
+/// The hints carry no backquotes: in a verdict a backquoted name is the
+/// suspect, and a command line is not one.
 pub const INTERPRETERS: &[(&str, &str)] = &[
-    ("python", "`python3 -X perf` (3.12 and later)"),
-    ("node", "`node --perf-basic-prof`"),
+    ("python", "python3 -X perf (3.12 and later)"),
+    ("node", "node --perf-basic-prof"),
     ("java", "a JVM agent that writes one"),
     ("jvm", "a JVM agent that writes one"),
-    ("ruby", "`ruby --yjit-perf` (3.3 and later)"),
+    ("ruby", "ruby --yjit-perf (3.3 and later)"),
     ("perl", "none: Perl writes no perf map"),
     ("php", "none this tool knows of"),
     ("lua", "none this tool knows of"),
@@ -1068,6 +1071,8 @@ mod tests {
         assert!(!says.contains("hottest function `"), "{says}");
         assert!(says.contains("python interpreter"), "{says}");
         assert!(says.contains("-X perf"), "{says}");
+        // Nothing in backquotes: a verdict's backquoted name is its suspect.
+        assert!(!says.contains('`'), "{says}");
         // A C program's flat profile is still ranked: it is its own code.
         let c: Vec<Vec<String>> = (0..10).map(|i| labels(&format!("main;f{i}"))).collect();
         let says = hottest(
